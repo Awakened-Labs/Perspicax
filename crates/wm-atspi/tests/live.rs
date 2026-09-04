@@ -303,8 +303,12 @@ async fn signals_arrive_without_anyone_re_reading_a_tree() {
 /// rather than reading one.
 ///
 /// `Action.DoAction` rather than `Component.GrabFocus`, because measured
-/// against GTK 4.18 `GrabFocus` errors on every widget in the tree -- there is
-/// no window manager on this box, so nothing ever holds input focus.
+/// against GTK 4.18 `GrabFocus` errors on every widget in the tree. The reason
+/// is not settled: the first guess -- that no window manager was running, so
+/// nothing ever held input focus -- was simply wrong, as openbox was managing
+/// that session throughout. The measurement stands and the workaround is
+/// sound; the explanation was not checked and has been removed rather than
+/// left to be believed.
 ///
 /// And a **check or toggle button** specifically, not merely the first widget
 /// whose `DoAction(0)` returns true. Plenty of them do while changing nothing
