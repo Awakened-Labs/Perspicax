@@ -16,7 +16,13 @@
 
 /// The upstream schema, re-exported so downstream crates need not depend on
 /// `accesskit` directly and cannot drift onto a different version of it.
-pub use accesskit::{Action, Node, NodeId, Role};
+///
+/// [`Rect`] is in this list for the same reason as everything else in it: a
+/// geometry type defined next to a node schema that already ships one is a
+/// parallel schema wearing a different hat. Note its shape before using it --
+/// it is kurbo-derived, so it is two corners (`x0`, `y0`, `x1`, `y1`) and not
+/// an origin plus a size.
+pub use accesskit::{Action, Node, NodeId, Rect, Role};
 
 /// A compositor surface. Opaque, and meaningful only to the [`HostView`] that
 /// minted it.
@@ -134,6 +140,21 @@ impl ObservedNode {
             origin: Origin::Unattributed,
             visibility: Visibility::Unknown,
         }
+    }
+
+    /// The node's bounds, **window-relative**, if the ingest path supplied any.
+    ///
+    /// The coordinate space is the entire point of this accessor existing
+    /// rather than callers reaching through to [`Node::bounds`] themselves. An
+    /// accessibility bridge reports what the toolkit believes, and a Wayland
+    /// client cannot know where it sits on screen -- so these numbers are
+    /// window-relative at best and meaningless at worst. Treating them as
+    /// global is the single easiest way to build a system that appears to work
+    /// and silently clicks the wrong place. Only a `HostView` may turn them
+    /// into anything global, because only a compositor knows a window's origin.
+    #[must_use]
+    pub fn bounds(&self) -> Option<Rect> {
+        self.node.bounds()
     }
 }
 
