@@ -20,8 +20,8 @@
 //! differently, and the tests assert the difference rather than tolerate it.
 
 use wm_atspi::{AtspiIngest, Strategy};
-use wm_index::{Change, Index, Ingest, Refusal, check_actable};
-use wm_node::Origin;
+use wm_index::{Change, Index, Ingest, Refusal, Selector, check_actable};
+use wm_node::{Origin, Role};
 
 const GTK: &str = "gtk4-widget-factory";
 const QT: &str = "gallery";
@@ -421,6 +421,129 @@ async fn volunteered_changes_apply_to_the_index() {
         index.take_deltas().len(),
     );
     assert!(index.len() >= after_snapshot, "applying changes lost nodes");
+}
+
+/// The shape of a GTK tree, pinned so that a schema or selector regression
+/// fails here rather than being argued about later.
+///
+/// # Why this is not a literal golden tree
+///
+/// Because a literal one would be a test of whether the desktop held still.
+/// The same `gtk4-widget-factory` was measured at 278, 279, 286, 298 and 320
+/// nodes across one afternoon -- ATK realises accessibles as they are needed,
+/// tooltips come and go, and reading the tree changes it. A recorded
+/// node-for-node snapshot would fail on the second run and be deleted by the
+/// third.
+///
+/// What does not drift is the shape: an application root, one window under it,
+/// and a vocabulary of roles the mapping table has to keep producing. That is
+/// what regresses when someone edits `map::role`, and that is what this pins.
+#[tokio::test]
+#[ignore = "needs a live accessibility bus and gtk4-widget-factory running"]
+async fn the_gtk_tree_keeps_its_shape() {
+    let (_, nodes) = read(GTK).await;
+    let mut index = Index::new();
+    index.ingest_snapshot(nodes);
+
+    let roots = index.roots();
+    assert_eq!(roots.len(), 1, "an application has exactly one root");
+    let root = index.get(roots[0]).expect("the root");
+    assert_eq!(root.node.role(), Role::Application);
+    assert_eq!(root.node.label(), Some(GTK));
+
+    let window = root
+        .node
+        .children()
+        .iter()
+        .filter_map(|id| index.get(*id))
+        .find(|node| node.node.role() == Role::Window)
+        .expect("the application root has a Window child");
+    assert!(
+        window.node.label().is_some_and(|l| !l.is_empty()),
+        "the window carries a title"
+    );
+
+    // Roles the widget factory demonstrably has. Each one is a live assertion
+    // about a different branch of `map::role`, so a mis-edit there lands here.
+    let present: std::collections::HashSet<Role> = index
+        .preorder()
+        .into_iter()
+        .filter_map(|id| index.get(id).map(|node| node.node.role()))
+        .collect();
+    for role in [
+        Role::Application,
+        Role::Window,
+        Role::Button,
+        Role::CheckBox,
+        Role::RadioButton,
+        Role::ComboBox,
+        Role::Label,
+        Role::Group,
+    ] {
+        assert!(present.contains(&role), "no {role:?} in the tree");
+    }
+
+    // Nothing should map to Unknown in a tree built entirely of stock widgets:
+    // that is the signature of a role the table forgot.
+    let unknowns = index
+        .preorder()
+        .into_iter()
+        .filter(|id| {
+            index
+                .get(*id)
+                .is_some_and(|n| n.node.role() == Role::Unknown)
+        })
+        .count();
+    assert_eq!(unknowns, 0, "{unknowns} nodes mapped to Role::Unknown");
+
+    println!(
+        "GTK  {} nodes, {} distinct roles",
+        index.len(),
+        present.len()
+    );
+}
+
+/// The selector grammar against a real tree rather than a synthetic one.
+///
+/// Each case exercises a different production, so a change to the parser or to
+/// `resolve_all` shows up as a selector that stops addressing a real widget.
+#[tokio::test]
+#[ignore = "needs a live accessibility bus and gtk4-widget-factory running"]
+async fn selectors_address_real_widgets() {
+    let (_, nodes) = read(GTK).await;
+    let mut index = Index::new();
+    index.ingest_snapshot(nodes);
+
+    let count = |selector: &str| {
+        index
+            .resolve_all(&Selector::parse(selector).expect("parses"))
+            .len()
+    };
+
+    // Bare role, with a trailing colon.
+    assert!(count("window:") >= 1, "no window matched `window:`");
+    assert!(count("button:") > 1, "a widget factory has several buttons");
+
+    // Descendant, not child: GTK inserts filler containers between a window
+    // and anything in it, so a child selector would match nothing here and
+    // that is exactly why `>` means descendant.
+    assert!(
+        count("window:>button:") > 1,
+        "`window:>button:` found nothing -- `>` has stopped meaning descendant"
+    );
+
+    // Indexing picks exactly one out of many.
+    assert_eq!(count("button:[0]"), 1);
+
+    // A role nothing in this tree has.
+    assert_eq!(count("terminal:"), 0);
+
+    println!(
+        "GTK  windows={} buttons={} buttons-under-a-window={}",
+        count("window:"),
+        count("button:"),
+        count("window:>button:"),
+    );
 }
 
 /// A name nothing answers to must say so, and say what *was* there -- the
