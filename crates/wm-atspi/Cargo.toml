@@ -1,0 +1,15 @@
+[package]
+name = "wm-atspi"
+description = "impl Ingest over AT-SPI2. Reads stock GTK and Qt with no patched toolkit build -- slow, and deliberately first."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+wm-index = { path = "../wm-index", version = "0.1.0" }
+wm-node = { path = "../wm-node", version = "0.1.0" }

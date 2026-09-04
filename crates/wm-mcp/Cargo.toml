@@ -1,0 +1,15 @@
+[package]
+name = "wm-mcp"
+description = "The agent interface: an MCP server over stdio. Tools, receipts, and the capability gate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+wm-index = { path = "../wm-index", version = "0.1.0" }
+wm-node = { path = "../wm-node", version = "0.1.0" }

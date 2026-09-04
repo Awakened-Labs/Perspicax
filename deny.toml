@@ -1,0 +1,54 @@
+# cargo-deny -- dependency license, advisory and source policy.
+#
+# Run: `cargo deny --all-features check`
+#
+# `--all-features` is passed on the command line and NOT set here, because in
+# cargo-deny 0.20 a `[graph] all-features = true` key is accepted without
+# warning and silently does nothing. A check that passes by never looking is
+# worse than no check, so the flag lives in `.gitlab-ci.yml` where it runs.
+#
+# One thing this tool cannot see, worth writing down before it bites: a
+# compositor links system C libraries -- libinput, libdrm, gbm, xkbcommon,
+# libwayland -- that never appear in the cargo graph. They are all
+# MIT/BSD-shaped today, but a future `-sys` crate vendoring something copyleft
+# would pass this gate and still poison distribution. When `wm-compositor`
+# grows its first `-sys` dependency, read that crate's bundled sources rather
+# than trusting the line below.
+
+[licenses]
+# Exhaustive rather than permissive-by-pattern, and deliberately short. A new
+# dependency carrying a licence nobody has looked at should FAIL the pipeline,
+# not sail through because it pattern-matched something familiar. The tree is
+# two crates deep right now; every future addition is a decision someone makes
+# on purpose.
+#
+# Absent on purpose: GPL and AGPL in any form, and LGPL. This workspace is
+# Apache-2.0 and is going open source; a copyleft dependency appearing in a
+# compositor's graph is the kind of thing that is cheap to refuse now and
+# expensive to unpick after a release.
+allow = [
+    "Apache-2.0",
+    "MIT",
+]
+# A crate with no licence expression at all is a licensing unknown, not a
+# permissive default.
+unused-allowed-license = "warn"
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[advisories]
+# `deny` is the default for vulnerabilities in cargo-deny 0.20; unmaintained
+# crates are surfaced rather than fatal, because "unmaintained" is a judgement
+# about a project's future and belongs to a human, not to a pipeline.
+unmaintained = "workspace"
+yanked = "deny"
+
+[sources]
+# Everything comes from crates.io. A git dependency is how an unreviewed fork
+# gets into a security-sensitive tree without anyone deciding to put it there.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,0 +1,18 @@
+[package]
+name = "wm-index"
+description = "The semantic index: node cache, stable ids, and the refusal gate. Portable by construction -- neither Wayland nor D-Bus appears in its dependency graph."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `wm-node` and nothing else, on purpose. This crate is the portable core: the
+# moment Smithay or zbus appears here, a GNOME or KWin host stops being a port
+# and becomes a rewrite. If a dependency is ever added below, it needs a reason
+# written down next to it that survives that question.
+wm-node = { path = "../wm-node", version = "0.1.0" }
