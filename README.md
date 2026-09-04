@@ -56,14 +56,54 @@ wm-probe        dev CLI — dump a tree, time a read, explain a refusal
 
 | | | |
 |---|---|---|
-| **M0** | Skeleton, conventions, CI | in progress |
-| **M1** | Semantic index + AT-SPI ingest — no compositor, runs on X11 | |
+| **M0** | Skeleton, conventions, CI | done |
+| **M1** | Semantic index + AT-SPI ingest — no compositor, runs on X11 | in progress |
 | **M2** | Compositor, provenance, occlusion, damage-driven invalidation | |
 | **M3** | MCP server and act — **v1** | |
 
 v1 is one demo, run against a GTK app and a Qt app, headless, in CI, with zero
 screenshots taken: observe a window, resolve a selector, click it, get a
 receipt — and get a *refusal* when the target is occluded.
+
+## What reading a tree costs
+
+Measured on Debian 13 (GNOME's accessibility stack, at-spi2-core 2.56.2), best
+of five, with `wm-probe time --app <name>`. These numbers are the argument for
+ever building a faster ingest path, so they are measured rather than asserted.
+
+| | GTK 4.18.6 <br> `gtk4-widget-factory`, 278 nodes | Qt 6.8.2 <br> `gallery`, 219 nodes |
+|---|---|---|
+| first read, cold | 5.73 s | 2.74 s |
+| `Cache.GetItems` | **62.3 ms** | 4.0 ms — **and 0 nodes** |
+| recursive walk | 5.25 s | 1.86 s |
+| walk + geometry | 5.96 s | 3.21 s |
+| drain one delta | **2 µs** | **2 µs** |
+
+Three things in that table matter more than the absolute figures.
+
+**The fast path is ~84× the walk, and only GTK has one.** Qt 6.8.2 exports
+`org.a11y.atspi.Cache`, introspects cleanly, declares `GetItems`, and answers
+it with an empty array — a successful reply containing nothing. Probing by
+interface therefore takes the fast path, receives no nodes, and reports that a
+window full of widgets is empty. `wm-atspi` probes by *result* for this reason.
+
+**A cold cache is not a small cache, it is a different answer.** GTK's is
+filled by ATK as accessibles are realised, so a freshly started
+`gtk4-widget-factory` answers `GetItems` with **11** of its 278 nodes — again
+successfully, with nothing in the reply to suggest anything is missing. Walk it
+once and the cache holds all 278 thereafter. `wm-atspi` compares each item's
+declared child count against the children actually delivered and falls back to
+the walk on any shortfall, which is why the `first read` row above says 5.73 s
+and not 62 ms: it walked, because the cache asked to be doubted.
+
+**Staying current costs six orders of magnitude less than starting over.** A
+drain reads signals that already arrived and asks the application nothing. That
+gap — 2 µs against seconds — is the whole reason this project treats polling a
+tree as the bug rather than the fallback.
+
+Geometry is a separate row because no bulk API exists for it on either toolkit:
+`Cache.GetItems` carries roles, names, states and parentage and no extents at
+all, so bounds are a round trip per node even on the fast path.
 
 ## Build
 
@@ -80,6 +120,19 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo deny --all-features check
 cargo test --workspace
 ```
+
+Tests that need a real accessibility bus and real applications are `#[ignore]`d,
+so the four gates above stay green on a machine with no graphical session. To
+run them:
+
+```sh
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+cargo test -p wm-atspi --test live -- --ignored --test-threads=1
+```
+
+Without those two variables an SSH session finds an empty desktop and reports
+no error worth reading. `wm-probe apps` says what the bus can actually see.
 
 ## Licence
 

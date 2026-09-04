@@ -16,23 +16,30 @@
 //! The refusal gate ([`Refusal`], [`check_actable`]) lives here rather than in
 //! the MCP server, and that placement is deliberate: a future host that talks
 //! to agents some other way must not be able to route around it.
+//!
+//! Between those two traits sit the three things that make a tree of nodes
+//! addressable:
+//!
+//! - [`Interner`] -- an ingest path's own keys in, opaque [`NodeId`]s out, and
+//!   never the same id twice.
+//! - [`Selector`] -- the addressing scheme a human or a model can write down,
+//!   as opposed to one minted at runtime.
+//! - [`Index`] -- the cache, the tree order both of the above depend on, and
+//!   the [`Delta`] computation that keeps a subscription from being a poll.
 
-use wm_node::{Node, NodeId, ObservedNode, Origin, SurfaceId, Visibility};
+pub mod cache;
+pub mod id;
+pub mod selector;
 
-/// A rectangle in some coordinate space the sender and receiver agree on.
-///
-/// Which space that is matters more here than the arithmetic does. Accessibility
-/// bridges report bounds that a Wayland client cannot compute correctly -- a
-/// client does not know its own position on screen -- so bounds crossing this
-/// boundary are **window-relative**, and only a [`HostView`] may turn them into
-/// anything global. Nothing in this crate assumes otherwise.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Rect {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
+use core::future::Future;
+
+use wm_node::{Node, NodeId, ObservedNode, Origin, Rect, SurfaceId, Visibility};
+
+pub use crate::{
+    cache::{Delta, Index},
+    id::Interner,
+    selector::{Selector, SelectorParseError},
+};
 
 /// Why an agent was not allowed to act.
 ///
@@ -111,6 +118,28 @@ pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
 /// Implementations are expected to be *push*-shaped wherever the underlying
 /// source allows it. Polling a whole tree is the failure mode this project was
 /// started to fix, not a fallback to reach for.
+///
+/// # Why this trait is async, and why that costs this crate nothing
+///
+/// Every real source of nodes is asynchronous. AT-SPI2 is D-Bus, which the
+/// `atspi` crate exposes over zbus; the eventual fast path is a Wayland
+/// protocol. Making implementations hide that behind a blocking facade would
+/// mean burying a runtime inside a library and, worse, would put a *polling*
+/// shape on `drain_changes` -- the exact thing the paragraph above rejects.
+///
+/// Being async does not compromise this crate's portability, because
+/// [`Future`] lives in `core`: there is no runtime dependency here, and there
+/// is not going to be one. The runtime belongs to whoever drives the trait.
+///
+/// # Why `impl Future + Send` rather than `async fn`
+///
+/// Written as a bare `async fn`, the returned future carries no auto-trait
+/// bounds, so a caller that wants to `spawn` the driver onto a multi-threaded
+/// runtime cannot ask for `Send` and gets a famously indirect error instead.
+/// Spelling the bound here makes it an obligation of the implementation, which
+/// is where it can actually be satisfied -- zbus proxies are `Send`, so this
+/// costs the AT-SPI path nothing, and it fails loudly at the definition rather
+/// than quietly at the first `tokio::spawn`.
 pub trait Ingest {
     /// The implementation's own error type -- D-Bus failures for an AT-SPI
     /// bridge, protocol errors for a Wayland one.
@@ -118,21 +147,41 @@ pub trait Ingest {
 
     /// Read a subtree in as few round trips as the source permits.
     ///
+    /// "As few as the source permits" is doing real work in that sentence, and
+    /// what a source permits is not what it advertises. A warm GTK application
+    /// answers in one `Cache.GetItems` call; the Qt widget gallery offers the
+    /// same interface and answers it with an empty array; a cold GTK one
+    /// answers with a fraction of its tree. All three must be walked node by
+    /// node to get an answer, and only the first can avoid it. Every one of
+    /// those is a legitimate implementation of this method, and the distance
+    /// between them is the measurement the project turns on.
+    ///
     /// # Errors
     ///
     /// Returns `Self::Error` if the underlying source cannot be read.
-    fn snapshot(&mut self, root: NodeId) -> Result<Vec<ObservedNode>, Self::Error>;
+    fn snapshot(
+        &mut self,
+        root: NodeId,
+    ) -> impl Future<Output = Result<Vec<ObservedNode>, Self::Error>> + Send;
 
     /// Drain whatever the source has volunteered since the last call.
     ///
+    /// Volunteered, not fetched. An implementation that answers this by going
+    /// and looking has misread the trait.
+    ///
     /// # Errors
     ///
     /// Returns `Self::Error` if the underlying source cannot be read.
-    fn drain_changes(&mut self) -> Result<Vec<Change>, Self::Error>;
+    fn drain_changes(&mut self) -> impl Future<Output = Result<Vec<Change>, Self::Error>> + Send;
 }
 
 /// A change the ingest path volunteered.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` because a change is a value, and two of them being equal is a
+/// question worth asking -- an ingest path that reports the same change twice
+/// has turned a delta stream back into a poll, and a test can only say so if
+/// changes compare.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Change {
     /// A node appeared or its contents changed.
     Upserted { id: NodeId, node: Box<Node> },
@@ -201,6 +250,11 @@ pub enum PointerButton {
 
 #[cfg(test)]
 mod tests {
+    use core::{
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+
     use super::*;
     use wm_node::{ProcessOrigin, Role};
 
@@ -252,5 +306,70 @@ mod tests {
             check_actable(&judged_by_nobody).unwrap_err(),
             Refusal::Unjudged
         );
+    }
+
+    /// A minimal executor, so this crate can exercise its own async seam
+    /// without acquiring a runtime -- not even as a dev-dependency. The mock
+    /// below never suspends, so one poll always completes it; reaching
+    /// `Pending` would mean it had grown a suspension point it is not supposed
+    /// to have, which is worth a panic rather than a spin.
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut future = pin!(future);
+        let mut cx = Context::from_waker(Waker::noop());
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(value) => value,
+            Poll::Pending => unreachable!("MockIngest must not suspend"),
+        }
+    }
+
+    /// The smallest thing that can satisfy [`Ingest`]. It exists to hold the
+    /// trait's shape still: that it is implementable with a plain `async fn`,
+    /// and that what comes back is `Send`.
+    struct MockIngest {
+        nodes: Vec<ObservedNode>,
+        changes: Vec<Change>,
+    }
+
+    impl Ingest for MockIngest {
+        type Error = core::convert::Infallible;
+
+        async fn snapshot(&mut self, _root: NodeId) -> Result<Vec<ObservedNode>, Self::Error> {
+            Ok(self.nodes.clone())
+        }
+
+        async fn drain_changes(&mut self) -> Result<Vec<Change>, Self::Error> {
+            Ok(core::mem::take(&mut self.changes))
+        }
+    }
+
+    #[test]
+    fn the_async_seam_round_trips() {
+        let mut ingest = MockIngest {
+            nodes: vec![ObservedNode::unjoined(NodeId(1), Node::new(Role::Button))],
+            changes: vec![Change::Removed { id: NodeId(1) }],
+        };
+
+        assert_eq!(block_on(ingest.snapshot(NodeId(0))).unwrap().len(), 1);
+        assert_eq!(block_on(ingest.drain_changes()).unwrap().len(), 1);
+
+        // Drained means drained. A source that re-reports what it has already
+        // volunteered turns a delta stream back into a poll.
+        assert!(block_on(ingest.drain_changes()).unwrap().is_empty());
+    }
+
+    /// A compile-time assertion wearing a test's clothes. If [`Ingest`]'s
+    /// futures ever stop being `Send`, this stops building -- which is the
+    /// whole reason the bound is spelled on the trait rather than left to
+    /// inference at each call site.
+    #[test]
+    fn ingest_futures_are_send() {
+        fn assert_send<T: Send>(_: T) {}
+
+        let mut ingest = MockIngest {
+            nodes: Vec::new(),
+            changes: Vec::new(),
+        };
+        assert_send(ingest.snapshot(NodeId(0)));
+        assert_send(ingest.drain_changes());
     }
 }

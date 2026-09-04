@@ -29,6 +29,23 @@
 allow = [
     "Apache-2.0",
     "MIT",
+    # Added 2026-09-04, when `wm-atspi` brought in zbus and its proc-macros.
+    #
+    # Reached through exactly one crate: `unicode-ident`, which is
+    # `(MIT OR Apache-2.0) AND Unicode-3.0` -- the permissive half is already
+    # allowed above, and the `AND` is what fails the gate. The Unicode-3.0
+    # term covers the character tables the crate embeds, not its code.
+    #
+    # The Unicode License v3 is permissive and not copyleft: it grants
+    # unlimited use and redistribution of the data files, and asks only that
+    # the notice travel with them. It carries no reciprocal obligation, so it
+    # does not touch the reason GPL/LGPL/AGPL are absent from this list, and
+    # `unicode-ident` is a build-time dependency of every proc-macro crate in
+    # the Rust ecosystem -- refusing it would mean refusing proc macros.
+    #
+    # Scope, deliberately: this allows the licence, not a class of them. A
+    # second crate arriving under Unicode-3.0 still gets read before it ships.
+    "Unicode-3.0",
 ]
 # A crate with no licence expression at all is a licensing unknown, not a
 # permissive default.

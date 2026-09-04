@@ -36,3 +36,21 @@ unsafe_code = "forbid"
 # types means the eventual fast path is a transport swap rather than a
 # translation layer we own forever.
 accesskit = "0.25"
+
+# The accessibility bus client. Pinned at the workspace level so `wm-atspi` and
+# any future crate that speaks AT-SPI cannot drift onto different versions of a
+# wire format they both have to agree about.
+atspi = { version = "0.30", features = ["tokio"] }
+thiserror = "2"
+tracing = "0.1"
+# Only for `now_or_never`: draining a signal stream must not be able to wait,
+# or `drain_changes` would block on a desktop that happens to be quiet.
+futures-util = { version = "0.3", default-features = false }
+
+# Binary-only. `anyhow` in binaries and `thiserror` in libraries: a caller of a
+# library must be able to match on what went wrong, whereas a CLI's only
+# consumer is a person reading the message.
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

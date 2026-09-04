@@ -5,26 +5,29 @@
 # before pushing" means the same thing in both repos and a habit carries over
 # rather than being relearned.
 #
-# WHAT THIS IMAGE DOES NOT YET CARRY. From M1 the test job needs a live
-# accessibility bus and two real toolkit applications to read -- that is the
-# whole point of the ingest path, and mocking it would test our mock. When M1
-# lands, `test` grows a `before_script` installing:
+# The `test` job carries a live accessibility bus and two real toolkit
+# applications, because that is the whole point of the ingest path and mocking
+# it would test our mock. See `ci/live-tests.sh` for the session it builds.
 #
-#   dbus-x11 at-spi2-core            # the bus, plus at-spi-bus-launcher
-#   libgtk-4-1  <a GTK4 sample app>  # the volunteered-tree case
-#   qt6-base-dev <a Qt6 sample app>  # the second toolkit, which is the point
+# From M2 this additionally needs libinput/libdrm/gbm/libxkbcommon development
+# packages for Smithay's backends; the headless backend is what keeps that from
+# also needing a GPU.
 #
-# and runs under `dbus-run-session`. From M2 it additionally needs
-# libinput/libdrm/gbm/libxkbcommon development packages for Smithay's backends;
-# the headless backend is what keeps that from also needing a GPU.
+# Two things the M0 version of this comment got wrong, both corrected against
+# real toolkits rather than reasoned about:
 #
-# Qt is the one to verify early rather than assume: a Qt build's AT-SPI bridge
-# is a `QAccessibleBridgePlugin`, and it is genuinely absent from some distro
-# builds (the Gentoo box this was written on has no `plugins/accessiblebridge`
-# directory at all). If the CI image's Qt turns out to lack it, that is a real
-# finding about our reach and not a CI problem to work around quietly.
+#   - `dbus-run-session` is in `dbus-daemon` on Debian 13, not `dbus-x11`.
+#   - Qt's AT-SPI bridge is NOT a `QAccessibleBridgePlugin`. Qt 6 compiles it
+#     into QtGui under QT_FEATURE_accessibility and
+#     QT_FEATURE_accessibility_atspi_bridge, so there is no plugin directory to
+#     look for on any distribution, and its absence is diagnosed with
+#     `strings libQt6Gui.so.6 | grep org.a11y`. It is present in Debian's build.
 
-image: rust:1.93-bookworm
+# Trixie, not bookworm: Debian 13 is where every figure in the README was
+# measured and where the live tests are known to pass, and an accessibility
+# stack is not the place to discover that a different distribution behaves
+# differently by accident. GTK 4.18.6, Qt 6.8.2, at-spi2-core 2.56.2.
+image: rust:1.93-trixie
 
 # Without this, every push to a branch with an open MR runs the pipeline twice
 # -- once for the branch, once for the merge request event. The trap is armed
@@ -109,7 +112,26 @@ deny:
     # for why setting it in the config file silently does nothing.
     - cargo deny --all-features check
 
+# The only job that needs a desktop. Everything it installs is what the two
+# toolkits and the bus need to exist; the session itself is built by the script.
 test:
   stage: test
+  variables:
+    DEBIAN_FRONTEND: noninteractive
+  before_script:
+    - rustc --version && cargo --version
+    - apt-get update -qq
+    # `--no-install-recommends`, so anything reached only by a Recommends has
+    # to be named. `xauth` is the one that bites: it is a Recommends of xvfb
+    # and `xvfb-run` exits 3 with "xauth command not found" without it, which
+    # a workstation never sees because a desktop install already has it.
+    - >
+      apt-get install -y --no-install-recommends
+      xvfb
+      xauth
+      dbus-daemon
+      at-spi2-core
+      gtk-4-examples
+      qt6-base-examples
   script:
-    - cargo test --workspace
+    - xvfb-run -a dbus-run-session -- ci/live-tests.sh
