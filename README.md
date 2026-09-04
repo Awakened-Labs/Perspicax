@@ -101,6 +101,15 @@ drain reads signals that already arrived and asks the application nothing. That
 gap — 2 µs against seconds — is the whole reason this project treats polling a
 tree as the bug rather than the fallback.
 
+**`CoordType::Screen` is unusable, and not only under Wayland.** Asking both
+applications for screen-relative and window-relative extents under a GNOME Xorg
+session and a GNOME Wayland session: Qt reports true screen offsets on Xorg and
+degrades to window-relative under Wayland, where a client genuinely cannot know
+where it is. GTK answers `Screen` with coordinates that contradict its own
+`Window` answer on *both* — `0,0` for a child it simultaneously places at
+`10,57`. This crate therefore only ever asks for `Window`, and only a compositor
+may turn those into anything global.
+
 Geometry is a separate row because no bulk API exists for it on either toolkit:
 `Cache.GetItems` carries roles, names, states and parentage and no extents at
 all, so bounds are a round trip per node even on the fast path.

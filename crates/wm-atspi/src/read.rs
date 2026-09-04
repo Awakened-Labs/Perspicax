@@ -531,9 +531,24 @@ pub async fn accessible<'a>(
 /// latency table reports "cold tree" and "cold tree + geometry" as two numbers
 /// rather than one.
 ///
-/// [`CoordType::Window`] always, never `Screen`: a Wayland client cannot know
-/// where it sits on screen, and the bus will answer a `Screen` request with a
-/// confident fiction.
+/// [`CoordType::Window`] always, never `Screen`. Measured 2026-09-04 against
+/// the same two applications under a GNOME Xorg session and a GNOME Wayland
+/// session, asking each node for both coordinate types:
+///
+/// | | Qt `Screen` | GTK `Screen` |
+/// |---|---|---|
+/// | Xorg | correct -- a real screen offset | **wrong** -- `0,0` for a child its own `Window` call puts at `10,57` |
+/// | Wayland | degrades to window-relative | **wrong** -- same as above |
+///
+/// Qt is honest: it reports true screen coordinates where it can know them and
+/// falls back to window-relative under Wayland, where a client genuinely
+/// cannot. GTK answers `Screen` with numbers that disagree with its own
+/// `Window` answer on *both* session types.
+///
+/// So `Screen` is not merely unavailable under Wayland, it is unreliable
+/// everywhere -- and unreliable in the shape that matters, since a plausible
+/// wrong box is what makes a system click in the wrong place. Only a
+/// `HostView` turns window-relative bounds into anything global.
 pub async fn extents(connection: &Connection, key: &ObjectKey) -> Option<Rect> {
     let proxy = ComponentProxy::builder(connection)
         .destination(key.bus().to_owned())
