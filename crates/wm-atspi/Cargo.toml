@@ -14,6 +14,7 @@ workspace = true
 wm-index = { path = "../wm-index", version = "0.1.0" }
 wm-node = { path = "../wm-node", version = "0.1.0" }
 atspi.workspace = true
+futures-util.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
@@ -21,3 +22,8 @@ tracing.workspace = true
 # Only the tests need a runtime. The crate itself names no executor: it returns
 # futures and lets whoever drives `Ingest` decide what runs them.
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# The live tests need to *cause* a change, not just observe one. Poking a real
+# widget is the harness playing the part of a user, and it has to reach the bus
+# directly to do it -- going through this crate would be a test that proves
+# only that its own two halves agree with each other.
+atspi.workspace = true

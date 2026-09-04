@@ -147,11 +147,14 @@ pub trait Ingest {
 
     /// Read a subtree in as few round trips as the source permits.
     ///
-    /// "As few as the source permits" is doing real work in that sentence: a
-    /// GTK application answers this in one `Cache.GetItems` call, while a Qt
-    /// one implements neither `Cache` nor `Collection` and must be walked node
-    /// by node. Both are legitimate implementations of this method, and the
-    /// distance between them is the measurement the project turns on.
+    /// "As few as the source permits" is doing real work in that sentence, and
+    /// what a source permits is not what it advertises. A warm GTK application
+    /// answers in one `Cache.GetItems` call; the Qt widget gallery offers the
+    /// same interface and answers it with an empty array; a cold GTK one
+    /// answers with a fraction of its tree. All three must be walked node by
+    /// node to get an answer, and only the first can avoid it. Every one of
+    /// those is a legitimate implementation of this method, and the distance
+    /// between them is the measurement the project turns on.
     ///
     /// # Errors
     ///
@@ -173,7 +176,12 @@ pub trait Ingest {
 }
 
 /// A change the ingest path volunteered.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` because a change is a value, and two of them being equal is a
+/// question worth asking -- an ingest path that reports the same change twice
+/// has turned a delta stream back into a poll, and a test can only say so if
+/// changes compare.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Change {
     /// A node appeared or its contents changed.
     Upserted { id: NodeId, node: Box<Node> },

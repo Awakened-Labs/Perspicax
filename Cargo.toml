@@ -43,3 +43,6 @@ accesskit = "0.25"
 atspi = { version = "0.30", features = ["tokio"] }
 thiserror = "2"
 tracing = "0.1"
+# Only for `now_or_never`: draining a signal stream must not be able to wait,
+# or `drain_changes` would block on a desktop that happens to be quiet.
+futures-util = { version = "0.3", default-features = false }

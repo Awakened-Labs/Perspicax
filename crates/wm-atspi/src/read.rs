@@ -328,7 +328,12 @@ pub async fn read_with(
 ) -> Result<Vec<RawNode>, Error> {
     match strategy {
         Strategy::Walk => walk(connection, app.root()).await,
-        Strategy::Cache | Strategy::LegacyCache => Ok(try_cache(connection, app)
+        // The *raw* cache read, deliberately skipping the completeness gate
+        // that [`cold_read`] applies. A caller naming a strategy is measuring
+        // it, and answering "nothing" because the cache is cold would hide the
+        // exact number they asked for -- the 11-against-278 that
+        // [`cache_is_complete`] exists to describe.
+        Strategy::Cache | Strategy::LegacyCache => Ok(cache_items(connection, app)
             .await
             .filter(|(used, _)| *used == strategy)
             .map(|(_, nodes)| nodes)
@@ -348,6 +353,25 @@ pub async fn read_with(
 /// not give you the tree*. Distinguishing them would only invite a caller to
 /// handle one of them optimistically.
 async fn try_cache(connection: &Connection, app: &AppRef) -> Option<(Strategy, Vec<RawNode>)> {
+    let (strategy, nodes) = cache_items(connection, app).await?;
+    if cache_is_complete(&nodes) {
+        return Some((strategy, nodes));
+    }
+    tracing::debug!(
+        app = app.name(),
+        nodes = nodes.len(),
+        "Cache.GetItems answered with a partial tree; it is still filling up"
+    );
+    None
+}
+
+/// The one-round-trip read with no judgement applied: whatever the cache says,
+/// in whichever of the two layouts it says it in.
+///
+/// Separated from [`try_cache`] so that "what does the cache contain?" and
+/// "is that the tree?" stay two questions. The probe needs the second; a
+/// measurement needs the first.
+async fn cache_items(connection: &Connection, app: &AppRef) -> Option<(Strategy, Vec<RawNode>)> {
     let proxy = CacheProxy::builder(connection)
         .destination(app.root().bus().to_owned())
         .ok()?
@@ -363,14 +387,7 @@ async fn try_cache(connection: &Connection, app: &AppRef) -> Option<(Strategy, V
         Ok(items) if !items.is_empty() => {
             let mut nodes: Vec<RawNode> = items.iter().filter_map(from_cache_item).collect();
             link_children(&mut nodes);
-            if cache_is_complete(&nodes) {
-                return Some((Strategy::Cache, nodes));
-            }
-            tracing::debug!(
-                app = app.name(),
-                nodes = nodes.len(),
-                "Cache.GetItems answered with a partial tree; it is still filling up"
-            );
+            return Some((Strategy::Cache, nodes));
         }
         Ok(_) => tracing::debug!(app = app.name(), "Cache.GetItems answered with no nodes"),
         Err(error) => tracing::debug!(app = app.name(), %error, "Cache.GetItems (modern) failed"),
@@ -541,7 +558,7 @@ pub async fn extents(connection: &Connection, key: &ObjectKey) -> Option<Rect> {
 /// the crate calls those two `short_name` and `name`. So `short_name` is the
 /// accessible's name -- what a selector's bare word matches -- and `name` is
 /// its description.
-fn from_cache_item(item: &CacheItem) -> Option<RawNode> {
+pub(crate) fn from_cache_item(item: &CacheItem) -> Option<RawNode> {
     Some(RawNode {
         key: ObjectKey::from_owned(&item.object)?,
         parent: ObjectKey::from_owned(&item.parent),

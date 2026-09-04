@@ -30,6 +30,7 @@
 
 pub mod app;
 pub mod error;
+pub mod events;
 pub mod map;
 pub mod read;
 
@@ -44,6 +45,7 @@ use wm_node::{NodeId, ObservedNode};
 pub use crate::{
     app::{AppRef, ObjectKey},
     error::Error,
+    events::Subscription,
     read::Strategy,
 };
 
@@ -56,7 +58,7 @@ pub use crate::{
 /// produce.
 #[derive(Debug)]
 pub struct AtspiIngest {
-    connection: Connection,
+    bus: AccessibilityConnection,
     app: AppRef,
     /// AT-SPI's `(bus name, object path)` in, opaque [`NodeId`]s out. The one
     /// id map in the process: `wm-index` owns the never-reuse rule, and this
@@ -69,6 +71,10 @@ pub struct AtspiIngest {
     /// case; see [`AtspiIngest::forcing`].
     forced: Option<Strategy>,
     with_geometry: bool,
+    /// The live signal subscription. Opened by [`AtspiIngest::connect`] before
+    /// any tree is read, so that nothing can change in the gap between reading
+    /// a tree and starting to listen.
+    events: Subscription,
 }
 
 impl AtspiIngest {
@@ -83,18 +89,24 @@ impl AtspiIngest {
     /// `name`; it carries the names that were present.
     pub async fn connect(name: &str) -> Result<Self, Error> {
         let bus = AccessibilityConnection::new().await?;
-        let connection = bus.connection().clone();
 
         let mut available = Vec::new();
         for candidate in applications(&bus).await? {
             if candidate.name() == name {
+                // Subscribe before returning, and therefore before the caller
+                // can take a snapshot. The alternative -- snapshot, then
+                // subscribe -- silently loses every change that happens in
+                // between, and produces an index that is wrong in a way no
+                // later signal corrects.
+                let events = Subscription::open(candidate.root().bus()).await?;
                 return Ok(Self {
-                    connection,
+                    bus,
                     app: candidate,
                     interner: Interner::new(),
                     strategy: None,
                     forced: None,
                     with_geometry: false,
+                    events,
                 });
             }
             available.push(candidate.name().to_owned());
@@ -171,12 +183,13 @@ impl AtspiIngest {
             .ok_or(Error::UnknownRoot(root.0))?
             .clone();
 
+        let connection: Connection = self.bus.connection().clone();
         let (strategy, nodes) = match self.forced {
             Some(forced) => (
                 forced,
-                read::read_with(&self.connection, &self.app, forced).await?,
+                read::read_with(&connection, &self.app, forced).await?,
             ),
-            None => read::cold_read(&self.connection, &self.app).await?,
+            None => read::cold_read(&connection, &self.app).await?,
         };
         self.strategy = Some(strategy);
         tracing::debug!(
@@ -189,7 +202,7 @@ impl AtspiIngest {
         let mut nodes = read::subtree(nodes, &key);
         if self.with_geometry {
             for node in &mut nodes {
-                node.bounds = read::extents(&self.connection, &node.key).await;
+                node.bounds = read::extents(&connection, &node.key).await;
             }
         }
         Ok(read::to_observed(nodes, &mut self.interner))
@@ -211,15 +224,18 @@ impl Ingest for AtspiIngest {
         self.read_subtree(root).await
     }
 
-    /// Nothing yet: this is M1 slice 4's subject.
+    /// Take what the bus has volunteered since the last call.
     ///
-    /// Returning an empty vector is the honest stub. The alternative -- reading
-    /// the tree and diffing it -- would be a poll wearing a delta's clothes,
-    /// which is the one thing this trait's documentation forbids, and it would
-    /// pass a test suite while being the exact bug the project was started
-    /// over.
+    /// Volunteered, not fetched: this reads a queue of signals that already
+    /// arrived and never asks the application anything. It cannot block, and
+    /// on a quiet desktop it returns an empty vector immediately.
+    ///
+    /// Not `Ok(Vec::new())` with a re-read hidden behind it. Diffing a fresh
+    /// tree against the cached one would satisfy this signature, pass a test
+    /// suite, and be a poll wearing a delta's clothes -- which is the single
+    /// thing [`Ingest`]'s own documentation forbids.
     async fn drain_changes(&mut self) -> Result<Vec<Change>, Self::Error> {
-        Ok(Vec::new())
+        Ok(self.events.drain(&mut self.interner))
     }
 }
 
