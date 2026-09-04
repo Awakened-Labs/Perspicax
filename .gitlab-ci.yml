@@ -121,9 +121,14 @@ test:
   before_script:
     - rustc --version && cargo --version
     - apt-get update -qq
+    # `--no-install-recommends`, so anything reached only by a Recommends has
+    # to be named. `xauth` is the one that bites: it is a Recommends of xvfb
+    # and `xvfb-run` exits 3 with "xauth command not found" without it, which
+    # a workstation never sees because a desktop install already has it.
     - >
       apt-get install -y --no-install-recommends
       xvfb
+      xauth
       dbus-daemon
       at-spi2-core
       gtk-4-examples
