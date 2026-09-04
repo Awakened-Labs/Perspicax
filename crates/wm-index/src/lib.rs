@@ -16,10 +16,30 @@
 //! The refusal gate ([`Refusal`], [`check_actable`]) lives here rather than in
 //! the MCP server, and that placement is deliberate: a future host that talks
 //! to agents some other way must not be able to route around it.
+//!
+//! Between those two traits sit the three things that make a tree of nodes
+//! addressable:
+//!
+//! - [`Interner`] -- an ingest path's own keys in, opaque [`NodeId`]s out, and
+//!   never the same id twice.
+//! - [`Selector`] -- the addressing scheme a human or a model can write down,
+//!   as opposed to one minted at runtime.
+//! - [`Index`] -- the cache, the tree order both of the above depend on, and
+//!   the [`Delta`] computation that keeps a subscription from being a poll.
+
+pub mod cache;
+pub mod id;
+pub mod selector;
 
 use core::future::Future;
 
 use wm_node::{Node, NodeId, ObservedNode, Origin, Rect, SurfaceId, Visibility};
+
+pub use crate::{
+    cache::{Delta, Index},
+    id::Interner,
+    selector::{Selector, SelectorParseError},
+};
 
 /// Why an agent was not allowed to act.
 ///
