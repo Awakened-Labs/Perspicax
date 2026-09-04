@@ -20,6 +20,29 @@ set -euo pipefail
 # hard-coding a triplet that is right on exactly one runner.
 gallery=$(dpkg -L qt6-base-examples | grep -m1 '/widgets/gallery/bin/gallery$')
 
+# Turn accessibility on for this session, and check that it took.
+#
+# `org.a11y.Status.IsEnabled` is what Qt's AT-SPI bridge gates on: with it
+# false the gallery starts perfectly, draws its window, prints nothing, and
+# never joins the accessibility bus at all. GTK's ATK bridge ignores the flag
+# and registers either way, so the symptom is one toolkit silently missing.
+#
+# A desktop sets it from dconf (`org.gnome.desktop.interface
+# toolkit-accessibility`), which is exactly why this was invisible on a
+# workstation and fatal in a container: a fresh HOME has no dconf state, so the
+# flag defaults to false.
+echo "enabling accessibility for this session"
+gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
+    --method org.freedesktop.DBus.Properties.Set \
+    org.a11y.Status IsEnabled "<true>" >/dev/null
+
+enabled=$(gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
+    --method org.freedesktop.DBus.Properties.Get org.a11y.Status IsEnabled)
+if [[ "$enabled" != *true* ]]; then
+    echo "could not enable accessibility: IsEnabled is $enabled" >&2
+    exit 1
+fi
+
 echo "starting the toolkit applications"
 gtk4-widget-factory >/tmp/gtk4-widget-factory.log 2>&1 &
 # Qt compiles its AT-SPI bridge into QtGui under two feature flags rather than
