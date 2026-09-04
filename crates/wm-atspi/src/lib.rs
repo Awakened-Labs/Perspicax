@@ -240,6 +240,22 @@ impl Ingest for AtspiIngest {
 }
 
 /// Every application currently on the accessibility bus.
+///
+/// The first thing to run when `--app` finds nothing: it distinguishes "that
+/// name is wrong" from "the bus is empty", and an empty list on a desktop that
+/// visibly has windows on it means the accessibility bus is not the one this
+/// process is talking to -- almost always `XDG_RUNTIME_DIR` and
+/// `DBUS_SESSION_BUS_ADDRESS` over SSH.
+///
+/// # Errors
+///
+/// [`Error::Bus`] if the accessibility bus cannot be reached.
+pub async fn on_the_bus() -> Result<Vec<AppRef>, Error> {
+    let bus = AccessibilityConnection::new().await?;
+    applications(&bus).await
+}
+
+/// Every application currently on the accessibility bus.
 async fn applications(bus: &AccessibilityConnection) -> Result<Vec<AppRef>, Error> {
     let registry = bus.root_accessible_on_registry().await?;
     let connection = bus.connection();

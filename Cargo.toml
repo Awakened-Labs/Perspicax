@@ -46,3 +46,11 @@ tracing = "0.1"
 # Only for `now_or_never`: draining a signal stream must not be able to wait,
 # or `drain_changes` would block on a desktop that happens to be quiet.
 futures-util = { version = "0.3", default-features = false }
+
+# Binary-only. `anyhow` in binaries and `thiserror` in libraries: a caller of a
+# library must be able to match on what went wrong, whereas a CLI's only
+# consumer is a person reading the message.
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
