@@ -13,3 +13,11 @@ workspace = true
 [dependencies]
 wm-index = { path = "../wm-index", version = "0.1.0" }
 wm-node = { path = "../wm-node", version = "0.1.0" }
+atspi.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# Only the tests need a runtime. The crate itself names no executor: it returns
+# futures and lets whoever drives `Ingest` decide what runs them.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -36,3 +36,10 @@ unsafe_code = "forbid"
 # types means the eventual fast path is a transport swap rather than a
 # translation layer we own forever.
 accesskit = "0.25"
+
+# The accessibility bus client. Pinned at the workspace level so `wm-atspi` and
+# any future crate that speaks AT-SPI cannot drift onto different versions of a
+# wire format they both have to agree about.
+atspi = { version = "0.30", features = ["tokio"] }
+thiserror = "2"
+tracing = "0.1"

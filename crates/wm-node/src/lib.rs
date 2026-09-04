@@ -22,7 +22,12 @@
 /// parallel schema wearing a different hat. Note its shape before using it --
 /// it is kurbo-derived, so it is two corners (`x0`, `y0`, `x1`, `y1`) and not
 /// an origin plus a size.
-pub use accesskit::{Action, Node, NodeId, Rect, Role};
+///
+/// [`Toggled`] and [`Orientation`] joined the list when `wm-atspi` needed to
+/// project AT-SPI's state bits onto a node: a tri-state checkbox is
+/// `Toggled::Mixed` and not a `bool`, and inventing either type locally would
+/// be the same parallel-schema mistake in miniature.
+pub use accesskit::{Action, Node, NodeId, Orientation, Rect, Role, Toggled};
 
 /// A compositor surface. Opaque, and meaningful only to the [`HostView`] that
 /// minted it.
