@@ -26,14 +26,29 @@ gtk4-widget-factory >/tmp/gtk4-widget-factory.log 2>&1 &
 # shipping it as a plugin, and asks for this variable before using it.
 QT_ACCESSIBILITY=1 "$gallery" >/tmp/qt6-gallery.log 2>&1 &
 
-cargo build --workspace --tests
+# `--all-targets`, not `--tests`. `--tests` builds test harnesses and does NOT
+# produce `target/debug/wm-probe`, so the poll below would run a binary that
+# does not exist -- which is exactly what happened the first time this ran in a
+# container, while passing on a workstation where an earlier build had left one
+# behind.
+cargo build --workspace --all-targets
+
+probe=./target/debug/wm-probe
+if [ ! -x "$probe" ]; then
+    echo "wm-probe was not built at $probe -- check the build target selection" >&2
+    exit 1
+fi
 
 # Poll rather than sleep. A fixed wait is either too short on a loaded runner
 # or wasted on an idle one, and when it is too short the failure surfaces as a
 # confusing test error rather than as "the application never arrived".
+#
+# stderr is captured rather than discarded. Throwing it away is how a missing
+# binary came to be reported as an empty accessibility bus.
 echo "waiting for both applications to reach the accessibility bus"
+on_bus=""
 for _ in $(seq 60); do
-    on_bus=$(./target/debug/wm-probe apps 2>/dev/null || true)
+    on_bus=$("$probe" apps 2>&1 || true)
     if grep -q gtk4-widget-factory <<<"$on_bus" && grep -q gallery <<<"$on_bus"; then
         echo "$on_bus"
         break
@@ -41,9 +56,9 @@ for _ in $(seq 60); do
     sleep 1
 done
 
-if ! grep -q gtk4-widget-factory <<<"${on_bus:-}" || ! grep -q gallery <<<"${on_bus:-}"; then
-    echo "an application never reached the accessibility bus:" >&2
-    echo "${on_bus:-<nothing on the bus>}" >&2
+if ! grep -q gtk4-widget-factory <<<"$on_bus" || ! grep -q gallery <<<"$on_bus"; then
+    echo "an application never reached the accessibility bus." >&2
+    echo "--- wm-probe apps said ---" >&2; echo "${on_bus:-<no output at all>}" >&2
     echo "--- gtk4-widget-factory ---" >&2; cat /tmp/gtk4-widget-factory.log >&2 || true
     echo "--- qt6 gallery ---" >&2;        cat /tmp/qt6-gallery.log >&2 || true
     exit 1
