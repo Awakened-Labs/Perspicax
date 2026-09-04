@@ -1,0 +1,115 @@
+# GitLab CI -- the four gates, in the order they run: fmt, clippy, deny, test.
+#
+# This is the M0 shape and it is deliberately boring. What matters is that the
+# order and the names match our other repositories's pipeline, so "run the gates locally
+# before pushing" means the same thing in both repos and a habit carries over
+# rather than being relearned.
+#
+# WHAT THIS IMAGE DOES NOT YET CARRY. From M1 the test job needs a live
+# accessibility bus and two real toolkit applications to read -- that is the
+# whole point of the ingest path, and mocking it would test our mock. When M1
+# lands, `test` grows a `before_script` installing:
+#
+#   dbus-x11 at-spi2-core            # the bus, plus at-spi-bus-launcher
+#   libgtk-4-1  <a GTK4 sample app>  # the volunteered-tree case
+#   qt6-base-dev <a Qt6 sample app>  # the second toolkit, which is the point
+#
+# and runs under `dbus-run-session`. From M2 it additionally needs
+# libinput/libdrm/gbm/libxkbcommon development packages for Smithay's backends;
+# the headless backend is what keeps that from also needing a GPU.
+#
+# Qt is the one to verify early rather than assume: a Qt build's AT-SPI bridge
+# is a `QAccessibleBridgePlugin`, and it is genuinely absent from some distro
+# builds (the Gentoo box this was written on has no `plugins/accessiblebridge`
+# directory at all). If the CI image's Qt turns out to lack it, that is a real
+# finding about our reach and not a CI problem to work around quietly.
+
+image: rust:1.93-bookworm
+
+# Without this, every push to a branch with an open MR runs the pipeline twice
+# -- once for the branch, once for the merge request event. The trap is armed
+# by any job carrying a `rules:` block, so the guard lives here at the top
+# where the next job to grow one cannot forget it.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+stages:
+  - check
+  - test
+
+variables:
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  # Incremental compilation is worthless when every job is a cold build, and
+  # `line-tables-only` drops the bulk of the debuginfo while keeping file:line
+  # in panic backtraces. Dev/test profiles only.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+default:
+  interruptible: true
+  # The registry only -- deliberately not `target/`. Caching a build directory
+  # means archiving and restoring it every run, and it grows without bound on
+  # the runner. Keyed on Cargo.lock so a dependency bump refreshes it.
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/registry/index
+      - .cargo/registry/cache
+  before_script:
+    - rustc --version && cargo --version
+
+# Default rustfmt style, no exceptions. No dependencies to build, so no cache.
+fmt:
+  stage: check
+  cache: []
+  script:
+    - rustup component add rustfmt
+    - cargo fmt --all --check
+
+# `-D warnings`: the tree is clippy-clean, so a new warning fails the pipeline
+# rather than accumulating into background noise nobody reads. Deliberate
+# exceptions carry an `#[allow]` at the definition with a `reason` explaining
+# itself -- the M0 skeleton crates each carry one.
+clippy:
+  stage: check
+  script:
+    - rustup component add clippy
+    - cargo clippy --workspace --all-targets -- -D warnings
+
+deny:
+  stage: check
+  cache:
+    - key:
+        files:
+          - Cargo.lock
+      paths:
+        - .cargo/registry/index
+        - .cargo/registry/cache
+    # Pinned, and the version appears in the key as well as the command. They
+    # are two spellings of one number: bump them together, because a key left
+    # behind pins the old binary and an unpinned install lets a cargo-deny
+    # release change the verdict with no commit here to explain it.
+    - key: cargo-deny-0.20.2
+      paths:
+        - .cargo/bin
+        - .cargo/.crates.toml
+        - .cargo/.crates2.json
+  script:
+    # Idempotent because of the cache paths above: a no-op exiting 0 on a warm
+    # runner.
+    - cargo install cargo-deny --version 0.20.2 --locked
+    # `--all-features` must be on the command line; see the note in deny.toml
+    # for why setting it in the config file silently does nothing.
+    - cargo deny --all-features check
+
+test:
+  stage: test
+  script:
+    - cargo test --workspace

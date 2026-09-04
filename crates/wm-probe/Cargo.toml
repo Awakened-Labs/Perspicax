@@ -1,0 +1,20 @@
+[package]
+name = "wm-probe"
+description = "Dev CLI: dump a semantic tree, time a read, explain a refusal. The tool that makes each milestone demonstrable rather than merely tested."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "wm-probe"
+path = "src/main.rs"
+
+[dependencies]
+wm-atspi = { path = "../wm-atspi", version = "0.1.0" }
+wm-index = { path = "../wm-index", version = "0.1.0" }
+wm-node = { path = "../wm-node", version = "0.1.0" }

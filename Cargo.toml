@@ -1,0 +1,38 @@
+# The workspace is deliberately layered rather than flat: `wm-index` and
+# `wm-node` must compile without Wayland or D-Bus anywhere in their graph, and
+# a workspace member that cannot see Smithay cannot accidentally depend on it.
+# That property is load-bearing -- it is what makes a GNOME or KWin host a port
+# rather than a rewrite -- so it is enforced by the dependency graph, not by a
+# comment asking people to be careful.
+[workspace]
+resolver = "3"
+members = [
+    "crates/wm-atspi",
+    "crates/wm-compositor",
+    "crates/wm-index",
+    "crates/wm-mcp",
+    "crates/wm-node",
+    "crates/wm-probe",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "Apache-2.0"
+repository = "https://github.com/Awakened-Labs/Perspicax"
+
+[workspace.lints.rust]
+# `forbid`, not `deny`, everywhere except the one crate that genuinely cannot
+# hold the line. A compositor talks to DRM, GBM and libinput through C, so
+# `wm-compositor` downgrades this to `deny` in its own manifest with the reason
+# written there. Every other crate in the tree -- including the two that will
+# eventually parse text an untrusted process rendered -- stays at `forbid`.
+unsafe_code = "forbid"
+
+[workspace.dependencies]
+# AccessKit is the node schema. We do not define a parallel one: GTK 4.20 already
+# ships a `GtkAccessKitContext` behind `GTK_A11Y=accesskit`, so adopting these
+# types means the eventual fast path is a transport swap rather than a
+# translation layer we own forever.
+accesskit = "0.25"
