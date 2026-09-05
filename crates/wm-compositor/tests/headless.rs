@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use wm_compositor::{Config, Error};
+use wm_compositor::{Config, Error, Facts};
 
 /// The smallest claim worth making automatically: it binds a socket, runs an
 /// event loop, and stops when it is told to. Everything else in this milestone
@@ -23,8 +23,10 @@ fn a_headless_compositor_comes_up_and_stops_when_told() {
         run_for: Some(Duration::from_millis(250)),
     };
 
+    let facts = Facts::new();
     let started = Instant::now();
-    wm_compositor::run(&config).expect("a headless compositor needs nothing but a runtime dir");
+    wm_compositor::run(&config, &facts)
+        .expect("a headless compositor needs nothing but a runtime dir");
     let elapsed = started.elapsed();
 
     assert!(
@@ -34,6 +36,10 @@ fn a_headless_compositor_comes_up_and_stops_when_told() {
     assert!(
         elapsed < Duration::from_secs(5),
         "overshot its deadline by an order of magnitude, in {elapsed:?}"
+    );
+    assert!(
+        facts.read().surfaces().is_empty(),
+        "a compositor nobody connected to has no surfaces to describe"
     );
 }
 
@@ -49,7 +55,7 @@ fn a_command_that_does_not_exist_is_named_in_the_error() {
         run_for: Some(Duration::from_millis(50)),
     };
 
-    match wm_compositor::run(&config) {
+    match wm_compositor::run(&config, &Facts::new()) {
         Err(Error::Spawn { command, source }) => {
             assert_eq!(command, "wm-no-such-program --flag");
             assert_eq!(source.kind(), std::io::ErrorKind::NotFound);

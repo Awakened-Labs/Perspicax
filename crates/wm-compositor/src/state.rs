@@ -6,7 +6,15 @@
 //! [`Compositor::send_frames`], and both follow from this compositor not
 //! drawing anything.
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    os::unix::net::UnixStream,
+    sync::{Arc, OnceLock},
+    time::Instant,
+};
+
+use wm_node::{Origin, SurfaceId};
+
+use crate::{facts::Facts, origin};
 
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
@@ -73,6 +81,15 @@ pub struct Compositor {
     /// which is the order `wm_index::HostFacts` wants, so the two agree by
     /// construction rather than by a conversion someone has to keep right.
     pub(crate) space: Space<Window>,
+    /// What this compositor last told the rest of the process. See
+    /// [`crate::facts`] for why the boundary is a published copy.
+    pub(crate) facts: Facts,
+    /// Bumped on every publication, so a reader can tell two snapshots apart
+    /// without comparing them.
+    pub(crate) generation: u64,
+    /// Minted per toplevel and never reused. A retired id addressing a new
+    /// window is the failure `Refusal::Stale` exists to prevent, one layer up.
+    next_surface: u64,
     #[expect(dead_code, reason = "RAII handle for the wl_output global")]
     pub(crate) output: Output,
     placed: i32,
@@ -82,7 +99,7 @@ pub struct Compositor {
 impl Compositor {
     /// Bring up every global a stock GTK or Qt client expects to find, and one
     /// virtual output for them to sit on.
-    pub(crate) fn new(display: &DisplayHandle, size: (i32, i32)) -> Self {
+    pub(crate) fn new(display: &DisplayHandle, size: (i32, i32), facts: Facts) -> Self {
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(display, "wm-seat");
 
@@ -122,20 +139,51 @@ impl Compositor {
             seat,
             space,
             output,
+            facts,
+            generation: 0,
+            next_surface: 0,
             placed: 0,
             started: Instant::now(),
         }
     }
 
-    /// Accept a connection.
-    pub(crate) fn insert_client(&mut self, stream: std::os::unix::net::UnixStream) {
-        match self
+    /// Accept a connection, and settle who is on the other end of it before
+    /// that client can do anything else.
+    ///
+    /// The ordering is awkward and unavoidable: a client's state has to be
+    /// constructed before the `Client` that would answer for its credentials
+    /// exists. So the origin is written once, immediately after insertion and
+    /// before the loop dispatches a single request, into a slot whose empty
+    /// state means `Unattributed` -- which is refused. A failure to attribute
+    /// therefore costs the client its ability to be acted on, and never
+    /// silently grants it somebody else's identity.
+    pub(crate) fn insert_client(&mut self, stream: UnixStream) {
+        let client = match self
             .display
             .insert_client(stream, Arc::new(ClientState::default()))
         {
-            Ok(client) => tracing::debug!(id = ?client.id(), "client connected"),
-            Err(error) => tracing::warn!(%error, "could not insert client"),
+            Ok(client) => client,
+            Err(error) => {
+                tracing::warn!(%error, "could not insert client");
+                return;
+            }
+        };
+
+        let origin = client
+            .get_credentials(&self.display)
+            .map_or(Origin::Unattributed, |credentials| {
+                origin::of_pid(credentials.pid)
+            });
+        if let Some(state) = client.get_data::<ClientState>() {
+            state.attribute(origin.clone());
         }
+        tracing::info!(id = ?client.id(), ?origin, "client connected");
+    }
+
+    /// The next surface id. Monotonic, and never handed out twice.
+    fn mint_surface_id(&mut self) -> SurfaceId {
+        self.next_surface += 1;
+        SurfaceId(self.next_surface)
     }
 
     /// Tell every surface it may draw again.
@@ -222,6 +270,7 @@ impl CompositorHandler for Compositor {
             window.on_commit();
         }
         self.space.refresh();
+        self.publish_facts();
     }
 }
 
@@ -239,16 +288,21 @@ impl XdgShellHandler for Compositor {
         surface.send_configure();
 
         let window = Window::new_wayland_window(surface);
+        let id = self.mint_surface_id();
+        window.user_data().insert_if_missing(|| id);
+
         let at = (self.placed * CASCADE, self.placed * CASCADE);
         self.placed += 1;
         self.space.map_element(window, at, true);
-        tracing::info!(at = ?at, "toplevel mapped");
+        tracing::info!(surface = id.0, at = ?at, "toplevel mapped");
+        self.publish_facts();
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(window) = self.window_for(surface.wl_surface()) {
             self.space.unmap_elem(&window);
         }
+        self.publish_facts();
     }
 
     /// Popups are accepted and configured, and deliberately not placed yet. A
@@ -314,14 +368,29 @@ impl DataDeviceHandler for Compositor {
 impl ClientDndGrabHandler for Compositor {}
 impl ServerDndGrabHandler for Compositor {}
 
-/// Per-client state.
+/// Per-client state: the protocol's, and this client's provenance.
 ///
-/// It holds a `CompositorClientState` today and it is where a client's
-/// credentials will be cached next, which is the reason it is a named struct
-/// rather than `()`.
+/// The origin is settled once, when the connection is accepted, and never
+/// re-derived. Credentials are a fact about a socket at the instant it was
+/// accepted; asking again later against a pid the kernel may since have
+/// recycled would be worse information wearing a fresher timestamp.
 #[derive(Default)]
 pub(crate) struct ClientState {
     compositor: CompositorClientState,
+    origin: OnceLock<Origin>,
+}
+
+impl ClientState {
+    /// Record who this client is. Once, and only the first time: an identity
+    /// that could be overwritten is not an attestation.
+    fn attribute(&self, origin: Origin) {
+        let _ = self.origin.set(origin);
+    }
+
+    /// Who this client is, or `Unattributed` if it was never established.
+    pub(crate) fn origin(&self) -> Origin {
+        self.origin.get().cloned().unwrap_or_default()
+    }
 }
 
 impl ClientData for ClientState {

@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
-use wm_compositor::Config;
+use wm_compositor::{Config, Facts};
 
 #[derive(Parser)]
 #[command(
@@ -85,7 +85,10 @@ fn main() -> Result<()> {
         run_for: cli.run_for.map(Duration::from_secs_f64),
     };
 
-    wm_compositor::run(&config).context("the compositor stopped")
+    // Created here rather than inside the compositor: from the next slice on,
+    // the thread that reads these facts is not the thread that publishes them.
+    let facts = Facts::new();
+    wm_compositor::run(&config, &facts).context("the compositor stopped")
 }
 
 /// `1920x1080` into a pair. Rejected rather than clamped: a compositor asked

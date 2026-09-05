@@ -88,6 +88,15 @@ pub struct SurfaceFacts {
     /// Node space's origin, relative to `geometry`'s origin. See the module
     /// documentation; zero means "unmeasured", which is also usually correct.
     pub node_space_offset: Vec2,
+    /// Where surface-local `(0, 0)` sits in global space.
+    ///
+    /// Usually `geometry`'s own origin and *not* under client-side decoration,
+    /// where the buffer starts at the outside of the shadow and the window
+    /// geometry starts at the visible frame. Opaque regions arrive in
+    /// surface-local coordinates, so getting this wrong offsets every occlusion
+    /// test by the shadow margin -- which is precisely the size of error that
+    /// produces a confident wrong answer rather than an obvious one.
+    pub buffer_origin: Vec2,
     /// Where the client says it is opaque, in surface-local coordinates.
     ///
     /// `None` is materially different from `Some(vec![])`: the first is a
@@ -113,6 +122,7 @@ impl SurfaceFacts {
             mapped: true,
             geometry,
             node_space_offset: Vec2::ZERO,
+            buffer_origin: Vec2::new(geometry.x0, geometry.y0),
             opaque: None,
             origin: Origin::Unattributed,
             damage_generation: 0,
@@ -148,6 +158,15 @@ impl SurfaceFacts {
         self
     }
 
+    /// The same surface, with surface-local `(0, 0)` somewhere other than the
+    /// window geometry's own origin -- which is what client-side decoration
+    /// does.
+    #[must_use]
+    pub fn with_buffer_origin(mut self, origin: Vec2) -> Self {
+        self.buffer_origin = origin;
+        self
+    }
+
     /// The same surface, damaged `generation` times.
     #[must_use]
     pub fn damaged(mut self, generation: u64) -> Self {
@@ -179,9 +198,10 @@ impl SurfaceFacts {
 
     /// A surface-local region, in global space. Regions are *not* subject to
     /// `node_space_offset`: that offset corrects an accessibility bridge's idea
-    /// of an origin, and the Wayland protocol does not share it.
+    /// of an origin, and the Wayland protocol does not share it. They are
+    /// subject to `buffer_origin`, which is the protocol's own.
     fn surface_local_to_global(&self, region: Rect) -> Rect {
-        let (dx, dy) = (self.geometry.x0, self.geometry.y0);
+        let (dx, dy) = (self.buffer_origin.x, self.buffer_origin.y);
         Rect::new(
             region.x0 + dx,
             region.y0 + dy,
@@ -597,6 +617,26 @@ mod tests {
             1,
         );
         assert_eq!(verdict(&facts).visibility, Visibility::Visible);
+    }
+
+    /// Under client-side decoration the buffer starts outside the visible
+    /// frame, so a surface's two origins are not the same point. An opaque
+    /// region declared at surface-local `(0, 0)` lands at the outside of the
+    /// shadow, not at the corner of the window.
+    #[test]
+    fn a_decorated_surface_has_two_origins_and_they_are_used_for_different_things() {
+        let decorated = SurfaceFacts::new(SurfaceId(1), rect(100.0, 100.0, 500.0, 400.0))
+            .with_buffer_origin(Vec2::new(80.0, 80.0));
+        assert_eq!(
+            decorated.surface_local_to_global(rect(0.0, 0.0, 10.0, 10.0)),
+            rect(80.0, 80.0, 90.0, 90.0),
+            "a region is placed from the buffer's origin"
+        );
+        assert_eq!(
+            decorated.to_global(rect(0.0, 0.0, 10.0, 10.0)),
+            rect(100.0, 100.0, 110.0, 110.0),
+            "a node is placed from the window geometry's origin"
+        );
     }
 
     #[test]

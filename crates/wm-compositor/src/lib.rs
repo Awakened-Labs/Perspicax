@@ -32,7 +32,11 @@
 //! Real DRM, modesetting and multi-output wait for `--seat`; they are the part
 //! of compositor work that consumes schedule without proving anything.
 
+pub mod facts;
+mod origin;
 pub mod state;
+
+pub use crate::facts::Facts;
 
 use std::{
     ffi::OsString,
@@ -112,17 +116,20 @@ impl Default for Config {
 
 /// Run a compositor until its deadline passes, or forever.
 ///
+/// `facts` is where it publishes what it knows; the caller owns that handle so
+/// that whoever reads the facts need not be the thread running this loop.
+///
 /// # Errors
 ///
 /// [`Error`], for any of the ways a compositor fails to come up: no socket, no
 /// event loop, a child that will not start, or a display that fails mid-run.
-pub fn run(config: &Config) -> Result<(), Error> {
+pub fn run(config: &Config, facts: &Facts) -> Result<(), Error> {
     let mut event_loop: EventLoop<'static, Compositor> =
         EventLoop::try_new().map_err(|error| Error::EventLoop(error.to_string()))?;
     let mut display: Display<Compositor> =
         Display::new().map_err(|error| Error::Display(error.to_string()))?;
     let handle = display.handle();
-    let mut state = Compositor::new(&handle, config.size);
+    let mut state = Compositor::new(&handle, config.size, facts.clone());
 
     let socket =
         ListeningSocketSource::new_auto().map_err(|error| Error::Socket(error.to_string()))?;
