@@ -221,9 +221,21 @@ pub trait HostView {
     /// whether the surface is mapped at all.
     fn visibility(&self, surface: SurfaceId, rect: Rect) -> Visibility;
 
-    /// How many frames of damage this surface has taken that the index has not
-    /// yet reconciled. Non-zero means any node read from it is stale.
-    fn staleness(&self, surface: SurfaceId) -> u32;
+    /// How many frames of damage this surface has taken, ever. Monotonic.
+    ///
+    /// Deliberately a counter and not a verdict. This was written as
+    /// `staleness` before M2 measured what damage is, and a host cannot answer
+    /// "is this stale" -- staleness is a comparison against what *the reader*
+    /// last reconciled, and the host does not know that number. It is also not
+    /// a whole-surface question: an idle GTK application repaints its window
+    /// about forty times a second, so a host that answered "stale" whenever
+    /// damage had arrived would refuse every node in it permanently.
+    /// [`SurfaceFacts::damage_since`] is where the counter and the reconcile
+    /// point are compared, and [`Index::reconcile`] is what moves the latter.
+    ///
+    /// [`SurfaceFacts::damage_since`]: crate::SurfaceFacts::damage_since
+    /// [`Index::reconcile`]: crate::Index::reconcile
+    fn damage_generation(&self, surface: SurfaceId) -> u64;
 
     /// Dispatch input through the compositor's own input path, so focus,
     /// grabs and z-order stay correct by construction.

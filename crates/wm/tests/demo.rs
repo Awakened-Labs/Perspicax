@@ -14,7 +14,7 @@ use wm::{
     observe::{self, AppReport},
     session,
 };
-use wm_compositor::{Config, Facts, Stop};
+use wm_compositor::{Config, Facts, Requests, Stop};
 use wm_index::Refusal;
 use wm_node::{NodeId, Origin, SurfaceId, Visibility};
 
@@ -150,7 +150,7 @@ fn run_demo() -> Vec<AppReport> {
         })
     };
 
-    wm_compositor::run(&config, &facts, &stop).expect("the compositor runs");
+    wm_compositor::run(&config, &facts, &Requests::new(), &stop).expect("the compositor runs");
     reader.join().expect("the reader finishes");
     receiver
         .recv()

@@ -19,13 +19,6 @@
 //!   surface, and the compositor supplies the origin. That translation happens
 //!   here, once, in [`Compositor::act`].
 
-#![expect(
-    dead_code,
-    reason = "slice 1 builds the dispatch path; slice 2's calloop channel is \
-              what first reaches it. `expect` rather than `allow`, so this \
-              starts complaining the moment that lands."
-)]
-
 use std::time::Instant;
 
 use smithay::{
@@ -72,6 +65,11 @@ pub enum ActError {
     /// reporting success is the failure an agent cannot detect.
     #[error("no key on this layout produces {0:?}")]
     Untypeable(char),
+    /// No compositor loop answered. It has not started, it has stopped, or it
+    /// is wedged; from outside those look the same and an agent can do nothing
+    /// different about any of them.
+    #[error("no compositor loop answered")]
+    Unreachable,
 }
 
 /// What the compositor did, as it alone can report it.

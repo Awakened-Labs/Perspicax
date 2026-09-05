@@ -34,12 +34,14 @@
 
 pub mod act;
 pub mod facts;
+pub mod host;
 mod origin;
 pub mod state;
 
 pub use crate::{
     act::{ActError, Dispatched},
     facts::Facts,
+    host::{Host, Request, Requests},
 };
 
 use std::{
@@ -56,6 +58,7 @@ use smithay::{
     reexports::{
         calloop::{
             EventLoop, Interest, Mode as PollMode, PostAction,
+            channel::Event as ChannelEvent,
             generic::Generic,
             timer::{TimeoutAction, Timer},
         },
@@ -163,16 +166,18 @@ impl Default for Config {
 
 /// Run a compositor until its deadline passes, or forever.
 ///
-/// `facts` is where it publishes what it knows and `stop` is how it is asked to
-/// finish; the caller owns both handles, so that whoever reads the facts and
-/// decides when there is nothing left to read need not be the thread running
-/// this loop.
+/// Three handles, all owned by the caller, and each one a direction: `facts` is
+/// what this loop publishes outward, `requests` is what it accepts inward, and
+/// `stop` is how it is asked to finish. The caller holds all three so that
+/// whoever reads the facts, drives the acting, and decides when there is
+/// nothing left to do need not be the thread running this loop -- and cannot
+/// be, since none of the state below is `Send`.
 ///
 /// # Errors
 ///
 /// [`Error`], for any of the ways a compositor fails to come up: no socket, no
 /// event loop, a child that will not start, or a display that fails mid-run.
-pub fn run(config: &Config, facts: &Facts, stop: &Stop) -> Result<(), Error> {
+pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> Result<(), Error> {
     let mut event_loop: EventLoop<'static, Compositor> =
         EventLoop::try_new().map_err(|error| Error::EventLoop(error.to_string()))?;
     let mut display: Display<Compositor> =
@@ -215,6 +220,41 @@ pub fn run(config: &Config, facts: &Facts, stop: &Stop) -> Result<(), Error> {
             TimeoutAction::ToDuration(FRAME_INTERVAL)
         })
         .map_err(|error| Error::EventLoop(error.to_string()))?;
+
+    // The inbound arrow. Everything else this loop listens to is something a
+    // client did; this is the one source carrying a request from our own
+    // process, and it is what makes the compositor drivable rather than only
+    // readable. The work happens here, on this thread, because `Compositor` is
+    // not `Send` and no lock could change that.
+    //
+    // `take_inbox` returning `None` means a second `run` against one `Requests`.
+    // That is a caller error rather than a runtime condition, and the loop
+    // still comes up: it simply accepts no actions, and every `Host::act`
+    // against it times out saying so.
+    if let Some(inbox) = requests.take_inbox() {
+        event_loop
+            .handle()
+            .insert_source(inbox, |event, (), state: &mut Compositor| {
+                let ChannelEvent::Msg(request) = event else {
+                    return;
+                };
+                let outcome = state.act(request.surface, &request.action);
+                if let Err(ref error) = outcome {
+                    tracing::warn!(surface = request.surface.0, %error, "act refused");
+                }
+                // Acting can move focus, and focus is one of the facts the join
+                // weighs. Publish before answering, so a caller that reads the
+                // facts the moment its receipt arrives sees the world the
+                // receipt describes rather than the one before it.
+                state.publish_facts();
+                // A caller that stopped waiting has dropped the receiver. That
+                // is its right, and there is nobody left to tell.
+                let _ = request.reply.send(outcome);
+            })
+            .map_err(|error| Error::EventLoop(error.to_string()))?;
+    } else {
+        tracing::warn!("this Requests already has a loop: no actions will be accepted");
+    }
 
     tracing::info!(socket = ?socket_name, size = ?config.size, "compositor up");
     let mut children = spawn_all(&config.spawn, &config.env, &socket_name)?;

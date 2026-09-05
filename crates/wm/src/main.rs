@@ -25,7 +25,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use wm::{observe, session};
-use wm_compositor::{Config, Facts, Stop};
+use wm_compositor::{Config, Facts, Requests, Stop};
 
 #[derive(Parser)]
 #[command(
@@ -114,7 +114,7 @@ fn main() -> Result<()> {
         dump_when_ready(facts.clone(), stop.clone(), after);
     }
 
-    wm_compositor::run(&config, &facts, &stop).context("the compositor stopped")
+    wm_compositor::run(&config, &facts, &Requests::new(), &stop).context("the compositor stopped")
 }
 
 /// Turn accessibility on for this session, briefly borrowing a runtime to do
