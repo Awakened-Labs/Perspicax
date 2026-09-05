@@ -9,9 +9,13 @@
 # applications, because that is the whole point of the ingest path and mocking
 # it would test our mock. See `ci/live-tests.sh` for the session it builds.
 #
-# From M2 this additionally needs libinput/libdrm/gbm/libxkbcommon development
-# packages for Smithay's backends; the headless backend is what keeps that from
-# also needing a GPU.
+# What M2 actually costs, measured rather than predicted. The M0 version of
+# this comment expected libinput, libdrm, gbm and libxkbcommon; the real answer
+# is `libxkbcommon` alone, because the compositor takes Smithay with
+# `default-features = false` and no renderer at all. No EGL, no GL, no GBM, no
+# DRM, no GPU -- and no libwayland either, since wayland-backend's Rust server
+# implementation is what `use_system_lib` would replace. The one system library
+# left is libxkbcommon, which Smithay links unconditionally for keymaps.
 #
 # Two things the M0 version of this comment got wrong, both corrected against
 # real toolkits rather than reasoned about:

@@ -1,0 +1,23 @@
+[package]
+name = "wm"
+description = "The composition root: one binary that runs the compositor, and from M3 the MCP server beside it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A binary, not a library, and its own crate rather than a `[[bin]]` inside
+# `wm-compositor`. The composition root is where independent pieces are wired
+# together, so it depends on all of them and nothing depends on it: M3 adds
+# `wm-mcp` here without `wm-compositor` -- a library about surfaces -- having to
+# acquire a dependency on an MCP server to keep a binary compiling.
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wm-compositor = { path = "../wm-compositor", version = "0.1.0" }

@@ -1,0 +1,103 @@
+//! `wm` -- the composition root.
+//!
+//! One binary, because the pieces have to share a process: the semantic index
+//! is only worth anything joined to the compositor that can say what is
+//! visible, and an agent interface that had to reach either of them over IPC
+//! would be paying for a boundary that buys nothing.
+//!
+//! # Running it
+//!
+//! ```sh
+//! wm --headless --spawn gtk4-widget-factory --run-for 10
+//! ```
+//!
+//! It needs `XDG_RUNTIME_DIR` set, which is where the Wayland socket goes. Over
+//! SSH that is `export XDG_RUNTIME_DIR=/run/user/$(id -u)`, the same variable
+//! `wm-probe` needs for the accessibility bus and for the same reason: a login
+//! shell has a session, and an SSH command does not.
+//!
+//! Set `RUST_LOG=info` for a running account of clients connecting and windows
+//! mapping; that log is currently the only way to watch a compositor that
+//! deliberately draws nothing.
+
+use std::time::Duration;
+
+use anyhow::{Context as _, Result, bail};
+use clap::Parser;
+use wm_compositor::Config;
+
+#[derive(Parser)]
+#[command(
+    name = "wm",
+    about = "An agent-native Wayland compositor: it tracks what is on screen instead of drawing it.",
+    version
+)]
+struct Cli {
+    /// Run with no window system at all: a virtual output, no rendering, no
+    /// GPU.
+    ///
+    /// The only mode there is. `--nested`, which runs inside an existing
+    /// session and shows you pixels, is named in the plan and not built:
+    /// nothing this milestone has to prove needs a picture, and a renderer is
+    /// the single largest dependency a compositor can acquire. The flag is
+    /// required rather than defaulted so that the day a second mode exists,
+    /// no script silently changes meaning.
+    #[arg(long)]
+    headless: bool,
+
+    /// The virtual output's size, as `WIDTHxHEIGHT`. Every global rectangle the
+    /// index reports is in this space.
+    #[arg(long, default_value = "1920x1080", value_parser = parse_size)]
+    size: (i32, i32),
+
+    /// A command to run against this compositor, repeatable. Split on spaces,
+    /// so quoting an argument containing one will not do what you want.
+    #[arg(long = "spawn", value_name = "COMMAND")]
+    spawn: Vec<String>,
+
+    /// Exit after this many seconds instead of running until killed.
+    #[arg(long, value_name = "SECONDS")]
+    run_for: Option<f64>,
+}
+
+fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    let cli = Cli::parse();
+    if !cli.headless {
+        bail!("no backend selected: pass --headless (see --help; it is the only one)");
+    }
+
+    let config = Config {
+        size: cli.size,
+        spawn: cli
+            .spawn
+            .iter()
+            .map(|command| {
+                command
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+        run_for: cli.run_for.map(Duration::from_secs_f64),
+    };
+
+    wm_compositor::run(&config).context("the compositor stopped")
+}
+
+/// `1920x1080` into a pair. Rejected rather than clamped: a compositor asked
+/// for a zero-sized output should say so, not quietly invent one.
+fn parse_size(raw: &str) -> Result<(i32, i32)> {
+    let (width, height) = raw
+        .split_once(['x', 'X'])
+        .with_context(|| format!("expected WIDTHxHEIGHT, got `{raw}`"))?;
+    let width: i32 = width.trim().parse().context("width")?;
+    let height: i32 = height.trim().parse().context("height")?;
+    if width <= 0 || height <= 0 {
+        bail!("an output must have a positive size, got {width}x{height}");
+    }
+    Ok((width, height))
+}

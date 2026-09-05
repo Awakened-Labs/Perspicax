@@ -7,6 +7,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/wm",
     "crates/wm-atspi",
     "crates/wm-compositor",
     "crates/wm-index",
@@ -47,6 +48,22 @@ tracing = "0.1"
 # or `drain_changes` would block on a desktop that happens to be quiet.
 futures-util = { version = "0.3", default-features = false }
 
+# The compositor. `default-features = false` is doing a great deal of work: the
+# default set turns on DRM, GBM, udev, libseat, X11, winit, EGL, GL, Vulkan and
+# Xwayland, and M2 needs none of them. `wayland_frontend` is the server half of
+# the protocol -- and with `use_system_lib` off, `wayland-backend` uses its Rust
+# implementation, so this does not link libwayland either. `desktop` is Space
+# and Window, which carry z-order and add no dependencies at all.
+#
+# Rendering is absent on purpose rather than deferred. Occlusion needs geometry,
+# z-order, regions and damage; it does not need pixels. The only backend that
+# costs system libraries is `nested`, which is a cargo feature on wm-compositor
+# rather than something CI has to build.
+smithay = { version = "0.7", default-features = false, features = [
+    "wayland_frontend",
+    "desktop",
+] }
+
 # Binary-only. `anyhow` in binaries and `thiserror` in libraries: a caller of a
 # library must be able to match on what went wrong, whereas a CLI's only
 # consumer is a person reading the message.
@@ -54,3 +71,10 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Log output for the one binary that has no other way to show its work. `fmt`
+# only, and no ANSI: this runs in CI and under a session manager far more often
+# than it runs in somebody's terminal.
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "fmt",
+    "env-filter",
+] }

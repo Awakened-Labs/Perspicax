@@ -5,19 +5,216 @@
 //! put input into the seat so that focus, grabs and z-order stay correct by
 //! construction rather than by imitation.
 //!
-//! Scope for M2 is two backends and no more: `--headless` (a virtual output;
-//! also the CI rig) and `--nested` (runs inside an existing X11 or Wayland
-//! session). Real DRM, modesetting and multi-output wait for `--seat`; they are
-//! the part of compositor work that consumes schedule without proving anything.
-//!
 //! The signal worth building for is the disagreement between two feeds: surface
 //! damage says *something changed on screen*, accessibility events say *what
 //! changed semantically*. Damage arriving with no accompanying event is the
 //! precise definition of a surface that renders without explaining itself, and
 //! the only honest trigger for a vision fallback.
+//!
+//! # It does not draw anything, and that is the design
+//!
+//! A compositor is usually a thing that composites. This one runs a Wayland
+//! server, tracks surfaces, geometry, regions, z-order and damage, and never
+//! puts a pixel anywhere. Everything M2 has to answer -- who drew this, can it
+//! be seen, has it changed -- is bookkeeping the server does on the way past;
+//! none of it needs the picture.
+//!
+//! What that buys is not elegance, it is dependencies. No renderer means no
+//! EGL, no GL, no GBM, no DRM and no GPU, so the whole thing runs in a
+//! container as ordinary software, which is what makes the M2 demo a CI job
+//! rather than a machine somebody has to keep. The one system library left is
+//! `libxkbcommon`, which Smithay links unconditionally for keymaps.
+//!
+//! It also fixes a real behaviour: because nothing is ever read from a client's
+//! buffer, buffers are released the moment they arrive rather than one commit
+//! late. See [`state::Compositor::commit`].
+//!
+//! Real DRM, modesetting and multi-output wait for `--seat`; they are the part
+//! of compositor work that consumes schedule without proving anything.
 
-#![allow(
-    dead_code,
-    reason = "M0 skeleton: fixes the seam and the unsafe_code \
-    posture for this crate before M2 gives it a body."
-)]
+pub mod state;
+
+use std::{
+    ffi::OsString,
+    process::{Child, Command},
+    time::{Duration, Instant},
+};
+
+use smithay::{
+    reexports::{
+        calloop::{
+            EventLoop, Interest, Mode as PollMode, PostAction,
+            generic::Generic,
+            timer::{TimeoutAction, Timer},
+        },
+        wayland_server::Display,
+    },
+    wayland::socket::ListeningSocketSource,
+};
+
+use crate::state::Compositor;
+
+/// How often clients are told they may draw again. 60 Hz, because that is what
+/// a toolkit expects and a slower tick would make every damage measurement in
+/// this milestone a measurement of this constant instead.
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// What went wrong bringing a compositor up.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// The event loop could not be created, or a source could not be added.
+    #[error("the compositor's event loop failed: {0}")]
+    EventLoop(String),
+    /// The Wayland display itself could not be created.
+    #[error("could not create the Wayland display: {0}")]
+    Display(String),
+    /// No Wayland socket could be bound. Nearly always a missing or unwritable
+    /// `XDG_RUNTIME_DIR`.
+    #[error("no Wayland socket could be bound: {0}")]
+    Socket(String),
+    /// A child named by `--spawn` could not be started.
+    #[error("could not spawn `{command}`: {source}")]
+    Spawn {
+        /// The command, as given.
+        command: String,
+        /// Why it did not start.
+        source: std::io::Error,
+    },
+    /// The display failed while talking to clients.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+/// How to run.
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// The virtual output's size in pixels. Windows are placed inside it, and
+    /// it is the coordinate space every global rect in [`wm_index::HostFacts`]
+    /// is expressed in.
+    pub size: (i32, i32),
+    /// Commands to start once the socket exists, each as a program and its
+    /// arguments.
+    pub spawn: Vec<Vec<String>>,
+    /// Stop after this long. `None` runs until killed, which is what a session
+    /// wants; a test wants a bound.
+    pub run_for: Option<Duration>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            size: (1920, 1080),
+            spawn: Vec::new(),
+            run_for: None,
+        }
+    }
+}
+
+/// Run a compositor until its deadline passes, or forever.
+///
+/// # Errors
+///
+/// [`Error`], for any of the ways a compositor fails to come up: no socket, no
+/// event loop, a child that will not start, or a display that fails mid-run.
+pub fn run(config: &Config) -> Result<(), Error> {
+    let mut event_loop: EventLoop<'static, Compositor> =
+        EventLoop::try_new().map_err(|error| Error::EventLoop(error.to_string()))?;
+    let mut display: Display<Compositor> =
+        Display::new().map_err(|error| Error::Display(error.to_string()))?;
+    let handle = display.handle();
+    let mut state = Compositor::new(&handle, config.size);
+
+    let socket =
+        ListeningSocketSource::new_auto().map_err(|error| Error::Socket(error.to_string()))?;
+    let socket_name = socket.socket_name().to_os_string();
+    event_loop
+        .handle()
+        .insert_source(socket, |stream, (), state: &mut Compositor| {
+            state.insert_client(stream);
+        })
+        .map_err(|error| Error::EventLoop(error.to_string()))?;
+
+    // The display's own file descriptor, registered only so that a client
+    // becoming readable wakes the loop; the dispatch itself happens below,
+    // outside any callback.
+    //
+    // The usual way to write this hands the `Display` to calloop as source data
+    // and reaches it again through `Generic::get_mut`, which is `unsafe`. This
+    // crate is the one in the workspace allowed to write `unsafe`, and it has
+    // not needed to yet -- keeping the display in a local and only *polling*
+    // its descriptor here is why.
+    let poll_fd = display.backend().poll_fd().try_clone_to_owned()?;
+    event_loop
+        .handle()
+        .insert_source(
+            Generic::new(poll_fd, Interest::READ, PollMode::Level),
+            |_, _, _: &mut Compositor| Ok(PostAction::Continue),
+        )
+        .map_err(|error| Error::EventLoop(error.to_string()))?;
+
+    event_loop
+        .handle()
+        .insert_source(Timer::immediate(), |_, (), state: &mut Compositor| {
+            state.send_frames();
+            TimeoutAction::ToDuration(FRAME_INTERVAL)
+        })
+        .map_err(|error| Error::EventLoop(error.to_string()))?;
+
+    tracing::info!(socket = ?socket_name, size = ?config.size, "compositor up");
+    let mut children = spawn_all(&config.spawn, &socket_name)?;
+
+    let deadline = config.run_for.map(|run_for| Instant::now() + run_for);
+    let result = loop {
+        if let Err(error) = event_loop.dispatch(Some(FRAME_INTERVAL), &mut state) {
+            break Err(Error::EventLoop(error.to_string()));
+        }
+        if let Err(error) = display.dispatch_clients(&mut state) {
+            break Err(Error::Io(error));
+        }
+        if let Err(error) = display.flush_clients() {
+            break Err(Error::Io(error));
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            break Ok(());
+        }
+    };
+
+    // Children are killed rather than left behind. A compositor that exits
+    // owing a live GTK window to a socket nobody is listening on has produced a
+    // process that will never be told to stop.
+    for child in &mut children {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
+}
+
+/// Start every `--spawn` command against this compositor's socket.
+///
+/// The two toolkit variables are set because the default is not "whatever is
+/// running": a GTK or Qt client with `DISPLAY` set and no instruction will pick
+/// X11, connect to whatever X server is around, and map its window somewhere
+/// this compositor cannot see -- which looks exactly like a client that failed
+/// to start.
+fn spawn_all(commands: &[Vec<String>], socket: &OsString) -> Result<Vec<Child>, Error> {
+    let mut children = Vec::with_capacity(commands.len());
+    for command in commands {
+        let Some((program, arguments)) = command.split_first() else {
+            continue;
+        };
+        let child = Command::new(program)
+            .args(arguments)
+            .env("WAYLAND_DISPLAY", socket)
+            .env("GDK_BACKEND", "wayland")
+            .env("QT_QPA_PLATFORM", "wayland")
+            .env_remove("DISPLAY")
+            .spawn()
+            .map_err(|source| Error::Spawn {
+                command: command.join(" "),
+                source,
+            })?;
+        tracing::info!(pid = child.id(), command = %command.join(" "), "spawned");
+        children.push(child);
+    }
+    Ok(children)
+}
