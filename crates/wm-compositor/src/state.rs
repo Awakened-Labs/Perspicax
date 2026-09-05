@@ -7,6 +7,7 @@
 //! drawing anything.
 
 use std::{
+    collections::{HashMap, HashSet},
     os::unix::net::UnixStream,
     sync::{Arc, OnceLock},
     time::Instant,
@@ -20,7 +21,11 @@ use smithay::{
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
     delegate_xdg_shell,
     desktop::{Space, Window},
-    input::{Seat, SeatHandler, SeatState, pointer::CursorImageStatus},
+    input::{
+        Seat, SeatHandler, SeatState,
+        keyboard::{KeyboardHandle, XkbConfig},
+        pointer::CursorImageStatus,
+    },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
@@ -30,7 +35,7 @@ use smithay::{
             protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
         },
     },
-    utils::{Serial, Transform},
+    utils::{SERIAL_COUNTER, Serial, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -77,6 +82,23 @@ pub struct Compositor {
     pub(crate) data_device: DataDeviceState,
     #[expect(dead_code, reason = "RAII handle for the wl_seat global")]
     pub(crate) seat: Seat<Self>,
+    /// `None` only if xkb could not compile a default keymap, which would mean
+    /// the session has no usable keyboard layout at all. Focus still works
+    /// without one; nothing else in M2 does.
+    keyboard: Option<KeyboardHandle<Self>>,
+    /// Surfaces that have presented a buffer at least once.
+    ///
+    /// A toplevel exists from the moment a client asks for one; it is on screen
+    /// from the moment it puts something in it. The gap between the two is
+    /// where a node would otherwise be judged visible on a window with nothing
+    /// in it. Recorded here rather than read from the surface, because this
+    /// compositor releases every buffer the instant it arrives and so never has
+    /// one to look at afterwards.
+    presented: HashSet<SurfaceId>,
+    /// When each surface was last given keyboard focus. The host's half of the
+    /// focus correlation the join uses to tell two windows of one process
+    /// apart -- see `wm_index::join`.
+    focused_at: HashMap<SurfaceId, Instant>,
     /// Windows and their z-order. `Space::elements()` iterates back to front,
     /// which is the order `wm_index::HostFacts` wants, so the two agree by
     /// construction rather than by a conversion someone has to keep right.
@@ -101,7 +123,14 @@ impl Compositor {
     /// virtual output for them to sit on.
     pub(crate) fn new(display: &DisplayHandle, size: (i32, i32), facts: Facts) -> Self {
         let mut seat_state = SeatState::new();
-        let seat = seat_state.new_wl_seat(display, "wm-seat");
+        let mut seat = seat_state.new_wl_seat(display, "wm-seat");
+        let keyboard = match seat.add_keyboard(XkbConfig::default(), 200, 25) {
+            Ok(keyboard) => Some(keyboard),
+            Err(error) => {
+                tracing::warn!(%error, "no keyboard: xkb could not compile a default keymap");
+                None
+            }
+        };
 
         let output = Output::new(
             "wm-headless".to_owned(),
@@ -139,6 +168,9 @@ impl Compositor {
             seat,
             space,
             output,
+            keyboard,
+            presented: HashSet::new(),
+            focused_at: HashMap::new(),
             facts,
             generation: 0,
             next_surface: 0,
@@ -223,6 +255,25 @@ impl Compositor {
         }
     }
 
+    /// Give a surface keyboard focus, and remember when.
+    fn focus(&mut self, surface: WlSurface, id: SurfaceId) {
+        let Some(keyboard) = self.keyboard.clone() else {
+            return;
+        };
+        keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+        self.focused_at.insert(id, Instant::now());
+    }
+
+    /// When this surface was last focused.
+    pub(crate) fn focused_at(&self, id: SurfaceId) -> Option<Instant> {
+        self.focused_at.get(&id).copied()
+    }
+
+    /// Whether this surface has ever had anything in it.
+    pub(crate) fn has_presented(&self, id: SurfaceId) -> bool {
+        self.presented.contains(&id)
+    }
+
     /// The window whose toplevel owns this surface, if any.
     fn window_for(&self, surface: &WlSurface) -> Option<Window> {
         self.space
@@ -259,15 +310,27 @@ impl CompositorHandler for Compositor {
     /// instead of stalled against a compositor that had no use for its
     /// contents in the first place.
     fn commit(&mut self, surface: &WlSurface) {
-        with_states(surface, |states| {
+        let presented = with_states(surface, |states| {
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-            if let Some(BufferAssignment::NewBuffer(buffer)) = attributes.current().buffer.take() {
-                buffer.release();
+            match attributes.current().buffer.take() {
+                Some(BufferAssignment::NewBuffer(buffer)) => {
+                    buffer.release();
+                    true
+                }
+                Some(BufferAssignment::Removed) => false,
+                None => true,
             }
         });
 
         if let Some(window) = self.window_for(surface) {
             window.on_commit();
+            if let Some(id) = window.user_data().get::<SurfaceId>().copied() {
+                if presented {
+                    self.presented.insert(id);
+                } else {
+                    self.presented.remove(&id);
+                }
+            }
         }
         self.space.refresh();
         self.publish_facts();
@@ -287,6 +350,8 @@ impl XdgShellHandler for Compositor {
         });
         surface.send_configure();
 
+        // Taken before the toplevel is moved into the window.
+        let wl_surface = surface.wl_surface().clone();
         let window = Window::new_wayland_window(surface);
         let id = self.mint_surface_id();
         window.user_data().insert_if_missing(|| id);
@@ -295,6 +360,13 @@ impl XdgShellHandler for Compositor {
         self.placed += 1;
         self.space.map_element(window, at, true);
         tracing::info!(surface = id.0, at = ?at, "toplevel mapped");
+
+        // Focus what just appeared. A newly mapped window taking focus is what
+        // every desktop does, and here it does double duty: it is the host half
+        // of the focus correlation, and it makes the toolkit's own idea of
+        // which window is active agree with ours -- which is the pair of
+        // observations the join weighs.
+        self.focus(wl_surface, id);
         self.publish_facts();
     }
 

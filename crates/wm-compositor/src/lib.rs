@@ -41,6 +41,10 @@ pub use crate::facts::Facts;
 use std::{
     ffi::OsString,
     process::{Child, Command},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -62,6 +66,37 @@ use crate::state::Compositor;
 /// a toolkit expects and a slower tick would make every damage measurement in
 /// this milestone a measurement of this constant instead.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// A request for a running compositor to stop.
+///
+/// Separate from [`Config::run_for`] because the two answer different
+/// questions. A deadline is a guess made before anything started; this is a
+/// decision made by whoever is actually doing the work -- and the work that
+/// matters here, reading two accessibility trees, takes seconds it cannot
+/// predict. A compositor that exited on a guessed deadline mid-read would take
+/// its clients down with it and the read would fail for a reason nothing
+/// upstream could see.
+#[derive(Debug, Clone, Default)]
+pub struct Stop(Arc<AtomicBool>);
+
+impl Stop {
+    /// A request nobody has made yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the compositor to stop after its current turn round the loop.
+    pub fn request(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    /// Whether anyone has asked.
+    #[must_use]
+    pub fn requested(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
 
 /// What went wrong bringing a compositor up.
 #[derive(Debug, thiserror::Error)]
@@ -116,14 +151,16 @@ impl Default for Config {
 
 /// Run a compositor until its deadline passes, or forever.
 ///
-/// `facts` is where it publishes what it knows; the caller owns that handle so
-/// that whoever reads the facts need not be the thread running this loop.
+/// `facts` is where it publishes what it knows and `stop` is how it is asked to
+/// finish; the caller owns both handles, so that whoever reads the facts and
+/// decides when there is nothing left to read need not be the thread running
+/// this loop.
 ///
 /// # Errors
 ///
 /// [`Error`], for any of the ways a compositor fails to come up: no socket, no
 /// event loop, a child that will not start, or a display that fails mid-run.
-pub fn run(config: &Config, facts: &Facts) -> Result<(), Error> {
+pub fn run(config: &Config, facts: &Facts, stop: &Stop) -> Result<(), Error> {
     let mut event_loop: EventLoop<'static, Compositor> =
         EventLoop::try_new().map_err(|error| Error::EventLoop(error.to_string()))?;
     let mut display: Display<Compositor> =
@@ -181,7 +218,7 @@ pub fn run(config: &Config, facts: &Facts) -> Result<(), Error> {
         if let Err(error) = display.flush_clients() {
             break Err(Error::Io(error));
         }
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if stop.requested() || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             break Ok(());
         }
     };

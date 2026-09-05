@@ -20,11 +20,13 @@
 //! mapping; that log is currently the only way to watch a compositor that
 //! deliberately draws nothing.
 
+mod observe;
+
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
-use wm_compositor::{Config, Facts};
+use wm_compositor::{Config, Facts, Stop};
 
 #[derive(Parser)]
 #[command(
@@ -58,6 +60,17 @@ struct Cli {
     /// Exit after this many seconds instead of running until killed.
     #[arg(long, value_name = "SECONDS")]
     run_for: Option<f64>,
+
+    /// Wait this many seconds for the spawned clients to settle, then read the
+    /// accessibility bus, join it to what this compositor drew, judge every
+    /// node, print the result, and stop.
+    ///
+    /// The wait is for the applications, not for us: a toolkit maps its window
+    /// and then populates its accessibility tree, and reading too early finds a
+    /// window with nothing in it. The stop afterwards is a request rather than
+    /// a deadline, because reading a Qt tree takes seconds nobody can predict.
+    #[arg(long, value_name = "SECONDS")]
+    dump_tree: Option<f64>,
 }
 
 fn main() -> Result<()> {
@@ -85,10 +98,53 @@ fn main() -> Result<()> {
         run_for: cli.run_for.map(Duration::from_secs_f64),
     };
 
-    // Created here rather than inside the compositor: from the next slice on,
-    // the thread that reads these facts is not the thread that publishes them.
+    // Created here rather than inside the compositor, because the thread that
+    // reads these facts is not the thread that publishes them.
     let facts = Facts::new();
-    wm_compositor::run(&config, &facts).context("the compositor stopped")
+    let stop = Stop::new();
+
+    if let Some(after) = cli.dump_tree.map(Duration::from_secs_f64) {
+        dump_when_ready(facts.clone(), stop.clone(), after);
+    }
+
+    wm_compositor::run(&config, &facts, &stop).context("the compositor stopped")
+}
+
+/// Read and report the desktop on its own thread, then ask the compositor to
+/// stop.
+///
+/// A thread rather than a task, and a thread with its own runtime rather than
+/// one shared with the compositor: Wayland state is not `Send` and the calloop
+/// loop must not be blocked, while the accessibility read is D-Bus and spends
+/// most of its time waiting. Neither side can host the other, which is exactly
+/// what the published-facts boundary exists to allow.
+fn dump_when_ready(facts: Facts, stop: Stop, after: Duration) {
+    std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                tracing::error!(%error, "no runtime for the accessibility read");
+                stop.request();
+                return;
+            }
+        };
+
+        runtime.block_on(async {
+            tokio::time::sleep(after).await;
+            match observe::observe(&facts).await {
+                Ok(reports) => observe::report(&reports, &facts.read()),
+                Err(error) => tracing::error!("{error:#}"),
+            }
+        });
+
+        // Asked for rather than assumed: the read above has no predictable
+        // duration, and a compositor that exited on a guess would take the
+        // applications being read down with it.
+        stop.request();
+    });
 }
 
 /// `1920x1080` into a pair. Rejected rather than clamped: a compositor asked

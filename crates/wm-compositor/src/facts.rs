@@ -33,7 +33,10 @@ use smithay::{
     desktop::Window,
     reexports::wayland_server::Resource as _,
     utils::IsAlive,
-    wayland::compositor::{RectangleKind, SurfaceAttributes, with_states},
+    wayland::{
+        compositor::{RectangleKind, SurfaceAttributes, with_states},
+        shell::xdg::{SurfaceCachedState, XdgToplevelSurfaceData},
+    },
 };
 use wm_index::{HostFacts, SurfaceFacts};
 use wm_node::{Origin, Rect, SurfaceId, Vec2};
@@ -114,35 +117,75 @@ impl Compositor {
         let toplevel = window.toplevel()?;
         let surface = toplevel.wl_surface();
 
-        let geometry = self.space.element_geometry(window)?;
-        let bbox = self.space.element_bbox(window)?;
+        // Where we put it, which is a fact this compositor owns outright.
+        let location = self.space.element_location(window)?;
 
-        let (opaque, mapped) = with_states(surface, |states| {
-            let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-            let current = attributes.current();
-            (
-                current.opaque_region.as_ref().map(regions),
-                current.buffer.is_some() || !geometry.size.is_empty(),
-            )
+        // How big it is, from the client's own `xdg_surface.set_window_geometry`
+        // rather than from `Window::geometry()`.
+        //
+        // Smithay derives a window's bounding box from buffer dimensions
+        // recorded by `on_commit_buffer_handler`, which lives behind a renderer
+        // feature this compositor does not enable -- so `Window::geometry()`
+        // here is always `0x0`, and every node on it judges `Unmapped`. The
+        // declared window geometry is better information anyway: it is the
+        // visible frame excluding shadow, which is the rectangle an
+        // accessibility bridge's window-relative coordinates are measured
+        // against, and both GTK and Qt set it under client-side decoration.
+        //
+        // A client that declares none is not described, and its nodes are
+        // refused. That is the fail-closed direction: the alternative is
+        // inventing a size and judging visibility against it.
+        let declared = with_states(surface, |states| {
+            states
+                .cached_state
+                .get::<SurfaceCachedState>()
+                .current()
+                .geometry
+        })?;
+        if declared.size.is_empty() {
+            return None;
+        }
+
+        let opaque = with_states(surface, |states| {
+            states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .current()
+                .opaque_region
+                .as_ref()
+                .map(regions)
         });
 
         Some(SurfaceFacts {
             id,
-            // Alive and carrying something to look at. A toplevel that has been
-            // created but never committed a buffer is a window in name only,
+            // Alive, and carrying something to look at. A toplevel that has been
+            // created but never presented a buffer is a window in name only,
             // and reporting it as mapped would let a node be judged visible on
             // a surface with nothing on it.
-            mapped: window.alive() && mapped && !geometry.size.is_empty(),
-            geometry: to_rect(geometry),
-            // Zero until it is measured against a real toolkit. Guessing the
-            // decoration margin here would be the single easiest way to build a
-            // system that clicks confidently beside the button.
+            mapped: window.alive() && self.has_presented(id),
+            geometry: Rect::new(
+                f64::from(location.x),
+                f64::from(location.y),
+                f64::from(location.x + declared.size.w),
+                f64::from(location.y + declared.size.h),
+            ),
+            // Zero, and measured rather than assumed: both GTK and Qt report
+            // window-relative extents from the window geometry's origin, not
+            // the buffer's. See `wm_index::host`'s module documentation for the
+            // numbers.
             node_space_offset: Vec2::ZERO,
-            // The buffer starts at the bounding box, which under client-side
-            // decoration is outside the window geometry by the shadow margin.
-            buffer_origin: Vec2::new(f64::from(bbox.loc.x), f64::from(bbox.loc.y)),
+            // Surface-local (0,0) sits at the declared geometry's own offset
+            // *back* from where we placed that geometry -- under CSD that is
+            // the shadow margin, and it is where opaque regions are measured
+            // from.
+            buffer_origin: Vec2::new(
+                f64::from(location.x - declared.loc.x),
+                f64::from(location.y - declared.loc.y),
+            ),
             opaque,
             origin: self.origin_of(window),
+            title: title(surface),
+            focused_at: self.focused_at(id),
             damage_generation: 0,
         })
     }
@@ -166,6 +209,26 @@ impl Compositor {
     }
 }
 
+/// The title the client set on this toplevel.
+///
+/// A string the application chooses for itself and may change to anything,
+/// which is why the join treats it as something that separates candidates
+/// rather than as something that admits them.
+fn title(
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> Option<String> {
+    with_states(surface, |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .and_then(|data| {
+                data.lock()
+                    .ok()
+                    .and_then(|attributes| attributes.title.clone())
+            })
+    })
+}
+
 /// The `Add` rectangles of a region, in surface-local coordinates.
 ///
 /// `Subtract` rectangles are dropped, and the direction of that error is the
@@ -187,16 +250,6 @@ fn regions(region: &smithay::wayland::compositor::RegionAttributes) -> Vec<Rect>
             )
         })
         .collect()
-}
-
-/// Smithay's integer logical rectangle as the schema's floating-point one.
-fn to_rect(rect: smithay::utils::Rectangle<i32, smithay::utils::Logical>) -> Rect {
-    Rect::new(
-        f64::from(rect.loc.x),
-        f64::from(rect.loc.y),
-        f64::from(rect.loc.x + rect.size.w),
-        f64::from(rect.loc.y + rect.size.h),
-    )
 }
 
 #[cfg(test)]

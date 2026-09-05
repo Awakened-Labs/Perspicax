@@ -93,21 +93,7 @@ impl AtspiIngest {
         let mut available = Vec::new();
         for candidate in applications(&bus).await? {
             if candidate.name() == name {
-                // Subscribe before returning, and therefore before the caller
-                // can take a snapshot. The alternative -- snapshot, then
-                // subscribe -- silently loses every change that happens in
-                // between, and produces an index that is wrong in a way no
-                // later signal corrects.
-                let events = Subscription::open(candidate.root().bus()).await?;
-                return Ok(Self {
-                    bus,
-                    app: candidate,
-                    interner: Interner::new(),
-                    strategy: None,
-                    forced: None,
-                    with_geometry: false,
-                    events,
-                });
+                return Self::attach(candidate).await;
             }
             available.push(candidate.name().to_owned());
         }
@@ -115,6 +101,45 @@ impl AtspiIngest {
         Err(Error::NoSuchApp {
             name: name.to_owned(),
             available,
+        })
+    }
+
+    /// Read an application already enumerated by [`on_the_bus`].
+    ///
+    /// # Why a name is not an address
+    ///
+    /// [`connect`](Self::connect) resolves a display name, and a display name
+    /// is not unique: a desktop can perfectly well be running two copies of one
+    /// program, and one of them can be a leftover nobody has noticed. Resolving
+    /// by name silently picks the first, so a caller that enumerated the bus,
+    /// found two, and asked for each by name would read the same application
+    /// twice and never learn that it had. Measured 2026-09-04 on the test bed,
+    /// where two `gtk4-widget-factory` processes were on the bus and the second
+    /// was unreachable by name.
+    ///
+    /// So a caller that already holds an [`AppRef`] passes it here and gets the
+    /// application it actually chose, addressed by the unique connection name
+    /// underneath. It also saves enumerating the whole bus a second time.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Bus`] if the accessibility bus cannot be reached, or if the
+    /// application has gone since it was enumerated.
+    pub async fn attach(app: AppRef) -> Result<Self, Error> {
+        let bus = AccessibilityConnection::new().await?;
+        // Subscribe before returning, and therefore before the caller can take
+        // a snapshot. The alternative -- snapshot, then subscribe -- silently
+        // loses every change that happens in between, and produces an index
+        // that is wrong in a way no later signal corrects.
+        let events = Subscription::open(app.root().bus()).await?;
+        Ok(Self {
+            bus,
+            app,
+            interner: Interner::new(),
+            strategy: None,
+            forced: None,
+            with_geometry: false,
+            events,
         })
     }
 

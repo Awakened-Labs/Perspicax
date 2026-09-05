@@ -30,12 +30,18 @@
 //!
 //! [`SurfaceFacts::geometry`] places a surface in global space, and
 //! [`SurfaceFacts::node_space_offset`] is the correction between node space and
-//! that origin. It is zero when a bridge reports relative to the same point the
-//! host calls the window's origin, and it is *not* zero under client-side
-//! decoration, where the xdg window geometry and the buffer origin differ by the
-//! shadow margin. So it is a field rather than an assumption: M2 measures it
-//! against real toolkits, and until then a host that leaves it at zero is
-//! saying "I have not checked", which is the honest default.
+//! that origin.
+//!
+//! **Measured 2026-09-04 against GTK 4.18.6 and Qt 6.8.2, both under
+//! client-side decoration: it is zero for both.** Each bridge reports its
+//! window node's own extents as starting at `0,0`, and GTK's reported size
+//! (1666x881) is exactly the window geometry this compositor placed
+//! (`32,32 -> 1698,913`). So a bridge measures from the same origin the host
+//! calls the window's, and *not* from the buffer, which under decoration starts
+//! outside it by the shadow margin. The field stays, because "both toolkits we
+//! have tried" is not "every toolkit", and because a host that has not checked
+//! should be able to say zero and mean "unmeasured" rather than "measured
+//! zero".
 //!
 //! # The occlusion policy, stated once
 //!
@@ -63,7 +69,11 @@
 //! where the host can be asked which surface a point resolves to -- and where
 //! being wrong is refused rather than reported.
 
+use std::time::Instant;
+
 use wm_node::{Origin, Rect, SurfaceId, Vec2, Visibility};
+
+use crate::join::SurfaceClaim;
 
 /// One surface, as its host currently sees it.
 ///
@@ -106,6 +116,15 @@ pub struct SurfaceFacts {
     pub opaque: Option<Vec<Rect>>,
     /// Who owns the client that drew this surface, from its credentials.
     pub origin: Origin,
+    /// The title the client set on this toplevel, if it set one.
+    ///
+    /// Here rather than fetched separately because a published snapshot is the
+    /// only channel across the thread boundary, and a join assembled from two
+    /// channels would be correlating a title from one instant against a z-order
+    /// from another.
+    pub title: Option<String>,
+    /// When the host last gave this surface keyboard focus.
+    pub focused_at: Option<Instant>,
     /// How many times this surface has been damaged. Monotonic; the index
     /// compares it against what it has reconciled to decide staleness.
     pub damage_generation: u64,
@@ -125,7 +144,28 @@ impl SurfaceFacts {
             buffer_origin: Vec2::new(geometry.x0, geometry.y0),
             opaque: None,
             origin: Origin::Unattributed,
+            title: None,
+            focused_at: None,
             damage_generation: 0,
+        }
+    }
+
+    /// This surface as something the [`join`](crate::join::join) can weigh.
+    ///
+    /// The pid is unwrapped from the origin here rather than stored twice: an
+    /// unattributed surface has no pid, and the join's own gate refuses to
+    /// match on an absent one, so the two rules meet without either having to
+    /// know about the other.
+    #[must_use]
+    pub fn claim(&self) -> SurfaceClaim {
+        SurfaceClaim {
+            surface: self.id,
+            title: self.title.clone(),
+            pid: match &self.origin {
+                Origin::Process(process) => Some(process.pid),
+                Origin::Unattributed => None,
+            },
+            focused_at: self.focused_at,
         }
     }
 
@@ -148,6 +188,13 @@ impl SurfaceFacts {
     #[must_use]
     pub fn owned_by(mut self, origin: Origin) -> Self {
         self.origin = origin;
+        self
+    }
+
+    /// The same surface, with the title its client set.
+    #[must_use]
+    pub fn titled(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
         self
     }
 

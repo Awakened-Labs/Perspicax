@@ -1521,9 +1521,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "tokio",
  "tracing",
  "tracing-subscriber",
+ "wm-atspi",
  "wm-compositor",
+ "wm-index",
+ "wm-node",
 ]
 
 [[package]]

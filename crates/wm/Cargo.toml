@@ -18,6 +18,10 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+wm-atspi = { path = "../wm-atspi", version = "0.1.0" }
 wm-compositor = { path = "../wm-compositor", version = "0.1.0" }
+wm-index = { path = "../wm-index", version = "0.1.0" }
+wm-node = { path = "../wm-node", version = "0.1.0" }

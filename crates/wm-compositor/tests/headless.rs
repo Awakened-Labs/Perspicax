@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use wm_compositor::{Config, Error, Facts};
+use wm_compositor::{Config, Error, Facts, Stop};
 
 /// The smallest claim worth making automatically: it binds a socket, runs an
 /// event loop, and stops when it is told to. Everything else in this milestone
@@ -25,7 +25,7 @@ fn a_headless_compositor_comes_up_and_stops_when_told() {
 
     let facts = Facts::new();
     let started = Instant::now();
-    wm_compositor::run(&config, &facts)
+    wm_compositor::run(&config, &facts, &Stop::new())
         .expect("a headless compositor needs nothing but a runtime dir");
     let elapsed = started.elapsed();
 
@@ -55,11 +55,38 @@ fn a_command_that_does_not_exist_is_named_in_the_error() {
         run_for: Some(Duration::from_millis(50)),
     };
 
-    match wm_compositor::run(&config, &Facts::new()) {
+    match wm_compositor::run(&config, &Facts::new(), &Stop::new()) {
         Err(Error::Spawn { command, source }) => {
             assert_eq!(command, "wm-no-such-program --flag");
             assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
         }
         other => panic!("expected a spawn failure naming the command, got {other:?}"),
     }
+}
+
+/// Being asked to stop beats a deadline that has not arrived. The read this
+/// exists for takes seconds it cannot predict, so the only honest deadline is
+/// "when the reader says so".
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_stop_request_ends_the_loop_before_its_deadline() {
+    let config = Config {
+        size: (800, 600),
+        spawn: Vec::new(),
+        run_for: Some(Duration::from_secs(60)),
+    };
+
+    let stop = Stop::new();
+    let asker = stop.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        asker.request();
+    });
+
+    let started = Instant::now();
+    wm_compositor::run(&config, &Facts::new(), &stop).expect("stopping is not a failure");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "waited for the deadline instead of the request"
+    );
 }
