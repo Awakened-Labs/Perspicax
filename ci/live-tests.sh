@@ -54,7 +54,7 @@ QT_ACCESSIBILITY=1 "$gallery" >/tmp/qt6-gallery.log 2>&1 &
 # does not exist -- which is exactly what happened the first time this ran in a
 # container, while passing on a workstation where an earlier build had left one
 # behind.
-cargo build --workspace --all-targets
+cargo build --locked --workspace --all-targets
 
 probe=./target/debug/wm-probe
 if [ ! -x "$probe" ]; then
@@ -89,4 +89,4 @@ fi
 
 # One thread: the live tests read and poke the same two applications, and
 # interleaving them would make each one's result depend on the others.
-cargo test --workspace -- --include-ignored --test-threads=1
+cargo test --locked --workspace -- --include-ignored --test-threads=1
