@@ -9,9 +9,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use wm_node::{NodeId, ObservedNode, Visibility};
+use wm_node::{NodeId, ObservedNode, Origin, SurfaceId, Visibility};
 
-use crate::{Change, Refusal, selector::Selector};
+use crate::{
+    Change, Refusal, check_actable,
+    host::{HostFacts, Judgement, Tally, judge},
+    selector::Selector,
+};
 
 /// Something an agent subscribed to changes would want to hear about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +38,11 @@ pub struct Index {
     /// Child -> parent. Populated from each node's own child list, so a child
     /// can be recorded before it arrives.
     parents: HashMap<NodeId, NodeId>,
-    stale: HashSet<NodeId>,
+    /// Nodes that cannot be trusted, and how many frames of surface damage
+    /// each one owes. Zero is a real value and the common one: an
+    /// accessibility-side invalidation says the tree changed shape, which is
+    /// staleness with no damage behind it.
+    stale: HashMap<NodeId, u32>,
     pending: Vec<Delta>,
 }
 
@@ -66,7 +74,7 @@ impl Index {
     /// Whether this node's subtree has been invalidated and not yet re-read.
     #[must_use]
     pub fn is_stale(&self, id: NodeId) -> bool {
-        self.stale.contains(&id)
+        self.stale.contains_key(&id)
     }
 
     /// Take everything that has changed since the last call.
@@ -161,9 +169,9 @@ impl Index {
         if !self.nodes.contains_key(&root) {
             return;
         }
-        self.stale.insert(root);
+        self.stale.insert(root, 0);
         for id in self.descendants(root) {
-            self.stale.insert(id);
+            self.stale.insert(id, 0);
         }
         self.pending.push(Delta::Invalidated { root });
     }
@@ -300,6 +308,91 @@ impl Index {
             1 => Ok(matches[0]),
             n => Err(Refusal::AmbiguousSelector { matches: n }),
         }
+    }
+
+    /// Attribute one node to the surface it was drawn on and the process that
+    /// drew it.
+    ///
+    /// Visibility is deliberately not set here. Knowing which surface a node
+    /// belongs to is not the same as knowing whether it can be seen, and a join
+    /// that quietly implied `Visible` would be the whole failure of this
+    /// project in one line. [`Index::judge`] is what answers that, against
+    /// facts, and a node between the two calls is `Unknown` and refused.
+    pub fn join(&mut self, id: NodeId, surface: SurfaceId, origin: &Origin) {
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.surface = Some(surface);
+            node.origin = origin.clone();
+        }
+    }
+
+    /// Attribute a node and everything beneath it, and say how many were
+    /// attributed.
+    ///
+    /// The natural unit: an accessibility bridge reports one tree per window,
+    /// and every node in it was drawn on that window's surface. The exception
+    /// is a menu or a combo popup, which is its own surface while its
+    /// accessible nodes hang off the toplevel -- so a caller that has resolved
+    /// a popup joins it separately rather than letting this walk cover it.
+    pub fn join_subtree(&mut self, root: NodeId, surface: SurfaceId, origin: &Origin) -> usize {
+        let mut joined = 0;
+        for id in core::iter::once(root).chain(self.descendants(root)) {
+            if self.nodes.contains_key(&id) {
+                self.join(id, surface, origin);
+                joined += 1;
+            }
+        }
+        joined
+    }
+
+    /// Judge every cached node against a host's published facts, and report
+    /// what that pass decided.
+    ///
+    /// Stale nodes are judged like any other. Their geometry is suspect, which
+    /// is exactly why staleness is a separate refusal consulted by
+    /// [`Index::actable`] -- the verdict here stays the best available
+    /// description of the screen, and the gate above it is what refuses to act
+    /// on a description it distrusts.
+    pub fn judge(&mut self, facts: &HostFacts) -> Tally {
+        let mut tally = Tally::default();
+        for node in self.nodes.values_mut() {
+            let verdict = match (node.surface, node.bounds()) {
+                (Some(surface), Some(rect)) => judge(facts, surface, rect),
+                // No surface joined, or a bridge that reported no extents at
+                // all. Both are "nobody has judged this", which is what
+                // `Unknown` means and what the gate refuses.
+                _ => Judgement {
+                    visibility: Visibility::Unknown,
+                    unproven: false,
+                },
+            };
+            tally.record(&verdict);
+            node.visibility = verdict.visibility;
+        }
+        tally
+    }
+
+    /// The node with this id, if an agent may act on it.
+    ///
+    /// Staleness is checked **before** origin and visibility, and the order is
+    /// the point: a stale node's attribution and geometry were computed from
+    /// data the index already knows to be behind the screen. Reporting
+    /// `Occluded` from a rect that has since moved would be a confident answer
+    /// derived from something we have just admitted we do not trust, and an
+    /// agent told "stale" can wait and re-read, whereas one told "occluded" will
+    /// go and raise the wrong window.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NotFound`] for an id this index does not hold,
+    /// [`Refusal::Stale`] for one behind the screen, and otherwise whatever
+    /// [`check_actable`] says about the node itself.
+    pub fn actable(&self, id: NodeId) -> Result<&ObservedNode, Refusal> {
+        let node = self.nodes.get(&id).ok_or(Refusal::NotFound)?;
+        if let Some(frames) = self.stale.get(&id) {
+            return Err(Refusal::Stale { frames: *frames });
+        }
+        check_actable(node)?;
+        Ok(node)
     }
 }
 
@@ -543,5 +636,188 @@ mod tests {
             index.len(),
             "a node was visited twice"
         );
+    }
+
+    // --- the join, the judgement, and the gate that consults both ------------
+
+    use crate::host::{HostFacts, SurfaceFacts};
+    use wm_node::{Rect, SurfaceId};
+
+    fn placed(id: u64, label: &str, bounds: Rect) -> ObservedNode {
+        let mut node = Node::new(Role::Button);
+        node.set_label(label);
+        node.set_bounds(bounds);
+        ObservedNode::unjoined(NodeId(id), node)
+    }
+
+    fn origin() -> Origin {
+        Origin::Process(Box::new(ProcessOrigin {
+            pid: 9182,
+            exe: Some("/usr/bin/gtk4-widget-factory".into()),
+            cgroup: None,
+            sandbox: None,
+        }))
+    }
+
+    /// One 400x300 window holding two buttons, the second of which sits under
+    /// where an overlapping surface will be placed.
+    fn joined() -> Index {
+        let mut index = Index::new();
+        let mut root = Node::new(Role::Window);
+        root.set_label("Text Editor");
+        root.set_children(vec![NodeId(2), NodeId(3)]);
+        root.set_bounds(Rect::new(0.0, 0.0, 400.0, 300.0));
+        index.ingest_snapshot([
+            ObservedNode::unjoined(NodeId(1), root),
+            placed(2, "Open", Rect::new(10.0, 10.0, 90.0, 40.0)),
+            placed(3, "Cancel", Rect::new(200.0, 200.0, 280.0, 240.0)),
+        ]);
+        index.take_deltas();
+        index.join_subtree(NodeId(1), SurfaceId(1), &origin());
+        index
+    }
+
+    fn desktop(cover: Option<SurfaceFacts>) -> HostFacts {
+        let window = SurfaceFacts::new(SurfaceId(1), Rect::new(0.0, 0.0, 400.0, 300.0));
+        match cover {
+            Some(cover) => HostFacts::bottom_to_top([window, cover], 1),
+            None => HostFacts::bottom_to_top([window], 1),
+        }
+    }
+
+    #[test]
+    fn joining_a_subtree_attributes_every_node_beneath_it() {
+        let index = joined();
+        assert_eq!(index.len(), 3);
+        for id in [1, 2, 3] {
+            let node = index.get(NodeId(id)).unwrap();
+            assert_eq!(node.surface, Some(SurfaceId(1)));
+            assert_eq!(node.origin, origin());
+        }
+    }
+
+    /// Knowing which surface drew a node is not knowing whether it can be
+    /// seen. Between the join and the judgement every node is still refused.
+    #[test]
+    fn a_join_does_not_imply_visibility() {
+        let index = joined();
+        assert_eq!(
+            index.get(NodeId(2)).unwrap().visibility,
+            Visibility::Unknown
+        );
+        assert_eq!(
+            index.actable(NodeId(2)).unwrap_err(),
+            Refusal::Unjudged,
+            "attributed but unjudged is still un-actable"
+        );
+    }
+
+    #[test]
+    fn judging_fills_in_what_the_host_could_see() {
+        let mut index = joined();
+        let cover = SurfaceFacts::new(SurfaceId(2), Rect::new(180.0, 180.0, 400.0, 300.0));
+        let tally = index.judge(&desktop(Some(cover)));
+
+        assert!(index.actable(NodeId(2)).is_ok(), "Open is in the clear");
+        assert_eq!(
+            index.actable(NodeId(3)).unwrap_err(),
+            Refusal::Occluded { by: SurfaceId(2) },
+            "Cancel is under the other window, and the refusal says which"
+        );
+
+        assert_eq!(tally.judged, 3);
+        assert_eq!(
+            tally.occluded, 2,
+            "Cancel and the window root, whose own rect is the whole window \
+             and so is partly covered too. Partial coverage occludes: nothing \
+             here knows which point of a node an agent would aim at, and the \
+             half that answers 'no' is the safe half to be wrong on"
+        );
+        assert_eq!(
+            tally.unproven, 2,
+            "both rest on policy, because the covering surface declared no \
+             opaque region at all"
+        );
+    }
+
+    /// A bridge that reports no extents leaves a node unjudged rather than
+    /// judged visible. There is no rect, so there is no answer.
+    #[test]
+    fn a_node_with_no_bounds_is_not_judged() {
+        let mut index = joined();
+        let tally = index.judge(&desktop(None));
+        assert_eq!(
+            index.get(NodeId(1)).unwrap().visibility,
+            Visibility::Visible
+        );
+        assert_eq!(tally.unjudged, 0);
+
+        let mut index = Index::new();
+        index.ingest_snapshot([observed(9, Role::Button, Some("No bounds"), &[])]);
+        index.join(NodeId(9), SurfaceId(1), &origin());
+        let tally = index.judge(&desktop(None));
+        assert_eq!(tally.unjudged, 1);
+        assert_eq!(index.actable(NodeId(9)).unwrap_err(), Refusal::Unjudged);
+    }
+
+    /// Staleness outranks every other verdict, and the order is the point: an
+    /// occlusion computed from a rect the index already knows has moved is a
+    /// confident answer derived from data it has just admitted it distrusts.
+    #[test]
+    fn actable_reports_staleness_before_anything_else() {
+        let mut index = joined();
+        let cover = SurfaceFacts::new(SurfaceId(2), Rect::new(180.0, 180.0, 400.0, 300.0));
+        index.judge(&desktop(Some(cover)));
+        index.apply(Change::SubtreeInvalidated { root: NodeId(1) });
+
+        assert_eq!(
+            index.actable(NodeId(3)).unwrap_err(),
+            Refusal::Stale { frames: 0 },
+            "the occlusion verdict is still cached, and staleness still wins"
+        );
+        assert_eq!(
+            index.get(NodeId(3)).unwrap().visibility,
+            Visibility::Occluded { by: SurfaceId(2) },
+            "and the description is kept, because a stale tree is still the \
+             best account of the screen anyone has"
+        );
+    }
+
+    /// Zero frames is a real value, not a placeholder: the accessibility bus
+    /// said the tree changed shape, and no surface was damaged. The message
+    /// has to read that way rather than as "stale by 0 frames".
+    #[test]
+    fn an_accessibility_invalidation_is_staleness_with_no_damage() {
+        let mut index = joined();
+        index.apply(Change::SubtreeInvalidated { root: NodeId(1) });
+        assert_eq!(
+            index.actable(NodeId(2)).unwrap_err().to_string(),
+            "node's subtree was invalidated and has not been re-read"
+        );
+        assert_eq!(
+            Refusal::Stale { frames: 4 }.to_string(),
+            "node is stale by 4 frame(s) of damage"
+        );
+    }
+
+    #[test]
+    fn actable_refuses_an_id_this_index_never_held() {
+        assert_eq!(
+            joined().actable(NodeId(404)).unwrap_err(),
+            Refusal::NotFound
+        );
+    }
+
+    /// A node can outlive the surface it was read from -- a window closes
+    /// between a read and a judgement. That is `Unknown`, and refused.
+    #[test]
+    fn a_node_whose_surface_the_host_no_longer_knows_is_unjudged() {
+        let mut index = joined();
+        index.judge(&desktop(None));
+        assert!(index.actable(NodeId(2)).is_ok());
+
+        let tally = index.judge(&HostFacts::default());
+        assert_eq!(tally.unjudged, 3);
+        assert_eq!(index.actable(NodeId(2)).unwrap_err(), Refusal::Unjudged);
     }
 }

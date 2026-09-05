@@ -27,7 +27,11 @@
 /// project AT-SPI's state bits onto a node: a tri-state checkbox is
 /// `Toggled::Mixed` and not a `bool`, and inventing either type locally would
 /// be the same parallel-schema mistake in miniature.
-pub use accesskit::{Action, Node, NodeId, Orientation, Rect, Role, Toggled};
+///
+/// [`Vec2`] joined it for `wm-index`'s host facts, which need to express the
+/// offset between two coordinate spaces. A displacement is not a position, and
+/// the type that already ships beside [`Rect`] says so in its name.
+pub use accesskit::{Action, Node, NodeId, Orientation, Rect, Role, Toggled, Vec2};
 
 /// A compositor surface. Opaque, and meaningful only to the [`HostView`] that
 /// minted it.
