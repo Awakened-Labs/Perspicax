@@ -15,6 +15,15 @@
 # runs the demo the milestone is judged on -- a compositor of our own hosting
 # both toolkits -- which needs XDG_RUNTIME_DIR for its Wayland socket, a thing
 # a CI container does not have and a login session does.
+#
+# From M3 it runs `crates/wm/tests/act.rs` as well, which is v1's exit
+# criterion: a control clicked in each toolkit with a receipt for it, and a
+# covered control refused with the occluding surface named. It needs nothing
+# this script did not already arrange -- the applications it drives are ones
+# `wm` spawns itself, and `cargo test --include-ignored` below picks the tests
+# up without being told about them. The two applications started further down
+# are for `wm-atspi`'s live tests, and `observe` skips them because their
+# processes own none of our surfaces.
 
 set -euo pipefail
 

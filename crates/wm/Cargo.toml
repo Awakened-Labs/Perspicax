@@ -43,3 +43,9 @@ wm-compositor = { path = "../wm-compositor", version = "0.1.0" }
 wm-index = { path = "../wm-index", version = "0.1.0" }
 wm-mcp = { path = "../wm-mcp", version = "0.1.0" }
 wm-node = { path = "../wm-node", version = "0.1.0" }
+
+# The v1 demo asserts on the JSON two tools actually answered, rather than on a
+# projection of it made a second time in the test -- so it needs to hold a
+# `serde_json::Value`. Nothing in the library does.
+[dev-dependencies]
+serde_json.workspace = true
