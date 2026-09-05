@@ -9,5 +9,6 @@
 //! So the demo and the test run the same code, which is the only arrangement
 //! in which a green test means the demo works.
 
+pub mod act;
 pub mod observe;
 pub mod session;

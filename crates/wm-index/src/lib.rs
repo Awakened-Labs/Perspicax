@@ -37,6 +37,7 @@ pub mod cache;
 pub mod host;
 pub mod id;
 pub mod join;
+pub mod receipt;
 pub mod selector;
 
 use core::future::Future;
@@ -48,6 +49,7 @@ pub use crate::{
     host::{HostFacts, Judgement, SurfaceFacts, Tally, judge},
     id::Interner,
     join::{Evidence, Finding, Join, SurfaceClaim, WindowClaim, join},
+    receipt::{DamageWitness, Receipt, Verb},
     selector::{Selector, SelectorParseError},
 };
 
