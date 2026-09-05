@@ -4,8 +4,8 @@ A Wayland compositor that exposes everything a human can see on screen as a
 typed, addressable API, so an agent can drive programs that have no API of
 their own.
 
-**Status: pre-alpha.** The skeleton and conventions are in place; nothing
-observes anything yet. See `Milestones` below for what exists.
+**Status: pre-alpha.** It observes, attributes and judges; it does not act yet.
+See `Milestones` below for what exists.
 
 ## Why this lives in the compositor
 
@@ -44,11 +44,12 @@ compositor:
 `wm-index` sits between them and imports neither Wayland nor D-Bus.
 
 ```
+wm              the composition root — one binary, `wm --headless`
 wm-mcp          MCP server (rmcp, stdio) — tools, receipts, capability gate
 wm-index        node cache, stable ids, selectors, deltas, refusals  [portable]
 wm-node         node schema — AccessKit types plus Origin and Visibility
 wm-atspi        impl Ingest — AT-SPI2 over D-Bus
-wm-compositor   impl HostView — Smithay: outputs, seat, xwayland, damage
+wm-compositor   impl HostView — Smithay: outputs, seat, damage. Draws nothing.
 wm-probe        dev CLI — dump a tree, time a read, explain a refusal
 ```
 
@@ -57,8 +58,8 @@ wm-probe        dev CLI — dump a tree, time a read, explain a refusal
 | | | |
 |---|---|---|
 | **M0** | Skeleton, conventions, CI | done |
-| **M1** | Semantic index + AT-SPI ingest — no compositor, runs on X11 | in progress |
-| **M2** | Compositor, provenance, occlusion, damage-driven invalidation | |
+| **M1** | Semantic index + AT-SPI ingest — no compositor, runs on X11 | done |
+| **M2** | Compositor, provenance, occlusion, damage-driven invalidation | done |
 | **M3** | MCP server and act — **v1** | |
 
 v1 is one demo, run against a GTK app and a Qt app, headless, in CI, with zero
@@ -113,6 +114,68 @@ may turn those into anything global.
 Geometry is a separate row because no bulk API exists for it on either toolkit:
 `Cache.GetItems` carries roles, names, states and parentage and no extents at
 all, so bounds are a round trip per node even on the fast path.
+
+## What the compositor adds
+
+M2's claim in one command, which is also `crates/wm/tests/demo.rs`:
+
+```sh
+wm --headless --spawn gtk4-widget-factory --spawn gallery --dump-tree 8
+```
+
+It starts an accessibility registry, hosts both toolkits as Wayland clients of
+its own compositor, reads their trees, and binds each window to the surface it
+was drawn on. Then every node has the two fields the schema has carried as
+`Unknown` since the first commit:
+
+```
+gallery (Qt) -- 219 nodes
+  window 2 "Widget Gallery Qt 6.8.2" -> surface 1  [Pid(10478), Title]
+  219 judged: 2 visible, 122 occluded (0 unproven), 94 clipped
+gtk4-widget-factory (GTK) -- 275 nodes
+  window 2 "GTK Widget Factory" -> surface 2  [Pid(10479), Title]
+  275 judged: 263 visible, 0 occluded, 1 clipped
+```
+
+The gallery reads 124 visible and 0 occluded when it is alone on the screen.
+Placing the GTK window over it moves 122 of those nodes to `Occluded`, each
+naming the surface in the way, and the refusal gate stops every one of them —
+which is the failure mode no library outside a compositor can even detect.
+
+**The process is the gate and the title is not.** A window binds to a surface
+when two separately attested pids agree: one from the Wayland connection's
+credentials, one from the accessibility bus daemon. A title that matches is
+extra evidence and never sufficient — on the test bed, `mutter-x11-frames`
+draws X11 decorations and therefore truthfully advertises the string
+"Widget Gallery Qt 6.8.2" from a different process. A join that trusted titles
+would have attributed the gallery's entire tree to the window manager.
+Everything that cannot be bound stays `Unattributed` and is refused, and the
+reason is reported rather than logged.
+
+## What a toolkit renders without explaining
+
+Measured on the same Debian 13 box, hosting both applications under
+`wm --headless` for eight idle seconds with nobody touching them.
+
+| | GTK 4.18.6 <br> `gtk4-widget-factory` | Qt 6.8.2 <br> `gallery` |
+|---|---|---|
+| frames of damage, idle | **768** | 18 |
+| nodes under damage no a11y event explained | 263 of 275 | 12 of 219 |
+
+The first row is the one that changes a design. An idle GTK application repaints
+its whole window about forty times a second while nothing is happening, so a
+rule that treated surface damage as making a node stale would refuse every node
+in that application permanently — and no re-read is fast enough to recover,
+because reading its tree costs 62 ms at best. Damage therefore cannot mean
+"unsafe to act"; what it means is *pixels changed here and the semantic feed did
+not mention it*.
+
+That is the fused signal this project exists to notice, and these numbers are
+its baseline. GTK and Qt both explain themselves, so their unexplained repaints
+are exactly that — repaints. A Flutter, GL or canvas surface produces the same
+signal for a different reason: it renders and no bridge can say what it drew.
+Telling those two apart is what a compositor is for, and it is the only honest
+trigger for a vision fallback.
 
 ## Build
 

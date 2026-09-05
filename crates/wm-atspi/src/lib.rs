@@ -93,21 +93,7 @@ impl AtspiIngest {
         let mut available = Vec::new();
         for candidate in applications(&bus).await? {
             if candidate.name() == name {
-                // Subscribe before returning, and therefore before the caller
-                // can take a snapshot. The alternative -- snapshot, then
-                // subscribe -- silently loses every change that happens in
-                // between, and produces an index that is wrong in a way no
-                // later signal corrects.
-                let events = Subscription::open(candidate.root().bus()).await?;
-                return Ok(Self {
-                    bus,
-                    app: candidate,
-                    interner: Interner::new(),
-                    strategy: None,
-                    forced: None,
-                    with_geometry: false,
-                    events,
-                });
+                return Self::attach(candidate).await;
             }
             available.push(candidate.name().to_owned());
         }
@@ -115,6 +101,45 @@ impl AtspiIngest {
         Err(Error::NoSuchApp {
             name: name.to_owned(),
             available,
+        })
+    }
+
+    /// Read an application already enumerated by [`on_the_bus`].
+    ///
+    /// # Why a name is not an address
+    ///
+    /// [`connect`](Self::connect) resolves a display name, and a display name
+    /// is not unique: a desktop can perfectly well be running two copies of one
+    /// program, and one of them can be a leftover nobody has noticed. Resolving
+    /// by name silently picks the first, so a caller that enumerated the bus,
+    /// found two, and asked for each by name would read the same application
+    /// twice and never learn that it had. Measured 2026-09-04 on the test bed,
+    /// where two `gtk4-widget-factory` processes were on the bus and the second
+    /// was unreachable by name.
+    ///
+    /// So a caller that already holds an [`AppRef`] passes it here and gets the
+    /// application it actually chose, addressed by the unique connection name
+    /// underneath. It also saves enumerating the whole bus a second time.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Bus`] if the accessibility bus cannot be reached, or if the
+    /// application has gone since it was enumerated.
+    pub async fn attach(app: AppRef) -> Result<Self, Error> {
+        let bus = AccessibilityConnection::new().await?;
+        // Subscribe before returning, and therefore before the caller can take
+        // a snapshot. The alternative -- snapshot, then subscribe -- silently
+        // loses every change that happens in between, and produces an index
+        // that is wrong in a way no later signal corrects.
+        let events = Subscription::open(app.root().bus()).await?;
+        Ok(Self {
+            bus,
+            app,
+            interner: Interner::new(),
+            strategy: None,
+            forced: None,
+            with_geometry: false,
+            events,
         })
     }
 
@@ -237,6 +262,43 @@ impl Ingest for AtspiIngest {
     async fn drain_changes(&mut self) -> Result<Vec<Change>, Self::Error> {
         Ok(self.events.drain(&mut self.interner))
     }
+}
+
+/// Turn accessibility on for this session.
+///
+/// `org.a11y.Status.IsEnabled` is what Qt's AT-SPI bridge gates on. With it
+/// false the application starts perfectly, draws its window, prints nothing,
+/// and never joins the accessibility bus -- while GTK's bridge ignores the flag
+/// and registers either way, so the symptom is *one* toolkit silently missing
+/// and no error anywhere.
+///
+/// A desktop sets it from dconf (`org.gnome.desktop.interface
+/// toolkit-accessibility`), which is why this is invisible on a workstation and
+/// fatal in a container: a fresh `HOME` has no dconf state, so the flag
+/// defaults to false exactly where nobody is watching for it.
+///
+/// # Errors
+///
+/// [`Error::Bus`] if the session bus cannot be reached or the property cannot
+/// be set -- which on a machine with no `org.a11y.Bus` at all is the honest
+/// answer rather than something to shrug off.
+pub async fn enable() -> Result<(), Error> {
+    let connection = Connection::session().await?;
+    let status = atspi::zbus::Proxy::new(
+        &connection,
+        "org.a11y.Bus",
+        "/org/a11y/bus",
+        "org.a11y.Status",
+    )
+    .await?;
+    // `set_property` reports D-Bus's own error type rather than zbus's, and
+    // the distinction is not worth a variant: from here both mean the same
+    // thing, which is that the accessibility bus would not take the answer.
+    status
+        .set_property("IsEnabled", true)
+        .await
+        .map_err(|error| Error::Call(error.into()))?;
+    Ok(())
 }
 
 /// Every application currently on the accessibility bus.

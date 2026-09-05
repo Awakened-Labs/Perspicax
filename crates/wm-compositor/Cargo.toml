@@ -18,5 +18,8 @@ repository.workspace = true
 unsafe_code = "deny"
 
 [dependencies]
+smithay.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 wm-index = { path = "../wm-index", version = "0.1.0" }
 wm-node = { path = "../wm-node", version = "0.1.0" }

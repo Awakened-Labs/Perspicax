@@ -26,9 +26,17 @@
 //!   as opposed to one minted at runtime.
 //! - [`Index`] -- the cache, the tree order both of the above depend on, and
 //!   the [`Delta`] computation that keeps a subscription from being a poll.
+//!
+//! And beneath [`HostView`], one more thing that could have lived in a
+//! compositor and deliberately does not: [`HostFacts`] and [`judge`], the plain
+//! data a host publishes and the arithmetic that turns it into a
+//! [`Visibility`]. Occlusion decided here is occlusion decided once, testable
+//! without Wayland, and identical across every host -- see [`mod@host`].
 
 pub mod cache;
+pub mod host;
 pub mod id;
+pub mod join;
 pub mod selector;
 
 use core::future::Future;
@@ -37,7 +45,9 @@ use wm_node::{Node, NodeId, ObservedNode, Origin, Rect, SurfaceId, Visibility};
 
 pub use crate::{
     cache::{Delta, Index},
+    host::{HostFacts, Judgement, SurfaceFacts, Tally, judge},
     id::Interner,
+    join::{Evidence, Finding, Join, SurfaceClaim, WindowClaim, join},
     selector::{Selector, SelectorParseError},
 };
 
@@ -80,7 +90,10 @@ impl core::fmt::Display for Refusal {
             Self::Unmapped => write!(f, "node's surface is not mapped"),
             Self::Unjudged => write!(f, "node visibility has not been judged by a compositor"),
             Self::Unattributed => write!(f, "node has no attributed origin"),
-            Self::Stale { frames } => write!(f, "node is stale by {frames} frame(s)"),
+            Self::Stale { frames: 0 } => {
+                write!(f, "node's subtree was invalidated and has not been re-read")
+            }
+            Self::Stale { frames } => write!(f, "node is stale by {frames} frame(s) of damage"),
             Self::NoCapability { origin } => write!(f, "no capability for origin {origin:?}"),
             Self::AmbiguousSelector { matches } => write!(f, "selector matched {matches} nodes"),
             Self::NotFound => write!(f, "selector matched no nodes"),

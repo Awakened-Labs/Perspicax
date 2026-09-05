@@ -11,14 +11,24 @@
 # supplies the X display without which neither toolkit will map a window, and
 # an application with no window has no accessible tree to read.
 #
-# Verified end to end on Debian 13 before being written down: 87 tests, of
-# which 11 need the bus.
+# Verified end to end on Debian 13 before being written down. From M2 this also
+# runs the demo the milestone is judged on -- a compositor of our own hosting
+# both toolkits -- which needs XDG_RUNTIME_DIR for its Wayland socket, a thing
+# a CI container does not have and a login session does.
 
 set -euo pipefail
 
 # The gallery's path is architecture-qualified, so ask dpkg rather than
-# hard-coding a triplet that is right on exactly one runner.
+# hard-coding a triplet that is right on exactly one runner. Exported so the
+# M2 demo test finds the same one rather than repeating the search.
 gallery=$(dpkg -L qt6-base-examples | grep -m1 '/widgets/gallery/bin/gallery$')
+export WM_QT_GALLERY="$gallery"
+
+# Where a Wayland socket can be bound. A login session has one; a container
+# does not, and the failure is `wm` refusing to start with no obvious cause.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/wm-runtime}"
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
 
 # Turn accessibility on for this session, and check that it took.
 #
@@ -54,7 +64,7 @@ QT_ACCESSIBILITY=1 "$gallery" >/tmp/qt6-gallery.log 2>&1 &
 # does not exist -- which is exactly what happened the first time this ran in a
 # container, while passing on a workstation where an earlier build had left one
 # behind.
-cargo build --workspace --all-targets
+cargo build --locked --workspace --all-targets
 
 probe=./target/debug/wm-probe
 if [ ! -x "$probe" ]; then
@@ -89,4 +99,4 @@ fi
 
 # One thread: the live tests read and poke the same two applications, and
 # interleaving them would make each one's result depend on the others.
-cargo test --workspace -- --include-ignored --test-threads=1
+cargo test --locked --workspace -- --include-ignored --test-threads=1

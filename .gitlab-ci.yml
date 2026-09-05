@@ -9,9 +9,18 @@
 # applications, because that is the whole point of the ingest path and mocking
 # it would test our mock. See `ci/live-tests.sh` for the session it builds.
 #
-# From M2 this additionally needs libinput/libdrm/gbm/libxkbcommon development
-# packages for Smithay's backends; the headless backend is what keeps that from
-# also needing a GPU.
+# `qt6-wayland` is the M2 addition that is easy to miss and silent when
+# missing: without it the Qt gallery has no Wayland platform plugin, falls back
+# to xcb, and connects to xvfb instead of to our compositor -- which looks
+# exactly like a broken join rather than a missing package.
+#
+# What M2 actually costs, measured rather than predicted. The M0 version of
+# this comment expected libinput, libdrm, gbm and libxkbcommon; the real answer
+# is `libxkbcommon` alone, because the compositor takes Smithay with
+# `default-features = false` and no renderer at all. No EGL, no GL, no GBM, no
+# DRM, no GPU -- and no libwayland either, since wayland-backend's Rust server
+# implementation is what `use_system_lib` would replace. The one system library
+# left is libxkbcommon, which Smithay links unconditionally for keymaps.
 #
 # Two things the M0 version of this comment got wrong, both corrected against
 # real toolkits rather than reasoned about:
@@ -84,7 +93,7 @@ clippy:
   stage: check
   script:
     - rustup component add clippy
-    - cargo clippy --workspace --all-targets -- -D warnings
+    - cargo clippy --locked --workspace --all-targets -- -D warnings
 
 deny:
   stage: check
@@ -106,8 +115,13 @@ deny:
         - .cargo/.crates2.json
   script:
     # Idempotent because of the cache paths above: a no-op exiting 0 on a warm
-    # runner.
+    # runner. This `--locked` is cargo-deny's own lockfile, not this tree's.
     - cargo install cargo-deny --version 0.20.2 --locked
+    # This tree's lockfile, asserted with cargo rather than with a flag on
+    # somebody else's binary -- and asserted HERE in particular, because this
+    # is the job whose verdict depends on the resolved graph. A stale lock
+    # would mean cargo-deny reading dependencies no commit in this repo chose.
+    - cargo metadata --locked --format-version 1 > /dev/null
     # `--all-features` must be on the command line; see the note in deny.toml
     # for why setting it in the config file silently does nothing.
     - cargo deny --all-features check
@@ -133,5 +147,7 @@ test:
       at-spi2-core
       gtk-4-examples
       qt6-base-examples
+      qt6-wayland
+      libxkbcommon-dev
   script:
     - xvfb-run -a dbus-run-session -- ci/live-tests.sh
