@@ -128,6 +128,27 @@ pub struct SurfaceFacts {
     /// How many times this surface has been damaged. Monotonic; the index
     /// compares it against what it has reconciled to decide staleness.
     pub damage_generation: u64,
+    /// Where recent damage landed, oldest first, in surface-local coordinates,
+    /// each tagged with the generation it arrived at.
+    ///
+    /// # Why the extent matters and a counter alone will not do
+    ///
+    /// Measured 2026-09-04: `gtk4-widget-factory` sitting idle with nobody
+    /// touching it damages its window about **41 times a second**, while Qt's
+    /// widget gallery manages about one every two seconds. A rule that made any
+    /// unreconciled damage stale the whole window would therefore refuse every
+    /// node in a GTK application permanently -- and no re-read is fast enough
+    /// to catch up, because reading that tree costs 62 ms at best.
+    ///
+    /// So staleness is scoped to where the pixels actually changed. A spinner
+    /// repainting its own corner does not make the Cancel button across the
+    /// window unsafe to click, and knowing the difference needs the damage
+    /// regions, which is information only a compositor has.
+    ///
+    /// Bounded, because it is a history and not a log. When it no longer
+    /// reaches back to what a reader reconciled, the answer is the whole
+    /// surface -- see [`SurfaceFacts::damage_since`].
+    pub damage: Vec<(u64, Rect)>,
 }
 
 impl SurfaceFacts {
@@ -147,6 +168,7 @@ impl SurfaceFacts {
             title: None,
             focused_at: None,
             damage_generation: 0,
+            damage: Vec::new(),
         }
     }
 
@@ -219,6 +241,43 @@ impl SurfaceFacts {
     pub fn damaged(mut self, generation: u64) -> Self {
         self.damage_generation = generation;
         self
+    }
+
+    /// The same surface, with a recorded history of where damage landed.
+    #[must_use]
+    pub fn damaging(mut self, history: impl IntoIterator<Item = (u64, Rect)>) -> Self {
+        self.damage = history.into_iter().collect();
+        self.damage_generation = self.damage.last().map_or(0, |(generation, _)| *generation);
+        self
+    }
+
+    /// Everything that has changed on this surface since `reconciled`, in
+    /// global space, or `None` if nothing has.
+    ///
+    /// Three answers, and the third is the one worth reading. Nothing newer
+    /// than `reconciled` is `None`. Damage this history still holds is the
+    /// union of those regions. And damage older than the history reaches is the
+    /// **whole surface**: a reader that has fallen further behind than the
+    /// compositor remembers cannot be told what changed, and the honest answer
+    /// to "what did I miss" is "possibly all of it".
+    #[must_use]
+    pub fn damage_since(&self, reconciled: u64) -> Option<Rect> {
+        if self.damage_generation <= reconciled {
+            return None;
+        }
+        match self.damage.first() {
+            // The first thing the history still holds is newer than the first
+            // thing this reader has not seen, so something in between was
+            // dropped.
+            Some((oldest, _)) if *oldest > reconciled + 1 => Some(self.geometry),
+            None => Some(self.geometry),
+            Some(_) => self
+                .damage
+                .iter()
+                .filter(|(generation, _)| *generation > reconciled)
+                .map(|(_, region)| self.surface_local_to_global(*region))
+                .reduce(|left, right| left.union(right)),
+        }
     }
 
     /// A node-space rect, in global space.
@@ -396,7 +455,7 @@ pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
 
 /// Whether two rects share any area. Touching edges do not count: a rect that
 /// meets another exactly at its boundary covers none of it.
-fn overlaps(a: Rect, b: Rect) -> bool {
+pub(crate) fn overlaps(a: Rect, b: Rect) -> bool {
     !a.intersect(b).is_empty()
 }
 
@@ -700,6 +759,51 @@ mod tests {
         assert_eq!(surface.origin, origin);
         assert_eq!(surface.damage_generation, 3);
         assert!(facts.surface(SurfaceId(2)).is_none());
+    }
+
+    /// The three answers `damage_since` gives, and the third is the one that
+    /// keeps a reader honest rather than merely informed.
+    #[test]
+    fn damage_since_says_nothing_something_or_everything() {
+        let surface = window().damaging([
+            (1, rect(0.0, 0.0, 10.0, 10.0)),
+            (2, rect(300.0, 200.0, 320.0, 220.0)),
+            (3, rect(310.0, 210.0, 330.0, 230.0)),
+        ]);
+
+        assert_eq!(surface.damage_since(3), None, "nothing newer than the read");
+        assert_eq!(
+            surface.damage_since(1),
+            Some(rect(300.0, 200.0, 330.0, 230.0)),
+            "the union of what is newer, and not a whole-window panic"
+        );
+
+        // A reader further behind than the history reaches cannot be told what
+        // it missed, so it is told it missed everything.
+        let truncated = window().damaging([(9, rect(0.0, 0.0, 10.0, 10.0))]);
+        assert_eq!(
+            truncated.damage_since(3),
+            Some(truncated.geometry),
+            "a gap in the history is answered with the whole surface"
+        );
+        assert_eq!(
+            truncated.damage_since(8),
+            Some(rect(0.0, 0.0, 10.0, 10.0)),
+            "and an unbroken history is not"
+        );
+    }
+
+    /// Damage arrives in surface-local coordinates, so under decoration it is
+    /// placed from the buffer's origin and not the window geometry's.
+    #[test]
+    fn damage_is_placed_from_the_buffer_origin() {
+        let decorated = SurfaceFacts::new(SurfaceId(1), rect(100.0, 100.0, 500.0, 400.0))
+            .with_buffer_origin(Vec2::new(80.0, 80.0))
+            .damaging([(1, rect(0.0, 0.0, 10.0, 10.0))]);
+        assert_eq!(
+            decorated.damage_since(0),
+            Some(rect(80.0, 80.0, 90.0, 90.0))
+        );
     }
 
     #[test]

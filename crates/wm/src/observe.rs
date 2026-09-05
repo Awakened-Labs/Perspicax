@@ -22,13 +22,26 @@
 //! it stays un-actable, and the reason appears as a [`Finding`] rather than in
 //! a log nobody reads.
 
+use std::{collections::HashSet, time::Duration};
+
 use anyhow::{Context as _, Result};
 use wm_atspi::{AppRef, AtspiIngest};
 use wm_compositor::Facts;
 use wm_index::{
-    Finding, HostFacts, Index, Ingest as _, Join, SurfaceClaim, Tally, WindowClaim, join,
+    Finding, HostFacts, Index, Ingest as _, Join, SurfaceClaim, SurfaceFacts, Tally, WindowClaim,
+    join,
 };
 use wm_node::{NodeId, Origin, Role, SurfaceId};
+
+/// How long one application gets to be read before it is given up on.
+///
+/// Generous: the M1 measurements put a cold Qt tree with geometry at about
+/// three seconds, and a loaded machine is slower. It exists because the
+/// alternative was observed rather than imagined -- `gnome-shell` on the test
+/// bed answers the registry and then fails its own peer handshake, and reading
+/// it never returns. One application must not be able to hide the desktop, and
+/// saying so in a doc comment is not the same as arranging it.
+const PER_APP: Duration = Duration::from_secs(20);
 
 /// What one application turned out to be.
 pub struct AppReport {
@@ -44,6 +57,9 @@ pub struct AppReport {
     pub findings: Vec<Finding>,
     /// What judging its nodes decided.
     pub tally: Tally,
+    /// How many of its nodes sit under rendering that arrived after this read
+    /// and that no semantic event explained.
+    pub unexplained: usize,
 }
 
 /// Read every application on the accessibility bus and join it to the host.
@@ -54,50 +70,97 @@ pub struct AppReport {
 /// application that cannot be read is reported and skipped: one misbehaving
 /// toolkit must not be able to hide the desktop.
 pub async fn observe(facts: &Facts) -> Result<Vec<AppReport>> {
-    let host = facts.read();
-    let surfaces: Vec<SurfaceClaim> = host.surfaces().iter().map(|s| s.claim()).collect();
-
     let apps = wm_atspi::on_the_bus()
         .await
         .context("the accessibility bus could not be reached")?;
 
+    // Only applications this host actually drew. The pid is the join's gate, so
+    // an application whose process owns none of our surfaces cannot bind to one
+    // however promising its windows look -- and reading it would cost a D-Bus
+    // round trip per node to reach that conclusion. On the test bed the
+    // difference is the whole GNOME session: gnome-shell, seven gsd-* daemons,
+    // and two leftover copies of the demo applications, none of which this
+    // compositor is hosting.
+    let ours: HashSet<u32> = facts
+        .read()
+        .surfaces()
+        .iter()
+        .filter_map(|surface| surface.claim().pid)
+        .collect();
+
     let mut reports = Vec::new();
+    let mut skipped = 0;
     for app in apps {
+        if !app.bus_pid().is_some_and(|pid| ours.contains(&pid)) {
+            skipped += 1;
+            continue;
+        }
         let (name, toolkit) = (app.name().to_owned(), app.toolkit().to_owned());
         // By reference, not by name. A desktop can be running two copies of one
         // program -- the test bed was, one of them a leftover -- and resolving
         // by name reads the first twice while never reaching the second.
-        match read_app(app, &surfaces, &host).await {
-            Ok(mut report) => {
+        match tokio::time::timeout(PER_APP, read_app(app, facts)).await {
+            Ok(Ok(mut report)) => {
                 report.toolkit = toolkit;
                 reports.push(report);
             }
-            Err(error) => tracing::warn!(app = %name, %error, "could not read application"),
+            Ok(Err(error)) => {
+                tracing::warn!(app = %name, %error, "could not read application");
+            }
+            Err(_) => tracing::warn!(app = %name, "gave up reading application"),
         }
+    }
+    if skipped > 0 {
+        tracing::info!(
+            skipped,
+            "applications on the bus that this host did not draw"
+        );
     }
     Ok(reports)
 }
 
 /// Read one application, join it, and judge it.
-async fn read_app(app: AppRef, surfaces: &[SurfaceClaim], host: &HostFacts) -> Result<AppReport> {
+async fn read_app(app: AppRef, facts: &Facts) -> Result<AppReport> {
     let name = app.name().to_owned();
     let mut ingest = AtspiIngest::attach(app).await?.with_geometry(true);
     let root = ingest.root_id();
+
+    // The state of the host *before* the read, kept so the reconciliation
+    // below can be honest about what this tree does and does not contain.
+    let before = facts.read();
+    let surfaces: Vec<SurfaceClaim> = before.surfaces().iter().map(SurfaceFacts::claim).collect();
+
     let nodes = ingest.snapshot(root).await?;
 
     let mut index = Index::new();
     index.ingest_snapshot(nodes);
 
     let windows = toplevels(&index, root, ingest.app().bus_pid());
-    let (joins, findings) = join(&windows, surfaces);
+    let (joins, findings) = join(&windows, &surfaces);
 
     for join in &joins {
-        let origin = host
+        let origin = before
             .surface(join.surface)
             .map_or(Origin::Unattributed, |facts| facts.origin.clone());
         index.join_subtree(join.node, join.surface, &origin);
+
+        // Credited with the generation the surface was at when the read
+        // STARTED. A GTK tree takes tens of milliseconds at best, during which
+        // that application repaints its window perhaps twice; crediting the
+        // read with where the counter finished would quietly claim those
+        // frames had been seen.
+        let generation = before
+            .surface(join.surface)
+            .map_or(0, |facts| facts.damage_generation);
+        index.reconcile(join.surface, generation);
     }
-    let tally = index.judge(host);
+
+    // Judged and staled against the host as it is NOW, which is the whole
+    // point: the difference between then and now is exactly what a reader
+    // needs to be told it missed.
+    let now = facts.read();
+    let tally = index.judge(&now);
+    let unexplained = index.under_damage(&now).len();
 
     Ok(AppReport {
         name,
@@ -106,6 +169,7 @@ async fn read_app(app: AppRef, surfaces: &[SurfaceClaim], host: &HostFacts) -> R
         joins,
         findings,
         tally,
+        unexplained,
     })
 }
 
@@ -183,6 +247,12 @@ pub fn report(reports: &[AppReport], host: &HostFacts) {
             let node_bounds = app.index.get(join.node).and_then(|node| node.bounds());
             let surface = app.index.get(join.node).and_then(|node| node.surface);
             println!(
+                "    damage: {} frames",
+                surface
+                    .and_then(|id| host.surface(id))
+                    .map_or(0, |facts| facts.damage_generation),
+            );
+            println!(
                 "    node space: {:?}   host geometry: {:?}",
                 node_bounds.map(|b| (b.x0, b.y0, b.x1, b.y1)),
                 surface.and_then(|id| host.surface(id)).map(|facts| (
@@ -196,7 +266,10 @@ pub fn report(reports: &[AppReport], host: &HostFacts) {
         for finding in &app.findings {
             println!("  FINDING: {finding}");
         }
-        println!("  {}", app.tally);
+        println!(
+            "  {}\n  {} of them under rendering no semantic event explained",
+            app.tally, app.unexplained
+        );
 
         // The two numbers M2 exists to produce, for one node each, so a human
         // can see the join actually reached the leaves.

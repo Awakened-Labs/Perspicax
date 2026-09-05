@@ -9,10 +9,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use wm_node::{NodeId, ObservedNode, Origin, SurfaceId, Visibility};
+use wm_node::{NodeId, ObservedNode, Origin, Rect, SurfaceId, Visibility};
 
 use crate::{
     Change, Refusal, check_actable,
+    host::overlaps,
     host::{HostFacts, Judgement, Tally, judge},
     selector::Selector,
 };
@@ -38,6 +39,10 @@ pub struct Index {
     /// Child -> parent. Populated from each node's own child list, so a child
     /// can be recorded before it arrives.
     parents: HashMap<NodeId, NodeId>,
+    /// The damage generation each surface's nodes were last read at. A
+    /// surface absent from here has never been reconciled, which is generation
+    /// zero and therefore behind everything.
+    reconciled: HashMap<SurfaceId, u64>,
     /// Nodes that cannot be trusted, and how many frames of surface damage
     /// each one owes. Zero is a real value and the common one: an
     /// accessibility-side invalidation says the tree changed shape, which is
@@ -369,6 +374,82 @@ impl Index {
             node.visibility = verdict.visibility;
         }
         tally
+    }
+
+    /// Record that this surface's nodes were read as of `generation`.
+    ///
+    /// Called with the generation observed **before** the read started, not
+    /// after. A tree takes milliseconds at best and seconds at worst to read,
+    /// and anything that changed while it was being read is not in it --
+    /// crediting the read with the generation it finished at would silently
+    /// swallow exactly the frames a reader most needs to know it missed.
+    pub fn reconcile(&mut self, surface: SurfaceId, generation: u64) {
+        self.reconciled.insert(surface, generation);
+    }
+
+    /// Every node sitting under pixels that changed since this index read it.
+    ///
+    /// # This is a measurement, not a refusal, and the difference was measured
+    ///
+    /// The obvious use is staleness: pixels under a node changed, so do not
+    /// trust its rectangle. Against real toolkits that rule is unusable.
+    /// `gtk4-widget-factory` sitting idle with nobody touching it damages its
+    /// whole window about **41 times a second**; Qt's gallery manages one small
+    /// region every two seconds. Applying damage as a refusal therefore leaves
+    /// 273 of a GTK application's 275 nodes un-actable at all times, with no
+    /// re-read fast enough to ever catch up -- and it is not even true, because
+    /// what those frames contain is a repaint of the same widgets.
+    ///
+    /// So damage does not decide actability here. [`Refusal::Stale`] is
+    /// produced by the accessibility feed saying a subtree changed, which is a
+    /// statement about *meaning*. What this returns is the other half: the
+    /// nodes under rendering that the semantic feed did not explain.
+    ///
+    /// That difference is the whole product. Damage says something changed on
+    /// screen; accessibility events say what changed. **Damage with no
+    /// accompanying event is a surface that rendered without explaining
+    /// itself** -- which for GTK and Qt is a repaint and can be ignored, and
+    /// for a Flutter or canvas surface is the precise definition of a region no
+    /// bridge can describe, and the only honest trigger for a vision fallback.
+    /// Counting it on toolkits that *do* explain themselves is how that trigger
+    /// gets a baseline to be compared against.
+    ///
+    /// Scoped to the node rather than to the surface, because the region is
+    /// the information a compositor uniquely has: a spinner repainting its own
+    /// corner has not touched the button across the window.
+    #[must_use]
+    pub fn under_damage(&self, facts: &HostFacts) -> Vec<NodeId> {
+        let unreconciled: HashMap<SurfaceId, Rect> = facts
+            .surfaces()
+            .iter()
+            .filter_map(|surface| {
+                let reconciled = self
+                    .reconciled
+                    .get(&surface.id)
+                    .copied()
+                    .unwrap_or_default();
+                Some((surface.id, surface.damage_since(reconciled)?))
+            })
+            .collect();
+
+        let mut under = Vec::new();
+        for id in self.preorder() {
+            let Some(node) = self.nodes.get(&id) else {
+                continue;
+            };
+            let (Some(surface_id), Some(bounds)) = (node.surface, node.bounds()) else {
+                continue;
+            };
+            let (Some(region), Some(surface)) =
+                (unreconciled.get(&surface_id), facts.surface(surface_id))
+            else {
+                continue;
+            };
+            if overlaps(surface.to_global(bounds), *region) {
+                under.push(id);
+            }
+        }
+        under
     }
 
     /// The node with this id, if an agent may act on it.
@@ -806,6 +887,56 @@ mod tests {
             joined().actable(NodeId(404)).unwrap_err(),
             Refusal::NotFound
         );
+    }
+
+    /// The measured case, in miniature: an application repainting one corner
+    /// of itself does not make the rest of the window unsafe. Without this,
+    /// GTK's ~41 frames a second of idle repainting would refuse every node it
+    /// has, permanently, with no read fast enough to recover.
+    #[test]
+    fn damage_is_reported_where_it_lands_and_not_across_the_window() {
+        let mut index = joined();
+        let spinner = Rect::new(200.0, 200.0, 280.0, 240.0);
+        let facts = HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(SurfaceId(1), Rect::new(0.0, 0.0, 400.0, 300.0))
+                    .damaging([(1, spinner)]),
+            ],
+            2,
+        );
+        index.judge(&facts);
+        index.reconcile(SurfaceId(1), 0);
+
+        assert_eq!(
+            index.under_damage(&facts),
+            vec![NodeId(1), NodeId(3)],
+            "the window root and Cancel, which sit under the repainted corner"
+        );
+        assert!(
+            index.actable(NodeId(3)).is_ok(),
+            "and being repainted is not by itself a reason to refuse: an \
+             application that redraws itself has not necessarily changed"
+        );
+    }
+
+    /// Reconciling at the generation a read *finished* at would swallow the
+    /// frames that arrived during it. This is the same test one generation
+    /// later, and nothing should be stale.
+    #[test]
+    fn a_read_that_has_caught_up_reports_no_damage() {
+        let mut index = joined();
+        let facts = HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(SurfaceId(1), Rect::new(0.0, 0.0, 400.0, 300.0))
+                    .damaging([(1, Rect::new(200.0, 200.0, 280.0, 240.0))]),
+            ],
+            2,
+        );
+        index.judge(&facts);
+        index.reconcile(SurfaceId(1), 1);
+
+        assert!(index.under_damage(&facts).is_empty());
+        assert!(index.actable(NodeId(3)).is_ok());
     }
 
     /// A node can outlive the surface it was read from -- a window closes

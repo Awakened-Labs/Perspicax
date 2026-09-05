@@ -186,7 +186,8 @@ impl Compositor {
             origin: self.origin_of(window),
             title: title(surface),
             focused_at: self.focused_at(id),
-            damage_generation: 0,
+            damage_generation: self.damage_generation(id),
+            damage: self.damage_history(id),
         })
     }
 

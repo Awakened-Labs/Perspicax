@@ -13,7 +13,7 @@ use std::{
     time::Instant,
 };
 
-use wm_node::{Origin, SurfaceId};
+use wm_node::{Origin, Rect, SurfaceId};
 
 use crate::{facts::Facts, origin};
 
@@ -39,7 +39,7 @@ use smithay::{
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            BufferAssignment, CompositorClientState, CompositorHandler, CompositorState,
+            BufferAssignment, CompositorClientState, CompositorHandler, CompositorState, Damage,
             SurfaceAttributes, TraversalAction, with_states, with_surface_tree_downward,
         },
         output::{OutputHandler, OutputManagerState},
@@ -50,7 +50,8 @@ use smithay::{
             },
         },
         shell::xdg::{
-            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+            PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler,
+            XdgShellState,
         },
         shm::{ShmHandler, ShmState},
     },
@@ -61,6 +62,14 @@ use smithay::{
 /// about overlap. A placement policy, and a placeholder for one: the arc's
 /// occlusion demo needs to *choose* where windows go, and will replace this.
 const CASCADE: i32 = 32;
+
+/// How many damaged regions to remember per surface.
+///
+/// A history, not a log. At the ~41 frames a second an idle GTK application
+/// produces this is about six seconds of memory, which is far longer than any
+/// read of a tree takes; a reader further behind than this is told the whole
+/// surface changed, which is true and is the safe direction to be wrong in.
+const DAMAGE_HISTORY: usize = 256;
 
 /// Everything this compositor knows.
 pub struct Compositor {
@@ -86,6 +95,11 @@ pub struct Compositor {
     /// the session has no usable keyboard layout at all. Focus still works
     /// without one; nothing else in M2 does.
     keyboard: Option<KeyboardHandle<Self>>,
+    /// Where damage landed on each surface, oldest first, tagged with the
+    /// generation it arrived at. Monotonic and bounded: the index compares
+    /// generations against what it has reconciled, and a counter that went
+    /// backwards would make a stale node look current.
+    damage: HashMap<SurfaceId, Vec<(u64, Rect)>>,
     /// Surfaces that have presented a buffer at least once.
     ///
     /// A toplevel exists from the moment a client asks for one; it is on screen
@@ -169,6 +183,7 @@ impl Compositor {
             space,
             output,
             keyboard,
+            damage: HashMap::new(),
             presented: HashSet::new(),
             focused_at: HashMap::new(),
             facts,
@@ -269,6 +284,19 @@ impl Compositor {
         self.focused_at.get(&id).copied()
     }
 
+    /// How many frames of damage this surface has taken.
+    pub(crate) fn damage_generation(&self, id: SurfaceId) -> u64 {
+        self.damage
+            .get(&id)
+            .and_then(|history| history.last())
+            .map_or(0, |(generation, _)| *generation)
+    }
+
+    /// Where damage landed on this surface, oldest first.
+    pub(crate) fn damage_history(&self, id: SurfaceId) -> Vec<(u64, Rect)> {
+        self.damage.get(&id).cloned().unwrap_or_default()
+    }
+
     /// Whether this surface has ever had anything in it.
     pub(crate) fn has_presented(&self, id: SurfaceId) -> bool {
         self.presented.contains(&id)
@@ -310,16 +338,41 @@ impl CompositorHandler for Compositor {
     /// instead of stalled against a compositor that had no use for its
     /// contents in the first place.
     fn commit(&mut self, surface: &WlSurface) {
-        let presented = with_states(surface, |states| {
+        let whole = declared_geometry(surface);
+        let (presented, damaged) = with_states(surface, |states| {
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-            match attributes.current().buffer.take() {
+            let current = attributes.current();
+
+            // Drained, not read: `SurfaceAttributes` accumulates damage from
+            // commit to commit and expects whoever processes it to clear it.
+            let scale = f64::from(current.buffer_scale.max(1));
+            let mut damaged: Vec<Rect> = current
+                .damage
+                .drain(..)
+                .map(|damage| match damage {
+                    Damage::Surface(rect) => to_rect(rect, 1.0),
+                    // Buffer coordinates are the surface's multiplied by the
+                    // scale the client declared, so dividing is what puts them
+                    // back into the space every other rectangle here uses.
+                    Damage::Buffer(rect) => to_rect(rect, scale),
+                })
+                .collect();
+
+            let presented = match current.buffer.take() {
                 Some(BufferAssignment::NewBuffer(buffer)) => {
                     buffer.release();
                     true
                 }
                 Some(BufferAssignment::Removed) => false,
                 None => true,
+            };
+
+            // A commit that presents a buffer without saying which part of it
+            // changed has changed all of it as far as anyone here can tell.
+            if damaged.is_empty() && presented {
+                damaged.extend(whole);
             }
+            (presented, damaged)
         });
 
         if let Some(window) = self.window_for(surface) {
@@ -329,6 +382,14 @@ impl CompositorHandler for Compositor {
                     self.presented.insert(id);
                 } else {
                     self.presented.remove(&id);
+                }
+                if !damaged.is_empty() {
+                    let history = self.damage.entry(id).or_default();
+                    let generation = history.last().map_or(0, |(g, _)| *g) + 1;
+                    history.extend(damaged.into_iter().map(|rect| (generation, rect)));
+                    if history.len() > DAMAGE_HISTORY {
+                        history.drain(..history.len() - DAMAGE_HISTORY);
+                    }
                 }
             }
         }
@@ -476,3 +537,29 @@ delegate_output!(Compositor);
 delegate_seat!(Compositor);
 delegate_shm!(Compositor);
 delegate_xdg_shell!(Compositor);
+
+/// A smithay rectangle in the surface's own coordinates, divided by `scale`.
+fn to_rect<Kind>(rect: smithay::utils::Rectangle<i32, Kind>, scale: f64) -> Rect {
+    Rect::new(
+        f64::from(rect.loc.x) / scale,
+        f64::from(rect.loc.y) / scale,
+        f64::from(rect.loc.x + rect.size.w) / scale,
+        f64::from(rect.loc.y + rect.size.h) / scale,
+    )
+}
+
+/// The window geometry a client declared, in surface-local coordinates.
+///
+/// Used as the extent of a commit that presented a buffer and described no
+/// damage. A client that has not declared one yet has nothing on screen for
+/// damage to be about.
+pub(crate) fn declared_geometry(surface: &WlSurface) -> Option<Rect> {
+    with_states(surface, |states| {
+        states
+            .cached_state
+            .get::<SurfaceCachedState>()
+            .current()
+            .geometry
+            .map(|geometry| to_rect(geometry, 1.0))
+    })
+}

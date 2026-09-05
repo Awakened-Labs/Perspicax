@@ -114,6 +114,31 @@ Geometry is a separate row because no bulk API exists for it on either toolkit:
 `Cache.GetItems` carries roles, names, states and parentage and no extents at
 all, so bounds are a round trip per node even on the fast path.
 
+## What a toolkit renders without explaining
+
+Measured on the same Debian 13 box, hosting both applications under
+`wm --headless` for eight idle seconds with nobody touching them.
+
+| | GTK 4.18.6 <br> `gtk4-widget-factory` | Qt 6.8.2 <br> `gallery` |
+|---|---|---|
+| frames of damage, idle | **768** | 18 |
+| nodes under damage no a11y event explained | 263 of 275 | 12 of 219 |
+
+The first row is the one that changes a design. An idle GTK application repaints
+its whole window about forty times a second while nothing is happening, so a
+rule that treated surface damage as making a node stale would refuse every node
+in that application permanently — and no re-read is fast enough to recover,
+because reading its tree costs 62 ms at best. Damage therefore cannot mean
+"unsafe to act"; what it means is *pixels changed here and the semantic feed did
+not mention it*.
+
+That is the fused signal this project exists to notice, and these numbers are
+its baseline. GTK and Qt both explain themselves, so their unexplained repaints
+are exactly that — repaints. A Flutter, GL or canvas surface produces the same
+signal for a different reason: it renders and no bridge can say what it drew.
+Telling those two apart is what a compositor is for, and it is the only honest
+trigger for a vision fallback.
+
 ## Build
 
 ```sh
