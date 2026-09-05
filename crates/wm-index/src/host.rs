@@ -288,6 +288,26 @@ impl SurfaceFacts {
         Rect::new(rect.x0 + dx, rect.y0 + dy, rect.x1 + dx, rect.y1 + dy)
     }
 
+    /// Whether damage newer than `reconciled` landed on a window-relative rect.
+    ///
+    /// The region scoping is the whole point and it is what only a compositor
+    /// can do. "This surface changed" is nearly always true -- an idle
+    /// gtk4-widget-factory repaints its whole window about forty times a second
+    /// -- and therefore says nothing about whether a particular button
+    /// reacted. "Pixels changed *here*" is a different claim, and it is the one
+    /// worth putting in a receipt.
+    ///
+    /// Still evidence rather than proof, in one direction: a toolkit that
+    /// repaints wholesale damages every rect on it, including this one, whether
+    /// or not the act did anything. A `false` is the strong answer -- nothing
+    /// happened here at all -- and a `true` is only as informative as the
+    /// surface's idle rate makes it.
+    #[must_use]
+    pub fn damage_touches(&self, reconciled: u64, rect: Rect) -> bool {
+        self.damage_since(reconciled)
+            .is_some_and(|region| overlaps(self.to_global(rect), region))
+    }
+
     /// Whether this surface proves that `global` shows through it.
     ///
     /// Proof, not likelihood -- see the module's policy. A surface that

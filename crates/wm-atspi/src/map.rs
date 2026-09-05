@@ -234,10 +234,23 @@ pub fn apply_states(states: StateSet, node: &mut Node) {
         node.set_hidden();
     }
 
-    // AT-SPI splits "greyed out" (`Sensitive`) from "switched off"
-    // (`Enabled`); AccessKit has one flag, and either bit being absent means
-    // an agent must not treat the node as live.
-    if !states.contains(State::Sensitive) || !states.contains(State::Enabled) {
+    // AT-SPI splits "greyed out" (`Sensitive`) from "switched off" (`Enabled`)
+    // and AccessKit has one flag, so one of the two bits has to decide it.
+    //
+    // MEASURED 2026-09-05 against GTK 4 under `GTK_A11Y=atspi`: a plainly
+    // clickable button reports `Focusable | Focused | Sensitive | Showing |
+    // Visible` and **never** `Enabled` -- not on the button, not on its window,
+    // not on any node in the tree. Requiring both bits therefore marked every
+    // GTK node disabled, and M3 put that on the wire as `state.disabled` for a
+    // control that works, which is the confidently-wrong kind of answer this
+    // project exists to stop giving. The tests missed it because their fixtures
+    // set both bits, which is what the specification suggests and not what a
+    // toolkit does.
+    //
+    // So the negative claim is the absence of `Sensitive`, which is the bit
+    // toolkits actually maintain. `Enabled` will earn a rule here on the day a
+    // toolkit is measured setting it.
+    if !states.contains(State::Sensitive) {
         node.set_disabled();
     }
 
@@ -462,6 +475,32 @@ mod tests {
         let mut node = Node::new(Role::Button);
         apply_states(states(&[State::Showing, State::Visible]), &mut node);
         assert!(node.is_disabled());
+    }
+
+    /// The state set a real GTK 4 button actually reports, copied from a
+    /// measurement rather than from the specification -- which is the whole
+    /// point of the test. Written from the spec, this fixture would carry
+    /// `Enabled` as well, and carrying it is what hid the bug: GTK sets
+    /// `Sensitive` and never `Enabled`, so a rule requiring both marked every
+    /// node in every GTK application unavailable for interaction.
+    #[test]
+    fn a_real_gtk_button_is_not_disabled() {
+        let mut node = Node::new(Role::Button);
+        apply_states(
+            states(&[
+                State::Focusable,
+                State::Focused,
+                State::Sensitive,
+                State::Showing,
+                State::Visible,
+            ]),
+            &mut node,
+        );
+        assert!(
+            !node.is_disabled(),
+            "a sensitive GTK button is not disabled"
+        );
+        assert!(!node.is_hidden());
     }
 
     #[test]

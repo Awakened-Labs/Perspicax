@@ -15,7 +15,7 @@ use std::{
 
 use wm_node::{Origin, Rect, SurfaceId};
 
-use crate::{facts::Facts, origin};
+use crate::{act::Keys, facts::Facts, origin};
 
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
@@ -24,7 +24,7 @@ use smithay::{
     input::{
         Seat, SeatHandler, SeatState,
         keyboard::{KeyboardHandle, XkbConfig},
-        pointer::CursorImageStatus,
+        pointer::{CursorImageStatus, PointerHandle},
     },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
@@ -93,8 +93,16 @@ pub struct Compositor {
     pub(crate) seat: Seat<Self>,
     /// `None` only if xkb could not compile a default keymap, which would mean
     /// the session has no usable keyboard layout at all. Focus still works
-    /// without one; nothing else in M2 does.
-    keyboard: Option<KeyboardHandle<Self>>,
+    /// without one; nothing else does.
+    pub(crate) keyboard: Option<KeyboardHandle<Self>>,
+    /// The pointer capability. Absent from M2 entirely, because a compositor
+    /// that only reads the screen never needs to move anything; added here
+    /// because clicking is the whole of what M3 is for.
+    pub(crate) pointer: Option<PointerHandle<Self>>,
+    /// Which key produces which character, on this seat's layout. Built once at
+    /// construction: it is a pure function of the keymap, and rebuilding it per
+    /// keystroke would put a keymap compile inside an agent's latency budget.
+    pub(crate) keys: Keys,
     /// Where damage landed on each surface, oldest first, tagged with the
     /// generation it arrived at. Monotonic and bounded: the index compares
     /// generations against what it has reconciled, and a counter that went
@@ -145,6 +153,9 @@ impl Compositor {
                 None
             }
         };
+        // A pointer is unconditional where a keyboard is not: `add_pointer`
+        // cannot fail, because there is no keymap to compile.
+        let pointer = Some(seat.add_pointer());
 
         let output = Output::new(
             "wm-headless".to_owned(),
@@ -183,6 +194,8 @@ impl Compositor {
             space,
             output,
             keyboard,
+            pointer,
+            keys: Keys::from_default_layout(),
             damage: HashMap::new(),
             presented: HashSet::new(),
             focused_at: HashMap::new(),
@@ -271,7 +284,7 @@ impl Compositor {
     }
 
     /// Give a surface keyboard focus, and remember when.
-    fn focus(&mut self, surface: WlSurface, id: SurfaceId) {
+    pub(crate) fn focus_surface(&mut self, surface: WlSurface, id: SurfaceId) {
         let Some(keyboard) = self.keyboard.clone() else {
             return;
         };
@@ -303,6 +316,36 @@ impl Compositor {
     }
 
     /// The window whose toplevel owns this surface, if any.
+    /// The window carrying this id, if it is still mapped.
+    ///
+    /// The id lives in the window's user data, put there by `new_toplevel`, so
+    /// this is the inverse of the only place ids are ever handed out.
+    pub(crate) fn window_for_id(&self, id: SurfaceId) -> Option<Window> {
+        self.space
+            .elements()
+            .find(|window| window.user_data().get::<SurfaceId>() == Some(&id))
+            .cloned()
+    }
+
+    /// Which surface holds the keyboard right now.
+    ///
+    /// Asked of the seat rather than remembered, because a client can lose
+    /// focus for reasons this compositor did not initiate -- a destroyed
+    /// surface being the ordinary one -- and a cached answer would then
+    /// describe a window that is gone.
+    pub(crate) fn focused_surface(&self) -> Option<SurfaceId> {
+        let surface = self.keyboard.as_ref()?.current_focus()?;
+        let window = self.window_for(&surface)?;
+        window.user_data().get::<SurfaceId>().copied()
+    }
+
+    /// When this compositor started. The base of every event timestamp it
+    /// sends, so synthetic input is stamped on the same clock as frame
+    /// callbacks rather than on a second one that could disagree.
+    pub(crate) fn started_at(&self) -> Instant {
+        self.started
+    }
+
     fn window_for(&self, surface: &WlSurface) -> Option<Window> {
         self.space
             .elements()
@@ -427,7 +470,7 @@ impl XdgShellHandler for Compositor {
         // of the focus correlation, and it makes the toolkit's own idea of
         // which window is active agree with ours -- which is the pair of
         // observations the join weighs.
-        self.focus(wl_surface, id);
+        self.focus_surface(wl_surface, id);
         self.publish_facts();
     }
 

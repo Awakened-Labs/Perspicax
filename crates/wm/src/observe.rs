@@ -1,11 +1,11 @@
-//! Reading the desktop this compositor is hosting, and saying what it found.
+//! Reading the desktop this compositor is hosting, and keeping it read.
 //!
-//! This is where the two halves of the project meet for the first time. An
-//! accessibility bridge describes trees and knows nothing about surfaces; a
-//! compositor holds surfaces and cannot read a widget. Everything the project
-//! claims over a library that scrapes AT-SPI from outside happens in the
-//! handful of lines below that put a bridge's window next to a host's surface
-//! and decide whether they are the same thing.
+//! This is where the two halves of the project meet. An accessibility bridge
+//! describes trees and knows nothing about surfaces; a compositor holds
+//! surfaces and cannot read a widget. Everything the project claims over a
+//! library that scrapes AT-SPI from outside happens in the handful of lines
+//! below that put a bridge's window next to a host's surface and decide whether
+//! they are the same thing.
 //!
 //! The order is deliberate and each step depends on the one before it:
 //!
@@ -21,17 +21,36 @@
 //! A window that does not join keeps `Origin::Unattributed`, every node under
 //! it stays un-actable, and the reason appears as a [`Finding`] rather than in
 //! a log nobody reads.
+//!
+//! # One index, and one id space inside it
+//!
+//! Every application lands in the **same** [`Index`], minting ids from the same
+//! [`Ids`]. That was not true until M3 slice 5, and the difference is invisible
+//! until ids leave the process: AT-SPI numbers object paths per application, so
+//! `/org/a11y/atspi/accessible/1` exists in every program on the bus, and an
+//! interner each meant two applications both minted id 1. Nothing above could
+//! tell those two nodes apart -- least of all the MCP server, which hands an
+//! agent an id and takes it back.
+//!
+//! # Read once, then listen
+//!
+//! [`observe`] is the expensive half and runs once: seconds against a cold Qt
+//! tree. After it, each [`App`] is still attached and still subscribed, so
+//! [`App::changes`] takes what the bus has volunteered without asking anything.
+//! Polling a tree is the failure mode this project exists to remove, and the
+//! subscription was opened before the snapshot precisely so that nothing can
+//! change in the gap between the two.
 
 use std::{collections::HashSet, time::Duration};
 
 use anyhow::{Context as _, Result};
-use wm_atspi::{AppRef, AtspiIngest};
+use wm_atspi::{AppRef, AtspiIngest, Ids};
 use wm_compositor::Facts;
 use wm_index::{
-    Finding, HostFacts, Index, Ingest as _, Join, SurfaceClaim, SurfaceFacts, Tally, WindowClaim,
-    join,
+    Change, Finding, HostFacts, Index, Ingest as _, Join, SurfaceClaim, SurfaceFacts, Tally,
+    WindowClaim, join,
 };
-use wm_node::{NodeId, Origin, Role, SurfaceId};
+use wm_node::{NodeId, ObservedNode, Origin, Role, SurfaceId};
 
 /// How long one application gets to be read before it is given up on.
 ///
@@ -43,22 +62,98 @@ use wm_node::{NodeId, Origin, Role, SurfaceId};
 /// saying so in a doc comment is not the same as arranging it.
 const PER_APP: Duration = Duration::from_secs(20);
 
-/// What one application turned out to be.
-pub struct AppReport {
+/// One application this compositor drew: what it turned out to be, and the
+/// live connection it is still being read through.
+pub struct App {
     /// Its name on the accessibility bus.
     pub name: String,
     /// The toolkit it reports. Diagnostic only.
     pub toolkit: String,
-    /// Its whole tree, attributed and judged.
-    pub index: Index,
+    /// Its root node, in the desktop's shared index.
+    pub root: NodeId,
     /// Its toplevels, bound to surfaces.
     pub joins: Vec<Join>,
     /// Its toplevels that could not be bound, and why.
     pub findings: Vec<Finding>,
-    /// What judging its nodes decided.
+    /// Still attached, and still subscribed. This is what makes staying
+    /// current a matter of listening rather than reading again.
+    ingest: AtspiIngest,
+}
+
+impl App {
+    /// Every node of this application, in tree order, root first.
+    ///
+    /// The index is the desktop's, so an application is a subtree of it rather
+    /// than a thing of its own -- and this is how a caller asks for its part.
+    #[must_use]
+    pub fn nodes(&self, index: &Index) -> Vec<NodeId> {
+        let mut nodes = vec![self.root];
+        nodes.extend(index.descendants(self.root));
+        nodes
+    }
+
+    /// Take what this application has volunteered since the last call.
+    ///
+    /// Volunteered, not fetched: this drains a queue of signals that already
+    /// arrived and asks the application nothing, so it cannot block and on a
+    /// quiet desktop it returns immediately.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the accessibility bus connection has gone.
+    pub async fn changes(&mut self) -> Result<Vec<Change>> {
+        self.ingest
+            .drain_changes()
+            .await
+            .with_context(|| format!("could not drain changes from {}", self.name))
+    }
+
+    /// Read this application's whole tree again.
+    ///
+    /// The answer to [`Change::SubtreeInvalidated`], which says a subtree
+    /// changed shape and cannot be trusted until it is read. Expensive, and
+    /// deliberately the caller's decision rather than something
+    /// [`App::changes`] does on its own.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the application cannot be read -- it has exited, or the bus
+    /// has gone.
+    pub async fn reread(&mut self) -> Result<Vec<ObservedNode>> {
+        let root = self.root;
+        tokio::time::timeout(PER_APP, self.ingest.snapshot(root))
+            .await
+            .with_context(|| format!("gave up re-reading {}", self.name))?
+            .with_context(|| format!("could not re-read {}", self.name))
+    }
+
+    /// Attribute this application's windows to their surfaces again.
+    ///
+    /// Cheap -- a tree walk, no I/O -- and necessary after any change, because
+    /// a node the bus has just volunteered arrives unjoined and therefore
+    /// un-actable. Every node under a window was drawn on that window's
+    /// surface, which is [`Index::join_subtree`]'s own rule, so re-running it
+    /// is the whole of re-attribution.
+    pub fn rejoin(&self, index: &mut Index, facts: &HostFacts) {
+        for join in &self.joins {
+            let origin = facts
+                .surface(join.surface)
+                .map_or(Origin::Unattributed, |facts| facts.origin.clone());
+            index.join_subtree(join.node, join.surface, &origin);
+        }
+    }
+}
+
+/// What one read of the desktop found.
+pub struct Reading {
+    /// Every application's tree, in one index and one id space.
+    pub index: Index,
+    /// The applications, still attached.
+    pub apps: Vec<App>,
+    /// What judging the lot decided.
     pub tally: Tally,
-    /// How many of its nodes sit under rendering that arrived after this read
-    /// and that no semantic event explained.
+    /// How many nodes sit under rendering that arrived after this read and
+    /// that no semantic event explained.
     pub unexplained: usize,
 }
 
@@ -69,8 +164,8 @@ pub struct AppReport {
 /// Fails only if the accessibility bus itself cannot be reached. An individual
 /// application that cannot be read is reported and skipped: one misbehaving
 /// toolkit must not be able to hide the desktop.
-pub async fn observe(facts: &Facts) -> Result<Vec<AppReport>> {
-    let apps = wm_atspi::on_the_bus()
+pub async fn observe(facts: &Facts) -> Result<Reading> {
+    let bus = wm_atspi::on_the_bus()
         .await
         .context("the accessibility bus could not be reached")?;
 
@@ -88,9 +183,14 @@ pub async fn observe(facts: &Facts) -> Result<Vec<AppReport>> {
         .filter_map(|surface| surface.claim().pid)
         .collect();
 
-    let mut reports = Vec::new();
+    // One id map for the desktop, handed to every ingest below. See the module
+    // documentation for what an interner each costs.
+    let ids = Ids::default();
+    let mut index = Index::new();
+    let mut apps = Vec::new();
     let mut skipped = 0;
-    for app in apps {
+
+    for app in bus {
         if !app.bus_pid().is_some_and(|pid| ours.contains(&pid)) {
             skipped += 1;
             continue;
@@ -99,14 +199,12 @@ pub async fn observe(facts: &Facts) -> Result<Vec<AppReport>> {
         // By reference, not by name. A desktop can be running two copies of one
         // program -- the test bed was, one of them a leftover -- and resolving
         // by name reads the first twice while never reaching the second.
-        match tokio::time::timeout(PER_APP, read_app(app, facts)).await {
-            Ok(Ok(mut report)) => {
-                report.toolkit = toolkit;
-                reports.push(report);
+        match tokio::time::timeout(PER_APP, read_app(app, &ids, &mut index, facts)).await {
+            Ok(Ok(mut app)) => {
+                app.toolkit = toolkit;
+                apps.push(app);
             }
-            Ok(Err(error)) => {
-                tracing::warn!(app = %name, %error, "could not read application");
-            }
+            Ok(Err(error)) => tracing::warn!(app = %name, %error, "could not read application"),
             Err(_) => tracing::warn!(app = %name, "gave up reading application"),
         }
     }
@@ -116,13 +214,29 @@ pub async fn observe(facts: &Facts) -> Result<Vec<AppReport>> {
             "applications on the bus that this host did not draw"
         );
     }
-    Ok(reports)
+
+    // Judged and staled against the host as it is NOW, which is the whole
+    // point: the difference between when each tree was read and now is exactly
+    // what a reader needs to be told it missed.
+    let now = facts.read();
+    let tally = index.judge(&now);
+    let unexplained = index.under_damage(&now).len();
+
+    Ok(Reading {
+        index,
+        apps,
+        tally,
+        unexplained,
+    })
 }
 
-/// Read one application, join it, and judge it.
-async fn read_app(app: AppRef, facts: &Facts) -> Result<AppReport> {
+/// Read one application into the desktop's index, and join it.
+async fn read_app(app: AppRef, ids: &Ids, index: &mut Index, facts: &Facts) -> Result<App> {
     let name = app.name().to_owned();
-    let mut ingest = AtspiIngest::attach(app).await?.with_geometry(true);
+    let mut ingest = AtspiIngest::attach(app)
+        .await?
+        .sharing(ids)
+        .with_geometry(true);
     let root = ingest.root_id();
 
     // The state of the host *before* the read, kept so the reconciliation
@@ -131,19 +245,22 @@ async fn read_app(app: AppRef, facts: &Facts) -> Result<AppReport> {
     let surfaces: Vec<SurfaceClaim> = before.surfaces().iter().map(SurfaceFacts::claim).collect();
 
     let nodes = ingest.snapshot(root).await?;
-
-    let mut index = Index::new();
     index.ingest_snapshot(nodes);
 
-    let windows = toplevels(&index, root, ingest.app().bus_pid());
+    let windows = toplevels(index, root, ingest.app().bus_pid());
     let (joins, findings) = join(&windows, &surfaces);
 
-    for join in &joins {
-        let origin = before
-            .surface(join.surface)
-            .map_or(Origin::Unattributed, |facts| facts.origin.clone());
-        index.join_subtree(join.node, join.surface, &origin);
+    let app = App {
+        name,
+        toolkit: String::new(),
+        root,
+        joins,
+        findings,
+        ingest,
+    };
+    app.rejoin(index, &before);
 
+    for join in &app.joins {
         // Credited with the generation the surface was at when the read
         // STARTED. A GTK tree takes tens of milliseconds at best, during which
         // that application repaints its window perhaps twice; crediting the
@@ -155,22 +272,7 @@ async fn read_app(app: AppRef, facts: &Facts) -> Result<AppReport> {
         index.reconcile(join.surface, generation);
     }
 
-    // Judged and staled against the host as it is NOW, which is the whole
-    // point: the difference between then and now is exactly what a reader
-    // needs to be told it missed.
-    let now = facts.read();
-    let tally = index.judge(&now);
-    let unexplained = index.under_damage(&now).len();
-
-    Ok(AppReport {
-        name,
-        toolkit: String::new(),
-        index,
-        joins,
-        findings,
-        tally,
-        unexplained,
-    })
+    Ok(app)
 }
 
 /// An application's toplevels, as claims to be weighed.
@@ -205,8 +307,9 @@ fn toplevels(index: &Index, root: NodeId, bus_pid: Option<u32>) -> Vec<WindowCla
 }
 
 /// Print what was found, in the order somebody debugging it would want.
-pub fn report(reports: &[AppReport], host: &HostFacts) {
-    for app in reports {
+pub fn report(reading: &Reading, host: &HostFacts) {
+    let index = &reading.index;
+    for app in &reading.apps {
         println!(
             "\n{} ({}) -- {} nodes",
             app.name,
@@ -215,12 +318,11 @@ pub fn report(reports: &[AppReport], host: &HostFacts) {
             } else {
                 &app.toolkit
             },
-            app.index.len()
+            app.nodes(index).len()
         );
 
         for join in &app.joins {
-            let title = app
-                .index
+            let title = index
                 .get(join.node)
                 .and_then(|node| node.node.label())
                 .unwrap_or_default()
@@ -237,15 +339,14 @@ pub fn report(reports: &[AppReport], host: &HostFacts) {
                     .join(", ")
             );
 
-            // The measurement this milestone owes: node space against the
-            // window geometry the host placed. A bridge whose window node
-            // reports its own extents as `0,0 -> w,h` is measuring from the
-            // same origin the compositor calls the window's, and
-            // `node_space_offset` is genuinely zero. Anything else is the
-            // shadow margin, and printing both is how that stops being a
-            // guess.
-            let node_bounds = app.index.get(join.node).and_then(|node| node.bounds());
-            let surface = app.index.get(join.node).and_then(|node| node.surface);
+            // The measurement M2 owes: node space against the window geometry
+            // the host placed. A bridge whose window node reports its own
+            // extents as `0,0 -> w,h` is measuring from the same origin the
+            // compositor calls the window's, and `node_space_offset` is
+            // genuinely zero. Anything else is the shadow margin, and printing
+            // both is how that stops being a guess.
+            let node_bounds = index.get(join.node).and_then(|node| node.bounds());
+            let surface = index.get(join.node).and_then(|node| node.surface);
             println!(
                 "    damage: {} frames",
                 surface
@@ -266,15 +367,11 @@ pub fn report(reports: &[AppReport], host: &HostFacts) {
         for finding in &app.findings {
             println!("  FINDING: {finding}");
         }
-        println!(
-            "  {}\n  {} of them under rendering no semantic event explained",
-            app.tally, app.unexplained
-        );
 
         // The two numbers M2 exists to produce, for one node each, so a human
         // can see the join actually reached the leaves.
-        if let Some(sample) = sample_node(&app.index) {
-            let node = app.index.get(sample).expect("just found");
+        if let Some(sample) = sample_node(index, app) {
+            let node = index.get(sample).expect("just found");
             println!(
                 "  e.g. node {} {:?} {:?} on {:?}: {:?} / {:?}",
                 sample.0,
@@ -286,12 +383,17 @@ pub fn report(reports: &[AppReport], host: &HostFacts) {
             );
         }
     }
+
+    println!(
+        "\n{}\n{} of them under rendering no semantic event explained",
+        reading.tally, reading.unexplained
+    );
 }
 
 /// A leaf worth showing: something with a label, a role that is not a
 /// container, and bounds.
-fn sample_node(index: &Index) -> Option<NodeId> {
-    index.preorder().into_iter().find(|id| {
+fn sample_node(index: &Index, app: &App) -> Option<NodeId> {
+    app.nodes(index).into_iter().find(|id| {
         index.get(*id).is_some_and(|node| {
             node.node.label().is_some()
                 && node.bounds().is_some()

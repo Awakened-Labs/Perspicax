@@ -78,3 +78,24 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
     "fmt",
     "env-filter",
 ] }
+
+# The MCP server. `server` is the half of the SDK we need (there is a `client`
+# half we do not), `macros` is `#[tool_router]` / `#[tool]` / `#[tool_handler]`,
+# and `transport-io` is stdio -- the only transport an MCP client launched by a
+# harness ever uses. No HTTP, no SSE: a server that listens on a socket is a
+# different security question, and this one is spawned as a child process.
+#
+# The plan named 3.1.4 and resolution takes 3.2.0, which is what the lockfile
+# holds and what was read: the four macros, `ServiceExt` and `transport-io` are
+# unchanged from the 1.7 that our MCP crate uses, and 3.x adds `name` /
+# `instructions` on `#[tool_handler]`, which is where this server introduces
+# itself. Written as the floor rather than pinned with `=`, like every other
+# dependency here; CI's `--locked` is what makes the build reproducible.
+rmcp = { version = "3.2", features = ["server", "macros", "transport-io"] }
+# The JSON Schema for each tool's parameters, derived. `rmcp` re-exports the
+# version it was built against as `rmcp::schemars`, and the params structs
+# derive through that re-export rather than this dependency, so the two cannot
+# drift apart. It is named here anyway because `#[derive(JsonSchema)]` needs
+# the crate resolvable at the path the macro writes.
+schemars = "1"
+serde = { version = "1", features = ["derive"] }

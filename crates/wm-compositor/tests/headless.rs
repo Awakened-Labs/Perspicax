@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use wm_compositor::{Config, Error, Facts, Stop};
+use wm_compositor::{Config, Error, Facts, Requests, Stop};
 
 /// The smallest claim worth making automatically: it binds a socket, runs an
 /// event loop, and stops when it is told to. Everything else in this milestone
@@ -26,7 +26,7 @@ fn a_headless_compositor_comes_up_and_stops_when_told() {
 
     let facts = Facts::new();
     let started = Instant::now();
-    wm_compositor::run(&config, &facts, &Stop::new())
+    wm_compositor::run(&config, &facts, &Requests::new(), &Stop::new())
         .expect("a headless compositor needs nothing but a runtime dir");
     let elapsed = started.elapsed();
 
@@ -57,7 +57,7 @@ fn a_command_that_does_not_exist_is_named_in_the_error() {
         run_for: Some(Duration::from_millis(50)),
     };
 
-    match wm_compositor::run(&config, &Facts::new(), &Stop::new()) {
+    match wm_compositor::run(&config, &Facts::new(), &Requests::new(), &Stop::new()) {
         Err(Error::Spawn { command, source }) => {
             assert_eq!(command, "wm-no-such-program --flag");
             assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
@@ -87,7 +87,8 @@ fn a_stop_request_ends_the_loop_before_its_deadline() {
     });
 
     let started = Instant::now();
-    wm_compositor::run(&config, &Facts::new(), &stop).expect("stopping is not a failure");
+    wm_compositor::run(&config, &Facts::new(), &Requests::new(), &stop)
+        .expect("stopping is not a failure");
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "waited for the deadline instead of the request"

@@ -4,8 +4,9 @@ A Wayland compositor that exposes everything a human can see on screen as a
 typed, addressable API, so an agent can drive programs that have no API of
 their own.
 
-**Status: pre-alpha.** It observes, attributes and judges; it does not act yet.
-See `Milestones` below for what exists.
+**Status: v1.** It observes, attributes, judges — and acts, through the
+compositor's own seat, returning a receipt for what happened and a refusal that
+names the surface in the way when it will not. See `Milestones` below.
 
 ## Why this lives in the compositor
 
@@ -45,7 +46,7 @@ compositor:
 
 ```
 wm              the composition root — one binary, `wm --headless`
-wm-mcp          MCP server (rmcp, stdio) — tools, receipts, capability gate
+wm-mcp          MCP server (rmcp, stdio) — six tools, DTOs, receipts  [portable]
 wm-index        node cache, stable ids, selectors, deltas, refusals  [portable]
 wm-node         node schema — AccessKit types plus Origin and Visibility
 wm-atspi        impl Ingest — AT-SPI2 over D-Bus
@@ -60,11 +61,12 @@ wm-probe        dev CLI — dump a tree, time a read, explain a refusal
 | **M0** | Skeleton, conventions, CI | done |
 | **M1** | Semantic index + AT-SPI ingest — no compositor, runs on X11 | done |
 | **M2** | Compositor, provenance, occlusion, damage-driven invalidation | done |
-| **M3** | MCP server and act — **v1** | |
+| **M3** | MCP server and act — **v1** | done |
 
 v1 is one demo, run against a GTK app and a Qt app, headless, in CI, with zero
 screenshots taken: observe a window, resolve a selector, click it, get a
-receipt — and get a *refusal* when the target is occluded.
+receipt — and get a *refusal* when the target is occluded. It is
+`crates/wm/tests/act.rs`.
 
 ## What reading a tree costs
 
@@ -152,6 +154,72 @@ would have attributed the gallery's entire tree to the window manager.
 Everything that cannot be bound stays `Unattributed` and is refused, and the
 reason is reported rather than logged.
 
+## What acting looks like
+
+```sh
+wm --headless --mcp --spawn gtk4-widget-factory
+```
+
+That is an MCP server on stdin and stdout with a compositor behind it. Six
+tools: `window_list`, `observe`, `resolve`, `act`, `deltas`, `screenshot`.
+
+An agent names a control and never a coordinate — the rectangle comes from the
+index and turning it into anything global is the compositor's job, so an agent
+that cannot name a pixel cannot name the wrong one. The input then goes onto the
+same `wl_pointer` and `wl_keyboard` a real device would use, which is what makes
+focus, grabs and z-order correct by construction rather than by a convention
+every client has to honour.
+
+**An act returns evidence, not a verdict.** There is no `success` field,
+because none could be honest:
+
+```json
+{ "selector": "Button:Cancel", "node": 6, "surface": 1,
+  "rendered_by": { "pid": 4242, "exe": "/usr/bin/gtk4-widget-factory" },
+  "verb": "click", "dispatch_ms": 0.15,
+  "focus_before": 1, "focus_after": 1, "focus_landed": true,
+  "damage": { "witness": "on_target", "frames": 1, "window_ms": 200 } }
+```
+
+`damage` says what the pixels did in the 200 ms the act was given, scoped to the
+target's own rectangle. Weigh it against the idle rates in the table below: an
+idle GTK window repaints about forty times a second, so `on_target` means less
+there than it does on Qt, and `quiet` — nothing changed at all — is the strong
+answer on both. A boolean would have been confidently wrong on one of the two
+toolkits this project tests against.
+
+**A refusal is an answer.** It names what is in the way and what would clear it,
+so a recoverable situation does not become a retry loop:
+
+```json
+{ "kind": "occluded", "message": "node occluded by surface 2", "occluded_by": 2 }
+```
+
+`observe` reports the same verdict per node, as `actable` plus `refused`, so an
+agent sees an occlusion before it spends a call discovering one.
+
+**Text an application rendered is marked as such.** Every string reaches an
+agent under `untrusted_text`, beside the credentials of the process that drew
+it — the marking is in the key, so it cannot be skimmed past, and the provenance
+is at the point of use rather than in a preamble a model has to have remembered.
+That is this project's injection defence, and it is a read-path property rather
+than an act-path gate.
+
+**There is no capability gate, deliberately.** wm is one actuator among several,
+not an agent's only one: an agent refused a click runs the command instead, so a
+gate here would document an intention rather than enforce a boundary — and a
+control that can be trivially bypassed is worse than an absent one, because it
+invites reliance. `Refusal::NoCapability` is declared and unconstructed until
+`--seat`, where wm will host applications the user launched rather than ones it
+spawned, and the question finally has two different answers.
+
+**`screenshot` ships declared and always refusing.** There is no renderer in
+this build at all — occlusion needs geometry, z-order, regions and damage, and
+none of those need pixels. It is listed so that a model can tell the fallback
+from the mechanism, and its refusal reports the count of nodes under rendering
+no semantic event explained, which is the only honest trigger for a pixel path
+and a number the compositor already computes.
+
 ## What a toolkit renders without explaining
 
 Measured on the same Debian 13 box, hosting both applications under
@@ -201,7 +269,12 @@ run them:
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
 cargo test -p wm-atspi --test live -- --ignored --test-threads=1
+cargo test -p wm --test act  -- --ignored --test-threads=1
 ```
+
+The second is v1's exit criterion, and it is the one command that asserts the
+whole claim: two toolkits hosted, a control clicked in each with a receipt to
+show for it, and a covered control refused with the occluding surface named.
 
 Without those two variables an SSH session finds an empty desktop and reports
 no error worth reading. `wm-probe apps` says what the bus can actually see.

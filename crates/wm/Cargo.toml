@@ -30,10 +30,22 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+# `anyhow` for the binary and `thiserror` for the library half, which is the
+# workspace's rule rather than an exception to it: `act::Failure` is matched on
+# by `wm-mcp` to tell a refusal an agent can recover from apart from a
+# compositor fault it cannot, so it has to be a type and not a message.
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 wm-atspi = { path = "../wm-atspi", version = "0.1.0" }
 wm-compositor = { path = "../wm-compositor", version = "0.1.0" }
 wm-index = { path = "../wm-index", version = "0.1.0" }
+wm-mcp = { path = "../wm-mcp", version = "0.1.0" }
 wm-node = { path = "../wm-node", version = "0.1.0" }
+
+# The v1 demo asserts on the JSON two tools actually answered, rather than on a
+# projection of it made a second time in the test -- so it needs to hold a
+# `serde_json::Value`. Nothing in the library does.
+[dev-dependencies]
+serde_json.workspace = true
