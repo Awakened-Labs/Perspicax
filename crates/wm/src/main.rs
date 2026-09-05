@@ -20,12 +20,11 @@
 //! mapping; that log is currently the only way to watch a compositor that
 //! deliberately draws nothing.
 
-mod observe;
-
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
+use wm::{observe, session};
 use wm_compositor::{Config, Facts, Stop};
 
 #[derive(Parser)]
@@ -83,6 +82,13 @@ fn main() -> Result<()> {
         bail!("no backend selected: pass --headless (see --help; it is the only one)");
     }
 
+    // Before anything is spawned, and in this order. A registry that arrives
+    // after its clients is a registry GTK has already given up on.
+    let _registry = session::Registry::ensure()?;
+    if let Err(error) = enable_accessibility() {
+        tracing::warn!("{error:#}");
+    }
+
     let config = Config {
         size: cli.size,
         spawn: cli
@@ -95,6 +101,7 @@ fn main() -> Result<()> {
                     .collect::<Vec<_>>()
             })
             .collect(),
+        env: session::accessibility_env(),
         run_for: cli.run_for.map(Duration::from_secs_f64),
     };
 
@@ -108,6 +115,22 @@ fn main() -> Result<()> {
     }
 
     wm_compositor::run(&config, &facts, &stop).context("the compositor stopped")
+}
+
+/// Turn accessibility on for this session, briefly borrowing a runtime to do
+/// it.
+///
+/// A warning rather than a failure when it does not work: a machine with no
+/// `org.a11y.Bus` at all can still host windows, and a compositor that refused
+/// to start because nothing would be readable would be refusing to do the half
+/// of its job that still works.
+fn enable_accessibility() -> Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("no runtime to enable accessibility with")?
+        .block_on(wm_atspi::enable())
+        .context("could not turn accessibility on for this session")
 }
 
 /// Read and report the desktop on its own thread, then ask the compositor to

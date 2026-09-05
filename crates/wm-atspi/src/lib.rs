@@ -264,6 +264,43 @@ impl Ingest for AtspiIngest {
     }
 }
 
+/// Turn accessibility on for this session.
+///
+/// `org.a11y.Status.IsEnabled` is what Qt's AT-SPI bridge gates on. With it
+/// false the application starts perfectly, draws its window, prints nothing,
+/// and never joins the accessibility bus -- while GTK's bridge ignores the flag
+/// and registers either way, so the symptom is *one* toolkit silently missing
+/// and no error anywhere.
+///
+/// A desktop sets it from dconf (`org.gnome.desktop.interface
+/// toolkit-accessibility`), which is why this is invisible on a workstation and
+/// fatal in a container: a fresh `HOME` has no dconf state, so the flag
+/// defaults to false exactly where nobody is watching for it.
+///
+/// # Errors
+///
+/// [`Error::Bus`] if the session bus cannot be reached or the property cannot
+/// be set -- which on a machine with no `org.a11y.Bus` at all is the honest
+/// answer rather than something to shrug off.
+pub async fn enable() -> Result<(), Error> {
+    let connection = Connection::session().await?;
+    let status = atspi::zbus::Proxy::new(
+        &connection,
+        "org.a11y.Bus",
+        "/org/a11y/bus",
+        "org.a11y.Status",
+    )
+    .await?;
+    // `set_property` reports D-Bus's own error type rather than zbus's, and
+    // the distinction is not worth a variant: from here both mean the same
+    // thing, which is that the accessibility bus would not take the answer.
+    status
+        .set_property("IsEnabled", true)
+        .await
+        .map_err(|error| Error::Call(error.into()))?;
+    Ok(())
+}
+
 /// Every application currently on the accessibility bus.
 ///
 /// The first thing to run when `--app` finds nothing: it distinguishes "that

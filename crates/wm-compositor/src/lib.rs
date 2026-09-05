@@ -134,6 +134,13 @@ pub struct Config {
     /// Commands to start once the socket exists, each as a program and its
     /// arguments.
     pub spawn: Vec<Vec<String>>,
+    /// Environment every spawned child gets on top of this process's own.
+    ///
+    /// Here rather than inherited, because the compositor is the session
+    /// manager for what it spawns, and the variables that decide whether a
+    /// toolkit joins the accessibility bus are exactly the kind that a desktop
+    /// sets invisibly and a container does not set at all.
+    pub env: Vec<(String, String)>,
     /// Stop after this long. `None` runs until killed, which is what a session
     /// wants; a test wants a bound.
     pub run_for: Option<Duration>,
@@ -144,6 +151,7 @@ impl Default for Config {
         Self {
             size: (1920, 1080),
             spawn: Vec::new(),
+            env: Vec::new(),
             run_for: None,
         }
     }
@@ -205,7 +213,7 @@ pub fn run(config: &Config, facts: &Facts, stop: &Stop) -> Result<(), Error> {
         .map_err(|error| Error::EventLoop(error.to_string()))?;
 
     tracing::info!(socket = ?socket_name, size = ?config.size, "compositor up");
-    let mut children = spawn_all(&config.spawn, &socket_name)?;
+    let mut children = spawn_all(&config.spawn, &config.env, &socket_name)?;
 
     let deadline = config.run_for.map(|run_for| Instant::now() + run_for);
     let result = loop {
@@ -240,7 +248,11 @@ pub fn run(config: &Config, facts: &Facts, stop: &Stop) -> Result<(), Error> {
 /// X11, connect to whatever X server is around, and map its window somewhere
 /// this compositor cannot see -- which looks exactly like a client that failed
 /// to start.
-fn spawn_all(commands: &[Vec<String>], socket: &OsString) -> Result<Vec<Child>, Error> {
+fn spawn_all(
+    commands: &[Vec<String>],
+    env: &[(String, String)],
+    socket: &OsString,
+) -> Result<Vec<Child>, Error> {
     let mut children = Vec::with_capacity(commands.len());
     for command in commands {
         let Some((program, arguments)) = command.split_first() else {
@@ -248,6 +260,7 @@ fn spawn_all(commands: &[Vec<String>], socket: &OsString) -> Result<Vec<Child>, 
         };
         let child = Command::new(program)
             .args(arguments)
+            .envs(env.iter().map(|(key, value)| (key, value)))
             .env("WAYLAND_DISPLAY", socket)
             .env("GDK_BACKEND", "wayland")
             .env("QT_QPA_PLATFORM", "wayland")

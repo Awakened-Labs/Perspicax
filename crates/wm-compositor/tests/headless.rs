@@ -20,6 +20,7 @@ fn a_headless_compositor_comes_up_and_stops_when_told() {
     let config = Config {
         size: (800, 600),
         spawn: Vec::new(),
+        env: Vec::new(),
         run_for: Some(Duration::from_millis(250)),
     };
 
@@ -52,6 +53,7 @@ fn a_command_that_does_not_exist_is_named_in_the_error() {
     let config = Config {
         size: (800, 600),
         spawn: vec![vec!["wm-no-such-program".to_owned(), "--flag".to_owned()]],
+        env: Vec::new(),
         run_for: Some(Duration::from_millis(50)),
     };
 
@@ -73,6 +75,7 @@ fn a_stop_request_ends_the_loop_before_its_deadline() {
     let config = Config {
         size: (800, 600),
         spawn: Vec::new(),
+        env: Vec::new(),
         run_for: Some(Duration::from_secs(60)),
     };
 

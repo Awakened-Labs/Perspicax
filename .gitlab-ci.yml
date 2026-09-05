@@ -9,6 +9,11 @@
 # applications, because that is the whole point of the ingest path and mocking
 # it would test our mock. See `ci/live-tests.sh` for the session it builds.
 #
+# `qt6-wayland` is the M2 addition that is easy to miss and silent when
+# missing: without it the Qt gallery has no Wayland platform plugin, falls back
+# to xcb, and connects to xvfb instead of to our compositor -- which looks
+# exactly like a broken join rather than a missing package.
+#
 # What M2 actually costs, measured rather than predicted. The M0 version of
 # this comment expected libinput, libdrm, gbm and libxkbcommon; the real answer
 # is `libxkbcommon` alone, because the compositor takes Smithay with
@@ -142,5 +147,7 @@ test:
       at-spi2-core
       gtk-4-examples
       qt6-base-examples
+      qt6-wayland
+      libxkbcommon-dev
   script:
     - xvfb-run -a dbus-run-session -- ci/live-tests.sh
