@@ -32,11 +32,15 @@
 //! Real DRM, modesetting and multi-output wait for `--seat`; they are the part
 //! of compositor work that consumes schedule without proving anything.
 
+pub mod act;
 pub mod facts;
 mod origin;
 pub mod state;
 
-pub use crate::facts::Facts;
+pub use crate::{
+    act::{ActError, Dispatched},
+    facts::Facts,
+};
 
 use std::{
     ffi::OsString,
