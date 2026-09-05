@@ -34,6 +34,8 @@ pub mod events;
 pub mod map;
 pub mod read;
 
+use std::sync::{Arc, Mutex};
+
 use atspi::{
     AccessibilityConnection,
     proxy::application::ApplicationProxy,
@@ -49,6 +51,40 @@ pub use crate::{
     read::Strategy,
 };
 
+/// The one id map for a desktop, shared by every ingest reading it.
+///
+/// # Why this is shared rather than owned
+///
+/// [`Interner`] mints from one and never reuses, which makes a [`NodeId`]
+/// stable for a node's lifetime -- and every layer above depends on that,
+/// most sharply the MCP server, which hands ids to an agent and takes them
+/// back. An interner per application breaks it silently: two applications both
+/// mint id 1, and nothing anywhere can tell the two apart afterwards.
+///
+/// [`ObjectKey`] is `(unique connection name, object path)` and is therefore
+/// already unique across the whole bus, so one interner over it is correct by
+/// construction rather than by a merge step somebody has to remember.
+///
+/// A `Mutex` and not a `RefCell`, because [`Ingest`]'s futures are `Send` by
+/// the trait's own bound and a reader may well drive several applications on a
+/// multi-threaded runtime. Nothing holds the lock across an `await`.
+pub type Ids = Arc<Mutex<Interner<ObjectKey>>>;
+
+/// The id map, locked.
+///
+/// A free function rather than a method on [`AtspiIngest`], because a method
+/// taking `&self` borrows the whole ingest and [`Ingest::drain_changes`] needs
+/// the subscription mutably at the same moment. Borrowing the one field says
+/// what is actually wanted.
+///
+/// A poisoned interner is unrecoverable rather than an error to report: it
+/// means a thread panicked mid-mint, so the map may hold a key with no id or an
+/// id with no key, and every stability guarantee above it rests on that map
+/// being consistent.
+fn lock(ids: &Ids) -> std::sync::MutexGuard<'_, Interner<ObjectKey>> {
+    ids.lock().expect("a panic left the id map inconsistent")
+}
+
 /// Reads one application's accessibility tree off the AT-SPI2 bus.
 ///
 /// Scoped to a single application rather than the whole desktop, because the
@@ -60,10 +96,12 @@ pub use crate::{
 pub struct AtspiIngest {
     bus: AccessibilityConnection,
     app: AppRef,
-    /// AT-SPI's `(bus name, object path)` in, opaque [`NodeId`]s out. The one
-    /// id map in the process: `wm-index` owns the never-reuse rule, and this
-    /// crate would only get it wrong a second time.
-    interner: Interner<ObjectKey>,
+    /// AT-SPI's `(bus name, object path)` in, opaque [`NodeId`]s out.
+    ///
+    /// Private by default and shared by [`AtspiIngest::sharing`]. A reader of
+    /// one application may keep its own; a reader of a desktop must not, and
+    /// [`Ids`] says why.
+    interner: Ids,
     /// The strategy the last cold read actually used. `None` until one has run
     /// -- it is a measurement, not a configuration.
     strategy: Option<Strategy>,
@@ -135,7 +173,7 @@ impl AtspiIngest {
         Ok(Self {
             bus,
             app,
-            interner: Interner::new(),
+            interner: Ids::default(),
             strategy: None,
             forced: None,
             with_geometry: false,
@@ -175,6 +213,20 @@ impl AtspiIngest {
         self
     }
 
+    /// Mint ids from a map shared with every other ingest reading this
+    /// desktop.
+    ///
+    /// Required of anything reading more than one application at once, and the
+    /// reason is in [`Ids`]: without it two applications each mint id 1 and the
+    /// layers above cannot tell those two nodes apart. A caller reading a
+    /// single application in isolation -- `wm-probe`, the M1 latency table --
+    /// does not need it.
+    #[must_use]
+    pub fn sharing(mut self, ids: &Ids) -> Self {
+        self.interner = Arc::clone(ids);
+        self
+    }
+
     /// The application this ingest is reading.
     #[must_use]
     pub fn app(&self) -> &AppRef {
@@ -192,18 +244,20 @@ impl AtspiIngest {
     /// Minted on demand so that a caller has something to hand
     /// [`Ingest::snapshot`] before any tree has been read.
     pub fn root_id(&mut self) -> NodeId {
-        self.interner.intern(self.app.root().clone())
+        lock(&self.interner).intern(self.app.root().clone())
     }
 
     /// How many ids this ingest has minted, retired ones included.
     #[must_use]
     pub fn minted(&self) -> u64 {
-        self.interner.minted()
+        lock(&self.interner).minted()
     }
 
     async fn read_subtree(&mut self, root: NodeId) -> Result<Vec<ObservedNode>, Error> {
-        let key = self
-            .interner
+        // The guard is scoped so that it is gone before the awaits below: a
+        // lock held across an `await` would make this future non-`Send`, which
+        // `Ingest`'s own bound would refuse.
+        let key = lock(&self.interner)
             .key(root)
             .ok_or(Error::UnknownRoot(root.0))?
             .clone();
@@ -230,7 +284,7 @@ impl AtspiIngest {
                 node.bounds = read::extents(&connection, &node.key).await;
             }
         }
-        Ok(read::to_observed(nodes, &mut self.interner))
+        Ok(read::to_observed(nodes, &mut lock(&self.interner)))
     }
 }
 
@@ -260,7 +314,7 @@ impl Ingest for AtspiIngest {
     /// suite, and be a poll wearing a delta's clothes -- which is the single
     /// thing [`Ingest`]'s own documentation forbids.
     async fn drain_changes(&mut self) -> Result<Vec<Change>, Self::Error> {
-        Ok(self.events.drain(&mut self.interner))
+        Ok(self.events.drain(&mut lock(&self.interner)))
     }
 }
 
@@ -361,4 +415,34 @@ async fn applications(bus: &AccessibilityConnection) -> Result<Vec<AppRef>, Erro
         apps.push(AppRef::new(name, toolkit, root, bus_pid));
     }
     Ok(apps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bug [`Ids`] exists to remove, stated as the case that produces it.
+    ///
+    /// AT-SPI object paths are numbered per application, so
+    /// `/org/a11y/atspi/accessible/1` exists in *every* program on the bus.
+    /// With an interner each, two applications both mint id 1 for it and
+    /// nothing above can tell those two nodes apart -- which matters most
+    /// exactly where it is least visible, at the MCP wire, where an agent is
+    /// handed an id and hands it back.
+    #[test]
+    fn one_id_map_across_two_applications_cannot_mint_a_collision() {
+        let ids = Ids::default();
+        let path = "/org/a11y/atspi/accessible/1";
+        let gtk = ObjectKey::new(":1.42", path);
+        let qt = ObjectKey::new(":1.57", path);
+
+        let first = lock(&ids).intern(gtk.clone());
+        let second = lock(&ids).intern(qt);
+        assert_ne!(first, second);
+
+        // And still stable for the node it named, which is the property the
+        // sharing must not cost.
+        assert_eq!(lock(&ids).intern(gtk), first);
+        assert_eq!(lock(&ids).minted(), 2);
+    }
 }

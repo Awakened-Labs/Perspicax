@@ -1857,6 +1857,7 @@ dependencies = [
  "wm-atspi",
  "wm-compositor",
  "wm-index",
+ "wm-mcp",
  "wm-node",
 ]
 

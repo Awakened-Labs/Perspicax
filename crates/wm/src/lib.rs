@@ -10,5 +10,6 @@
 //! in which a green test means the demo works.
 
 pub mod act;
+pub mod desk;
 pub mod observe;
 pub mod session;

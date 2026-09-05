@@ -95,6 +95,15 @@ pub struct Text {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// The node's contents -- an entry's text, a slider's reading.
+    ///
+    /// **Absent from every node this build produces**, and worth saying rather
+    /// than leaving to be inferred: an accessible object's contents live on
+    /// AT-SPI's `Text` and `Value` interfaces, and `wm-atspi` reads neither, so
+    /// nothing ever fills this in. It is projected because it is part of the
+    /// schema and because the day an ingest reads those interfaces the wire
+    /// should not have to change -- but until then, absent here means "not
+    /// read", never "empty". Measured 2026-09-05: typing into a real GTK entry
+    /// through `act` puts the text in the entry and leaves this `null`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     /// The process that rendered every string above.

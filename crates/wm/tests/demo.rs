@@ -8,14 +8,16 @@
 //! `#[ignore]`d because it needs a live accessibility bus and two installed
 //! sample applications. `ci/live-tests.sh` runs it with `--include-ignored`.
 
-use std::{path::PathBuf, process::Command, sync::mpsc, thread, time::Duration};
+use std::{
+    collections::HashSet, path::PathBuf, process::Command, sync::mpsc, thread, time::Duration,
+};
 
 use wm::{
-    observe::{self, AppReport},
+    observe::{self, App, Reading},
     session,
 };
 use wm_compositor::{Config, Facts, Requests, Stop};
-use wm_index::Refusal;
+use wm_index::{Index, Refusal};
 use wm_node::{NodeId, Origin, SurfaceId, Visibility};
 
 /// How long the applications get to map their windows and populate their
@@ -29,41 +31,61 @@ const SETTLE: Duration = Duration::from_secs(8);
 #[test]
 #[ignore = "needs a live accessibility bus, gtk-4-examples and qt6-base-examples"]
 fn a_node_under_another_window_is_refused_and_names_the_surface() {
-    let reports = run_demo();
+    let reading = run_demo();
+    let index = &reading.index;
     assert_eq!(
-        reports.len(),
+        reading.apps.len(),
         2,
         "expected both toolkits to be hosted and read, got {:?}",
-        reports.iter().map(|r| &r.name).collect::<Vec<_>>()
+        reading.apps.iter().map(|app| &app.name).collect::<Vec<_>>()
     );
 
     // Every application bound exactly one window to exactly one surface.
-    for report in &reports {
+    for app in &reading.apps {
         assert_eq!(
-            report.joins.len(),
+            app.joins.len(),
             1,
             "{} did not bind exactly one window: {:?}",
-            report.name,
-            report.findings
+            app.name,
+            app.findings
         );
         assert!(
-            report.findings.is_empty(),
+            app.findings.is_empty(),
             "{} produced findings: {:?}",
-            report.name,
-            report.findings
+            app.name,
+            app.findings
         );
     }
 
+    // One index, one id space. Until M3 slice 5 each application minted from
+    // its own interner and both started at 1, so the two trees collided --
+    // invisibly, because nothing had ever put them in the same index to notice.
+    let sets: Vec<HashSet<NodeId>> = reading
+        .apps
+        .iter()
+        .map(|app| app.nodes(index).into_iter().collect())
+        .collect();
+    assert_eq!(
+        sets[0].intersection(&sets[1]).count(),
+        0,
+        "two applications shared node ids"
+    );
+    assert_eq!(
+        index.len(),
+        sets[0].len() + sets[1].len(),
+        "the index holds nodes belonging to neither application's tree"
+    );
+
     // Provenance reached the leaves, which is the claim no library outside a
     // compositor can make.
-    for report in &reports {
-        let sample = first_visible(report)
-            .unwrap_or_else(|| panic!("{} has no visible attributed node at all", report.name));
-        let node = report.index.get(sample).expect("just found");
+    for app in &reading.apps {
+        let sample = first_visible(index, app)
+            .unwrap_or_else(|| panic!("{} has no visible attributed node at all", app.name));
+        let node = index.get(sample).expect("just found");
         assert!(
             matches!(node.origin, Origin::Process(_)),
             "{} node {} is {:?}, not attributed",
-            report.name,
+            app.name,
             sample.0,
             node.origin
         );
@@ -72,15 +94,20 @@ fn a_node_under_another_window_is_refused_and_names_the_surface() {
     // The windows are cascaded, so one covers part of the other. Which one
     // ends up on top depends on which toolkit maps first, and that is not
     // deterministic -- so the test finds the covered one rather than assuming.
-    let (covered, occluded_node, by) = reports
+    let (covered, occluded_node, by) = reading
+        .apps
         .iter()
-        .find_map(|report| first_occluded(report).map(|(node, by)| (report, node, by)))
+        .find_map(|app| first_occluded(index, app).map(|(node, by)| (app, node, by)))
         .expect("with two overlapping windows, something must be covered");
 
-    let above = reports
+    let top = reading
+        .apps
         .iter()
-        .find(|report| report.name != covered.name)
-        .and_then(|report| report.joins.first())
+        .find(|app| app.name != covered.name)
+        .expect("two applications");
+    let above = top
+        .joins
+        .first()
         .map(|join| join.surface)
         .expect("the other application is hosted too");
     assert_eq!(
@@ -92,29 +119,29 @@ fn a_node_under_another_window_is_refused_and_names_the_surface() {
     // And the gate refuses it, naming what is in the way -- which is the whole
     // sentence this milestone exists to be able to say.
     assert_eq!(
-        covered.index.actable(occluded_node).unwrap_err(),
+        index.actable(occluded_node).unwrap_err(),
         Refusal::Occluded { by },
         "a covered node must be refused, and the refusal must name the surface"
     );
 
-    let top = reports
-        .iter()
-        .find(|report| report.name != covered.name)
-        .expect("two reports");
+    // Counted over the top application's own nodes rather than read off a
+    // per-application tally, which one desktop-wide index no longer has: the
+    // question is about this window, and the index is about the screen.
+    let (visible, occluded) = seen(index, top);
     assert_eq!(
-        top.tally.occluded, 0,
+        occluded, 0,
         "nothing is above {}, so nothing of it can be occluded",
         top.name
     );
     assert!(
-        top.tally.visible > 0,
+        visible > 0,
         "{} is on top and should have visible nodes",
         top.name
     );
 }
 
 /// Host both toolkits, read them, and give back what was found.
-fn run_demo() -> Vec<AppReport> {
+fn run_demo() -> Reading {
     let gallery = qt_gallery().expect("qt6-base-examples must be installed");
     let _registry = session::Registry::ensure().expect("an accessibility registry");
 
@@ -159,24 +186,33 @@ fn run_demo() -> Vec<AppReport> {
 }
 
 /// The first node this application shows as visible.
-fn first_visible(report: &AppReport) -> Option<NodeId> {
-    report.index.preorder().into_iter().find(|id| {
-        report
-            .index
+fn first_visible(index: &Index, app: &App) -> Option<NodeId> {
+    app.nodes(index).into_iter().find(|id| {
+        index
             .get(*id)
             .is_some_and(|node| node.visibility == Visibility::Visible)
     })
 }
 
 /// The first node this application shows as covered, and what covers it.
-fn first_occluded(report: &AppReport) -> Option<(NodeId, SurfaceId)> {
-    report
-        .index
-        .preorder()
+fn first_occluded(index: &Index, app: &App) -> Option<(NodeId, SurfaceId)> {
+    app.nodes(index)
         .into_iter()
-        .find_map(|id| match report.index.get(id)?.visibility {
+        .find_map(|id| match index.get(id)?.visibility {
             Visibility::Occluded { by } => Some((id, by)),
             _ => None,
+        })
+}
+
+/// How many of this application's nodes are visible, and how many are covered.
+fn seen(index: &Index, app: &App) -> (usize, usize) {
+    app.nodes(index)
+        .into_iter()
+        .filter_map(|id| index.get(id))
+        .fold((0, 0), |(visible, occluded), node| match node.visibility {
+            Visibility::Visible => (visible + 1, occluded),
+            Visibility::Occluded { .. } => (visible, occluded + 1),
+            _ => (visible, occluded),
         })
 }
 

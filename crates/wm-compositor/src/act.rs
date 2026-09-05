@@ -246,14 +246,14 @@ impl Compositor {
         at: Rect,
         button: PointerButton,
     ) -> Result<(), ActError> {
-        let (global, local) = self.point_in(window, at);
+        let (global, origin) = self.point_in(window, at);
         let Some(pointer) = self.pointer.clone() else {
             return Ok(());
         };
         let Some(toplevel) = window.toplevel() else {
             return Ok(());
         };
-        let focus = Some((toplevel.wl_surface().clone(), local.into()));
+        let focus = Some((toplevel.wl_surface().clone(), origin.into()));
         let time = self.now_ms();
 
         pointer.motion(
@@ -289,7 +289,7 @@ impl Compositor {
 
     /// Scroll at a point, in surface-local units.
     fn act_scroll(&mut self, window: &Window, at: Rect, dx: f64, dy: f64) -> Result<(), ActError> {
-        let (global, local) = self.point_in(window, at);
+        let (global, origin) = self.point_in(window, at);
         let Some(pointer) = self.pointer.clone() else {
             return Ok(());
         };
@@ -300,7 +300,7 @@ impl Compositor {
 
         pointer.motion(
             self,
-            Some((toplevel.wl_surface().clone(), local.into())),
+            Some((toplevel.wl_surface().clone(), origin.into())),
             &MotionEvent {
                 location: global.into(),
                 serial: SERIAL_COUNTER.next_serial(),
@@ -391,22 +391,37 @@ impl Compositor {
         );
     }
 
-    /// A window-relative rect's centre, as (global, surface-local) points.
+    /// Where to put the pointer for a window-relative rect: the rect's centre
+    /// in global space, and the window's own origin in global space.
     ///
-    /// Both are needed and they are not the same number: the motion event's
-    /// `location` is in compositor space, while the focus it carries wants the
-    /// coordinate inside the surface. Under client-side decoration these differ
-    /// by the shadow margin as well as the window position, which is why
-    /// `SurfaceFacts` has carried `geometry` and `buffer_origin` separately
-    /// since M2.
+    /// # The second number is the window's origin, and getting that wrong is silent
+    ///
+    /// [`PointerHandle::motion`] takes the pointer's location in compositor
+    /// space *and* the focus target's origin in compositor space, and works out
+    /// the surface-local coordinate by subtracting the second from the first.
+    /// Handing it the surface-local point instead -- which is the intuitive
+    /// reading of "focus", and what this function returned until M3 slice 5 --
+    /// makes it subtract the offset twice, so the client is told the pointer is
+    /// at `global - local` inside its surface.
+    ///
+    /// Nothing catches that, and the reason is worth writing down. A window at
+    /// the origin has `global == local`, so the client is told `(0, 0)`: it
+    /// receives a real enter, a real press and a real release, at the top-left
+    /// corner of its window rather than on the widget. Every test that asserts
+    /// "the click reached the surface" passes. It was found by clicking a real
+    /// GTK button and asking the application, which reported that it had not
+    /// been clicked while the receipt reported `DamageWitness::Quiet` --
+    /// the receipt being right about it is the whole argument for receipts.
+    ///
+    /// [`PointerHandle::motion`]: smithay::input::pointer::PointerHandle::motion
     fn point_in(&self, window: &Window, at: Rect) -> ((f64, f64), (f64, f64)) {
         let local = (at.x0 + (at.x1 - at.x0) / 2.0, at.y0 + (at.y1 - at.y0) / 2.0);
         let origin = self
             .space
             .element_location(window)
-            .map_or((0, 0), |point| (point.x, point.y));
-        let global = (local.0 + f64::from(origin.0), local.1 + f64::from(origin.1));
-        (global, local)
+            .map_or((0.0, 0.0), |point| (f64::from(point.x), f64::from(point.y)));
+        let global = (local.0 + origin.0, local.1 + origin.1);
+        (global, origin)
     }
 
     /// Milliseconds since this compositor started, which is the clock every

@@ -60,6 +60,20 @@ impl Facts {
         Self::default()
     }
 
+    /// A handle that already holds a snapshot.
+    ///
+    /// Not a way to write to a live one -- [`publish`](Self::publish) is
+    /// private and stays that way, because "whatever the compositor last
+    /// published" is a claim that a second writer would quietly make false.
+    /// This makes a *different* handle, over a screen the caller described, so
+    /// that everything downstream of `Facts` can be exercised against a
+    /// deliberate arrangement of windows rather than only against one a real
+    /// compositor happened to produce.
+    #[must_use]
+    pub fn of(facts: HostFacts) -> Self {
+        Self(Arc::new(RwLock::new(facts)))
+    }
+
     /// A copy of the latest snapshot.
     ///
     /// A clone rather than a guard, deliberately: a caller holding a read guard
