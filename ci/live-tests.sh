@@ -108,4 +108,11 @@ fi
 
 # One thread: the live tests read and poke the same two applications, and
 # interleaving them would make each one's result depend on the others.
-cargo test --locked --workspace -- --include-ignored --test-threads=1
+#
+# `--nocapture` because the M3 demo's output is the point of running it. A test
+# that passes silently proves the assertions held; the receipt it printed --
+# which node, which surface, how long the dispatch took, what the pixels did --
+# is the measurement, and this project's habit is to measure rather than assert.
+# Safe alongside `--test-threads=1`, which is what stops two tests' output
+# interleaving into something unreadable.
+cargo test --locked --workspace -- --include-ignored --test-threads=1 --nocapture

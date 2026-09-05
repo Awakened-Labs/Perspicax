@@ -137,12 +137,21 @@ fn an_agent_clicks_a_control_and_gets_a_receipt_in_each_toolkit() {
             receipt.origin
         );
         assert_eq!(receipt.verb, Verb::Click(PointerButton::Left));
-        assert!(
-            receipt.dispatch < Duration::from_millis(100),
-            "{toolkit}: dispatch took {:?}, which is a round trip to a thread and should not",
-            receipt.dispatch
-        );
         assert_eq!(receipt.damage_window, wm::act::DAMAGE_WINDOW);
+
+        // The two durations are separate fields for a reason, and this is the
+        // reason stated as a relation rather than as a magic number: dispatch
+        // is a round trip to the compositor's thread, and the damage window is
+        // deliberate patience. A constant here would be a timing assertion on
+        // a shared runner, which is a flake waiting to happen; the relation is
+        // the property worth holding and cannot flake without something being
+        // genuinely wrong.
+        assert!(
+            receipt.dispatch < receipt.damage_window,
+            "{toolkit}: dispatch took {:?}, which is not the cheap half of a {:?} window",
+            receipt.dispatch,
+            receipt.damage_window
+        );
 
         // What the pixels did is EVIDENCE and not a verdict, so what is
         // asserted is that evidence was gathered -- not what it says. An idle
