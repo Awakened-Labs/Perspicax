@@ -206,6 +206,11 @@ cargo test -p wm-atspi --test live -- --ignored --test-threads=1
 Without those two variables an SSH session finds an empty desktop and reports
 no error worth reading. `wm-probe apps` says what the bus can actually see.
 
+`scripts/provision-testbed.sh` builds that machine from a fresh Debian 13
+install — the desktop, both toolkits, the bus and the pinned toolchain — for
+anyone reproducing the figures above rather than taking them on trust.
+`ci/live-tests.sh` is the other half: the same suite with no desktop at all.
+
 ## Licence
 
 Apache-2.0. See `LICENSE`.
