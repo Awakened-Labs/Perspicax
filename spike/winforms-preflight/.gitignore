@@ -1,0 +1,5 @@
+# Built artifacts. The sources are the record; the binaries are reproducible
+# with `make` plus the prefix's own csc.exe, and a PE in git ages badly.
+msaa-probe.exe
+hwnd-diag.exe
+WinFormsTarget.exe
