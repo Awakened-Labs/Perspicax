@@ -2,8 +2,8 @@
 
 **The question.** Does wine-mono actually implement WinForms accessibility
 (`AccessibleObject` / `IAccessible`)? If it does not — for the same reason WPF
-was skipped — then C1 has no decision target and the two-gate structure in
-`the plan of record` loses its second gate.
+was skipped — then C1 has no decision target and the project's two-gate
+structure loses its second gate.
 
 **Why it runs first.** Reviewer Concern #2: this is the cheapest thing in the
 plan and it must precede a line of `uia-dump.exe`, not run alongside it.
@@ -114,9 +114,8 @@ guess at it.**
 
 ## One correction to the plan of record
 
-`the plan of record` states WPF was skipped because
-wine-mono #223 leaves "15 WPF DLLs absent". **In wine-mono 11.0.0 on this box
-they are present**: `PresentationFramework.dll` (6.5 MB), `PresentationCore.dll`
+The plan of record skips WPF on the grounds that wine-mono #223 leaves "15 WPF
+DLLs absent". **In wine-mono 11.0.0 on this box they are present**: `PresentationFramework.dll` (6.5 MB), `PresentationCore.dll`
 (3.9 MB) and `WindowsBase.dll` (1.2 MB) are all in the GAC.
 
 Present is not the same as working, and this pre-flight did not test a WPF app —
