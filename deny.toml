@@ -11,9 +11,9 @@
 # compositor links system C libraries -- libinput, libdrm, gbm, xkbcommon,
 # libwayland -- that never appear in the cargo graph. They are all
 # MIT/BSD-shaped today, but a future `-sys` crate vendoring something copyleft
-# would pass this gate and still poison distribution. When `wm-compositor`
-# grows its first `-sys` dependency, read that crate's bundled sources rather
-# than trusting the line below.
+# would pass this gate and still poison distribution. When
+# `perspicax-compositor` grows its first `-sys` dependency, read that crate's
+# bundled sources rather than trusting the line below.
 
 [licenses]
 # Exhaustive rather than permissive-by-pattern, and deliberately short. A new
@@ -29,17 +29,18 @@
 allow = [
     "Apache-2.0",
     "MIT",
-    # Added 2026-09-04, when `wm-atspi` brought in zbus and its proc-macros.
+    # Added 2026-09-04, when `perspicax-atspi` brought in zbus and its
+    # proc-macros.
     #
-    # Reached through exactly one crate: `unicode-ident`, which is
-    # `(MIT OR Apache-2.0) AND Unicode-3.0` -- the permissive half is already
-    # allowed above, and the `AND` is what fails the gate. The Unicode-3.0
-    # term covers the character tables the crate embeds, not its code.
+    # Reached through exactly one crate: `unicode-ident`, which is `(MIT OR
+    # Apache-2.0) AND Unicode-3.0` -- the permissive half is already allowed
+    # above, and the `AND` is what fails the gate. The Unicode-3.0 term covers
+    # the character tables the crate embeds, not its code.
     #
-    # The Unicode License v3 is permissive and not copyleft: it grants
-    # unlimited use and redistribution of the data files, and asks only that
-    # the notice travel with them. It carries no reciprocal obligation, so it
-    # does not touch the reason GPL/LGPL/AGPL are absent from this list, and
+    # The Unicode License v3 is permissive and not copyleft: it grants unlimited
+    # use and redistribution of the data files, and asks only that the notice
+    # travel with them. It carries no reciprocal obligation, so it does not
+    # touch the reason GPL/LGPL/AGPL are absent from this list, and
     # `unicode-ident` is a build-time dependency of every proc-macro crate in
     # the Rust ecosystem -- refusing it would mean refusing proc macros.
     #

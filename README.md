@@ -1,4 +1,4 @@
-# wm — an agent-native window manager
+# perspicax — an agent-native window manager
 
 A Wayland compositor that exposes everything a human can see on screen as a
 typed, addressable API, so an agent can drive programs that have no API of
@@ -35,23 +35,23 @@ correct by construction rather than by hope.
 Two traits carry the design, and they are the reason this is not welded to one
 compositor:
 
-- **`Ingest`** — where nodes come from. `wm-atspi` reads stock GTK and Qt over
+- **`Ingest`** — where nodes come from. `perspicax-atspi` reads stock GTK and Qt over
   the accessibility bus today; a faster path can replace it without the layers
   above noticing.
 - **`HostView`** — what only a compositor knows: is this rect visible, who owns
-  this surface, dispatch this input. `wm-compositor` implements it on Smithay;
+  this surface, dispatch this input. `perspicax-compositor` implements it on Smithay;
   a GNOME extension or KWin plugin later is a port, not a rewrite.
 
-`wm-index` sits between them and imports neither Wayland nor D-Bus.
+`perspicax-index` sits between them and imports neither Wayland nor D-Bus.
 
 ```
-wm              the composition root — one binary, `wm --headless`
-wm-mcp          MCP server (rmcp, stdio) — six tools, DTOs, receipts  [portable]
-wm-index        node cache, stable ids, selectors, deltas, refusals  [portable]
-wm-node         node schema — AccessKit types plus Origin and Visibility
-wm-atspi        impl Ingest — AT-SPI2 over D-Bus
-wm-compositor   impl HostView — Smithay: outputs, seat, damage. Draws nothing.
-wm-probe        dev CLI — dump a tree, time a read, explain a refusal
+perspicax              the composition root — one binary, `perspicax --headless`
+perspicax-mcp          MCP server (rmcp, stdio) — six tools, DTOs, receipts  [portable]
+perspicax-index        node cache, stable ids, selectors, deltas, refusals  [portable]
+perspicax-node         node schema — AccessKit types plus Origin and Visibility
+perspicax-atspi        impl Ingest — AT-SPI2 over D-Bus
+perspicax-compositor   impl HostView — Smithay: outputs, seat, damage. Draws nothing.
+perspicax-probe        dev CLI — dump a tree, time a read, explain a refusal
 ```
 
 ## Milestones
@@ -66,12 +66,12 @@ wm-probe        dev CLI — dump a tree, time a read, explain a refusal
 v1 is one demo, run against a GTK app and a Qt app, headless, in CI, with zero
 screenshots taken: observe a window, resolve a selector, click it, get a
 receipt — and get a *refusal* when the target is occluded. It is
-`crates/wm/tests/act.rs`.
+`crates/perspicax/tests/act.rs`.
 
 ## What reading a tree costs
 
 Measured on Debian 13 (GNOME's accessibility stack, at-spi2-core 2.56.2), best
-of five, with `wm-probe time --app <name>`. These numbers are the argument for
+of five, with `perspicax-probe time --app <name>`. These numbers are the argument for
 ever building a faster ingest path, so they are measured rather than asserted.
 
 | | GTK 4.18.6 <br> `gtk4-widget-factory`, 278 nodes | Qt 6.8.2 <br> `gallery`, 219 nodes |
@@ -88,13 +88,13 @@ Three things in that table matter more than the absolute figures.
 `org.a11y.atspi.Cache`, introspects cleanly, declares `GetItems`, and answers
 it with an empty array — a successful reply containing nothing. Probing by
 interface therefore takes the fast path, receives no nodes, and reports that a
-window full of widgets is empty. `wm-atspi` probes by *result* for this reason.
+window full of widgets is empty. `perspicax-atspi` probes by *result* for this reason.
 
 **A cold cache is not a small cache, it is a different answer.** GTK's is
 filled by ATK as accessibles are realised, so a freshly started
 `gtk4-widget-factory` answers `GetItems` with **11** of its 278 nodes — again
 successfully, with nothing in the reply to suggest anything is missing. Walk it
-once and the cache holds all 278 thereafter. `wm-atspi` compares each item's
+once and the cache holds all 278 thereafter. `perspicax-atspi` compares each item's
 declared child count against the children actually delivered and falls back to
 the walk on any shortfall, which is why the `first read` row above says 5.73 s
 and not 62 ms: it walked, because the cache asked to be doubted.
@@ -119,10 +119,10 @@ all, so bounds are a round trip per node even on the fast path.
 
 ## What the compositor adds
 
-M2's claim in one command, which is also `crates/wm/tests/demo.rs`:
+M2's claim in one command, which is also `crates/perspicax/tests/demo.rs`:
 
 ```sh
-wm --headless --spawn gtk4-widget-factory --spawn gallery --dump-tree 8
+perspicax --headless --spawn gtk4-widget-factory --spawn gallery --dump-tree 8
 ```
 
 It starts an accessibility registry, hosts both toolkits as Wayland clients of
@@ -157,7 +157,7 @@ reason is reported rather than logged.
 ## What acting looks like
 
 ```sh
-wm --headless --mcp --spawn gtk4-widget-factory
+perspicax --headless --mcp --spawn gtk4-widget-factory
 ```
 
 That is an MCP server on stdin and stdout with a compositor behind it. Six
@@ -205,12 +205,12 @@ is at the point of use rather than in a preamble a model has to have remembered.
 That is this project's injection defence, and it is a read-path property rather
 than an act-path gate.
 
-**There is no capability gate, deliberately.** wm is one actuator among several,
+**There is no capability gate, deliberately.** perspicax is one actuator among several,
 not an agent's only one: an agent refused a click runs the command instead, so a
 gate here would document an intention rather than enforce a boundary — and a
 control that can be trivially bypassed is worse than an absent one, because it
 invites reliance. `Refusal::NoCapability` is declared and unconstructed until
-`--seat`, where wm will host applications the user launched rather than ones it
+`--seat`, where perspicax will host applications the user launched rather than ones it
 spawned, and the question finally has two different answers.
 
 **`screenshot` ships declared and always refusing.** There is no renderer in
@@ -223,7 +223,7 @@ and a number the compositor already computes.
 ## What a toolkit renders without explaining
 
 Measured on the same Debian 13 box, hosting both applications under
-`wm --headless` for eight idle seconds with nobody touching them.
+`perspicax --headless` for eight idle seconds with nobody touching them.
 
 | | GTK 4.18.6 <br> `gtk4-widget-factory` | Qt 6.8.2 <br> `gallery` |
 |---|---|---|
@@ -268,8 +268,8 @@ run them:
 ```sh
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
-cargo test -p wm-atspi --test live -- --ignored --test-threads=1
-cargo test -p wm --test act  -- --ignored --test-threads=1
+cargo test -p perspicax-atspi --test live -- --ignored --test-threads=1
+cargo test -p perspicax --test act  -- --ignored --test-threads=1
 ```
 
 The second is v1's exit criterion, and it is the one command that asserts the
@@ -277,7 +277,7 @@ whole claim: two toolkits hosted, a control clicked in each with a receipt to
 show for it, and a covered control refused with the occluding surface named.
 
 Without those two variables an SSH session finds an empty desktop and reports
-no error worth reading. `wm-probe apps` says what the bus can actually see.
+no error worth reading. `perspicax-probe apps` says what the bus can actually see.
 
 `scripts/provision-testbed.sh` builds that machine from a fresh Debian 13
 install — the desktop, both toolkits, the bus and the pinned toolchain — for

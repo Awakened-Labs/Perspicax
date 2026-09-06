@@ -3,9 +3,9 @@
 **The question.** Can a Wine window's identity come from two kernel-attested
 sources that do not both reduce to wineserver's bookkeeping?
 
-**The budget.** One day. Against stock sway, never against `wm`. SO_PEERCRED
+**The budget.** One day. Against stock sway, never against `perspicax`. SO_PEERCRED
 attestation is compositor-independent, so involving our own compositor would add
-a variable and answer nothing; and "does `winewayland.drv` connect to `wm`" is a
+a variable and answer nothing; and "does `winewayland.drv` connect to `perspicax`" is a
 separate protocol-surface question that must not eat this one.
 
 **The deliverable.** Strong, Weak, or Dishonest-only — one paragraph, with the
@@ -176,7 +176,7 @@ not about the attestation.
 
 The spike is closed. Two follow-ons it surfaced, both out of its scope:
 
-- `crates/wm-compositor/src/origin.rs` reads `/proc/<pid>/exe` unpinned, which
+- `crates/perspicax-compositor/src/origin.rs` reads `/proc/<pid>/exe` unpinned, which
   for a Wine client returns `wine-preloader` — a confident and useless answer
   attached to a real surface. `pidfd_open` at accept, or the `starttime` token
   this harness records, closes the reuse window.

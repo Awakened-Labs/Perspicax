@@ -16,13 +16,13 @@
 # both toolkits -- which needs XDG_RUNTIME_DIR for its Wayland socket, a thing
 # a CI container does not have and a login session does.
 #
-# From M3 it runs `crates/wm/tests/act.rs` as well, which is v1's exit
+# From M3 it runs `crates/perspicax/tests/act.rs` as well, which is v1's exit
 # criterion: a control clicked in each toolkit with a receipt for it, and a
 # covered control refused with the occluding surface named. It needs nothing
 # this script did not already arrange -- the applications it drives are ones
-# `wm` spawns itself, and `cargo test --include-ignored` below picks the tests
+# `perspicax` spawns itself, and `cargo test --include-ignored` below picks the tests
 # up without being told about them. The two applications started further down
-# are for `wm-atspi`'s live tests, and `observe` skips them because their
+# are for `perspicax-atspi`'s live tests, and `observe` skips them because their
 # processes own none of our surfaces.
 
 set -euo pipefail
@@ -31,11 +31,11 @@ set -euo pipefail
 # hard-coding a triplet that is right on exactly one runner. Exported so the
 # M2 demo test finds the same one rather than repeating the search.
 gallery=$(dpkg -L qt6-base-examples | grep -m1 '/widgets/gallery/bin/gallery$')
-export WM_QT_GALLERY="$gallery"
+export PERSPICAX_QT_GALLERY="$gallery"
 
 # Where a Wayland socket can be bound. A login session has one; a container
-# does not, and the failure is `wm` refusing to start with no obvious cause.
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/wm-runtime}"
+# does not, and the failure is `perspicax` refusing to start with no obvious cause.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/perspicax-runtime}"
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
@@ -69,15 +69,15 @@ gtk4-widget-factory >/tmp/gtk4-widget-factory.log 2>&1 &
 QT_ACCESSIBILITY=1 "$gallery" >/tmp/qt6-gallery.log 2>&1 &
 
 # `--all-targets`, not `--tests`. `--tests` builds test harnesses and does NOT
-# produce `target/debug/wm-probe`, so the poll below would run a binary that
+# produce `target/debug/perspicax-probe`, so the poll below would run a binary that
 # does not exist -- which is exactly what happened the first time this ran in a
 # container, while passing on a workstation where an earlier build had left one
 # behind.
 cargo build --locked --workspace --all-targets
 
-probe=./target/debug/wm-probe
+probe=./target/debug/perspicax-probe
 if [ ! -x "$probe" ]; then
-    echo "wm-probe was not built at $probe -- check the build target selection" >&2
+    echo "perspicax-probe was not built at $probe -- check the build target selection" >&2
     exit 1
 fi
 
@@ -100,7 +100,7 @@ done
 
 if ! grep -q gtk4-widget-factory <<<"$on_bus" || ! grep -q gallery <<<"$on_bus"; then
     echo "an application never reached the accessibility bus." >&2
-    echo "--- wm-probe apps said ---" >&2; echo "${on_bus:-<no output at all>}" >&2
+    echo "--- perspicax-probe apps said ---" >&2; echo "${on_bus:-<no output at all>}" >&2
     echo "--- gtk4-widget-factory ---" >&2; cat /tmp/gtk4-widget-factory.log >&2 || true
     echo "--- qt6 gallery ---" >&2;        cat /tmp/qt6-gallery.log >&2 || true
     exit 1
