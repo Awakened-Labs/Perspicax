@@ -1,0 +1,102 @@
+# The four gates that need no desktop.
+#
+# This is deliberately not a port of `.gitlab-ci.yml`. That pipeline has a fifth
+# job -- `ci/live-tests.sh` under `xvfb-run dbus-run-session`, which builds a
+# session with an accessibility bus and two real toolkit applications on it, and
+# runs the tests that assert this project's actual claim. It is portable to
+# Actions via a container, but it is not free, and no contributor exists yet to
+# benefit from it. It stays on GitLab until one does.
+#
+# So: green here means the tree builds, lints, and its non-live tests pass. It
+# does NOT mean the demo works. The README's numbers come from the live suite,
+# and `scripts/provision-testbed.sh` builds the machine that reproduces them.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# `--locked` on every cargo invocation below: the committed lockfile is the
+# build, and a resolver free to pick something newer would make CI's answer
+# about a dependency graph no commit here chose.
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to the toolchain the GitLab pipeline uses (`rust:1.93-trixie`),
+      # not `stable`. The workspace needs 1.92 and edition 2024 as a floor, and
+      # an accessibility stack is not the place to discover that a toolchain
+      # bump changed behaviour on a day nobody touched the code.
+      - name: Pin the toolchain
+        run: |
+          rustup toolchain install 1.93 --profile minimal --component rustfmt,clippy
+          rustup default 1.93
+          rustc --version && cargo --version
+
+      # The only system library this workspace needs. Smithay is taken with
+      # `default-features = false`, so there is no DRM, GBM, EGL, libinput or
+      # libwayland in the graph -- but `xkbcommon` is a plain dependency of
+      # smithay for keymaps and carries `#[link(name = "xkbcommon")]`.
+      #
+      # `cargo check` does NOT catch its absence, because checking never links.
+      # The failure appears only when a binary or a test is built, which is why
+      # it is installed here rather than discovered in the test job.
+      - name: The one system library
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+
+      - name: fmt
+        run: cargo fmt --all --check
+
+      # `-D warnings`: the tree is clippy-clean, so a new warning fails the run
+      # rather than accumulating into background noise nobody reads. Deliberate
+      # exceptions carry an `#[allow]` at the definition with a `reason`.
+      - name: clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      # Live tests are `#[ignore]`d, so this stays green on a machine with no
+      # graphical session. That is the whole reason the split exists.
+      - name: test
+        run: cargo test --locked --workspace
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned, and the version appears in the cache key as well as the command.
+      # They are two spellings of one number: bump them together, because a key
+      # left behind pins the old binary, and an unpinned install lets a
+      # cargo-deny release change the verdict with no commit here to explain it.
+      - name: Cache cargo-deny
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-deny
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-deny-0.20.2
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
+
+      # This tree's lockfile, asserted with cargo rather than with a flag on
+      # somebody else's binary -- and asserted HERE in particular, because this
+      # is the job whose verdict depends on the resolved graph. A stale lock
+      # would mean cargo-deny reading dependencies no commit in this repo chose.
+      - name: Assert the lockfile is current
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      # `--all-features` MUST be on the command line. In cargo-deny 0.20 a
+      # `[graph] all-features = true` key in deny.toml is accepted without
+      # warning and silently does nothing, and a check that passes by never
+      # looking is worse than no check at all.
+      - name: deny
+        run: cargo deny --all-features check
