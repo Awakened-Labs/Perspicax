@@ -21,12 +21,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 license = "Apache-2.0"
-# PUBLICATION BLOCKER -- this is still the internal host. It must become the
-# GitHub URL before the push in step 4 of the open-source decision, because a
-# push is what makes it public and permanent. The PyPI 0.0.0 incident is the
-# precedent: an internal github.com URL shipped in a published artifact for
-# thirteen minutes because the field was correct in source and stale in the
-# thing actually uploaded. Verify the artifact, never the source it came from.
+# The publication home. Set before the push rather than after it, because this
+# string is the one piece of the manifest that is wrong in a way no test can
+# catch: it points somewhere, and a reader believes it.
 repository = "https://github.com/Awakened-Labs/Perspicax"
 
 [workspace.lints.rust]
