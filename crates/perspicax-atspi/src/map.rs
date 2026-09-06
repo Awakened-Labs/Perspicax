@@ -217,14 +217,14 @@ pub fn role(role: AtspiRole, states: StateSet) -> Role {
 ///
 /// AT-SPI has two state bits that look like the answer to "can I see this":
 /// `Visible` ("should be rendered") and `Showing` ("is being rendered"). They
-/// are the application's claims about its own widgets, made by the process
-/// that drew them, over a bus it volunteered to join. A compositor knows
-/// better and can be made to say so; an application cannot be checked.
+/// are the application's claims about its own widgets, made by the process that
+/// drew them, over a bus it volunteered to join. A compositor knows better and
+/// can be made to say so; an application cannot be checked.
 ///
 /// So they land on [`Node::set_hidden`], which is part of the *application's*
 /// schema and reads as "the app says this is not shown" -- and
-/// [`Visibility`](perspicax_node::Visibility) stays `Unknown` for every node this
-/// crate produces, exactly as it should until a `HostView` exists. The two
+/// [`Visibility`](perspicax_node::Visibility) stays `Unknown` for every node
+/// this crate produces, exactly as it should until a `HostView` exists. The two
 /// facts are kept in two fields because they are two different claims with two
 /// different warrants, and collapsing them is the mistake this project was
 /// started over.
@@ -302,16 +302,16 @@ pub fn apply_states(states: StateSet, node: &mut Node) {
 /// Declare the actions a node supports, from what one read already told us.
 ///
 /// Deliberately coarse, and deliberately free. AT-SPI's precise action list
-/// lives behind `Action.GetActions`, which is **one D-Bus round trip per
-/// node** -- on the slow path that would double an already O(n) walk to
-/// produce a list nothing in M1 may act on, since every node here is
+/// lives behind `Action.GetActions`, which is **one D-Bus round trip per node**
+/// -- on the slow path that would double an already O(n) walk to produce a list
+/// nothing in M1 may act on, since every node here is
 /// [`Origin::Unattributed`](perspicax_node::Origin::Unattributed) and therefore
 /// refused. So this infers what the interface set and the state bits already
 /// carry, and the exact list stays a cost M4 can choose to pay.
 ///
 /// Note what is *not* inferred: nothing here promises the action will work.
-/// [`check_actable`](perspicax_index::check_actable) is what decides that, and it
-/// will refuse all of these until a compositor exists.
+/// [`check_actable`](perspicax_index::check_actable) is what decides that, and
+/// it will refuse all of these until a compositor exists.
 pub fn apply_actions(states: StateSet, interfaces: InterfaceSet, node: &mut Node) {
     // The Action interface is AT-SPI's "this widget does something when you
     // poke it". Its first action is `click` or `activate` on both GTK and Qt.
@@ -346,8 +346,8 @@ pub fn apply_actions(states: StateSet, interfaces: InterfaceSet, node: &mut Node
 /// Because applications answer this call with nonsense, and measurably so.
 /// Sweeping every node of `gtk4-widget-factory` produces, among thirteen
 /// sensible boxes, exactly one reading `(0, 0, -605997344, 22099)` -- GTK
-/// answering for a widget it has not realised, with whatever was in the
-/// struct. It is not an error; the call succeeds.
+/// answering for a widget it has not realised, with whatever was in the struct.
+/// It is not an error; the call succeeds.
 ///
 /// A box with negative area is not a fact about the screen, and letting one
 /// into the index would put geometry there that no compositor could later
@@ -362,7 +362,8 @@ pub fn apply_actions(states: StateSet, interfaces: InterfaceSet, node: &mut Node
 /// The coordinates are whatever [`CoordType`](atspi::CoordType) was asked for,
 /// and this crate only ever asks for `Window`. A Wayland client cannot know
 /// where it is on screen, so `Screen` extents are a fiction the bus will
-/// nonetheless answer with. See [`ObservedNode::bounds`](perspicax_node::ObservedNode::bounds).
+/// nonetheless answer with. See
+/// [`ObservedNode::bounds`](perspicax_node::ObservedNode::bounds).
 #[must_use]
 pub fn extents_to_rect((x, y, width, height): (i32, i32, i32, i32)) -> Option<Rect> {
     if width < 0 || height < 0 {

@@ -262,8 +262,8 @@ fn a_covered_control_is_refused_and_the_refusal_names_the_surface_in_the_way() {
 /// Host the given applications, read them, and drive the agent interface
 /// against what was found.
 ///
-/// The shape is `demo.rs`'s: `perspicax_compositor::run` blocks the main test thread
-/// because Wayland state is not `Send` and the loop owns it, so the work
+/// The shape is `demo.rs`'s: `perspicax_compositor::run` blocks the main test
+/// thread because Wayland state is not `Send` and the loop owns it, so the work
 /// happens on a worker that asks the compositor to stop when it is done. A
 /// deadline is a backstop only -- reading a Qt tree takes seconds nobody can
 /// predict.

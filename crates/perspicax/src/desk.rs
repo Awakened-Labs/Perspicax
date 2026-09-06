@@ -1,11 +1,11 @@
 //! The desktop, as the agent interface sees it.
 //!
-//! `perspicax-mcp` describes what it needs as a trait with three methods and never
-//! implements it, so that the agent-facing surface stays portable -- a GNOME
-//! extension or a KWin plugin satisfies the same three and gets the same six
-//! tools. This is that trait satisfied, here in the composition root, because
-//! this is the only place that holds the index, the host's facts and the
-//! compositor's inbound channel at once.
+//! `perspicax-mcp` describes what it needs as a trait with three methods and
+//! never implements it, so that the agent-facing surface stays portable -- a
+//! GNOME extension or a KWin plugin satisfies the same three and gets the same
+//! six tools. This is that trait satisfied, here in the composition root,
+//! because this is the only place that holds the index, the host's facts and
+//! the compositor's inbound channel at once.
 //!
 //! # Semantics are cached; visibility is not
 //!
@@ -13,9 +13,9 @@
 //! costs seconds. Whether a node can be *seen* is a different question with a
 //! different cost: it is arithmetic over rectangles the host has already
 //! published, and it is microseconds. So the two are refreshed on different
-//! schedules, and [`Desk::current`] is where that rule lives -- **every read and
-//! every act re-judges first**, so a window raised a moment ago is accounted
-//! for even though nobody has re-read a tree since.
+//! schedules, and [`Desk::current`] is where that rule lives -- **every read
+//! and every act re-judges first**, so a window raised a moment ago is
+//! accounted for even though nobody has re-read a tree since.
 //!
 //! Without that, the milestone's own demo would fail in the most misleading
 //! possible way: the windows overlap after the trees were read, and a verdict
@@ -23,11 +23,11 @@
 //!
 //! # Acting takes the lock, and that is correct rather than convenient
 //!
-//! [`Desktop::act`] holds the index for the whole dispatch, including the 200 ms
-//! the damage window costs. That is not a concession to a simple lock strategy:
-//! a tree read from the middle of a dispatch describes a moment that never
-//! existed, and an agent cannot meaningfully observe a desktop mid-click. Acts
-//! serialise against reads because acts serialise against reality.
+//! [`Desktop::act`] holds the index for the whole dispatch, including the 200
+//! ms the damage window costs. That is not a concession to a simple lock
+//! strategy: a tree read from the middle of a dispatch describes a moment that
+//! never existed, and an agent cannot meaningfully observe a desktop mid-click.
+//! Acts serialise against reads because acts serialise against reality.
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -147,9 +147,9 @@ impl Desktop for Desk {
             // cost the agent exactly the part it can act on.
             act::Failure::Refused(refusal) => Denied::Refused(refusal),
             // A statement about this compositor rather than about the target.
-            // Flattened to its message because `perspicax-mcp` deliberately cannot see
-            // the crate the type comes from, and because there is nothing an
-            // agent can do with it but report it.
+            // Flattened to its message because `perspicax-mcp` deliberately
+            // cannot see the crate the type comes from, and because there is
+            // nothing an agent can do with it but report it.
             act::Failure::Dispatch(error) => Denied::Undispatched(error.to_string()),
         })
     }

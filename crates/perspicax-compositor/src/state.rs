@@ -122,8 +122,8 @@ pub struct Compositor {
     /// apart -- see `perspicax_index::join`.
     focused_at: HashMap<SurfaceId, Instant>,
     /// Windows and their z-order. `Space::elements()` iterates back to front,
-    /// which is the order `perspicax_index::HostFacts` wants, so the two agree by
-    /// construction rather than by a conversion someone has to keep right.
+    /// which is the order `perspicax_index::HostFacts` wants, so the two agree
+    /// by construction rather than by a conversion someone has to keep right.
     pub(crate) space: Space<Window>,
     /// What this compositor last told the rest of the process. See
     /// [`crate::facts`] for why the boundary is a published copy.

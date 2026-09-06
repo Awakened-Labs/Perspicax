@@ -682,8 +682,8 @@ mod tests {
     }
 
     /// A bracket in the wrong place is the client's mistake and nothing was
-    /// looked at; a refusal is a statement about a screen that was. `perspicax-index`
-    /// keeps those apart and the wire keeps them apart too.
+    /// looked at; a refusal is a statement about a screen that was.
+    /// `perspicax-index` keeps those apart and the wire keeps them apart too.
     #[tokio::test]
     async fn a_selector_that_is_not_one_is_a_protocol_error_not_a_refusal() {
         let (server, desktop) = server(Ok(receipt()));

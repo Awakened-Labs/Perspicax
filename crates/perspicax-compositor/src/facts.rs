@@ -12,11 +12,11 @@
 //! but plain values -- no surface handle, no Smithay type, nothing that has to
 //! be dropped on the right thread.
 //!
-//! That is also what lets [`HostView`](perspicax_index::HostView)'s three read methods
-//! be synchronous. They answer from a published snapshot rather than by asking
-//! a compositor a question and waiting for its event loop to get round to it.
-//! Acting has to cross in the other direction and will be a message, not a
-//! lock.
+//! That is also what lets [`HostView`](perspicax_index::HostView)'s three read
+//! methods be synchronous. They answer from a published snapshot rather than by
+//! asking a compositor a question and waiting for its event loop to get round
+//! to it. Acting has to cross in the other direction and will be a message, not
+//! a lock.
 //!
 //! # A snapshot is consistent, and it is not current
 //!
@@ -24,8 +24,8 @@
 //! them. That is a feature: judging half a tree against one arrangement of
 //! windows and the other half against the next would produce a verdict that was
 //! never true at any instant. Currency is what the generation counter and the
-//! damage bookkeeping are for -- being *behind* is a state the index can
-//! detect and refuse on, whereas being *inconsistent* is not.
+//! damage bookkeeping are for -- being *behind* is a state the index can detect
+//! and refuse on, whereas being *inconsistent* is not.
 
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -185,8 +185,8 @@ impl Compositor {
             ),
             // Zero, and measured rather than assumed: both GTK and Qt report
             // window-relative extents from the window geometry's origin, not
-            // the buffer's. See `perspicax_index::host`'s module documentation for the
-            // numbers.
+            // the buffer's. See `perspicax_index::host`'s module documentation
+            // for the numbers.
             node_space_offset: Vec2::ZERO,
             // Surface-local (0,0) sits at the declared geometry's own offset
             // *back* from where we placed that geometry -- under CSD that is

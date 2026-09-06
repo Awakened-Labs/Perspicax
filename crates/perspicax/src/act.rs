@@ -81,9 +81,9 @@ pub fn act(
     verb: &Verb,
     window: Duration,
 ) -> Result<Receipt, Failure> {
-    // Resolution and the gate, in that order and both in `perspicax-index`. Nothing
-    // here re-decides either: a host that could talk itself past the gate would
-    // make the gate's location pointless.
+    // Resolution and the gate, in that order and both in `perspicax-index`.
+    // Nothing here re-decides either: a host that could talk itself past the
+    // gate would make the gate's location pointless.
     let id = index.resolve(selector)?;
     let node = index.actable(id)?;
 

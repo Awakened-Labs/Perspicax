@@ -23,14 +23,14 @@
 /// it is kurbo-derived, so it is two corners (`x0`, `y0`, `x1`, `y1`) and not
 /// an origin plus a size.
 ///
-/// [`Toggled`] and [`Orientation`] joined the list when `perspicax-atspi` needed to
-/// project AT-SPI's state bits onto a node: a tri-state checkbox is
+/// [`Toggled`] and [`Orientation`] joined the list when `perspicax-atspi`
+/// needed to project AT-SPI's state bits onto a node: a tri-state checkbox is
 /// `Toggled::Mixed` and not a `bool`, and inventing either type locally would
 /// be the same parallel-schema mistake in miniature.
 ///
-/// [`Vec2`] joined it for `perspicax-index`'s host facts, which need to express the
-/// offset between two coordinate spaces. A displacement is not a position, and
-/// the type that already ships beside [`Rect`] says so in its name.
+/// [`Vec2`] joined it for `perspicax-index`'s host facts, which need to express
+/// the offset between two coordinate spaces. A displacement is not a position,
+/// and the type that already ships beside [`Rect`] says so in its name.
 pub use accesskit::{Action, Node, NodeId, Orientation, Rect, Role, Toggled, Vec2};
 
 /// A compositor surface. Opaque, and meaningful only to the [`HostView`] that
@@ -137,9 +137,9 @@ pub struct ObservedNode {
 impl ObservedNode {
     /// A node from an ingest path that has not yet been joined to a surface.
     ///
-    /// This is the honest starting state for every node `perspicax-atspi` produces:
-    /// the accessibility bus knows the role and the name, and knows nothing
-    /// whatsoever about origin or visibility.
+    /// This is the honest starting state for every node `perspicax-atspi`
+    /// produces: the accessibility bus knows the role and the name, and knows
+    /// nothing whatsoever about origin or visibility.
     #[must_use]
     pub fn unjoined(id: NodeId, node: Node) -> Self {
         Self {

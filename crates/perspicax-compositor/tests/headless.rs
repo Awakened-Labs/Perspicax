@@ -2,10 +2,10 @@
 //!
 //! These bind an actual Wayland socket, so they need `XDG_RUNTIME_DIR` -- which
 //! a login session has and a bare `ssh host cmd` or a CI container does not.
-//! They are `#[ignore]`d for the same reason `perspicax-atspi`'s live tests are: the
-//! four gates have to stay green on a machine with no session, and a test that
-//! silently passes by skipping itself is worse than one that has to be asked
-//! for. `ci/live-tests.sh` runs them with `--include-ignored`.
+//! They are `#[ignore]`d for the same reason `perspicax-atspi`'s live tests
+//! are: the four gates have to stay green on a machine with no session, and a
+//! test that silently passes by skipping itself is worse than one that has to
+//! be asked for. `ci/live-tests.sh` runs them with `--include-ignored`.
 
 use std::time::{Duration, Instant};
 

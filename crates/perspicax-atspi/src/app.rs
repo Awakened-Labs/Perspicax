@@ -2,10 +2,11 @@
 //! belongs to.
 //!
 //! Neither type leaves this crate's vocabulary by accident. [`ObjectKey`] is
-//! the key `perspicax-index`'s [`Interner`](perspicax_index::Interner) is instantiated over,
-//! so it is translated into an opaque [`NodeId`](perspicax_node::NodeId) before any
-//! layer above sees it; [`AppRef`] holds the one piece of information this
-//! crate is deliberately *not* allowed to pass upward at all.
+//! the key `perspicax-index`'s [`Interner`](perspicax_index::Interner) is
+//! instantiated over, so it is translated into an opaque
+//! [`NodeId`](perspicax_node::NodeId) before any layer above sees it;
+//! [`AppRef`] holds the one piece of information this crate is deliberately
+//! *not* allowed to pass upward at all.
 
 use atspi::{ObjectRef, ObjectRefOwned};
 
@@ -75,17 +76,17 @@ impl ObjectKey {
 /// better place: `GetConnectionUnixProcessID` on the accessibility bus's own
 /// daemon, which answers from the peer credentials of the socket the
 /// application connected on. That is a kernel-attested number, not a
-/// self-report, and it is worth being precise that this crate uses the
-/// stronger of the two available sources.
+/// self-report, and it is worth being precise that this crate uses the stronger
+/// of the two available sources.
 ///
-/// It still does not make an [`Origin`](perspicax_node::Origin), for a reason that
-/// survives the number being true: it attributes a **bus connection**, not a
-/// **surface**. Knowing which process joined the accessibility bus says nothing
-/// about which process drew the window a node claims to live in, and a
+/// It still does not make an [`Origin`](perspicax_node::Origin), for a reason
+/// that survives the number being true: it attributes a **bus connection**, not
+/// a **surface**. Knowing which process joined the accessibility bus says
+/// nothing about which process drew the window a node claims to live in, and a
 /// compositor is the only thing that can answer the second question. An
 /// application may also serve accessibility for trees it did not draw -- that
-/// is what `org.a11y.atspi.Socket` is for -- so even an honest pid can name
-/// the wrong author.
+/// is what `org.a11y.atspi.Socket` is for -- so even an honest pid can name the
+/// wrong author.
 ///
 /// So it is kept here, in this crate's own vocabulary. In M2 the compositor
 /// will hold a pid from the *Wayland* client's credentials, and this one
@@ -139,7 +140,8 @@ impl AppRef {
     ///
     /// True, and still not an attribution -- read the type-level note before
     /// using it for anything. It exists for M2's focus-correlation join and for
-    /// diagnostics, and it must never become an [`Origin`](perspicax_node::Origin).
+    /// diagnostics, and it must never become an
+    /// [`Origin`](perspicax_node::Origin).
     #[must_use]
     pub fn bus_pid(&self) -> Option<u32> {
         self.bus_pid

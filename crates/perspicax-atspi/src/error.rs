@@ -26,9 +26,9 @@ pub enum Error {
     /// No application on the bus answers to that name.
     ///
     /// Carries every name that *is* present, for the same reason
-    /// [`Refusal`](perspicax_index::Refusal) variants carry their context: an agent or
-    /// a human told only "no" can only guess, whereas one handed the list can
-    /// correct a typo without a second round trip.
+    /// [`Refusal`](perspicax_index::Refusal) variants carry their context: an
+    /// agent or a human told only "no" can only guess, whereas one handed the
+    /// list can correct a typo without a second round trip.
     #[error("no application named {name:?} on the accessibility bus (present: {})",
             if available.is_empty() { "none".to_owned() } else { available.join(", ") })]
     NoSuchApp {
@@ -41,7 +41,8 @@ pub enum Error {
     /// A snapshot was asked for from a node this ingest never minted.
     ///
     /// Distinct from a node that has been retired: an id from another
-    /// [`Interner`](perspicax_index::Interner) is a programming error, not a race.
+    /// [`Interner`](perspicax_index::Interner) is a programming error, not a
+    /// race.
     #[error("node {0} was not minted by this ingest")]
     UnknownRoot(u64),
 }

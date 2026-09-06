@@ -213,14 +213,13 @@ impl AtspiIngest {
         self
     }
 
-    /// Mint ids from a map shared with every other ingest reading this
-    /// desktop.
+    /// Mint ids from a map shared with every other ingest reading this desktop.
     ///
     /// Required of anything reading more than one application at once, and the
     /// reason is in [`Ids`]: without it two applications each mint id 1 and the
     /// layers above cannot tell those two nodes apart. A caller reading a
-    /// single application in isolation -- `perspicax-probe`, the M1 latency table --
-    /// does not need it.
+    /// single application in isolation -- `perspicax-probe`, the M1 latency
+    /// table -- does not need it.
     #[must_use]
     pub fn sharing(mut self, ids: &Ids) -> Self {
         self.interner = Arc::clone(ids);

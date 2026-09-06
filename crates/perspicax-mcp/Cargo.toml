@@ -10,11 +10,11 @@ repository.workspace = true
 [lints]
 workspace = true
 
-# Deliberately short, and the two absences are the point: no `perspicax-compositor`
-# and no `perspicax-atspi`. The agent-facing surface is portable for the same reason
-# `perspicax-index` is -- a GNOME extension or a KWin plugin that satisfies
-# [`Desktop`](crate::Desktop) gets this server unchanged. What this crate cannot
-# see, it cannot come to depend on.
+# Deliberately short, and the two absences are the point: no
+# `perspicax-compositor` and no `perspicax-atspi`. The agent-facing surface is
+# portable for the same reason `perspicax-index` is -- a GNOME extension or a
+# KWin plugin that satisfies [`Desktop`](crate::Desktop) gets this server
+# unchanged. What this crate cannot see, it cannot come to depend on.
 [dependencies]
 rmcp.workspace = true
 schemars.workspace = true

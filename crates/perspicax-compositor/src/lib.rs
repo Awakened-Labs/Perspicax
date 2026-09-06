@@ -135,8 +135,8 @@ pub enum Error {
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The virtual output's size in pixels. Windows are placed inside it, and
-    /// it is the coordinate space every global rect in [`perspicax_index::HostFacts`]
-    /// is expressed in.
+    /// it is the coordinate space every global rect in
+    /// [`perspicax_index::HostFacts`] is expressed in.
     pub size: (i32, i32),
     /// Commands to start once the socket exists, each as a program and its
     /// arguments.

@@ -11,8 +11,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-# `perspicax-node` and nothing else, on purpose. This crate is the portable core: the
-# moment Smithay or zbus appears here, a GNOME or KWin host stops being a port
-# and becomes a rewrite. If a dependency is ever added below, it needs a reason
-# written down next to it that survives that question.
+# `perspicax-node` and nothing else, on purpose. This crate is the portable
+# core: the moment Smithay or zbus appears here, a GNOME or KWin host stops
+# being a port and becomes a rewrite. If a dependency is ever added below, it
+# needs a reason written down next to it that survives that question.
 perspicax-node = { path = "../perspicax-node", version = "0.1.0" }

@@ -49,9 +49,9 @@ const LEVEL_SHIFTED: u32 = 1;
 
 /// Why an action could not be dispatched.
 ///
-/// These sit below `perspicax_index::Refusal`, which answers the different question of
-/// whether an act should be *allowed*. Everything here is a statement about
-/// this compositor's ability to carry it out.
+/// These sit below `perspicax_index::Refusal`, which answers the different
+/// question of whether an act should be *allowed*. Everything here is a
+/// statement about this compositor's ability to carry it out.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ActError {
     /// No surface with this id is mapped. It was destroyed, or never existed.
@@ -196,10 +196,10 @@ impl Keys {
 impl Compositor {
     /// Carry out one action against one surface.
     ///
-    /// The surface is named rather than inferred: `perspicax-index` resolved a node to
-    /// a surface through the join, and re-deriving it here from a coordinate
-    /// would be the compositor second-guessing an attribution that was made
-    /// with better evidence.
+    /// The surface is named rather than inferred: `perspicax-index` resolved a
+    /// node to a surface through the join, and re-deriving it here from a
+    /// coordinate would be the compositor second-guessing an attribution that
+    /// was made with better evidence.
     pub(crate) fn act(
         &mut self,
         surface: SurfaceId,

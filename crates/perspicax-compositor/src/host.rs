@@ -46,10 +46,10 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// One action, addressed to one surface, with somewhere to put the answer.
 ///
-/// The surface is carried rather than derived. `perspicax-index` resolved a node to a
-/// surface through the join, weighing two independently attested pids; a
-/// compositor that re-derived it here from a coordinate would be second-
-/// guessing that with worse evidence.
+/// The surface is carried rather than derived. `perspicax-index` resolved a
+/// node to a surface through the join, weighing two independently attested
+/// pids; a compositor that re-derived it here from a coordinate would be
+/// second- guessing that with worse evidence.
 pub struct Request {
     /// Which surface to act on.
     pub surface: SurfaceId,
@@ -190,8 +190,8 @@ impl HostView for Host {
 
     /// Whether a window-relative rect on this surface can actually be seen.
     ///
-    /// Delegated to `perspicax_index::judge`, which is the same function the index
-    /// uses when it judges a whole tree. Deliberately not a second
+    /// Delegated to `perspicax_index::judge`, which is the same function the
+    /// index uses when it judges a whole tree. Deliberately not a second
     /// implementation: two occlusion policies that agreed today would disagree
     /// eventually, and the disagreement would show up as an agent clicking
     /// something it had been told was visible.

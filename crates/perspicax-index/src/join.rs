@@ -9,15 +9,15 @@
 //!
 //! # Why this is a correlation and not a lookup
 //!
-//! The obvious answer is the pid, and it is necessary without being
-//! sufficient. The compositor's pid comes from the credentials of a Wayland
-//! socket; the bridge's comes from `GetConnectionUnixProcessID` on the
-//! accessibility bus. Both are kernel-attested, and they attest to *different
-//! sockets*: one says which process drew, the other says which process is
-//! serving accessibility. Usually the same program. Not always -- AT-SPI's
-//! `Socket` interface exists precisely so one process can serve trees it did
-//! not draw -- and one program with four windows produces one pid and four
-//! surfaces, which a pid cannot separate at all.
+//! The obvious answer is the pid, and it is necessary without being sufficient.
+//! The compositor's pid comes from the credentials of a Wayland socket; the
+//! bridge's comes from `GetConnectionUnixProcessID` on the accessibility bus.
+//! Both are kernel-attested, and they attest to *different sockets*: one says
+//! which process drew, the other says which process is serving accessibility.
+//! Usually the same program. Not always -- AT-SPI's `Socket` interface exists
+//! precisely so one process can serve trees it did not draw -- and one program
+//! with four windows produces one pid and four surfaces, which a pid cannot
+//! separate at all.
 //!
 //! So the join weighs evidence, and the rule when the evidence does not settle
 //! it is the rule this whole project runs on: **a disagreement is a finding,
@@ -29,11 +29,11 @@
 //! # Windows are structural, not a role
 //!
 //! Callers build [`WindowClaim`]s from the *children of an application's root*,
-//! not by looking for [`Role::Window`](perspicax_node::Role::Window). GTK's toplevel
-//! is an AT-SPI `frame` and maps to `Role::Window`; the Qt widget gallery's is
-//! a `dialog` and maps to `Role::Dialog`. A role-shaped search finds one
-//! toolkit, misses the other entirely, and reports an empty desktop rather than
-//! an error.
+//! not by looking for [`Role::Window`](perspicax_node::Role::Window). GTK's
+//! toplevel is an AT-SPI `frame` and maps to `Role::Window`; the Qt widget
+//! gallery's is a `dialog` and maps to `Role::Dialog`. A role-shaped search
+//! finds one toolkit, misses the other entirely, and reports an empty desktop
+//! rather than an error.
 //!
 //! [`Origin::Unattributed`]: perspicax_node::Origin::Unattributed
 

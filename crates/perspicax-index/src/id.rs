@@ -16,10 +16,10 @@ use perspicax_node::NodeId;
 
 /// A bidirectional map from an ingest path's own key type to [`NodeId`].
 ///
-/// Generic in the key so that this crate stays transport-agnostic: `perspicax-atspi`
-/// instantiates it over an AT-SPI object reference, a fast path would
-/// instantiate it over something else, and the index itself never learns the
-/// difference.
+/// Generic in the key so that this crate stays transport-agnostic:
+/// `perspicax-atspi` instantiates it over an AT-SPI object reference, a fast
+/// path would instantiate it over something else, and the index itself never
+/// learns the difference.
 #[derive(Debug)]
 pub struct Interner<K> {
     forward: HashMap<K, NodeId>,

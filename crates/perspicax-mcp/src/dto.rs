@@ -2,18 +2,19 @@
 //!
 //! # Why a projection rather than serde on the schema
 //!
-//! `perspicax-node` derives nothing and `accesskit`'s `serde` feature is off, so the
-//! wire format is a decision rather than a default -- and three things follow
-//! from making it here instead of there.
+//! `perspicax-node` derives nothing and `accesskit`'s `serde` feature is off,
+//! so the wire format is a decision rather than a default -- and three things
+//! follow from making it here instead of there.
 //!
-//! The wire stays still when the schema moves. `accesskit` is upstream and gains
-//! properties with every release; a client parsing whatever the schema happened
-//! to hold that week would break on a dependency bump nobody thought was
-//! agent-facing.
+//! The wire stays still when the schema moves. `accesskit` is upstream and
+//! gains properties with every release; a client parsing whatever the schema
+//! happened to hold that week would break on a dependency bump nobody thought
+//! was agent-facing.
 //!
 //! The agent gets a projection rather than a dump. An AccessKit node carries
 //! text decorations, live-region politeness and page-breaking hints; none of
-//! that helps a model decide what to click, and every field of it costs context.
+//! that helps a model decide what to click, and every field of it costs
+//! context.
 //!
 //! And this is the natural place to **mark text untrusted**, which is the
 //! milestone's whole read-path security posture. See [`Text`].
@@ -21,13 +22,13 @@
 //! # Ids on the wire are plain integers
 //!
 //! The plan called for `Display` and `FromStr` on `NodeId` so an agent could
-//! hand an id back. It cannot be written: [`perspicax_node::NodeId`] is a re-export of
-//! `accesskit::NodeId`, so both traits are foreign to both crates and the orphan
-//! rule forbids the impls. It is also not needed. `accesskit` already ships
-//! `From<u64>` and `From<NodeId> for u64`, JSON has integers, and an id that is
-//! a number on the wire cannot be handed back in the wrong lexical form. Ids are
-//! minted from one, so the 2^53 ceiling a JSON reader imposes is not a ceiling
-//! anything can reach.
+//! hand an id back. It cannot be written: [`perspicax_node::NodeId`] is a
+//! re-export of `accesskit::NodeId`, so both traits are foreign to both crates
+//! and the orphan rule forbids the impls. It is also not needed. `accesskit`
+//! already ships `From<u64>` and `From<NodeId> for u64`, JSON has integers, and
+//! an id that is a number on the wire cannot be handed back in the wrong
+//! lexical form. Ids are minted from one, so the 2^53 ceiling a JSON reader
+//! imposes is not a ceiling anything can reach.
 
 use perspicax_index::{DamageWitness, Delta, HostFacts, Index, Receipt, Refusal, SurfaceFacts};
 use perspicax_node::{NodeId, ObservedNode, Orientation, Origin, Rect, SurfaceId, Toggled};
@@ -98,12 +99,12 @@ pub struct Text {
     ///
     /// **Absent from every node this build produces**, and worth saying rather
     /// than leaving to be inferred: an accessible object's contents live on
-    /// AT-SPI's `Text` and `Value` interfaces, and `perspicax-atspi` reads neither, so
-    /// nothing ever fills this in. It is projected because it is part of the
-    /// schema and because the day an ingest reads those interfaces the wire
-    /// should not have to change -- but until then, absent here means "not
-    /// read", never "empty". Measured 2026-09-05: typing into a real GTK entry
-    /// through `act` puts the text in the entry and leaves this `null`.
+    /// AT-SPI's `Text` and `Value` interfaces, and `perspicax-atspi` reads
+    /// neither, so nothing ever fills this in. It is projected because it is
+    /// part of the schema and because the day an ingest reads those interfaces
+    /// the wire should not have to change -- but until then, absent here means
+    /// "not read", never "empty". Measured 2026-09-05: typing into a real GTK
+    /// entry through `act` puts the text in the entry and leaves this `null`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     /// The process that rendered every string above.
@@ -134,15 +135,16 @@ impl Text {
 
 /// A rectangle, as an origin and a size.
 ///
-/// `perspicax-node`'s [`Rect`] is kurbo-derived and is two corners; an agent reading
-/// JSON wants width and height, and converting once here is cheaper than every
-/// client doing the subtraction and one of them getting it backwards.
+/// `perspicax-node`'s [`Rect`] is kurbo-derived and is two corners; an agent
+/// reading JSON wants width and height, and converting once here is cheaper
+/// than every client doing the subtraction and one of them getting it
+/// backwards.
 ///
 /// **No tool accepts one of these.** Coordinates leave this system and never
-/// enter it: a [`Verb`](perspicax_index::Verb) names a control and the compositor supplies the
-/// geometry, so an agent that cannot name a pixel cannot name the wrong one.
-/// These are here to be reasoned about -- which of two buttons is on the left --
-/// not to be sent back.
+/// enter it: a [`Verb`](perspicax_index::Verb) names a control and the
+/// compositor supplies the geometry, so an agent that cannot name a pixel
+/// cannot name the wrong one. These are here to be reasoned about -- which of
+/// two buttons is on the left -- not to be sent back.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Bounds {
     pub x: f64,
@@ -345,9 +347,9 @@ impl Node {
     /// Project one cached node, asking the gate what it would say.
     ///
     /// The gate is consulted here rather than reimplemented, which is the same
-    /// rule the act path follows: `perspicax-index` decides actability once, and
-    /// everything that reports on it asks. A projection with its own opinion
-    /// would eventually disagree with the thing that actually refuses.
+    /// rule the act path follows: `perspicax-index` decides actability once,
+    /// and everything that reports on it asks. A projection with its own
+    /// opinion would eventually disagree with the thing that actually refuses.
     #[must_use]
     pub fn of(index: &Index, id: NodeId) -> Option<Self> {
         let node = index.get(id)?;

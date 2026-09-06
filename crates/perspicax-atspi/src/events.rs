@@ -25,9 +25,9 @@
 //! So they become [`Change::SubtreeInvalidated`] instead: the index keeps what
 //! it has, marks it untrustworthy, and whoever wants the new value pays for it
 //! when they want it. That is what `Delta::Invalidated` is for, and it is why
-//! [`Index::invalidate`](perspicax_index::Index) deliberately keeps the stale nodes
-//! rather than dropping them -- a stale tree is still the best description of
-//! the screen anyone has.
+//! [`Index::invalidate`](perspicax_index::Index) deliberately keeps the stale
+//! nodes rather than dropping them -- a stale tree is still the best
+//! description of the screen anyone has.
 //!
 //! The dividend is that every rule in this module is testable against a
 //! synthetic event with no bus, no desktop and no application.
@@ -60,8 +60,8 @@ use crate::{app::ObjectKey, error::Error, map, read::from_cache_item};
 /// filtered to a single application, so a busy desktop's other programs cost
 /// nothing; and only five signal types are subscribed rather than the whole
 /// `org.a11y.atspi.Event` surface. What remains is a real obligation on the
-/// caller: [`drain_changes`](perspicax_index::Ingest::drain_changes) must be called
-/// regularly, not occasionally.
+/// caller: [`drain_changes`](perspicax_index::Ingest::drain_changes) must be
+/// called regularly, not occasionally.
 ///
 /// Making loss detectable needs a sequence number the protocol does not
 /// provide, or a periodic reconciliation read. Both are M2's problem, and the

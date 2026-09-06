@@ -6,18 +6,20 @@
 //!
 //! # What this crate can and cannot see
 //!
-//! It depends on `perspicax-index` and `perspicax-node`, and on nothing else in the
-//! workspace. No Smithay, no D-Bus, no compositor. That is the same restraint
-//! `perspicax-index` observes and it is load-bearing for the same reason: the agent
-//! interface is portable, so a port of this project to a GNOME extension or a
-//! KWin plugin re-implements [`Desktop`] and gets these six tools unchanged. A
-//! crate that cannot see a compositor cannot come to depend on one.
+//! It depends on `perspicax-index` and `perspicax-node`, and on nothing else in
+//! the workspace. No Smithay, no D-Bus, no compositor. That is the same
+//! restraint `perspicax-index` observes and it is load-bearing for the same
+//! reason: the agent interface is portable, so a port of this project to a
+//! GNOME extension or a KWin plugin re-implements [`Desktop`] and gets these
+//! six tools unchanged. A crate that cannot see a compositor cannot come to
+//! depend on one.
 //!
-//! The consequence is that the act path is **injected, not imported**. `perspicax`'s
-//! `act` module is the composition root of a click -- it is the only place that
-//! holds the index, the host and a clock at once -- and it lives in `perspicax` because
-//! waiting 200 ms for damage is I/O and `perspicax-index` does none. This crate calls
-//! it through [`Desktop::act`] and does not know what is on the other side.
+//! The consequence is that the act path is **injected, not imported**.
+//! `perspicax`'s `act` module is the composition root of a click -- it is the
+//! only place that holds the index, the host and a clock at once -- and it
+//! lives in `perspicax` because waiting 200 ms for damage is I/O and
+//! `perspicax-index` does none. This crate calls it through [`Desktop::act`]
+//! and does not know what is on the other side.
 //!
 //! # Two rules the tools keep
 //!
@@ -26,15 +28,16 @@
 //! after, and what the pixels did in the window it was given. An agent handed
 //! `true` has learned that a function returned, which is not what it asked.
 //!
-//! **The gate is not here.** [`perspicax_index::check_actable`] lives in `perspicax-index` so
-//! that a future host speaking some other protocol cannot route around it. This
-//! crate reports what the gate said and adds nothing on top of it -- there is no
-//! capability layer in v1, deliberately and for reasons written down in the
-//! plan: perspicax is one actuator among several, an agent that is refused a click can
-//! run a command instead, and a boundary that can be walked around invites the
-//! reliance it cannot support. [`perspicax_index::Refusal::NoCapability`] stays
-//! declared and unconstructed until `--seat`, where perspicax will host applications it
-//! did not spawn and the question finally has two answers.
+//! **The gate is not here.** [`perspicax_index::check_actable`] lives in
+//! `perspicax-index` so that a future host speaking some other protocol cannot
+//! route around it. This crate reports what the gate said and adds nothing on
+//! top of it -- there is no capability layer in v1, deliberately and for
+//! reasons written down in the plan: perspicax is one actuator among several,
+//! an agent that is refused a click can run a command instead, and a boundary
+//! that can be walked around invites the reliance it cannot support.
+//! [`perspicax_index::Refusal::NoCapability`] stays declared and unconstructed
+//! until `--seat`, where perspicax will host applications it did not spawn and
+//! the question finally has two answers.
 
 pub mod dto;
 mod server;
@@ -141,9 +144,9 @@ pub enum ServeError {
 /// `.with_writer(std::io::stderr)` before this is called.
 ///
 /// It is worth being exact about the state of that, because the failure is
-/// silent: `perspicax`'s binary initialises `tracing` to **stdout**, which is right
-/// while nothing serves this over stdio and is the first thing a `--mcp` flag
-/// has to change. Any other host of this server owes the same line.
+/// silent: `perspicax`'s binary initialises `tracing` to **stdout**, which is
+/// right while nothing serves this over stdio and is the first thing a `--mcp`
+/// flag has to change. Any other host of this server owes the same line.
 ///
 /// # Errors
 ///

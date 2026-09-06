@@ -231,8 +231,9 @@ pub fn subtree(nodes: Vec<RawNode>, root: &ObjectKey) -> Vec<RawNode> {
 
 /// Turn a cold read into nodes the index can hold.
 ///
-/// Every node comes out [`Origin::Unattributed`](perspicax_node::Origin::Unattributed)
-/// and [`Visibility::Unknown`](perspicax_node::Visibility::Unknown) -- that is
+/// Every node comes out
+/// [`Origin::Unattributed`](perspicax_node::Origin::Unattributed) and
+/// [`Visibility::Unknown`](perspicax_node::Visibility::Unknown) -- that is
 /// [`ObservedNode::unjoined`]'s whole job, and in M1 there is no `HostView` to
 /// change either. Which means every node produced here is un-actable, and the
 /// refusal gate says so. That is the correct M1 behaviour, and it is asserted

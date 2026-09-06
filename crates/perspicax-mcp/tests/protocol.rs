@@ -226,8 +226,8 @@ async fn the_tools_answer_over_the_wire_and_refusals_arrive_as_refusals() {
     assert_eq!(acted["structuredContent"]["kind"], "not_found");
 
     // And a malformed request is a protocol error rather than a tool result,
-    // which is the distinction `perspicax-index` draws between a selector that is not
-    // one and a screen that did not satisfy a perfectly good one.
+    // which is the distinction `perspicax-index` draws between a selector that
+    // is not one and a screen that did not satisfy a perfectly good one.
     client
         .send(&json!({
             "jsonrpc": "2.0",
