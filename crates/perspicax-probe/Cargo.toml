@@ -1,0 +1,24 @@
+[package]
+name = "perspicax-probe"
+description = "Dev CLI: dump a semantic tree, time a read, explain a refusal. The tool that makes each milestone demonstrable rather than merely tested."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "perspicax-probe"
+path = "src/main.rs"
+
+[dependencies]
+perspicax-atspi = { path = "../perspicax-atspi", version = "0.1.0" }
+perspicax-index = { path = "../perspicax-index", version = "0.1.0" }
+perspicax-node = { path = "../perspicax-node", version = "0.1.0" }
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

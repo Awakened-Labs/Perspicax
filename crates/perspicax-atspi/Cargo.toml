@@ -1,0 +1,29 @@
+[package]
+name = "perspicax-atspi"
+description = "impl Ingest over AT-SPI2. Reads stock GTK and Qt with no patched toolkit build -- slow, and deliberately first."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+perspicax-index = { path = "../perspicax-index", version = "0.1.0" }
+perspicax-node = { path = "../perspicax-node", version = "0.1.0" }
+atspi.workspace = true
+futures-util.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# Only the tests need a runtime. The crate itself names no executor: it returns
+# futures and lets whoever drives `Ingest` decide what runs them.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# The live tests need to *cause* a change, not just observe one. Poking a real
+# widget is the harness playing the part of a user, and it has to reach the bus
+# directly to do it -- going through this crate would be a test that proves
+# only that its own two halves agree with each other.
+atspi.workspace = true

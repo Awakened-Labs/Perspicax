@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Driver for the Wine attestation spike. Subcommands run in the order below.
 #
-# The whole point of the arrangement is that it never touches wm: the
+# The whole point of the arrangement is that it never touches perspicax: the
 # compositor is a stock sway, the instrument is a proxy on the socket, and the
 # clients are ordinary PE binaries. SO_PEERCRED attestation is
 # compositor-independent, so testing it against our own compositor would only

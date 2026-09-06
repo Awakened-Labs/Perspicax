@@ -1,5 +1,5 @@
-# The workspace is deliberately layered rather than flat: `wm-index` and
-# `wm-node` must compile without Wayland or D-Bus anywhere in their graph, and
+# The workspace is deliberately layered rather than flat: `perspicax-index` and
+# `perspicax-node` must compile without Wayland or D-Bus anywhere in their graph, and
 # a workspace member that cannot see Smithay cannot accidentally depend on it.
 # That property is load-bearing -- it is what makes a GNOME or KWin host a port
 # rather than a rewrite -- so it is enforced by the dependency graph, not by a
@@ -7,13 +7,13 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/wm",
-    "crates/wm-atspi",
-    "crates/wm-compositor",
-    "crates/wm-index",
-    "crates/wm-mcp",
-    "crates/wm-node",
-    "crates/wm-probe",
+    "crates/perspicax",
+    "crates/perspicax-atspi",
+    "crates/perspicax-compositor",
+    "crates/perspicax-index",
+    "crates/perspicax-mcp",
+    "crates/perspicax-node",
+    "crates/perspicax-probe",
 ]
 
 [workspace.package]
@@ -21,12 +21,18 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 license = "Apache-2.0"
+# PUBLICATION BLOCKER -- this is still the internal host. It must become the
+# GitHub URL before the push in step 4 of the open-source decision, because a
+# push is what makes it public and permanent. The PyPI 0.0.0 incident is the
+# precedent: an internal github.com URL shipped in a published artifact for
+# thirteen minutes because the field was correct in source and stale in the
+# thing actually uploaded. Verify the artifact, never the source it came from.
 repository = "https://github.com/Awakened-Labs/Perspicax"
 
 [workspace.lints.rust]
 # `forbid`, not `deny`, everywhere except the one crate that genuinely cannot
 # hold the line. A compositor talks to DRM, GBM and libinput through C, so
-# `wm-compositor` downgrades this to `deny` in its own manifest with the reason
+# `perspicax-compositor` downgrades this to `deny` in its own manifest with the reason
 # written there. Every other crate in the tree -- including the two that will
 # eventually parse text an untrusted process rendered -- stays at `forbid`.
 unsafe_code = "forbid"
@@ -38,7 +44,7 @@ unsafe_code = "forbid"
 # translation layer we own forever.
 accesskit = "0.25"
 
-# The accessibility bus client. Pinned at the workspace level so `wm-atspi` and
+# The accessibility bus client. Pinned at the workspace level so `perspicax-atspi` and
 # any future crate that speaks AT-SPI cannot drift onto different versions of a
 # wire format they both have to agree about.
 atspi = { version = "0.30", features = ["tokio"] }
@@ -57,7 +63,7 @@ futures-util = { version = "0.3", default-features = false }
 #
 # Rendering is absent on purpose rather than deferred. Occlusion needs geometry,
 # z-order, regions and damage; it does not need pixels. The only backend that
-# costs system libraries is `nested`, which is a cargo feature on wm-compositor
+# costs system libraries is `nested`, which is a cargo feature on perspicax-compositor
 # rather than something CI has to build.
 smithay = { version = "0.7", default-features = false, features = [
     "wayland_frontend",

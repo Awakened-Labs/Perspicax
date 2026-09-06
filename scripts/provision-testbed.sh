@@ -41,7 +41,7 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
 
 # Build dependencies. `libxkbcommon-dev` is the ONLY system library this
 # workspace needs, which is worth stating because it is counterintuitive for a
-# compositor: `wm-compositor` takes Smithay with `default-features = false` and
+# compositor: `perspicax-compositor` takes Smithay with `default-features = false` and
 # no renderer, so there is no EGL, no GL, no GBM, no DRM and no libinput in the
 # graph -- and no libwayland either, since wayland-backend's Rust server
 # implementation is what `use_system_lib` would have replaced. Smithay links
@@ -85,7 +85,7 @@ command -v cargo-deny >/dev/null || cargo install cargo-deny --version 0.20.2 --
 say "autologin for $WHO"
 # The box must reach a *seated* graphical session with nobody at the console.
 # The seat is what supplies XDG_RUNTIME_DIR and a session bus -- and
-# XDG_RUNTIME_DIR in particular is where `wm` binds its Wayland socket, which a
+# XDG_RUNTIME_DIR in particular is where `perspicax` binds its Wayland socket, which a
 # container does not have and which is why `ci/live-tests.sh` has to invent one.
 sudo install -d /etc/gdm3
 if ! sudo grep -q '^AutomaticLoginEnable=true' /etc/gdm3/daemon.conf 2>/dev/null; then
@@ -101,10 +101,10 @@ Reboot, then log in over SSH and run the live tests against the seated session:
 
     export XDG_RUNTIME_DIR=/run/user/$(id -u)
     export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
-    cargo test -p wm-atspi --test live -- --ignored --test-threads=1
+    cargo test -p perspicax-atspi --test live -- --ignored --test-threads=1
 
 Without those two variables an SSH session finds an empty desktop and reports
-no error worth reading. `wm-probe apps` says what the bus can actually see.
+no error worth reading. `perspicax-probe apps` says what the bus can actually see.
 
 To reproduce the CI shape instead, with no desktop involved:
 
