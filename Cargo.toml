@@ -99,3 +99,17 @@ rmcp = { version = "3.2", features = ["server", "macros", "transport-io"] }
 # the crate resolvable at the path the macro writes.
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
+
+# The audience for this compositor builds it from source -- there is no binary
+# distribution and, for a thing whose claim rests on measured latencies, there
+# should not be one taken on trust. So the release profile is stated rather than
+# defaulted: a reader who runs the README's numbers should be running the same
+# build the README was measured on.
+#
+# `panic` is deliberately left alone. Unwinding is load-bearing here: a client
+# that provokes a panic on the compositor's own thread must not take the seat,
+# the index and every other client's session down with it.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
