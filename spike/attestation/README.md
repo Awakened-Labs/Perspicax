@@ -113,11 +113,74 @@ one `sandbox_app_id`, spanning 3 distinct Unix pids. One stamp covers every
 process Wine spawned. Genuinely independent of A and B, and strictly coarser
 than either.
 
+## Verdict
+
+**Weak.** A Wine window carries two kernel-attested identities that do not both
+reduce to wineserver's bookkeeping, but neither reaches the window. The first is
+peer credentials on the Wayland connection: `winewayland.drv` connects from
+inside each Win32 process, and against stock sway Wine's fan-out —
+`explorer.exe`, `winemenubuilder.exe`, the application and its children —
+produced six connections over six distinct pids with none shared, so
+`SO_PEERCRED` at accept, pinned by `pidfd_open` against reuse, names the
+authoring process without asking wineserver anything; per-message
+`SCM_CREDENTIALS` re-attests the same fact at send time and never diverged for
+Wine, against a control proving a divergence would be visible, which makes it an
+integrity check against fd hand-off rather than a second name. The second is
+socket provenance: a `wp_security_context_v1` listener stamped by a launcher
+before Wine exists, which sway attributed to all four windows across three pids
+under one instance id — a different root, and equally wineserver-free. Together
+they establish "process P, sandbox instance I", and stop there. Three top-levels
+in one process shared one connection, one pid and one client-asserted `app_id`,
+so nothing kernel-side separates windows within a process; and `/proc/<pid>/exe`
+is `wine-preloader` for every Wine client, the Windows program name surviving
+only in a `cmdline` that Wine demonstrably rewrites — so *which program*
+authored a window is not attested at all, only *which process*. Strong is
+reachable only by owning the launcher, which is a deployment property rather
+than a fact about Wine. Measured on a wow64-only prefix; 32-bit prefixes
+unverified.
+
+### What Weak costs, and what it does not
+
+Weak is a verdict against one bar: *which program, and which window*. It is
+worth being precise about the bar it clears, because that is the part that is
+usable now.
+
+Against **"which process authored this"** the guarantee is solid, unconditional
+and available today. `SO_PEERCRED` on the accepted connection, pinned with
+`pidfd_open`, names the Unix process that drew a Wine window; it needs no
+launcher cooperation, no sandbox, no `wp_security_context_v1`, and no
+wineserver. M1 is what makes this true rather than hopeful — Wine really does
+open a connection per Unix process, so the pid the kernel reports is the pid
+that drew the pixels, not a bookkeeper's stand-in for it. Any policy keyed on
+process identity or process-scoped trust — refusing a string from a process that
+has no business producing one, scoping what an agent may believe to the process
+it came from, telling one running application from another — is fully served.
+
+What Weak actually denies is *finer* than that, and it is worth stating as two
+concrete refusals rather than a mood:
+
+- **Two windows of one Wine process are indistinguishable.** A policy that needs
+  "this dialog does not carry the same authority as that main window" cannot be
+  built on kernel evidence. Both discriminators Wayland offers here — `app_id`
+  and title — are set by the client.
+- **The Windows program is unnamed.** `/proc/<pid>/exe` is the Wine loader for
+  everything, so a policy cannot key on "this came from Notepad" without
+  trusting `cmdline` or asking wineserver, and neither is attested.
+
+So the honest one-line framing: this buys **process-granular provenance for Wine
+windows, for free, in any compositor** — and buys nothing below the process
+boundary. Whether that is enough is a question about the policy being written,
+not about the attestation.
+
 ## What remains
 
-The verdict paragraph, and the judgement behind it: A and B pin a window to a
-Unix *process* without wineserver, C names the *app instance* without
-wineserver — but nothing kernel-side separates two windows of one process, and
-nothing kernel-side says which Windows program a process is running. Whether
-that is Weak, or Strong-conditional-on-owning-the-launcher, is the call the
-paragraph has to make and defend.
+The spike is closed. Two follow-ons it surfaced, both out of its scope:
+
+- `crates/wm-compositor/src/origin.rs` reads `/proc/<pid>/exe` unpinned, which
+  for a Wine client returns `wine-preloader` — a confident and useless answer
+  attached to a real surface. `pidfd_open` at accept, or the `starttime` token
+  this harness records, closes the reuse window.
+- Scoping the UIA-to-`Ingest` bridge. Wine ships a real `uiautomationcore.dll`
+  and no AT-SPI bridge on the Unix side, so the accessibility tree exists inside
+  the prefix and nothing exports it. That is the question this spike was told
+  not to eat, and it now has a known provenance ceiling to be designed against.
