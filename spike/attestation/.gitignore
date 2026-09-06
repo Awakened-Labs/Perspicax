@@ -1,0 +1,13 @@
+# Built here rather than vendored: the point is that the harness compiles
+# against whatever sway, Wine and wayland-protocols the testbed actually has.
+wl-attest
+fdpass-probe
+secctx-launch
+attest-win.exe
+security-context-v1-protocol.c
+security-context-v1-client-protocol.h
+
+# Run output. Readings that matter are quoted in README.md; the raw ledgers are
+# per-run and per-box.
+*.jsonl
+*.log
