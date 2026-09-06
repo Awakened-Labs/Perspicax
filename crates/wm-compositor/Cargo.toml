@@ -1,6 +1,6 @@
 [package]
 name = "wm-compositor"
-description = "impl HostView on Smithay: outputs, xdg-shell, seat, xwayland, and the damage feed that drives invalidation."
+description = "impl HostView on Smithay: outputs, xdg-shell, seat, and the damage feed that drives invalidation."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
