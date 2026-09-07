@@ -1,9 +1,9 @@
 # GitLab CI -- the four gates, in the order they run: fmt, clippy, deny, test.
 #
 # This is the M0 shape and it is deliberately boring. What matters is that the
-# order and the names match our other repositories's pipeline, so "run the gates locally
-# before pushing" means the same thing in both repos and a habit carries over
-# rather than being relearned.
+# order and the names are the same ones used across our other repositories, so
+# "run the gates locally before pushing" means the same thing everywhere and the
+# habit carries over rather than being relearned.
 #
 # The `test` job carries a live accessibility bus and two real toolkit
 # applications, because that is the whole point of the ingest path and mocking

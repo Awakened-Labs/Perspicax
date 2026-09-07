@@ -90,7 +90,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 #
 # The plan named 3.1.4 and resolution takes 3.2.0, which is what the lockfile
 # holds and what was read: the four macros, `ServiceExt` and `transport-io` are
-# unchanged from the 1.7 that our MCP crate uses, and 3.x adds `name` /
+# unchanged from the 1.7 we use elsewhere, and 3.x adds `name` /
 # `instructions` on `#[tool_handler]`, which is where this server introduces
 # itself. Written as the floor rather than pinned with `=`, like every other
 # dependency here; CI's `--locked` is what makes the build reproducible.
