@@ -16,7 +16,7 @@ use perspicax::{
     observe::{self, App, Reading},
     session,
 };
-use perspicax_compositor::{Config, Facts, Requests, Stop};
+use perspicax_compositor::{Backend, Config, Facts, Requests, Stop};
 use perspicax_index::{Index, Refusal};
 use perspicax_node::{NodeId, Origin, SurfaceId, Visibility};
 
@@ -148,7 +148,7 @@ fn run_demo() -> Reading {
     let facts = Facts::new();
     let stop = Stop::new();
     let config = Config {
-        size: (1280, 800),
+        backend: Backend::Headless { size: (1280, 800) },
         spawn: vec![
             vec![gallery.to_string_lossy().into_owned()],
             vec!["gtk4-widget-factory".to_owned()],

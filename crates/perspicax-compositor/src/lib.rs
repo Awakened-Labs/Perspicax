@@ -11,7 +11,7 @@
 //! precise definition of a surface that renders without explaining itself, and
 //! the only honest trigger for a vision fallback.
 //!
-//! # It does not draw anything, and that is the design
+//! # Headless, it does not draw anything, and that is the design
 //!
 //! A compositor is usually a thing that composites. This one runs a Wayland
 //! server, tracks surfaces, geometry, regions, z-order and damage, and never
@@ -29,10 +29,13 @@
 //! buffer, buffers are released the moment they arrive rather than one commit
 //! late. See [`state::Compositor::commit`].
 //!
-//! Real DRM, modesetting and multi-output wait for `--seat`; they are the part
-//! of compositor work that consumes schedule without proving anything.
+//! A person needs the picture, so [`Backend::Seat`] -- behind the `seat`
+//! feature -- renders to the outputs a GPU has connected and takes input from
+//! libinput. It is a second backend beside this one, not a replacement for
+//! it: the headless compositor stays renderer-free, and it stays what CI runs.
 
 pub mod act;
+mod backend;
 pub mod facts;
 pub mod host;
 mod origin;
@@ -40,6 +43,7 @@ pub mod state;
 
 pub use crate::{
     act::{ActError, Dispatched},
+    backend::Backend,
     facts::Facts,
     host::{Host, Request, Requests},
 };
@@ -126,18 +130,32 @@ pub enum Error {
         /// Why it did not start.
         source: std::io::Error,
     },
+    /// The backend asked for was left out of this build.
+    #[error(
+        "this perspicax was built without the {backend} backend; rebuild with \
+         the `{feature}` cargo feature (from the workspace root, \
+         `--features perspicax/desktop` builds a full session)"
+    )]
+    NotBuilt {
+        /// The backend, as the CLI spells it.
+        backend: &'static str,
+        /// The cargo feature that provides it.
+        feature: &'static str,
+    },
+    /// The seat could not be brought up: no session, no GPU, no input.
+    #[error("the seat could not be brought up: {0}")]
+    Seat(String),
     /// The display failed while talking to clients.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
-/// How to run.
-#[derive(Debug, Clone)]
+/// How to run. The default is a 1920x1080 headless compositor that spawns
+/// nothing and runs until stopped.
+#[derive(Debug, Clone, Default)]
 pub struct Config {
-    /// The virtual output's size in pixels. Windows are placed inside it, and
-    /// it is the coordinate space every global rect in
-    /// [`perspicax_index::HostFacts`] is expressed in.
-    pub size: (i32, i32),
+    /// Where output goes and input comes from. See [`Backend`].
+    pub backend: Backend,
     /// Commands to start once the socket exists, each as a program and its
     /// arguments.
     pub spawn: Vec<Vec<String>>,
@@ -153,17 +171,6 @@ pub struct Config {
     pub run_for: Option<Duration>,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            size: (1920, 1080),
-            spawn: Vec::new(),
-            env: Vec::new(),
-            run_for: None,
-        }
-    }
-}
-
 /// Run a compositor until its deadline passes, or forever.
 ///
 /// Three handles, all owned by the caller, and each one a direction: `facts` is
@@ -175,15 +182,30 @@ impl Default for Config {
 ///
 /// # Errors
 ///
-/// [`Error`], for any of the ways a compositor fails to come up: no socket, no
-/// event loop, a child that will not start, or a display that fails mid-run.
+/// [`Error`], for any of the ways a compositor fails to come up: a backend
+/// this build left out, no socket, no event loop, a child that will not start,
+/// or a display that fails mid-run.
 pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> Result<(), Error> {
+    config.backend.ensure_built()?;
+    let size = match config.backend {
+        Backend::Headless { size } => size,
+        // Built, and not yet able to run: the session, DRM and renderer land
+        // in the next slice of this milestone. Refused here, before a socket
+        // exists, so no client is ever accepted by a compositor that cannot
+        // show it anything.
+        Backend::Seat => {
+            return Err(Error::Seat(
+                "the seat backend is compiled in but not implemented yet".to_owned(),
+            ));
+        }
+    };
+
     let mut event_loop: EventLoop<'static, Compositor> =
         EventLoop::try_new().map_err(|error| Error::EventLoop(error.to_string()))?;
     let mut display: Display<Compositor> =
         Display::new().map_err(|error| Error::Display(error.to_string()))?;
     let handle = display.handle();
-    let mut state = Compositor::new(&handle, config.size, facts.clone());
+    let mut state = Compositor::new(&handle, size, facts.clone());
 
     let socket =
         ListeningSocketSource::new_auto().map_err(|error| Error::Socket(error.to_string()))?;
@@ -256,7 +278,7 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         tracing::warn!("this Requests already has a loop: no actions will be accepted");
     }
 
-    tracing::info!(socket = ?socket_name, size = ?config.size, "compositor up");
+    tracing::info!(socket = ?socket_name, backend = ?config.backend, "compositor up");
     let mut children = spawn_all(&config.spawn, &config.env, &socket_name)?;
 
     let deadline = config.run_for.map(|run_for| Instant::now() + run_for);

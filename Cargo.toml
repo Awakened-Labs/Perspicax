@@ -58,10 +58,11 @@ futures-util = { version = "0.3", default-features = false }
 # implementation, so this does not link libwayland either. `desktop` is Space
 # and Window, which carry z-order and add no dependencies at all.
 #
-# Rendering is absent on purpose rather than deferred. Occlusion needs geometry,
-# z-order, regions and damage; it does not need pixels. The only backend that
-# costs system libraries is `nested`, which is a cargo feature on
-# perspicax-compositor rather than something CI has to build.
+# Rendering is absent from the headless build on purpose. Occlusion needs
+# geometry, z-order, regions and damage; it does not need pixels. A real
+# session does need them, so DRM, GBM, EGL, GLES, libinput, udev and libseat
+# arrive through `perspicax-compositor`'s `seat` feature, and X11 applications
+# through its `xwayland` feature -- each costing only the build that asks.
 smithay = { version = "0.7", default-features = false, features = [
     "wayland_frontend",
     "desktop",

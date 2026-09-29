@@ -23,3 +23,27 @@ thiserror.workspace = true
 tracing.workspace = true
 perspicax-index = { path = "../perspicax-index", version = "0.1.0" }
 perspicax-node = { path = "../perspicax-node", version = "0.1.0" }
+
+# Backends, as cargo features, so a build carries only the system libraries it
+# will actually use. Neither is on by default: the four gates build the
+# headless compositor, which needs nothing but libxkbcommon, and a feature a
+# library turns on for itself is one every dependent pays for without asking.
+[features]
+# A real session on a real seat: libseat for device access without root, udev
+# to find GPUs and hotplug outputs, DRM/KMS and GBM to put buffers on a
+# connector, EGL and GLES to composite into them, libinput for keyboards and
+# pointers. Every one of these is a C library, found by pkg-config at build
+# time -- which is why this is a feature rather than the default.
+seat = [
+    "smithay/backend_drm",
+    "smithay/backend_gbm",
+    "smithay/backend_egl",
+    "smithay/renderer_gl",
+    "smithay/backend_libinput",
+    "smithay/backend_udev",
+    "smithay/backend_session_libseat",
+]
+# X11 applications, hosted by an Xwayland this compositor starts. Pure Rust on
+# our side (x11rb speaks the protocol; Xwayland itself is a program we spawn,
+# not a library we link), so it costs the headless build nothing to carry.
+xwayland = ["smithay/xwayland"]

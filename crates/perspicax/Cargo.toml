@@ -45,6 +45,15 @@ perspicax-index = { path = "../perspicax-index", version = "0.1.0" }
 perspicax-mcp = { path = "../perspicax-mcp", version = "0.1.0" }
 perspicax-node = { path = "../perspicax-node", version = "0.1.0" }
 
+# The USE flags. Each forwards to the crate that does the work, and `desktop` is
+# the set a person logging in from a TTY wants. None are default: the gates
+# build the headless compositor, and a default here would make every `cargo
+# test` on a machine without libinput and libseat a build failure.
+[features]
+seat = ["perspicax-compositor/seat"]
+xwayland = ["perspicax-compositor/xwayland"]
+desktop = ["seat", "xwayland"]
+
 # The v1 demo asserts on the JSON two tools actually answered, rather than on a
 # projection of it made a second time in the test -- so it needs to hold a
 # `serde_json::Value`. Nothing in the library does.

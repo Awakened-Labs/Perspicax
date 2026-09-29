@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use perspicax_compositor::{Config, Error, Facts, Requests, Stop};
+use perspicax_compositor::{Backend, Config, Error, Facts, Requests, Stop};
 
 /// The smallest claim worth making automatically: it binds a socket, runs an
 /// event loop, and stops when it is told to. Everything else in this milestone
@@ -18,7 +18,7 @@ use perspicax_compositor::{Config, Error, Facts, Requests, Stop};
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_headless_compositor_comes_up_and_stops_when_told() {
     let config = Config {
-        size: (800, 600),
+        backend: Backend::Headless { size: (800, 600) },
         spawn: Vec::new(),
         env: Vec::new(),
         run_for: Some(Duration::from_millis(250)),
@@ -51,7 +51,7 @@ fn a_headless_compositor_comes_up_and_stops_when_told() {
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_command_that_does_not_exist_is_named_in_the_error() {
     let config = Config {
-        size: (800, 600),
+        backend: Backend::Headless { size: (800, 600) },
         spawn: vec![vec![
             "perspicax-no-such-program".to_owned(),
             "--flag".to_owned(),
@@ -76,7 +76,7 @@ fn a_command_that_does_not_exist_is_named_in_the_error() {
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_stop_request_ends_the_loop_before_its_deadline() {
     let config = Config {
-        size: (800, 600),
+        backend: Backend::Headless { size: (800, 600) },
         spawn: Vec::new(),
         env: Vec::new(),
         run_for: Some(Duration::from_secs(60)),

@@ -68,6 +68,37 @@ screenshots taken: observe a window, resolve a selector, click it, get a
 receipt — and get a *refusal* when the target is occluded. It is
 `crates/perspicax/tests/act.rs`.
 
+## Roadmap: a window manager a person uses every day
+
+v1 hosts applications for an agent. The W track makes the same compositor one
+a person logs in to — KDE-Plasma-like out of the box, and tunable all the way
+down to wallpaper and a keyboard. The agent interface is kept working at every
+step; it is the reason the compositor exists, not a feature bolted to it.
+
+Two layers of tuning. **Cargo features** decide what is built at all, the way
+USE flags do: `seat` (DRM, GBM, EGL/GLES, libinput, libseat), `xwayland`, and
+`desktop`, which is both. Later, one feature per shell component and per
+optional module. **A config file** decides what a build that has a thing does
+with it, and a key for something left out of the build is an error naming the
+feature, never silently ignored.
+
+| | | |
+|---|---|---|
+| **W1** | A usable session: DRM from a TTY, libinput, move/resize, keybinds, multi-monitor, clipboard, layer-shell and session-lock (so waybar, fuzzel and swaylock work), Xwayland | in progress |
+| **W2** | Config profiles (`classic`, `minimal`) and policy: focus models, a workspace grid with edge flipping, moving between screens, snapping | |
+| **W3** | Server-side decorations, then tabbed window groups | |
+| **W4** | Protocols Smithay lacks: foreign-toplevel management, ext-workspace, screencopy, output management — and `screenshot` stops refusing | |
+| **W5** | `perspicax-shell`, a separate process: wallpaper, panel, tray, start menu, root menu, desktop icons — each a feature and a toggle | |
+| **W6** | Polish: themes, keymaps, a session entry for display managers | |
+
+The shell is a separate process on purpose. A panel that crashes should not
+take every window with it, and anything speaking layer-shell can stand in for
+any piece of it.
+
+X11 applications arrive through Xwayland, a client this compositor starts — not
+through a second build that is an X11 window manager. There is one display
+server path, so there is nothing to keep two builds of in step.
+
 ## What reading a tree costs
 
 Measured on Debian 13 (GNOME's accessibility stack, at-spi2-core 2.56.2), best
@@ -214,7 +245,7 @@ invites reliance. `Refusal::NoCapability` is declared and unconstructed until
 spawned, and the question finally has two different answers.
 
 **`screenshot` ships declared and always refusing.** There is no renderer in
-this build at all — occlusion needs geometry, z-order, regions and damage, and
+the headless build at all — occlusion needs geometry, z-order, regions and damage, and
 none of those need pixels. It is listed so that a model can tell the fallback
 from the mechanism, and its refusal reports the count of nodes under rendering
 no semantic event explained, which is the only honest trigger for a pixel path
@@ -250,6 +281,13 @@ trigger for a vision fallback.
 ```sh
 cargo build --workspace
 cargo test  --workspace
+```
+
+The daily-driver build, which needs the development packages for libudev,
+libinput, libseat, libgbm, libdrm, libEGL and libGLESv2:
+
+```sh
+cargo build --release --features perspicax/desktop
 ```
 
 Gates, in the order CI runs them:

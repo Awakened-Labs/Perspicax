@@ -36,7 +36,7 @@ use perspicax::{
     observe::{self, App},
     session,
 };
-use perspicax_compositor::{Config, Facts, Host, Requests, Stop};
+use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop};
 use perspicax_index::{Index, PointerButton, Receipt, Refusal, Selector, Verb};
 use perspicax_mcp::{Denied, Desktop, Perspicax, dto};
 use perspicax_node::{NodeId, Origin, Role, SurfaceId};
@@ -276,7 +276,7 @@ fn run(spawn: Vec<Vec<String>>) -> Drive {
     // so a `Host` built from a second channel would be one nobody hears.
     let requests = Requests::new();
     let config = Config {
-        size: (1280, 800),
+        backend: Backend::Headless { size: (1280, 800) },
         spawn,
         env: session::accessibility_env(),
         run_for: Some(Duration::from_secs(180)),

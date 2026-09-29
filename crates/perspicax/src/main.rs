@@ -11,13 +11,19 @@
 //! perspicax --headless --spawn gtk4-widget-factory --run-for 10
 //! ```
 //!
+//! Or, from a TTY on a build with `--features desktop`, as a real session:
+//!
+//! ```sh
+//! perspicax --seat
+//! ```
+//!
 //! It needs `XDG_RUNTIME_DIR` set, which is where the Wayland socket goes. Over
 //! SSH that is `export XDG_RUNTIME_DIR=/run/user/$(id -u)`, the same variable
 //! `perspicax-probe` needs for the accessibility bus and for the same reason: a login
 //! shell has a session, and an SSH command does not.
 //!
 //! Set `RUST_LOG=info` for a running account of clients connecting and windows
-//! mapping; that log is currently the only way to watch a compositor that
+//! mapping; headless, that log is the only way to watch a compositor that
 //! deliberately draws nothing.
 
 use std::{sync::Arc, time::Duration};
@@ -25,7 +31,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use perspicax::{desk::Desk, observe, session};
-use perspicax_compositor::{Config, Facts, Host, Requests, Stop};
+use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop};
 use perspicax_index::Change;
 
 /// How often the index takes what the accessibility bus has volunteered.
@@ -39,25 +45,34 @@ const REFRESH: Duration = Duration::from_millis(250);
 #[derive(Parser)]
 #[command(
     name = "perspicax",
-    about = "An agent-native Wayland compositor: it tracks what is on screen instead of drawing it.",
-    version
+    about = "An agent-native Wayland compositor: everything on screen, as a typed API.",
+    version,
+    group = clap::ArgGroup::new("backend").required(true).args(["headless", "seat"])
 )]
 struct Cli {
     /// Run with no window system at all: a virtual output, no rendering, no
-    /// GPU.
+    /// GPU. What CI runs, and what an agent with no person present wants.
     ///
-    /// The only mode there is. `--nested`, which runs inside an existing
-    /// session and shows you pixels, is named in the plan and not built:
-    /// nothing this milestone has to prove needs a picture, and a renderer is
-    /// the single largest dependency a compositor can acquire. The flag is
-    /// required rather than defaulted so that the day a second mode exists,
-    /// no script silently changes meaning.
+    /// One of `--headless` or `--seat` is required rather than defaulted, so
+    /// that no script written against one silently starts meaning the other.
     #[arg(long)]
     headless: bool,
 
+    /// Run as a real session on this machine's seat: the connected monitors,
+    /// the keyboards and pointers, device access through libseat. Start it
+    /// from a TTY. Needs a build with `--features seat` (or `desktop`).
+    #[arg(long)]
+    seat: bool,
+
     /// The virtual output's size, as `WIDTHxHEIGHT`. Every global rectangle the
-    /// index reports is in this space.
-    #[arg(long, default_value = "1920x1080", value_parser = parse_size)]
+    /// index reports is in this space. Headless only: a seat's outputs are the
+    /// size its monitors are.
+    #[arg(
+        long,
+        default_value = "1920x1080",
+        value_parser = parse_size,
+        conflicts_with = "seat"
+    )]
     size: (i32, i32),
 
     /// A command to run against this compositor, repeatable. Split on spaces,
@@ -121,9 +136,15 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    if !cli.headless {
-        bail!("no backend selected: pass --headless (see --help; it is the only one)");
-    }
+    let backend = if cli.seat {
+        Backend::Seat
+    } else {
+        Backend::Headless { size: cli.size }
+    };
+    // First, before the accessibility bus is touched: a backend this binary
+    // cannot run is the one thing worth saying, and it should not arrive
+    // after a registry has been started for nothing.
+    backend.ensure_built()?;
 
     // Before anything is spawned, and in this order. A registry that arrives
     // after its clients is a registry GTK has already given up on.
@@ -133,7 +154,7 @@ fn main() -> Result<()> {
     }
 
     let config = Config {
-        size: cli.size,
+        backend,
         spawn: cli
             .spawn
             .iter()
