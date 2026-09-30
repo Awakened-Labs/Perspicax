@@ -6,6 +6,8 @@
 //! under the pointer takes the keyboard and stays where it is in the stack.
 //! So every decision here names both parts separately.
 
+use std::time::Duration;
+
 /// How the keyboard follows the pointer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusModel {
@@ -130,6 +132,25 @@ pub fn cycle<W: Copy>(bottom_to_top: &[W]) -> Option<W> {
     }
 }
 
+/// How old an activation token may be and still move focus.
+///
+/// Long enough for a slow application to start and map its window after the
+/// click that launched it; short enough that a token saved up and spent later
+/// cannot pull focus away from whatever the person is doing by then.
+pub const ACTIVATION_WINDOW: Duration = Duration::from_secs(10);
+
+/// Whether an `xdg-activation` request may take focus.
+///
+/// Only a token minted in answer to the person's own input (a click or key
+/// with a seat serial behind it), and only while it is fresh. Anything else
+/// is a window trying to take focus for itself, which is the focus stealing
+/// the protocol exists to prevent. A refused activation is not an error. The
+/// window simply stays where it is.
+#[must_use]
+pub fn grants_activation(age: Duration, from_input: bool) -> bool {
+    from_input && age < ACTIVATION_WINDOW
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +235,20 @@ mod tests {
     fn cycling_one_window_or_none_does_nothing() {
         assert_eq!(cycle(&[1]), None);
         assert_eq!(cycle::<u32>(&[]), None);
+    }
+
+    #[test]
+    fn a_fresh_token_from_a_click_may_take_focus() {
+        assert!(grants_activation(Duration::from_millis(300), true));
+    }
+
+    #[test]
+    fn a_token_with_no_input_behind_it_may_not() {
+        assert!(!grants_activation(Duration::ZERO, false));
+    }
+
+    #[test]
+    fn a_stale_token_may_not() {
+        assert!(!grants_activation(ACTIVATION_WINDOW, true));
     }
 }

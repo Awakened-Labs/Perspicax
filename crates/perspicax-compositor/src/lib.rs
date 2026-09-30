@@ -39,6 +39,7 @@ mod backend;
 pub mod facts;
 pub mod host;
 mod origin;
+mod shell;
 pub mod state;
 
 pub use crate::{
@@ -279,6 +280,7 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         if let Err(error) = display.dispatch_clients(&mut state) {
             break Err(Error::Io(error));
         }
+        state.popups.cleanup();
         if let Err(error) = display.flush_clients() {
             break Err(Error::Io(error));
         }

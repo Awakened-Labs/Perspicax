@@ -114,9 +114,15 @@ impl Compositor {
         // `Space::elements()` iterates back to front, which is the order
         // `HostFacts::bottom_to_top` wants. The two agree by construction
         // rather than through a conversion somebody has to keep right.
+        //
+        // Minimized windows first, as unmapped: below everything, and judged
+        // `Unmapped` rather than forgotten, so an agent asking about a node in
+        // one is told the window is hidden -- which it can do something about
+        // -- rather than that no such surface exists.
         let surfaces: Vec<SurfaceFacts> = self
-            .space
-            .elements()
+            .minimized
+            .iter()
+            .chain(self.space.elements())
             .filter_map(|window| self.facts_for(window))
             .collect();
 
@@ -132,8 +138,13 @@ impl Compositor {
         let toplevel = window.toplevel()?;
         let surface = toplevel.wl_surface();
 
-        // Where we put it, which is a fact this compositor owns outright.
-        let location = self.space.element_location(window)?;
+        // Where we put it, which is a fact this compositor owns outright. A
+        // minimized window is described where it will come back to.
+        let minimized = self.minimized.contains(window);
+        let location = match self.space.element_location(window) {
+            Some(location) => location,
+            None => crate::shell::placement(window, |placement| placement.parked)?,
+        };
 
         // How big it is, from the client's own `xdg_surface.set_window_geometry`
         // rather than from `Window::geometry()`.
@@ -178,7 +189,7 @@ impl Compositor {
             // created but never presented a buffer is a window in name only,
             // and reporting it as mapped would let a node be judged visible on
             // a surface with nothing on it.
-            mapped: window.alive() && self.has_presented(id),
+            mapped: window.alive() && self.has_presented(id) && !minimized,
             geometry: Rect::new(
                 f64::from(location.x),
                 f64::from(location.y),

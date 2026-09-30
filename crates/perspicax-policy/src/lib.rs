@@ -1,9 +1,11 @@
 //! Window-management decisions, as data.
 //!
 //! The compositor knows *how* to focus a surface, raise a window or start a
-//! program. This crate decides *whether* and *which*: given what is under the
-//! pointer and what holds the keyboard, which window should be focused and
-//! which raised; given a chord, what it means.
+//! program. This crate decides *whether*, *which* and *where*. Given what is
+//! under the pointer and what holds the keyboard, it decides which window
+//! should be focused and which raised. Given a chord or a modifier-drag, it
+//! decides what that means. Given a drag, an output or a maximized window, it
+//! decides where a window goes and how big it is.
 //!
 //! It imports no Smithay and does no I/O, for the same reason
 //! `perspicax-index` doesn't. A decision that can be written as a function of
@@ -19,10 +21,12 @@
 
 mod binds;
 mod focus;
+mod geometry;
 
 pub use crate::{
-    binds::{Action, Bindings, Chord, Mods},
-    focus::{Change, Decision, Focus, FocusModel, cycle},
+    binds::{Action, Bindings, Button, Chord, Drag, Mods},
+    focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},
+    geometry::{Edges, Rect, anchor, edges_near, place, resize, unmaximized_at},
 };
 
 /// Keysyms, re-exported so a caller spells chords with the same type this

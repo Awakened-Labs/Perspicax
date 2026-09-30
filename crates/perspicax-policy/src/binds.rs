@@ -46,13 +46,40 @@ pub enum Action {
     CycleFocus,
 }
 
-/// A table of chords and what each one does.
+/// A pointer button, as far as a binding cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    Left,
+    Middle,
+    Right,
+}
+
+/// What dragging a window with the drag modifier held does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drag {
+    /// Move the window, grabbed anywhere, not only by its titlebar.
+    Move,
+    /// Resize it from the edges nearest the pointer. See
+    /// [`crate::edges_near`].
+    Resize,
+}
+
+/// A table of chords and what each one does, plus the modifier that turns a
+/// press anywhere on a window into a drag.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Bindings(Vec<(Chord, Action)>);
+pub struct Bindings {
+    keys: Vec<(Chord, Action)>,
+    /// `None`: no modifier-drag at all, and every click is the client's.
+    drag: Option<Mods>,
+}
 
 impl Bindings {
     /// The two bindings anyone coming from Windows or Plasma presses without
     /// thinking: Alt+F4 closes, Alt+Tab moves to the next window.
+    ///
+    /// Alt also drags: left to move a window, right to resize it, from
+    /// anywhere on it. That is what Plasma does, and every X window manager
+    /// before it.
     ///
     /// No terminal or launcher binding. Starting programs arrives with config
     /// (slice 5), and which program is the person's choice, not a guess made
@@ -60,6 +87,7 @@ impl Bindings {
     #[must_use]
     pub fn classic() -> Self {
         Self::default()
+            .drag_with(Mods::alt())
             .bind(
                 Chord {
                     mods: Mods::alt(),
@@ -80,9 +108,31 @@ impl Bindings {
     /// user's config over a profile) overrides an earlier one this way.
     #[must_use]
     pub fn bind(mut self, chord: Chord, action: Action) -> Self {
-        self.0.retain(|(bound, _)| *bound != chord);
-        self.0.push((chord, action));
+        self.keys.retain(|(bound, _)| *bound != chord);
+        self.keys.push((chord, action));
         self
+    }
+
+    /// Make `mods` the modifier that turns a press on a window into a drag.
+    #[must_use]
+    pub fn drag_with(mut self, mods: Mods) -> Self {
+        self.drag = Some(mods);
+        self
+    }
+
+    /// Whether pressing `button` with `mods` held starts a drag, and which.
+    /// The modifiers must match exactly, as for keys, so Alt+Shift+click is
+    /// still the client's.
+    #[must_use]
+    pub fn drag(&self, mods: Mods, button: Button) -> Option<Drag> {
+        if self.drag != Some(mods) {
+            return None;
+        }
+        match button {
+            Button::Left => Some(Drag::Move),
+            Button::Right => Some(Drag::Resize),
+            Button::Middle => None,
+        }
     }
 
     /// What this key press means, if anything.
@@ -94,7 +144,7 @@ impl Bindings {
     /// Alt+Shift+Tab can mean different things.
     #[must_use]
     pub fn resolve(&self, mods: Mods, syms: &[Keysym]) -> Option<&Action> {
-        self.0
+        self.keys
             .iter()
             .find(|(chord, _)| chord.mods == mods && syms.contains(&chord.key))
             .map(|(_, action)| action)
@@ -167,5 +217,26 @@ mod tests {
             bindings.resolve(Mods::alt(), &[Keysym::F4]),
             Some(&Action::CycleFocus)
         );
+    }
+
+    #[test]
+    fn alt_left_drag_moves_and_alt_right_drag_resizes_in_the_classic_table() {
+        let classic = Bindings::classic();
+        assert_eq!(classic.drag(Mods::alt(), Button::Left), Some(Drag::Move));
+        assert_eq!(classic.drag(Mods::alt(), Button::Right), Some(Drag::Resize));
+        assert_eq!(classic.drag(Mods::alt(), Button::Middle), None);
+    }
+
+    #[test]
+    fn a_plain_click_is_never_a_drag() {
+        assert_eq!(
+            Bindings::classic().drag(Mods::default(), Button::Left),
+            None
+        );
+    }
+
+    #[test]
+    fn with_no_drag_modifier_nothing_drags() {
+        assert_eq!(Bindings::default().drag(Mods::alt(), Button::Left), None);
     }
 }

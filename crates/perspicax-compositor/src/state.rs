@@ -16,23 +16,25 @@ use std::{
 use perspicax_index::Consent;
 use perspicax_node::{Origin, Rect, SurfaceId};
 
-use crate::{act::Keys, backend::Running, facts::Facts, origin};
+use crate::{act::Keys, backend::Running, facts::Facts, origin, shell};
 
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
-    desktop::{Space, Window},
+    delegate_compositor, delegate_data_device, delegate_output, delegate_primary_selection,
+    delegate_seat, delegate_shm, delegate_xdg_activation, delegate_xdg_shell,
+    desktop::{PopupKind, PopupManager, Space, Window},
     input::{
         Seat, SeatHandler, SeatState,
         keyboard::{KeyboardHandle, XkbConfig},
-        pointer::{CursorImageStatus, PointerHandle},
+        pointer::{CursorImageStatus, GrabStartData, PointerHandle},
     },
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
-            Client, DisplayHandle,
+            Client, DisplayHandle, Resource as _,
             backend::{ClientData, ClientId, DisconnectReason},
-            protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
+            protocol::{
+                wl_buffer::WlBuffer, wl_output::WlOutput, wl_seat::WlSeat, wl_surface::WlSurface,
+            },
         },
     },
     utils::{SERIAL_COUNTER, Serial},
@@ -47,6 +49,10 @@ use smithay::{
             SelectionHandler,
             data_device::{
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+                set_data_device_focus,
+            },
+            primary_selection::{
+                PrimarySelectionHandler, PrimarySelectionState, set_primary_focus,
             },
         },
         shell::xdg::{
@@ -54,14 +60,11 @@ use smithay::{
             XdgShellState,
         },
         shm::{ShmHandler, ShmState},
+        xdg_activation::{
+            XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+        },
     },
 };
-
-/// How far each new toplevel is offset from the last, so two windows opened in
-/// a row are not stacked exactly on top of each other and invisible to a test
-/// about overlap. A placement policy, and a placeholder for one: the arc's
-/// occlusion demo needs to *choose* where windows go, and will replace this.
-const CASCADE: i32 = 32;
 
 /// How many damaged regions to remember per surface.
 ///
@@ -158,7 +161,18 @@ pub struct Compositor {
     /// What the focused client asked the pointer to look like. Only the seat
     /// draws it; headless records it and nothing reads it.
     pub(crate) cursor: CursorImageStatus,
-    placed: i32,
+    /// Popups (menus, tooltips), tracked so they render and hit-test with
+    /// their window and so a grab can dismiss them.
+    pub(crate) popups: PopupManager,
+    /// Windows the person minimized: unmapped from the space, kept here in
+    /// the order they went, and described to the index as unmapped rather
+    /// than forgotten.
+    pub(crate) minimized: Vec<Window>,
+    /// RAII handles for the primary-selection and xdg-activation globals.
+    primary_selection: PrimarySelectionState,
+    activation: XdgActivationState,
+    /// How many windows have been placed, for the cascade.
+    pub(crate) placed: u32,
     started: Instant,
 }
 
@@ -211,6 +225,10 @@ impl Compositor {
             cursor: CursorImageStatus::default_named(),
             generation: 0,
             next_surface: 0,
+            popups: PopupManager::default(),
+            minimized: Vec::new(),
+            primary_selection: PrimarySelectionState::new::<Self>(display),
+            activation: XdgActivationState::new::<Self>(display),
             placed: 0,
             started: Instant::now(),
         }
@@ -378,14 +396,12 @@ impl Compositor {
         self.started
     }
 
-    fn window_for(&self, surface: &WlSurface) -> Option<Window> {
+    /// The window whose toplevel is this surface, mapped or minimized.
+    pub(crate) fn window_for(&self, surface: &WlSurface) -> Option<Window> {
         self.space
             .elements()
-            .find(|window| {
-                window
-                    .toplevel()
-                    .is_some_and(|toplevel| toplevel.wl_surface() == surface)
-            })
+            .chain(&self.minimized)
+            .find(|window| shell::is_toplevel_of(window, surface))
             .cloned()
     }
 }
@@ -471,8 +487,10 @@ impl CompositorHandler for Compositor {
             });
         }
 
+        self.popups.commit(surface);
         if let Some(window) = self.window_for(surface) {
             window.on_commit();
+            self.settle_resize(&window);
             if let Some(id) = window.user_data().get::<SurfaceId>().copied() {
                 if presented {
                     self.presented.insert(id);
@@ -514,8 +532,7 @@ impl XdgShellHandler for Compositor {
         let id = self.mint_surface_id();
         window.user_data().insert_if_missing(|| id);
 
-        let at = (self.placed * CASCADE, self.placed * CASCADE);
-        self.placed += 1;
+        let at = self.place_new();
         self.space.map_element(window, at, true);
         tracing::info!(surface = id.0, at = ?at, "toplevel mapped");
 
@@ -531,21 +548,41 @@ impl XdgShellHandler for Compositor {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(window) = self.window_for(surface.wl_surface()) {
             self.space.unmap_elem(&window);
+            self.minimized.retain(|minimized| minimized != &window);
         }
+        self.backend.redraw();
         self.publish_facts();
     }
 
-    /// Popups are accepted and configured, and deliberately not placed yet. A
-    /// menu is its own surface while its accessible nodes hang off the
-    /// toplevel, so where it belongs is a question this arc measures rather
-    /// than guesses at.
+    /// Popups are tracked on both backends, so they render and hit-test with
+    /// their window. Only with a person at the seat are they also kept on
+    /// screen: headless, a menu's placement is left to its positioner, because
+    /// a menu is its own surface while its accessible nodes hang off the
+    /// toplevel, and where it belongs is a question M2 measured rather than
+    /// guessed at.
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
+        if self.backend.has_person() {
+            self.constrain(&surface);
+        }
+        if let Err(error) = self.popups.track_popup(PopupKind::Xdg(surface.clone())) {
+            tracing::warn!(%error, "could not track popup");
+        }
         if let Err(error) = surface.send_configure() {
             tracing::warn!(%error, "could not configure popup");
         }
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
+    /// A menu wants the keyboard and pointer until it is dismissed. Only a
+    /// person makes that request meaningful: headless, the act path addresses
+    /// surfaces directly and a grab would only get in its way.
+    fn grab(&mut self, surface: PopupSurface, seat: WlSeat, serial: Serial) {
+        if !self.backend.has_person() {
+            return;
+        }
+        if let Some(seat) = Seat::<Self>::from_resource(&seat) {
+            self.grab_popup(surface, &seat, serial);
+        }
+    }
 
     fn reposition_request(
         &mut self,
@@ -556,7 +593,98 @@ impl XdgShellHandler for Compositor {
         surface.with_pending_state(|state| {
             state.positioner = positioner;
         });
+        if self.backend.has_person() {
+            self.constrain(&surface);
+        }
         surface.send_repositioned(token);
+    }
+
+    /// A titlebar drag. Honoured only if the serial is the button press that
+    /// is still holding the pointer, which is what stops a client from
+    /// starting a move nobody asked for.
+    fn move_request(&mut self, surface: ToplevelSurface, seat: WlSeat, serial: Serial) {
+        let Some((window, start)) = self.interactive(&surface, &seat, serial) else {
+            return;
+        };
+        self.start_move(&window, start, serial);
+    }
+
+    fn resize_request(
+        &mut self,
+        surface: ToplevelSurface,
+        seat: WlSeat,
+        serial: Serial,
+        edges: xdg_toplevel::ResizeEdge,
+    ) {
+        let Some((window, start)) = self.interactive(&surface, &seat, serial) else {
+            return;
+        };
+        self.start_resize(&window, shell::edges(edges), start, serial);
+    }
+
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        if self.backend.has_person() {
+            self.fill(&surface, xdg_toplevel::State::Maximized, None);
+        } else {
+            surface.send_configure();
+        }
+    }
+
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        if self.backend.has_person() {
+            self.unfill(&surface, xdg_toplevel::State::Maximized, None);
+        }
+    }
+
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, output: Option<WlOutput>) {
+        if self.backend.has_person() {
+            self.fill(&surface, xdg_toplevel::State::Fullscreen, output.as_ref());
+        } else {
+            surface.send_configure();
+        }
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        if self.backend.has_person() {
+            self.unfill(&surface, xdg_toplevel::State::Fullscreen, None);
+        }
+    }
+
+    fn minimize_request(&mut self, surface: ToplevelSurface) {
+        if !self.backend.has_person() {
+            return;
+        }
+        if let Some(window) = self.window_for(surface.wl_surface()) {
+            self.minimize(&window);
+        }
+    }
+}
+
+impl Compositor {
+    /// The window and grab start for an interactive move or resize, if the
+    /// request is one to honour: a person at the seat, a window we know, and a
+    /// serial that is the press currently holding the pointer.
+    fn interactive(
+        &self,
+        surface: &ToplevelSurface,
+        seat: &WlSeat,
+        serial: Serial,
+    ) -> Option<(Window, GrabStartData<Self>)> {
+        if !self.backend.has_person() {
+            return None;
+        }
+        let pointer = Seat::<Self>::from_resource(seat)?.get_pointer()?;
+        if !pointer.has_grab(serial) {
+            return None;
+        }
+        let start = pointer.grab_start_data()?;
+        // The press must have landed on this client's window, or a client
+        // could drag a window it does not own.
+        let (focus, _) = start.focus.as_ref()?;
+        if !focus.id().same_client_as(&surface.wl_surface().id()) {
+            return None;
+        }
+        Some((self.window_for(surface.wl_surface())?, start))
     }
 }
 
@@ -573,8 +701,15 @@ impl SeatHandler for Compositor {
     /// active, and no other. Headless leaves every toplevel activated from the
     /// start (see `new_toplevel`), because the toolkits it hosts for reading
     /// render differently when they believe they are in the background.
-    fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&WlSurface>) {
-        if !self.backend.activation_follows_focus() {
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        // The clipboard and the primary selection belong to whoever has the
+        // keyboard: a client may only read a selection while focused. On both
+        // backends, because an agent pasting is as real as a person pasting.
+        let client = focused.and_then(|surface| self.display.get_client(surface.id()).ok());
+        set_data_device_focus(&self.display, seat, client.clone());
+        set_primary_focus(&self.display, seat, client);
+
+        if !self.backend.has_person() {
             return;
         }
         for window in self.space.elements() {
@@ -618,6 +753,47 @@ impl DataDeviceHandler for Compositor {
 impl ClientDndGrabHandler for Compositor {}
 impl ServerDndGrabHandler for Compositor {}
 
+impl PrimarySelectionHandler for Compositor {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection
+    }
+}
+
+impl XdgActivationHandler for Compositor {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.activation
+    }
+
+    /// A client asking for one of its windows to be brought forward: an
+    /// application opened from a launcher, a link opened in a browser that
+    /// was already running. Granted only for a fresh token minted from the
+    /// person's own input (see `perspicax_policy::grants_activation`), so a
+    /// window cannot pull focus to itself while someone is typing elsewhere.
+    fn request_activation(
+        &mut self,
+        token: XdgActivationToken,
+        data: XdgActivationTokenData,
+        surface: WlSurface,
+    ) {
+        self.activation.remove_token(&token);
+        if !perspicax_policy::grants_activation(data.timestamp.elapsed(), data.serial.is_some()) {
+            tracing::debug!("activation refused: no recent input behind the token");
+            return;
+        }
+        let Some(window) = self.window_for(&surface) else {
+            return;
+        };
+        let Some(id) = shell::id_of(&window) else {
+            return;
+        };
+        self.restore(&window);
+        self.space.raise_element(&window, false);
+        self.focus_surface(surface, id);
+        self.backend.redraw();
+        self.publish_facts();
+    }
+}
+
 /// Per-client state: the protocol's, and this client's provenance.
 ///
 /// The origin is settled once, when the connection is accepted, and never
@@ -654,6 +830,8 @@ delegate_output!(Compositor);
 delegate_seat!(Compositor);
 delegate_shm!(Compositor);
 delegate_xdg_shell!(Compositor);
+delegate_primary_selection!(Compositor);
+delegate_xdg_activation!(Compositor);
 
 /// A smithay rectangle in the surface's own coordinates, divided by `scale`.
 fn to_rect<Kind>(rect: smithay::utils::Rectangle<i32, Kind>, scale: f64) -> Rect {

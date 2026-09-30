@@ -233,9 +233,12 @@ impl Running {
         }
     }
 
-    /// Whether xdg `activated` follows keyboard focus. See
-    /// [`Compositor`]'s `focus_changed`.
-    pub(crate) fn activation_follows_focus(&self) -> bool {
+    /// Whether a person sits at this seat. It decides everything that exists
+    /// for a person and would get in an agent's way: `activated` following
+    /// the keyboard, interactive moves and resizes, maximize, minimize,
+    /// popup grabs. Headless keeps the deterministic M2 behaviour its tests
+    /// are written against. See `crate::shell`.
+    pub(crate) fn has_person(&self) -> bool {
         self.renders()
     }
 

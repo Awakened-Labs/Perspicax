@@ -25,10 +25,11 @@ thiserror.workspace = true
 tracing.workspace = true
 perspicax-index = { path = "../perspicax-index", version = "0.1.0" }
 perspicax-node = { path = "../perspicax-node", version = "0.1.0" }
-# Seat-only, and optional for that reason: headless has no person at the seat
-# and so no focus policy or bindings to resolve, and no cursor to draw.
-perspicax-policy = { path = "../perspicax-policy", version = "0.1.0", optional = true }
-# Reads the person's Xcursor theme. MIT, pure Rust, no dependencies.
+# The window-management decisions. Pure, so both backends share them: one
+# placement rule headless and on a seat, rather than two that drift apart.
+perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
+# Seat-only: reads the person's Xcursor theme, and headless draws no cursor.
+# MIT, pure Rust, no dependencies.
 xcursor = { version = "0.3", optional = true }
 
 # Backends, as cargo features, so a build carries only the system libraries it
@@ -42,7 +43,6 @@ xcursor = { version = "0.3", optional = true }
 # pointers. Every one of these is a C library, found by pkg-config at build
 # time -- which is why this is a feature rather than the default.
 seat = [
-    "dep:perspicax-policy",
     "dep:xcursor",
     "smithay/backend_drm",
     "smithay/backend_gbm",

@@ -14,7 +14,7 @@
 //! out here.
 
 use perspicax_node::SurfaceId;
-use perspicax_policy::{Action, Change, Decision, Mods, cycle};
+use perspicax_policy::{Action, Button, Change, Decision, Drag, Mods, cycle, edges_near};
 use smithay::{
     backend::{
         input::{
@@ -28,7 +28,7 @@ use smithay::{
     desktop::{Window, WindowSurfaceType},
     input::{
         keyboard::{FilterResult, Keycode, ModifiersState},
-        pointer::{AxisFrame, ButtonEvent, MotionEvent},
+        pointer::{AxisFrame, ButtonEvent, GrabStartData, MotionEvent},
     },
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
@@ -39,7 +39,12 @@ use super::super::{
     hatch::{self, Hatch},
     pointer,
 };
-use crate::state::Compositor;
+use crate::{shell::id_of, state::Compositor};
+
+/// Linux button codes, from `linux/input-event-codes.h`.
+const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
+const BTN_MIDDLE: u32 = 0x112;
 
 /// A key the compositor kept for itself.
 enum Taken {
@@ -173,7 +178,15 @@ fn perform(state: &mut Compositor, action: &Action) {
             }
         }
         Action::CycleFocus => {
-            let stack: Vec<SurfaceId> = state.space.elements().filter_map(id_of).collect();
+            // Minimized windows count as below the bottom of the stack, so
+            // cycling reaches them first and brings them back: without a
+            // taskbar (W4), this is how a minimized window returns.
+            let stack: Vec<SurfaceId> = state
+                .minimized
+                .iter()
+                .chain(state.space.elements())
+                .filter_map(id_of)
+                .collect();
             if let Some(next) = cycle(&stack) {
                 apply(
                     state,
@@ -224,25 +237,62 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
     let Some(handle) = state.pointer.clone() else {
         return;
     };
-    // Focus and raise before the press is delivered, so the client receives
-    // its click already on top and focused, as it would under any desktop.
-    if pressed == ButtonState::Pressed
-        && let Some(focus) = policy(state)
-    {
-        let over = under(state, handle.current_location()).and_then(|(window, ..)| id_of(&window));
-        let decision = focus.pressed(over, state.focused_surface());
-        apply(state, decision);
+    let at = handle.current_location();
+    let event = ButtonEvent {
+        serial: SERIAL_COUNTER.next_serial(),
+        time,
+        button: code,
+        state: pressed,
+    };
+    if pressed == ButtonState::Pressed {
+        let over = under(state, at).map(|(window, ..)| window);
+        // Focus and raise before the press is delivered, so the client
+        // receives its click already on top and focused, as it would under
+        // any desktop.
+        if let Some(focus) = policy(state) {
+            let decision = focus.pressed(over.as_ref().and_then(id_of), state.focused_surface());
+            apply(state, decision);
+        }
+        // With the drag modifier held, the press is the compositor's: it
+        // starts a move or resize, and the client never sees it.
+        if let (Some(window), Some(drag)) = (over, drag(state, code)) {
+            let start = GrabStartData {
+                focus: None,
+                button: code,
+                location: at,
+            };
+            match drag {
+                Drag::Move => state.start_move(&window, start, event.serial),
+                Drag::Resize => {
+                    let Some(bounds) = state.space.element_geometry(&window) else {
+                        return;
+                    };
+                    let inside = (at - bounds.loc.to_f64()).to_i32_round();
+                    let edges = edges_near((inside.x, inside.y), (bounds.size.w, bounds.size.h));
+                    state.start_resize(&window, edges, start, event.serial);
+                }
+            }
+        }
     }
-    handle.button(
-        state,
-        &ButtonEvent {
-            serial: SERIAL_COUNTER.next_serial(),
-            time,
-            button: code,
-            state: pressed,
-        },
-    );
+    // Delivered to the client, or to the grab just started, which is how the
+    // grab learns which button to wait for the release of.
+    handle.button(state, &event);
     handle.frame(state);
+}
+
+/// Whether pressing this button, with the modifiers held now, is a drag.
+fn drag(state: &Compositor, code: u32) -> Option<Drag> {
+    let Running::Seat(session) = &state.backend else {
+        return None;
+    };
+    let held = state.keyboard.as_ref()?.modifier_state();
+    let button = match code {
+        BTN_LEFT => Button::Left,
+        BTN_RIGHT => Button::Right,
+        BTN_MIDDLE => Button::Middle,
+        _ => return None,
+    };
+    session.bindings.drag(mods(&held), button)
 }
 
 /// A scroll. Continuous amounts where the device reports them; otherwise the
@@ -282,6 +332,21 @@ fn apply(state: &mut Compositor, decision: Decision<SurfaceId>) {
     if decision == Decision::none() {
         return;
     }
+    let targets = [
+        match decision.focus {
+            Change::To(id) => Some(id),
+            _ => None,
+        },
+        decision.raise,
+    ];
+    let parked: Vec<_> = targets
+        .into_iter()
+        .flatten()
+        .filter_map(|id| state.minimized_with(id))
+        .collect();
+    for window in parked {
+        state.restore(&window);
+    }
     match decision.focus {
         Change::Keep => {}
         Change::To(id) => {
@@ -318,10 +383,6 @@ fn under(
     let (window, location) = state.space.element_under(at)?;
     let (surface, offset) = window.surface_under(at - location.to_f64(), WindowSurfaceType::ALL)?;
     Some((window.clone(), surface, (location + offset).to_f64()))
-}
-
-fn id_of(window: &Window) -> Option<SurfaceId> {
-    window.user_data().get::<SurfaceId>().copied()
 }
 
 fn policy(state: &Compositor) -> Option<perspicax_policy::Focus> {
