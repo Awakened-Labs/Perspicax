@@ -441,6 +441,7 @@ fn rescan(state: &mut Compositor) {
         if let Some(at) = session.heads.iter().position(|head| head.crtc == crtc) {
             let head = session.heads.remove(at);
             tracing::info!(output = head.output.name(), "monitor unplugged");
+            crate::layers::close_on(&head.output);
             state.space.unmap_output(&head.output);
             state.display.remove_global::<Compositor>(head.global);
         }
@@ -487,6 +488,7 @@ fn relight(state: &mut Compositor) {
         return;
     };
     for head in session.heads.drain(..) {
+        crate::layers::close_on(&head.output);
         state.space.unmap_output(&head.output);
         state.display.remove_global::<Compositor>(head.global);
     }
@@ -609,6 +611,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         backend,
         space,
         cursor: status,
+        lock,
         ..
     } = state;
     let Running::Seat(session) = backend else {
@@ -648,12 +651,32 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         }
         _ => Vec::new(),
     };
-    match space.render_elements_for_output(renderer, &head.output, 1.0) {
-        Ok(windows) => elements.extend(windows.into_iter().map(Elements::Space)),
-        Err(error) => {
-            tracing::warn!(output = head.output.name(), %error, "output is not mapped");
-            return;
-        }
+    // Locked: the lock surface for this output and nothing else. An output
+    // whose lock surface has not arrived yet shows only the backdrop, never
+    // the windows it is covering.
+    let scale = head.output.current_scale().fractional_scale();
+    let cover = lock.as_ref().map(|locked| locked.on(&head.output));
+    match cover {
+        Some(Some(cover)) => elements.extend(
+            render_elements_from_surface_tree(
+                renderer,
+                cover.surface.wl_surface(),
+                (0, 0),
+                scale,
+                1.0,
+                Kind::Unspecified,
+            )
+            .into_iter()
+            .map(Elements::CursorSurface),
+        ),
+        Some(None) => {}
+        None => match space.render_elements_for_output(renderer, &head.output, 1.0) {
+            Ok(windows) => elements.extend(windows.into_iter().map(Elements::Space)),
+            Err(error) => {
+                tracing::warn!(output = head.output.name(), %error, "output is not mapped");
+                return;
+            }
+        },
     }
     match head
         .drm
@@ -673,6 +696,14 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     let output = head.output.clone();
     for window in space.elements_for_output(&output) {
         window.send_frame(&output, now, None, |_, _| Some(output.clone()));
+    }
+    for layer in smithay::desktop::layer_map_for_output(&output).layers() {
+        layer.send_frame(&output, now, None, |_, _| Some(output.clone()));
+    }
+    if let Some(cover) = lock.as_ref().and_then(|locked| locked.on(&output)) {
+        send_frames_surface_tree(cover.surface.wl_surface(), &output, now, None, |_, _| {
+            Some(output.clone())
+        });
     }
     if let CursorImageStatus::Surface(surface) = status {
         send_frames_surface_tree(surface, &output, now, None, |_, _| Some(output.clone()));

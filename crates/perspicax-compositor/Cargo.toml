@@ -59,3 +59,10 @@ seat = [
 # our side (x11rb speaks the protocol; Xwayland itself is a program we spawn,
 # not a library we link), so it costs the headless build nothing to carry.
 xwayland = ["smithay/xwayland"]
+
+# A real Wayland client for the live tests, so a layer-shell test needs no
+# panel program installed. MIT; default features off, since the tests need
+# neither calloop nor xkbcommon on the client side.
+[dev-dependencies]
+smithay-client-toolkit = { version = "0.20", default-features = false }
+wayland-client = "0.31"

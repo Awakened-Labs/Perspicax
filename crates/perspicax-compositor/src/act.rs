@@ -72,6 +72,10 @@ pub enum ActError {
     /// headless, where nobody sits at the seat.
     #[error("the person at this seat is using it; try again when they pause")]
     PersonActive,
+    /// The session is locked. The person has walked away, and nothing acts on
+    /// their applications until they unlock it.
+    #[error("the session is locked")]
+    Locked,
     /// No compositor loop answered. It has not started, it has stopped, or it
     /// is wedged; from outside those look the same and an agent can do nothing
     /// different about any of them.
@@ -223,6 +227,9 @@ impl Compositor {
         surface: SurfaceId,
         action: &Action,
     ) -> Result<Dispatched, ActError> {
+        if self.lock.is_some() {
+            return Err(ActError::Locked);
+        }
         if self.person_is_active() {
             return Err(ActError::PersonActive);
         }

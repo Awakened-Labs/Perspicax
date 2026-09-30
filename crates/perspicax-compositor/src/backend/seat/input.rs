@@ -42,6 +42,7 @@ use super::{
     },
     settings,
 };
+use crate::layers;
 use crate::{shell::id_of, state::Compositor};
 
 /// Linux button codes, from `linux/input-event-codes.h`.
@@ -134,9 +135,15 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
                 };
             }
             let raw = keysym.raw_syms();
+            let locked = state.lock.is_some();
+            // While locked, only the escape hatches: a binding that opened a
+            // terminal over the lock screen would be an unlock.
             let taken = hatch::classify(modifiers, keysym.modified_sym(), &raw)
                 .map(Taken::Hatch)
                 .or_else(|| {
+                    if locked {
+                        return None;
+                    }
                     let mut syms = raw.clone();
                     syms.push(keysym.modified_sym());
                     session
@@ -242,10 +249,17 @@ fn moved(state: &mut Compositor, to: Point<f64, Logical>, time: u32) {
         .collect();
     let at = pointer::confine(to, &outputs);
     let under = under(state, at);
-    let over = under.as_ref().and_then(|(window, ..)| id_of(window));
+    // The focus policy is about windows. Over a panel it has nothing to say:
+    // passing it the panel as "no window" would make strict focus drop the
+    // keyboard every time the pointer crossed the taskbar.
+    let over_layer = under.as_ref().is_some_and(|hit| hit.window.is_none());
+    let over = under
+        .as_ref()
+        .and_then(|hit| hit.window.as_ref())
+        .and_then(id_of);
     handle.motion(
         state,
-        under.map(|(_, surface, origin)| (surface, origin)),
+        under.map(|hit| (hit.surface, hit.origin)),
         &MotionEvent {
             location: at,
             serial: SERIAL_COUNTER.next_serial(),
@@ -254,7 +268,9 @@ fn moved(state: &mut Compositor, to: Point<f64, Logical>, time: u32) {
     );
     handle.frame(state);
 
-    if let Some(focus) = policy(state) {
+    if let Some(focus) = policy(state)
+        && !over_layer
+    {
         let decision = focus.pointer_over(over, state.focused_surface());
         apply(state, decision);
     }
@@ -275,7 +291,16 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
         state: pressed,
     };
     if pressed == ButtonState::Pressed {
-        let over = under(state, at).map(|(window, ..)| window);
+        let hit = under(state, at);
+        // A panel or launcher that takes the keyboard on a click gets it,
+        // without anything being raised: layers stack by layer, not by click.
+        if let Some(hit) = hit
+            .as_ref()
+            .filter(|hit| hit.window.is_none() && hit.takes_focus)
+        {
+            state.focus_plain(hit.surface.clone());
+        }
+        let over = hit.and_then(|hit| hit.window);
         // Focus and raise before the press is delivered, so the client
         // receives its click already on top and focused, as it would under
         // any desktop.
@@ -403,19 +428,62 @@ fn apply(state: &mut Compositor, decision: Decision<SurfaceId>) {
     state.publish_facts();
 }
 
-/// The topmost window at `at`, the surface of it there (a subsurface or the
-/// toplevel itself), and that surface's origin in global space -- the pair
-/// `PointerHandle::motion` wants.
-fn under(
-    state: &Compositor,
-    at: Point<f64, Logical>,
-) -> Option<(Window, WlSurface, Point<f64, Logical>)> {
-    let (window, location) = state.space.element_under(at)?;
-    let (surface, offset) = window.surface_under(at - location.to_f64(), WindowSurfaceType::ALL)?;
-    Some((window.clone(), surface, (location + offset).to_f64()))
+/// What the pointer is over.
+struct Hit {
+    /// Set when it is a window, which is all the focus policy decides about.
+    window: Option<Window>,
+    /// Set when it is a layer surface that may take the keyboard on a click.
+    takes_focus: bool,
+    /// The surface there (a subsurface, a popup, the thing itself) and its
+    /// origin in global space -- the pair `PointerHandle::motion` wants.
+    surface: WlSurface,
+    origin: Point<f64, Logical>,
 }
 
+/// The topmost thing at `at`, in the order the person sees them: while
+/// locked, only the lock surface; otherwise the top and overlay layers, then
+/// the windows, then the bottom and background layers.
+fn under(state: &Compositor, at: Point<f64, Logical>) -> Option<Hit> {
+    if state.lock.is_some() {
+        let (surface, origin) = state.lock_surface_at(at)?;
+        return Some(Hit {
+            window: None,
+            takes_focus: true,
+            surface,
+            origin,
+        });
+    }
+    let layer = |layers: &[_]| {
+        state
+            .layer_surface_under(layers, at)
+            .map(|(layer, surface, origin)| Hit {
+                window: None,
+                takes_focus: layer.can_receive_keyboard_focus(),
+                surface,
+                origin,
+            })
+    };
+    layer(&layers::ABOVE)
+        .or_else(|| {
+            let (window, location) = state.space.element_under(at)?;
+            let (surface, offset) =
+                window.surface_under(at - location.to_f64(), WindowSurfaceType::ALL)?;
+            Some(Hit {
+                window: Some(window.clone()),
+                takes_focus: false,
+                surface,
+                origin: (location + offset).to_f64(),
+            })
+        })
+        .or_else(|| layer(&layers::BELOW))
+}
+
+/// The focus policy, unless the session is locked: then the lock surface
+/// holds the keyboard and no pointing may move it.
 fn policy(state: &Compositor) -> Option<perspicax_policy::Focus> {
+    if state.lock.is_some() {
+        return None;
+    }
     match &state.backend {
         Running::Seat(session) => Some(session.settings.focus),
         Running::Headless { .. } => None,

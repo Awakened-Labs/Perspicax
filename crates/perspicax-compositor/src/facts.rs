@@ -33,7 +33,7 @@ use perspicax_index::{HostFacts, SurfaceFacts};
 use perspicax_node::{Origin, Rect, SurfaceId, Vec2};
 use smithay::{
     desktop::Window,
-    reexports::wayland_server::Resource as _,
+    reexports::wayland_server::{Resource as _, protocol::wl_surface::WlSurface},
     utils::IsAlive,
     wayland::{
         compositor::{RectangleKind, SurfaceAttributes, with_states},
@@ -119,11 +119,38 @@ impl Compositor {
         // `Unmapped` rather than forgotten, so an agent asking about a node in
         // one is told the window is hidden -- which it can do something about
         // -- rather than that no such surface exists.
-        let surfaces: Vec<SurfaceFacts> = self
-            .minimized
+        //
+        // Layer surfaces around them, where the person sees them: background
+        // and bottom under every window, top and overlay over. A panel on
+        // `top` covering the foot of a maximized window is an occlusion the
+        // index has to know about. And while the session is locked, the lock
+        // surfaces go over everything, so every node beneath is honestly
+        // judged covered.
+        let below = self.layers_in(&crate::layers::BELOW);
+        let above = self.layers_in(&crate::layers::ABOVE);
+        let layer = |(layer, placed): &(smithay::desktop::LayerSurface, _)| {
+            let id = *layer.user_data().get::<SurfaceId>()?;
+            Some(self.plain_facts(id, layer.wl_surface(), *placed))
+        };
+        let covers = self
+            .lock
             .iter()
-            .chain(self.space.elements())
-            .filter_map(|window| self.facts_for(window))
+            .flat_map(|locked| &locked.surfaces)
+            .filter_map(|cover| {
+                let area = self.space.output_geometry(&cover.output)?;
+                Some(self.plain_facts(cover.id, cover.surface.wl_surface(), area))
+            });
+        let surfaces: Vec<SurfaceFacts> = below
+            .iter()
+            .filter_map(layer)
+            .chain(
+                self.minimized
+                    .iter()
+                    .chain(self.space.elements())
+                    .filter_map(|window| self.facts_for(window)),
+            )
+            .chain(above.iter().filter_map(layer))
+            .chain(covers)
             .collect();
 
         self.facts.publish(
@@ -218,6 +245,46 @@ impl Compositor {
         })
     }
 
+    /// The facts for a surface that is not a window -- a layer surface, a lock
+    /// surface -- placed by the compositor at `placed`. No declared window
+    /// geometry and no shadow margin: the rectangle is the surface.
+    fn plain_facts(
+        &self,
+        id: SurfaceId,
+        surface: &WlSurface,
+        placed: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    ) -> SurfaceFacts {
+        let opaque = with_states(surface, |states| {
+            states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .current()
+                .opaque_region
+                .as_ref()
+                .map(regions)
+        });
+        SurfaceFacts {
+            id,
+            mapped: surface.is_alive() && self.has_presented(id) && !placed.size.is_empty(),
+            geometry: Rect::new(
+                f64::from(placed.loc.x),
+                f64::from(placed.loc.y),
+                f64::from(placed.loc.x + placed.size.w),
+                f64::from(placed.loc.y + placed.size.h),
+            ),
+            node_space_offset: Vec2::ZERO,
+            buffer_origin: Vec2::new(f64::from(placed.loc.x), f64::from(placed.loc.y)),
+            opaque,
+            origin: self.origin_of_surface(surface),
+            // A layer's namespace is not a title, and the join uses titles to
+            // tell windows apart; better none than a wrong one.
+            title: None,
+            focused_at: self.focused_at(id),
+            damage_generation: self.damage_generation(id),
+            damage: self.damage_history(id),
+        }
+    }
+
     /// Who owns the client that drew this window.
     ///
     /// Read from the per-client state recorded when the connection was
@@ -229,8 +296,13 @@ impl Compositor {
         let Some(toplevel) = window.toplevel() else {
             return Origin::Unattributed;
         };
+        self.origin_of_surface(toplevel.wl_surface())
+    }
+
+    /// Who owns the client that drew this surface.
+    fn origin_of_surface(&self, surface: &WlSurface) -> Origin {
         self.display
-            .get_client(toplevel.wl_surface().id())
+            .get_client(surface.id())
             .ok()
             .and_then(|client| client.get_data::<ClientState>().map(ClientState::origin))
             .unwrap_or(Origin::Unattributed)

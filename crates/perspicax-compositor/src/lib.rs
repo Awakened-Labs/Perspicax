@@ -38,6 +38,8 @@ pub mod act;
 mod backend;
 pub mod facts;
 pub mod host;
+mod layers;
+mod lock;
 mod origin;
 mod shell;
 pub mod state;
@@ -179,6 +181,10 @@ pub struct Config {
     /// reads no config at all: what CI and an agent run has to be the same
     /// on every machine, whatever its owner likes their focus model to be.
     pub config: Option<PathBuf>,
+    /// The Wayland socket's name in `XDG_RUNTIME_DIR`, instead of the first
+    /// free `wayland-N`. For whoever has to connect without being spawned
+    /// by us: a test's own client, or a second session beside a first.
+    pub socket: Option<String>,
 }
 
 /// Run a compositor until its deadline passes, or forever.
@@ -205,15 +211,18 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
     // no monitor -- is refused before any client has been accepted by a
     // compositor that cannot show it anything.
     let backend = Running::start(config, &handle, &event_loop.handle())?;
-    let mut state = Compositor::new(&handle, backend, facts.clone());
+    let mut state = Compositor::new(&handle, event_loop.handle(), backend, facts.clone());
     Running::attach(&mut state, &event_loop.handle())?;
     // Once before any client, so a reader sees this host's consent policy and
     // outputs from the start rather than an empty default until something
     // happens to change.
     state.publish_facts();
 
-    let socket =
-        ListeningSocketSource::new_auto().map_err(|error| Error::Socket(error.to_string()))?;
+    let socket = match &config.socket {
+        Some(name) => ListeningSocketSource::with_name(name),
+        None => ListeningSocketSource::new_auto(),
+    }
+    .map_err(|error| Error::Socket(error.to_string()))?;
     let socket_name = socket.socket_name().to_os_string();
     event_loop
         .handle()

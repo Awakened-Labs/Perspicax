@@ -97,12 +97,12 @@ impl Compositor {
     /// there, so this is the same cascade from `(0, 0)` that M2 placed
     /// windows with.
     pub(crate) fn place_new(&mut self) -> Point<i32, Logical> {
-        let output = self
-            .pointer_location()
-            .and_then(|at| self.space.output_under(at).next().cloned())
-            .or_else(|| self.space.outputs().next().cloned());
-        let area = output
-            .and_then(|output| self.space.output_geometry(&output))
+        // Inside the part of the output panels leave free, so a new window
+        // never opens under a panel. Headless has no panels, so this is the
+        // whole virtual output, as it always was.
+        let area = self
+            .output_under_pointer()
+            .and_then(|output| self.usable_area(&output))
             .unwrap_or_default();
         let at = place(self.placed, rect(area));
         self.placed = self.placed.wrapping_add(1);
@@ -135,10 +135,9 @@ impl Compositor {
     /// Fill an output with a window, remembering where it was.
     ///
     /// `state` is `Maximized` or `Fullscreen`. They differ in what the client
-    /// draws (a fullscreen window drops its own decorations) and in stacking,
-    /// since fullscreen is always raised. The rectangle they fill is the same
-    /// until layer-shell (slice 6) gives maximized windows an area that
-    /// excludes panels.
+    /// draws (a fullscreen window drops its own decorations) and in what they
+    /// fill: a maximized window stops at the panels' exclusive zones, a
+    /// fullscreen one covers them.
     pub(crate) fn fill(
         &mut self,
         surface: &ToplevelSurface,
@@ -152,7 +151,16 @@ impl Compositor {
         let output = on
             .and_then(Output::from_resource)
             .or_else(|| self.output_of(&window));
-        let Some(area) = output.and_then(|output| self.space.output_geometry(&output)) else {
+        // Maximized fills what the panels leave free; fullscreen covers the
+        // panels too, which is the difference between the two.
+        let area = output.and_then(|output| {
+            if state == xdg_toplevel::State::Fullscreen {
+                self.space.output_geometry(&output)
+            } else {
+                self.usable_area(&output)
+            }
+        });
+        let Some(area) = area else {
             surface.send_configure();
             return;
         };

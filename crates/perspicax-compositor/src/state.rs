@@ -28,6 +28,7 @@ use smithay::{
         pointer::{CursorImageStatus, GrabStartData, PointerHandle},
     },
     reexports::{
+        calloop::LoopHandle,
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
             Client, DisplayHandle, Resource as _,
@@ -44,6 +45,8 @@ use smithay::{
             BufferAssignment, CompositorClientState, CompositorHandler, CompositorState, Damage,
             SurfaceAttributes, TraversalAction, with_states, with_surface_tree_downward,
         },
+        idle_inhibit::IdleInhibitManagerState,
+        idle_notify::IdleNotifierState,
         output::{OutputHandler, OutputManagerState},
         selection::{
             SelectionHandler,
@@ -55,6 +58,8 @@ use smithay::{
                 PrimarySelectionHandler, PrimarySelectionState, set_primary_focus,
             },
         },
+        session_lock::SessionLockManagerState,
+        shell::wlr_layer::WlrLayerShellState,
         shell::xdg::{
             PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler,
             XdgShellState,
@@ -97,7 +102,6 @@ pub struct Compositor {
     pub(crate) output_manager: OutputManagerState,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) data_device: DataDeviceState,
-    #[expect(dead_code, reason = "RAII handle for the wl_seat global")]
     pub(crate) seat: Seat<Self>,
     /// `None` only if xkb could not compile a default keymap, which would mean
     /// the session has no usable keyboard layout at all. Focus still works
@@ -171,6 +175,18 @@ pub struct Compositor {
     /// RAII handles for the primary-selection and xdg-activation globals.
     primary_selection: PrimarySelectionState,
     activation: XdgActivationState,
+    /// Panels, launchers, wallpapers: the layer-shell global. See
+    /// [`crate::layers`].
+    pub(crate) layer_shell: WlrLayerShellState,
+    /// The session-lock global, and the lock itself while one is held. See
+    /// [`crate::lock`].
+    pub(crate) lock_manager: SessionLockManagerState,
+    pub(crate) lock: Option<crate::lock::Locked>,
+    /// Idle notification (swayidle) and the surfaces inhibiting it.
+    pub(crate) idle: IdleNotifierState<Self>,
+    #[expect(dead_code, reason = "RAII handle for the idle-inhibit global")]
+    idle_inhibit: IdleInhibitManagerState,
+    pub(crate) inhibitors: Vec<WlSurface>,
     /// How to start a program against this compositor. Set by `run` once the
     /// socket exists, so `None` only before any client could connect.
     pub(crate) launch: Option<crate::Launch>,
@@ -182,7 +198,12 @@ pub struct Compositor {
 impl Compositor {
     /// Bring up every global a stock GTK or Qt client expects to find, on
     /// whatever outputs the backend starts with.
-    pub(crate) fn new(display: &DisplayHandle, backend: Running, facts: Facts) -> Self {
+    pub(crate) fn new(
+        display: &DisplayHandle,
+        event_loop: LoopHandle<'static, Self>,
+        backend: Running,
+        facts: Facts,
+    ) -> Self {
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(display, "perspicax-seat");
         let keyboard = match seat.add_keyboard(XkbConfig::default(), 200, 25) {
@@ -232,6 +253,14 @@ impl Compositor {
             minimized: Vec::new(),
             primary_selection: PrimarySelectionState::new::<Self>(display),
             activation: XdgActivationState::new::<Self>(display),
+            layer_shell: WlrLayerShellState::new::<Self>(display),
+            // Any client may lock. A lock client is the one kind that must
+            // work when everything else has gone wrong.
+            lock_manager: SessionLockManagerState::new::<Self, _>(display, |_| true),
+            lock: None,
+            idle: IdleNotifierState::new(display, event_loop),
+            idle_inhibit: IdleInhibitManagerState::new::<Self>(display),
+            inhibitors: Vec::new(),
             launch: None,
             placed: 0,
             started: Instant::now(),
@@ -272,7 +301,7 @@ impl Compositor {
     }
 
     /// The next surface id. Monotonic, and never handed out twice.
-    fn mint_surface_id(&mut self) -> SurfaceId {
+    pub(crate) fn mint_surface_id(&mut self) -> SurfaceId {
         self.next_surface += 1;
         SurfaceId(self.next_surface)
     }
@@ -290,12 +319,27 @@ impl Compositor {
     pub(crate) fn send_frames(&self) {
         let elapsed = u32::try_from(self.started.elapsed().as_millis() % u128::from(u32::MAX))
             .unwrap_or(u32::MAX);
-        for window in self.space.elements() {
-            let Some(toplevel) = window.toplevel() else {
-                continue;
-            };
+        let windows = self
+            .space
+            .elements()
+            .filter_map(|window| window.toplevel().map(|t| t.wl_surface().clone()));
+        let layers = self
+            .layers_in(&[
+                crate::layers::BELOW[0],
+                crate::layers::BELOW[1],
+                crate::layers::ABOVE[0],
+                crate::layers::ABOVE[1],
+            ])
+            .into_iter()
+            .map(|(layer, _)| layer.wl_surface().clone());
+        let covers = self
+            .lock
+            .iter()
+            .flat_map(|locked| &locked.surfaces)
+            .map(|cover| cover.surface.wl_surface().clone());
+        for surface in windows.chain(layers).chain(covers).collect::<Vec<_>>() {
             with_surface_tree_downward(
-                toplevel.wl_surface(),
+                &surface,
                 (),
                 |_, _, &()| TraversalAction::DoChildren(()),
                 |_, states, &()| {
@@ -330,6 +374,38 @@ impl Compositor {
     )]
     pub(crate) fn person_used_seat(&mut self) {
         self.person_at = Some(Instant::now());
+        self.idle.notify_activity(&self.seat);
+    }
+
+    /// The surface holding the keyboard, whatever kind it is.
+    pub(crate) fn keyboard_focus(&self) -> Option<WlSurface> {
+        self.keyboard.as_ref()?.current_focus()
+    }
+
+    /// Give the keyboard to a surface that is not a window: a launcher, a
+    /// lock screen.
+    pub(crate) fn focus_plain(&mut self, surface: WlSurface) {
+        if let Some(keyboard) = self.keyboard.clone() {
+            keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+        }
+    }
+
+    /// Give the keyboard back to the topmost window, or to nothing.
+    pub(crate) fn focus_top_window(&mut self) {
+        let top = self.space.elements().last().and_then(|window| {
+            Some((
+                window.toplevel()?.wl_surface().clone(),
+                shell::id_of(window)?,
+            ))
+        });
+        match top {
+            Some((surface, id)) => self.focus_surface(surface, id),
+            None => {
+                if let Some(keyboard) = self.keyboard.clone() {
+                    keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+                }
+            }
+        }
     }
 
     /// Whether an agent acting now would race the person at the seat.
@@ -492,22 +568,28 @@ impl CompositorHandler for Compositor {
         }
 
         self.popups.commit(surface);
-        if let Some(window) = self.window_for(surface) {
-            window.on_commit();
-            self.settle_resize(&window);
-            if let Some(id) = window.user_data().get::<SurfaceId>().copied() {
-                if presented {
-                    self.presented.insert(id);
-                } else {
-                    self.presented.remove(&id);
-                }
-                if !damaged.is_empty() {
-                    let history = self.damage.entry(id).or_default();
-                    let generation = history.last().map_or(0, |(g, _)| *g) + 1;
-                    history.extend(damaged.into_iter().map(|rect| (generation, rect)));
-                    if history.len() > DAMAGE_HISTORY {
-                        history.drain(..history.len() - DAMAGE_HISTORY);
-                    }
+        // A window or a layer surface: both are described to the index, so
+        // both keep the same presentation and damage records.
+        let id = match self.window_for(surface) {
+            Some(window) => {
+                window.on_commit();
+                self.settle_resize(&window);
+                shell::id_of(&window)
+            }
+            None => self.layer_committed(surface),
+        };
+        if let Some(id) = id {
+            if presented {
+                self.presented.insert(id);
+            } else {
+                self.presented.remove(&id);
+            }
+            if !damaged.is_empty() {
+                let history = self.damage.entry(id).or_default();
+                let generation = history.last().map_or(0, |(g, _)| *g) + 1;
+                history.extend(damaged.into_iter().map(|rect| (generation, rect)));
+                if history.len() > DAMAGE_HISTORY {
+                    history.drain(..history.len() - DAMAGE_HISTORY);
                 }
             }
         }

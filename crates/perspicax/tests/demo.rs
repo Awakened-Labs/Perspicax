@@ -158,6 +158,7 @@ fn run_demo() -> Reading {
         // is finished, because a Qt tree takes seconds nobody can predict.
         run_for: Some(Duration::from_secs(120)),
         config: None,
+        socket: None,
     };
 
     let (sender, receiver) = mpsc::channel();
