@@ -178,6 +178,7 @@ fn main() -> Result<()> {
             .then(|| cli.config.clone().or_else(perspicax_config::default_path))
             .flatten(),
         socket: None,
+        xwayland: false,
     };
 
     // Created here rather than inside the compositor, because the thread that

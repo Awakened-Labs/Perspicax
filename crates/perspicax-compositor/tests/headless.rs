@@ -25,6 +25,7 @@ fn a_headless_compositor_comes_up_and_stops_when_told() {
         run_for: Some(Duration::from_millis(250)),
         config: None,
         socket: None,
+        xwayland: false,
     };
 
     let facts = Facts::new();
@@ -68,6 +69,7 @@ fn a_command_that_does_not_exist_is_named_in_the_error() {
         run_for: Some(Duration::from_millis(50)),
         config: None,
         socket: None,
+        xwayland: false,
     };
 
     match perspicax_compositor::run(&config, &Facts::new(), &Requests::new(), &Stop::new()) {
@@ -92,6 +94,7 @@ fn a_stop_request_ends_the_loop_before_its_deadline() {
         run_for: Some(Duration::from_secs(60)),
         config: None,
         socket: None,
+        xwayland: false,
     };
 
     let stop = Stop::new();

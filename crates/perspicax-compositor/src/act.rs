@@ -254,10 +254,9 @@ impl Compositor {
 
     /// Give this surface the keyboard.
     fn act_focus(&mut self, window: &Window, id: SurfaceId) -> Result<(), ActError> {
-        let Some(toplevel) = window.toplevel() else {
+        let Some(wl_surface) = crate::shell::surface_of(window) else {
             return Err(ActError::NoSuchSurface(id.0));
         };
-        let wl_surface = toplevel.wl_surface().clone();
         self.focus_surface(wl_surface, id);
         Ok(())
     }
@@ -278,10 +277,10 @@ impl Compositor {
         let Some(pointer) = self.pointer.clone() else {
             return Ok(());
         };
-        let Some(toplevel) = window.toplevel() else {
+        let Some(surface) = crate::shell::surface_of(window) else {
             return Ok(());
         };
-        let focus = Some((toplevel.wl_surface().clone(), origin.into()));
+        let focus = Some((surface, origin.into()));
         let time = self.now_ms();
 
         pointer.motion(
@@ -321,14 +320,14 @@ impl Compositor {
         let Some(pointer) = self.pointer.clone() else {
             return Ok(());
         };
-        let Some(toplevel) = window.toplevel() else {
+        let Some(surface) = crate::shell::surface_of(window) else {
             return Ok(());
         };
         let time = self.now_ms();
 
         pointer.motion(
             self,
-            Some((toplevel.wl_surface().clone(), origin.into())),
+            Some((surface, origin.into())),
             &MotionEvent {
                 location: global.into(),
                 serial: SERIAL_COUNTER.next_serial(),

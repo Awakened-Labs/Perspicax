@@ -198,6 +198,10 @@ fn perform(state: &mut Compositor, action: &Action) {
             if let Some(toplevel) = window.as_ref().and_then(Window::toplevel) {
                 toplevel.send_close();
             }
+            #[cfg(feature = "xwayland")]
+            if let Some(x11) = window.as_ref().and_then(Window::x11_surface) {
+                let _ = x11.close();
+            }
         }
         Action::Spawn(command) => {
             let launch = state.launch.clone();
@@ -405,11 +409,9 @@ fn apply(state: &mut Compositor, decision: Decision<SurfaceId>) {
     match decision.focus {
         Change::Keep => {}
         Change::To(id) => {
-            let surface = state.window_for_id(id).and_then(|window| {
-                window
-                    .toplevel()
-                    .map(|toplevel| toplevel.wl_surface().clone())
-            });
+            let surface = state
+                .window_for_id(id)
+                .and_then(|window| crate::shell::surface_of(&window));
             if let Some(surface) = surface {
                 state.focus_surface(surface, id);
             }

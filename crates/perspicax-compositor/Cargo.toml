@@ -28,6 +28,10 @@ perspicax-node = { path = "../perspicax-node", version = "0.1.0" }
 # The window-management decisions. Pure, so both backends share them: one
 # placement rule headless and on a seat, rather than two that drift apart.
 perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
+# Xwayland-only: a second X connection, for the X-Resource extension's
+# QueryClientIds -- the X server's own word on which process drew a window.
+# Already in the tree under Smithay's own Xwayland support; MIT OR Apache-2.0.
+x11rb = { version = "0.13", default-features = false, features = ["res"], optional = true }
 # Seat-only: the person's config.toml. Headless reads none.
 perspicax-config = { path = "../perspicax-config", version = "0.1.0", optional = true }
 # Seat-only: reads the person's Xcursor theme, and headless draws no cursor.
@@ -58,7 +62,7 @@ seat = [
 # X11 applications, hosted by an Xwayland this compositor starts. Pure Rust on
 # our side (x11rb speaks the protocol; Xwayland itself is a program we spawn,
 # not a library we link), so it costs the headless build nothing to carry.
-xwayland = ["smithay/xwayland"]
+xwayland = ["smithay/xwayland", "dep:x11rb"]
 
 # A real Wayland client for the live tests, so a layer-shell test needs no
 # panel program installed. MIT; default features off, since the tests need

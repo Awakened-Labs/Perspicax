@@ -65,6 +65,7 @@ fn a_panel_on_the_top_layer_occludes_the_window_beneath_it() {
                 run_for: Some(Duration::from_secs(30)),
                 config: None,
                 socket: Some(socket),
+                xwayland: false,
             };
             perspicax_compositor::run(&config, &facts, &Requests::new(), &stop)
         })

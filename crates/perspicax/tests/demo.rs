@@ -159,6 +159,7 @@ fn run_demo() -> Reading {
         run_for: Some(Duration::from_secs(120)),
         config: None,
         socket: None,
+        xwayland: false,
     };
 
     let (sender, receiver) = mpsc::channel();

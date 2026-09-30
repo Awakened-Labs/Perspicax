@@ -83,6 +83,8 @@ use crate::{Error, state::Compositor};
 mod input;
 mod settings;
 
+pub(crate) use settings::populate;
+
 type Allocator = GbmAllocator<DrmDeviceFd>;
 type Exporter = GbmFramebufferExporter<DrmDeviceFd>;
 

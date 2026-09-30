@@ -187,6 +187,18 @@ pub struct Compositor {
     #[expect(dead_code, reason = "RAII handle for the idle-inhibit global")]
     idle_inhibit: IdleInhibitManagerState,
     pub(crate) inhibitors: Vec<WlSurface>,
+    /// Xwayland, its window manager, and the xwayland-shell global. See
+    /// [`crate::xwayland`].
+    #[cfg(feature = "xwayland")]
+    pub(crate) xwayland: crate::xwayland::Xwayland,
+    #[cfg(feature = "xwayland")]
+    pub(crate) xwayland_shell: Option<smithay::wayland::xwayland_shell::XWaylandShellState>,
+    /// The event loop, for the handlers that must schedule work on it.
+    #[cfg_attr(
+        not(feature = "xwayland"),
+        expect(dead_code, reason = "Xwayland's selections")
+    )]
+    pub(crate) loop_handle: LoopHandle<'static, Self>,
     /// How to start a program against this compositor. Set by `run` once the
     /// socket exists, so `None` only before any client could connect.
     pub(crate) launch: Option<crate::Launch>,
@@ -258,7 +270,12 @@ impl Compositor {
             // work when everything else has gone wrong.
             lock_manager: SessionLockManagerState::new::<Self, _>(display, |_| true),
             lock: None,
-            idle: IdleNotifierState::new(display, event_loop),
+            idle: IdleNotifierState::new(display, event_loop.clone()),
+            #[cfg(feature = "xwayland")]
+            xwayland: crate::xwayland::Xwayland::default(),
+            #[cfg(feature = "xwayland")]
+            xwayland_shell: None,
+            loop_handle: event_loop,
             idle_inhibit: IdleInhibitManagerState::new::<Self>(display),
             inhibitors: Vec::new(),
             launch: None,
@@ -319,10 +336,7 @@ impl Compositor {
     pub(crate) fn send_frames(&self) {
         let elapsed = u32::try_from(self.started.elapsed().as_millis() % u128::from(u32::MAX))
             .unwrap_or(u32::MAX);
-        let windows = self
-            .space
-            .elements()
-            .filter_map(|window| window.toplevel().map(|t| t.wl_surface().clone()));
+        let windows = self.space.elements().filter_map(shell::surface_of);
         let layers = self
             .layers_in(&[
                 crate::layers::BELOW[0],
@@ -392,12 +406,11 @@ impl Compositor {
 
     /// Give the keyboard back to the topmost window, or to nothing.
     pub(crate) fn focus_top_window(&mut self) {
-        let top = self.space.elements().last().and_then(|window| {
-            Some((
-                window.toplevel()?.wl_surface().clone(),
-                shell::id_of(window)?,
-            ))
-        });
+        let top = self
+            .space
+            .elements()
+            .last()
+            .and_then(|window| Some((shell::surface_of(window)?, shell::id_of(window)?)));
         match top {
             Some((surface, id)) => self.focus_surface(surface, id),
             None => {
@@ -438,6 +451,15 @@ impl Compositor {
     /// Where damage landed on this surface, oldest first.
     pub(crate) fn damage_history(&self, id: SurfaceId) -> Vec<(u64, Rect)> {
         self.damage.get(&id).cloned().unwrap_or_default()
+    }
+
+    /// Record that a surface has something in it.
+    #[cfg_attr(
+        not(feature = "xwayland"),
+        expect(dead_code, reason = "Xwayland's late association")
+    )]
+    pub(crate) fn mark_presented(&mut self, id: SurfaceId) {
+        self.presented.insert(id);
     }
 
     /// Whether this surface has ever had anything in it.
@@ -491,7 +513,15 @@ impl CompositorHandler for Compositor {
         &mut self.compositor
     }
 
+    /// Every client carries one of two kinds of data: ours, inserted in
+    /// `insert_client`, or -- for the one client this compositor did not
+    /// accept from its socket -- the data Smithay gives the Xwayland it
+    /// spawned.
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        #[cfg(feature = "xwayland")]
+        if let Some(xwayland) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
+            return &xwayland.compositor_state;
+        }
         &client
             .get_data::<ClientState>()
             .expect("every client this compositor inserts carries a ClientState")
@@ -578,6 +608,14 @@ impl CompositorHandler for Compositor {
             }
             None => self.layer_committed(surface),
         };
+        #[cfg(feature = "xwayland")]
+        if id.is_none() && presented {
+            with_states(surface, |states| {
+                states
+                    .data_map
+                    .insert_if_missing_threadsafe(|| crate::xwayland::PresentedUnclaimed);
+            });
+        }
         if let Some(id) = id {
             if presented {
                 self.presented.insert(id);
@@ -799,10 +837,12 @@ impl SeatHandler for Compositor {
             return;
         }
         for window in self.space.elements() {
-            let Some(toplevel) = window.toplevel() else {
-                continue;
-            };
-            if window.set_activated(Some(toplevel.wl_surface()) == focused) {
+            let active = shell::surface_of(window).as_ref() == focused;
+            // An X11 window is told at once; an xdg toplevel needs the
+            // configure that carries its new state.
+            if window.set_activated(active)
+                && let Some(toplevel) = window.toplevel()
+            {
                 toplevel.send_pending_configure();
             }
         }
@@ -828,6 +868,39 @@ impl OutputHandler for Compositor {}
 
 impl SelectionHandler for Compositor {
     type SelectionUserData = ();
+
+    /// A Wayland client copied something: offer it to X clients too.
+    #[cfg(feature = "xwayland")]
+    fn new_selection(
+        &mut self,
+        target: smithay::wayland::selection::SelectionTarget,
+        source: Option<smithay::wayland::selection::SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        if let Some(wm) = self.xwayland.wm.as_mut()
+            && let Err(error) = wm.new_selection(target, source.map(|source| source.mime_types()))
+        {
+            tracing::warn!(%error, ?target, "could not offer a selection to X11");
+        }
+    }
+
+    /// An X client is pasting what a Wayland client copied.
+    #[cfg(feature = "xwayland")]
+    fn send_selection(
+        &mut self,
+        target: smithay::wayland::selection::SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &(),
+    ) {
+        let handle = self.loop_handle.clone();
+        if let Some(wm) = self.xwayland.wm.as_mut()
+            && let Err(error) = wm.send_selection(target, mime_type, fd, handle)
+        {
+            tracing::warn!(%error, ?target, "could not hand a selection to X11");
+        }
+    }
 }
 
 impl DataDeviceHandler for Compositor {

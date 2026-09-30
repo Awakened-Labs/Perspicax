@@ -185,6 +185,10 @@ impl SurfaceFacts {
             title: self.title.clone(),
             pid: match &self.origin {
                 Origin::Process(process) => Some(process.pid),
+                // The X client's pid, however it was learned: the join uses
+                // it to pair a window with an accessibility tree, which is a
+                // correlation it weighs, not an attestation it trusts.
+                Origin::X11(x11) => x11.client.as_ref().map(|client| client.pid),
                 Origin::Unattributed => None,
             },
             focused_at: self.focused_at,

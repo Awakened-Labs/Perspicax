@@ -138,13 +138,22 @@ impl Consent {
     /// unattributed origin, whatever the policy: a policy about processes
     /// cannot say yes to a process nobody has identified.
     #[must_use]
+    ///
+    /// An X11 origin is judged by its server, never by its client: every X
+    /// client shares one Xwayland, and X11 lets any of them read and inject
+    /// into the others, so consenting to one X client is consenting to all of
+    /// them. The Xwayland perspicax starts for a person is never among the
+    /// processes it spawned for an agent, so on a seat X11 applications are
+    /// refused unless consent is everyone.
     pub fn permits(&self, origin: &Origin) -> bool {
-        let Origin::Process(process) = origin else {
-            return false;
+        let pid = match origin {
+            Origin::Unattributed => return false,
+            Origin::Process(process) => process.pid,
+            Origin::X11(x11) => x11.server,
         };
         match self {
             Self::Nobody => false,
-            Self::Spawned(pids) => pids.contains(&process.pid),
+            Self::Spawned(pids) => pids.contains(&pid),
             Self::Everyone => true,
         }
     }
@@ -162,7 +171,7 @@ impl Consent {
 pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
     match &node.origin {
         Origin::Unattributed => return Err(Refusal::Unattributed),
-        Origin::Process(_) => {}
+        Origin::Process(_) | Origin::X11(_) => {}
     }
     match &node.visibility {
         Visibility::Visible => Ok(()),
@@ -454,5 +463,25 @@ mod tests {
         ] {
             assert!(!consent.permits(&Origin::Unattributed), "{consent:?}");
         }
+    }
+
+    #[test]
+    fn an_x11_origin_is_consented_by_its_server_not_its_client() {
+        let x11 = Origin::X11(Box::new(perspicax_node::X11Origin {
+            server: 700,
+            client: Some(ProcessOrigin {
+                pid: 900,
+                exe: None,
+                cgroup: None,
+                sandbox: None,
+            }),
+            basis: perspicax_node::X11Basis::XRes,
+        }));
+        assert!(
+            !Consent::Spawned(vec![900]).permits(&x11),
+            "the client is not the unit"
+        );
+        assert!(Consent::Spawned(vec![700]).permits(&x11));
+        assert!(Consent::Everyone.permits(&x11));
     }
 }

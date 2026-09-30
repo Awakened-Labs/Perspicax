@@ -282,6 +282,7 @@ fn run(spawn: Vec<Vec<String>>) -> Drive {
         run_for: Some(Duration::from_secs(180)),
         config: None,
         socket: None,
+        xwayland: false,
     };
 
     let (sender, receiver) = mpsc::channel();

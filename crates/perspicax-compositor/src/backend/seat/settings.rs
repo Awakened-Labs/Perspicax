@@ -13,6 +13,7 @@ use std::{path::Path, process::Child};
 use perspicax_config::{Built, Config, Pointer};
 use smithay::{
     input::keyboard::XkbConfig,
+    reexports::calloop::LoopHandle,
     reexports::input::{Device, DeviceCapability},
 };
 
@@ -136,6 +137,32 @@ pub(super) fn reload(state: &mut Compositor) {
         relight(state);
     }
     tracing::info!(keyboard_changed, outputs_changed, "config reloaded");
+}
+
+/// Bring up the person's session around the windows: Xwayland if this build
+/// has it and the config wants it, then the autostart list -- after Xwayland
+/// is ready, so an X11 program in it finds `DISPLAY` set.
+pub(crate) fn populate(
+    state: &mut Compositor,
+    #[cfg_attr(
+        not(feature = "xwayland"),
+        expect(unused_variables, reason = "Xwayland's")
+    )]
+    event_loop: &LoopHandle<'static, Compositor>,
+) -> Result<(), Error> {
+    #[cfg(feature = "xwayland")]
+    if matches!(&state.backend, Running::Seat(session) if session.settings.xwayland) {
+        return crate::xwayland::start(state, event_loop, autostart);
+    }
+    autostart(state);
+    Ok(())
+}
+
+fn autostart(state: &mut Compositor) {
+    let launch = state.launch.clone();
+    if let Running::Seat(session) = &mut state.backend {
+        session.autostart(launch.as_ref());
+    }
 }
 
 impl Session {

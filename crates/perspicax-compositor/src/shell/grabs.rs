@@ -18,7 +18,7 @@ use smithay::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::protocol::wl_surface::WlSurface,
     },
-    utils::{Logical, Point},
+    utils::{Logical, Point, Size},
     wayland::{compositor::with_states, shell::xdg::SurfaceCachedState},
 };
 
@@ -191,6 +191,26 @@ impl ResizeGrab {
     }
 }
 
+/// The smallest and largest size a window declared, `0` meaning no limit:
+/// from its xdg cached state, or an X client's size hints.
+fn limits(window: &Window) -> Option<(Size<i32, Logical>, Size<i32, Logical>)> {
+    if let Some(toplevel) = window.toplevel() {
+        return Some(with_states(toplevel.wl_surface(), |states| {
+            let mut cached = states.cached_state.get::<SurfaceCachedState>();
+            let current = cached.current();
+            (current.min_size, current.max_size)
+        }));
+    }
+    #[cfg(feature = "xwayland")]
+    if let Some(x11) = window.x11_surface() {
+        return Some((
+            x11.min_size().unwrap_or_default(),
+            x11.max_size().unwrap_or_default(),
+        ));
+    }
+    None
+}
+
 /// Round a pointer delta to whole logical pixels.
 fn whole(delta: Point<f64, Logical>) -> (i32, i32) {
     let delta = delta.to_i32_round();
@@ -206,9 +226,14 @@ impl PointerGrab<Compositor> for MoveGrab {
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
-        let to = self.origin.to_f64() + (event.location - self.start.location);
-        data.space
-            .map_element(self.window.clone(), to.to_i32_round(), false);
+        let to = (self.origin.to_f64() + (event.location - self.start.location)).to_i32_round();
+        data.space.map_element(self.window.clone(), to, false);
+        // An X client keeps its own idea of where it is, and places its
+        // menus from it, so it is told.
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = self.window.x11_surface() {
+            let _ = x11.configure(smithay::utils::Rectangle::new(to, x11.geometry().size));
+        }
         data.backend.redraw();
     }
 
@@ -245,14 +270,9 @@ impl PointerGrab<Compositor> for ResizeGrab {
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
-        let Some(toplevel) = self.window.toplevel() else {
+        let Some((min, max)) = limits(&self.window) else {
             return;
         };
-        let (min, max) = with_states(toplevel.wl_surface(), |states| {
-            let mut cached = states.cached_state.get::<SurfaceCachedState>();
-            let current = cached.current();
-            (current.min_size, current.max_size)
-        });
         self.last = resize(
             self.from,
             self.edges,
@@ -261,6 +281,15 @@ impl PointerGrab<Compositor> for ResizeGrab {
             (max.w, max.h),
         );
         self.configure(true);
+        // X11 has no configure-and-wait: the window is simply given its new
+        // rectangle, anchored now rather than on a later commit.
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = self.window.x11_surface() {
+            let at = perspicax_policy::anchor(self.from, self.edges, self.last);
+            let _ = x11.configure(smithay::utils::Rectangle::new(at.into(), self.last.into()));
+            data.space.map_element(self.window.clone(), at, false);
+            data.backend.redraw();
+        }
     }
 
     fn button(

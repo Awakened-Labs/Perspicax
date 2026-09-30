@@ -469,9 +469,14 @@ pub(crate) fn edges(edge: xdg_toplevel::ResizeEdge) -> Edges {
     }
 }
 
-/// Whether `surface` is this window's toplevel.
+/// Whether `surface` is this window's own surface -- its xdg toplevel, or the
+/// surface Xwayland associated with its X11 window.
 pub(crate) fn is_toplevel_of(window: &Window, surface: &WlSurface) -> bool {
-    window
-        .toplevel()
-        .is_some_and(|toplevel| toplevel.wl_surface() == surface)
+    window.wl_surface().is_some_and(|own| *own == *surface)
+}
+
+/// A window's own surface, whichever protocol it came in by. `None` for an
+/// X11 window Xwayland has not yet associated with a surface.
+pub(crate) fn surface_of(window: &Window) -> Option<WlSurface> {
+    window.wl_surface().map(std::borrow::Cow::into_owned)
 }

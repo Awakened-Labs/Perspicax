@@ -303,6 +303,12 @@ perspicax --seat --spawn foot 2>~/perspicax.log
 Two chords always work, whatever the configuration says:
 **Ctrl+Alt+Backspace** ends the session, and **Ctrl+Alt+F1…F12** switches VT.
 
+X11 applications run under an Xwayland the session starts (`xwayland = false`
+in the config turns it off), with `DISPLAY` set for everything it launches. An
+X11 window's origin says so: the X client's pid comes from the X server's
+X-Resource answer rather than the kernel, and every X client shares one consent
+decision, because X11 lets them read and drive each other.
+
 The session reads `$XDG_CONFIG_HOME/perspicax/config.toml` (or `--config PATH`).
 Without one it runs the `classic` profile: click to focus, Alt+F4, Alt+Tab,
 Alt+drag to move and Alt+right-drag to resize, Logo+Shift+Left/Right to move a

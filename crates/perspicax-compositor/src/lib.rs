@@ -43,6 +43,8 @@ mod lock;
 mod origin;
 mod shell;
 pub mod state;
+#[cfg(feature = "xwayland")]
+mod xwayland;
 
 pub use crate::{
     act::{ActError, Dispatched},
@@ -185,6 +187,11 @@ pub struct Config {
     /// free `wayland-N`. For whoever has to connect without being spawned
     /// by us: a test's own client, or a second session beside a first.
     pub socket: Option<String>,
+    /// Start Xwayland headless too, for X11 applications an agent wants to
+    /// host. Off by default, so what CI runs needs no X server. A seat
+    /// decides from its config (`xwayland`), not from this. Ignored in a
+    /// build without the `xwayland` feature.
+    pub xwayland: bool,
 }
 
 /// Run a compositor until its deadline passes, or forever.
@@ -289,13 +296,16 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
     state.launch = Some(Launch {
         socket: socket_name.clone(),
         env: config.env.clone(),
+        x11_display: None,
     });
     let mut children = spawn_all(&config.spawn, &config.env, &socket_name)?;
     // What we started is what an agent may act on, on a seat. Headless, this
     // changes nothing: consent there is already everyone.
     state.grant(children.iter().map(Child::id));
     // The person's own programs, after the agent's: never granted consent.
-    state.backend.autostart(state.launch.as_ref());
+    // On a seat with Xwayland, they wait for it, so an X11 program in the
+    // autostart list finds a `DISPLAY`.
+    Running::populate(&mut state, &event_loop.handle(), config.xwayland)?;
 
     let deadline = config.run_for.map(|run_for| Instant::now() + run_for);
     let result = loop {
@@ -342,6 +352,7 @@ fn spawn_all(
     let launch = Launch {
         socket: socket.clone(),
         env: env.to_vec(),
+        x11_display: None,
     };
     commands
         .iter()
@@ -357,6 +368,10 @@ fn spawn_all(
 pub(crate) struct Launch {
     socket: OsString,
     env: Vec<(String, String)>,
+    /// Xwayland's display, once it is up. Without one, `DISPLAY` is removed,
+    /// so an X11 program fails plainly rather than finding some other X
+    /// server and drawing where this compositor cannot see.
+    pub(crate) x11_display: Option<u32>,
 }
 
 impl Launch {
@@ -366,18 +381,21 @@ impl Launch {
             command: String::new(),
             source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "an empty command"),
         })?;
-        let child = Command::new(program)
+        let mut command_line = Command::new(program);
+        command_line
             .args(arguments)
             .envs(self.env.iter().map(|(key, value)| (key, value)))
             .env("WAYLAND_DISPLAY", &self.socket)
             .env("GDK_BACKEND", "wayland")
-            .env("QT_QPA_PLATFORM", "wayland")
-            .env_remove("DISPLAY")
-            .spawn()
-            .map_err(|source| Error::Spawn {
-                command: command.join(" "),
-                source,
-            })?;
+            .env("QT_QPA_PLATFORM", "wayland");
+        match self.x11_display {
+            Some(display) => command_line.env("DISPLAY", format!(":{display}")),
+            None => command_line.env_remove("DISPLAY"),
+        };
+        let child = command_line.spawn().map_err(|source| Error::Spawn {
+            command: command.join(" "),
+            source,
+        })?;
         tracing::info!(pid = child.id(), command = %command.join(" "), "spawned");
         Ok(child)
     }

@@ -50,7 +50,12 @@ use crate::state::{ClientState, Compositor};
 /// [`run`](crate::run), so that whoever wants to read the facts does not have
 /// to be the thread running the compositor.
 #[derive(Debug, Clone, Default)]
-pub struct Facts(Arc<RwLock<HostFacts>>);
+pub struct Facts {
+    host: Arc<RwLock<HostFacts>>,
+    /// Xwayland's display number, once it is up: what `DISPLAY` must say
+    /// for an X11 program to reach this compositor.
+    x11_display: Arc<RwLock<Option<u32>>>,
+}
 
 impl Facts {
     /// A handle to no facts at all, which is what a compositor that has not
@@ -71,7 +76,10 @@ impl Facts {
     /// compositor happened to produce.
     #[must_use]
     pub fn of(facts: HostFacts) -> Self {
-        Self(Arc::new(RwLock::new(facts)))
+        Self {
+            host: Arc::new(RwLock::new(facts)),
+            x11_display: Arc::default(),
+        }
     }
 
     /// A copy of the latest snapshot.
@@ -87,7 +95,7 @@ impl Facts {
     /// thread's panic into a silent, permanent blindness in another.
     #[must_use]
     pub fn read(&self) -> HostFacts {
-        self.0
+        self.host
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -95,7 +103,26 @@ impl Facts {
 
     /// Replace the snapshot.
     fn publish(&self, facts: HostFacts) {
-        *self.0.write().unwrap_or_else(PoisonError::into_inner) = facts;
+        *self.host.write().unwrap_or_else(PoisonError::into_inner) = facts;
+    }
+
+    /// Xwayland's display number, if this compositor started one and it is
+    /// ready. `None` otherwise, including in a build without the `xwayland`
+    /// feature.
+    #[must_use]
+    pub fn x11_display(&self) -> Option<u32> {
+        *self
+            .x11_display
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    #[cfg(feature = "xwayland")]
+    pub(crate) fn publish_x11_display(&self, display: Option<u32>) {
+        *self
+            .x11_display
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = display;
     }
 }
 
@@ -162,6 +189,10 @@ impl Compositor {
     /// not been mapped through `new_toplevel` and is not ours to describe.
     fn facts_for(&self, window: &Window) -> Option<SurfaceFacts> {
         let id = *window.user_data().get::<SurfaceId>()?;
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = window.x11_surface() {
+            return self.x11_facts(id, window, x11);
+        }
         let toplevel = window.toplevel()?;
         let surface = toplevel.wl_surface();
 
@@ -283,6 +314,42 @@ impl Compositor {
             damage_generation: self.damage_generation(id),
             damage: self.damage_history(id),
         }
+    }
+
+    /// An X11 window's facts. No xdg geometry and no shadow margin: the X
+    /// window's own rectangle is the window. A window Xwayland has not yet
+    /// given a surface is described, unmapped, so its nodes are refused
+    /// rather than judged against nothing.
+    #[cfg(feature = "xwayland")]
+    fn x11_facts(
+        &self,
+        id: SurfaceId,
+        window: &Window,
+        x11: &smithay::xwayland::X11Surface,
+    ) -> Option<SurfaceFacts> {
+        let location = match self.space.element_location(window) {
+            Some(location) => location,
+            None => crate::shell::placement(window, |placement| placement.parked)?,
+        };
+        let size = x11.geometry().size;
+        let placed = smithay::utils::Rectangle::new(location, size);
+        let mut facts = match x11.wl_surface() {
+            Some(surface) => self.plain_facts(id, &surface, placed),
+            None => SurfaceFacts::new(
+                id,
+                Rect::new(
+                    f64::from(location.x),
+                    f64::from(location.y),
+                    f64::from(location.x + size.w),
+                    f64::from(location.y + size.h),
+                ),
+            )
+            .unmapped(),
+        };
+        facts.mapped &= !self.minimized.contains(window);
+        facts.origin = Self::x11_origin(window);
+        facts.title = Some(x11.title()).filter(|title| !title.is_empty());
+        Some(facts)
     }
 
     /// Who owns the client that drew this window.

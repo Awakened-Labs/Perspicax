@@ -38,7 +38,7 @@ use smithay::{
 
 use perspicax_index::Consent;
 
-use crate::{Config, Error, FRAME_INTERVAL, Launch, state::Compositor};
+use crate::{Config, Error, FRAME_INTERVAL, state::Compositor};
 
 /// Where the compositor puts its output and gets its input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,17 +245,35 @@ impl Running {
         self.renders()
     }
 
-    /// Start the person's autostart programs. Headless has no person and no
-    /// config, so nothing.
-    pub(crate) fn autostart(
-        &mut self,
-        #[cfg_attr(not(feature = "seat"), expect(unused_variables, reason = "the seat's"))]
-        launch: Option<&Launch>,
-    ) {
-        match self {
-            Self::Headless { .. } => {}
+    /// Start what the session runs besides its windows: Xwayland, if built
+    /// and wanted, then (on a seat) the autostart list once `DISPLAY` exists.
+    /// Headless starts Xwayland only when the caller asked for it, and has no
+    /// autostart.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Seat`] if Xwayland will not start at all.
+    pub(crate) fn populate(
+        state: &mut Compositor,
+        #[cfg_attr(
+            not(any(feature = "seat", feature = "xwayland")),
+            expect(unused_variables, reason = "the seat's and Xwayland's")
+        )]
+        event_loop: &LoopHandle<'static, Compositor>,
+        #[cfg_attr(
+            not(feature = "xwayland"),
+            expect(unused_variables, reason = "Xwayland's")
+        )]
+        headless_xwayland: bool,
+    ) -> Result<(), Error> {
+        match state.backend {
+            #[cfg(feature = "xwayland")]
+            Self::Headless { .. } if headless_xwayland => {
+                crate::xwayland::start(state, event_loop, |_| {})
+            }
+            Self::Headless { .. } => Ok(()),
             #[cfg(feature = "seat")]
-            Self::Seat(session) => session.autostart(launch),
+            Self::Seat(_) => seat::populate(state, event_loop),
         }
     }
 
