@@ -116,3 +116,18 @@ fi
 # Safe alongside `--test-threads=1`, which is what stops two tests' output
 # interleaving into something unreadable.
 cargo test --locked --workspace -- --include-ignored --test-threads=1 --nocapture
+
+# The one live test behind a feature: an X11 window under an Xwayland the
+# headless compositor starts, attributed to its client through XRes. The run
+# above builds without features, so it compiles this test out; it is asked for
+# by name here rather than by turning `xwayland` on for the whole suite, which
+# would change what every other test was built against.
+#
+# Checked for first, because a missing Xwayland surfaces inside the test as
+# "Xwayland never became ready", which reads like a compositor bug.
+if ! command -v Xwayland >/dev/null; then
+    echo "Xwayland is not installed; the xwayland provenance test cannot run" >&2
+    exit 1
+fi
+cargo test --locked -p perspicax-compositor --features xwayland --test xwayland \
+    -- --ignored --nocapture

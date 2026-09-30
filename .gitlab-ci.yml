@@ -170,6 +170,10 @@ test:
     # to be named. `xauth` is the one that bites: it is a Recommends of xvfb
     # and `xvfb-run` exits 3 with "xauth command not found" without it, which
     # a workstation never sees because a desktop install already has it.
+    #
+    # `xwayland` is the W1 addition: the Xwayland provenance test starts one
+    # under a headless compositor. Its X client is the test itself (x11rb), so
+    # no X11 application is needed beside it.
     - >
       apt-get install -y --no-install-recommends
       xvfb
@@ -179,6 +183,7 @@ test:
       gtk-4-examples
       qt6-base-examples
       qt6-wayland
+      xwayland
       libxkbcommon-dev
   script:
     - xvfb-run -a dbus-run-session -- ci/live-tests.sh
