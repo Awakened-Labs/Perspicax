@@ -138,10 +138,11 @@ impl Compositor {
         // rather than from `Window::geometry()`.
         //
         // Smithay derives a window's bounding box from buffer dimensions
-        // recorded by `on_commit_buffer_handler`, which lives behind a renderer
-        // feature this compositor does not enable -- so `Window::geometry()`
-        // here is always `0x0`, and every node on it judges `Unmapped`. The
-        // declared window geometry is better information anyway: it is the
+        // recorded by `on_commit_buffer_handler`, which only the seat backend
+        // calls -- so headless, `Window::geometry()` is always `0x0`, and
+        // every node on it would judge `Unmapped`. Reading the declared
+        // geometry on both backends keeps a seat's facts the ones CI tested,
+        // and it is better information anyway: it is the
         // visible frame excluding shadow, which is the rectangle an
         // accessibility bridge's window-relative coordinates are measured
         // against, and both GTK and Qt set it under client-side decoration.

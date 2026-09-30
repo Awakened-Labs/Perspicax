@@ -13,8 +13,10 @@ repository.workspace = true
 # rather than the workspace's `forbid` so a genuinely necessary site can carry a
 # narrow `#[allow]` with its reason written at the definition -- and so that
 # every such site is visible in a grep rather than lost inside a blanket
-# permission. No `unsafe` exists here yet; when the first appears it gets a
-# comment saying which C API forced it.
+# permission. The sites so far are two, both in `src/backend/seat.rs`, both
+# constructors Smithay marks `unsafe` over EGL (`eglGetPlatformDisplay` and a
+# context's thread affinity), each with the C API and the argument written
+# beside it.
 unsafe_code = "deny"
 
 [dependencies]

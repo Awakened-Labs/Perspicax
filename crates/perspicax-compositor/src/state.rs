@@ -15,7 +15,7 @@ use std::{
 
 use perspicax_node::{Origin, Rect, SurfaceId};
 
-use crate::{act::Keys, facts::Facts, origin};
+use crate::{act::Keys, backend::Running, facts::Facts, origin};
 
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
@@ -26,7 +26,6 @@ use smithay::{
         keyboard::{KeyboardHandle, XkbConfig},
         pointer::{CursorImageStatus, PointerHandle},
     },
-    output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
@@ -35,7 +34,7 @@ use smithay::{
             protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
         },
     },
-    utils::{SERIAL_COUNTER, Serial, Transform},
+    utils::{SERIAL_COUNTER, Serial},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -78,11 +77,10 @@ pub struct Compositor {
     pub(crate) compositor: CompositorState,
     pub(crate) xdg_shell: XdgShellState,
     pub(crate) shm: ShmState,
-    /// Held, not read. These three are RAII handles for protocol globals:
-    /// dropping the `Output` withdraws `wl_output`, dropping the
-    /// `OutputManagerState` withdraws `xdg_output`, and dropping the `Seat`
-    /// withdraws `wl_seat` -- so a client that connected a moment earlier would
-    /// watch the desktop lose features it had already bound. `expect` rather
+    /// Held, not read. These two are RAII handles for protocol globals:
+    /// dropping the `OutputManagerState` withdraws `xdg_output`, and dropping
+    /// the `Seat` withdraws `wl_seat` -- so a client that connected a moment
+    /// earlier would watch the desktop lose features it had already bound. `expect` rather
     /// than `allow`: the next slice dispatches focus through the seat, and this
     /// should start complaining the moment that makes it live.
     #[expect(dead_code, reason = "RAII handle for the xdg_output global")]
@@ -134,16 +132,22 @@ pub struct Compositor {
     /// Minted per toplevel and never reused. A retired id addressing a new
     /// window is the failure `Refusal::Stale` exists to prevent, one layer up.
     next_surface: u64,
-    #[expect(dead_code, reason = "RAII handle for the wl_output global")]
-    pub(crate) output: Output,
+    /// The backend this compositor was brought up on, and everything it owns:
+    /// the outputs, and on a seat the session, GPU and input devices.
+    pub(crate) backend: Running,
+    /// The linux-dmabuf global's state. Present in every seat build and
+    /// advertised only when the seat backend runs, because GPU clients hand
+    /// their buffers over as dmabufs and a renderer is what imports them.
+    #[cfg(feature = "seat")]
+    pub(crate) dmabuf: smithay::wayland::dmabuf::DmabufState,
     placed: i32,
     started: Instant,
 }
 
 impl Compositor {
-    /// Bring up every global a stock GTK or Qt client expects to find, and one
-    /// virtual output for them to sit on.
-    pub(crate) fn new(display: &DisplayHandle, size: (i32, i32), facts: Facts) -> Self {
+    /// Bring up every global a stock GTK or Qt client expects to find, on
+    /// whatever outputs the backend starts with.
+    pub(crate) fn new(display: &DisplayHandle, backend: Running, facts: Facts) -> Self {
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(display, "perspicax-seat");
         let keyboard = match seat.add_keyboard(XkbConfig::default(), 200, 25) {
@@ -157,30 +161,11 @@ impl Compositor {
         // cannot fail, because there is no keymap to compile.
         let pointer = Some(seat.add_pointer());
 
-        let output = Output::new(
-            "perspicax-headless".to_owned(),
-            PhysicalProperties {
-                size: (0, 0).into(),
-                subpixel: Subpixel::Unknown,
-                make: "perspicax".to_owned(),
-                model: "virtual".to_owned(),
-            },
-        );
-        let mode = Mode {
-            size: size.into(),
-            refresh: 60_000,
-        };
-        output.change_current_state(
-            Some(mode),
-            Some(Transform::Normal),
-            Some(Scale::Integer(1)),
-            Some((0, 0).into()),
-        );
-        output.set_preferred(mode);
-        output.create_global::<Self>(display);
-
         let mut space = Space::default();
-        space.map_output(&output, (0, 0));
+        for output in backend.initial_outputs() {
+            let at = output.current_location();
+            space.map_output(&output, at);
+        }
 
         Self {
             display: display.clone(),
@@ -192,7 +177,9 @@ impl Compositor {
             seat_state,
             seat,
             space,
-            output,
+            backend,
+            #[cfg(feature = "seat")]
+            dmabuf: smithay::wayland::dmabuf::DmabufState::new(),
             keyboard,
             pointer,
             keys: Keys::from_default_layout(),
@@ -372,27 +359,35 @@ impl CompositorHandler for Compositor {
 
     /// A client has finished describing a new state for a surface.
     ///
-    /// The buffer is released immediately, which a rendering compositor would
-    /// not do. It holds a buffer until it has drawn from it, and Smithay
-    /// therefore releases the *previous* buffer when a newer one arrives -- a
-    /// scheme that quietly requires the client to own at least two. This
-    /// compositor never reads a pixel, so it is finished with a buffer the
-    /// instant it arrives, and saying so keeps a single-buffered client running
-    /// instead of stalled against a compositor that had no use for its
-    /// contents in the first place.
+    /// Headless, the buffer is released immediately, which a rendering
+    /// compositor would not do. It holds a buffer until it has drawn from it,
+    /// and Smithay therefore releases the *previous* buffer when a newer one
+    /// arrives -- a scheme that quietly requires the client to own at least
+    /// two. The headless compositor never reads a pixel, so it is finished with
+    /// a buffer the instant it arrives, and saying so keeps a single-buffered
+    /// client running instead of stalled against a compositor that had no use
+    /// for its contents in the first place.
+    ///
+    /// On a seat the renderer does read it, so the buffer goes to Smithay's
+    /// renderer bookkeeping instead and is released once it has been drawn.
+    /// Everything this compositor *records* -- damage, presentation -- is the
+    /// same on both paths, so the facts a seat publishes are the facts CI
+    /// tested.
     fn commit(&mut self, surface: &WlSurface) {
+        let renders = self.backend.renders();
         let whole = declared_geometry(surface);
         let (presented, damaged) = with_states(surface, |states| {
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
             let current = attributes.current();
 
-            // Drained, not read: `SurfaceAttributes` accumulates damage from
-            // commit to commit and expects whoever processes it to clear it.
+            // Read, not drained, when a renderer is going to want the same
+            // damage next; it drains what it uses, and the rest is cleared
+            // below so no commit's damage is ever counted twice.
             let scale = f64::from(current.buffer_scale.max(1));
             let mut damaged: Vec<Rect> = current
                 .damage
-                .drain(..)
-                .map(|damage| match damage {
+                .iter()
+                .map(|damage| match *damage {
                     Damage::Surface(rect) => to_rect(rect, 1.0),
                     // Buffer coordinates are the surface's multiplied by the
                     // scale the client declared, so dividing is what puts them
@@ -401,14 +396,13 @@ impl CompositorHandler for Compositor {
                 })
                 .collect();
 
-            let presented = match current.buffer.take() {
-                Some(BufferAssignment::NewBuffer(buffer)) => {
+            let presented = !matches!(current.buffer, Some(BufferAssignment::Removed));
+            if !renders {
+                current.damage.clear();
+                if let Some(BufferAssignment::NewBuffer(buffer)) = current.buffer.take() {
                     buffer.release();
-                    true
                 }
-                Some(BufferAssignment::Removed) => false,
-                None => true,
-            };
+            }
 
             // A commit that presents a buffer without saying which part of it
             // changed has changed all of it as far as anyone here can tell.
@@ -417,6 +411,20 @@ impl CompositorHandler for Compositor {
             }
             (presented, damaged)
         });
+        #[cfg(feature = "seat")]
+        if renders {
+            smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
+            // What the renderer did not take -- damage committed without a new
+            // buffer -- is cleared here, as the headless path clears it.
+            with_states(surface, |states| {
+                states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .current()
+                    .damage
+                    .clear();
+            });
+        }
 
         if let Some(window) = self.window_for(surface) {
             window.on_commit();
@@ -437,6 +445,7 @@ impl CompositorHandler for Compositor {
             }
         }
         self.space.refresh();
+        self.backend.committed();
         self.publish_facts();
     }
 }

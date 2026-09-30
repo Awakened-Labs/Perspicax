@@ -50,7 +50,7 @@ perspicax-mcp          MCP server (rmcp, stdio) — six tools, DTOs, receipts  [
 perspicax-index        node cache, stable ids, selectors, deltas, refusals  [portable]
 perspicax-node         node schema — AccessKit types plus Origin and Visibility
 perspicax-atspi        impl Ingest — AT-SPI2 over D-Bus
-perspicax-compositor   impl HostView — Smithay: outputs, seat, damage. Draws nothing.
+perspicax-compositor   impl HostView — Smithay: outputs, seat, damage. Headless draws nothing.
 perspicax-probe        dev CLI — dump a tree, time a read, explain a refusal
 ```
 
@@ -289,6 +289,17 @@ libinput, libseat, libgbm, libdrm, libEGL and libGLESv2:
 ```sh
 cargo build --release --features perspicax/desktop
 ```
+
+Run it from a text console (a TTY, not a terminal inside another desktop), with
+seatd or logind managing the seat. Log to a file: the console the session
+takes over shows nothing until it ends.
+
+```sh
+perspicax --seat --spawn foot 2>~/perspicax.log
+```
+
+Two chords always work, whatever the configuration says:
+**Ctrl+Alt+Backspace** ends the session, and **Ctrl+Alt+F1…F12** switches VT.
 
 Gates, in the order CI runs them:
 

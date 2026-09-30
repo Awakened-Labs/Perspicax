@@ -61,21 +61,20 @@ use std::{
 use smithay::{
     reexports::{
         calloop::{
-            EventLoop, Interest, Mode as PollMode, PostAction,
-            channel::Event as ChannelEvent,
+            EventLoop, Interest, Mode as PollMode, PostAction, channel::Event as ChannelEvent,
             generic::Generic,
-            timer::{TimeoutAction, Timer},
         },
         wayland_server::Display,
     },
     wayland::socket::ListeningSocketSource,
 };
 
-use crate::state::Compositor;
+use crate::{backend::Running, state::Compositor};
 
-/// How often clients are told they may draw again. 60 Hz, because that is what
-/// a toolkit expects and a slower tick would make every damage measurement in
-/// this milestone a measurement of this constant instead.
+/// How often a headless compositor tells clients they may draw again, and the
+/// longest the loop sleeps between checks for a stop. 60 Hz, because that is
+/// what a toolkit expects and a slower tick would make every damage
+/// measurement in this milestone a measurement of this constant instead.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// A request for a running compositor to stop.
@@ -186,26 +185,17 @@ pub struct Config {
 /// this build left out, no socket, no event loop, a child that will not start,
 /// or a display that fails mid-run.
 pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> Result<(), Error> {
-    config.backend.ensure_built()?;
-    let size = match config.backend {
-        Backend::Headless { size } => size,
-        // Built, and not yet able to run: the session, DRM and renderer land
-        // in the next slice of this milestone. Refused here, before a socket
-        // exists, so no client is ever accepted by a compositor that cannot
-        // show it anything.
-        Backend::Seat => {
-            return Err(Error::Seat(
-                "the seat backend is compiled in but not implemented yet".to_owned(),
-            ));
-        }
-    };
-
     let mut event_loop: EventLoop<'static, Compositor> =
         EventLoop::try_new().map_err(|error| Error::EventLoop(error.to_string()))?;
     let mut display: Display<Compositor> =
         Display::new().map_err(|error| Error::Display(error.to_string()))?;
     let handle = display.handle();
-    let mut state = Compositor::new(&handle, size, facts.clone());
+    // Before the socket, so a seat that cannot come up -- no session, no GPU,
+    // no monitor -- is refused before any client has been accepted by a
+    // compositor that cannot show it anything.
+    let backend = Running::start(config.backend, &handle, &event_loop.handle())?;
+    let mut state = Compositor::new(&handle, backend, facts.clone());
+    Running::attach(&mut state, &event_loop.handle())?;
 
     let socket =
         ListeningSocketSource::new_auto().map_err(|error| Error::Socket(error.to_string()))?;
@@ -223,9 +213,10 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
     //
     // The usual way to write this hands the `Display` to calloop as source data
     // and reaches it again through `Generic::get_mut`, which is `unsafe`. This
-    // crate is the one in the workspace allowed to write `unsafe`, and it has
-    // not needed to yet -- keeping the display in a local and only *polling*
-    // its descriptor here is why.
+    // crate is the one in the workspace allowed to write `unsafe`, and it
+    // spends that only where a C API leaves no choice (EGL, in the seat
+    // backend) -- keeping the display in a local and only *polling* its
+    // descriptor here is why this is not one of those places.
     let poll_fd = display.backend().poll_fd().try_clone_to_owned()?;
     event_loop
         .handle()
@@ -233,14 +224,6 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
             Generic::new(poll_fd, Interest::READ, PollMode::Level),
             |_, _, _: &mut Compositor| Ok(PostAction::Continue),
         )
-        .map_err(|error| Error::EventLoop(error.to_string()))?;
-
-    event_loop
-        .handle()
-        .insert_source(Timer::immediate(), |_, (), state: &mut Compositor| {
-            state.send_frames();
-            TimeoutAction::ToDuration(FRAME_INTERVAL)
-        })
         .map_err(|error| Error::EventLoop(error.to_string()))?;
 
     // The inbound arrow. Everything else this loop listens to is something a
@@ -292,7 +275,10 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         if let Err(error) = display.flush_clients() {
             break Err(Error::Io(error));
         }
-        if stop.requested() || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if stop.requested()
+            || state.backend.exit_requested()
+            || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        {
             break Ok(());
         }
     };
