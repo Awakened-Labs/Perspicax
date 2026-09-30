@@ -38,7 +38,7 @@ use smithay::{
 
 use perspicax_index::Consent;
 
-use crate::{Error, FRAME_INTERVAL, state::Compositor};
+use crate::{Config, Error, FRAME_INTERVAL, Launch, state::Compositor};
 
 /// Where the compositor puts its output and gets its input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,16 +114,19 @@ impl Running {
     /// [`Error::NotBuilt`] for a backend this build left out, and
     /// [`Error::Seat`] for a seat that would not come up.
     pub(crate) fn start(
-        backend: Backend,
+        config: &Config,
         display: &DisplayHandle,
         #[cfg_attr(not(feature = "seat"), expect(unused_variables, reason = "the seat's"))]
         event_loop: &LoopHandle<'static, Compositor>,
     ) -> Result<Self, Error> {
-        backend.ensure_built()?;
-        match backend {
+        config.backend.ensure_built()?;
+        match config.backend {
             Backend::Headless { size } => Ok(Self::headless(display, size)),
             #[cfg(feature = "seat")]
-            Backend::Seat => Ok(Self::Seat(Box::new(seat::Session::open(event_loop)?))),
+            Backend::Seat => Ok(Self::Seat(Box::new(seat::Session::open(
+                event_loop,
+                config.config.clone(),
+            )?))),
             #[cfg(not(feature = "seat"))]
             Backend::Seat => unreachable!("ensure_built refuses a backend this build left out"),
         }
@@ -240,6 +243,20 @@ impl Running {
     /// are written against. See `crate::shell`.
     pub(crate) fn has_person(&self) -> bool {
         self.renders()
+    }
+
+    /// Start the person's autostart programs. Headless has no person and no
+    /// config, so nothing.
+    pub(crate) fn autostart(
+        &mut self,
+        #[cfg_attr(not(feature = "seat"), expect(unused_variables, reason = "the seat's"))]
+        launch: Option<&Launch>,
+    ) {
+        match self {
+            Self::Headless { .. } => {}
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.autostart(launch),
+        }
     }
 
     /// Whether the person at the keyboard asked the session to end.

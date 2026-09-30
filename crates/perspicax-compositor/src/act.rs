@@ -119,10 +119,21 @@ impl Keys {
     /// `XkbConfig::default()`, which is what the seat was built with, so the
     /// two cannot disagree about what is on the keyboard.
     pub(crate) fn from_default_layout() -> Self {
-        // Empty RMLVO names, which is exactly what `XkbConfig::default()`
-        // passes: libxkbcommon then resolves its own defaults, so the table and
-        // the seat cannot end up describing different keyboards.
-        let (rules, model, layout, variant) = ("", "", "", "");
+        Self::from_names("", "", "", "", None)
+    }
+
+    /// The same walk over a keymap compiled from these RMLVO names: the ones
+    /// the seat's keyboard was just given. Rebuilt whenever the layout
+    /// changes, because a table describing the previous layout would type
+    /// the wrong characters -- `y` for `z` on a German keyboard -- and report
+    /// success.
+    pub(crate) fn from_names(
+        rules: &str,
+        model: &str,
+        layout: &str,
+        variant: &str,
+        options: Option<String>,
+    ) -> Self {
         let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
         let Some(keymap) = xkb::Keymap::new_from_names(
             &context,
@@ -130,7 +141,7 @@ impl Keys {
             model,
             layout,
             variant,
-            None,
+            options,
             xkb::COMPILE_NO_FLAGS,
         ) else {
             tracing::warn!("no keymap: typing will refuse every character");

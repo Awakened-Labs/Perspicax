@@ -81,6 +81,7 @@ use super::{Running, connectors, cursor::Cursor};
 use crate::{Error, state::Compositor};
 
 mod input;
+mod settings;
 
 type Allocator = GbmAllocator<DrmDeviceFd>;
 type Exporter = GbmFramebufferExporter<DrmDeviceFd>;
@@ -119,10 +120,18 @@ pub(crate) struct Session {
     /// so their release is swallowed too: a client must never see half of a
     /// chord it was not given.
     pub(super) swallowed: Vec<Keycode>,
-    /// How the keyboard follows the pointer. Click-to-focus until config.
-    pub(super) focus: perspicax_policy::Focus,
-    /// What chords mean. The classic two until config.
-    pub(super) bindings: perspicax_policy::Bindings,
+    /// The person's config: focus model, bindings, input and outputs. See
+    /// [`settings`].
+    pub(super) settings: perspicax_config::Config,
+    /// Where it was read from, for the reload binding. `None` means the
+    /// classic profile, with nothing to re-read.
+    config_path: Option<PathBuf>,
+    /// Every input device libinput has handed us, so pointer settings can be
+    /// applied to each, and again on reload.
+    devices: Vec<smithay::reexports::input::Device>,
+    /// Programs this session started for the person (autostart, bindings),
+    /// stopped with it and reaped as they exit.
+    children: Vec<std::process::Child>,
     cursor: Cursor,
     /// False while another VT has the seat: no device may be touched then.
     active: bool,
@@ -152,7 +161,15 @@ impl Session {
     /// [`Error::Seat`] for each way a TTY session fails to come up, worded for
     /// the person who just typed `perspicax --seat` and is looking at a text
     /// console.
-    pub(crate) fn open(handle: &LoopHandle<'static, Compositor>) -> Result<Self, Error> {
+    pub(crate) fn open(
+        handle: &LoopHandle<'static, Compositor>,
+        config_path: Option<PathBuf>,
+    ) -> Result<Self, Error> {
+        // First, before the seat is taken: a config that cannot be used is
+        // refused while the person is still looking at a text console that
+        // can show them why.
+        let settings = settings::load(config_path.as_deref())?;
+
         let (mut seat, seat_events) = LibSeatSession::new().map_err(|error| {
             Error::Seat(format!(
                 "could not open a seat session ({error}); run from a TTY, with \
@@ -257,8 +274,10 @@ impl Session {
             heads: Vec::new(),
             handle: handle.clone(),
             swallowed: Vec::new(),
-            focus: perspicax_policy::Focus::default(),
-            bindings: perspicax_policy::Bindings::classic(),
+            settings,
+            config_path,
+            devices: Vec::new(),
+            children: Vec::new(),
             cursor: Cursor::load(),
             active: true,
             exit: false,
@@ -306,6 +325,7 @@ pub(crate) fn attach(state: &mut Compositor) -> Result<(), Error> {
         .create_global_with_default_feedback::<Compositor>(&state.display, &feedback);
 
     arm_panic_hook();
+    settings::apply_keyboard(state);
     rescan(state);
     let Running::Seat(session) = &state.backend else {
         return Ok(());
@@ -435,9 +455,9 @@ fn rescan(state: &mut Compositor) {
         let Some((info, _)) = connected.iter().find(|(info, _)| info.handle() == handle) else {
             continue;
         };
-        // The right edge of what is already mapped, so monitors line up left
-        // to right in the order they were found. Real layout is config's job
-        // (slice 5).
+        // Without a position in config, the right edge of what is already
+        // mapped, so monitors line up left to right in the order they were
+        // found.
         let x = state
             .space
             .outputs()
@@ -445,35 +465,83 @@ fn rescan(state: &mut Compositor) {
             .map(|geometry| geometry.loc.x + geometry.size.w)
             .max()
             .unwrap_or(0);
-        match light(session, &state.display, info, crtc, x) {
-            Ok(head) => {
-                tracing::info!(output = head.output.name(), x, "monitor lit");
-                state.space.map_output(&head.output, (x, 0));
+        match light(session, &state.display, info, crtc, (x, 0)) {
+            Ok(Some(head)) => {
+                let at = head.output.current_location();
+                tracing::info!(output = head.output.name(), ?at, "monitor lit");
+                state.space.map_output(&head.output, at);
                 session.heads.push(head);
             }
+            Ok(None) => {}
             Err(error) => tracing::warn!(?handle, %error, "could not light monitor"),
         }
     }
     session.request_frames();
 }
 
-/// Bring one connector up on one CRTC, at its preferred mode.
+/// Tear every output down and light them again from the config. A modeset
+/// on every monitor, which is why reload only does it when the output rules
+/// changed.
+fn relight(state: &mut Compositor) {
+    let Running::Seat(session) = &mut state.backend else {
+        return;
+    };
+    for head in session.heads.drain(..) {
+        state.space.unmap_output(&head.output);
+        state.display.remove_global::<Compositor>(head.global);
+    }
+    rescan(state);
+}
+
+/// Bring one connector up on one CRTC, as its config rule says: at the mode,
+/// position and scale asked for, or the preferred mode at `beside`. `Ok(None)`
+/// for a monitor the config turned off.
 fn light(
     session: &mut Session,
     display: &smithay::reexports::wayland_server::DisplayHandle,
     info: &connector::Info,
     crtc: crtc::Handle,
-    x: i32,
-) -> Result<Head, String> {
-    let mode = info
+    beside: (i32, i32),
+) -> Result<Option<Head>, String> {
+    let name = format!("{}-{}", info.interface().as_str(), info.interface_id());
+    let rule = session
+        .settings
+        .outputs
+        .iter()
+        .find(|rule| rule.name == name);
+    if rule.is_some_and(|rule| !rule.enable) {
+        tracing::info!(output = name, "left dark by config");
+        return Ok(None);
+    }
+
+    let offered: Vec<_> = info
         .modes()
         .iter()
-        .find(|mode| mode.mode_type().contains(ModeTypeFlags::PREFERRED))
-        .or_else(|| info.modes().first())
-        .copied()
-        .ok_or("the monitor offers no modes")?;
+        .map(|mode| {
+            let (width, height) = mode.size();
+            connectors::Offered {
+                width,
+                height,
+                refresh: f64::from(mode.vrefresh()),
+                preferred: mode.mode_type().contains(ModeTypeFlags::PREFERRED),
+            }
+        })
+        .collect();
+    let wanted = rule
+        .and_then(|rule| rule.mode)
+        .map(|mode| (mode.width, mode.height, mode.refresh));
+    let (at, honoured) =
+        connectors::pick_mode(wanted, &offered).ok_or("the monitor offers no modes")?;
+    if !honoured {
+        tracing::warn!(
+            output = name,
+            ?wanted,
+            "the monitor does not offer that mode; using its preferred one"
+        );
+    }
+    let mode = info.modes()[at];
+
     let (width_mm, height_mm) = info.size().unwrap_or((0, 0));
-    let name = format!("{}-{}", info.interface().as_str(), info.interface_id());
     let output = Output::new(
         name,
         PhysicalProperties {
@@ -490,12 +558,18 @@ fn light(
         },
     );
     let wl_mode = WlMode::from(mode);
+    let scale = match rule.and_then(|rule| rule.scale) {
+        Some(scale) if scale.fract() == 0.0 => Scale::Integer(scale as i32),
+        Some(scale) => Scale::Fractional(scale),
+        None => Scale::Integer(1),
+    };
+    let position = rule.and_then(|rule| rule.position).unwrap_or(beside);
     output.set_preferred(wl_mode);
     output.change_current_state(
         Some(wl_mode),
         Some(Transform::Normal),
-        Some(Scale::Integer(1)),
-        Some((x, 0).into()),
+        Some(scale),
+        Some(position.into()),
     );
 
     let drm = session
@@ -511,7 +585,7 @@ fn light(
         )
         .map_err(|error| error.to_string())?;
     let global = output.create_global::<Compositor>(display);
-    Ok(Head {
+    Ok(Some(Head {
         connector: info.handle(),
         crtc,
         output,
@@ -520,7 +594,7 @@ fn light(
         dirty: true,
         scheduled: false,
         queued: false,
-    })
+    }))
 }
 
 /// Render one output, queue it for scanout if anything changed, and let the
@@ -569,7 +643,8 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     // Front to back: the pointer over everything, then the windows.
     let mut elements: Vec<Elements> = match (pointer_at, space.output_geometry(&head.output)) {
         (Some(at), Some(geometry)) if geometry.to_f64().contains(at) => {
-            pointer_elements(renderer, cursor, status, at - geometry.loc.to_f64())
+            let scale = head.output.current_scale().fractional_scale();
+            pointer_elements(renderer, cursor, status, at - geometry.loc.to_f64(), scale)
         }
         _ => Vec::new(),
     };
@@ -612,11 +687,12 @@ fn pointer_elements(
     cursor: &Cursor,
     status: &CursorImageStatus,
     at: Point<f64, Logical>,
+    scale: f64,
 ) -> Vec<Elements> {
     match status {
         CursorImageStatus::Hidden => Vec::new(),
         CursorImageStatus::Named(_) => {
-            let origin = (at - cursor.hotspot.to_f64()).to_physical(1.0);
+            let origin = (at - cursor.hotspot.to_f64()).to_physical(scale);
             MemoryRenderBufferRenderElement::from_buffer(
                 renderer,
                 origin,
@@ -638,8 +714,8 @@ fn pointer_elements(
                     .and_then(|attributes| attributes.lock().ok().map(|a| a.hotspot))
                     .unwrap_or_default()
             });
-            let origin = (at - hotspot.to_f64()).to_physical_precise_round(1.0);
-            render_elements_from_surface_tree(renderer, surface, origin, 1.0, 1.0, Kind::Cursor)
+            let origin = (at - hotspot.to_f64()).to_physical_precise_round(scale);
+            render_elements_from_surface_tree(renderer, surface, origin, scale, 1.0, Kind::Cursor)
                 .into_iter()
                 .map(Elements::CursorSurface)
                 .collect()

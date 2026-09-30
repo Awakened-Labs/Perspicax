@@ -44,6 +44,23 @@ pub enum Action {
     Close,
     /// Bring the next window forward and focus it. See [`crate::cycle`].
     CycleFocus,
+    /// Send the focused window to the neighbouring output. See
+    /// [`crate::neighbour`] and [`crate::carry`].
+    MoveToOutput(Towards),
+    /// Start a program, as a program and its arguments. The person's own
+    /// program: it is never granted agent consent.
+    Spawn(Vec<String>),
+    /// Read the config file again and apply it.
+    Reload,
+}
+
+/// Which way along the row of outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Towards {
+    /// Rightward, wrapping to the leftmost.
+    Next,
+    /// Leftward, wrapping to the rightmost.
+    Previous,
 }
 
 /// A pointer button, as far as a binding cares.
@@ -111,6 +128,26 @@ impl Bindings {
         self.keys.retain(|(bound, _)| *bound != chord);
         self.keys.push((chord, action));
         self
+    }
+
+    /// Remove whatever a chord meant, so the key goes to the client. A user's
+    /// config uses this to take back a profile's binding.
+    #[must_use]
+    pub fn unbind(mut self, chord: Chord) -> Self {
+        self.keys.retain(|(bound, _)| *bound != chord);
+        self
+    }
+
+    /// No modifier-drag: every click is the client's.
+    #[must_use]
+    pub fn no_drag(mut self) -> Self {
+        self.drag = None;
+        self
+    }
+
+    /// Every binding, in the order they were made.
+    pub fn iter(&self) -> impl Iterator<Item = (&Chord, &Action)> {
+        self.keys.iter().map(|(chord, action)| (chord, action))
     }
 
     /// Make `mods` the modifier that turns a press on a window into a drag.
@@ -238,5 +275,16 @@ mod tests {
     #[test]
     fn with_no_drag_modifier_nothing_drags() {
         assert_eq!(Bindings::default().drag(Mods::alt(), Button::Left), None);
+    }
+
+    #[test]
+    fn unbinding_hands_the_chord_back_to_the_client() {
+        let chord = Chord {
+            mods: Mods::alt(),
+            key: Keysym::F4,
+        };
+        let bindings = Bindings::classic().unbind(chord);
+        assert_eq!(bindings.resolve(Mods::alt(), &[Keysym::F4]), None);
+        assert!(bindings.resolve(Mods::alt(), &[Keysym::Tab]).is_some());
     }
 }

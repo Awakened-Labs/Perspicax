@@ -51,6 +51,7 @@ pub use crate::{
 
 use std::{
     ffi::OsString,
+    path::PathBuf,
     process::{Child, Command},
     sync::{
         Arc,
@@ -145,6 +146,10 @@ pub enum Error {
     /// The seat could not be brought up: no session, no GPU, no input.
     #[error("the seat could not be brought up: {0}")]
     Seat(String),
+    /// The config file could not be used. Refused at start, rather than
+    /// starting a session that silently ignores what the person wrote.
+    #[error("config: {0}")]
+    Config(String),
     /// The display failed while talking to clients.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -169,6 +174,11 @@ pub struct Config {
     /// Stop after this long. `None` runs until killed, which is what a session
     /// wants; a test wants a bound.
     pub run_for: Option<Duration>,
+    /// The seat's `config.toml`, read at start and again on the reload
+    /// binding. A file that does not exist is the classic profile. Headless
+    /// reads no config at all: what CI and an agent run has to be the same
+    /// on every machine, whatever its owner likes their focus model to be.
+    pub config: Option<PathBuf>,
 }
 
 /// Run a compositor until its deadline passes, or forever.
@@ -194,7 +204,7 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
     // Before the socket, so a seat that cannot come up -- no session, no GPU,
     // no monitor -- is refused before any client has been accepted by a
     // compositor that cannot show it anything.
-    let backend = Running::start(config.backend, &handle, &event_loop.handle())?;
+    let backend = Running::start(config, &handle, &event_loop.handle())?;
     let mut state = Compositor::new(&handle, backend, facts.clone());
     Running::attach(&mut state, &event_loop.handle())?;
     // Once before any client, so a reader sees this host's consent policy and
@@ -267,10 +277,16 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
     }
 
     tracing::info!(socket = ?socket_name, backend = ?config.backend, "compositor up");
+    state.launch = Some(Launch {
+        socket: socket_name.clone(),
+        env: config.env.clone(),
+    });
     let mut children = spawn_all(&config.spawn, &config.env, &socket_name)?;
     // What we started is what an agent may act on, on a seat. Headless, this
     // changes nothing: consent there is already everyone.
     state.grant(children.iter().map(Child::id));
+    // The person's own programs, after the agent's: never granted consent.
+    state.backend.autostart(state.launch.as_ref());
 
     let deadline = config.run_for.map(|run_for| Instant::now() + run_for);
     let result = loop {
@@ -314,15 +330,37 @@ fn spawn_all(
     env: &[(String, String)],
     socket: &OsString,
 ) -> Result<Vec<Child>, Error> {
-    let mut children = Vec::with_capacity(commands.len());
-    for command in commands {
-        let Some((program, arguments)) = command.split_first() else {
-            continue;
-        };
+    let launch = Launch {
+        socket: socket.clone(),
+        env: env.to_vec(),
+    };
+    commands
+        .iter()
+        .filter(|command| !command.is_empty())
+        .map(|command| launch.spawn(command))
+        .collect()
+}
+
+/// What a program started by this compositor needs to find it: the socket,
+/// and the environment every child gets. Kept on the compositor so a key
+/// binding or an autostart entry starts programs exactly as `--spawn` does.
+#[derive(Debug, Clone)]
+pub(crate) struct Launch {
+    socket: OsString,
+    env: Vec<(String, String)>,
+}
+
+impl Launch {
+    /// Start one program, as a program and its arguments.
+    pub(crate) fn spawn(&self, command: &[String]) -> Result<Child, Error> {
+        let (program, arguments) = command.split_first().ok_or_else(|| Error::Spawn {
+            command: String::new(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "an empty command"),
+        })?;
         let child = Command::new(program)
             .args(arguments)
-            .envs(env.iter().map(|(key, value)| (key, value)))
-            .env("WAYLAND_DISPLAY", socket)
+            .envs(self.env.iter().map(|(key, value)| (key, value)))
+            .env("WAYLAND_DISPLAY", &self.socket)
             .env("GDK_BACKEND", "wayland")
             .env("QT_QPA_PLATFORM", "wayland")
             .env_remove("DISPLAY")
@@ -332,7 +370,6 @@ fn spawn_all(
                 source,
             })?;
         tracing::info!(pid = child.id(), command = %command.join(" "), "spawned");
-        children.push(child);
+        Ok(child)
     }
-    Ok(children)
 }

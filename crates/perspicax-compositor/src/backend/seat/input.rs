@@ -34,10 +34,13 @@ use smithay::{
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
 };
 
-use super::super::{
-    Running,
-    hatch::{self, Hatch},
-    pointer,
+use super::{
+    super::{
+        Running,
+        hatch::{self, Hatch},
+        pointer,
+    },
+    settings,
 };
 use crate::{shell::id_of, state::Compositor};
 
@@ -90,6 +93,17 @@ pub(super) fn handle(state: &mut Compositor, event: InputEvent<LibinputInputBack
             state.person_used_seat();
             axis(state, &event);
         }
+        InputEvent::DeviceAdded { mut device } => {
+            if let Running::Seat(session) = &mut state.backend {
+                settings::configure(&mut device, &session.settings.pointer);
+                session.devices.push(device);
+            }
+        }
+        InputEvent::DeviceRemoved { device } => {
+            if let Running::Seat(session) = &mut state.backend {
+                session.devices.retain(|known| known != &device);
+            }
+        }
         _ => {}
     }
 }
@@ -126,6 +140,7 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
                     let mut syms = raw.clone();
                     syms.push(keysym.modified_sym());
                     session
+                        .settings
                         .bindings
                         .resolve(mods(modifiers), &syms)
                         .cloned()
@@ -177,6 +192,21 @@ fn perform(state: &mut Compositor, action: &Action) {
                 toplevel.send_close();
             }
         }
+        Action::Spawn(command) => {
+            let launch = state.launch.clone();
+            if let Running::Seat(session) = &mut state.backend {
+                session.spawn(launch.as_ref(), command);
+            }
+        }
+        Action::MoveToOutput(towards) => {
+            if let Some(window) = state
+                .focused_surface()
+                .and_then(|id| state.window_for_id(id))
+            {
+                state.move_to_output(&window, *towards);
+            }
+        }
+        Action::Reload => settings::reload(state),
         Action::CycleFocus => {
             // Minimized windows count as below the bottom of the stack, so
             // cycling reaches them first and brings them back: without a
@@ -292,7 +322,7 @@ fn drag(state: &Compositor, code: u32) -> Option<Drag> {
         BTN_MIDDLE => Button::Middle,
         _ => return None,
     };
-    session.bindings.drag(mods(&held), button)
+    session.settings.bindings.drag(mods(&held), button)
 }
 
 /// A scroll. Continuous amounts where the device reports them; otherwise the
@@ -387,7 +417,7 @@ fn under(
 
 fn policy(state: &Compositor) -> Option<perspicax_policy::Focus> {
     match &state.backend {
-        Running::Seat(session) => Some(session.focus),
+        Running::Seat(session) => Some(session.settings.focus),
         Running::Headless { .. } => None,
     }
 }

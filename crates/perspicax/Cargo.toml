@@ -41,6 +41,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 perspicax-atspi = { path = "../perspicax-atspi", version = "0.1.0" }
 perspicax-compositor = { path = "../perspicax-compositor", version = "0.1.0" }
+perspicax-config = { path = "../perspicax-config", version = "0.1.0" }
 perspicax-index = { path = "../perspicax-index", version = "0.1.0" }
 perspicax-mcp = { path = "../perspicax-mcp", version = "0.1.0" }
 perspicax-node = { path = "../perspicax-node", version = "0.1.0" }

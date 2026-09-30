@@ -26,7 +26,7 @@
 //! mapping; headless, that log is the only way to watch a compositor that
 //! deliberately draws nothing.
 
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
@@ -74,6 +74,12 @@ struct Cli {
         conflicts_with = "seat"
     )]
     size: (i32, i32),
+
+    /// The session's config file, instead of
+    /// `$XDG_CONFIG_HOME/perspicax/config.toml`. Seat only: headless reads no
+    /// config, so what CI and an agent run is the same on every machine.
+    #[arg(long, value_name = "PATH", conflicts_with = "headless")]
+    config: Option<PathBuf>,
 
     /// A command to run against this compositor, repeatable. Split on spaces,
     /// so quoting an argument containing one will not do what you want.
@@ -167,6 +173,10 @@ fn main() -> Result<()> {
             .collect(),
         env: session::accessibility_env(),
         run_for: cli.run_for.map(Duration::from_secs_f64),
+        config: cli
+            .seat
+            .then(|| cli.config.clone().or_else(perspicax_config::default_path))
+            .flatten(),
     };
 
     // Created here rather than inside the compositor, because the thread that

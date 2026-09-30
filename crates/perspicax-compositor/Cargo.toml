@@ -28,6 +28,8 @@ perspicax-node = { path = "../perspicax-node", version = "0.1.0" }
 # The window-management decisions. Pure, so both backends share them: one
 # placement rule headless and on a seat, rather than two that drift apart.
 perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
+# Seat-only: the person's config.toml. Headless reads none.
+perspicax-config = { path = "../perspicax-config", version = "0.1.0", optional = true }
 # Seat-only: reads the person's Xcursor theme, and headless draws no cursor.
 # MIT, pure Rust, no dependencies.
 xcursor = { version = "0.3", optional = true }
@@ -43,6 +45,7 @@ xcursor = { version = "0.3", optional = true }
 # pointers. Every one of these is a C library, found by pkg-config at build
 # time -- which is why this is a feature rather than the default.
 seat = [
+    "dep:perspicax-config",
     "dep:xcursor",
     "smithay/backend_drm",
     "smithay/backend_gbm",

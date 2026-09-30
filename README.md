@@ -49,7 +49,8 @@ perspicax              the composition root — one binary, `perspicax --headles
 perspicax-mcp          MCP server (rmcp, stdio) — six tools, DTOs, receipts  [portable]
 perspicax-index        node cache, stable ids, selectors, deltas, refusals  [portable]
 perspicax-node         node schema — AccessKit types plus Origin and Visibility
-perspicax-policy       WM decisions as data — focus model, raise, key bindings  [portable]
+perspicax-policy       WM decisions as data — focus, bindings, placement, resize  [portable]
+perspicax-config       config.toml — schema, classic/minimal profiles, feature check  [portable]
 perspicax-atspi        impl Ingest — AT-SPI2 over D-Bus
 perspicax-compositor   impl HostView — Smithay: outputs, seat, damage. Headless draws nothing.
 perspicax-probe        dev CLI — dump a tree, time a read, explain a refusal
@@ -301,6 +302,48 @@ perspicax --seat --spawn foot 2>~/perspicax.log
 
 Two chords always work, whatever the configuration says:
 **Ctrl+Alt+Backspace** ends the session, and **Ctrl+Alt+F1…F12** switches VT.
+
+The session reads `$XDG_CONFIG_HOME/perspicax/config.toml` (or `--config PATH`).
+Without one it runs the `classic` profile: click to focus, Alt+F4, Alt+Tab,
+Alt+drag to move and Alt+right-drag to resize, Logo+Shift+Left/Right to move a
+window between screens, Logo+Shift+R to reload. Every key below is optional and
+overrides the profile one setting at a time. A misspelled key, or a key for a
+feature this build left out, is refused with its name rather than ignored.
+
+```toml
+profile = "minimal"            # or "classic"; minimal focuses under the pointer
+
+[focus]
+model = "sloppy"               # click | sloppy | strict
+autoraise = false
+
+[keys]
+"Logo+Return" = { spawn = ["foot"] }
+"Logo+d" = { spawn = ["fuzzel"] }
+"Alt+F4" = "none"              # hand a profile's chord back to the client
+
+drag = "Logo"                  # the drag modifier; "none" turns drags off
+
+[input.keyboard]
+layout = "gb"
+options = "ctrl:nocaps"
+repeat-rate = 30
+
+[input.pointer]
+natural-scroll = true
+tap-to-click = true
+
+[[output]]
+name = "DP-1"
+mode = "2560x1440@144"
+position = [0, 0]
+
+[[output]]
+name = "eDP-1"
+enable = false
+
+autostart = [["waybar"], ["swaybg", "-i", "/home/me/wall.png"]]
+```
 
 Gates, in the order CI runs them:
 

@@ -157,6 +157,7 @@ fn run_demo() -> Reading {
         // A backstop only. The read below asks the compositor to stop when it
         // is finished, because a Qt tree takes seconds nobody can predict.
         run_for: Some(Duration::from_secs(120)),
+        config: None,
     };
 
     let (sender, receiver) = mpsc::channel();

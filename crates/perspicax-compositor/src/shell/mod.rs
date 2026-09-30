@@ -21,7 +21,7 @@ mod grabs;
 use std::cell::RefCell;
 
 use perspicax_node::SurfaceId;
-use perspicax_policy::{Edges, Rect, place, unmaximized_at};
+use perspicax_policy::{Edges, Rect, Towards, carry, neighbour, place, unmaximized_at};
 use smithay::{
     desktop::{
         PopupKeyboardGrab, PopupKind, PopupPointerGrab, PopupUngrabStrategy, Window,
@@ -203,6 +203,51 @@ impl Compositor {
             pending.states.contains(xdg_toplevel::State::Maximized)
                 || pending.states.contains(xdg_toplevel::State::Fullscreen)
         })
+    }
+
+    /// Send a window to the output beside the one it is on. A maximized or
+    /// fullscreen window fills its new output; any other keeps its distance
+    /// from the corner (see `perspicax_policy::carry`).
+    #[cfg_attr(
+        not(feature = "seat"),
+        expect(dead_code, reason = "the seat's bindings")
+    )]
+    pub(crate) fn move_to_output(&mut self, window: &Window, towards: Towards) {
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        let areas: Vec<Rect> = outputs
+            .iter()
+            .map(|output| rect(self.space.output_geometry(output).unwrap_or_default()))
+            .collect();
+        let Some(from) = self
+            .output_of(window)
+            .and_then(|current| outputs.iter().position(|output| *output == current))
+        else {
+            return;
+        };
+        let (Some(to), Some(bounds)) = (
+            neighbour(&areas, from, towards),
+            self.space.element_geometry(window),
+        ) else {
+            return;
+        };
+        let filled = window.toplevel().filter(|t| Self::is_filling(t)).cloned();
+        if let Some(toplevel) = filled {
+            let state = if toplevel.with_pending_state(|pending| {
+                pending.states.contains(xdg_toplevel::State::Fullscreen)
+            }) {
+                xdg_toplevel::State::Fullscreen
+            } else {
+                xdg_toplevel::State::Maximized
+            };
+            self.space
+                .map_element(window.clone(), (areas[to].x, areas[to].y), false);
+            self.fill(&toplevel, state, None);
+        } else {
+            let at = carry(rect(bounds), areas[from], areas[to]);
+            self.space.map_element(window.clone(), at, false);
+        }
+        self.backend.redraw();
+        self.publish_facts();
     }
 
     /// Take a window off the screen, keeping its place. Focus moves to

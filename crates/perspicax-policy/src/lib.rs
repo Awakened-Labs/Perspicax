@@ -24,9 +24,9 @@ mod focus;
 mod geometry;
 
 pub use crate::{
-    binds::{Action, Bindings, Button, Chord, Drag, Mods},
+    binds::{Action, Bindings, Button, Chord, Drag, Mods, Towards},
     focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},
-    geometry::{Edges, Rect, anchor, edges_near, place, resize, unmaximized_at},
+    geometry::{Edges, Rect, anchor, carry, edges_near, neighbour, place, resize, unmaximized_at},
 };
 
 /// Keysyms, re-exported so a caller spells chords with the same type this

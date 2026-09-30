@@ -148,6 +148,38 @@ pub fn unmaximized_at(pointer: (f64, f64), maximized: Rect, restored: (i32, i32)
     (x, maximized.y)
 }
 
+/// The output next to `from` in the row, the way `towards` points,
+/// wrapping at either end. Outputs are ordered left to right by their left
+/// edge, then top to bottom, which is the order a person sees them in. `None`
+/// with fewer than two outputs, since there is nowhere to go.
+#[must_use]
+pub fn neighbour(outputs: &[Rect], from: usize, towards: crate::Towards) -> Option<usize> {
+    if outputs.len() < 2 || from >= outputs.len() {
+        return None;
+    }
+    let mut order: Vec<usize> = (0..outputs.len()).collect();
+    order.sort_by_key(|&i| (outputs[i].x, outputs[i].y));
+    let at = order.iter().position(|&i| i == from)?;
+    let len = order.len();
+    let next = match towards {
+        crate::Towards::Next => (at + 1) % len,
+        crate::Towards::Previous => (at + len - 1) % len,
+    };
+    Some(order[next])
+}
+
+/// Where a window at `window` on output `from` goes on output `to`: at the
+/// same distance from the output's top-left corner, pulled back inside if
+/// the new output is too small to hold it there. The same offset rather than
+/// the same proportion, because a window of fixed size scaled by position
+/// lands somewhere the eye does not expect.
+#[must_use]
+pub fn carry(window: Rect, from: Rect, to: Rect) -> (i32, i32) {
+    let dx = (window.x - from.x).clamp(0, (to.w - window.w).max(0));
+    let dy = (window.y - from.y).clamp(0, (to.h - window.h).max(0));
+    (to.x + dx, to.y + dy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +332,45 @@ mod tests {
         // A quarter of the way along a 1920-wide maximized window.
         let at = unmaximized_at((480.0, 10.0), FHD, (800, 600));
         assert_eq!(at, (280, 0), "480 - 800/4");
+    }
+
+    #[test]
+    fn the_next_output_is_to_the_right_and_wraps() {
+        let row = [
+            Rect::new(1920, 0, 1920, 1080),
+            FHD,
+            Rect::new(3840, 0, 1280, 1024),
+        ];
+        assert_eq!(neighbour(&row, 1, crate::Towards::Next), Some(0));
+        assert_eq!(
+            neighbour(&row, 2, crate::Towards::Next),
+            Some(1),
+            "wraps to the leftmost"
+        );
+        assert_eq!(
+            neighbour(&row, 1, crate::Towards::Previous),
+            Some(2),
+            "wraps to the rightmost"
+        );
+    }
+
+    #[test]
+    fn one_output_has_no_neighbour() {
+        assert_eq!(neighbour(&[FHD], 0, crate::Towards::Next), None);
+    }
+
+    #[test]
+    fn a_carried_window_keeps_its_offset_from_the_corner() {
+        let right = Rect::new(1920, 0, 2560, 1440);
+        assert_eq!(carry(Rect::new(100, 50, 800, 600), FHD, right), (2020, 50));
+    }
+
+    #[test]
+    fn a_carried_window_is_pulled_back_onto_a_smaller_output() {
+        let small = Rect::new(1920, 0, 1280, 1024);
+        assert_eq!(
+            carry(Rect::new(1000, 800, 800, 600), FHD, small),
+            (2400, 424)
+        );
     }
 }

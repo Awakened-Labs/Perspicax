@@ -280,6 +280,7 @@ fn run(spawn: Vec<Vec<String>>) -> Drive {
         spawn,
         env: session::accessibility_env(),
         run_for: Some(Duration::from_secs(180)),
+        config: None,
     };
 
     let (sender, receiver) = mpsc::channel();

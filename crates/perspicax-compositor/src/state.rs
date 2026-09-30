@@ -171,6 +171,9 @@ pub struct Compositor {
     /// RAII handles for the primary-selection and xdg-activation globals.
     primary_selection: PrimarySelectionState,
     activation: XdgActivationState,
+    /// How to start a program against this compositor. Set by `run` once the
+    /// socket exists, so `None` only before any client could connect.
+    pub(crate) launch: Option<crate::Launch>,
     /// How many windows have been placed, for the cascade.
     pub(crate) placed: u32,
     started: Instant,
@@ -229,6 +232,7 @@ impl Compositor {
             minimized: Vec::new(),
             primary_selection: PrimarySelectionState::new::<Self>(display),
             activation: XdgActivationState::new::<Self>(display),
+            launch: None,
             placed: 0,
             started: Instant::now(),
         }

@@ -10,6 +10,7 @@ members = [
     "crates/perspicax",
     "crates/perspicax-atspi",
     "crates/perspicax-compositor",
+    "crates/perspicax-config",
     "crates/perspicax-index",
     "crates/perspicax-mcp",
     "crates/perspicax-node",
