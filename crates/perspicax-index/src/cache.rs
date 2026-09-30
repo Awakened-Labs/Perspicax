@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use perspicax_node::{NodeId, ObservedNode, Origin, Rect, SurfaceId, Visibility};
 
 use crate::{
-    Change, Refusal, check_actable,
+    Change, Consent, Refusal, check_actable,
     host::overlaps,
     host::{HostFacts, Judgement, Tally, judge},
     selector::Selector,
@@ -49,6 +49,9 @@ pub struct Index {
     /// staleness with no damage behind it.
     stale: HashMap<NodeId, u32>,
     pending: Vec<Delta>,
+    /// The host's consent policy as of the last [`Index::judge`]. Taken with
+    /// the visibility verdicts, so the two describe the same instant.
+    consent: Consent,
 }
 
 impl Index {
@@ -358,6 +361,7 @@ impl Index {
     /// description of the screen, and the gate above it is what refuses to act
     /// on a description it distrusts.
     pub fn judge(&mut self, facts: &HostFacts) -> Tally {
+        self.consent = facts.consent().clone();
         let mut tally = Tally::default();
         for node in self.nodes.values_mut() {
             let verdict = match (node.surface, node.bounds()) {
@@ -465,14 +469,22 @@ impl Index {
     /// # Errors
     ///
     /// [`Refusal::NotFound`] for an id this index does not hold,
-    /// [`Refusal::Stale`] for one behind the screen, and otherwise whatever
-    /// [`check_actable`] says about the node itself.
+    /// [`Refusal::Stale`] for one behind the screen, then whatever
+    /// [`check_actable`] says about the node itself, and last
+    /// [`Refusal::NoCapability`] for an application the host's [`Consent`]
+    /// does not cover. Consent comes last so a refusal names the nearer
+    /// obstacle: a covered button is reported as covered, whoever drew it.
     pub fn actable(&self, id: NodeId) -> Result<&ObservedNode, Refusal> {
         let node = self.nodes.get(&id).ok_or(Refusal::NotFound)?;
         if let Some(frames) = self.stale.get(&id) {
             return Err(Refusal::Stale { frames: *frames });
         }
         check_actable(node)?;
+        if !self.consent.permits(&node.origin) {
+            return Err(Refusal::NoCapability {
+                origin: Box::new(node.origin.clone()),
+            });
+        }
         Ok(node)
     }
 }
@@ -764,6 +776,7 @@ mod tests {
             Some(cover) => HostFacts::bottom_to_top([window, cover], 1),
             None => HostFacts::bottom_to_top([window], 1),
         }
+        .with_consent(Consent::Everyone)
     }
 
     #[test]
@@ -903,7 +916,8 @@ mod tests {
                     .damaging([(1, spinner)]),
             ],
             2,
-        );
+        )
+        .with_consent(Consent::Everyone);
         index.judge(&facts);
         index.reconcile(SurfaceId(1), 0);
 
@@ -931,12 +945,55 @@ mod tests {
                     .damaging([(1, Rect::new(200.0, 200.0, 280.0, 240.0))]),
             ],
             2,
-        );
+        )
+        .with_consent(Consent::Everyone);
         index.judge(&facts);
         index.reconcile(SurfaceId(1), 1);
 
         assert!(index.under_damage(&facts).is_empty());
         assert!(index.actable(NodeId(3)).is_ok());
+    }
+
+    #[test]
+    fn a_host_that_publishes_no_consent_makes_nothing_actable() {
+        let mut index = joined();
+        index.judge(&desktop(None).with_consent(Consent::default()));
+        assert_eq!(
+            index.actable(NodeId(2)).unwrap_err(),
+            Refusal::NoCapability {
+                origin: Box::new(origin())
+            }
+        );
+    }
+
+    #[test]
+    fn consent_to_spawned_processes_covers_those_pids_and_no_others() {
+        let mut index = joined();
+        index.judge(&desktop(None).with_consent(Consent::Spawned(vec![9182])));
+        assert!(
+            index.actable(NodeId(2)).is_ok(),
+            "9182 is the one we spawned"
+        );
+
+        index.judge(&desktop(None).with_consent(Consent::Spawned(vec![1])));
+        assert!(matches!(
+            index.actable(NodeId(2)),
+            Err(Refusal::NoCapability { .. })
+        ));
+    }
+
+    /// Consent is asked last, so the refusal names the nearer obstacle: an
+    /// agent told "no capability" about a covered button would stop, when
+    /// "occluded" is what it could actually act on by asking the person.
+    #[test]
+    fn a_covered_node_is_reported_as_covered_before_consent_is_asked() {
+        let mut index = joined();
+        let cover = SurfaceFacts::new(SurfaceId(2), Rect::new(0.0, 0.0, 400.0, 300.0));
+        index.judge(&desktop(Some(cover)).with_consent(Consent::Nobody));
+        assert!(matches!(
+            index.actable(NodeId(2)),
+            Err(Refusal::Occluded { .. })
+        ));
     }
 
     /// A node can outlive the surface it was read from -- a window closes

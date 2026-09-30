@@ -10,58 +10,66 @@ use std::{
     collections::{HashMap, HashSet},
     os::unix::net::UnixStream,
     sync::{Arc, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
+use perspicax_index::Consent;
 use perspicax_node::{Origin, Rect, SurfaceId};
 
-use crate::{act::Keys, facts::Facts, origin};
+use crate::{act::Keys, backend::Running, facts::Facts, origin, shell};
 
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
-    desktop::{Space, Window},
+    delegate_compositor, delegate_data_device, delegate_output, delegate_primary_selection,
+    delegate_seat, delegate_shm, delegate_xdg_activation, delegate_xdg_shell,
+    desktop::{PopupKind, PopupManager, Space, Window},
     input::{
         Seat, SeatHandler, SeatState,
         keyboard::{KeyboardHandle, XkbConfig},
-        pointer::{CursorImageStatus, PointerHandle},
+        pointer::{CursorImageStatus, GrabStartData, PointerHandle},
     },
-    output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
+        calloop::LoopHandle,
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
-            Client, DisplayHandle,
+            Client, DisplayHandle, Resource as _,
             backend::{ClientData, ClientId, DisconnectReason},
-            protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
+            protocol::{
+                wl_buffer::WlBuffer, wl_output::WlOutput, wl_seat::WlSeat, wl_surface::WlSurface,
+            },
         },
     },
-    utils::{SERIAL_COUNTER, Serial, Transform},
+    utils::{SERIAL_COUNTER, Serial},
     wayland::{
         buffer::BufferHandler,
         compositor::{
             BufferAssignment, CompositorClientState, CompositorHandler, CompositorState, Damage,
             SurfaceAttributes, TraversalAction, with_states, with_surface_tree_downward,
         },
+        idle_inhibit::IdleInhibitManagerState,
+        idle_notify::IdleNotifierState,
         output::{OutputHandler, OutputManagerState},
         selection::{
             SelectionHandler,
             data_device::{
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+                set_data_device_focus,
+            },
+            primary_selection::{
+                PrimarySelectionHandler, PrimarySelectionState, set_primary_focus,
             },
         },
+        session_lock::SessionLockManagerState,
+        shell::wlr_layer::WlrLayerShellState,
         shell::xdg::{
             PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler,
             XdgShellState,
         },
         shm::{ShmHandler, ShmState},
+        xdg_activation::{
+            XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+        },
     },
 };
-
-/// How far each new toplevel is offset from the last, so two windows opened in
-/// a row are not stacked exactly on top of each other and invisible to a test
-/// about overlap. A placement policy, and a placeholder for one: the arc's
-/// occlusion demo needs to *choose* where windows go, and will replace this.
-const CASCADE: i32 = 32;
 
 /// How many damaged regions to remember per surface.
 ///
@@ -71,6 +79,12 @@ const CASCADE: i32 = 32;
 /// surface changed, which is true and is the safe direction to be wrong in.
 const DAMAGE_HISTORY: usize = 256;
 
+/// How long after the person's last key or pointer event an agent's act is
+/// refused as racing them. Long enough to cover the gap between keystrokes of
+/// someone typing steadily, short enough that an agent waiting for a pause is
+/// not waiting long.
+const PERSON_QUIET: Duration = Duration::from_millis(1500);
+
 /// Everything this compositor knows.
 pub struct Compositor {
     /// Kept so a new client can be inserted from an event callback.
@@ -78,18 +92,16 @@ pub struct Compositor {
     pub(crate) compositor: CompositorState,
     pub(crate) xdg_shell: XdgShellState,
     pub(crate) shm: ShmState,
-    /// Held, not read. These three are RAII handles for protocol globals:
-    /// dropping the `Output` withdraws `wl_output`, dropping the
-    /// `OutputManagerState` withdraws `xdg_output`, and dropping the `Seat`
-    /// withdraws `wl_seat` -- so a client that connected a moment earlier would
-    /// watch the desktop lose features it had already bound. `expect` rather
+    /// Held, not read. These two are RAII handles for protocol globals:
+    /// dropping the `OutputManagerState` withdraws `xdg_output`, and dropping
+    /// the `Seat` withdraws `wl_seat` -- so a client that connected a moment
+    /// earlier would watch the desktop lose features it had already bound. `expect` rather
     /// than `allow`: the next slice dispatches focus through the seat, and this
     /// should start complaining the moment that makes it live.
     #[expect(dead_code, reason = "RAII handle for the xdg_output global")]
     pub(crate) output_manager: OutputManagerState,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) data_device: DataDeviceState,
-    #[expect(dead_code, reason = "RAII handle for the wl_seat global")]
     pub(crate) seat: Seat<Self>,
     /// `None` only if xkb could not compile a default keymap, which would mean
     /// the session has no usable keyboard layout at all. Focus still works
@@ -134,16 +146,76 @@ pub struct Compositor {
     /// Minted per toplevel and never reused. A retired id addressing a new
     /// window is the failure `Refusal::Stale` exists to prevent, one layer up.
     next_surface: u64,
-    #[expect(dead_code, reason = "RAII handle for the wl_output global")]
-    pub(crate) output: Output,
-    placed: i32,
+    /// The backend this compositor was brought up on, and everything it owns:
+    /// the outputs, and on a seat the session, GPU and input devices.
+    pub(crate) backend: Running,
+    /// The linux-dmabuf global's state. Present in every seat build and
+    /// advertised only when the seat backend runs, because GPU clients hand
+    /// their buffers over as dmabufs and a renderer is what imports them.
+    #[cfg(feature = "seat")]
+    pub(crate) dmabuf: smithay::wayland::dmabuf::DmabufState,
+    /// Whose applications an agent may act on, published with every
+    /// snapshot. Starts as the backend's policy; [`Compositor::grant`] adds
+    /// what `run` spawns.
+    pub(crate) consent: Consent,
+    /// When the person at the seat last pressed a key or moved the pointer.
+    /// `None` headless, where nobody is at the seat, and so never a reason to
+    /// refuse an agent there.
+    person_at: Option<Instant>,
+    /// What the focused client asked the pointer to look like. Only the seat
+    /// draws it; headless records it and nothing reads it.
+    pub(crate) cursor: CursorImageStatus,
+    /// Popups (menus, tooltips), tracked so they render and hit-test with
+    /// their window and so a grab can dismiss them.
+    pub(crate) popups: PopupManager,
+    /// Windows the person minimized: unmapped from the space, kept here in
+    /// the order they went, and described to the index as unmapped rather
+    /// than forgotten.
+    pub(crate) minimized: Vec<Window>,
+    /// RAII handles for the primary-selection and xdg-activation globals.
+    primary_selection: PrimarySelectionState,
+    activation: XdgActivationState,
+    /// Panels, launchers, wallpapers: the layer-shell global. See
+    /// [`crate::layers`].
+    pub(crate) layer_shell: WlrLayerShellState,
+    /// The session-lock global, and the lock itself while one is held. See
+    /// [`crate::lock`].
+    pub(crate) lock_manager: SessionLockManagerState,
+    pub(crate) lock: Option<crate::lock::Locked>,
+    /// Idle notification (swayidle) and the surfaces inhibiting it.
+    pub(crate) idle: IdleNotifierState<Self>,
+    #[expect(dead_code, reason = "RAII handle for the idle-inhibit global")]
+    idle_inhibit: IdleInhibitManagerState,
+    pub(crate) inhibitors: Vec<WlSurface>,
+    /// Xwayland, its window manager, and the xwayland-shell global. See
+    /// [`crate::xwayland`].
+    #[cfg(feature = "xwayland")]
+    pub(crate) xwayland: crate::xwayland::Xwayland,
+    #[cfg(feature = "xwayland")]
+    pub(crate) xwayland_shell: Option<smithay::wayland::xwayland_shell::XWaylandShellState>,
+    /// The event loop, for the handlers that must schedule work on it.
+    #[cfg_attr(
+        not(feature = "xwayland"),
+        expect(dead_code, reason = "Xwayland's selections")
+    )]
+    pub(crate) loop_handle: LoopHandle<'static, Self>,
+    /// How to start a program against this compositor. Set by `run` once the
+    /// socket exists, so `None` only before any client could connect.
+    pub(crate) launch: Option<crate::Launch>,
+    /// How many windows have been placed, for the cascade.
+    pub(crate) placed: u32,
     started: Instant,
 }
 
 impl Compositor {
-    /// Bring up every global a stock GTK or Qt client expects to find, and one
-    /// virtual output for them to sit on.
-    pub(crate) fn new(display: &DisplayHandle, size: (i32, i32), facts: Facts) -> Self {
+    /// Bring up every global a stock GTK or Qt client expects to find, on
+    /// whatever outputs the backend starts with.
+    pub(crate) fn new(
+        display: &DisplayHandle,
+        event_loop: LoopHandle<'static, Self>,
+        backend: Running,
+        facts: Facts,
+    ) -> Self {
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(display, "perspicax-seat");
         let keyboard = match seat.add_keyboard(XkbConfig::default(), 200, 25) {
@@ -157,30 +229,12 @@ impl Compositor {
         // cannot fail, because there is no keymap to compile.
         let pointer = Some(seat.add_pointer());
 
-        let output = Output::new(
-            "perspicax-headless".to_owned(),
-            PhysicalProperties {
-                size: (0, 0).into(),
-                subpixel: Subpixel::Unknown,
-                make: "perspicax".to_owned(),
-                model: "virtual".to_owned(),
-            },
-        );
-        let mode = Mode {
-            size: size.into(),
-            refresh: 60_000,
-        };
-        output.change_current_state(
-            Some(mode),
-            Some(Transform::Normal),
-            Some(Scale::Integer(1)),
-            Some((0, 0).into()),
-        );
-        output.set_preferred(mode);
-        output.create_global::<Self>(display);
-
+        let consent = backend.consent();
         let mut space = Space::default();
-        space.map_output(&output, (0, 0));
+        for output in backend.initial_outputs() {
+            let at = output.current_location();
+            space.map_output(&output, at);
+        }
 
         Self {
             display: display.clone(),
@@ -192,7 +246,9 @@ impl Compositor {
             seat_state,
             seat,
             space,
-            output,
+            backend,
+            #[cfg(feature = "seat")]
+            dmabuf: smithay::wayland::dmabuf::DmabufState::new(),
             keyboard,
             pointer,
             keys: Keys::from_default_layout(),
@@ -200,8 +256,29 @@ impl Compositor {
             presented: HashSet::new(),
             focused_at: HashMap::new(),
             facts,
+            consent,
+            person_at: None,
+            cursor: CursorImageStatus::default_named(),
             generation: 0,
             next_surface: 0,
+            popups: PopupManager::default(),
+            minimized: Vec::new(),
+            primary_selection: PrimarySelectionState::new::<Self>(display),
+            activation: XdgActivationState::new::<Self>(display),
+            layer_shell: WlrLayerShellState::new::<Self>(display),
+            // Any client may lock. A lock client is the one kind that must
+            // work when everything else has gone wrong.
+            lock_manager: SessionLockManagerState::new::<Self, _>(display, |_| true),
+            lock: None,
+            idle: IdleNotifierState::new(display, event_loop.clone()),
+            #[cfg(feature = "xwayland")]
+            xwayland: crate::xwayland::Xwayland::default(),
+            #[cfg(feature = "xwayland")]
+            xwayland_shell: None,
+            loop_handle: event_loop,
+            idle_inhibit: IdleInhibitManagerState::new::<Self>(display),
+            inhibitors: Vec::new(),
+            launch: None,
             placed: 0,
             started: Instant::now(),
         }
@@ -241,7 +318,7 @@ impl Compositor {
     }
 
     /// The next surface id. Monotonic, and never handed out twice.
-    fn mint_surface_id(&mut self) -> SurfaceId {
+    pub(crate) fn mint_surface_id(&mut self) -> SurfaceId {
         self.next_surface += 1;
         SurfaceId(self.next_surface)
     }
@@ -259,12 +336,24 @@ impl Compositor {
     pub(crate) fn send_frames(&self) {
         let elapsed = u32::try_from(self.started.elapsed().as_millis() % u128::from(u32::MAX))
             .unwrap_or(u32::MAX);
-        for window in self.space.elements() {
-            let Some(toplevel) = window.toplevel() else {
-                continue;
-            };
+        let windows = self.space.elements().filter_map(shell::surface_of);
+        let layers = self
+            .layers_in(&[
+                crate::layers::BELOW[0],
+                crate::layers::BELOW[1],
+                crate::layers::ABOVE[0],
+                crate::layers::ABOVE[1],
+            ])
+            .into_iter()
+            .map(|(layer, _)| layer.wl_surface().clone());
+        let covers = self
+            .lock
+            .iter()
+            .flat_map(|locked| &locked.surfaces)
+            .map(|cover| cover.surface.wl_surface().clone());
+        for surface in windows.chain(layers).chain(covers).collect::<Vec<_>>() {
             with_surface_tree_downward(
-                toplevel.wl_surface(),
+                &surface,
                 (),
                 |_, _, &()| TraversalAction::DoChildren(()),
                 |_, states, &()| {
@@ -281,6 +370,60 @@ impl Compositor {
                 |_, _, &()| true,
             );
         }
+    }
+
+    /// Extend consent to processes this compositor started. Meaningful only
+    /// under [`Consent::Spawned`]: headless already consents to everyone.
+    pub(crate) fn grant(&mut self, pids: impl IntoIterator<Item = u32>) {
+        if let Consent::Spawned(granted) = &mut self.consent {
+            granted.extend(pids);
+            self.publish_facts();
+        }
+    }
+
+    /// The person at the seat just used it.
+    #[cfg_attr(
+        not(feature = "seat"),
+        expect(dead_code, reason = "the seat's input path")
+    )]
+    pub(crate) fn person_used_seat(&mut self) {
+        self.person_at = Some(Instant::now());
+        self.idle.notify_activity(&self.seat);
+    }
+
+    /// The surface holding the keyboard, whatever kind it is.
+    pub(crate) fn keyboard_focus(&self) -> Option<WlSurface> {
+        self.keyboard.as_ref()?.current_focus()
+    }
+
+    /// Give the keyboard to a surface that is not a window: a launcher, a
+    /// lock screen.
+    pub(crate) fn focus_plain(&mut self, surface: WlSurface) {
+        if let Some(keyboard) = self.keyboard.clone() {
+            keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+        }
+    }
+
+    /// Give the keyboard back to the topmost window, or to nothing.
+    pub(crate) fn focus_top_window(&mut self) {
+        let top = self
+            .space
+            .elements()
+            .last()
+            .and_then(|window| Some((shell::surface_of(window)?, shell::id_of(window)?)));
+        match top {
+            Some((surface, id)) => self.focus_surface(surface, id),
+            None => {
+                if let Some(keyboard) = self.keyboard.clone() {
+                    keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+                }
+            }
+        }
+    }
+
+    /// Whether an agent acting now would race the person at the seat.
+    pub(crate) fn person_is_active(&self) -> bool {
+        self.person_at.is_some_and(|at| at.elapsed() < PERSON_QUIET)
     }
 
     /// Give a surface keyboard focus, and remember when.
@@ -308,6 +451,15 @@ impl Compositor {
     /// Where damage landed on this surface, oldest first.
     pub(crate) fn damage_history(&self, id: SurfaceId) -> Vec<(u64, Rect)> {
         self.damage.get(&id).cloned().unwrap_or_default()
+    }
+
+    /// Record that a surface has something in it.
+    #[cfg_attr(
+        not(feature = "xwayland"),
+        expect(dead_code, reason = "Xwayland's late association")
+    )]
+    pub(crate) fn mark_presented(&mut self, id: SurfaceId) {
+        self.presented.insert(id);
     }
 
     /// Whether this surface has ever had anything in it.
@@ -346,14 +498,12 @@ impl Compositor {
         self.started
     }
 
-    fn window_for(&self, surface: &WlSurface) -> Option<Window> {
+    /// The window whose toplevel is this surface, mapped or minimized.
+    pub(crate) fn window_for(&self, surface: &WlSurface) -> Option<Window> {
         self.space
             .elements()
-            .find(|window| {
-                window
-                    .toplevel()
-                    .is_some_and(|toplevel| toplevel.wl_surface() == surface)
-            })
+            .chain(&self.minimized)
+            .find(|window| shell::is_toplevel_of(window, surface))
             .cloned()
     }
 }
@@ -363,7 +513,15 @@ impl CompositorHandler for Compositor {
         &mut self.compositor
     }
 
+    /// Every client carries one of two kinds of data: ours, inserted in
+    /// `insert_client`, or -- for the one client this compositor did not
+    /// accept from its socket -- the data Smithay gives the Xwayland it
+    /// spawned.
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        #[cfg(feature = "xwayland")]
+        if let Some(xwayland) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
+            return &xwayland.compositor_state;
+        }
         &client
             .get_data::<ClientState>()
             .expect("every client this compositor inserts carries a ClientState")
@@ -372,27 +530,35 @@ impl CompositorHandler for Compositor {
 
     /// A client has finished describing a new state for a surface.
     ///
-    /// The buffer is released immediately, which a rendering compositor would
-    /// not do. It holds a buffer until it has drawn from it, and Smithay
-    /// therefore releases the *previous* buffer when a newer one arrives -- a
-    /// scheme that quietly requires the client to own at least two. This
-    /// compositor never reads a pixel, so it is finished with a buffer the
-    /// instant it arrives, and saying so keeps a single-buffered client running
-    /// instead of stalled against a compositor that had no use for its
-    /// contents in the first place.
+    /// Headless, the buffer is released immediately, which a rendering
+    /// compositor would not do. It holds a buffer until it has drawn from it,
+    /// and Smithay therefore releases the *previous* buffer when a newer one
+    /// arrives -- a scheme that quietly requires the client to own at least
+    /// two. The headless compositor never reads a pixel, so it is finished with
+    /// a buffer the instant it arrives, and saying so keeps a single-buffered
+    /// client running instead of stalled against a compositor that had no use
+    /// for its contents in the first place.
+    ///
+    /// On a seat the renderer does read it, so the buffer goes to Smithay's
+    /// renderer bookkeeping instead and is released once it has been drawn.
+    /// Everything this compositor *records* -- damage, presentation -- is the
+    /// same on both paths, so the facts a seat publishes are the facts CI
+    /// tested.
     fn commit(&mut self, surface: &WlSurface) {
+        let renders = self.backend.renders();
         let whole = declared_geometry(surface);
         let (presented, damaged) = with_states(surface, |states| {
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
             let current = attributes.current();
 
-            // Drained, not read: `SurfaceAttributes` accumulates damage from
-            // commit to commit and expects whoever processes it to clear it.
+            // Read, not drained, when a renderer is going to want the same
+            // damage next; it drains what it uses, and the rest is cleared
+            // below so no commit's damage is ever counted twice.
             let scale = f64::from(current.buffer_scale.max(1));
             let mut damaged: Vec<Rect> = current
                 .damage
-                .drain(..)
-                .map(|damage| match damage {
+                .iter()
+                .map(|damage| match *damage {
                     Damage::Surface(rect) => to_rect(rect, 1.0),
                     // Buffer coordinates are the surface's multiplied by the
                     // scale the client declared, so dividing is what puts them
@@ -401,14 +567,13 @@ impl CompositorHandler for Compositor {
                 })
                 .collect();
 
-            let presented = match current.buffer.take() {
-                Some(BufferAssignment::NewBuffer(buffer)) => {
+            let presented = !matches!(current.buffer, Some(BufferAssignment::Removed));
+            if !renders {
+                current.damage.clear();
+                if let Some(BufferAssignment::NewBuffer(buffer)) = current.buffer.take() {
                     buffer.release();
-                    true
                 }
-                Some(BufferAssignment::Removed) => false,
-                None => true,
-            };
+            }
 
             // A commit that presents a buffer without saying which part of it
             // changed has changed all of it as far as anyone here can tell.
@@ -417,26 +582,57 @@ impl CompositorHandler for Compositor {
             }
             (presented, damaged)
         });
+        #[cfg(feature = "seat")]
+        if renders {
+            smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
+            // What the renderer did not take -- damage committed without a new
+            // buffer -- is cleared here, as the headless path clears it.
+            with_states(surface, |states| {
+                states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .current()
+                    .damage
+                    .clear();
+            });
+        }
 
-        if let Some(window) = self.window_for(surface) {
-            window.on_commit();
-            if let Some(id) = window.user_data().get::<SurfaceId>().copied() {
-                if presented {
-                    self.presented.insert(id);
-                } else {
-                    self.presented.remove(&id);
-                }
-                if !damaged.is_empty() {
-                    let history = self.damage.entry(id).or_default();
-                    let generation = history.last().map_or(0, |(g, _)| *g) + 1;
-                    history.extend(damaged.into_iter().map(|rect| (generation, rect)));
-                    if history.len() > DAMAGE_HISTORY {
-                        history.drain(..history.len() - DAMAGE_HISTORY);
-                    }
+        self.popups.commit(surface);
+        // A window or a layer surface: both are described to the index, so
+        // both keep the same presentation and damage records.
+        let id = match self.window_for(surface) {
+            Some(window) => {
+                window.on_commit();
+                self.settle_resize(&window);
+                shell::id_of(&window)
+            }
+            None => self.layer_committed(surface),
+        };
+        #[cfg(feature = "xwayland")]
+        if id.is_none() && presented {
+            with_states(surface, |states| {
+                states
+                    .data_map
+                    .insert_if_missing_threadsafe(|| crate::xwayland::PresentedUnclaimed);
+            });
+        }
+        if let Some(id) = id {
+            if presented {
+                self.presented.insert(id);
+            } else {
+                self.presented.remove(&id);
+            }
+            if !damaged.is_empty() {
+                let history = self.damage.entry(id).or_default();
+                let generation = history.last().map_or(0, |(g, _)| *g) + 1;
+                history.extend(damaged.into_iter().map(|rect| (generation, rect)));
+                if history.len() > DAMAGE_HISTORY {
+                    history.drain(..history.len() - DAMAGE_HISTORY);
                 }
             }
         }
         self.space.refresh();
+        self.backend.redraw();
         self.publish_facts();
     }
 }
@@ -460,8 +656,7 @@ impl XdgShellHandler for Compositor {
         let id = self.mint_surface_id();
         window.user_data().insert_if_missing(|| id);
 
-        let at = (self.placed * CASCADE, self.placed * CASCADE);
-        self.placed += 1;
+        let at = self.place_new();
         self.space.map_element(window, at, true);
         tracing::info!(surface = id.0, at = ?at, "toplevel mapped");
 
@@ -477,21 +672,41 @@ impl XdgShellHandler for Compositor {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(window) = self.window_for(surface.wl_surface()) {
             self.space.unmap_elem(&window);
+            self.minimized.retain(|minimized| minimized != &window);
         }
+        self.backend.redraw();
         self.publish_facts();
     }
 
-    /// Popups are accepted and configured, and deliberately not placed yet. A
-    /// menu is its own surface while its accessible nodes hang off the
-    /// toplevel, so where it belongs is a question this arc measures rather
-    /// than guesses at.
+    /// Popups are tracked on both backends, so they render and hit-test with
+    /// their window. Only with a person at the seat are they also kept on
+    /// screen: headless, a menu's placement is left to its positioner, because
+    /// a menu is its own surface while its accessible nodes hang off the
+    /// toplevel, and where it belongs is a question M2 measured rather than
+    /// guessed at.
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
+        if self.backend.has_person() {
+            self.constrain(&surface);
+        }
+        if let Err(error) = self.popups.track_popup(PopupKind::Xdg(surface.clone())) {
+            tracing::warn!(%error, "could not track popup");
+        }
         if let Err(error) = surface.send_configure() {
             tracing::warn!(%error, "could not configure popup");
         }
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
+    /// A menu wants the keyboard and pointer until it is dismissed. Only a
+    /// person makes that request meaningful: headless, the act path addresses
+    /// surfaces directly and a grab would only get in its way.
+    fn grab(&mut self, surface: PopupSurface, seat: WlSeat, serial: Serial) {
+        if !self.backend.has_person() {
+            return;
+        }
+        if let Some(seat) = Seat::<Self>::from_resource(&seat) {
+            self.grab_popup(surface, &seat, serial);
+        }
+    }
 
     fn reposition_request(
         &mut self,
@@ -502,7 +717,98 @@ impl XdgShellHandler for Compositor {
         surface.with_pending_state(|state| {
             state.positioner = positioner;
         });
+        if self.backend.has_person() {
+            self.constrain(&surface);
+        }
         surface.send_repositioned(token);
+    }
+
+    /// A titlebar drag. Honoured only if the serial is the button press that
+    /// is still holding the pointer, which is what stops a client from
+    /// starting a move nobody asked for.
+    fn move_request(&mut self, surface: ToplevelSurface, seat: WlSeat, serial: Serial) {
+        let Some((window, start)) = self.interactive(&surface, &seat, serial) else {
+            return;
+        };
+        self.start_move(&window, start, serial);
+    }
+
+    fn resize_request(
+        &mut self,
+        surface: ToplevelSurface,
+        seat: WlSeat,
+        serial: Serial,
+        edges: xdg_toplevel::ResizeEdge,
+    ) {
+        let Some((window, start)) = self.interactive(&surface, &seat, serial) else {
+            return;
+        };
+        self.start_resize(&window, shell::edges(edges), start, serial);
+    }
+
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        if self.backend.has_person() {
+            self.fill(&surface, xdg_toplevel::State::Maximized, None);
+        } else {
+            surface.send_configure();
+        }
+    }
+
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        if self.backend.has_person() {
+            self.unfill(&surface, xdg_toplevel::State::Maximized, None);
+        }
+    }
+
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, output: Option<WlOutput>) {
+        if self.backend.has_person() {
+            self.fill(&surface, xdg_toplevel::State::Fullscreen, output.as_ref());
+        } else {
+            surface.send_configure();
+        }
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        if self.backend.has_person() {
+            self.unfill(&surface, xdg_toplevel::State::Fullscreen, None);
+        }
+    }
+
+    fn minimize_request(&mut self, surface: ToplevelSurface) {
+        if !self.backend.has_person() {
+            return;
+        }
+        if let Some(window) = self.window_for(surface.wl_surface()) {
+            self.minimize(&window);
+        }
+    }
+}
+
+impl Compositor {
+    /// The window and grab start for an interactive move or resize, if the
+    /// request is one to honour: a person at the seat, a window we know, and a
+    /// serial that is the press currently holding the pointer.
+    fn interactive(
+        &self,
+        surface: &ToplevelSurface,
+        seat: &WlSeat,
+        serial: Serial,
+    ) -> Option<(Window, GrabStartData<Self>)> {
+        if !self.backend.has_person() {
+            return None;
+        }
+        let pointer = Seat::<Self>::from_resource(seat)?.get_pointer()?;
+        if !pointer.has_grab(serial) {
+            return None;
+        }
+        let start = pointer.grab_start_data()?;
+        // The press must have landed on this client's window, or a client
+        // could drag a window it does not own.
+        let (focus, _) = start.focus.as_ref()?;
+        if !focus.id().same_client_as(&surface.wl_surface().id()) {
+            return None;
+        }
+        Some((self.window_for(surface.wl_surface())?, start))
     }
 }
 
@@ -515,8 +821,37 @@ impl SeatHandler for Compositor {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+    /// On a seat, the window holding the keyboard is the one that looks
+    /// active, and no other. Headless leaves every toplevel activated from the
+    /// start (see `new_toplevel`), because the toolkits it hosts for reading
+    /// render differently when they believe they are in the background.
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        // The clipboard and the primary selection belong to whoever has the
+        // keyboard: a client may only read a selection while focused. On both
+        // backends, because an agent pasting is as real as a person pasting.
+        let client = focused.and_then(|surface| self.display.get_client(surface.id()).ok());
+        set_data_device_focus(&self.display, seat, client.clone());
+        set_primary_focus(&self.display, seat, client);
+
+        if !self.backend.has_person() {
+            return;
+        }
+        for window in self.space.elements() {
+            let active = shell::surface_of(window).as_ref() == focused;
+            // An X11 window is told at once; an xdg toplevel needs the
+            // configure that carries its new state.
+            if window.set_activated(active)
+                && let Some(toplevel) = window.toplevel()
+            {
+                toplevel.send_pending_configure();
+            }
+        }
+    }
+
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        self.cursor = image;
+        self.backend.redraw();
+    }
 }
 
 impl ShmHandler for Compositor {
@@ -533,6 +868,39 @@ impl OutputHandler for Compositor {}
 
 impl SelectionHandler for Compositor {
     type SelectionUserData = ();
+
+    /// A Wayland client copied something: offer it to X clients too.
+    #[cfg(feature = "xwayland")]
+    fn new_selection(
+        &mut self,
+        target: smithay::wayland::selection::SelectionTarget,
+        source: Option<smithay::wayland::selection::SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        if let Some(wm) = self.xwayland.wm.as_mut()
+            && let Err(error) = wm.new_selection(target, source.map(|source| source.mime_types()))
+        {
+            tracing::warn!(%error, ?target, "could not offer a selection to X11");
+        }
+    }
+
+    /// An X client is pasting what a Wayland client copied.
+    #[cfg(feature = "xwayland")]
+    fn send_selection(
+        &mut self,
+        target: smithay::wayland::selection::SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &(),
+    ) {
+        let handle = self.loop_handle.clone();
+        if let Some(wm) = self.xwayland.wm.as_mut()
+            && let Err(error) = wm.send_selection(target, mime_type, fd, handle)
+        {
+            tracing::warn!(%error, ?target, "could not hand a selection to X11");
+        }
+    }
 }
 
 impl DataDeviceHandler for Compositor {
@@ -543,6 +911,47 @@ impl DataDeviceHandler for Compositor {
 
 impl ClientDndGrabHandler for Compositor {}
 impl ServerDndGrabHandler for Compositor {}
+
+impl PrimarySelectionHandler for Compositor {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection
+    }
+}
+
+impl XdgActivationHandler for Compositor {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.activation
+    }
+
+    /// A client asking for one of its windows to be brought forward: an
+    /// application opened from a launcher, a link opened in a browser that
+    /// was already running. Granted only for a fresh token minted from the
+    /// person's own input (see `perspicax_policy::grants_activation`), so a
+    /// window cannot pull focus to itself while someone is typing elsewhere.
+    fn request_activation(
+        &mut self,
+        token: XdgActivationToken,
+        data: XdgActivationTokenData,
+        surface: WlSurface,
+    ) {
+        self.activation.remove_token(&token);
+        if !perspicax_policy::grants_activation(data.timestamp.elapsed(), data.serial.is_some()) {
+            tracing::debug!("activation refused: no recent input behind the token");
+            return;
+        }
+        let Some(window) = self.window_for(&surface) else {
+            return;
+        };
+        let Some(id) = shell::id_of(&window) else {
+            return;
+        };
+        self.restore(&window);
+        self.space.raise_element(&window, false);
+        self.focus_surface(surface, id);
+        self.backend.redraw();
+        self.publish_facts();
+    }
+}
 
 /// Per-client state: the protocol's, and this client's provenance.
 ///
@@ -580,6 +989,8 @@ delegate_output!(Compositor);
 delegate_seat!(Compositor);
 delegate_shm!(Compositor);
 delegate_xdg_shell!(Compositor);
+delegate_primary_selection!(Compositor);
+delegate_xdg_activation!(Compositor);
 
 /// A smithay rectangle in the surface's own coordinates, divided by `scale`.
 fn to_rect<Kind>(rect: smithay::utils::Rectangle<i32, Kind>, scale: f64) -> Rect {

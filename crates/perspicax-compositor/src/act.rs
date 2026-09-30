@@ -65,6 +65,17 @@ pub enum ActError {
     /// reporting success is the failure an agent cannot detect.
     #[error("no key on this layout produces {0:?}")]
     Untypeable(char),
+    /// The person at this seat used the keyboard or pointer moments ago.
+    /// Synthetic input now would race theirs: a `Focus` would pull the
+    /// keyboard out from under their typing, and a click would jump the
+    /// pointer they are holding. Try again once they pause. Never produced
+    /// headless, where nobody sits at the seat.
+    #[error("the person at this seat is using it; try again when they pause")]
+    PersonActive,
+    /// The session is locked. The person has walked away, and nothing acts on
+    /// their applications until they unlock it.
+    #[error("the session is locked")]
+    Locked,
     /// No compositor loop answered. It has not started, it has stopped, or it
     /// is wedged; from outside those look the same and an agent can do nothing
     /// different about any of them.
@@ -112,10 +123,21 @@ impl Keys {
     /// `XkbConfig::default()`, which is what the seat was built with, so the
     /// two cannot disagree about what is on the keyboard.
     pub(crate) fn from_default_layout() -> Self {
-        // Empty RMLVO names, which is exactly what `XkbConfig::default()`
-        // passes: libxkbcommon then resolves its own defaults, so the table and
-        // the seat cannot end up describing different keyboards.
-        let (rules, model, layout, variant) = ("", "", "", "");
+        Self::from_names("", "", "", "", None)
+    }
+
+    /// The same walk over a keymap compiled from these RMLVO names: the ones
+    /// the seat's keyboard was just given. Rebuilt whenever the layout
+    /// changes, because a table describing the previous layout would type
+    /// the wrong characters -- `y` for `z` on a German keyboard -- and report
+    /// success.
+    pub(crate) fn from_names(
+        rules: &str,
+        model: &str,
+        layout: &str,
+        variant: &str,
+        options: Option<String>,
+    ) -> Self {
         let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
         let Some(keymap) = xkb::Keymap::new_from_names(
             &context,
@@ -123,7 +145,7 @@ impl Keys {
             model,
             layout,
             variant,
-            None,
+            options,
             xkb::COMPILE_NO_FLAGS,
         ) else {
             tracing::warn!("no keymap: typing will refuse every character");
@@ -205,6 +227,12 @@ impl Compositor {
         surface: SurfaceId,
         action: &Action,
     ) -> Result<Dispatched, ActError> {
+        if self.lock.is_some() {
+            return Err(ActError::Locked);
+        }
+        if self.person_is_active() {
+            return Err(ActError::PersonActive);
+        }
         let window = self
             .window_for_id(surface)
             .ok_or(ActError::NoSuchSurface(surface.0))?;
@@ -226,10 +254,9 @@ impl Compositor {
 
     /// Give this surface the keyboard.
     fn act_focus(&mut self, window: &Window, id: SurfaceId) -> Result<(), ActError> {
-        let Some(toplevel) = window.toplevel() else {
+        let Some(wl_surface) = crate::shell::surface_of(window) else {
             return Err(ActError::NoSuchSurface(id.0));
         };
-        let wl_surface = toplevel.wl_surface().clone();
         self.focus_surface(wl_surface, id);
         Ok(())
     }
@@ -250,10 +277,10 @@ impl Compositor {
         let Some(pointer) = self.pointer.clone() else {
             return Ok(());
         };
-        let Some(toplevel) = window.toplevel() else {
+        let Some(surface) = crate::shell::surface_of(window) else {
             return Ok(());
         };
-        let focus = Some((toplevel.wl_surface().clone(), origin.into()));
+        let focus = Some((surface, origin.into()));
         let time = self.now_ms();
 
         pointer.motion(
@@ -293,14 +320,14 @@ impl Compositor {
         let Some(pointer) = self.pointer.clone() else {
             return Ok(());
         };
-        let Some(toplevel) = window.toplevel() else {
+        let Some(surface) = crate::shell::surface_of(window) else {
             return Ok(());
         };
         let time = self.now_ms();
 
         pointer.motion(
             self,
-            Some((toplevel.wl_surface().clone(), origin.into())),
+            Some((surface, origin.into())),
             &MotionEvent {
                 location: global.into(),
                 serial: SERIAL_COUNTER.next_serial(),
@@ -376,9 +403,11 @@ impl Compositor {
 
     /// One key event, with no compositor-level filtering.
     ///
-    /// The filter closure is where a real compositor implements its own key
-    /// bindings; this one has none, and forwarding everything is what makes the
-    /// events indistinguishable from a device's.
+    /// The filter closure is where the seat backend takes its escape hatches
+    /// and key bindings. Synthetic keys bypass it on purpose: an agent typing
+    /// text must never end the session, switch VT or close a window by
+    /// spelling a chord. Forwarding everything is also what makes the events
+    /// indistinguishable from a device's to the client.
     fn press(&mut self, keyboard: &KeyboardHandle<Self>, key: Keycode, state: KeyState) {
         let time = self.now_ms();
         keyboard.input::<(), _>(

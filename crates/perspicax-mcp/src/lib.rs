@@ -28,16 +28,16 @@
 //! after, and what the pixels did in the window it was given. An agent handed
 //! `true` has learned that a function returned, which is not what it asked.
 //!
-//! **The gate is not here.** [`perspicax_index::check_actable`] lives in
-//! `perspicax-index` so that a future host speaking some other protocol cannot
-//! route around it. This crate reports what the gate said and adds nothing on
-//! top of it -- there is no capability layer in v1, deliberately and for
-//! reasons written down in the plan: perspicax is one actuator among several,
-//! an agent that is refused a click can run a command instead, and a boundary
-//! that can be walked around invites the reliance it cannot support.
-//! [`perspicax_index::Refusal::NoCapability`] stays declared and unconstructed
-//! until `--seat`, where perspicax will host applications it did not spawn and
-//! the question finally has two answers.
+//! **The gate is not here.** [`perspicax_index::check_actable`] and the
+//! host's [`perspicax_index::Consent`] are consulted in `perspicax-index`, so
+//! that a future host speaking some other protocol cannot route around them.
+//! This crate reports what the gate said and adds nothing on top of it.
+//! Headless, consent is everyone: perspicax is one actuator among several, and
+//! a boundary an agent could walk around by running a command would invite the
+//! reliance it cannot support. On `--seat`, where the person launched most of
+//! what is on screen, consent covers only what perspicax spawned, and
+//! [`perspicax_index::Refusal::NoCapability`] is what an agent hears about the
+//! rest.
 
 pub mod dto;
 mod server;

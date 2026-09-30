@@ -11,9 +11,13 @@
 # compositor links system C libraries -- libinput, libdrm, gbm, xkbcommon,
 # libwayland -- that never appear in the cargo graph. They are all
 # MIT/BSD-shaped today, but a future `-sys` crate vendoring something copyleft
-# would pass this gate and still poison distribution. When
-# `perspicax-compositor` grows its first `-sys` dependency, read that crate's
-# bundled sources rather than trusting the line below.
+# would pass this gate and still poison distribution.
+#
+# The `seat` feature brought the first `-sys` crates (drm-sys, gbm-sys,
+# input-sys, libseat-sys, libudev-sys). Each binds a system library found by
+# pkg-config and vendors none of its C sources, so the line below still tells
+# the truth about what is compiled into the binary. A new `-sys` crate gets the
+# same read before it lands.
 
 [licenses]
 # Exhaustive rather than permissive-by-pattern, and deliberately short. A new
@@ -47,6 +51,20 @@ allow = [
     # Scope, deliberately: this allows the licence, not a class of them. A
     # second crate arriving under Unicode-3.0 still gets read before it ships.
     "Unicode-3.0",
+]
+# Exceptions, per crate rather than per licence, added 2026-09-29 when the
+# `seat` and `xwayland` features arrived. Both licences are permissive and
+# carry no reciprocal obligation; they are scoped to one crate each so that a
+# third crate arriving under either still fails the gate and gets read.
+#
+#   - encoding_rs: `(Apache-2.0 OR MIT) AND BSD-3-Clause`. Smithay's X11 window
+#     manager takes it to decode legacy X11 window titles. The BSD-3-Clause
+#     term covers the WHATWG index data the crate embeds.
+#   - libloading: ISC. Smithay's EGL backend takes it to open libEGL at run
+#     time rather than link it. ISC is MIT with the wording trimmed.
+exceptions = [
+    { crate = "encoding_rs", allow = ["BSD-3-Clause"] },
+    { crate = "libloading", allow = ["ISC"] },
 ]
 # A crate with no licence expression at all is a licensing unknown, not a
 # permissive default.

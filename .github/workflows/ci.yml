@@ -66,6 +66,34 @@ jobs:
       - name: test
         run: cargo test --locked --workspace
 
+  # The daily-driver build: the seat backend and Xwayland. The job above
+  # builds without them and stays lean on purpose; this one exists so the
+  # backend a person actually logs in to cannot rot behind a feature nobody
+  # compiles. No GPU and no seat on a runner, so clippy and non-live tests only.
+  seat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pin the toolchain
+        run: |
+          rustup toolchain install 1.93 --profile minimal --component clippy
+          rustup default 1.93
+          rustc --version && cargo --version
+
+      - name: The seat's system libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libudev-dev libinput-dev libseat-dev \
+            libgbm-dev libdrm-dev libegl-dev libgles-dev
+
+      - name: clippy
+        run: cargo clippy --locked --workspace --all-targets --features perspicax/desktop -- -D warnings
+
+      - name: test
+        run: cargo test --locked --workspace --features perspicax/desktop
+
   deny:
     runs-on: ubuntu-latest
     steps:

@@ -13,8 +13,10 @@ repository.workspace = true
 # rather than the workspace's `forbid` so a genuinely necessary site can carry a
 # narrow `#[allow]` with its reason written at the definition -- and so that
 # every such site is visible in a grep rather than lost inside a blanket
-# permission. No `unsafe` exists here yet; when the first appears it gets a
-# comment saying which C API forced it.
+# permission. The sites so far are two, both in `src/backend/seat.rs`, both
+# constructors Smithay marks `unsafe` over EGL (`eglGetPlatformDisplay` and a
+# context's thread affinity), each with the C API and the argument written
+# beside it.
 unsafe_code = "deny"
 
 [dependencies]
@@ -23,3 +25,48 @@ thiserror.workspace = true
 tracing.workspace = true
 perspicax-index = { path = "../perspicax-index", version = "0.1.0" }
 perspicax-node = { path = "../perspicax-node", version = "0.1.0" }
+# The window-management decisions. Pure, so both backends share them: one
+# placement rule headless and on a seat, rather than two that drift apart.
+perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
+# Xwayland-only: a second X connection, for the X-Resource extension's
+# QueryClientIds -- the X server's own word on which process drew a window.
+# Already in the tree under Smithay's own Xwayland support; MIT OR Apache-2.0.
+x11rb = { version = "0.13", default-features = false, features = ["res"], optional = true }
+# Seat-only: the person's config.toml. Headless reads none.
+perspicax-config = { path = "../perspicax-config", version = "0.1.0", optional = true }
+# Seat-only: reads the person's Xcursor theme, and headless draws no cursor.
+# MIT, pure Rust, no dependencies.
+xcursor = { version = "0.3", optional = true }
+
+# Backends, as cargo features, so a build carries only the system libraries it
+# will actually use. Neither is on by default: the four gates build the
+# headless compositor, which needs nothing but libxkbcommon, and a feature a
+# library turns on for itself is one every dependent pays for without asking.
+[features]
+# A real session on a real seat: libseat for device access without root, udev
+# to find GPUs and hotplug outputs, DRM/KMS and GBM to put buffers on a
+# connector, EGL and GLES to composite into them, libinput for keyboards and
+# pointers. Every one of these is a C library, found by pkg-config at build
+# time -- which is why this is a feature rather than the default.
+seat = [
+    "dep:perspicax-config",
+    "dep:xcursor",
+    "smithay/backend_drm",
+    "smithay/backend_gbm",
+    "smithay/backend_egl",
+    "smithay/renderer_gl",
+    "smithay/backend_libinput",
+    "smithay/backend_udev",
+    "smithay/backend_session_libseat",
+]
+# X11 applications, hosted by an Xwayland this compositor starts. Pure Rust on
+# our side (x11rb speaks the protocol; Xwayland itself is a program we spawn,
+# not a library we link), so it costs the headless build nothing to carry.
+xwayland = ["smithay/xwayland", "dep:x11rb"]
+
+# A real Wayland client for the live tests, so a layer-shell test needs no
+# panel program installed. MIT; default features off, since the tests need
+# neither calloop nor xkbcommon on the client side.
+[dev-dependencies]
+smithay-client-toolkit = { version = "0.20", default-features = false }
+wayland-client = "0.31"

@@ -16,7 +16,7 @@ use perspicax::{
     observe::{self, App, Reading},
     session,
 };
-use perspicax_compositor::{Config, Facts, Requests, Stop};
+use perspicax_compositor::{Backend, Config, Facts, Requests, Stop};
 use perspicax_index::{Index, Refusal};
 use perspicax_node::{NodeId, Origin, SurfaceId, Visibility};
 
@@ -148,7 +148,7 @@ fn run_demo() -> Reading {
     let facts = Facts::new();
     let stop = Stop::new();
     let config = Config {
-        size: (1280, 800),
+        backend: Backend::Headless { size: (1280, 800) },
         spawn: vec![
             vec![gallery.to_string_lossy().into_owned()],
             vec!["gtk4-widget-factory".to_owned()],
@@ -157,6 +157,9 @@ fn run_demo() -> Reading {
         // A backstop only. The read below asks the compositor to stop when it
         // is finished, because a Qt tree takes seconds nobody can predict.
         run_for: Some(Duration::from_secs(120)),
+        config: None,
+        socket: None,
+        xwayland: false,
     };
 
     let (sender, receiver) = mpsc::channel();

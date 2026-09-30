@@ -11,7 +11,7 @@
 //! precise definition of a surface that renders without explaining itself, and
 //! the only honest trigger for a vision fallback.
 //!
-//! # It does not draw anything, and that is the design
+//! # Headless, it does not draw anything, and that is the design
 //!
 //! A compositor is usually a thing that composites. This one runs a Wayland
 //! server, tracks surfaces, geometry, regions, z-order and damage, and never
@@ -29,23 +29,33 @@
 //! buffer, buffers are released the moment they arrive rather than one commit
 //! late. See [`state::Compositor::commit`].
 //!
-//! Real DRM, modesetting and multi-output wait for `--seat`; they are the part
-//! of compositor work that consumes schedule without proving anything.
+//! A person needs the picture, so [`Backend::Seat`] -- behind the `seat`
+//! feature -- renders to the outputs a GPU has connected and takes input from
+//! libinput. It is a second backend beside this one, not a replacement for
+//! it: the headless compositor stays renderer-free, and it stays what CI runs.
 
 pub mod act;
+mod backend;
 pub mod facts;
 pub mod host;
+mod layers;
+mod lock;
 mod origin;
+mod shell;
 pub mod state;
+#[cfg(feature = "xwayland")]
+mod xwayland;
 
 pub use crate::{
     act::{ActError, Dispatched},
+    backend::Backend,
     facts::Facts,
     host::{Host, Request, Requests},
 };
 
 use std::{
     ffi::OsString,
+    path::PathBuf,
     process::{Child, Command},
     sync::{
         Arc,
@@ -57,21 +67,20 @@ use std::{
 use smithay::{
     reexports::{
         calloop::{
-            EventLoop, Interest, Mode as PollMode, PostAction,
-            channel::Event as ChannelEvent,
+            EventLoop, Interest, Mode as PollMode, PostAction, channel::Event as ChannelEvent,
             generic::Generic,
-            timer::{TimeoutAction, Timer},
         },
         wayland_server::Display,
     },
     wayland::socket::ListeningSocketSource,
 };
 
-use crate::state::Compositor;
+use crate::{backend::Running, state::Compositor};
 
-/// How often clients are told they may draw again. 60 Hz, because that is what
-/// a toolkit expects and a slower tick would make every damage measurement in
-/// this milestone a measurement of this constant instead.
+/// How often a headless compositor tells clients they may draw again, and the
+/// longest the loop sleeps between checks for a stop. 60 Hz, because that is
+/// what a toolkit expects and a slower tick would make every damage
+/// measurement in this milestone a measurement of this constant instead.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// A request for a running compositor to stop.
@@ -126,18 +135,36 @@ pub enum Error {
         /// Why it did not start.
         source: std::io::Error,
     },
+    /// The backend asked for was left out of this build.
+    #[error(
+        "this perspicax was built without the {backend} backend; rebuild with \
+         the `{feature}` cargo feature (from the workspace root, \
+         `--features perspicax/desktop` builds a full session)"
+    )]
+    NotBuilt {
+        /// The backend, as the CLI spells it.
+        backend: &'static str,
+        /// The cargo feature that provides it.
+        feature: &'static str,
+    },
+    /// The seat could not be brought up: no session, no GPU, no input.
+    #[error("the seat could not be brought up: {0}")]
+    Seat(String),
+    /// The config file could not be used. Refused at start, rather than
+    /// starting a session that silently ignores what the person wrote.
+    #[error("config: {0}")]
+    Config(String),
     /// The display failed while talking to clients.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
-/// How to run.
-#[derive(Debug, Clone)]
+/// How to run. The default is a 1920x1080 headless compositor that spawns
+/// nothing and runs until stopped.
+#[derive(Debug, Clone, Default)]
 pub struct Config {
-    /// The virtual output's size in pixels. Windows are placed inside it, and
-    /// it is the coordinate space every global rect in
-    /// [`perspicax_index::HostFacts`] is expressed in.
-    pub size: (i32, i32),
+    /// Where output goes and input comes from. See [`Backend`].
+    pub backend: Backend,
     /// Commands to start once the socket exists, each as a program and its
     /// arguments.
     pub spawn: Vec<Vec<String>>,
@@ -151,17 +178,20 @@ pub struct Config {
     /// Stop after this long. `None` runs until killed, which is what a session
     /// wants; a test wants a bound.
     pub run_for: Option<Duration>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            size: (1920, 1080),
-            spawn: Vec::new(),
-            env: Vec::new(),
-            run_for: None,
-        }
-    }
+    /// The seat's `config.toml`, read at start and again on the reload
+    /// binding. A file that does not exist is the classic profile. Headless
+    /// reads no config at all: what CI and an agent run has to be the same
+    /// on every machine, whatever its owner likes their focus model to be.
+    pub config: Option<PathBuf>,
+    /// The Wayland socket's name in `XDG_RUNTIME_DIR`, instead of the first
+    /// free `wayland-N`. For whoever has to connect without being spawned
+    /// by us: a test's own client, or a second session beside a first.
+    pub socket: Option<String>,
+    /// Start Xwayland headless too, for X11 applications an agent wants to
+    /// host. Off by default, so what CI runs needs no X server. A seat
+    /// decides from its config (`xwayland`), not from this. Ignored in a
+    /// build without the `xwayland` feature.
+    pub xwayland: bool,
 }
 
 /// Run a compositor until its deadline passes, or forever.
@@ -175,18 +205,31 @@ impl Default for Config {
 ///
 /// # Errors
 ///
-/// [`Error`], for any of the ways a compositor fails to come up: no socket, no
-/// event loop, a child that will not start, or a display that fails mid-run.
+/// [`Error`], for any of the ways a compositor fails to come up: a backend
+/// this build left out, no socket, no event loop, a child that will not start,
+/// or a display that fails mid-run.
 pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> Result<(), Error> {
     let mut event_loop: EventLoop<'static, Compositor> =
         EventLoop::try_new().map_err(|error| Error::EventLoop(error.to_string()))?;
     let mut display: Display<Compositor> =
         Display::new().map_err(|error| Error::Display(error.to_string()))?;
     let handle = display.handle();
-    let mut state = Compositor::new(&handle, config.size, facts.clone());
+    // Before the socket, so a seat that cannot come up -- no session, no GPU,
+    // no monitor -- is refused before any client has been accepted by a
+    // compositor that cannot show it anything.
+    let backend = Running::start(config, &handle, &event_loop.handle())?;
+    let mut state = Compositor::new(&handle, event_loop.handle(), backend, facts.clone());
+    Running::attach(&mut state, &event_loop.handle())?;
+    // Once before any client, so a reader sees this host's consent policy and
+    // outputs from the start rather than an empty default until something
+    // happens to change.
+    state.publish_facts();
 
-    let socket =
-        ListeningSocketSource::new_auto().map_err(|error| Error::Socket(error.to_string()))?;
+    let socket = match &config.socket {
+        Some(name) => ListeningSocketSource::with_name(name),
+        None => ListeningSocketSource::new_auto(),
+    }
+    .map_err(|error| Error::Socket(error.to_string()))?;
     let socket_name = socket.socket_name().to_os_string();
     event_loop
         .handle()
@@ -201,9 +244,10 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
     //
     // The usual way to write this hands the `Display` to calloop as source data
     // and reaches it again through `Generic::get_mut`, which is `unsafe`. This
-    // crate is the one in the workspace allowed to write `unsafe`, and it has
-    // not needed to yet -- keeping the display in a local and only *polling*
-    // its descriptor here is why.
+    // crate is the one in the workspace allowed to write `unsafe`, and it
+    // spends that only where a C API leaves no choice (EGL, in the seat
+    // backend) -- keeping the display in a local and only *polling* its
+    // descriptor here is why this is not one of those places.
     let poll_fd = display.backend().poll_fd().try_clone_to_owned()?;
     event_loop
         .handle()
@@ -211,14 +255,6 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
             Generic::new(poll_fd, Interest::READ, PollMode::Level),
             |_, _, _: &mut Compositor| Ok(PostAction::Continue),
         )
-        .map_err(|error| Error::EventLoop(error.to_string()))?;
-
-    event_loop
-        .handle()
-        .insert_source(Timer::immediate(), |_, (), state: &mut Compositor| {
-            state.send_frames();
-            TimeoutAction::ToDuration(FRAME_INTERVAL)
-        })
         .map_err(|error| Error::EventLoop(error.to_string()))?;
 
     // The inbound arrow. Everything else this loop listens to is something a
@@ -256,8 +292,20 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         tracing::warn!("this Requests already has a loop: no actions will be accepted");
     }
 
-    tracing::info!(socket = ?socket_name, size = ?config.size, "compositor up");
+    tracing::info!(socket = ?socket_name, backend = ?config.backend, "compositor up");
+    state.launch = Some(Launch {
+        socket: socket_name.clone(),
+        env: config.env.clone(),
+        x11_display: None,
+    });
     let mut children = spawn_all(&config.spawn, &config.env, &socket_name)?;
+    // What we started is what an agent may act on, on a seat. Headless, this
+    // changes nothing: consent there is already everyone.
+    state.grant(children.iter().map(Child::id));
+    // The person's own programs, after the agent's: never granted consent.
+    // On a seat with Xwayland, they wait for it, so an X11 program in the
+    // autostart list finds a `DISPLAY`.
+    Running::populate(&mut state, &event_loop.handle(), config.xwayland)?;
 
     let deadline = config.run_for.map(|run_for| Instant::now() + run_for);
     let result = loop {
@@ -267,10 +315,14 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         if let Err(error) = display.dispatch_clients(&mut state) {
             break Err(Error::Io(error));
         }
+        state.popups.cleanup();
         if let Err(error) = display.flush_clients() {
             break Err(Error::Io(error));
         }
-        if stop.requested() || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if stop.requested()
+            || state.backend.exit_requested()
+            || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        {
             break Ok(());
         }
     };
@@ -297,25 +349,54 @@ fn spawn_all(
     env: &[(String, String)],
     socket: &OsString,
 ) -> Result<Vec<Child>, Error> {
-    let mut children = Vec::with_capacity(commands.len());
-    for command in commands {
-        let Some((program, arguments)) = command.split_first() else {
-            continue;
-        };
-        let child = Command::new(program)
+    let launch = Launch {
+        socket: socket.clone(),
+        env: env.to_vec(),
+        x11_display: None,
+    };
+    commands
+        .iter()
+        .filter(|command| !command.is_empty())
+        .map(|command| launch.spawn(command))
+        .collect()
+}
+
+/// What a program started by this compositor needs to find it: the socket,
+/// and the environment every child gets. Kept on the compositor so a key
+/// binding or an autostart entry starts programs exactly as `--spawn` does.
+#[derive(Debug, Clone)]
+pub(crate) struct Launch {
+    socket: OsString,
+    env: Vec<(String, String)>,
+    /// Xwayland's display, once it is up. Without one, `DISPLAY` is removed,
+    /// so an X11 program fails plainly rather than finding some other X
+    /// server and drawing where this compositor cannot see.
+    pub(crate) x11_display: Option<u32>,
+}
+
+impl Launch {
+    /// Start one program, as a program and its arguments.
+    pub(crate) fn spawn(&self, command: &[String]) -> Result<Child, Error> {
+        let (program, arguments) = command.split_first().ok_or_else(|| Error::Spawn {
+            command: String::new(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "an empty command"),
+        })?;
+        let mut command_line = Command::new(program);
+        command_line
             .args(arguments)
-            .envs(env.iter().map(|(key, value)| (key, value)))
-            .env("WAYLAND_DISPLAY", socket)
+            .envs(self.env.iter().map(|(key, value)| (key, value)))
+            .env("WAYLAND_DISPLAY", &self.socket)
             .env("GDK_BACKEND", "wayland")
-            .env("QT_QPA_PLATFORM", "wayland")
-            .env_remove("DISPLAY")
-            .spawn()
-            .map_err(|source| Error::Spawn {
-                command: command.join(" "),
-                source,
-            })?;
+            .env("QT_QPA_PLATFORM", "wayland");
+        match self.x11_display {
+            Some(display) => command_line.env("DISPLAY", format!(":{display}")),
+            None => command_line.env_remove("DISPLAY"),
+        };
+        let child = command_line.spawn().map_err(|source| Error::Spawn {
+            command: command.join(" "),
+            source,
+        })?;
         tracing::info!(pid = child.id(), command = %command.join(" "), "spawned");
-        children.push(child);
+        Ok(child)
     }
-    Ok(children)
 }

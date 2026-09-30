@@ -12,7 +12,7 @@
 
 use std::sync::Mutex;
 
-use perspicax_index::{Delta, HostFacts, Index, Receipt, Selector, SurfaceFacts, Verb};
+use perspicax_index::{Consent, Delta, HostFacts, Index, Receipt, Selector, SurfaceFacts, Verb};
 use perspicax_node::{Node, NodeId, ObservedNode, Origin, ProcessOrigin, Rect, Role, SurfaceId};
 
 use crate::{Denied, Desktop};
@@ -64,6 +64,7 @@ pub(crate) fn facts() -> HostFacts {
         ],
         7,
     )
+    .with_consent(Consent::Everyone)
 }
 
 /// The window's tree, joined to [`WINDOW`] and judged against [`facts`].

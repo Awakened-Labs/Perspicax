@@ -105,6 +105,60 @@ impl core::fmt::Display for Refusal {
 
 impl core::error::Error for Refusal {}
 
+/// Whose applications an agent may act on. Published by the host, consulted
+/// by [`Index::actable`] after [`check_actable`].
+///
+/// This is the capability layer, and it is narrow on purpose. It does not ask
+/// whether a *node* is safe. The visibility gate already does that. It asks
+/// whether the *person* at the seat has agreed to an agent driving this
+/// application at all. On a headless compositor there is no person, and every
+/// client is on a private socket an agent set up, so the answer is
+/// [`Consent::Everyone`]. On a seat the person launched most of what is on
+/// screen, and the default is only what perspicax spawned itself.
+///
+/// The default is [`Consent::Nobody`], so a host that forgets to publish
+/// consent produces no actable node. This is the same fail-closed rule the
+/// visibility gate follows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Consent {
+    /// No application may be acted on.
+    #[default]
+    Nobody,
+    /// Only processes with these pids: the ones the host started for an
+    /// agent. A process they start in turn is *not* included. Following
+    /// ancestry would mean a terminal perspicax spawned could extend consent
+    /// to anything typed into it.
+    Spawned(Vec<u32>),
+    /// Every attributed application.
+    Everyone,
+}
+
+impl Consent {
+    /// Whether an agent may act on something drawn by `origin`. Never for an
+    /// unattributed origin, whatever the policy: a policy about processes
+    /// cannot say yes to a process nobody has identified.
+    #[must_use]
+    ///
+    /// An X11 origin is judged by its server, never by its client: every X
+    /// client shares one Xwayland, and X11 lets any of them read and inject
+    /// into the others, so consenting to one X client is consenting to all of
+    /// them. The Xwayland perspicax starts for a person is never among the
+    /// processes it spawned for an agent, so on a seat X11 applications are
+    /// refused unless consent is everyone.
+    pub fn permits(&self, origin: &Origin) -> bool {
+        let pid = match origin {
+            Origin::Unattributed => return false,
+            Origin::Process(process) => process.pid,
+            Origin::X11(x11) => x11.server,
+        };
+        match self {
+            Self::Nobody => false,
+            Self::Spawned(pids) => pids.contains(&pid),
+            Self::Everyone => true,
+        }
+    }
+}
+
 /// The gate. Every act path goes through here.
 ///
 /// Both conditions fail closed, and both defaults are un-actable, so an ingest
@@ -117,7 +171,7 @@ impl core::error::Error for Refusal {}
 pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
     match &node.origin {
         Origin::Unattributed => return Err(Refusal::Unattributed),
-        Origin::Process(_) => {}
+        Origin::Process(_) | Origin::X11(_) => {}
     }
     match &node.visibility {
         Visibility::Visible => Ok(()),
@@ -398,5 +452,36 @@ mod tests {
         };
         assert_send(ingest.snapshot(NodeId(0)));
         assert_send(ingest.drain_changes());
+    }
+
+    #[test]
+    fn no_consent_policy_permits_an_unattributed_origin() {
+        for consent in [
+            Consent::Nobody,
+            Consent::Spawned(vec![0]),
+            Consent::Everyone,
+        ] {
+            assert!(!consent.permits(&Origin::Unattributed), "{consent:?}");
+        }
+    }
+
+    #[test]
+    fn an_x11_origin_is_consented_by_its_server_not_its_client() {
+        let x11 = Origin::X11(Box::new(perspicax_node::X11Origin {
+            server: 700,
+            client: Some(ProcessOrigin {
+                pid: 900,
+                exe: None,
+                cgroup: None,
+                sandbox: None,
+            }),
+            basis: perspicax_node::X11Basis::XRes,
+        }));
+        assert!(
+            !Consent::Spawned(vec![900]).permits(&x11),
+            "the client is not the unit"
+        );
+        assert!(Consent::Spawned(vec![700]).permits(&x11));
+        assert!(Consent::Everyone.permits(&x11));
     }
 }

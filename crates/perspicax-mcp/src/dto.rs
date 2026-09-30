@@ -31,7 +31,9 @@
 //! imposes is not a ceiling anything can reach.
 
 use perspicax_index::{DamageWitness, Delta, HostFacts, Index, Receipt, Refusal, SurfaceFacts};
-use perspicax_node::{NodeId, ObservedNode, Orientation, Origin, Rect, SurfaceId, Toggled};
+use perspicax_node::{
+    NodeId, ObservedNode, Orientation, Origin, Rect, SurfaceId, Toggled, X11Basis,
+};
 use serde::Serialize;
 
 /// Who drew something, from the client's connection credentials.
@@ -54,6 +56,12 @@ pub struct Provenance {
     /// Flatpak or Snap identity, when the process carries one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<String>,
+    /// Present when the drawing process is an X11 client under Xwayland.
+    /// `pid` above is then Xwayland itself -- the only process the
+    /// compositor holds credentials for -- and this says which X client drew
+    /// it and how that was learned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x11: Option<X11Provenance>,
 }
 
 impl Provenance {
@@ -68,9 +76,38 @@ impl Provenance {
                 exe: process.exe.clone(),
                 cgroup: process.cgroup.clone(),
                 sandbox: process.sandbox.clone(),
+                x11: None,
+            }),
+            Origin::X11(x11) => Some(Self {
+                pid: x11.server,
+                exe: None,
+                cgroup: None,
+                sandbox: None,
+                x11: Some(X11Provenance {
+                    client_pid: x11.client.as_ref().map(|client| client.pid),
+                    client_exe: x11.client.as_ref().and_then(|client| client.exe.clone()),
+                    basis: match x11.basis {
+                        X11Basis::XRes => "xres",
+                        X11Basis::ClaimedPid => "claimed_pid",
+                        X11Basis::ServerOnly => "server_only",
+                    },
+                }),
             }),
         }
     }
+}
+
+/// The X client behind an Xwayland surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct X11Provenance {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_exe: Option<String>,
+    /// `xres` (the X server's own answer, trusted because perspicax started
+    /// it), `claimed_pid` (the client's `_NET_WM_PID`, a hint only), or
+    /// `server_only`.
+    pub basis: &'static str,
 }
 
 /// Strings an application rendered, carried under a key that says what they are.

@@ -58,6 +58,40 @@ pub enum Origin {
     Unattributed,
     /// Attributed to a process the compositor holds credentials for.
     Process(Box<ProcessOrigin>),
+    /// Drawn by an X11 client through the Xwayland server the compositor
+    /// started. Weaker than [`Origin::Process`], and deliberately a separate
+    /// variant so nothing can mistake one for the other. The compositor's
+    /// Wayland credentials name only Xwayland; which X client drew the window
+    /// is Xwayland's answer, not the kernel's.
+    X11(Box<X11Origin>),
+}
+
+/// The provenance of a node drawn under Xwayland.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct X11Origin {
+    /// The Xwayland server's pid, from its Wayland credentials. This is the
+    /// part the compositor attests, and the unit consent is decided on: every
+    /// X client shares one server, and X11 lets any of them read and inject
+    /// into the others, so they are one trust domain.
+    pub server: u32,
+    /// The X client's own process, as well as it could be learned.
+    pub client: Option<ProcessOrigin>,
+    /// How `client` was learned.
+    pub basis: X11Basis,
+}
+
+/// How an X client's process was identified, strongest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum X11Basis {
+    /// From the X-Resource extension's `QueryClientIds`: the X server's own
+    /// view of the connection's peer, trusted because the compositor started
+    /// that server.
+    XRes,
+    /// From the window's `_NET_WM_PID` property, which the client sets about
+    /// itself. A hint, and nothing more.
+    ClaimedPid,
+    /// Not learned at all: only the server is known.
+    ServerOnly,
 }
 
 /// The provenance of an attributed node.

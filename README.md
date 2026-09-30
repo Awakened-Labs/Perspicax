@@ -49,8 +49,10 @@ perspicax              the composition root — one binary, `perspicax --headles
 perspicax-mcp          MCP server (rmcp, stdio) — six tools, DTOs, receipts  [portable]
 perspicax-index        node cache, stable ids, selectors, deltas, refusals  [portable]
 perspicax-node         node schema — AccessKit types plus Origin and Visibility
+perspicax-policy       WM decisions as data — focus, bindings, placement, resize  [portable]
+perspicax-config       config.toml — schema, classic/minimal profiles, feature check  [portable]
 perspicax-atspi        impl Ingest — AT-SPI2 over D-Bus
-perspicax-compositor   impl HostView — Smithay: outputs, seat, damage. Draws nothing.
+perspicax-compositor   impl HostView — Smithay: outputs, seat, damage. Headless draws nothing.
 perspicax-probe        dev CLI — dump a tree, time a read, explain a refusal
 ```
 
@@ -67,6 +69,37 @@ v1 is one demo, run against a GTK app and a Qt app, headless, in CI, with zero
 screenshots taken: observe a window, resolve a selector, click it, get a
 receipt — and get a *refusal* when the target is occluded. It is
 `crates/perspicax/tests/act.rs`.
+
+## Roadmap: a window manager a person uses every day
+
+v1 hosts applications for an agent. The W track makes the same compositor one
+a person logs in to — KDE-Plasma-like out of the box, and tunable all the way
+down to wallpaper and a keyboard. The agent interface is kept working at every
+step; it is the reason the compositor exists, not a feature bolted to it.
+
+Two layers of tuning. **Cargo features** decide what is built at all, the way
+USE flags do: `seat` (DRM, GBM, EGL/GLES, libinput, libseat), `xwayland`, and
+`desktop`, which is both. Later, one feature per shell component and per
+optional module. **A config file** decides what a build that has a thing does
+with it, and a key for something left out of the build is an error naming the
+feature, never silently ignored.
+
+| | | |
+|---|---|---|
+| **W1** | A usable session: DRM from a TTY, libinput, move/resize, keybinds, multi-monitor, clipboard, layer-shell and session-lock (so waybar, fuzzel and swaylock work), Xwayland | in progress |
+| **W2** | Config profiles (`classic`, `minimal`) and policy: focus models, a workspace grid with edge flipping, moving between screens, snapping | |
+| **W3** | Server-side decorations, then tabbed window groups | |
+| **W4** | Protocols Smithay lacks: foreign-toplevel management, ext-workspace, screencopy, output management — and `screenshot` stops refusing | |
+| **W5** | `perspicax-shell`, a separate process: wallpaper, panel, tray, start menu, root menu, desktop icons — each a feature and a toggle | |
+| **W6** | Polish: themes, keymaps, a session entry for display managers | |
+
+The shell is a separate process on purpose. A panel that crashes should not
+take every window with it, and anything speaking layer-shell can stand in for
+any piece of it.
+
+X11 applications arrive through Xwayland, a client this compositor starts — not
+through a second build that is an X11 window manager. There is one display
+server path, so there is nothing to keep two builds of in step.
 
 ## What reading a tree costs
 
@@ -205,16 +238,16 @@ is at the point of use rather than in a preamble a model has to have remembered.
 That is this project's injection defence, and it is a read-path property rather
 than an act-path gate.
 
-**There is no capability gate, deliberately.** perspicax is one actuator among several,
-not an agent's only one: an agent refused a click runs the command instead, so a
-gate here would document an intention rather than enforce a boundary — and a
-control that can be trivially bypassed is worse than an absent one, because it
-invites reliance. `Refusal::NoCapability` is declared and unconstructed until
-`--seat`, where perspicax will host applications the user launched rather than ones it
-spawned, and the question finally has two different answers.
+**Consent is about the person, not the node.** Headless, there is no capability
+gate: perspicax is one actuator among several, an agent refused a click runs the
+command instead, and every client is on a socket the agent set up. On `--seat`
+the question has two answers, because the person launched most of what is on
+screen. There an agent may act only on what perspicax itself spawned
+(`Refusal::NoCapability` otherwise), and not at all while the person is using the
+keyboard or pointer: an act in the middle of their typing would race it.
 
 **`screenshot` ships declared and always refusing.** There is no renderer in
-this build at all — occlusion needs geometry, z-order, regions and damage, and
+the headless build at all — occlusion needs geometry, z-order, regions and damage, and
 none of those need pixels. It is listed so that a model can tell the fallback
 from the mechanism, and its refusal reports the count of nodes under rendering
 no semantic event explained, which is the only honest trigger for a pixel path
@@ -250,6 +283,72 @@ trigger for a vision fallback.
 ```sh
 cargo build --workspace
 cargo test  --workspace
+```
+
+The daily-driver build, which needs the development packages for libudev,
+libinput, libseat, libgbm, libdrm, libEGL and libGLESv2:
+
+```sh
+cargo build --release --features perspicax/desktop
+```
+
+Run it from a text console (a TTY, not a terminal inside another desktop), with
+seatd or logind managing the seat. Log to a file: the console the session
+takes over shows nothing until it ends.
+
+```sh
+perspicax --seat --spawn foot 2>~/perspicax.log
+```
+
+Two chords always work, whatever the configuration says:
+**Ctrl+Alt+Backspace** ends the session, and **Ctrl+Alt+F1…F12** switches VT.
+
+X11 applications run under an Xwayland the session starts (`xwayland = false`
+in the config turns it off), with `DISPLAY` set for everything it launches. An
+X11 window's origin says so: the X client's pid comes from the X server's
+X-Resource answer rather than the kernel, and every X client shares one consent
+decision, because X11 lets them read and drive each other.
+
+The session reads `$XDG_CONFIG_HOME/perspicax/config.toml` (or `--config PATH`).
+Without one it runs the `classic` profile: click to focus, Alt+F4, Alt+Tab,
+Alt+drag to move and Alt+right-drag to resize, Logo+Shift+Left/Right to move a
+window between screens, Logo+Shift+R to reload. Every key below is optional and
+overrides the profile one setting at a time. A misspelled key, or a key for a
+feature this build left out, is refused with its name rather than ignored.
+
+```toml
+profile = "minimal"            # or "classic"; minimal focuses under the pointer
+
+[focus]
+model = "sloppy"               # click | sloppy | strict
+autoraise = false
+
+[keys]
+"Logo+Return" = { spawn = ["foot"] }
+"Logo+d" = { spawn = ["fuzzel"] }
+"Alt+F4" = "none"              # hand a profile's chord back to the client
+
+drag = "Logo"                  # the drag modifier; "none" turns drags off
+
+[input.keyboard]
+layout = "gb"
+options = "ctrl:nocaps"
+repeat-rate = 30
+
+[input.pointer]
+natural-scroll = true
+tap-to-click = true
+
+[[output]]
+name = "DP-1"
+mode = "2560x1440@144"
+position = [0, 0]
+
+[[output]]
+name = "eDP-1"
+enable = false
+
+autostart = [["waybar"], ["swaybg", "-i", "/home/me/wall.png"]]
 ```
 
 Gates, in the order CI runs them:

@@ -95,6 +95,37 @@ clippy:
     - rustup component add clippy
     - cargo clippy --locked --workspace --all-targets -- -D warnings
 
+# The daily-driver build: `--features perspicax/desktop`, which is the seat
+# backend (libseat, udev, DRM, GBM, EGL, GLES, libinput) and Xwayland. The jobs
+# above build without it and stay lean on purpose; this one exists so the
+# backend a person actually logs in to cannot rot behind a feature nobody
+# compiles. Clippy and the non-live tests only -- a container has no GPU and
+# no seat, so what `--seat` does on hardware is the manual checklist's job.
+seat:
+  stage: check
+  variables:
+    DEBIAN_FRONTEND: noninteractive
+  before_script:
+    - rustc --version && cargo --version
+    - apt-get update -qq
+    # Headers and pkg-config files for every C library the feature links or
+    # loads. libEGL and libGLESv2 are opened at run time, but gl_generator's
+    # bindings and the EGL platform probe want the development packages present.
+    - >
+      apt-get install -y --no-install-recommends
+      libxkbcommon-dev
+      libudev-dev
+      libinput-dev
+      libseat-dev
+      libgbm-dev
+      libdrm-dev
+      libegl-dev
+      libgles-dev
+  script:
+    - rustup component add clippy
+    - cargo clippy --locked --workspace --all-targets --features perspicax/desktop -- -D warnings
+    - cargo test --locked --workspace --features perspicax/desktop
+
 deny:
   stage: check
   cache:

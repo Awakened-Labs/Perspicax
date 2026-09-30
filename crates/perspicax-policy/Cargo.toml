@@ -1,0 +1,17 @@
+[package]
+name = "perspicax-policy"
+description = "Window-management decisions as data: which window gets focus, what gets raised, which chord means what. No Smithay; the compositor executes what this decides."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# Keysyms by name rather than as bare numbers. Already in the tree under
+# Smithay's xkbcommon, pure Rust and dependency-free, so naming it here costs
+# the pure crates nothing and keeps `0xffc1` from meaning F4 by convention.
+[dependencies]
+xkeysym = "0.2"

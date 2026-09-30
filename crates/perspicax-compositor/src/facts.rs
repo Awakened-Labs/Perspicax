@@ -33,7 +33,7 @@ use perspicax_index::{HostFacts, SurfaceFacts};
 use perspicax_node::{Origin, Rect, SurfaceId, Vec2};
 use smithay::{
     desktop::Window,
-    reexports::wayland_server::Resource as _,
+    reexports::wayland_server::{Resource as _, protocol::wl_surface::WlSurface},
     utils::IsAlive,
     wayland::{
         compositor::{RectangleKind, SurfaceAttributes, with_states},
@@ -50,7 +50,12 @@ use crate::state::{ClientState, Compositor};
 /// [`run`](crate::run), so that whoever wants to read the facts does not have
 /// to be the thread running the compositor.
 #[derive(Debug, Clone, Default)]
-pub struct Facts(Arc<RwLock<HostFacts>>);
+pub struct Facts {
+    host: Arc<RwLock<HostFacts>>,
+    /// Xwayland's display number, once it is up: what `DISPLAY` must say
+    /// for an X11 program to reach this compositor.
+    x11_display: Arc<RwLock<Option<u32>>>,
+}
 
 impl Facts {
     /// A handle to no facts at all, which is what a compositor that has not
@@ -71,7 +76,10 @@ impl Facts {
     /// compositor happened to produce.
     #[must_use]
     pub fn of(facts: HostFacts) -> Self {
-        Self(Arc::new(RwLock::new(facts)))
+        Self {
+            host: Arc::new(RwLock::new(facts)),
+            x11_display: Arc::default(),
+        }
     }
 
     /// A copy of the latest snapshot.
@@ -87,7 +95,7 @@ impl Facts {
     /// thread's panic into a silent, permanent blindness in another.
     #[must_use]
     pub fn read(&self) -> HostFacts {
-        self.0
+        self.host
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -95,7 +103,26 @@ impl Facts {
 
     /// Replace the snapshot.
     fn publish(&self, facts: HostFacts) {
-        *self.0.write().unwrap_or_else(PoisonError::into_inner) = facts;
+        *self.host.write().unwrap_or_else(PoisonError::into_inner) = facts;
+    }
+
+    /// Xwayland's display number, if this compositor started one and it is
+    /// ready. `None` otherwise, including in a build without the `xwayland`
+    /// feature.
+    #[must_use]
+    pub fn x11_display(&self) -> Option<u32> {
+        *self
+            .x11_display
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    #[cfg(feature = "xwayland")]
+    pub(crate) fn publish_x11_display(&self, display: Option<u32>) {
+        *self
+            .x11_display
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = display;
     }
 }
 
@@ -114,34 +141,78 @@ impl Compositor {
         // `Space::elements()` iterates back to front, which is the order
         // `HostFacts::bottom_to_top` wants. The two agree by construction
         // rather than through a conversion somebody has to keep right.
-        let surfaces: Vec<SurfaceFacts> = self
-            .space
-            .elements()
-            .filter_map(|window| self.facts_for(window))
+        //
+        // Minimized windows first, as unmapped: below everything, and judged
+        // `Unmapped` rather than forgotten, so an agent asking about a node in
+        // one is told the window is hidden -- which it can do something about
+        // -- rather than that no such surface exists.
+        //
+        // Layer surfaces around them, where the person sees them: background
+        // and bottom under every window, top and overlay over. A panel on
+        // `top` covering the foot of a maximized window is an occlusion the
+        // index has to know about. And while the session is locked, the lock
+        // surfaces go over everything, so every node beneath is honestly
+        // judged covered.
+        let below = self.layers_in(&crate::layers::BELOW);
+        let above = self.layers_in(&crate::layers::ABOVE);
+        let layer = |(layer, placed): &(smithay::desktop::LayerSurface, _)| {
+            let id = *layer.user_data().get::<SurfaceId>()?;
+            Some(self.plain_facts(id, layer.wl_surface(), *placed))
+        };
+        let covers = self
+            .lock
+            .iter()
+            .flat_map(|locked| &locked.surfaces)
+            .filter_map(|cover| {
+                let area = self.space.output_geometry(&cover.output)?;
+                Some(self.plain_facts(cover.id, cover.surface.wl_surface(), area))
+            });
+        let surfaces: Vec<SurfaceFacts> = below
+            .iter()
+            .filter_map(layer)
+            .chain(
+                self.minimized
+                    .iter()
+                    .chain(self.space.elements())
+                    .filter_map(|window| self.facts_for(window)),
+            )
+            .chain(above.iter().filter_map(layer))
+            .chain(covers)
             .collect();
 
-        self.facts
-            .publish(HostFacts::bottom_to_top(surfaces, generation));
+        self.facts.publish(
+            HostFacts::bottom_to_top(surfaces, generation).with_consent(self.consent.clone()),
+        );
     }
 
     /// One window's facts, or `None` if it has no id yet -- which means it has
     /// not been mapped through `new_toplevel` and is not ours to describe.
     fn facts_for(&self, window: &Window) -> Option<SurfaceFacts> {
         let id = *window.user_data().get::<SurfaceId>()?;
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = window.x11_surface() {
+            return self.x11_facts(id, window, x11);
+        }
         let toplevel = window.toplevel()?;
         let surface = toplevel.wl_surface();
 
-        // Where we put it, which is a fact this compositor owns outright.
-        let location = self.space.element_location(window)?;
+        // Where we put it, which is a fact this compositor owns outright. A
+        // minimized window is described where it will come back to.
+        let minimized = self.minimized.contains(window);
+        let location = match self.space.element_location(window) {
+            Some(location) => location,
+            None => crate::shell::placement(window, |placement| placement.parked)?,
+        };
 
         // How big it is, from the client's own `xdg_surface.set_window_geometry`
         // rather than from `Window::geometry()`.
         //
         // Smithay derives a window's bounding box from buffer dimensions
-        // recorded by `on_commit_buffer_handler`, which lives behind a renderer
-        // feature this compositor does not enable -- so `Window::geometry()`
-        // here is always `0x0`, and every node on it judges `Unmapped`. The
-        // declared window geometry is better information anyway: it is the
+        // recorded by `on_commit_buffer_handler`, which only the seat backend
+        // calls -- so headless, `Window::geometry()` is always `0x0`, and
+        // every node on it would judge `Unmapped`. Reading the declared
+        // geometry on both backends keeps a seat's facts the ones CI tested,
+        // and it is better information anyway: it is the
         // visible frame excluding shadow, which is the rectangle an
         // accessibility bridge's window-relative coordinates are measured
         // against, and both GTK and Qt set it under client-side decoration.
@@ -176,7 +247,7 @@ impl Compositor {
             // created but never presented a buffer is a window in name only,
             // and reporting it as mapped would let a node be judged visible on
             // a surface with nothing on it.
-            mapped: window.alive() && self.has_presented(id),
+            mapped: window.alive() && self.has_presented(id) && !minimized,
             geometry: Rect::new(
                 f64::from(location.x),
                 f64::from(location.y),
@@ -205,6 +276,82 @@ impl Compositor {
         })
     }
 
+    /// The facts for a surface that is not a window -- a layer surface, a lock
+    /// surface -- placed by the compositor at `placed`. No declared window
+    /// geometry and no shadow margin: the rectangle is the surface.
+    fn plain_facts(
+        &self,
+        id: SurfaceId,
+        surface: &WlSurface,
+        placed: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    ) -> SurfaceFacts {
+        let opaque = with_states(surface, |states| {
+            states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .current()
+                .opaque_region
+                .as_ref()
+                .map(regions)
+        });
+        SurfaceFacts {
+            id,
+            mapped: surface.is_alive() && self.has_presented(id) && !placed.size.is_empty(),
+            geometry: Rect::new(
+                f64::from(placed.loc.x),
+                f64::from(placed.loc.y),
+                f64::from(placed.loc.x + placed.size.w),
+                f64::from(placed.loc.y + placed.size.h),
+            ),
+            node_space_offset: Vec2::ZERO,
+            buffer_origin: Vec2::new(f64::from(placed.loc.x), f64::from(placed.loc.y)),
+            opaque,
+            origin: self.origin_of_surface(surface),
+            // A layer's namespace is not a title, and the join uses titles to
+            // tell windows apart; better none than a wrong one.
+            title: None,
+            focused_at: self.focused_at(id),
+            damage_generation: self.damage_generation(id),
+            damage: self.damage_history(id),
+        }
+    }
+
+    /// An X11 window's facts. No xdg geometry and no shadow margin: the X
+    /// window's own rectangle is the window. A window Xwayland has not yet
+    /// given a surface is described, unmapped, so its nodes are refused
+    /// rather than judged against nothing.
+    #[cfg(feature = "xwayland")]
+    fn x11_facts(
+        &self,
+        id: SurfaceId,
+        window: &Window,
+        x11: &smithay::xwayland::X11Surface,
+    ) -> Option<SurfaceFacts> {
+        let location = match self.space.element_location(window) {
+            Some(location) => location,
+            None => crate::shell::placement(window, |placement| placement.parked)?,
+        };
+        let size = x11.geometry().size;
+        let placed = smithay::utils::Rectangle::new(location, size);
+        let mut facts = match x11.wl_surface() {
+            Some(surface) => self.plain_facts(id, &surface, placed),
+            None => SurfaceFacts::new(
+                id,
+                Rect::new(
+                    f64::from(location.x),
+                    f64::from(location.y),
+                    f64::from(location.x + size.w),
+                    f64::from(location.y + size.h),
+                ),
+            )
+            .unmapped(),
+        };
+        facts.mapped &= !self.minimized.contains(window);
+        facts.origin = Self::x11_origin(window);
+        facts.title = Some(x11.title()).filter(|title| !title.is_empty());
+        Some(facts)
+    }
+
     /// Who owns the client that drew this window.
     ///
     /// Read from the per-client state recorded when the connection was
@@ -216,8 +363,13 @@ impl Compositor {
         let Some(toplevel) = window.toplevel() else {
             return Origin::Unattributed;
         };
+        self.origin_of_surface(toplevel.wl_surface())
+    }
+
+    /// Who owns the client that drew this surface.
+    fn origin_of_surface(&self, surface: &WlSurface) -> Origin {
         self.display
-            .get_client(toplevel.wl_surface().id())
+            .get_client(surface.id())
             .ok()
             .and_then(|client| client.get_data::<ClientState>().map(ClientState::origin))
             .unwrap_or(Origin::Unattributed)
