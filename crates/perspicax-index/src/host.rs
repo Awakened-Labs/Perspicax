@@ -73,7 +73,7 @@ use std::time::Instant;
 
 use perspicax_node::{Origin, Rect, SurfaceId, Vec2, Visibility};
 
-use crate::join::SurfaceClaim;
+use crate::{Consent, join::SurfaceClaim};
 
 /// One surface, as its host currently sees it.
 ///
@@ -347,6 +347,7 @@ impl SurfaceFacts {
 pub struct HostFacts {
     surfaces: Vec<SurfaceFacts>,
     generation: u64,
+    consent: Consent,
 }
 
 impl HostFacts {
@@ -363,7 +364,22 @@ impl HostFacts {
         Self {
             surfaces: surfaces.into_iter().collect(),
             generation,
+            consent: Consent::Nobody,
         }
+    }
+
+    /// The same facts, with the host's [`Consent`] policy. Without this,
+    /// consent is [`Consent::Nobody`] and nothing is actable.
+    #[must_use]
+    pub fn with_consent(mut self, consent: Consent) -> Self {
+        self.consent = consent;
+        self
+    }
+
+    /// Whose applications an agent may act on, as the host published it.
+    #[must_use]
+    pub fn consent(&self) -> &Consent {
+        &self.consent
     }
 
     /// The host's publication counter for this snapshot.

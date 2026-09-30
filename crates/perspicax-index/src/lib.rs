@@ -105,6 +105,51 @@ impl core::fmt::Display for Refusal {
 
 impl core::error::Error for Refusal {}
 
+/// Whose applications an agent may act on. Published by the host, consulted
+/// by [`Index::actable`] after [`check_actable`].
+///
+/// This is the capability layer, and it is narrow on purpose. It does not ask
+/// whether a *node* is safe. The visibility gate already does that. It asks
+/// whether the *person* at the seat has agreed to an agent driving this
+/// application at all. On a headless compositor there is no person, and every
+/// client is on a private socket an agent set up, so the answer is
+/// [`Consent::Everyone`]. On a seat the person launched most of what is on
+/// screen, and the default is only what perspicax spawned itself.
+///
+/// The default is [`Consent::Nobody`], so a host that forgets to publish
+/// consent produces no actable node. This is the same fail-closed rule the
+/// visibility gate follows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Consent {
+    /// No application may be acted on.
+    #[default]
+    Nobody,
+    /// Only processes with these pids: the ones the host started for an
+    /// agent. A process they start in turn is *not* included. Following
+    /// ancestry would mean a terminal perspicax spawned could extend consent
+    /// to anything typed into it.
+    Spawned(Vec<u32>),
+    /// Every attributed application.
+    Everyone,
+}
+
+impl Consent {
+    /// Whether an agent may act on something drawn by `origin`. Never for an
+    /// unattributed origin, whatever the policy: a policy about processes
+    /// cannot say yes to a process nobody has identified.
+    #[must_use]
+    pub fn permits(&self, origin: &Origin) -> bool {
+        let Origin::Process(process) = origin else {
+            return false;
+        };
+        match self {
+            Self::Nobody => false,
+            Self::Spawned(pids) => pids.contains(&process.pid),
+            Self::Everyone => true,
+        }
+    }
+}
+
 /// The gate. Every act path goes through here.
 ///
 /// Both conditions fail closed, and both defaults are un-actable, so an ingest
@@ -398,5 +443,16 @@ mod tests {
         };
         assert_send(ingest.snapshot(NodeId(0)));
         assert_send(ingest.drain_changes());
+    }
+
+    #[test]
+    fn no_consent_policy_permits_an_unattributed_origin() {
+        for consent in [
+            Consent::Nobody,
+            Consent::Spawned(vec![0]),
+            Consent::Everyone,
+        ] {
+            assert!(!consent.permits(&Origin::Unattributed), "{consent:?}");
+        }
     }
 }

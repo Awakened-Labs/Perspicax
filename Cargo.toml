@@ -13,6 +13,7 @@ members = [
     "crates/perspicax-index",
     "crates/perspicax-mcp",
     "crates/perspicax-node",
+    "crates/perspicax-policy",
     "crates/perspicax-probe",
 ]
 

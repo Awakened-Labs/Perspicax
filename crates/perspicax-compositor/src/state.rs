@@ -10,9 +10,10 @@ use std::{
     collections::{HashMap, HashSet},
     os::unix::net::UnixStream,
     sync::{Arc, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
+use perspicax_index::Consent;
 use perspicax_node::{Origin, Rect, SurfaceId};
 
 use crate::{act::Keys, backend::Running, facts::Facts, origin};
@@ -69,6 +70,12 @@ const CASCADE: i32 = 32;
 /// read of a tree takes; a reader further behind than this is told the whole
 /// surface changed, which is true and is the safe direction to be wrong in.
 const DAMAGE_HISTORY: usize = 256;
+
+/// How long after the person's last key or pointer event an agent's act is
+/// refused as racing them. Long enough to cover the gap between keystrokes of
+/// someone typing steadily, short enough that an agent waiting for a pause is
+/// not waiting long.
+const PERSON_QUIET: Duration = Duration::from_millis(1500);
 
 /// Everything this compositor knows.
 pub struct Compositor {
@@ -140,6 +147,17 @@ pub struct Compositor {
     /// their buffers over as dmabufs and a renderer is what imports them.
     #[cfg(feature = "seat")]
     pub(crate) dmabuf: smithay::wayland::dmabuf::DmabufState,
+    /// Whose applications an agent may act on, published with every
+    /// snapshot. Starts as the backend's policy; [`Compositor::grant`] adds
+    /// what `run` spawns.
+    pub(crate) consent: Consent,
+    /// When the person at the seat last pressed a key or moved the pointer.
+    /// `None` headless, where nobody is at the seat, and so never a reason to
+    /// refuse an agent there.
+    person_at: Option<Instant>,
+    /// What the focused client asked the pointer to look like. Only the seat
+    /// draws it; headless records it and nothing reads it.
+    pub(crate) cursor: CursorImageStatus,
     placed: i32,
     started: Instant,
 }
@@ -161,6 +179,7 @@ impl Compositor {
         // cannot fail, because there is no keymap to compile.
         let pointer = Some(seat.add_pointer());
 
+        let consent = backend.consent();
         let mut space = Space::default();
         for output in backend.initial_outputs() {
             let at = output.current_location();
@@ -187,6 +206,9 @@ impl Compositor {
             presented: HashSet::new(),
             focused_at: HashMap::new(),
             facts,
+            consent,
+            person_at: None,
+            cursor: CursorImageStatus::default_named(),
             generation: 0,
             next_surface: 0,
             placed: 0,
@@ -268,6 +290,29 @@ impl Compositor {
                 |_, _, &()| true,
             );
         }
+    }
+
+    /// Extend consent to processes this compositor started. Meaningful only
+    /// under [`Consent::Spawned`]: headless already consents to everyone.
+    pub(crate) fn grant(&mut self, pids: impl IntoIterator<Item = u32>) {
+        if let Consent::Spawned(granted) = &mut self.consent {
+            granted.extend(pids);
+            self.publish_facts();
+        }
+    }
+
+    /// The person at the seat just used it.
+    #[cfg_attr(
+        not(feature = "seat"),
+        expect(dead_code, reason = "the seat's input path")
+    )]
+    pub(crate) fn person_used_seat(&mut self) {
+        self.person_at = Some(Instant::now());
+    }
+
+    /// Whether an agent acting now would race the person at the seat.
+    pub(crate) fn person_is_active(&self) -> bool {
+        self.person_at.is_some_and(|at| at.elapsed() < PERSON_QUIET)
     }
 
     /// Give a surface keyboard focus, and remember when.
@@ -445,7 +490,7 @@ impl CompositorHandler for Compositor {
             }
         }
         self.space.refresh();
-        self.backend.committed();
+        self.backend.redraw();
         self.publish_facts();
     }
 }
@@ -524,8 +569,28 @@ impl SeatHandler for Compositor {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+    /// On a seat, the window holding the keyboard is the one that looks
+    /// active, and no other. Headless leaves every toplevel activated from the
+    /// start (see `new_toplevel`), because the toolkits it hosts for reading
+    /// render differently when they believe they are in the background.
+    fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        if !self.backend.activation_follows_focus() {
+            return;
+        }
+        for window in self.space.elements() {
+            let Some(toplevel) = window.toplevel() else {
+                continue;
+            };
+            if window.set_activated(Some(toplevel.wl_surface()) == focused) {
+                toplevel.send_pending_configure();
+            }
+        }
+    }
+
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        self.cursor = image;
+        self.backend.redraw();
+    }
 }
 
 impl ShmHandler for Compositor {

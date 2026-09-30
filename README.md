@@ -49,6 +49,7 @@ perspicax              the composition root — one binary, `perspicax --headles
 perspicax-mcp          MCP server (rmcp, stdio) — six tools, DTOs, receipts  [portable]
 perspicax-index        node cache, stable ids, selectors, deltas, refusals  [portable]
 perspicax-node         node schema — AccessKit types plus Origin and Visibility
+perspicax-policy       WM decisions as data — focus model, raise, key bindings  [portable]
 perspicax-atspi        impl Ingest — AT-SPI2 over D-Bus
 perspicax-compositor   impl HostView — Smithay: outputs, seat, damage. Headless draws nothing.
 perspicax-probe        dev CLI — dump a tree, time a read, explain a refusal
@@ -236,13 +237,13 @@ is at the point of use rather than in a preamble a model has to have remembered.
 That is this project's injection defence, and it is a read-path property rather
 than an act-path gate.
 
-**There is no capability gate, deliberately.** perspicax is one actuator among several,
-not an agent's only one: an agent refused a click runs the command instead, so a
-gate here would document an intention rather than enforce a boundary — and a
-control that can be trivially bypassed is worse than an absent one, because it
-invites reliance. `Refusal::NoCapability` is declared and unconstructed until
-`--seat`, where perspicax will host applications the user launched rather than ones it
-spawned, and the question finally has two different answers.
+**Consent is about the person, not the node.** Headless, there is no capability
+gate: perspicax is one actuator among several, an agent refused a click runs the
+command instead, and every client is on a socket the agent set up. On `--seat`
+the question has two answers, because the person launched most of what is on
+screen. There an agent may act only on what perspicax itself spawned
+(`Refusal::NoCapability` otherwise), and not at all while the person is using the
+keyboard or pointer: an act in the middle of their typing would race it.
 
 **`screenshot` ships declared and always refusing.** There is no renderer in
 the headless build at all — occlusion needs geometry, z-order, regions and damage, and

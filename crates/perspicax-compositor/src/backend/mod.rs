@@ -15,8 +15,12 @@
 
 #[cfg(any(feature = "seat", test))]
 mod connectors;
+#[cfg(feature = "seat")]
+mod cursor;
 #[cfg(any(feature = "seat", test))]
 mod hatch;
+#[cfg(any(feature = "seat", test))]
+mod pointer;
 #[cfg(feature = "seat")]
 pub(crate) mod seat;
 
@@ -31,6 +35,8 @@ use smithay::{
     },
     utils::Transform,
 };
+
+use perspicax_index::Consent;
 
 use crate::{Error, FRAME_INTERVAL, state::Compositor};
 
@@ -172,9 +178,10 @@ impl Running {
         }
     }
 
-    /// A surface committed: something may need drawing. Headless draws
-    /// nothing, so only the seat has anything to do.
-    pub(crate) fn committed(&mut self) {
+    /// Something on screen may have changed: a surface committed, the pointer
+    /// moved, the cursor image changed. Headless draws nothing, so only the
+    /// seat has anything to do.
+    pub(crate) fn redraw(&mut self) {
         match self {
             Self::Headless { .. } => {}
             #[cfg(feature = "seat")]
@@ -210,6 +217,26 @@ impl Running {
             #[cfg(feature = "seat")]
             Self::Seat(_) => seat::attach(state),
         }
+    }
+
+    /// Whose applications an agent may act on, before anything is spawned.
+    ///
+    /// Headless: everyone. Nobody sits at a headless compositor, and its
+    /// socket exists for the agent that started it. On a seat, only what
+    /// perspicax itself spawns for an agent. The person launched everything
+    /// else, and nobody has asked them.
+    pub(crate) fn consent(&self) -> Consent {
+        match self {
+            Self::Headless { .. } => Consent::Everyone,
+            #[cfg(feature = "seat")]
+            Self::Seat(_) => Consent::Spawned(Vec::new()),
+        }
+    }
+
+    /// Whether xdg `activated` follows keyboard focus. See
+    /// [`Compositor`]'s `focus_changed`.
+    pub(crate) fn activation_follows_focus(&self) -> bool {
+        self.renders()
     }
 
     /// Whether the person at the keyboard asked the session to end.

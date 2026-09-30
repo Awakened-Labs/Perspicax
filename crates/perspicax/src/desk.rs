@@ -160,7 +160,7 @@ mod tests {
     use std::time::Duration;
 
     use perspicax_compositor::Requests;
-    use perspicax_index::{PointerButton, Refusal, SurfaceFacts};
+    use perspicax_index::{Consent, PointerButton, Refusal, SurfaceFacts};
     use perspicax_node::{
         Node, NodeId, ObservedNode, Origin, ProcessOrigin, Rect, Role, SurfaceId,
     };
@@ -187,6 +187,7 @@ mod tests {
             [SurfaceFacts::new(WINDOW, Rect::new(0.0, 0.0, 400.0, 300.0)).owned_by(origin())],
             1,
         )
+        .with_consent(Consent::Everyone)
     }
 
     /// The same window, with something over the button.
@@ -198,6 +199,7 @@ mod tests {
             ],
             2,
         )
+        .with_consent(Consent::Everyone)
     }
 
     /// A window with one button, joined and judged against `facts`.

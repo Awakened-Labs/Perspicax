@@ -10,6 +10,7 @@
 use std::time::{Duration, Instant};
 
 use perspicax_compositor::{Backend, Config, Error, Facts, Requests, Stop};
+use perspicax_index::Consent;
 
 /// The smallest claim worth making automatically: it binds a socket, runs an
 /// event loop, and stops when it is told to. Everything else in this milestone
@@ -41,6 +42,11 @@ fn a_headless_compositor_comes_up_and_stops_when_told() {
     assert!(
         facts.read().surfaces().is_empty(),
         "a compositor nobody connected to has no surfaces to describe"
+    );
+    assert_eq!(
+        facts.read().consent(),
+        &Consent::Everyone,
+        "headless consents to every client -- without this every act in CI is refused"
     );
 }
 

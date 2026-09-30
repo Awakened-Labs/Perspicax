@@ -120,8 +120,9 @@ impl Compositor {
             .filter_map(|window| self.facts_for(window))
             .collect();
 
-        self.facts
-            .publish(HostFacts::bottom_to_top(surfaces, generation));
+        self.facts.publish(
+            HostFacts::bottom_to_top(surfaces, generation).with_consent(self.consent.clone()),
+        );
     }
 
     /// One window's facts, or `None` if it has no id yet -- which means it has

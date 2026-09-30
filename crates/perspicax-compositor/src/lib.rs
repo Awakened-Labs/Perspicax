@@ -196,6 +196,10 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
     let backend = Running::start(config.backend, &handle, &event_loop.handle())?;
     let mut state = Compositor::new(&handle, backend, facts.clone());
     Running::attach(&mut state, &event_loop.handle())?;
+    // Once before any client, so a reader sees this host's consent policy and
+    // outputs from the start rather than an empty default until something
+    // happens to change.
+    state.publish_facts();
 
     let socket =
         ListeningSocketSource::new_auto().map_err(|error| Error::Socket(error.to_string()))?;
@@ -263,6 +267,9 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
 
     tracing::info!(socket = ?socket_name, backend = ?config.backend, "compositor up");
     let mut children = spawn_all(&config.spawn, &config.env, &socket_name)?;
+    // What we started is what an agent may act on, on a seat. Headless, this
+    // changes nothing: consent there is already everyone.
+    state.grant(children.iter().map(Child::id));
 
     let deadline = config.run_for.map(|run_for| Instant::now() + run_for);
     let result = loop {

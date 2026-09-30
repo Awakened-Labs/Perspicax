@@ -1,5 +1,5 @@
 //! A real session: libseat, one GPU, one DRM output per connected monitor,
-//! GLES to composite, and the keyboard.
+//! GLES to composite, and the person's keyboard and pointer ([`input`]).
 //!
 //! # Shape
 //!
@@ -23,9 +23,8 @@
 //! # What is not here yet
 //!
 //! One GPU: the primary. A second card's connectors are ignored, and said so
-//! in the log. The pointer, xcursor and hit-testing arrive with slice 3; the
-//! keyboard is here now because the escape hatches in [`super::hatch`] must
-//! exist before anyone runs this on a TTY.
+//! in the log. Every output is at scale 1; scale and layout come with config
+//! (slice 5).
 
 use std::{path::PathBuf, sync::Once};
 
@@ -43,18 +42,26 @@ use smithay::{
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
         egl::{EGLContext, EGLDisplay},
-        input::{Event as _, InputEvent, KeyState, KeyboardKeyEvent as _},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
-            ImportDma as _, ImportMemWl as _, element::surface::WaylandSurfaceRenderElement,
+            ImportDma as _, ImportMemWl as _,
+            element::{
+                Kind,
+                memory::MemoryRenderBufferRenderElement,
+                render_elements,
+                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+            },
             gles::GlesRenderer,
         },
         session::{Event as SessionEvent, Session as _, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu},
     },
     delegate_dmabuf,
-    desktop::space::SpaceRenderElements,
-    input::keyboard::{FilterResult, Keycode},
+    desktop::{space::SpaceRenderElements, utils::send_frames_surface_tree},
+    input::{
+        keyboard::Keycode,
+        pointer::{CursorImageAttributes, CursorImageStatus},
+    },
     output::{Mode as WlMode, Output, PhysicalProperties, Scale},
     reexports::{
         calloop::LoopHandle,
@@ -63,21 +70,28 @@ use smithay::{
         rustix::fs::OFlags,
         wayland_server::backend::GlobalId,
     },
-    utils::{DeviceFd, SERIAL_COUNTER, Transform},
-    wayland::dmabuf::{
-        DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier,
+    utils::{DeviceFd, IsAlive as _, Logical, Point, Transform},
+    wayland::{
+        compositor::with_states,
+        dmabuf::{DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
     },
 };
 
-use super::{
-    Running, connectors,
-    hatch::{self, Hatch},
-};
+use super::{Running, connectors, cursor::Cursor};
 use crate::{Error, state::Compositor};
+
+mod input;
 
 type Allocator = GbmAllocator<DrmDeviceFd>;
 type Exporter = GbmFramebufferExporter<DrmDeviceFd>;
-type Elements = SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>;
+
+render_elements! {
+    /// What one output shows, front to back: the pointer, then the windows.
+    Elements<=GlesRenderer>;
+    Space=SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
+    Cursor=MemoryRenderBufferRenderElement<GlesRenderer>,
+    CursorSurface=WaylandSurfaceRenderElement<GlesRenderer>,
+}
 
 /// What shows where no window is: a dark grey, so a working output is
 /// distinguishable from a dead one. The wallpaper is the shell's job (W5).
@@ -92,7 +106,7 @@ const COLOR_FORMATS: [Fourcc; 2] = [Fourcc::Argb8888, Fourcc::Xrgb8888];
 pub(crate) struct Session {
     /// The seat itself: device access, and the VT. Dropping the last clone
     /// closes the seat, which is what gives the VT back.
-    seat: LibSeatSession,
+    pub(super) seat: LibSeatSession,
     libinput: Libinput,
     /// The node dmabufs are imported on, and the node client buffers must come
     /// from to be scanned out directly.
@@ -101,12 +115,18 @@ pub(crate) struct Session {
     renderer: GlesRenderer,
     heads: Vec<Head>,
     handle: LoopHandle<'static, Compositor>,
-    /// Keys whose press was an escape hatch, so their release is swallowed
-    /// too: a client must never see half of a chord it was not given.
-    swallowed: Vec<Keycode>,
+    /// Keys whose press the compositor kept (an escape hatch or a binding),
+    /// so their release is swallowed too: a client must never see half of a
+    /// chord it was not given.
+    pub(super) swallowed: Vec<Keycode>,
+    /// How the keyboard follows the pointer. Click-to-focus until config.
+    pub(super) focus: perspicax_policy::Focus,
+    /// What chords mean. The classic two until config.
+    pub(super) bindings: perspicax_policy::Bindings,
+    cursor: Cursor,
     /// False while another VT has the seat: no device may be touched then.
     active: bool,
-    exit: bool,
+    pub(super) exit: bool,
 }
 
 /// One connected monitor, driven by one CRTC.
@@ -208,11 +228,7 @@ impl Session {
         handle
             .insert_source(
                 LibinputInputBackend::new(libinput.clone()),
-                |event, (), state| {
-                    if let InputEvent::Keyboard { event } = event {
-                        key(state, event.key_code(), event.state(), event.time_msec());
-                    }
-                },
+                |event, (), state| input::handle(state, event),
             )
             .map_err(|error| Error::EventLoop(error.to_string()))?;
         handle
@@ -241,6 +257,9 @@ impl Session {
             heads: Vec::new(),
             handle: handle.clone(),
             swallowed: Vec::new(),
+            focus: perspicax_policy::Focus::default(),
+            bindings: perspicax_policy::Bindings::classic(),
+            cursor: Cursor::load(),
             active: true,
             exit: false,
         })
@@ -508,7 +527,16 @@ fn light(
 /// clients on it draw again.
 fn render(state: &mut Compositor, crtc: crtc::Handle) {
     let now = state.started_at().elapsed();
-    let Compositor { backend, space, .. } = state;
+    let pointer_at = state
+        .pointer
+        .as_ref()
+        .map(|pointer| pointer.current_location());
+    let Compositor {
+        backend,
+        space,
+        cursor: status,
+        ..
+    } = state;
     let Running::Seat(session) = backend else {
         return;
     };
@@ -516,6 +544,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         renderer,
         heads,
         active,
+        cursor,
         ..
     } = &mut **session;
     let Some(head) = heads.iter_mut().find(|head| head.crtc == crtc) else {
@@ -529,13 +558,28 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     }
     head.dirty = false;
 
-    let elements = match space.render_elements_for_output(renderer, &head.output, 1.0) {
-        Ok(elements) => elements,
+    // A client's cursor surface that has since been destroyed falls back to
+    // the compositor's arrow rather than to nothing.
+    if let CursorImageStatus::Surface(surface) = status
+        && !surface.alive()
+    {
+        *status = CursorImageStatus::default_named();
+    }
+
+    // Front to back: the pointer over everything, then the windows.
+    let mut elements: Vec<Elements> = match (pointer_at, space.output_geometry(&head.output)) {
+        (Some(at), Some(geometry)) if geometry.to_f64().contains(at) => {
+            pointer_elements(renderer, cursor, status, at - geometry.loc.to_f64())
+        }
+        _ => Vec::new(),
+    };
+    match space.render_elements_for_output(renderer, &head.output, 1.0) {
+        Ok(windows) => elements.extend(windows.into_iter().map(Elements::Space)),
         Err(error) => {
             tracing::warn!(output = head.output.name(), %error, "output is not mapped");
             return;
         }
-    };
+    }
     match head
         .drm
         .render_frame(renderer, &elements, BACKDROP, FrameFlags::DEFAULT)
@@ -549,10 +593,57 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     }
 
     // Whether or not anything changed: a client waiting on a callback for a
-    // commit that damaged nothing still has to be told it may draw again.
+    // commit that damaged nothing still has to be told it may draw again. An
+    // animated client cursor is a client drawing too.
     let output = head.output.clone();
     for window in space.elements_for_output(&output) {
         window.send_frame(&output, now, None, |_, _| Some(output.clone()));
+    }
+    if let CursorImageStatus::Surface(surface) = status {
+        send_frames_surface_tree(surface, &output, now, None, |_, _| Some(output.clone()));
+    }
+}
+
+/// The pointer, drawn at `at` in the output's own coordinates: the client's
+/// cursor surface if it set one, the compositor's arrow if it did not,
+/// nothing if it asked for none.
+fn pointer_elements(
+    renderer: &mut GlesRenderer,
+    cursor: &Cursor,
+    status: &CursorImageStatus,
+    at: Point<f64, Logical>,
+) -> Vec<Elements> {
+    match status {
+        CursorImageStatus::Hidden => Vec::new(),
+        CursorImageStatus::Named(_) => {
+            let origin = (at - cursor.hotspot.to_f64()).to_physical(1.0);
+            MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                origin,
+                &cursor.image,
+                None,
+                None,
+                None,
+                Kind::Cursor,
+            )
+            .map(Elements::Cursor)
+            .into_iter()
+            .collect()
+        }
+        CursorImageStatus::Surface(surface) => {
+            let hotspot = with_states(surface, |states| {
+                states
+                    .data_map
+                    .get::<std::sync::Mutex<CursorImageAttributes>>()
+                    .and_then(|attributes| attributes.lock().ok().map(|a| a.hotspot))
+                    .unwrap_or_default()
+            });
+            let origin = (at - hotspot.to_f64()).to_physical_precise_round(1.0);
+            render_elements_from_surface_tree(renderer, surface, origin, 1.0, 1.0, Kind::Cursor)
+                .into_iter()
+                .map(Elements::CursorSurface)
+                .collect()
+        }
     }
 }
 
@@ -605,61 +696,6 @@ fn resume(state: &mut Compositor) {
         head.queued = false;
     }
     rescan(state);
-}
-
-/// One key, from libinput. Escape hatches are taken here, before any client
-/// or binding sees the key; everything else goes to the focused client.
-fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
-    let Some(keyboard) = state.keyboard.clone() else {
-        return;
-    };
-    let serial = SERIAL_COUNTER.next_serial();
-    let taken = keyboard.input(
-        state,
-        keycode,
-        pressed,
-        serial,
-        time,
-        |state, modifiers, keysym| {
-            let Running::Seat(session) = &mut state.backend else {
-                return FilterResult::Forward;
-            };
-            match pressed {
-                KeyState::Pressed => {
-                    match hatch::classify(modifiers, keysym.modified_sym(), &keysym.raw_syms()) {
-                        Some(hatch) => {
-                            session.swallowed.push(keycode);
-                            FilterResult::Intercept(Some(hatch))
-                        }
-                        None => FilterResult::Forward,
-                    }
-                }
-                KeyState::Released => match session.swallowed.iter().position(|&k| k == keycode) {
-                    Some(at) => {
-                        session.swallowed.swap_remove(at);
-                        FilterResult::Intercept(None)
-                    }
-                    None => FilterResult::Forward,
-                },
-            }
-        },
-    );
-
-    let (Some(Some(hatch)), Running::Seat(session)) = (taken, &mut state.backend) else {
-        return;
-    };
-    match hatch {
-        Hatch::Exit => {
-            tracing::info!("Ctrl+Alt+Backspace: ending the session");
-            session.exit = true;
-        }
-        Hatch::Vt(vt) => {
-            tracing::info!(vt, "switching VT");
-            if let Err(error) = session.seat.change_vt(vt) {
-                tracing::warn!(vt, %error, "could not switch VT");
-            }
-        }
-    }
 }
 
 impl DmabufHandler for Compositor {
