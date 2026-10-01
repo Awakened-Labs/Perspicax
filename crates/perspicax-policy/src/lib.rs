@@ -20,10 +20,12 @@
 //! (`layout`); which workspace shows which windows (`workspace`); changing
 //! workspace with the pointer (`flip`); snapping to halves and quarters
 //! (`snap`); the frame drawn around a window (`frame`); and tab groups
-//! (`tabs`). `perspicax-config`
+//! (`tabs`); and which programs may use the protocols that reach past their
+//! own windows (`access`). `perspicax-config`
 //! builds their settings from `config.toml` and the `classic`/`minimal`
 //! profiles.
 
+mod access;
 mod binds;
 mod flip;
 mod focus;
@@ -35,6 +37,7 @@ mod tabs;
 mod workspace;
 
 pub use crate::{
+    access::{Access, Program, Protocol, Rule},
     binds::{Action, Bindings, Button, Chord, Drag, Mods, Towards},
     flip::{EdgeDwell, Flipping, NOTCH_PIXELS, Notches, arrival, edge_at},
     focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},

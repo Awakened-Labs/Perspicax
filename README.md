@@ -413,7 +413,23 @@ name = "eDP-1"
 enable = false
 
 autostart = [["waybar"], ["swaybg", "-i", "/home/me/wall.png"]]
+
+[protocols]                    # who may reach past their own windows:
+foreign-toplevel-management = "any"   # "any", "off", or a list of programs
+workspace = "any"
+screencopy = ["grim", "/usr/bin/wf-recorder"]   # a name, or a full path
+output-management = ["kanshi", "wlr-randr"]
 ```
+
+`[protocols]` names the programs that may use the protocols reaching past
+their own windows: a taskbar's list of windows (`foreign-toplevel-list`, and
+`foreign-toplevel-management` to activate and close them), a pager
+(`workspace`), a screenshot tool (`screencopy`) and a display tool
+(`output-management`). Listing windows and workspaces is open by default;
+reading pixels and moving monitors is for the usual tools, by name. A name is
+whatever the kernel says the client is running, which any program can be
+called, so a full path is the stricter form. Whatever this says, all of them
+are inert while the screen is locked.
 
 Monitors are placed relative to each other, so the layout survives one being
 unplugged: a monitor beside one that is missing goes to the right of the
