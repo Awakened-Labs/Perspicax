@@ -38,8 +38,7 @@ use crate::{Error, Launch, act::Keys, backend::Running, state::Compositor};
 const BUILT: Built = Built {
     seat: true,
     xwayland: cfg!(feature = "xwayland"),
-    // Nothing renders on demand yet; W4 slice 6 adds the `capture` feature.
-    capture: false,
+    capture: cfg!(feature = "capture"),
 };
 
 /// How long a save has to be quiet before it is read: long enough for an

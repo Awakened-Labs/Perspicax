@@ -144,6 +144,11 @@ pub(crate) enum Running {
         outputs: Vec<Plugged>,
         workspaces: Shape,
         access: Access,
+        /// The software renderer pictures are drawn with, made the first
+        /// time one is asked for. See [`crate::capture`]. Boxed, as the
+        /// seat's session is: it is large, and the rest of this is not.
+        #[cfg(feature = "capture")]
+        pixman: Option<Box<smithay::backend::renderer::pixman::PixmanRenderer>>,
     },
     /// The session, the GPU and the outputs on it. Boxed because it is large
     /// and the headless variant is not.
@@ -174,6 +179,8 @@ impl Running {
                 outputs: outputs.iter().map(|out| plug(display, out)).collect(),
                 workspaces: *workspaces,
                 access: access.clone(),
+                #[cfg(feature = "capture")]
+                pixman: None,
             }),
             #[cfg(feature = "seat")]
             Backend::Seat => Ok(Self::Seat(Box::new(seat::Session::open(
@@ -238,12 +245,14 @@ impl Running {
         }
     }
 
-    /// Whether this backend reads client buffers after commit. The renderer
-    /// does; headless never looks at a pixel and releases each buffer as it
+    /// Whether this backend keeps client buffers after commit, to draw from.
+    /// The seat's renderer does, and so does headless when it can take
+    /// pictures, which are drawn from the buffers last committed. Otherwise
+    /// headless never looks at a pixel and releases each buffer as it
     /// arrives. See [`Compositor`]'s `commit`.
-    pub(crate) fn renders(&self) -> bool {
+    pub(crate) fn keeps_buffers(&self) -> bool {
         match self {
-            Self::Headless { .. } => false,
+            Self::Headless { .. } => cfg!(feature = "capture"),
             #[cfg(feature = "seat")]
             Self::Seat(_) => true,
         }
@@ -311,7 +320,11 @@ impl Running {
     /// popup grabs. Headless keeps the deterministic M2 behaviour its tests
     /// are written against. See `crate::shell`.
     pub(crate) fn has_person(&self) -> bool {
-        self.renders()
+        match self {
+            Self::Headless { .. } => false,
+            #[cfg(feature = "seat")]
+            Self::Seat(_) => true,
+        }
     }
 
     /// Start what the session runs besides its windows: Xwayland, if built

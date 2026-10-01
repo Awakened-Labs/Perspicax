@@ -80,6 +80,15 @@ pub enum ActError {
     /// different about any of them.
     #[error("no compositor loop answered")]
     Unreachable,
+    /// No monitor of this name.
+    #[error("no output named {0}")]
+    NoSuchOutput(String),
+    /// A picture was asked of a build that cannot take one.
+    #[error("this build has no `{0}` feature")]
+    NotBuilt(&'static str),
+    /// The renderer could not draw or read back the picture.
+    #[error("the picture could not be taken: {0}")]
+    Capture(String),
 }
 
 /// What the compositor did, as it alone can report it.

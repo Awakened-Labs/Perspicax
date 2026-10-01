@@ -104,10 +104,6 @@ render_elements! {
 const PREVIEW: [f32; 4] = [0.55, 0.7, 0.95, 1.0];
 const PREVIEW_ALPHA: f32 = 0.25;
 
-/// What shows where no window is: a dark grey, so a working output is
-/// distinguishable from a dead one. The wallpaper is the shell's job (W5).
-const BACKDROP: [f32; 4] = [0.12, 0.12, 0.14, 1.0];
-
 /// Which hardware planes a frame may use: the primary plane only, with the
 /// cursor and every window composited into it.
 ///
@@ -447,6 +443,14 @@ fn gpu_path(seat: &str) -> Result<PathBuf, Error> {
     }
 }
 
+impl Session {
+    /// The renderer, for drawing something other than a frame: a picture.
+    #[cfg(feature = "capture")]
+    pub(crate) fn renderer(&mut self) -> &mut GlesRenderer {
+        &mut self.renderer
+    }
+}
+
 /// EGL on the GBM device, and GLES on that.
 fn renderer(gbm: &GbmDevice<DrmDeviceFd>) -> Result<GlesRenderer, Error> {
     // `eglGetPlatformDisplay` returns the same display for the same device to
@@ -782,7 +786,10 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
             }
         },
     }
-    match head.drm.render_frame(renderer, &elements, BACKDROP, PLANES) {
+    match head
+        .drm
+        .render_frame(renderer, &elements, crate::BACKDROP, PLANES)
+    {
         Ok(frame) if !frame.is_empty => match head.drm.queue_frame(()) {
             Ok(()) => head.queued = true,
             Err(error) => tracing::warn!(output = head.output.name(), %error, "frame not queued"),

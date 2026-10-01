@@ -121,9 +121,11 @@ seat:
       libdrm-dev
       libegl-dev
       libgles-dev
+      libpixman-1-dev
   script:
     - rustup component add clippy
     - cargo clippy --locked --workspace --all-targets --features perspicax/desktop -- -D warnings
+    - cargo clippy --locked --workspace --all-targets --features perspicax/capture -- -D warnings
     - cargo test --locked --workspace --features perspicax/desktop
 
 deny:
@@ -185,5 +187,6 @@ test:
       qt6-wayland
       xwayland
       libxkbcommon-dev
+      libpixman-1-dev
   script:
     - xvfb-run -a dbus-run-session -- ci/live-tests.sh

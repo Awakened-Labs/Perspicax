@@ -39,6 +39,7 @@ pub mod id;
 pub mod join;
 pub mod receipt;
 pub mod selector;
+pub mod shot;
 
 use core::future::Future;
 
@@ -51,6 +52,7 @@ pub use crate::{
     join::{Evidence, Finding, Join, SurfaceClaim, WindowClaim, join},
     receipt::{DamageWitness, Receipt, Verb, WindowReceipt, WindowVerb, WindowWitness},
     selector::{Selector, SelectorParseError},
+    shot::{Drawn, Shot, ShotTarget},
 };
 
 /// Why an agent was not allowed to act.

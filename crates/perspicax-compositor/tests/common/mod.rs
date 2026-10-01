@@ -247,6 +247,8 @@ pub struct Desk {
     shm: Shm,
     pool: SlotPool,
     pub windows: Vec<Window>,
+    /// Each window's colour, ARGB, in the order they opened.
+    pub colours: Vec<u32>,
     pub drawn: usize,
     pub list: Option<ExtForeignToplevelListV1>,
     pub list_finished: bool,
@@ -278,6 +280,7 @@ impl Desk {
             shm,
             pool,
             windows: Vec::new(),
+            colours: Vec::new(),
             drawn: 0,
             list: None,
             list_finished: false,
@@ -298,6 +301,18 @@ impl Desk {
     }
 
     pub fn open_window(&mut self, qh: &QueueHandle<Self>, title: &str, app_id: &str) {
+        self.open_coloured(qh, title, app_id, 0xffff_ffff);
+    }
+
+    /// Open a window drawn all in one colour, ARGB.
+    pub fn open_coloured(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        title: &str,
+        app_id: &str,
+        colour: u32,
+    ) {
+        self.colours.push(colour);
         let surface = self.compositor.create_surface(qh);
         let window = self.xdg.create_window(surface, WindowDecorations::None, qh);
         window.set_title(title);
@@ -702,7 +717,15 @@ impl WindowHandler for Desk {
                 wl_shm::Format::Argb8888,
             )
             .expect("a buffer");
-        canvas.fill(0xff);
+        let colour = self
+            .windows
+            .iter()
+            .position(|known| known == window)
+            .and_then(|at| self.colours.get(at).copied())
+            .unwrap_or(0xffff_ffff);
+        for pixel in canvas.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&colour.to_le_bytes());
+        }
         let surface = window.wl_surface();
         buffer.attach_to(surface).expect("attach");
         surface.damage_buffer(0, 0, i32::MAX, i32::MAX);

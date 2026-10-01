@@ -37,6 +37,7 @@
 mod access;
 pub mod act;
 mod backend;
+mod capture;
 mod decorations;
 pub mod facts;
 mod focus;
@@ -89,6 +90,15 @@ use crate::{backend::Running, host::Inbound, state::Compositor};
 /// what a toolkit expects and a slower tick would make every damage
 /// measurement in this milestone a measurement of this constant instead.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// What shows where no window is: a dark grey, so a working output is
+/// distinguishable from a dead one, on a monitor and in a picture of one. The
+/// wallpaper is the shell's job (W5).
+#[cfg_attr(
+    not(any(feature = "seat", feature = "capture")),
+    expect(dead_code, reason = "drawn only by a seat or a picture")
+)]
+pub(crate) const BACKDROP: [f32; 4] = [0.12, 0.12, 0.14, 1.0];
 
 /// A request for a running compositor to stop.
 ///
@@ -282,6 +292,14 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
                     ChannelEvent::Msg(Inbound::Act(request)) => request,
                     ChannelEvent::Msg(Inbound::Command(command)) => {
                         state.command(&command);
+                        return;
+                    }
+                    ChannelEvent::Msg(Inbound::Capture(request)) => {
+                        let shot = state.capture(&request.target);
+                        if let Err(ref error) = shot {
+                            tracing::warn!(%error, "capture refused");
+                        }
+                        let _ = request.reply.send(shot);
                         return;
                     }
                     ChannelEvent::Closed => return,

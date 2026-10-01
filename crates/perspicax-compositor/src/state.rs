@@ -636,7 +636,7 @@ impl CompositorHandler for Compositor {
     /// same on both paths, so the facts a seat publishes are the facts CI
     /// tested.
     fn commit(&mut self, surface: &WlSurface) {
-        let renders = self.backend.renders();
+        let renders = self.backend.keeps_buffers();
         let whole = declared_geometry(surface);
         let (presented, damaged) = with_states(surface, |states| {
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
@@ -673,7 +673,7 @@ impl CompositorHandler for Compositor {
             }
             (presented, damaged)
         });
-        #[cfg(feature = "seat")]
+        #[cfg(any(feature = "seat", feature = "capture"))]
         if renders {
             smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
             // What the renderer did not take -- damage committed without a new
