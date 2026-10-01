@@ -17,8 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use perspicax_compositor::{Backend, Config, Facts, Requests, Stop};
+use perspicax_compositor::{Backend, Command, Config, Facts, Requests, Stop};
 use perspicax_node::{Origin, X11Basis};
+use perspicax_policy::Action;
 use x11rb::{
     connection::Connection as _,
     protocol::xproto::{AtomEnum, ConnectionExt as _, CreateWindowAux, PropMode, WindowClass},
@@ -134,4 +135,124 @@ fn eventually<T>(within: Duration, mut probe: impl FnMut() -> Option<T>) -> Opti
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Issue #8: an X11 window has no xdg maximized state, so maximizing one
+/// snaps it to the whole monitor. It must be framed as maximized all the
+/// same: the titlebar and no border, with the client sized for exactly that.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_maximized_x11_window_keeps_its_titlebar_and_loses_its_border() {
+    let facts = Facts::new();
+    let requests = Requests::new();
+    let stop = Stop::new();
+    let compositor = {
+        let (facts, requests, stop) = (facts.clone(), requests.clone(), stop.clone());
+        thread::spawn(move || {
+            let config = Config {
+                backend: Backend::headless((800, 600)),
+                spawn: Vec::new(),
+                env: Vec::new(),
+                run_for: Some(Duration::from_secs(30)),
+                config: None,
+                socket: None,
+                xwayland: true,
+            };
+            perspicax_compositor::run(&config, &facts, &requests, &stop)
+        })
+    };
+
+    let display = eventually(Duration::from_secs(15), || facts.x11_display())
+        .expect("Xwayland never became ready");
+    let (x, screen) = x11rb::connect(Some(&format!(":{display}"))).expect("an X connection");
+    let root = x.setup().roots[screen].root;
+    // Two of them, so that Alt+Tab's cycle has one to go to.
+    for title in ["first", "second"] {
+        let window = x.generate_id().expect("an X id");
+        x.create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            window,
+            root,
+            0,
+            0,
+            320,
+            200,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new().background_pixel(x.setup().roots[screen].white_pixel),
+        )
+        .expect("create_window");
+        x.change_property8(
+            PropMode::REPLACE,
+            window,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            title.as_bytes(),
+        )
+        .expect("WM_NAME");
+        x.map_window(window).expect("map_window");
+    }
+    x.flush().expect("flush");
+
+    // The focused window with a frame of this many strips.
+    let framed = |strips: usize| {
+        eventually(Duration::from_secs(10), || {
+            facts.read().surfaces().iter().find_map(|surface| {
+                (surface.mapped && surface.focused_at.is_some() && surface.frame.len() == strips)
+                    .then(|| surface.clone())
+            })
+        })
+    };
+    eventually(Duration::from_secs(10), || {
+        let facts = facts.read();
+        let framed = facts
+            .surfaces()
+            .iter()
+            .filter(|s| s.mapped && s.frame.len() == 4);
+        (framed.count() == 2).then_some(())
+    })
+    .expect("X11 windows with no Motif hints are framed: titlebar and border");
+
+    // Focused first, as a person's click would: a window maps before
+    // Xwayland has given it a surface, so mapping it cannot focus it.
+    requests
+        .command(Command::Perform(Action::CycleFocus))
+        .expect("the compositor is listening");
+    eventually(Duration::from_secs(5), || {
+        facts
+            .read()
+            .surfaces()
+            .iter()
+            .any(|surface| surface.focused_at.is_some())
+            .then_some(())
+    })
+    .expect("the X11 window never took focus");
+
+    requests
+        .command(Command::Perform(Action::ToggleMaximize))
+        .expect("the compositor is listening");
+    let maximized = framed(1).unwrap_or_else(|| panic!("never titlebar-only: {:?}", facts.read()));
+    let titlebar = maximized.frame[0];
+    assert_eq!(
+        (titlebar.x0, titlebar.y0, titlebar.x1, titlebar.y1),
+        (0.0, 0.0, 800.0, 24.0),
+        "the titlebar across the top of the monitor"
+    );
+    assert_eq!(
+        (maximized.geometry.x0, maximized.geometry.y0),
+        (0.0, 24.0),
+        "and the client right under it, with no border"
+    );
+
+    requests
+        .command(Command::Perform(Action::ToggleMaximize))
+        .expect("the compositor is listening");
+    framed(4).expect("restored, the border is back");
+
+    stop.request();
+    compositor
+        .join()
+        .expect("the compositor thread panicked")
+        .expect("the compositor failed");
 }

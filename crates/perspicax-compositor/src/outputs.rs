@@ -15,13 +15,12 @@
 
 use perspicax_policy::{Rect, Screen, arrange, overlapping, rescue};
 use smithay::{
-    desktop::Window,
     output::Output,
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
     utils::{Logical, Point, Rectangle, Size},
 };
 
-use crate::{shell::rect, state::Compositor};
+use crate::{framed::Framed, shell::rect, state::Compositor};
 
 impl Compositor {
     /// Place every output where its rule says, carry each window along with
@@ -32,7 +31,7 @@ impl Compositor {
         // Which output each window is on, before anything moves, and where
         // that output was. A window on an output that has just been unplugged
         // is on none, and is rescued below rather than carried.
-        let before: Vec<(Window, Output, Point<i32, Logical>)> = self
+        let before: Vec<(Framed, Output, Point<i32, Logical>)> = self
             .space
             .elements()
             .filter_map(|window| {
@@ -106,7 +105,7 @@ impl Compositor {
     /// than keeping the size of the monitor it filled.
     fn rescue_windows(&mut self) {
         let areas = self.output_rects();
-        let strays: Vec<(Window, Point<i32, Logical>)> = self
+        let strays: Vec<(Framed, Point<i32, Logical>)> = self
             .space
             .elements()
             .filter_map(|window| {
@@ -124,6 +123,7 @@ impl Compositor {
             self.space.map_element(window.clone(), at, false);
             self.window_moved(&window);
             let Some(toplevel) = window.toplevel().filter(|t| Self::is_filling(t)).cloned() else {
+                self.fit_frame(&window);
                 continue;
             };
             let state = if toplevel.with_pending_state(|pending| {
@@ -141,7 +141,7 @@ impl Compositor {
     /// monitor it was on is gone, and then onto the nearest one.
     pub(crate) fn unpark(
         &self,
-        window: &Window,
+        window: &Framed,
         parked: Point<i32, Logical>,
     ) -> Point<i32, Logical> {
         let size = window.geometry().size;
@@ -152,7 +152,7 @@ impl Compositor {
     /// The output most of this window is on, or `None` if none of it is on
     /// any. Unlike `output_of`, no fallback to the pointer's: a window on no
     /// output is exactly what has to be told apart here.
-    fn mostly_on(&self, window: &Window) -> Option<Output> {
+    fn mostly_on(&self, window: &Framed) -> Option<Output> {
         self.output_at(self.extent(window)?)
     }
 

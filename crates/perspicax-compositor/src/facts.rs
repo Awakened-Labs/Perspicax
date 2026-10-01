@@ -32,7 +32,6 @@ use std::sync::{Arc, PoisonError, RwLock};
 use perspicax_index::{HostFacts, SurfaceFacts};
 use perspicax_node::{Origin, Rect, SurfaceId, Vec2};
 use smithay::{
-    desktop::Window,
     reexports::wayland_server::{Resource as _, protocol::wl_surface::WlSurface},
     utils::IsAlive,
     wayland::{
@@ -41,7 +40,10 @@ use smithay::{
     },
 };
 
-use crate::state::{ClientState, Compositor};
+use crate::{
+    framed::Framed,
+    state::{ClientState, Compositor},
+};
 
 /// A handle to whatever the compositor last published.
 ///
@@ -197,7 +199,7 @@ impl Compositor {
 
     /// One window's facts, or `None` if it has no id yet -- which means it has
     /// not been mapped through `new_toplevel` and is not ours to describe.
-    fn facts_for(&self, window: &Window) -> Option<SurfaceFacts> {
+    fn facts_for(&self, window: &Framed) -> Option<SurfaceFacts> {
         let id = *window.user_data().get::<SurfaceId>()?;
         #[cfg(feature = "xwayland")]
         if let Some(x11) = window.x11_surface() {
@@ -250,6 +252,11 @@ impl Compositor {
                 .as_ref()
                 .map(regions)
         });
+        let hidden = if parked {
+            self.hidden_why(window)
+        } else {
+            (None, None)
+        };
 
         Some(SurfaceFacts {
             id,
@@ -283,10 +290,16 @@ impl Compositor {
             focused_at: self.focused_at(id),
             damage_generation: self.damage_generation(id),
             damage: self.damage_history(id),
-            off_workspace: if parked {
-                self.off_workspace(window)
+            off_workspace: hidden.0,
+            behind_tab: hidden.1,
+            // A parked window draws nothing, frame included.
+            frame: if parked {
+                Vec::new()
             } else {
-                None
+                self.frame_facts(
+                    window,
+                    smithay::utils::Rectangle::new(location, declared.size),
+                )
             },
         })
     }
@@ -329,6 +342,8 @@ impl Compositor {
             damage_generation: self.damage_generation(id),
             damage: self.damage_history(id),
             off_workspace: None,
+            behind_tab: None,
+            frame: Vec::new(),
         }
     }
 
@@ -340,7 +355,7 @@ impl Compositor {
     fn x11_facts(
         &self,
         id: SurfaceId,
-        window: &Window,
+        window: &Framed,
         x11: &smithay::xwayland::X11Surface,
     ) -> Option<SurfaceFacts> {
         let location = match self.space.element_location(window) {
@@ -364,7 +379,9 @@ impl Compositor {
         };
         if self.parked.contains(window) {
             facts.mapped = false;
-            facts.off_workspace = self.off_workspace(window);
+            (facts.off_workspace, facts.behind_tab) = self.hidden_why(window);
+        } else {
+            facts.frame = self.frame_facts(window, placed);
         }
         facts.origin = Self::x11_origin(window);
         facts.title = Some(x11.title()).filter(|title| !title.is_empty());
@@ -378,7 +395,7 @@ impl Compositor {
     /// socket at the moment it was accepted, and re-deriving them later from a
     /// pid that may have been recycled would be strictly worse information
     /// wearing a fresher timestamp.
-    fn origin_of(&self, window: &Window) -> Origin {
+    fn origin_of(&self, window: &Framed) -> Origin {
         let Some(toplevel) = window.toplevel() else {
             return Origin::Unattributed;
         };
@@ -400,7 +417,7 @@ impl Compositor {
 /// A string the application chooses for itself and may change to anything,
 /// which is why the join treats it as something that separates candidates
 /// rather than as something that admits them.
-fn title(
+pub(crate) fn title(
     surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
 ) -> Option<String> {
     with_states(surface, |states| {

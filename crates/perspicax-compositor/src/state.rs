@@ -19,7 +19,9 @@ use perspicax_policy::Workspaces;
 
 use smithay::wayland::seat::WaylandFocus;
 
-use crate::{act::Keys, backend::Running, facts::Facts, focus::FocusTarget, origin, shell};
+use crate::{
+    act::Keys, backend::Running, facts::Facts, focus::FocusTarget, framed::Framed, origin, shell,
+};
 
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_output, delegate_primary_selection,
@@ -139,7 +141,10 @@ pub struct Compositor {
     /// Windows and their z-order. `Space::elements()` iterates back to front,
     /// which is the order `perspicax_index::HostFacts` wants, so the two agree
     /// by construction rather than by a conversion someone has to keep right.
-    pub(crate) space: Space<Window>,
+    pub(crate) space: Space<Framed>,
+    /// Who draws each window's frame: the two protocols that negotiate it.
+    /// See [`crate::decorations`].
+    pub(crate) decorations: crate::decorations::DecorationStates,
     /// What this compositor last told the rest of the process. See
     /// [`crate::facts`] for why the boundary is a published copy.
     pub(crate) facts: Facts,
@@ -177,15 +182,22 @@ pub struct Compositor {
     /// than forgotten. Which of the two is in each window's
     /// [`shell::Placement`]; see `shell::workspaces` for the one rule that
     /// decides what is in the space and what is here.
-    pub(crate) parked: Vec<Window>,
+    pub(crate) parked: Vec<Framed>,
     /// Which workspace every window is on and which each monitor shows.
     pub(crate) workspaces: Workspaces<SurfaceId, String>,
+    /// Which windows are tabs of one another, and which tab of each group is
+    /// in front. See `shell::tabs`.
+    pub(crate) tabs: perspicax_policy::Groups<SurfaceId>,
     /// The window being moved with the pointer, while it is: an edge flip
     /// takes it along to the next workspace.
-    pub(crate) dragging: Option<Window>,
+    pub(crate) dragging: Option<Framed>,
     /// Where the window being dragged would snap if let go now. See
     /// `shell::snap`.
     pub(crate) snap_preview: Option<shell::SnapPreview>,
+    /// The titlebar a tab being dragged would join if let go now: drawn like
+    /// a snap preview. See `shell::tabs`.
+    #[cfg(feature = "seat")]
+    pub(crate) tab_drop: Option<smithay::utils::Rectangle<i32, smithay::utils::Logical>>,
     /// RAII handles for the primary-selection and xdg-activation globals.
     primary_selection: PrimarySelectionState,
     activation: XdgActivationState,
@@ -260,6 +272,7 @@ impl Compositor {
             seat_state,
             seat,
             space,
+            decorations: crate::decorations::DecorationStates::new(display, &backend.decorations()),
             backend,
             #[cfg(feature = "seat")]
             dmabuf: smithay::wayland::dmabuf::DmabufState::new(),
@@ -278,8 +291,11 @@ impl Compositor {
             popups: PopupManager::default(),
             parked: Vec::new(),
             workspaces: Workspaces::new(workspace_shape),
+            tabs: perspicax_policy::Groups::default(),
             dragging: None,
             snap_preview: None,
+            #[cfg(feature = "seat")]
+            tab_drop: None,
             primary_selection: PrimarySelectionState::new::<Self>(display),
             activation: XdgActivationState::new::<Self>(display),
             layer_shell: WlrLayerShellState::new::<Self>(display),
@@ -532,7 +548,7 @@ impl Compositor {
     ///
     /// The id lives in the window's user data, put there by `new_toplevel`, so
     /// this is the inverse of the only place ids are ever handed out.
-    pub(crate) fn window_for_id(&self, id: SurfaceId) -> Option<Window> {
+    pub(crate) fn window_for_id(&self, id: SurfaceId) -> Option<Framed> {
         self.space
             .elements()
             .find(|window| window.user_data().get::<SurfaceId>() == Some(&id))
@@ -559,7 +575,7 @@ impl Compositor {
     }
 
     /// The window whose toplevel is this surface, mapped or parked.
-    pub(crate) fn window_for(&self, surface: &WlSurface) -> Option<Window> {
+    pub(crate) fn window_for(&self, surface: &WlSurface) -> Option<Framed> {
         self.space
             .elements()
             .chain(&self.parked)
@@ -712,7 +728,7 @@ impl XdgShellHandler for Compositor {
 
         // Taken before the toplevel is moved into the window.
         let wl_surface = surface.wl_surface().clone();
-        let window = Window::new_wayland_window(surface);
+        let window = Framed::from(Window::new_wayland_window(surface));
         let id = self.mint_surface_id();
         window.user_data().insert_if_missing(|| id);
 
@@ -854,7 +870,7 @@ impl Compositor {
         surface: &ToplevelSurface,
         seat: &WlSeat,
         serial: Serial,
-    ) -> Option<(Window, GrabStartData<Self>)> {
+    ) -> Option<(Framed, GrabStartData<Self>)> {
         if !self.backend.has_person() {
             return None;
         }

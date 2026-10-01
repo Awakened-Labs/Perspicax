@@ -61,7 +61,7 @@ use smithay::{
     },
 };
 
-use crate::{Error, shell, state::Compositor};
+use crate::{Error, framed::Framed, shell, state::Compositor};
 
 /// Everything about the running Xwayland.
 #[derive(Default)]
@@ -215,7 +215,7 @@ type Attribution = RefCell<Option<X11Origin>>;
 
 impl Compositor {
     /// The origin of an X11 window, as far as it is known.
-    pub(crate) fn x11_origin(window: &Window) -> Origin {
+    pub(crate) fn x11_origin(window: &Framed) -> Origin {
         window
             .user_data()
             .get::<Attribution>()
@@ -261,7 +261,7 @@ impl Compositor {
 
     /// Record what is known about an X11 window's origin at map time -- its
     /// claimed pid -- and ask XRes for the real one.
-    fn claim_x11(&mut self, window: &Window, x11: &X11Surface) {
+    fn claim_x11(&mut self, window: &Framed, x11: &X11Surface) {
         let Some(server) = self.xwayland.server else {
             return;
         };
@@ -290,7 +290,7 @@ impl Compositor {
     }
 
     /// The mapped or parked window wrapping this X11 surface.
-    fn x11_window(&self, surface: &X11Surface) -> Option<Window> {
+    fn x11_window(&self, surface: &X11Surface) -> Option<Framed> {
         self.space
             .elements()
             .chain(&self.parked)
@@ -355,7 +355,7 @@ impl XwmHandler for Compositor {
             tracing::warn!(%error, "could not map X11 window");
             return;
         }
-        let window = Window::new_x11_window(x11.clone());
+        let window = Framed::from(Window::new_x11_window(x11.clone()));
         let id = self.mint_surface_id();
         window.user_data().insert_if_missing(|| id);
         self.claim_x11(&window, &x11);
@@ -363,6 +363,9 @@ impl XwmHandler for Compositor {
         let size = x11.geometry().size;
         let _ = x11.configure(Rectangle::new(at, size));
         self.space.map_element(window.clone(), at, false);
+        // Its Motif hints are in by now, so whether it is framed is known,
+        // and the titlebar has to start on screen.
+        self.fit_frame(&window);
         self.adopt(&window);
         if let Some(wm) = self.xwayland.wm.as_mut() {
             let _ = wm.raise_window(&x11);
@@ -379,7 +382,7 @@ impl XwmHandler for Compositor {
     /// where, so they render, hit-test and occlude like anything else.
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, x11: X11Surface) {
         let at = x11.geometry().loc;
-        let window = Window::new_x11_window(x11.clone());
+        let window = Framed::from(Window::new_x11_window(x11.clone()));
         let id = self.mint_surface_id();
         window.user_data().insert_if_missing(|| id);
         self.claim_x11(&window, &x11);
@@ -546,7 +549,7 @@ impl Compositor {
     fn x11_interactive(
         &self,
         x11: &X11Surface,
-    ) -> Option<(Window, smithay::input::pointer::GrabStartData<Self>)> {
+    ) -> Option<(Framed, smithay::input::pointer::GrabStartData<Self>)> {
         if !self.backend.has_person() {
             return None;
         }

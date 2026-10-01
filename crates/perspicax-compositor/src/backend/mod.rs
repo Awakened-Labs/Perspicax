@@ -209,6 +209,17 @@ impl Running {
         }
     }
 
+    /// Who draws window frames, and how they look: the person's config on a
+    /// seat. Headless takes the defaults, so the frames a seat would draw are
+    /// in the facts CI tests, though nothing is drawn.
+    pub(crate) fn decorations(&self) -> perspicax_policy::Decorations {
+        match self {
+            Self::Headless { .. } => perspicax_policy::Decorations::default(),
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.settings.decorations,
+        }
+    }
+
     /// Whether this backend reads client buffers after commit. The renderer
     /// does; headless never looks at a pixel and releases each buffer as it
     /// arrives. See [`Compositor`]'s `commit`.

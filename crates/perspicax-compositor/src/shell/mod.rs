@@ -19,20 +19,23 @@
 mod actions;
 mod grabs;
 mod snap;
+mod tabs;
 mod workspaces;
 
 use std::cell::RefCell;
 
 use perspicax_node::SurfaceId;
-use perspicax_policy::{Edges, Rect, Towards, carry, neighbour, place, unmaximized_at};
+use perspicax_policy::{
+    Edges, Look, Rect, Towards, carry, inset, neighbour, place, unmaximized_at,
+};
 use smithay::{
     desktop::{
-        PopupKeyboardGrab, PopupKind, PopupPointerGrab, PopupUngrabStrategy, Window,
+        PopupKeyboardGrab, PopupKind, PopupPointerGrab, PopupUngrabStrategy,
         find_popup_root_surface, get_popup_toplevel_coords,
     },
     input::{
         Seat,
-        pointer::{Focus, GrabStartData},
+        pointer::{CursorIcon, CursorImageStatus, Focus, GrabStartData},
     },
     output::Output,
     reexports::{
@@ -46,7 +49,7 @@ use smithay::{
     },
 };
 
-use crate::state::Compositor;
+use crate::{framed::Framed, state::Compositor};
 
 pub(crate) use grabs::{MoveGrab, ResizeGrab};
 pub(crate) use snap::SnapPreview;
@@ -84,7 +87,7 @@ pub(crate) struct Resize {
 }
 
 /// This window's placement record, created on first use.
-pub(crate) fn placement<T>(window: &Window, f: impl FnOnce(&mut Placement) -> T) -> T {
+pub(crate) fn placement<T>(window: &Framed, f: impl FnOnce(&mut Placement) -> T) -> T {
     window
         .user_data()
         .insert_if_missing(|| RefCell::new(Placement::default()));
@@ -93,6 +96,20 @@ pub(crate) fn placement<T>(window: &Window, f: impl FnOnce(&mut Placement) -> T)
         .get::<RefCell<Placement>>()
         .expect("inserted on the line above");
     f(&mut cell.borrow_mut())
+}
+
+/// The resize arrow for dragging `edges`.
+pub(crate) fn resize_cursor(edges: Edges) -> CursorIcon {
+    match (edges.top, edges.bottom, edges.left, edges.right) {
+        (true, _, true, _) => CursorIcon::NwResize,
+        (true, _, _, true) => CursorIcon::NeResize,
+        (_, true, true, _) => CursorIcon::SwResize,
+        (_, true, _, true) => CursorIcon::SeResize,
+        (true, ..) => CursorIcon::NResize,
+        (_, true, ..) => CursorIcon::SResize,
+        (.., true, _) => CursorIcon::WResize,
+        _ => CursorIcon::EResize,
+    }
 }
 
 /// Smithay's rectangle as policy's.
@@ -128,13 +145,13 @@ impl Compositor {
     /// headless every window is `0x0` there, and nothing could tell which
     /// output one is on. An X11 window's geometry comes from the X server, and
     /// a client that declared nothing falls back to the buffer's.
-    pub(crate) fn extent(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
+    pub(crate) fn extent(&self, window: &Framed) -> Option<Rectangle<i32, Logical>> {
         let location = self.space.element_location(window)?;
         Some(Rectangle::new(location, extent_size(window)))
     }
 
     /// The output a window is mostly on, or the one under the pointer.
-    pub(crate) fn output_of(&self, window: &Window) -> Option<Output> {
+    pub(crate) fn output_of(&self, window: &Framed) -> Option<Output> {
         let bounds = self.extent(window);
         let overlap = |output: &&Output| {
             let (Some(bounds), Some(area)) = (bounds, self.space.output_geometry(output)) else {
@@ -188,6 +205,15 @@ impl Compositor {
             surface.send_configure();
             return;
         };
+        // The client gets what its frame leaves: the titlebar of a maximized
+        // window is inside the area, not above it.
+        let look = if state == xdg_toplevel::State::Fullscreen {
+            Look::Fullscreen
+        } else {
+            Look::Maximized
+        };
+        let client = inset(rect(area), self.insets_as(&window, look));
+        let area = Rectangle::new((client.x, client.y).into(), (client.w, client.h).into());
         if let Some(current) = self.space.element_geometry(&window) {
             placement(&window, |placement| {
                 placement.restore.get_or_insert(current);
@@ -241,7 +267,7 @@ impl Compositor {
     /// fullscreen window fills its new output; any other keeps its distance
     /// from the corner (see `perspicax_policy::carry`). Per output, it joins
     /// the workspace its new monitor is showing.
-    pub(crate) fn move_to_output(&mut self, window: &Window, towards: Towards) {
+    pub(crate) fn move_to_output(&mut self, window: &Framed, towards: Towards) {
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
         let areas: Vec<Rect> = outputs
             .iter()
@@ -280,7 +306,7 @@ impl Compositor {
 
     /// Take a window off the screen, keeping its place. Focus moves to
     /// whatever is on top now, as it would if the window had closed.
-    pub(crate) fn minimize(&mut self, window: &Window) {
+    pub(crate) fn minimize(&mut self, window: &Framed) {
         placement(window, |placement| placement.minimized = true);
         self.show_what_belongs();
         self.backend.redraw();
@@ -292,7 +318,7 @@ impl Compositor {
     /// a window on another desktop does on every desktop that has them. It
     /// comes back where it was, or onto the nearest monitor if that one is
     /// gone. The caller raises and focuses it, if that is what it wants.
-    pub(crate) fn restore(&mut self, window: &Window) {
+    pub(crate) fn restore(&mut self, window: &Framed) {
         placement(window, |placement| placement.minimized = false);
         self.go_to_workspace_of(window);
         self.show_what_belongs();
@@ -300,7 +326,7 @@ impl Compositor {
     }
 
     /// A parked window with this id: minimized, or on another workspace.
-    pub(crate) fn parked_with(&self, id: SurfaceId) -> Option<Window> {
+    pub(crate) fn parked_with(&self, id: SurfaceId) -> Option<Framed> {
         self.parked
             .iter()
             .find(|window| id_of(window) == Some(id))
@@ -308,13 +334,13 @@ impl Compositor {
     }
 
     /// Whether the person minimized this window.
-    pub(crate) fn is_minimized(window: &Window) -> bool {
+    pub(crate) fn is_minimized(window: &Framed) -> bool {
         placement(window, |placement| placement.minimized)
     }
 
     /// The last commit of a resize from the left or top: move the window so
     /// its *opposite* edge stays still, at whatever size the client chose.
-    pub(crate) fn settle_resize(&mut self, window: &Window) {
+    pub(crate) fn settle_resize(&mut self, window: &Framed) {
         let Some(resize) = placement(window, |placement| placement.resize) else {
             return;
         };
@@ -335,25 +361,35 @@ impl Compositor {
     /// or a modifier-drag.
     pub(crate) fn start_move(
         &mut self,
-        window: &Window,
+        window: &Framed,
         start: GrabStartData<Self>,
         serial: Serial,
     ) {
         let Some(pointer) = self.pointer.clone() else {
             return;
         };
-        // A maximized window dragged by its titlebar comes out of maximized
-        // under the pointer, rather than being moved while still claiming to
-        // fill the screen.
+        let Some(origin) = self.space.element_location(window) else {
+            return;
+        };
+        // A maximized or snapped window is not restored yet: only once the
+        // pointer has really moved (see `MoveGrab`), so a click on its
+        // titlebar leaves it as it is.
+        let filled = window.toplevel().is_some_and(Self::is_filling) || Self::is_snapped(window);
+        let grab = MoveGrab::new(start, window.clone(), origin, filled);
+        pointer.set_grab(self, grab, serial, Focus::Clear);
+        // After, not before: replacing a grab unsets the one before it.
+        self.dragging = Some(window.clone());
+    }
+
+    /// Take a maximized or snapped window out of its fill as a drag starts:
+    /// back to its own size, hanging from the pointer at `at` where it was
+    /// grabbed, rather than moving while still claiming to fill the screen.
+    pub(crate) fn release_fill(&mut self, window: &Framed, at: Point<f64, Logical>) {
         if let Some(toplevel) = window.toplevel().filter(|t| Self::is_filling(t)).cloned() {
             let filled = self.space.element_geometry(window);
             let restored = placement(window, |placement| placement.restore.map(|r| r.size));
             if let (Some(filled), Some(restored)) = (filled, restored) {
-                let at = unmaximized_at(
-                    (start.location.x, start.location.y),
-                    rect(filled),
-                    (restored.w, restored.h),
-                );
+                let at = unmaximized_at((at.x, at.y), rect(filled), (restored.w, restored.h));
                 toplevel.with_pending_state(|pending| {
                     pending.states.unset(xdg_toplevel::State::Fullscreen);
                 });
@@ -365,27 +401,16 @@ impl Compositor {
             let snapped = self.extent(window);
             let restored = placement(window, |placement| placement.restore.map(|r| r.size));
             if let (Some(snapped), Some(restored)) = (snapped, restored) {
-                let (x, _) = unmaximized_at(
-                    (start.location.x, start.location.y),
-                    rect(snapped),
-                    (restored.w, restored.h),
-                );
+                let (x, _) = unmaximized_at((at.x, at.y), rect(snapped), (restored.w, restored.h));
                 self.unsnap(window, Some((x, snapped.loc.y).into()));
             }
         }
-        let Some(origin) = self.space.element_location(window) else {
-            return;
-        };
-        let grab = MoveGrab::new(start, window.clone(), origin);
-        pointer.set_grab(self, grab, serial, Focus::Clear);
-        // After, not before: replacing a grab unsets the one before it.
-        self.dragging = Some(window.clone());
     }
 
     /// Start resizing a window with the pointer.
     pub(crate) fn start_resize(
         &mut self,
-        window: &Window,
+        window: &Framed,
         edges: Edges,
         start: GrabStartData<Self>,
         serial: Serial,
@@ -401,6 +426,9 @@ impl Compositor {
         };
         let grab = ResizeGrab::new(start, window.clone(), edges, rect(bounds));
         pointer.set_grab(self, grab, serial, Focus::Clear);
+        // The arrow for these edges for the whole resize, however it began:
+        // from a frame, with the drag modifier, or asked for by a client.
+        self.cursor = CursorImageStatus::Named(resize_cursor(edges));
     }
 
     /// Keep a popup on screen: flip or slide it, as its positioner allows, so
@@ -478,7 +506,7 @@ impl Compositor {
 
 /// A window's size, as [`Compositor::extent`] measures it, whether it is on
 /// screen or parked.
-pub(crate) fn extent_size(window: &Window) -> Size<i32, Logical> {
+pub(crate) fn extent_size(window: &Framed) -> Size<i32, Logical> {
     let declared = window
         .toplevel()
         .and_then(|toplevel| crate::state::declared_geometry(toplevel.wl_surface()))
@@ -494,7 +522,7 @@ pub(crate) fn extent_size(window: &Window) -> Size<i32, Logical> {
     }
 }
 
-pub(crate) fn id_of(window: &Window) -> Option<SurfaceId> {
+pub(crate) fn id_of(window: &Framed) -> Option<SurfaceId> {
     window.user_data().get::<SurfaceId>().copied()
 }
 
@@ -511,12 +539,54 @@ pub(crate) fn edges(edge: xdg_toplevel::ResizeEdge) -> Edges {
 
 /// Whether `surface` is this window's own surface -- its xdg toplevel, or the
 /// surface Xwayland associated with its X11 window.
-pub(crate) fn is_toplevel_of(window: &Window, surface: &WlSurface) -> bool {
+pub(crate) fn is_toplevel_of(window: &Framed, surface: &WlSurface) -> bool {
     window.wl_surface().is_some_and(|own| *own == *surface)
 }
 
 /// A window's own surface, whichever protocol it came in by. `None` for an
 /// X11 window Xwayland has not yet associated with a surface.
-pub(crate) fn surface_of(window: &Window) -> Option<WlSurface> {
+pub(crate) fn surface_of(window: &Framed) -> Option<WlSurface> {
     window.wl_surface().map(std::borrow::Cow::into_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edges(top: bool, bottom: bool, left: bool, right: bool) -> Edges {
+        Edges {
+            top,
+            bottom,
+            left,
+            right,
+        }
+    }
+
+    #[test]
+    fn each_edge_and_corner_resizes_under_its_own_arrow() {
+        assert_eq!(
+            resize_cursor(edges(true, false, true, false)),
+            CursorIcon::NwResize
+        );
+        assert_eq!(
+            resize_cursor(edges(false, true, false, true)),
+            CursorIcon::SeResize
+        );
+        assert_eq!(
+            resize_cursor(edges(true, false, false, false)),
+            CursorIcon::NResize
+        );
+        assert_eq!(
+            resize_cursor(edges(false, false, true, false)),
+            CursorIcon::WResize
+        );
+        assert_eq!(
+            resize_cursor(edges(false, false, false, true)),
+            CursorIcon::EResize
+        );
+        assert_eq!(
+            resize_cursor(edges(false, true, false, false)),
+            CursorIcon::SResize
+        );
+    }
 }

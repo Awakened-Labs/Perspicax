@@ -5,9 +5,8 @@
 //! under the pointer should light up as it passes. Everything a grab does not
 //! care about (scrolling, gestures) is passed through unchanged.
 
-use perspicax_policy::{Edges, Rect, resize};
+use perspicax_policy::{Edges, Rect, dragged, resize};
 use smithay::{
-    desktop::Window,
     input::pointer::{
         AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
         GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
@@ -20,7 +19,7 @@ use smithay::{
 };
 
 use super::{Resize, placement};
-use crate::state::Compositor;
+use crate::{framed::Framed, state::Compositor};
 
 /// The half of `PointerGrab` neither grab changes: scrolling, frames and
 /// gestures go wherever they would have gone.
@@ -120,20 +119,26 @@ macro_rules! pass_through {
 /// Moving a window: it follows the pointer from where it was grabbed.
 pub(crate) struct MoveGrab {
     start: GrabStartData<Compositor>,
-    window: Window,
+    window: Framed,
     origin: Point<i32, Logical>,
+    /// The window is maximized or snapped, and has not been restored yet: it
+    /// is, once the pointer has travelled far enough to make the press a
+    /// drag. Until then nothing moves, so a click is only a click.
+    filled: bool,
 }
 
 impl MoveGrab {
     pub(crate) fn new(
         start: GrabStartData<Compositor>,
-        window: Window,
+        window: Framed,
         origin: Point<i32, Logical>,
+        filled: bool,
     ) -> Self {
         Self {
             start,
             window,
             origin,
+            filled,
         }
     }
 }
@@ -142,7 +147,7 @@ impl MoveGrab {
 /// client's commits are anchored by [`Compositor::settle_resize`].
 pub(crate) struct ResizeGrab {
     start: GrabStartData<Compositor>,
-    window: Window,
+    window: Framed,
     edges: Edges,
     from: Rect,
     last: (i32, i32),
@@ -151,7 +156,7 @@ pub(crate) struct ResizeGrab {
 impl ResizeGrab {
     pub(crate) fn new(
         start: GrabStartData<Compositor>,
-        window: Window,
+        window: Framed,
         edges: Edges,
         from: Rect,
     ) -> Self {
@@ -190,7 +195,7 @@ impl ResizeGrab {
 
 /// The smallest and largest size a window declared, `0` meaning no limit:
 /// from its xdg cached state, or an X client's size hints.
-fn limits(window: &Window) -> Option<(Size<i32, Logical>, Size<i32, Logical>)> {
+fn limits(window: &Framed) -> Option<(Size<i32, Logical>, Size<i32, Logical>)> {
     if let Some(toplevel) = window.toplevel() {
         return Some(with_states(toplevel.wl_surface(), |states| {
             let mut cached = states.cached_state.get::<SurfaceCachedState>();
@@ -208,6 +213,94 @@ fn limits(window: &Window) -> Option<(Size<i32, Logical>, Size<i32, Logical>)> {
     None
 }
 
+/// A tab being dragged by its titlebar with the middle button, to join
+/// another window's group or leave its own. Once the press has become a drag,
+/// the tab comes to the front of its group and follows the pointer, and the
+/// window it would join is outlined.
+#[cfg(feature = "seat")]
+pub(crate) struct TabDragGrab {
+    start: GrabStartData<Compositor>,
+    tab: Framed,
+    /// Where the tab was when the drag began, and so where its group stays.
+    /// `None` until the press has travelled far enough to be a drag: a
+    /// middle click on a titlebar does nothing.
+    home: Option<Point<i32, Logical>>,
+}
+
+#[cfg(feature = "seat")]
+impl TabDragGrab {
+    pub(crate) fn new(start: GrabStartData<Compositor>, tab: Framed) -> Self {
+        Self {
+            start,
+            tab,
+            home: None,
+        }
+    }
+}
+
+#[cfg(feature = "seat")]
+impl PointerGrab<Compositor> for TabDragGrab {
+    fn motion(
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
+        _focus: Option<(crate::focus::FocusTarget, Point<f64, Logical>)>,
+        event: &MotionEvent,
+    ) {
+        handle.motion(data, None, event);
+        let (from, now) = (self.start.location, event.location);
+        let home = match self.home {
+            Some(home) => home,
+            None if dragged((from.x, from.y), (now.x, now.y)) => {
+                // A tab behind its group comes forward to be dragged.
+                data.activate_tab(&self.tab);
+                let Some(home) = data.space.element_location(&self.tab) else {
+                    return;
+                };
+                self.home = Some(home);
+                home
+            }
+            None => return,
+        };
+        let to = (home.to_f64() + (now - from)).to_i32_round();
+        data.space.map_element(self.tab.clone(), to, false);
+        data.space.raise_element(&self.tab, false);
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = self.tab.x11_surface() {
+            let _ = x11.configure(smithay::utils::Rectangle::new(to, x11.geometry().size));
+        }
+        data.tab_drop = data.tab_target(&self.tab, now).map(|(_, outline)| outline);
+        data.backend.redraw();
+    }
+
+    fn button(
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
+        event: &ButtonEvent,
+    ) {
+        handle.button(data, event);
+        if handle.current_pressed().is_empty() {
+            let at = handle.current_location();
+            data.tab_drop = None;
+            handle.unset_grab(self, data, event.serial, event.time, true);
+            if let Some(home) = self.home {
+                data.drop_tab(&self.tab, at, home);
+            }
+        }
+    }
+
+    pass_through!();
+
+    fn start_data(&self) -> &GrabStartData<Compositor> {
+        &self.start
+    }
+
+    fn unset(&mut self, data: &mut Compositor) {
+        data.tab_drop = None;
+    }
+}
+
 /// Round a pointer delta to whole logical pixels.
 fn whole(delta: Point<f64, Logical>) -> (i32, i32) {
     let delta = delta.to_i32_round();
@@ -223,6 +316,17 @@ impl PointerGrab<Compositor> for MoveGrab {
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
+        if self.filled {
+            let (from, now) = (self.start.location, event.location);
+            if !dragged((from.x, from.y), (now.x, now.y)) {
+                return;
+            }
+            self.filled = false;
+            data.release_fill(&self.window, from);
+            if let Some(origin) = data.space.element_location(&self.window) {
+                self.origin = origin;
+            }
+        }
         let to = (self.origin.to_f64() + (event.location - self.start.location)).to_i32_round();
         data.space.map_element(self.window.clone(), to, false);
         // An X client keeps its own idea of where it is, and places its

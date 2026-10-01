@@ -66,6 +66,17 @@ pub enum Action {
     /// Start a program, as a program and its arguments. The person's own
     /// program: it is never granted agent consent.
     Spawn(Vec<String>),
+    /// Maximize the focused window, or put a maximized one back.
+    ToggleMaximize,
+    /// Take the focused window off the screen until it is cycled back to.
+    Minimize,
+    /// Bring the next tab of the focused window's group to the front, or the
+    /// previous one. See [`crate::Groups`].
+    CycleTab { forward: bool },
+    /// Make the focused window a tab of the window focused before it.
+    TabWithPrevious,
+    /// Take the focused window out of its tab group.
+    DetachTab,
     /// Read the config file again and apply it.
     Reload,
 }

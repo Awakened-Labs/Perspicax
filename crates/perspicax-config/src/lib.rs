@@ -24,8 +24,8 @@ mod keys;
 use std::path::{Path, PathBuf};
 
 use perspicax_policy::{
-    Action, Bindings, Chord, Direction, Flipping, Focus, FocusModel, Grid, Keysym, Mods, Place,
-    Shape, Side, Snapping, Towards,
+    Action, Bindings, Chord, Colour, Decorations, Direction, Flipping, Focus, FocusModel, Grid,
+    Keysym, Mods, Place, Shape, Side, Snapping, Towards,
 };
 use serde::Deserialize;
 
@@ -76,6 +76,8 @@ pub struct Config {
     /// Dragging a window to an edge of the desk to give it half or a quarter
     /// of a monitor.
     pub snapping: Snapping,
+    /// Who draws a window's titlebar and border, and what they look like.
+    pub decorations: Decorations,
     /// Whether X11 applications get an Xwayland. Only meaningful in a build
     /// with the `xwayland` feature; saying `true` in one without it is an
     /// error.
@@ -209,6 +211,23 @@ impl Config {
             )
             .bind(logo_shift(Keysym::r), Action::Reload);
 
+        // Tabs, in both profiles: Logo+Tab steps through the focused
+        // window's group, and Logo+G groups the focused window with the one
+        // focused before it, which is the keyboard's way to do what dragging
+        // one titlebar onto another does.
+        let logo = |key| Chord {
+            mods: Mods {
+                logo: true,
+                ..Mods::default()
+            },
+            key,
+        };
+        bindings = bindings
+            .bind(logo(Keysym::Tab), Action::CycleTab { forward: true })
+            .bind(logo_shift(Keysym::Tab), Action::CycleTab { forward: false })
+            .bind(logo(Keysym::g), Action::TabWithPrevious)
+            .bind(logo_shift(Keysym::g), Action::DetachTab);
+
         // Workspaces. Ctrl+Logo+arrows switches and, with Shift, takes the
         // focused window along, in both profiles: Plasma's keys, and Windows'
         // for left and right. Classic adds Plasma's Ctrl+F1..F4; minimal adds
@@ -326,6 +345,7 @@ impl Config {
                     scroll: true,
                 },
             },
+            decorations: Decorations::default(),
             xwayland: built.xwayland,
         }
     }
@@ -396,6 +416,26 @@ struct Raw {
     xwayland: Option<bool>,
     workspaces: Option<RawWorkspaces>,
     snap: Option<RawSnap>,
+    decorations: Option<RawDecorations>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawDecorations {
+    mode: Option<RawDecorationMode>,
+    title_height: Option<i32>,
+    border: Option<i32>,
+    focused: Option<String>,
+    unfocused: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawDecorationMode {
+    /// This compositor draws the frame, unless a client asks to draw its own.
+    Server,
+    /// Every client draws its own.
+    Client,
 }
 
 #[derive(Debug, Deserialize)]
@@ -659,6 +699,10 @@ impl Raw {
             config.snapping.drag = snap.drag.unwrap_or(config.snapping.drag);
         }
 
+        if let Some(decorations) = self.decorations {
+            config.decorations = decorations.apply(config.decorations)?;
+        }
+
         if let Some(empty) = self.autostart.iter().position(Vec::is_empty) {
             return Err(invalid(
                 format!("autostart[{empty}]"),
@@ -667,6 +711,49 @@ impl Raw {
         }
         config.autostart = self.autostart;
         Ok(config)
+    }
+}
+
+impl RawDecorations {
+    fn apply(self, mut decorations: Decorations) -> Result<Decorations, Error> {
+        if let Some(mode) = self.mode {
+            decorations.server = matches!(mode, RawDecorationMode::Server);
+        }
+        let pixels = |key: &str, value: i32, range: std::ops::RangeInclusive<i32>| {
+            if range.contains(&value) {
+                Ok(value)
+            } else {
+                Err(invalid(
+                    format!("decorations.{key}"),
+                    format!(
+                        "{value} is outside {} to {} pixels",
+                        range.start(),
+                        range.end()
+                    ),
+                ))
+            }
+        };
+        if let Some(title) = self.title_height {
+            decorations.title = pixels("title-height", title, 8..=96)?;
+        }
+        if let Some(border) = self.border {
+            decorations.border = pixels("border", border, 0..=32)?;
+        }
+        let colour = |key: &str, text: String| {
+            Colour::parse(&text).ok_or_else(|| {
+                invalid(
+                    format!("decorations.{key}"),
+                    format!("{text:?} is not a colour; write one as \"#rrggbb\""),
+                )
+            })
+        };
+        if let Some(focused) = self.focused {
+            decorations.focused = colour("focused", focused)?;
+        }
+        if let Some(unfocused) = self.unfocused {
+            decorations.unfocused = colour("unfocused", unfocused)?;
+        }
+        Ok(decorations)
     }
 }
 
@@ -815,10 +902,18 @@ fn action_for(action: RawAction) -> Result<Option<Action>, String> {
             "move-to-previous-output" => Action::MoveToOutput(Towards::Previous),
             "reload" => Action::Reload,
             "toggle-sticky" => Action::ToggleSticky,
+            "toggle-maximize" => Action::ToggleMaximize,
+            "minimize" => Action::Minimize,
+            "next-tab" => Action::CycleTab { forward: true },
+            "previous-tab" => Action::CycleTab { forward: false },
+            "tab-with-previous" => Action::TabWithPrevious,
+            "detach-tab" => Action::DetachTab,
             other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
                 format!(
                     "`{other}` is not an action; use close, cycle-focus, reload, \
-                         toggle-sticky, move-to-next-output, move-to-previous-output, \
+                         toggle-sticky, toggle-maximize, minimize, next-tab, previous-tab, \
+                         tab-with-previous, detach-tab, \
+                         move-to-next-output, move-to-previous-output, \
                          move-to-output-<side>, workspace-<side>, workspace-<number>, \
                          send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
                          none, or \
@@ -1232,6 +1327,38 @@ mod tests {
     }
 
     #[test]
+    fn decorations_are_configured_in_their_own_table() {
+        assert_eq!(
+            Config::profile(Profile::Minimal, SEAT).decorations,
+            Decorations::default()
+        );
+        let config = parse(
+            "[decorations]\nmode = \"client\"\ntitle-height = 30\nborder = 0\n\
+             focused = \"#ff8800\"",
+            SEAT,
+        )
+        .unwrap();
+        let decorations = config.decorations;
+        assert!(!decorations.server);
+        assert_eq!((decorations.title, decorations.border), (30, 0));
+        assert_eq!(decorations.focused, Colour::rgb(0xff, 0x88, 0x00));
+        assert_eq!(decorations.unfocused, Decorations::default().unfocused);
+    }
+
+    #[test]
+    fn a_decoration_that_cannot_be_drawn_is_refused_by_name() {
+        for (text, key) in [
+            ("title-height = 2", "decorations.title-height"),
+            ("border = -1", "decorations.border"),
+            ("focused = \"orange\"", "decorations.focused"),
+        ] {
+            let error = parse(&format!("[decorations]\n{text}"), SEAT).unwrap_err();
+            assert!(error.to_string().contains(key), "{error}");
+        }
+        assert!(parse("[decorations]\nmode = \"both\"", SEAT).is_err());
+    }
+
+    #[test]
     fn an_empty_or_huge_grid_is_refused() {
         for grid in ["[0, 2]", "[2, 99]"] {
             let error = parse(&format!("[workspaces]\ngrid = {grid}"), SEAT).unwrap_err();
@@ -1301,6 +1428,67 @@ mod tests {
         assert_eq!(
             config.bindings.resolve(logo, &[Keysym::s]),
             Some(&Action::ToggleSticky)
+        );
+    }
+
+    #[test]
+    fn logo_tab_steps_through_tabs_and_logo_g_groups_in_both_profiles() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let bindings = Config::profile(profile, SEAT).bindings;
+            let logo = Mods {
+                logo: true,
+                ..Mods::default()
+            };
+            let shift = Mods {
+                shift: true,
+                ..logo
+            };
+            assert_eq!(
+                bindings.resolve(logo, &[Keysym::Tab]),
+                Some(&Action::CycleTab { forward: true })
+            );
+            assert_eq!(
+                bindings.resolve(shift, &[Keysym::Tab]),
+                Some(&Action::CycleTab { forward: false })
+            );
+            assert_eq!(
+                bindings.resolve(logo, &[Keysym::g]),
+                Some(&Action::TabWithPrevious)
+            );
+            assert_eq!(
+                bindings.resolve(shift, &[Keysym::g]),
+                Some(&Action::DetachTab)
+            );
+        }
+        let config = parse("[keys]\n\"Alt+t\" = \"next-tab\"", SEAT).unwrap();
+        let alt = Mods {
+            alt: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(alt, &[Keysym::t]),
+            Some(&Action::CycleTab { forward: true })
+        );
+    }
+
+    #[test]
+    fn the_titlebar_buttons_are_actions_a_key_can_have_too() {
+        let config = parse(
+            "[keys]\n\"Logo+m\" = \"toggle-maximize\"\n\"Logo+n\" = \"minimize\"",
+            SEAT,
+        )
+        .unwrap();
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::m]),
+            Some(&Action::ToggleMaximize)
+        );
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::n]),
+            Some(&Action::Minimize)
         );
     }
 

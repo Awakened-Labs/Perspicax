@@ -82,6 +82,7 @@ use crate::{Error, state::Compositor};
 
 mod input;
 mod settings;
+mod titles;
 
 pub(crate) use settings::{populate, reload};
 
@@ -92,7 +93,7 @@ render_elements! {
     /// What one output shows, front to back: the pointer, a snap preview,
     /// then the windows.
     Elements<=GlesRenderer>;
-    Space=SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
+    Space=SpaceRenderElements<GlesRenderer, crate::framed::FramedElement<GlesRenderer>>,
     Cursor=MemoryRenderBufferRenderElement<GlesRenderer>,
     CursorSurface=WaylandSurfaceRenderElement<GlesRenderer>,
     Preview=SolidColorRenderElement,
@@ -159,6 +160,13 @@ pub(crate) struct Session {
     /// stopped with it and reaped as they exit.
     children: Vec<std::process::Child>,
     cursor: Cursor,
+    /// The fonts window titles are written in. See [`titles`].
+    titles: titles::Titles,
+    /// The last press on a titlebar, by window, time and place: the first
+    /// half of a double-click.
+    pub(super) title_press: Option<(Option<perspicax_node::SurfaceId>, perspicax_policy::Press)>,
+    /// A titlebar button pressed and not yet let go.
+    pub(super) button_press: Option<(crate::framed::Framed, perspicax_policy::FrameButton)>,
     /// The snap preview's colour and size, kept so the damage tracker can
     /// tell a preview that moved from one that did not.
     preview: SolidColorBuffer,
@@ -319,6 +327,9 @@ impl Session {
             devices: Vec::new(),
             children: Vec::new(),
             cursor: Cursor::load(),
+            titles: titles::Titles::new(),
+            title_press: None,
+            button_press: None,
             preview: SolidColorBuffer::new((1, 1), PREVIEW),
             dwell,
             dwell_armed: None,
@@ -648,6 +659,17 @@ fn light(
 /// Render one output, queue it for scanout if anything changed, and let the
 /// clients on it draw again.
 fn render(state: &mut Compositor, crtc: crtc::Handle) {
+    state.dress_frames();
+    // Every titlebar's labels, while the compositor can still be asked: a
+    // window's tabs name its whole group.
+    let labels: Vec<_> = state
+        .space
+        .elements()
+        .map(|window| {
+            let (labels, front) = state.tab_labels(window);
+            (window.clone(), labels, front)
+        })
+        .collect();
     let now = state.started_at().elapsed();
     let pointer_at = state
         .pointer
@@ -659,6 +681,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         cursor: status,
         lock,
         snap_preview,
+        tab_drop,
         ..
     } = state;
     let Running::Seat(session) = backend else {
@@ -670,6 +693,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         active,
         cursor,
         preview,
+        titles,
         ..
     } = &mut **session;
     let Some(head) = heads.iter_mut().find(|head| head.crtc == crtc) else {
@@ -682,6 +706,15 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         return;
     }
     head.dirty = false;
+
+    // Titles before the windows are drawn: writing one needs the fonts,
+    // which drawing a window has no way to reach.
+    let whole = crate::framed::whole_scale(head.output.current_scale().fractional_scale());
+    for (window, labels, front) in labels {
+        if space.outputs_for_element(&window).contains(&head.output) {
+            titles.prepare(&window, labels, front, whole);
+        }
+    }
 
     // A client's cursor surface that has since been destroyed falls back to
     // the compositor's arrow rather than to nothing.
@@ -700,16 +733,20 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         _ => Vec::new(),
     };
     // Under the pointer and over the windows: where the window being dragged
-    // would snap, on the output it would snap on.
-    if let (Some(snap), Some(geometry), None) = (
-        snap_preview.as_ref(),
-        space.output_geometry(&head.output),
-        lock.as_ref(),
-    ) && snap.output == head.output
+    // would snap, on the output it would snap on, or the titlebar the tab
+    // being dragged would join.
+    let target = snap_preview
+        .as_ref()
+        .filter(|snap| snap.output == head.output)
+        .map(|snap| snap.area)
+        .or(*tab_drop);
+    if let (Some(area), Some(geometry), None) =
+        (target, space.output_geometry(&head.output), lock.as_ref())
+        && area.overlaps(geometry)
     {
         let scale = head.output.current_scale().fractional_scale();
-        preview.update(snap.area.size, PREVIEW);
-        let at = (snap.area.loc - geometry.loc).to_physical_precise_round(scale);
+        preview.update(area.size, PREVIEW);
+        let at = (area.loc - geometry.loc).to_physical_precise_round(scale);
         elements.push(Elements::Preview(SolidColorRenderElement::from_buffer(
             preview,
             at,
@@ -779,19 +816,20 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
 /// nothing if it asked for none.
 fn pointer_elements(
     renderer: &mut GlesRenderer,
-    cursor: &Cursor,
+    cursor: &mut Cursor,
     status: &CursorImageStatus,
     at: Point<f64, Logical>,
     scale: f64,
 ) -> Vec<Elements> {
     match status {
         CursorImageStatus::Hidden => Vec::new(),
-        CursorImageStatus::Named(_) => {
-            let origin = (at - cursor.hotspot.to_f64()).to_physical(scale);
+        CursorImageStatus::Named(icon) => {
+            let image = cursor.image(*icon);
+            let origin = (at - image.hotspot.to_f64()).to_physical(scale);
             MemoryRenderBufferRenderElement::from_buffer(
                 renderer,
                 origin,
-                &cursor.image,
+                &image.image,
                 None,
                 None,
                 None,

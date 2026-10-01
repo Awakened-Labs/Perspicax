@@ -10,19 +10,18 @@
 //! where it was in the same [`super::Placement::restore`] maximize uses, so
 //! dragging it out of its zone gives it back its size, whichever it was.
 
-use perspicax_policy::{Direction, Snapping, Zone, keyed, zone};
+use perspicax_policy::{Direction, Look, Snapping, Zone, inset, keyed, zone};
 use smithay::{
-    desktop::Window,
     output::Output,
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
     utils::{Logical, Point, Rectangle},
 };
 
 use super::{placement, rect};
-use crate::state::Compositor;
+use crate::{framed::Framed, state::Compositor};
 
 /// The xdg-shell states a zone is tiled against.
-const TILED: [xdg_toplevel::State; 4] = [
+pub(super) const TILED: [xdg_toplevel::State; 4] = [
     xdg_toplevel::State::TiledLeft,
     xdg_toplevel::State::TiledRight,
     xdg_toplevel::State::TiledTop,
@@ -55,7 +54,7 @@ pub(crate) struct SnapPreview {
 impl Compositor {
     /// Snap a window to a zone of `output`, or of the output it is mostly
     /// on.
-    pub(crate) fn snap(&mut self, window: &Window, zone: Zone, output: Option<Output>) {
+    pub(crate) fn snap(&mut self, window: &Framed, zone: Zone, output: Option<Output>) {
         if zone == Zone::Top {
             self.clear_tiling(window);
             // Maximized on the output it is mostly on, which for a window
@@ -71,7 +70,15 @@ impl Compositor {
         let Some(area) = self.usable_area(&output) else {
             return;
         };
-        let target = zone.rect(rect(area));
+        // The top zone is the whole monitor: maximized, framed as maximized,
+        // with the titlebar and no border. Only an X11 window gets here with
+        // it; an xdg window is filled above.
+        let look = if zone == Zone::Top {
+            Look::Maximized
+        } else {
+            Look::Normal
+        };
+        let target = inset(zone.rect(rect(area)), self.insets_as(window, look));
         if let Some(current) = self.extent(window) {
             placement(window, |placement| {
                 placement.restore.get_or_insert(current);
@@ -94,6 +101,8 @@ impl Compositor {
         }
         #[cfg(feature = "xwayland")]
         if let Some(x11) = window.x11_surface() {
+            // Said to the X client too, which also decides the frame's look.
+            let _ = x11.set_maximized(zone == Zone::Top);
             let _ = x11.configure(Rectangle::new(
                 (target.x, target.y).into(),
                 (target.w, target.h).into(),
@@ -108,11 +117,15 @@ impl Compositor {
 
     /// Take a window out of its zone: back to the size it had before it was
     /// snapped, at `at`, or where it was.
-    pub(crate) fn unsnap(&mut self, window: &Window, at: Option<Point<i32, Logical>>) {
+    pub(crate) fn unsnap(&mut self, window: &Framed, at: Option<Point<i32, Logical>>) {
         let restore = placement(window, |placement| {
             placement.snapped = None;
             placement.restore.take()
         });
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = window.x11_surface() {
+            let _ = x11.set_maximized(false);
+        }
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|pending| {
                 for state in TILED {
@@ -163,7 +176,7 @@ impl Compositor {
     }
 
     /// Whether this window is snapped to a half or a quarter.
-    pub(crate) fn is_snapped(window: &Window) -> bool {
+    pub(crate) fn is_snapped(window: &Framed) -> bool {
         placement(window, |placement| placement.snapped.is_some())
     }
 
@@ -198,14 +211,14 @@ impl Compositor {
     }
 
     /// The drag ended: snap where the preview said, if anywhere.
-    pub(crate) fn finish_snap(&mut self, window: &Window) {
+    pub(crate) fn finish_snap(&mut self, window: &Framed) {
         if let Some(preview) = self.snap_preview.take() {
             self.snap(window, preview.zone, Some(preview.output));
             self.backend.redraw();
         }
     }
 
-    fn clear_tiling(&mut self, window: &Window) {
+    fn clear_tiling(&mut self, window: &Framed) {
         placement(window, |placement| placement.snapped = None);
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|pending| {

@@ -154,6 +154,19 @@ pub struct SurfaceFacts {
     /// it is turns a refusal an agent can do nothing about into one it can:
     /// the window is not gone, it is on workspace 3.
     pub off_workspace: Option<u16>,
+    /// The tab showing in front of this one, when this window is a tab behind
+    /// it in a tab group. The window is unmapped then, and as with a
+    /// workspace, saying which tab is in front tells an agent where it went.
+    pub behind_tab: Option<SurfaceId>,
+    /// What the host drew around this surface, in global space: a titlebar
+    /// and a border, outside `geometry`.
+    ///
+    /// No client drew these pixels, so no client's opaque region can speak
+    /// for them, and they are opaque by construction: the host drew them
+    /// solid. A node of another window under a titlebar is therefore covered
+    /// as a matter of proof, not policy. Empty for a surface that draws its
+    /// own frame, or has none.
+    pub frame: Vec<Rect>,
 }
 
 impl SurfaceFacts {
@@ -175,6 +188,8 @@ impl SurfaceFacts {
             damage_generation: 0,
             damage: Vec::new(),
             off_workspace: None,
+            behind_tab: None,
+            frame: Vec::new(),
         }
     }
 
@@ -214,6 +229,23 @@ impl SurfaceFacts {
     pub fn on_workspace(mut self, number: u16) -> Self {
         self.mapped = false;
         self.off_workspace = Some(number);
+        self
+    }
+
+    /// The same surface, unmapped because it is a tab behind `shown` in its
+    /// tab group.
+    #[must_use]
+    pub fn behind_tab(mut self, shown: SurfaceId) -> Self {
+        self.mapped = false;
+        self.behind_tab = Some(shown);
+        self
+    }
+
+    /// The same surface, with a frame the host drew around it, in global
+    /// space.
+    #[must_use]
+    pub fn framed(mut self, frame: impl IntoIterator<Item = Rect>) -> Self {
+        self.frame = frame.into_iter().collect();
         self
     }
 
@@ -477,7 +509,9 @@ impl Judgement {
 /// 2. An unmapped surface is `Unmapped` before any arithmetic, because the
 ///    geometry of a surface that is not on screen means nothing -- or
 ///    `OtherWorkspace`, when it is unmapped only because the workspace it is
-///    on is not the one showing.
+///    on is not the one showing, or `InactiveTab`, when it is a tab behind
+///    another. A tab behind another in a group on a hidden workspace is
+///    `OtherWorkspace`: the coarser reason, and the one to clear first.
 /// 3. A zero-area rect is `Clipped`. Toolkits report `0x0` extents for widgets
 ///    they have realised but not laid out, and for children scrolled out of a
 ///    viewport; a zero-area rect is also the one input for which every
@@ -490,16 +524,21 @@ impl Judgement {
 ///    Before occlusion, because raising a window over it would still leave it
 ///    where nobody can see it.
 /// 6. Only then, occlusion, from the top down, so the surface named is the one
-///    an agent has to deal with first.
+///    an agent has to deal with first. A surface's frame is part of it: a
+///    titlebar over the node occludes it, and proves it, because the host
+///    drew the titlebar solid. A window's own frame never covers its own
+///    nodes, because it is outside the window and test 4 has already said
+///    `Clipped` of anything out there.
 #[must_use]
 pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
     let Some(target) = facts.surface(surface) else {
         return Judgement::proven(Visibility::Unknown);
     };
     if !target.mapped {
-        return Judgement::proven(match target.off_workspace {
-            Some(workspace) => Visibility::OtherWorkspace { workspace },
-            None => Visibility::Unmapped,
+        return Judgement::proven(match (target.off_workspace, target.behind_tab) {
+            (Some(workspace), _) => Visibility::OtherWorkspace { workspace },
+            (None, Some(shown)) => Visibility::InactiveTab { shown },
+            (None, None) => Visibility::Unmapped,
         });
     }
     if rect.abs().is_empty() {
@@ -522,7 +561,13 @@ pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
         .position(|candidate| candidate.id == surface);
     let above = position.map_or(0, |index| index + 1);
     for candidate in facts.surfaces()[above..].iter().rev() {
-        if !candidate.mapped || !overlaps(candidate.geometry, global) {
+        if !candidate.mapped {
+            continue;
+        }
+        if candidate.frame.iter().any(|strip| overlaps(*strip, global)) {
+            return Judgement::proven(Visibility::Occluded { by: candidate.id });
+        }
+        if !overlaps(candidate.geometry, global) {
             continue;
         }
         if candidate.proves_transparent(global) {
@@ -597,7 +642,9 @@ impl Tally {
             Visibility::Visible => self.visible += 1,
             Visibility::Occluded { .. } => self.occluded += 1,
             Visibility::Clipped => self.clipped += 1,
-            Visibility::Unmapped | Visibility::OtherWorkspace { .. } => self.unmapped += 1,
+            Visibility::Unmapped
+            | Visibility::OtherWorkspace { .. }
+            | Visibility::InactiveTab { .. } => self.unmapped += 1,
             Visibility::OffScreen => self.off_screen += 1,
             Visibility::Unknown => self.unjudged += 1,
         }
@@ -675,6 +722,29 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_behind_another_names_the_one_in_front() {
+        let facts = HostFacts::bottom_to_top([window().behind_tab(SurfaceId(7))], 1);
+        assert_eq!(
+            verdict(&facts),
+            Judgement::proven(Visibility::InactiveTab {
+                shown: SurfaceId(7)
+            })
+        );
+    }
+
+    /// Both at once: the group is on another workspace, which is the reason
+    /// to clear first, so it is the one given.
+    #[test]
+    fn a_hidden_workspace_outranks_a_hidden_tab() {
+        let facts =
+            HostFacts::bottom_to_top([window().behind_tab(SurfaceId(7)).on_workspace(2)], 1);
+        assert_eq!(
+            verdict(&facts).visibility,
+            Visibility::OtherWorkspace { workspace: 2 }
+        );
+    }
+
+    #[test]
     fn nothing_on_an_unmapped_surface_can_be_seen() {
         let facts = HostFacts::bottom_to_top([window().unmapped()], 1);
         assert_eq!(verdict(&facts).visibility, Visibility::Unmapped);
@@ -713,6 +783,36 @@ mod tests {
                 unproven: true,
             }
         );
+    }
+
+    /// A titlebar is pixels no client drew. One over a node covers it, and
+    /// proves it, even when the window it belongs to declared its own
+    /// surface fully transparent: the frame is not the surface.
+    #[test]
+    fn a_titlebar_over_a_node_occludes_it_as_a_matter_of_proof() {
+        let below = rect(0.0, 150.0, 400.0, 400.0);
+        let titlebar = rect(0.0, 124.0, 400.0, 150.0);
+        let cover = SurfaceFacts::new(SurfaceId(2), below)
+            .declaring_opaque([])
+            .framed([titlebar]);
+        let facts = HostFacts::bottom_to_top([window(), cover], 1);
+        assert_eq!(
+            verdict(&facts),
+            Judgement::proven(Visibility::Occluded { by: SurfaceId(2) })
+        );
+
+        let elsewhere = SurfaceFacts::new(SurfaceId(2), rect(500.0, 500.0, 600.0, 600.0))
+            .framed([rect(500.0, 474.0, 600.0, 500.0)]);
+        let facts = HostFacts::bottom_to_top([window(), elsewhere], 1);
+        assert_eq!(verdict(&facts), Judgement::proven(Visibility::Visible));
+    }
+
+    /// A window's own titlebar is not something its nodes can be under.
+    #[test]
+    fn a_window_is_not_occluded_by_its_own_frame() {
+        let framed = window().framed([rect(0.0, -26.0, 400.0, 0.0)]);
+        let facts = HostFacts::bottom_to_top([framed], 1);
+        assert_eq!(verdict(&facts), Judgement::proven(Visibility::Visible));
     }
 
     /// And the other half: a client that *did* declare where it is opaque is

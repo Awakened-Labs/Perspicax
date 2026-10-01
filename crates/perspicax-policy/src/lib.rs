@@ -18,25 +18,37 @@
 //! The decisions, by module: focus and what a chord means (`focus`, `binds`);
 //! where a window goes and how big (`geometry`); where each monitor sits
 //! (`layout`); which workspace shows which windows (`workspace`); changing
-//! workspace with the pointer (`flip`); and snapping to halves and quarters
-//! (`snap`). `perspicax-config` builds their settings from `config.toml` and
-//! the `classic`/`minimal` profiles.
+//! workspace with the pointer (`flip`); snapping to halves and quarters
+//! (`snap`); the frame drawn around a window (`frame`); and tab groups
+//! (`tabs`). `perspicax-config`
+//! builds their settings from `config.toml` and the `classic`/`minimal`
+//! profiles.
 
 mod binds;
 mod flip;
 mod focus;
+mod frame;
 mod geometry;
 mod layout;
 mod snap;
+mod tabs;
 mod workspace;
 
 pub use crate::{
     binds::{Action, Bindings, Button, Chord, Drag, Mods, Towards},
     flip::{EdgeDwell, Flipping, NOTCH_PIXELS, Notches, arrival, edge_at},
     focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},
-    geometry::{Edges, Rect, anchor, carry, edges_near, neighbour, place, resize, unmaximized_at},
+    frame::{
+        Colour, Decorations, FrameButton, GRIP, Insets, Look, Part, Press, buttons, buttons_in,
+        fit, frame_rects, inset, is_double, outset, part_at, tab_rects, titlebar,
+    },
+    geometry::{
+        DRAG_THRESHOLD, Edges, Rect, anchor, carry, dragged, edges_near, neighbour, place, resize,
+        unmaximized_at,
+    },
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
     snap::{Snapping, Zone, keyed, zone},
+    tabs::Groups,
     workspace::{Cell, Direction, Grid, Home, Mode, Shape, Workspaces},
 };
 

@@ -36,8 +36,10 @@
 
 pub mod act;
 mod backend;
+mod decorations;
 pub mod facts;
 mod focus;
+mod framed;
 pub mod host;
 mod layers;
 mod lock;

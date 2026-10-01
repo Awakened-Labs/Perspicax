@@ -62,9 +62,17 @@ allow = [
 #     term covers the WHATWG index data the crate embeds.
 #   - libloading: ISC. Smithay's EGL backend takes it to open libEGL at run
 #     time rather than link it. ISC is MIT with the wording trimmed.
+#
+# Added 2026-10-01 with W3's window titles, under the same rule:
+#
+#   - slotmap: Zlib. fontdb keeps its font faces in one, and cosmic-text,
+#     which draws titles on the seat, takes fontdb to find the system's fonts.
+#     Zlib asks only that the notice stay with the source and that altered
+#     versions say so; it has no reciprocal term.
 exceptions = [
     { crate = "encoding_rs", allow = ["BSD-3-Clause"] },
     { crate = "libloading", allow = ["ISC"] },
+    { crate = "slotmap", allow = ["Zlib"] },
 ]
 # A crate with no licence expression at all is a licensing unknown, not a
 # permissive default.

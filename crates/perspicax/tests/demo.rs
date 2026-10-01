@@ -77,10 +77,12 @@ fn a_node_under_another_window_is_refused_and_names_the_surface() {
     );
 
     // Provenance reached the leaves, which is the claim no library outside a
-    // compositor can make.
+    // compositor can make. Any judged node will do, visible or not: since the
+    // compositor draws the gallery's titlebar (W3), the gallery opens below its
+    // titlebar and the GTK window, cascaded over it, can cover all of it.
     for app in &reading.apps {
-        let sample = first_visible(index, app)
-            .unwrap_or_else(|| panic!("{} has no visible attributed node at all", app.name));
+        let sample = first_judged(index, app)
+            .unwrap_or_else(|| panic!("{} has no judged node at all", app.name));
         let node = index.get(sample).expect("just found");
         assert!(
             matches!(node.origin, Origin::Process(_)),
@@ -189,12 +191,12 @@ fn run_demo() -> Reading {
         .expect("the accessibility bus is readable")
 }
 
-/// The first node this application shows as visible.
-fn first_visible(index: &Index, app: &App) -> Option<NodeId> {
+/// The first node of this application the compositor has judged.
+fn first_judged(index: &Index, app: &App) -> Option<NodeId> {
     app.nodes(index).into_iter().find(|id| {
         index
             .get(*id)
-            .is_some_and(|node| node.visibility == Visibility::Visible)
+            .is_some_and(|node| node.visibility != Visibility::Unknown)
     })
 }
 

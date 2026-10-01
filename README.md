@@ -88,8 +88,8 @@ feature, never silently ignored.
 |---|---|---|
 | **W1** | A usable session: DRM from a TTY, libinput, move/resize, keybinds, multi-monitor, clipboard, layer-shell and session-lock (so waybar, fuzzel and swaylock work), Xwayland | done |
 | **W2** | Config profiles (`classic`, `minimal`) and policy: focus models, a workspace grid with edge flipping, moving between screens, snapping | done |
-| **W3** | Server-side decorations, then tabbed window groups | |
-| **W4** | Protocols Smithay lacks: foreign-toplevel management, ext-workspace, screencopy, output management — and `screenshot` stops refusing | |
+| **W3** | Server-side decorations, then tabbed window groups | done |
+| **W4** | Protocols Smithay lacks: foreign-toplevel management, ext-workspace, screencopy, output management — and `screenshot` stops refusing; agent verbs to close a window and bring a tab forward | |
 | **W5** | `perspicax-shell`, a separate process: wallpaper, panel, tray, start menu, root menu, desktop icons — each a feature and a toggle | |
 | **W6** | Polish: themes, keymaps, a session entry for display managers | |
 
@@ -231,8 +231,18 @@ so a recoverable situation does not become a retry loop:
 `observe` reports the same verdict per node, as `actable` plus `refused`, so an
 agent sees an occlusion before it spends a call discovering one. A window on a
 workspace that is not showing is refused as `other_workspace`, naming the
-workspace, and a node hanging off the edge of every monitor as `off_screen`.
-Neither is cleared by the agent switching the person's screen on its own.
+workspace, a window that is a tab behind another as `inactive_tab`, naming the
+tab in front, and a node hanging off the edge of every monitor as `off_screen`.
+None is cleared by the agent switching the person's screen on its own.
+
+**A titlebar is pixels no client drew.** The frame perspicax draws around a
+window goes into the facts beside the window, so a node of another window
+under a titlebar is refused as `occluded`, naming the window the titlebar
+belongs to, and the verdict is proof rather than policy: the frame is drawn
+solid. A window's own frame sits outside it and never covers its own nodes.
+One cost of drawing the frame: a toolkit that would have drawn close and
+maximize buttons no longer does, so they are not in its accessibility tree,
+and there is no agent verb yet to close a window or bring a tab forward (W4).
 
 **Text an application rendered is marked as such.** Every string reaches an
 agent under `untrusted_text`, beside the credentials of the process that drew
@@ -323,7 +333,16 @@ profile, which is Plasma's and Windows' habits:
 - dragging a window to an edge of the desk snaps it to half the monitor, a
   corner to a quarter, the top to maximized, with Logo+arrows to do the same
   from the keyboard;
-- Logo+Shift+Left/Right moves a window between screens, Logo+Shift+R reloads.
+- Logo+Shift+Left/Right moves a window between screens, Logo+Shift+R reloads;
+- a titlebar drawn by the compositor for a client that asks for one (Qt, foot,
+  GTK 3 without a headerbar, and X11 applications): drag it to move,
+  double-click it to maximize, and minimize, maximize and close at its right;
+  drag an edge or a corner, or just outside one, to resize;
+- tabs, as Fluxbox has them: drag a titlebar with the middle button onto
+  another window's to make the two tabs of one window, and a tab away to part
+  them. Logo+G does the same from the keyboard with the window focused before,
+  Logo+Tab steps through the tabs, and Logo+Shift+G takes one out. A window
+  that draws its own frame gets a strip of tabs above it while it is grouped.
 
 `minimal` is Fluxbox's and Enlightenment's: focus follows the pointer, a 2×2
 grid of workspaces that wraps, and resting the pointer against an edge of the
@@ -370,6 +389,14 @@ scroll = true                  # scroll over the desktop
 [snap]
 drag = true
 threshold = 4                  # pixels from the edge
+
+[decorations]
+mode = "server"                # draw titlebars for clients that ask; "client"
+                               # tells every client to draw its own
+title-height = 24
+border = 2
+focused = "#2d6fa3"            # the title is written in black or white,
+unfocused = "#475057"          # whichever reads on the colour
 
 [[output]]
 name = "DP-1"

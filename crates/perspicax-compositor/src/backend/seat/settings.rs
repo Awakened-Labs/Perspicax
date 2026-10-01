@@ -232,6 +232,7 @@ pub(crate) fn reload(state: &mut Compositor) {
     };
     let keyboard_changed = fresh.keyboard != session.settings.keyboard;
     let outputs_changed = fresh.outputs != session.settings.outputs;
+    let decorations_changed = fresh.decorations != session.settings.decorations;
     let workspaces = fresh.workspaces;
     if fresh.flipping.delay_ms != session.settings.flipping.delay_ms {
         session.dwell = perspicax_policy::EdgeDwell::new(fresh.flipping.delay_ms);
@@ -253,7 +254,17 @@ pub(crate) fn reload(state: &mut Compositor) {
         state.backend.redraw();
         state.publish_facts();
     }
-    tracing::info!(keyboard_changed, outputs_changed, "config reloaded");
+    // Frames are drawn from the settings as they are each time, but a window
+    // sized to fill a zone or a monitor was sized for the old frame.
+    if decorations_changed {
+        state.refit_frames();
+    }
+    tracing::info!(
+        keyboard_changed,
+        outputs_changed,
+        decorations_changed,
+        "config reloaded"
+    );
 }
 
 /// Bring up the person's session around the windows: Xwayland if this build

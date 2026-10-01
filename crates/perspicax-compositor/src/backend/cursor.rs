@@ -6,13 +6,17 @@
 //! generated rather than drawing nothing: a session whose pointer is
 //! invisible looks like one whose mouse is dead.
 //!
-//! One image, not the full set of named shapes. A client that wants a text
-//! beam or a resize arrow still gets it by attaching its own cursor surface,
-//! which GTK and Qt both do. Named shapes from the compositor itself arrive
-//! with `cursor-shape-v1`.
+//! Other shapes are read from the same theme the first time they are asked
+//! for: the resize arrows the compositor shows over a window's frame. A shape
+//! the theme lacks is drawn as the arrow. A client that wants a text beam
+//! still gets it by attaching its own cursor surface, which GTK and Qt both
+//! do. Named shapes asked for by clients arrive with `cursor-shape-v1`.
+
+use std::collections::HashMap;
 
 use smithay::{
     backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
+    input::pointer::CursorIcon,
     utils::{Logical, Point, Transform},
 };
 use xcursor::{CursorTheme, parser::parse_xcursor};
@@ -21,34 +25,64 @@ use xcursor::{CursorTheme, parser::parse_xcursor};
 /// Xcursor default, and what every toolkit falls back to as well.
 const DEFAULT_SIZE: u32 = 24;
 
-/// The compositor's own pointer image.
-pub(crate) struct Cursor {
+/// One pointer image.
+pub(crate) struct Image {
     pub(crate) image: MemoryRenderBuffer,
     /// The pixel that is "the pointer", from the image's top-left.
     pub(crate) hotspot: Point<i32, Logical>,
 }
 
+/// The compositor's own pointer images: the arrow, and each other shape once
+/// it has been asked for.
+pub(crate) struct Cursor {
+    theme: CursorTheme,
+    size: u32,
+    arrow: Image,
+    /// Shapes read so far, `None` for one the theme does not have, so it is
+    /// looked for once and not on every frame.
+    shapes: HashMap<CursorIcon, Option<Image>>,
+}
+
 impl Cursor {
     /// The theme's default arrow, or a generated one.
     pub(crate) fn load() -> Self {
-        let theme = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".to_owned());
+        let name = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".to_owned());
         let size = std::env::var("XCURSOR_SIZE")
             .ok()
             .and_then(|size| size.parse().ok())
             .unwrap_or(DEFAULT_SIZE);
-        themed(&theme, size).unwrap_or_else(|| {
-            tracing::warn!(%theme, "no Xcursor theme found; drawing a plain arrow");
+        let theme = CursorTheme::load(&name);
+        let arrow = themed(&theme, &["default", "left_ptr"], size).unwrap_or_else(|| {
+            tracing::warn!(theme = %name, "no Xcursor theme found; drawing a plain arrow");
             generated()
-        })
+        });
+        Self {
+            theme,
+            size,
+            arrow,
+            shapes: HashMap::new(),
+        }
+    }
+
+    /// The image for `icon`: the theme's, or the arrow if it has none.
+    pub(crate) fn image(&mut self, icon: CursorIcon) -> &Image {
+        if icon == CursorIcon::Default {
+            return &self.arrow;
+        }
+        let (theme, size) = (&self.theme, self.size);
+        let shape = self.shapes.entry(icon).or_insert_with(|| {
+            let names: Vec<&str> = std::iter::once(icon.name())
+                .chain(icon.alt_names().iter().copied())
+                .collect();
+            themed(theme, &names, size)
+        });
+        shape.as_ref().unwrap_or(&self.arrow)
     }
 }
 
-/// The theme's `default` cursor at the nominal size nearest `size`.
-fn themed(theme: &str, size: u32) -> Option<Cursor> {
-    let theme = CursorTheme::load(theme);
-    let path = theme
-        .load_icon("default")
-        .or_else(|| theme.load_icon("left_ptr"))?;
+/// The first of `names` the theme has, at the nominal size nearest `size`.
+fn themed(theme: &CursorTheme, names: &[&str], size: u32) -> Option<Image> {
+    let path = names.iter().find_map(|name| theme.load_icon(name))?;
     let images = parse_xcursor(&std::fs::read(path).ok()?)?;
     let image = images
         .iter()
@@ -63,7 +97,7 @@ fn themed(theme: &str, size: u32) -> Option<Cursor> {
     );
     // Xcursor stores each pixel as a little-endian ARGB word, so the bytes in
     // file order are B, G, R, A: DRM's `Argb8888`.
-    Some(Cursor {
+    Some(Image {
         image: buffer(&image.pixels_rgba, dimensions),
         hotspot: hotspot.into(),
     })
@@ -71,7 +105,7 @@ fn themed(theme: &str, size: u32) -> Option<Cursor> {
 
 /// A white arrow with a black outline, drawn into the same byte order the
 /// themed path uses.
-fn generated() -> Cursor {
+fn generated() -> Image {
     const SIDE: usize = 16;
     let mut pixels = vec![0_u8; SIDE * SIDE * 4];
     for y in 0..SIDE {
@@ -85,7 +119,7 @@ fn generated() -> Cursor {
             pixels[at..at + 4].copy_from_slice(&[shade, shade, shade, 255]);
         }
     }
-    Cursor {
+    Image {
         image: buffer(&pixels, (16, 16)),
         hotspot: (0, 0).into(),
     }

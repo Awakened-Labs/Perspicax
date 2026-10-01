@@ -25,7 +25,6 @@ use perspicax_index::{Action, PointerButton};
 use perspicax_node::{Rect, SurfaceId};
 use smithay::{
     backend::input::{Axis, AxisSource, ButtonState, KeyState},
-    desktop::Window,
     input::{
         keyboard::{FilterResult, KeyboardHandle, Keycode, Keysym, xkb},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
@@ -33,7 +32,7 @@ use smithay::{
     utils::SERIAL_COUNTER,
 };
 
-use crate::state::Compositor;
+use crate::{framed::Framed, state::Compositor};
 
 /// Linux button codes, from `linux/input-event-codes.h`. Wayland carries these
 /// verbatim rather than an enum of its own, so the numbers are the protocol.
@@ -253,7 +252,7 @@ impl Compositor {
     }
 
     /// Give this surface the keyboard.
-    fn act_focus(&mut self, window: &Window, id: SurfaceId) -> Result<(), ActError> {
+    fn act_focus(&mut self, window: &Framed, id: SurfaceId) -> Result<(), ActError> {
         let Some(wl_surface) = crate::shell::surface_of(window) else {
             return Err(ActError::NoSuchSurface(id.0));
         };
@@ -269,7 +268,7 @@ impl Compositor {
     /// centre is the part of it the widget certainly owns.
     fn act_click(
         &mut self,
-        window: &Window,
+        window: &Framed,
         at: Rect,
         button: PointerButton,
     ) -> Result<(), ActError> {
@@ -315,7 +314,7 @@ impl Compositor {
     }
 
     /// Scroll at a point, in surface-local units.
-    fn act_scroll(&mut self, window: &Window, at: Rect, dx: f64, dy: f64) -> Result<(), ActError> {
+    fn act_scroll(&mut self, window: &Framed, at: Rect, dx: f64, dy: f64) -> Result<(), ActError> {
         let (global, origin) = self.point_in(window, at);
         let Some(pointer) = self.pointer.clone() else {
             return Ok(());
@@ -452,7 +451,7 @@ impl Compositor {
     /// that something under the click changed, not that the click landed.
     ///
     /// [`PointerHandle::motion`]: smithay::input::pointer::PointerHandle::motion
-    fn point_in(&self, window: &Window, at: Rect) -> ((f64, f64), (f64, f64)) {
+    fn point_in(&self, window: &Framed, at: Rect) -> ((f64, f64), (f64, f64)) {
         let local = (at.x0 + (at.x1 - at.x0) / 2.0, at.y0 + (at.y1 - at.y0) / 2.0);
         let placed = self.space.element_location(window).unwrap_or_default();
         // `at` is relative to the window geometry, which sits at `placed`.
