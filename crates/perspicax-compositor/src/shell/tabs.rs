@@ -16,7 +16,7 @@ use crate::{framed::Framed, state::Compositor};
 
 impl Compositor {
     /// The window with this id, on screen or parked.
-    fn any_window(&self, id: SurfaceId) -> Option<Framed> {
+    pub(crate) fn any_window(&self, id: SurfaceId) -> Option<Framed> {
         self.window_for_id(id).or_else(|| self.parked_with(id))
     }
 
@@ -75,7 +75,6 @@ impl Compositor {
     }
 
     /// Bring `tab` to the front of its group, in the group's place.
-    #[cfg(feature = "seat")]
     pub(crate) fn activate_tab(&mut self, tab: &Framed) {
         let Some(id) = id_of(tab) else {
             return;

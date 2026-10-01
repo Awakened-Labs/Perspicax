@@ -39,7 +39,7 @@ use wayland_client::{
     backend::ObjectId,
     event_created_child,
     globals::{GlobalList, registry_queue_init},
-    protocol::{wl_output, wl_shm, wl_surface},
+    protocol::{wl_output, wl_seat, wl_shm, wl_surface},
 };
 use wayland_protocols::ext::{
     foreign_toplevel_list::v1::client::{
@@ -50,6 +50,10 @@ use wayland_protocols::ext::{
         ext_session_lock_manager_v1::ExtSessionLockManagerV1,
         ext_session_lock_v1::{self, ExtSessionLockV1},
     },
+};
+use wayland_protocols_wlr::foreign_toplevel::v1::client::{
+    zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
+    zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
 };
 
 pub const WINDOW: (u32, u32) = (400, 300);
@@ -189,6 +193,25 @@ pub struct Listed {
     pub done: usize,
 }
 
+/// One window as a taskbar's controls were told it.
+#[derive(Debug, Clone)]
+pub struct Tasked {
+    pub handle: ZwlrForeignToplevelHandleV1,
+    pub title: String,
+    pub app_id: String,
+    pub states: Vec<zwlr_foreign_toplevel_handle_v1::State>,
+    pub outputs: usize,
+    pub parent: Option<ObjectId>,
+    pub closed: bool,
+    pub done: usize,
+}
+
+impl Tasked {
+    pub fn is(&self, state: zwlr_foreign_toplevel_handle_v1::State) -> bool {
+        self.states.contains(&state)
+    }
+}
+
 /// The test's client: windows of its own, drawn once in a flat colour, and
 /// whichever of the watching protocols a test binds.
 pub struct Desk {
@@ -205,6 +228,12 @@ pub struct Desk {
     pub listed: HashMap<ObjectId, Listed>,
     pub lock: Option<ExtSessionLockV1>,
     pub locked: bool,
+    pub taskbar: Option<ZwlrForeignToplevelManagerV1>,
+    pub taskbar_finished: bool,
+    pub tasked: Vec<Tasked>,
+    pub seat: Option<wl_seat::WlSeat>,
+    /// How many times the compositor asked one of our windows to close.
+    pub asked_to_close: usize,
 }
 
 impl Desk {
@@ -225,6 +254,11 @@ impl Desk {
             listed: HashMap::new(),
             lock: None,
             locked: false,
+            taskbar: None,
+            taskbar_finished: false,
+            tasked: Vec::new(),
+            seat: None,
+            asked_to_close: 0,
         }
     }
 
@@ -262,6 +296,49 @@ impl Desk {
         self.listed
             .values()
             .find(|listed| listed.title == title && !listed.closed)
+    }
+
+    /// Bind the taskbar's controls, and a seat to activate with. Panics if
+    /// they are not advertised.
+    pub fn bind_taskbar(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.taskbar = Some(
+            globals
+                .bind::<ZwlrForeignToplevelManagerV1, _, _>(qh, 1..=3, ())
+                .expect("zwlr_foreign_toplevel_manager_v1"),
+        );
+        self.seat = Some(
+            globals
+                .bind::<wl_seat::WlSeat, _, _>(qh, 1..=7, ())
+                .expect("wl_seat"),
+        );
+    }
+
+    /// The window the taskbar knows by this title, open.
+    pub fn task(&self, title: &str) -> Option<&Tasked> {
+        self.tasked
+            .iter()
+            .find(|tasked| tasked.title == title && !tasked.closed && tasked.done > 0)
+    }
+
+    /// The open windows the taskbar knows, by title.
+    pub fn task_titles(&self) -> Vec<String> {
+        let mut titles: Vec<_> = self
+            .tasked
+            .iter()
+            .filter(|tasked| !tasked.closed && tasked.done > 0)
+            .map(|tasked| tasked.title.clone())
+            .collect();
+        titles.sort();
+        titles
+    }
+
+    /// Click a window in the taskbar.
+    pub fn activate(&self, title: &str) {
+        let seat = self.seat.as_ref().expect("bind_taskbar first");
+        self.task(title)
+            .expect("a known window")
+            .handle
+            .activate(seat);
     }
 
     /// Lock the session, as swaylock does.
@@ -326,6 +403,89 @@ impl Dispatch<ExtForeignToplevelHandleV1, ()> for Desk {
     }
 }
 
+impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        _: &ZwlrForeignToplevelManagerV1,
+        event: zwlr_foreign_toplevel_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel } => {
+                desk.tasked.push(Tasked {
+                    handle: toplevel,
+                    title: String::new(),
+                    app_id: String::new(),
+                    states: Vec::new(),
+                    outputs: 0,
+                    parent: None,
+                    closed: false,
+                    done: 0,
+                });
+            }
+            zwlr_foreign_toplevel_manager_v1::Event::Finished => desk.taskbar_finished = true,
+            _ => {}
+        }
+    }
+
+    event_created_child!(Desk, ZwlrForeignToplevelManagerV1, [
+        zwlr_foreign_toplevel_manager_v1::EVT_TOPLEVEL_OPCODE => (ZwlrForeignToplevelHandleV1, ())
+    ]);
+}
+
+impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        handle: &ZwlrForeignToplevelHandleV1,
+        event: zwlr_foreign_toplevel_handle_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use zwlr_foreign_toplevel_handle_v1::Event;
+        let Some(tasked) = desk
+            .tasked
+            .iter_mut()
+            .find(|tasked| tasked.handle == *handle)
+        else {
+            return;
+        };
+        match event {
+            Event::Title { title } => tasked.title = title,
+            Event::AppId { app_id } => tasked.app_id = app_id,
+            Event::OutputEnter { .. } => tasked.outputs += 1,
+            Event::OutputLeave { .. } => tasked.outputs -= 1,
+            Event::State { state } => {
+                tasked.states = state
+                    .chunks_exact(4)
+                    .filter_map(|bytes| {
+                        let value = u32::from_le_bytes(bytes.try_into().ok()?);
+                        zwlr_foreign_toplevel_handle_v1::State::try_from(value).ok()
+                    })
+                    .collect();
+            }
+            Event::Parent { parent } => tasked.parent = parent.map(|parent| parent.id()),
+            Event::Done => tasked.done += 1,
+            Event::Closed => tasked.closed = true,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_seat::WlSeat, ()> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &wl_seat::WlSeat,
+        _: wl_seat::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
 impl Dispatch<ExtSessionLockManagerV1, ()> for Desk {
     fn event(
         _: &mut Self,
@@ -354,7 +514,9 @@ impl Dispatch<ExtSessionLockV1, ()> for Desk {
 }
 
 impl WindowHandler for Desk {
-    fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {}
+    fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {
+        self.asked_to_close += 1;
+    }
 
     fn configure(
         &mut self,

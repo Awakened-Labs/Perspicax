@@ -15,6 +15,7 @@
 //! changed behind the lock once it is lifted, in one batch.
 
 mod list;
+mod wlr;
 
 use std::collections::BTreeMap;
 
@@ -28,6 +29,10 @@ use smithay::{
                 ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
             },
             xdg::shell::server::xdg_toplevel,
+        },
+        wayland_protocols_wlr::foreign_toplevel::v1::server::{
+            zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+            zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
         },
         wayland_server::{DisplayHandle, Resource},
     },
@@ -64,6 +69,7 @@ struct Known {
     /// runs, and never reused.
     identifier: String,
     lists: Vec<ExtForeignToplevelHandleV1>,
+    wlr: Vec<ZwlrForeignToplevelHandleV1>,
 }
 
 /// Every window a taskbar has been told about, and every taskbar.
@@ -71,6 +77,7 @@ pub(crate) struct Toplevels {
     /// Ordered by id, which is the order they opened in.
     known: BTreeMap<SurfaceId, Known>,
     lists: Vec<ExtForeignToplevelListV1>,
+    managers: Vec<ZwlrForeignToplevelManagerV1>,
     /// Different every run, so an identifier from one compositor is never
     /// mistaken for a window of the next.
     run: u64,
@@ -86,6 +93,13 @@ impl Toplevels {
                 protocol: Protocol::ForeignToplevelList,
             },
         );
+        display.create_global::<Compositor, ZwlrForeignToplevelManagerV1, _>(
+            wlr::VERSION,
+            Filtered {
+                gate: gate.clone(),
+                protocol: Protocol::ForeignToplevelManagement,
+            },
+        );
         let run = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| {
@@ -94,6 +108,7 @@ impl Toplevels {
         Self {
             known: BTreeMap::new(),
             lists: Vec::new(),
+            managers: Vec::new(),
             run,
         }
     }
@@ -110,6 +125,7 @@ impl Compositor {
             return;
         }
         let now = self.snapshots();
+        let outputs: Vec<smithay::output::Output> = self.space.outputs().cloned().collect();
         let toplevels = &mut self.toplevels;
 
         let gone: Vec<SurfaceId> = toplevels
@@ -121,14 +137,26 @@ impl Compositor {
         for id in gone {
             if let Some(known) = toplevels.known.remove(&id) {
                 list::closed(&known);
+                wlr::closed(&known);
             }
         }
 
         for (id, snapshot) in now {
-            if let Some(known) = toplevels.known.get_mut(&id) {
+            let parent = snapshot
+                .parent
+                .and_then(|parent| toplevels.known.get(&parent));
+            if let Some(known) = toplevels.known.get(&id) {
                 if known.snapshot != snapshot {
                     list::changed(known, &snapshot);
-                    known.snapshot = snapshot;
+                    wlr::changed(
+                        known,
+                        &snapshot,
+                        |client| parent.and_then(|parent| wlr::held_by(parent, client)),
+                        &outputs,
+                    );
+                    if let Some(known) = toplevels.known.get_mut(&id) {
+                        known.snapshot = snapshot;
+                    }
                 }
                 continue;
             }
@@ -136,9 +164,23 @@ impl Compositor {
                 snapshot,
                 identifier: toplevels.identifier(id),
                 lists: Vec::new(),
+                wlr: Vec::new(),
             };
             for instance in &toplevels.lists {
                 list::announce(&self.display, instance, id, &mut known);
+            }
+            for manager in &toplevels.managers {
+                let parent = parent.and_then(|parent| {
+                    wlr::held_by(parent, &self.display.get_client(manager.id()).ok()?)
+                });
+                wlr::announce(
+                    &self.display,
+                    manager,
+                    id,
+                    &mut known,
+                    parent.as_ref(),
+                    &outputs,
+                );
             }
             toplevels.known.insert(id, known);
         }
@@ -147,8 +189,10 @@ impl Compositor {
     /// Withdraw what the current rules no longer allow from the clients
     /// that hold it.
     pub(crate) fn revoke_toplevels(&mut self, protocol: Protocol) {
-        if protocol == Protocol::ForeignToplevelList {
-            list::revoke(self);
+        match protocol {
+            Protocol::ForeignToplevelList => list::revoke(self),
+            Protocol::ForeignToplevelManagement => wlr::revoke(self),
+            _ => {}
         }
     }
 
