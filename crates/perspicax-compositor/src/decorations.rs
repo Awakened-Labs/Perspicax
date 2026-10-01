@@ -270,13 +270,35 @@ impl Compositor {
         self.space.map_element(window.clone(), to, false);
     }
 
-    /// The client changed who draws its frame: give a window that fills a
-    /// zone or a monitor the size that leaves room for the new frame, and
-    /// keep any other one's titlebar on screen.
+    /// The client changed who draws its frame: refit its window to the new
+    /// frame.
     fn decoration_changed(&mut self, surface: &WlSurface) {
         let Some(window) = self.window_for(surface) else {
             return;
         };
+        self.refit(&window);
+        self.backend.redraw();
+        self.publish_facts();
+    }
+
+    /// The `[decorations]` settings changed: refit every window on screen to
+    /// the frame it now has. A window that is off screen is fitted when it
+    /// comes back.
+    #[cfg(feature = "seat")]
+    pub(crate) fn refit_frames(&mut self) {
+        let windows: Vec<Framed> = self.space.elements().cloned().collect();
+        for window in &windows {
+            self.refit(window);
+        }
+        self.backend.redraw();
+        self.publish_facts();
+    }
+
+    /// Give a window that fills a zone or a monitor the size that leaves
+    /// room for its frame as it is now, and keep any other one's titlebar on
+    /// screen.
+    fn refit(&mut self, window: &Framed) {
+        let window = window.clone();
         let zone = placement(&window, |placement| placement.snapped);
         let toplevel = window.toplevel().cloned();
         let maximized = toplevel.as_ref().is_some_and(|toplevel| {
@@ -291,8 +313,6 @@ impl Compositor {
         } else {
             self.fit_frame(&window);
         }
-        self.backend.redraw();
-        self.publish_facts();
     }
 
     /// The mode to answer a client with, given what it asked for: what it
