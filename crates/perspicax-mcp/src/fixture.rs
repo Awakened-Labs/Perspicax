@@ -13,8 +13,8 @@
 use std::sync::Mutex;
 
 use perspicax_index::{
-    Consent, Delta, HostFacts, Index, Receipt, Selector, SurfaceFacts, Verb, WindowReceipt,
-    WindowVerb, WindowWitness,
+    Consent, Delta, Drawn, HostFacts, Index, Receipt, Selector, Shot, ShotTarget, SurfaceFacts,
+    Verb, WindowReceipt, WindowVerb, WindowWitness,
 };
 use perspicax_node::{Node, NodeId, ObservedNode, Origin, ProcessOrigin, Rect, Role, SurfaceId};
 
@@ -150,6 +150,38 @@ impl Desktop for Fake {
             .expect("no test poisons this")
             .push((selector.to_string(), verb.clone()));
         self.answer.clone()
+    }
+
+    /// A 2x2 picture of the monitor, the window drawn and the overlay
+    /// painted over; or of the window alone, through the real gate.
+    fn capture(&self, target: ShotTarget) -> Result<Shot, Denied> {
+        let drawn = |surface, origin| Drawn {
+            surface,
+            rect: Rect::new(0.0, 0.0, 2.0, 2.0),
+            origin,
+        };
+        let (drawn, redacted, output) = match target {
+            ShotTarget::Window(surface) => {
+                let origin = perspicax_index::check_readable(&self.facts, surface)?
+                    .origin
+                    .clone();
+                (vec![drawn(surface, origin)], Vec::new(), None)
+            }
+            ShotTarget::Output(_) => (
+                vec![drawn(WINDOW, origin())],
+                vec![drawn(OVERLAY, Origin::Unattributed)],
+                Some("HEADLESS-1".to_owned()),
+            ),
+        };
+        Ok(Shot {
+            width: 2,
+            height: 2,
+            scale: 1.0,
+            output,
+            rgba: [0x33, 0x66, 0x99, 0xff].repeat(4),
+            drawn,
+            redacted,
+        })
     }
 
     /// Through the real gate, against the fixture's facts, then a receipt

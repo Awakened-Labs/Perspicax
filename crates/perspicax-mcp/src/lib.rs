@@ -2,7 +2,7 @@
 //!
 //! Eight tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
 //! `tab_forward`, `deltas` and `screenshot`. Everything above them is `rmcp`
-//! and everything below them is [`Desktop`], a trait with four methods that
+//! and everything below them is [`Desktop`], a trait with five methods that
 //! this crate never implements.
 //!
 //! # What this crate can and cannot see
@@ -49,18 +49,19 @@ mod fixture;
 use std::sync::Arc;
 
 use perspicax_index::{
-    Delta, HostFacts, Index, Receipt, Refusal, Selector, Verb, WindowReceipt, WindowVerb,
+    Delta, HostFacts, Index, Receipt, Refusal, Selector, Shot, ShotTarget, Verb, WindowReceipt,
+    WindowVerb,
 };
 use perspicax_node::SurfaceId;
 
-pub use crate::server::Perspicax;
+pub use crate::server::{Perspicax, ScreenshotParams};
 
 /// What an MCP server needs from the process hosting it.
 ///
-/// Four methods, and the split between them is the crate boundary this
+/// Five methods, and the split between them is the crate boundary this
 /// project's architecture rests on: two questions about the past, which any
-/// reader can answer from a snapshot, and two acts, which only the thread
-/// that owns the compositor can carry out.
+/// reader can answer from a snapshot, and three things only the thread that
+/// owns the compositor can do -- two acts and a picture.
 ///
 /// `Send + Sync + 'static` because the server is handed round an async runtime
 /// and its tools run on the blocking pool. Implementors are expected to be
@@ -108,6 +109,15 @@ pub trait Desktop: Send + Sync + 'static {
     ///
     /// As [`Desktop::act`].
     fn act_window(&self, surface: SurfaceId, verb: WindowVerb) -> Result<WindowReceipt, Denied>;
+
+    /// Take a picture of a monitor or a window.
+    ///
+    /// # Errors
+    ///
+    /// [`Denied::Refused`] for a window the gate will not let the agent read,
+    /// [`Denied::NotBuilt`] from a build that cannot take pictures, and
+    /// [`Denied::Undispatched`] when the compositor could not.
+    fn capture(&self, target: ShotTarget) -> Result<Shot, Denied>;
 }
 
 /// Why an act produced no receipt.
@@ -127,6 +137,9 @@ pub enum Denied {
     /// The compositor could not carry it out.
     #[error("not dispatched: {0}")]
     Undispatched(String),
+    /// This build has no such capability: the cargo feature named.
+    #[error("not built: this perspicax has no `{0}` feature")]
+    NotBuilt(String),
 }
 
 /// Why the server stopped.

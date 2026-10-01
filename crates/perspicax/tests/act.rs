@@ -38,8 +38,9 @@ use perspicax::{
 };
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop};
 use perspicax_index::{Index, PointerButton, Receipt, Refusal, Selector, Verb};
-use perspicax_mcp::{Denied, Desktop, Perspicax, dto};
+use perspicax_mcp::{Denied, Desktop, Perspicax, ScreenshotParams, dto};
 use perspicax_node::{NodeId, Origin, Role, SurfaceId};
+use rmcp::handler::server::wrapper::Parameters;
 
 /// How long the applications get to map their windows and populate their
 /// accessibility trees before anything is read.
@@ -171,11 +172,12 @@ fn an_agent_clicks_a_control_and_gets_a_receipt_in_each_toolkit() {
             receipt.focus_after.map(|s| s.0),
         );
 
-        // Zero screenshots taken, and structurally so: the only pixel path
-        // there is refuses, and the demo above did not need it.
+        // Zero screenshots taken, and structurally so: this test is built
+        // without the `capture` feature, so the only pixel path there is
+        // says it was not built, and the demo above did not need it.
         assert_eq!(drive.screenshot_failed, Some(true), "{toolkit}");
         assert_eq!(drive.screenshot["captured"], false, "{toolkit}");
-        assert_eq!(drive.screenshot["reason"], "no_renderer", "{toolkit}");
+        assert_eq!(drive.screenshot["reason"], "not_built", "{toolkit}");
     }
 }
 
@@ -380,12 +382,15 @@ async fn drive(facts: &Facts, host: &Host) -> Drive {
     let acts = targets.into_iter().map(click).collect();
 
     // The two tools that take no arguments, called for real rather than
-    // projected -- `window_list` is the agent's entry point and `screenshot` is
-    // the one that has to refuse.
+    // projected -- `window_list` is the agent's entry point and `screenshot`,
+    // in a build without `capture`, is the one that has to refuse.
     let shared: Arc<dyn Desktop> = Arc::<Desk>::clone(&desk);
     let server = Perspicax::new(shared);
     let windows = server.window_list().await.expect("window_list answers");
-    let shot = server.screenshot().await.expect("screenshot answers");
+    let shot = server
+        .screenshot(Parameters(ScreenshotParams::default()))
+        .await
+        .expect("screenshot answers");
 
     // A window with nothing on it would make the assertions above vacuous, so
     // the count is reported either way.

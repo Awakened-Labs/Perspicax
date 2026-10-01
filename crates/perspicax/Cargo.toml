@@ -61,3 +61,6 @@ desktop = ["seat", "xwayland", "capture"]
 # `serde_json::Value`. Nothing in the library does.
 [dev-dependencies]
 serde_json.workspace = true
+# `screenshot` takes its parameters in rmcp's wrapper, and the demo calls the
+# tool itself rather than a projection of it.
+rmcp.workspace = true

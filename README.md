@@ -263,12 +263,17 @@ screen. There an agent may act only on what perspicax itself spawned
 (`Refusal::NoCapability` otherwise), and not at all while the person is using the
 keyboard or pointer: an act in the middle of their typing would race it.
 
-**`screenshot` ships declared and always refusing.** There is no renderer in
-the headless build at all — occlusion needs geometry, z-order, regions and damage, and
-none of those need pixels. It is listed so that a model can tell the fallback
-from the mechanism, and its refusal reports the count of nodes under rendering
-no semantic event explained, which is the only honest trigger for a pixel path
-and a number the compositor already computes.
+**`screenshot` is the fallback, and says so.** Occlusion needs geometry,
+z-order, regions and damage, none of which need pixels, so nothing is drawn
+for the index and a picture is rendered only when one is asked for: in
+software with pixman headless, with the GPU on a seat, behind the `capture`
+feature (a build without it answers `not_built`). Every answer carries the
+count of nodes under damage no semantic event explained, which is the honest
+trigger for a pixel path. A picture comes with an account of every surface in
+it and the process that drew it, so no pixel is anonymous, and a window drawn
+by a process the agent holds no consent for is painted over in grey and listed
+as redacted rather than shown: a picture is a way of reading, and the gate on
+reading applies to it.
 
 ## What a toolkit renders without explaining
 

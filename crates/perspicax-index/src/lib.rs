@@ -207,6 +207,25 @@ pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
     }
 }
 
+/// The gate for reading a whole window: a picture of it. It must exist, be
+/// attributed, and be drawn by a process the agent holds consent for -- the
+/// same consent acting on it needs, because a picture of a window is a way of
+/// reading it.
+///
+/// # Errors
+///
+/// The [`Refusal`] saying why not.
+pub fn check_readable(facts: &HostFacts, surface: SurfaceId) -> Result<&SurfaceFacts, Refusal> {
+    let window = facts.surface(surface).ok_or(Refusal::NotFound)?;
+    match &window.origin {
+        Origin::Unattributed => Err(Refusal::Unattributed),
+        origin if facts.consent().permits(origin) => Ok(window),
+        origin => Err(Refusal::NoCapability {
+            origin: Box::new(origin.clone()),
+        }),
+    }
+}
+
 /// The gate for acting on a whole window. Every window verb goes through
 /// here, as every node verb goes through [`check_actable`].
 ///
@@ -226,20 +245,11 @@ pub fn check_window(
     surface: SurfaceId,
     verb: WindowVerb,
 ) -> Result<&SurfaceFacts, Refusal> {
-    let window = facts.surface(surface).ok_or(Refusal::NotFound)?;
-    let consented = |window: &SurfaceFacts| match &window.origin {
-        Origin::Unattributed => Err(Refusal::Unattributed),
-        origin if facts.consent().permits(origin) => Ok(()),
-        origin => Err(Refusal::NoCapability {
-            origin: Box::new(origin.clone()),
-        }),
-    };
-    consented(window)?;
+    let window = check_readable(facts, surface)?;
     if verb == WindowVerb::Forward
         && let Some(front) = window.behind_tab
     {
-        let front = facts.surface(front).ok_or(Refusal::NotFound)?;
-        consented(front)?;
+        let front = check_readable(facts, front)?;
         if let Some(workspace) = front.off_workspace {
             return Err(Refusal::OtherWorkspace { workspace });
         }

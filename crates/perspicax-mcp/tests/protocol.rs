@@ -15,7 +15,7 @@
 //!
 //! Implementing [`Desktop`] out here also proves the trait is satisfiable from
 //! outside the crate, which is the whole claim of it: a GNOME extension or a
-//! KWin plugin re-implements these four methods and gets the eight tools.
+//! KWin plugin re-implements these five methods and gets the eight tools.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,6 +57,13 @@ impl Desktop for Nothing {
         _verb: perspicax_index::WindowVerb,
     ) -> Result<perspicax_index::WindowReceipt, Denied> {
         Err(Denied::Refused(Refusal::NotFound))
+    }
+
+    fn capture(
+        &self,
+        _target: perspicax_index::ShotTarget,
+    ) -> Result<perspicax_index::Shot, Denied> {
+        Err(Denied::NotBuilt("capture".to_owned()))
     }
 }
 
@@ -212,12 +219,12 @@ async fn the_tools_answer_over_the_wire_and_refusals_arrive_as_refusals() {
     assert_eq!(windows["structuredContent"]["count"], 0);
     assert_eq!(windows["isError"], false);
 
-    // The one tool that ships refusing, refusing.
+    // A desktop that cannot take pictures says so, and why.
     let picture = client
         .call(3, "tools/call", json!({ "name": "screenshot" }))
         .await;
     assert_eq!(picture["isError"], true);
-    assert_eq!(picture["structuredContent"]["reason"], "no_renderer");
+    assert_eq!(picture["structuredContent"]["reason"], "not_built");
     assert_eq!(picture["structuredContent"]["unexplained"], 0);
 
     // A selector that matches nothing on an empty desktop: refused by name,
