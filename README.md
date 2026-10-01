@@ -46,7 +46,7 @@ compositor:
 
 ```
 perspicax              the composition root — one binary, `perspicax --headless`
-perspicax-mcp          MCP server (rmcp, stdio) — six tools, DTOs, receipts  [portable]
+perspicax-mcp          MCP server (rmcp, stdio) — eight tools, DTOs, receipts  [portable]
 perspicax-index        node cache, stable ids, selectors, deltas, refusals  [portable]
 perspicax-node         node schema — AccessKit types plus Origin and Visibility
 perspicax-policy       WM decisions as data — focus, bindings, placement, monitors, workspaces, snapping  [portable]
@@ -193,8 +193,12 @@ reason is reported rather than logged.
 perspicax --headless --mcp --spawn gtk4-widget-factory
 ```
 
-That is an MCP server on stdin and stdout with a compositor behind it. Six
-tools: `window_list`, `observe`, `resolve`, `act`, `deltas`, `screenshot`.
+That is an MCP server on stdin and stdout with a compositor behind it. Eight
+tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
+`tab_forward`, `deltas`, `screenshot`. The two window verbs act on a whole
+window by its surface: a close is a request the application may answer with a
+dialog, and a tab is brought forward only where the person can already see its
+group, never by switching what they are looking at.
 
 An agent names a control and never a coordinate — the rectangle comes from the
 index and turning it into anything global is the compositor's job, so an agent

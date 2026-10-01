@@ -37,7 +37,11 @@
 use std::{thread, time::Duration, time::Instant};
 
 use perspicax_compositor::{ActError, Facts, Host};
-use perspicax_index::{DamageWitness, Index, Receipt, Refusal, Selector, Verb};
+use perspicax_index::{
+    DamageWitness, Index, Receipt, Refusal, Selector, Verb, WindowReceipt, WindowVerb,
+    WindowWitness, check_window,
+};
+use perspicax_node::SurfaceId;
 
 /// How long an act is given to have a visible effect, by default.
 ///
@@ -140,6 +144,65 @@ pub fn act(
     })
 }
 
+/// Act on a whole window -- close it, or bring a tab forward -- and report
+/// what became of it.
+///
+/// The same order as [`act`], with a window in place of a node: the gate
+/// (`check_window`, in `perspicax-index`), the dispatch, the wait, and then
+/// what the facts say happened. No damage is watched, because what a window
+/// verb does is not a change of pixels inside it: a closed window is gone,
+/// or a dialog asking about unsaved work has appeared beside it.
+///
+/// # Errors
+///
+/// [`Failure::Refused`] when the gate says no, [`Failure::Dispatch`] when the
+/// compositor did not carry it out.
+pub fn act_window(
+    host: &Host,
+    facts: &Facts,
+    surface: SurfaceId,
+    verb: WindowVerb,
+    window: Duration,
+) -> Result<WindowReceipt, Failure> {
+    let before = facts.read();
+    let origin = check_window(&before, surface, verb)?.origin.clone();
+    let known: Vec<SurfaceId> = before.surfaces().iter().map(|facts| facts.id).collect();
+
+    let started = Instant::now();
+    let dispatched = host.act(surface, &verb.action())?;
+    let dispatch = started.elapsed();
+
+    thread::sleep(window);
+
+    let after = facts.read();
+    let witness = match after.surface(surface) {
+        None => WindowWitness::Gone,
+        Some(_) if verb == WindowVerb::Close => WindowWitness::StillOpen {
+            appeared: after
+                .surfaces()
+                .iter()
+                .filter(|facts| !known.contains(&facts.id) && facts.origin == origin)
+                .map(|facts| facts.id)
+                .collect(),
+        },
+        Some(facts) => match facts.behind_tab {
+            None => WindowWitness::InFront,
+            Some(shown) => WindowWitness::StillBehind { shown },
+        },
+    };
+
+    Ok(WindowReceipt {
+        surface,
+        origin,
+        verb,
+        dispatch,
+        focus_before: dispatched.focus_before,
+        focus_after: dispatched.focus_after,
+        witness,
+        window,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +256,23 @@ mod tests {
                 &Facts::new(),
                 &selector,
                 &Verb::Focus,
+                Duration::ZERO
+            ),
+            Err(Failure::Refused(Refusal::NotFound))
+        );
+    }
+
+    #[test]
+    fn a_window_the_gate_refuses_is_never_dispatched() {
+        // No facts at all: the window does not exist as far as the gate can
+        // tell, and the host -- which has no compositor behind it -- is
+        // never asked, or this would be `Dispatch(Unreachable)`.
+        assert_eq!(
+            act_window(
+                &host(),
+                &Facts::new(),
+                SurfaceId(1),
+                WindowVerb::Close,
                 Duration::ZERO
             ),
             Err(Failure::Refused(Refusal::NotFound))

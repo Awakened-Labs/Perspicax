@@ -75,8 +75,9 @@ pub enum Command {
     /// Do what a key binding does: switch workspace, send the focused window
     /// somewhere, close it. The same code a person's keys run, so a test can
     /// drive window management with no keyboard. Not an MCP tool: an agent
-    /// rearranging a person's desk is a capability decision that waits for
-    /// the workspace protocols (W4).
+    /// rearranging a person's desk wholesale is not something it may do.
+    /// What it may do to a window is narrower and gated, and goes through
+    /// [`Request`] as `Action::Close` and `Action::Forward`.
     Perform(perspicax_policy::Action),
     /// Put new `[protocols]` rules in force, as a seat does when the person
     /// saves a changed config: who may use the protocols that reach past

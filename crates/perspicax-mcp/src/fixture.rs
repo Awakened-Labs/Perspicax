@@ -12,7 +12,10 @@
 
 use std::sync::Mutex;
 
-use perspicax_index::{Consent, Delta, HostFacts, Index, Receipt, Selector, SurfaceFacts, Verb};
+use perspicax_index::{
+    Consent, Delta, HostFacts, Index, Receipt, Selector, SurfaceFacts, Verb, WindowReceipt,
+    WindowVerb, WindowWitness,
+};
 use perspicax_node::{Node, NodeId, ObservedNode, Origin, ProcessOrigin, Rect, Role, SurfaceId};
 
 use crate::{Denied, Desktop};
@@ -147,5 +150,26 @@ impl Desktop for Fake {
             .expect("no test poisons this")
             .push((selector.to_string(), verb.clone()));
         self.answer.clone()
+    }
+
+    /// Through the real gate, against the fixture's facts, then a receipt
+    /// as if the window had done what it was asked.
+    fn act_window(&self, surface: SurfaceId, verb: WindowVerb) -> Result<WindowReceipt, Denied> {
+        let origin = perspicax_index::check_window(&self.facts, surface, verb)?
+            .origin
+            .clone();
+        Ok(WindowReceipt {
+            surface,
+            origin,
+            verb,
+            dispatch: std::time::Duration::from_millis(1),
+            focus_before: Some(surface),
+            focus_after: None,
+            witness: match verb {
+                WindowVerb::Close => WindowWitness::Gone,
+                WindowVerb::Forward => WindowWitness::InFront,
+            },
+            window: std::time::Duration::from_millis(200),
+        })
     }
 }

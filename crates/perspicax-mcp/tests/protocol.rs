@@ -15,7 +15,7 @@
 //!
 //! Implementing [`Desktop`] out here also proves the trait is satisfiable from
 //! outside the crate, which is the whole claim of it: a GNOME extension or a
-//! KWin plugin re-implements these three methods and gets the six tools.
+//! KWin plugin re-implements these four methods and gets the eight tools.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,6 +48,14 @@ impl Desktop for Nothing {
     }
 
     fn act(&self, _selector: &Selector, _verb: &Verb) -> Result<Receipt, Denied> {
+        Err(Denied::Refused(Refusal::NotFound))
+    }
+
+    fn act_window(
+        &self,
+        _surface: perspicax_node::SurfaceId,
+        _verb: perspicax_index::WindowVerb,
+    ) -> Result<perspicax_index::WindowReceipt, Denied> {
         Err(Denied::Refused(Refusal::NotFound))
     }
 }
@@ -169,6 +177,8 @@ async fn the_server_introduces_itself_and_lists_its_tools_with_no_compositor_run
             "observe",
             "resolve",
             "screenshot",
+            "tab_forward",
+            "window_close",
             "window_list"
         ]
     );

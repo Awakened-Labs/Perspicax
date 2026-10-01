@@ -32,8 +32,11 @@
 use std::sync::{Mutex, MutexGuard};
 
 use perspicax_compositor::{Facts, Host};
-use perspicax_index::{Delta, HostFacts, Index, Receipt, Selector, Verb};
+use perspicax_index::{
+    Delta, HostFacts, Index, Receipt, Selector, Verb, WindowReceipt, WindowVerb,
+};
 use perspicax_mcp::{Denied, Desktop};
+use perspicax_node::SurfaceId;
 
 use crate::act;
 
@@ -141,17 +144,26 @@ impl Desktop for Desk {
             verb,
             act::DAMAGE_WINDOW,
         )
-        .map_err(|failure| match failure {
-            // The gate's answer, carried through unchanged: it names what is in
-            // the way and what would clear it, and paraphrasing it here would
-            // cost the agent exactly the part it can act on.
-            act::Failure::Refused(refusal) => Denied::Refused(refusal),
-            // A statement about this compositor rather than about the target.
-            // Flattened to its message because `perspicax-mcp` deliberately
-            // cannot see the crate the type comes from, and because there is
-            // nothing an agent can do with it but report it.
-            act::Failure::Dispatch(error) => Denied::Undispatched(error.to_string()),
-        })
+        .map_err(denied)
+    }
+
+    fn act_window(&self, surface: SurfaceId, verb: WindowVerb) -> Result<WindowReceipt, Denied> {
+        act::act_window(&self.host, &self.facts, surface, verb, act::DAMAGE_WINDOW).map_err(denied)
+    }
+}
+
+/// A failure to act, as the MCP server reports it.
+fn denied(failure: act::Failure) -> Denied {
+    match failure {
+        // The gate's answer, carried through unchanged: it names what is in
+        // the way and what would clear it, and paraphrasing it here would
+        // cost the agent exactly the part it can act on.
+        act::Failure::Refused(refusal) => Denied::Refused(refusal),
+        // A statement about this compositor rather than about the target.
+        // Flattened to its message because `perspicax-mcp` deliberately
+        // cannot see the crate the type comes from, and because there is
+        // nothing an agent can do with it but report it.
+        act::Failure::Dispatch(error) => Denied::Undispatched(error.to_string()),
     }
 }
 

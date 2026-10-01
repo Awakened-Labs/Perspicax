@@ -167,6 +167,16 @@ pub struct SurfaceFacts {
     /// as a matter of proof, not policy. Empty for a surface that draws its
     /// own frame, or has none.
     pub frame: Vec<Rect>,
+    /// The app id the client set (`app_id` under Wayland, the class under
+    /// X11): a string it chose for itself, like the title.
+    pub app_id: Option<String>,
+    /// The tab group this window is in, in tab order, or empty when it is in
+    /// none. Which of them is in front is whichever is not `behind_tab`.
+    pub tabs: Vec<SurfaceId>,
+    /// The workspace this window belongs to, numbered from 1, whether or not
+    /// it is showing. `None` for a window on every workspace, or one no
+    /// workspace has been decided for.
+    pub workspace: Option<u16>,
 }
 
 impl SurfaceFacts {
@@ -190,6 +200,9 @@ impl SurfaceFacts {
             off_workspace: None,
             behind_tab: None,
             frame: Vec::new(),
+            app_id: None,
+            tabs: Vec::new(),
+            workspace: None,
         }
     }
 
@@ -261,6 +274,13 @@ impl SurfaceFacts {
     #[must_use]
     pub fn owned_by(mut self, origin: Origin) -> Self {
         self.origin = origin;
+        self
+    }
+
+    /// The same surface, a tab of a group of `tabs`, in tab order.
+    #[must_use]
+    pub fn tabbed(mut self, tabs: impl IntoIterator<Item = SurfaceId>) -> Self {
+        self.tabs = tabs.into_iter().collect();
         self
     }
 

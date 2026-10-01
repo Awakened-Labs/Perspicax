@@ -271,6 +271,21 @@ impl Compositor {
     }
 }
 
+/// The app id a window's client set: `app_id` under Wayland, the class
+/// under X11.
+pub(crate) fn app_id(window: &Framed) -> Option<String> {
+    #[cfg(feature = "xwayland")]
+    if let Some(x11) = window.x11_surface() {
+        return Some(x11.class()).filter(|class| !class.is_empty());
+    }
+    with_states(window.toplevel()?.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .and_then(|data| data.lock().ok()?.app_id.clone())
+    })
+}
+
 /// Whether `resource` belongs to a client the rules still admit to
 /// `protocol`. A client that has gone counts as not admitted.
 fn still_admitted(

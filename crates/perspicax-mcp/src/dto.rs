@@ -30,7 +30,10 @@
 //! lexical form. Ids are minted from one, so the 2^53 ceiling a JSON reader
 //! imposes is not a ceiling anything can reach.
 
-use perspicax_index::{DamageWitness, Delta, HostFacts, Index, Receipt, Refusal, SurfaceFacts};
+use perspicax_index::{
+    DamageWitness, Delta, HostFacts, Index, Receipt, Refusal, SurfaceFacts, WindowReceipt,
+    WindowWitness,
+};
 use perspicax_node::{
     NodeId, ObservedNode, Orientation, Origin, Rect, SurfaceId, Toggled, X11Basis,
 };
@@ -456,6 +459,27 @@ pub struct Window {
     /// rate, not a total: an idle GTK window repaints about forty times a
     /// second and an idle Qt one about once every two.
     pub damage_frames: u64,
+    /// The app id the client set, under a key that says who set it, as the
+    /// title is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub untrusted_app_id: Option<String>,
+    /// The workspace it belongs to, counting from 1, whether or not that
+    /// workspace is showing. Absent for a window on every workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<u16>,
+    /// Its tab group, when it is in one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tabs: Option<Tabs>,
+}
+
+/// A window's tab group: every tab, and which is in front.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Tabs {
+    /// Every tab's surface, in tab order.
+    pub members: Vec<u64>,
+    /// The tab in front, which has the group's place on screen. Any other
+    /// can be brought forward with `tab_forward`.
+    pub front: u64,
 }
 
 impl Window {
@@ -496,6 +520,12 @@ impl Window {
             rendered_by: Provenance::of(&facts.origin),
             untrusted_title: facts.title.clone(),
             damage_frames: facts.damage_generation,
+            untrusted_app_id: facts.app_id.clone(),
+            workspace: facts.workspace,
+            tabs: (!facts.tabs.is_empty()).then(|| Tabs {
+                members: facts.tabs.iter().map(|tab| tab.0).collect(),
+                front: facts.behind_tab.unwrap_or(facts.id).0,
+            }),
         }
     }
 }
@@ -577,6 +607,67 @@ impl From<&Receipt> for Acted {
                 frames: receipt.damage.frames(),
                 window_ms: u64::try_from(receipt.damage_window.as_millis()).unwrap_or(u64::MAX),
             },
+        }
+    }
+}
+
+/// What became of a window an agent closed or brought forward.
+///
+/// No `success`, for the reason [`Acted`] has none: `witness` is what was
+/// seen once the window had been given `window_ms` to react.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WindowActed {
+    /// The window acted on.
+    pub surface: u64,
+    /// Who owns it, from its connection credentials.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rendered_by: Option<Provenance>,
+    /// `close` or `forward`.
+    pub verb: &'static str,
+    /// The round trip to the compositor's thread and back.
+    pub dispatch_ms: f64,
+    /// Which surface held keyboard focus before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_before: Option<u64>,
+    /// And after.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_after: Option<u64>,
+    /// `gone`, `still_open`, `in_front` or `still_behind`.
+    pub witness: &'static str,
+    /// `still_open`: windows of the same process that appeared meanwhile --
+    /// a dialog asking about unsaved work, typically. Observe it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub appeared: Vec<u64>,
+    /// `still_behind`: the tab still in front.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shown_tab: Option<u64>,
+    /// How long the window was given to react.
+    pub window_ms: u64,
+}
+
+impl From<&WindowReceipt> for WindowActed {
+    fn from(receipt: &WindowReceipt) -> Self {
+        let (witness, appeared, shown_tab) = match &receipt.witness {
+            WindowWitness::Gone => ("gone", Vec::new(), None),
+            WindowWitness::StillOpen { appeared } => (
+                "still_open",
+                appeared.iter().map(|surface| surface.0).collect(),
+                None,
+            ),
+            WindowWitness::InFront => ("in_front", Vec::new(), None),
+            WindowWitness::StillBehind { shown } => ("still_behind", Vec::new(), Some(shown.0)),
+        };
+        Self {
+            surface: receipt.surface.0,
+            rendered_by: Provenance::of(&receipt.origin),
+            verb: receipt.verb.name(),
+            dispatch_ms: receipt.dispatch.as_secs_f64() * 1000.0,
+            focus_before: receipt.focus_before.map(|surface| surface.0),
+            focus_after: receipt.focus_after.map(|surface| surface.0),
+            witness,
+            appeared,
+            shown_tab,
+            window_ms: u64::try_from(receipt.window.as_millis()).unwrap_or(u64::MAX),
         }
     }
 }

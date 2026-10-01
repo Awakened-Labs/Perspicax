@@ -98,6 +98,86 @@ impl Verb {
     }
 }
 
+/// What an agent asks of a whole window, rather than of a control in it.
+///
+/// Addressed by surface, not by selector: a window is what `window_list`
+/// names, and the controls a person would use to do the same (a titlebar's
+/// close button, a tab) are drawn by the compositor and are in no
+/// accessible tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowVerb {
+    /// Ask the window to close. A request its client may decline -- to ask
+    /// about unsaved work, say -- and never a kill.
+    Close,
+    /// Bring a tab behind another to the front of its group, in the group's
+    /// place, as clicking its tab does.
+    Forward,
+}
+
+impl WindowVerb {
+    /// The action a host dispatches for it.
+    #[must_use]
+    pub fn action(self) -> Action {
+        match self {
+            Self::Close => Action::Close,
+            Self::Forward => Action::Forward,
+        }
+    }
+
+    /// A short name, for a receipt an agent will read.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Close => "close",
+            Self::Forward => "forward",
+        }
+    }
+}
+
+/// What became of a window an agent closed or brought forward, once it had
+/// been given time to react.
+///
+/// As with [`DamageWitness`], what was seen rather than whether it worked.
+/// A window still open after a close has not necessarily refused: it may be
+/// asking the person whether to save, and `appeared` names the window that
+/// is asking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowWitness {
+    /// The window is gone.
+    Gone,
+    /// The window is still open. `appeared` lists windows of the same
+    /// process that were not there before: a dialog asking about unsaved
+    /// work, typically.
+    StillOpen { appeared: Vec<SurfaceId> },
+    /// The tab is in front of its group.
+    InFront,
+    /// The tab is still behind `shown`.
+    StillBehind { shown: SurfaceId },
+}
+
+/// What happened when an agent acted on a window.
+///
+/// No success field, for the reason [`Receipt`] has none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowReceipt {
+    /// The window acted on.
+    pub surface: SurfaceId,
+    /// Who owns it, from its connection credentials.
+    pub origin: Origin,
+    /// What was asked for.
+    pub verb: WindowVerb,
+    /// How long the dispatch itself took.
+    pub dispatch: Duration,
+    /// Which surface held keyboard focus before.
+    pub focus_before: Option<SurfaceId>,
+    /// And after.
+    pub focus_after: Option<SurfaceId>,
+    /// What became of the window.
+    pub witness: WindowWitness,
+    /// How long it was given to react.
+    pub window: Duration,
+}
+
 /// What the pixels did, in the window an act was given to have an effect.
 ///
 /// Region-scoped on purpose: "the surface changed" is nearly always true and

@@ -49,7 +49,7 @@ pub use crate::{
     host::{HostFacts, Judgement, SurfaceFacts, Tally, judge},
     id::Interner,
     join::{Evidence, Finding, Join, SurfaceClaim, WindowClaim, join},
-    receipt::{DamageWitness, Receipt, Verb},
+    receipt::{DamageWitness, Receipt, Verb, WindowReceipt, WindowVerb, WindowWitness},
     selector::{Selector, SelectorParseError},
 };
 
@@ -205,6 +205,49 @@ pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
     }
 }
 
+/// The gate for acting on a whole window. Every window verb goes through
+/// here, as every node verb goes through [`check_actable`].
+///
+/// A window is addressed by surface, so there is no node to judge visible:
+/// what is checked instead is that the window exists, that it is attributed,
+/// and that the agent holds consent for whoever drew it. Bringing a tab
+/// forward hides the tab in front, so consent for that one is needed too.
+/// And it is only done where the person can already see the group: a group
+/// on a hidden workspace, or minimized, is refused rather than brought into
+/// view, because an agent never switches what the person is looking at.
+///
+/// # Errors
+///
+/// The [`Refusal`] saying why not.
+pub fn check_window(
+    facts: &HostFacts,
+    surface: SurfaceId,
+    verb: WindowVerb,
+) -> Result<&SurfaceFacts, Refusal> {
+    let window = facts.surface(surface).ok_or(Refusal::NotFound)?;
+    let consented = |window: &SurfaceFacts| match &window.origin {
+        Origin::Unattributed => Err(Refusal::Unattributed),
+        origin if facts.consent().permits(origin) => Ok(()),
+        origin => Err(Refusal::NoCapability {
+            origin: Box::new(origin.clone()),
+        }),
+    };
+    consented(window)?;
+    if verb == WindowVerb::Forward
+        && let Some(front) = window.behind_tab
+    {
+        let front = facts.surface(front).ok_or(Refusal::NotFound)?;
+        consented(front)?;
+        if let Some(workspace) = front.off_workspace {
+            return Err(Refusal::OtherWorkspace { workspace });
+        }
+        if !front.mapped {
+            return Err(Refusal::Unmapped);
+        }
+    }
+    Ok(window)
+}
+
 /// Where nodes come from.
 ///
 /// Implementations are expected to be *push*-shaped wherever the underlying
@@ -342,6 +385,10 @@ pub enum Action {
     Scroll { at: Rect, dx: f64, dy: f64 },
     /// Give this surface keyboard focus.
     Focus,
+    /// Ask this surface's window to close.
+    Close,
+    /// Bring this surface's window to the front of its tab group.
+    Forward,
 }
 
 /// A pointer button, in the usual left/middle/right sense.
@@ -506,5 +553,107 @@ mod tests {
         );
         assert!(Consent::Spawned(vec![700]).permits(&x11));
         assert!(Consent::Everyone.permits(&x11));
+    }
+
+    fn owned_by(pid: u32) -> Origin {
+        Origin::Process(Box::new(ProcessOrigin {
+            pid,
+            exe: None,
+            cgroup: None,
+            sandbox: None,
+        }))
+    }
+
+    /// Two tabs of one group: `1` behind `2`, both drawn by pid 10.
+    fn tabs(front: SurfaceFacts, consent: Consent) -> HostFacts {
+        let area = Rect::new(0.0, 0.0, 400.0, 300.0);
+        HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(SurfaceId(1), area)
+                    .owned_by(owned_by(10))
+                    .behind_tab(SurfaceId(2)),
+                front.owned_by(owned_by(10)),
+            ],
+            1,
+        )
+        .with_consent(consent)
+    }
+
+    fn front() -> SurfaceFacts {
+        SurfaceFacts::new(SurfaceId(2), Rect::new(0.0, 0.0, 400.0, 300.0))
+    }
+
+    #[test]
+    fn a_window_verb_needs_a_window_an_origin_and_consent() {
+        let facts = tabs(front(), Consent::Everyone);
+        assert_eq!(
+            check_window(&facts, SurfaceId(9), WindowVerb::Close).unwrap_err(),
+            Refusal::NotFound
+        );
+        assert!(check_window(&facts, SurfaceId(2), WindowVerb::Close).is_ok());
+
+        let facts = tabs(front(), Consent::Spawned(vec![11]));
+        assert!(matches!(
+            check_window(&facts, SurfaceId(2), WindowVerb::Close),
+            Err(Refusal::NoCapability { .. })
+        ));
+
+        let unattributed = HostFacts::bottom_to_top(
+            [SurfaceFacts::new(
+                SurfaceId(1),
+                Rect::new(0.0, 0.0, 1.0, 1.0),
+            )],
+            1,
+        )
+        .with_consent(Consent::Everyone);
+        assert_eq!(
+            check_window(&unattributed, SurfaceId(1), WindowVerb::Close).unwrap_err(),
+            Refusal::Unattributed
+        );
+    }
+
+    #[test]
+    fn a_tab_comes_forward_only_where_the_person_can_already_see_its_group() {
+        let showing = tabs(front(), Consent::Everyone);
+        assert!(check_window(&showing, SurfaceId(1), WindowVerb::Forward).is_ok());
+        assert!(
+            check_window(&showing, SurfaceId(2), WindowVerb::Forward).is_ok(),
+            "already in front: nothing to refuse"
+        );
+
+        let elsewhere = tabs(front().on_workspace(3), Consent::Everyone);
+        assert_eq!(
+            check_window(&elsewhere, SurfaceId(1), WindowVerb::Forward).unwrap_err(),
+            Refusal::OtherWorkspace { workspace: 3 }
+        );
+        assert!(
+            check_window(&elsewhere, SurfaceId(1), WindowVerb::Close).is_ok(),
+            "closing does not show anything"
+        );
+
+        let minimized = tabs(front().unmapped(), Consent::Everyone);
+        assert_eq!(
+            check_window(&minimized, SurfaceId(1), WindowVerb::Forward).unwrap_err(),
+            Refusal::Unmapped
+        );
+    }
+
+    #[test]
+    fn bringing_a_tab_forward_needs_consent_for_the_one_it_hides() {
+        let area = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let facts = HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(SurfaceId(1), area)
+                    .owned_by(owned_by(10))
+                    .behind_tab(SurfaceId(2)),
+                SurfaceFacts::new(SurfaceId(2), area).owned_by(owned_by(20)),
+            ],
+            1,
+        )
+        .with_consent(Consent::Spawned(vec![10]));
+        assert!(matches!(
+            check_window(&facts, SurfaceId(1), WindowVerb::Forward),
+            Err(Refusal::NoCapability { .. })
+        ));
     }
 }
