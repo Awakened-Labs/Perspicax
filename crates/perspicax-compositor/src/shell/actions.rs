@@ -66,7 +66,7 @@ impl Compositor {
                     .chain(self.space.elements())
                     .filter_map(id_of)
                     .collect();
-                if let Some(next) = cycle(&stack) {
+                if let Some(next) = cycle(&stack, self.focused_surface()) {
                     self.apply_focus(Decision {
                         focus: Change::To(next),
                         raise: Some(next),

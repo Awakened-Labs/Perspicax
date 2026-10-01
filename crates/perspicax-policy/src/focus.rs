@@ -117,17 +117,22 @@ impl Focus {
 }
 
 /// The window a "next window" chord should bring forward, given the stack
-/// bottom to top.
+/// bottom to top and the window that has the keyboard.
 ///
 /// The bottom one, so pressing the chord repeatedly walks through every
 /// window in turn: each press lifts the bottom window to the top, and the
 /// next press finds a different one at the bottom. Swapping the top two
-/// instead would never reach a third window. `None` with fewer than two
-/// windows, because cycling one window is a no-op.
+/// instead would never reach a third window.
+///
+/// A lone window is brought forward only if it does not already have the
+/// keyboard: a minimized one that is the only window on the workspace comes
+/// back, and an unfocused one is focused. Otherwise there is nothing to cycle,
+/// and `None`.
 #[must_use]
-pub fn cycle<W: Copy>(bottom_to_top: &[W]) -> Option<W> {
+pub fn cycle<W: Copy + PartialEq>(bottom_to_top: &[W], focused: Option<W>) -> Option<W> {
     match bottom_to_top {
         [first, _, ..] => Some(*first),
+        [only] if focused != Some(*only) => Some(*only),
         _ => None,
     }
 }
@@ -228,13 +233,21 @@ mod tests {
 
     #[test]
     fn cycling_brings_the_bottom_window_forward() {
-        assert_eq!(cycle(&[1, 2, 3]), Some(1));
+        assert_eq!(cycle(&[1, 2, 3], Some(3)), Some(1));
     }
 
     #[test]
-    fn cycling_one_window_or_none_does_nothing() {
-        assert_eq!(cycle(&[1]), None);
-        assert_eq!(cycle::<u32>(&[]), None);
+    fn cycling_the_focused_window_alone_or_none_does_nothing() {
+        assert_eq!(cycle(&[1], Some(1)), None);
+        assert_eq!(cycle::<u32>(&[], None), None);
+    }
+
+    /// Issue #6: the only window on a workspace, minimized or merely
+    /// unfocused, is still somewhere Alt+Tab can go.
+    #[test]
+    fn cycling_brings_back_a_lone_window_that_does_not_have_the_keyboard() {
+        assert_eq!(cycle(&[7], None), Some(7), "minimized, or nothing focused");
+        assert_eq!(cycle(&[7], Some(9)), Some(7), "focus is somewhere else");
     }
 
     #[test]
