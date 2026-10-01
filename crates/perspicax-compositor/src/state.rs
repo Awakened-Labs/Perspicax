@@ -414,15 +414,18 @@ impl Compositor {
     /// window now on top, as on any desktop; a launcher or lock screen that
     /// holds it keeps it. Only with a person at the seat: headless keeps the
     /// M2 contract that focus moves only when something asks it to.
-    pub(crate) fn refocus_after_close(&mut self) {
+    ///
+    /// `closing` is the closed window's surface, compared rather than asked
+    /// whether it is alive: a client destroys its window role before the
+    /// surface, so at this point the surface still is, and an aliveness check
+    /// concluded the keyboard was still held. Found on the first hardware run.
+    pub(crate) fn refocus_after_close(&mut self, closing: Option<&WlSurface>) {
         if !self.backend.has_person() {
             return;
         }
         let held = self
-            .keyboard
-            .as_ref()
-            .and_then(|keyboard| keyboard.current_focus())
-            .is_some_and(|focus| smithay::utils::IsAlive::alive(&focus));
+            .keyboard_focus()
+            .is_some_and(|focus| focus.is_alive() && Some(&focus) != closing);
         if !held {
             self.focus_top_window();
         }
@@ -716,7 +719,7 @@ impl XdgShellHandler for Compositor {
             self.space.unmap_elem(&window);
             self.minimized.retain(|minimized| minimized != &window);
         }
-        self.refocus_after_close();
+        self.refocus_after_close(Some(surface.wl_surface()));
         self.backend.redraw();
         self.publish_facts();
     }
