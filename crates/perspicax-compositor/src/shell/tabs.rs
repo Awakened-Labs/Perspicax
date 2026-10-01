@@ -262,6 +262,12 @@ impl Compositor {
     /// Put `front` where `place` is, as the group's front tab: on its
     /// workspace, at its location and size, maximized or snapped as it is.
     /// `place` is parked if the groups say it is no longer in front.
+    ///
+    /// A group has one state, and the tab coming forward takes all of it,
+    /// dropping its own: the rect it would be restored to, and whether it is
+    /// maximized or tiled. A tab that was maximized while it was in front
+    /// otherwise came back maximized into a group that had since been
+    /// restored, and restoring it went back to its own stale rect.
     fn bring_forward(&mut self, front: &Framed, place: &Framed) {
         let (Some(id), Some(from)) = (id_of(front), id_of(place)) else {
             return;
@@ -271,7 +277,7 @@ impl Compositor {
             .element_location(place)
             .or_else(|| placement(place, |placement| placement.parked));
         let size = extent_size(place);
-        let zone = placement(place, |placement| placement.snapped);
+        let (zone, restore) = placement(place, |placement| (placement.snapped, placement.restore));
         let maximized = place.toplevel().is_some_and(|toplevel| {
             toplevel.with_pending_state(|pending| {
                 pending.states.contains(xdg_toplevel::State::Maximized)
@@ -280,6 +286,12 @@ impl Compositor {
 
         self.workspaces.share(id, from);
         self.show_what_belongs();
+        // Before the zone or the fill below, which keep a restore rect that is
+        // already there rather than taking the tab's own size.
+        placement(front, |placement| {
+            placement.restore = restore;
+            placement.snapped = None;
+        });
 
         let toplevel = front.toplevel().cloned();
         match (zone, toplevel) {
@@ -290,7 +302,14 @@ impl Compositor {
             (None, toplevel) => {
                 if let Some(location) = location {
                     if let Some(toplevel) = toplevel {
-                        toplevel.with_pending_state(|pending| pending.size = Some(size));
+                        toplevel.with_pending_state(|pending| {
+                            pending.states.unset(xdg_toplevel::State::Maximized);
+                            pending.states.unset(xdg_toplevel::State::Fullscreen);
+                            for state in super::snap::TILED {
+                                pending.states.unset(state);
+                            }
+                            pending.size = Some(size);
+                        });
                         toplevel.send_pending_configure();
                     }
                     #[cfg(feature = "xwayland")]

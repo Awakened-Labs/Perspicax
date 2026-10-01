@@ -21,7 +21,7 @@ use super::{placement, rect};
 use crate::{framed::Framed, state::Compositor};
 
 /// The xdg-shell states a zone is tiled against.
-const TILED: [xdg_toplevel::State; 4] = [
+pub(super) const TILED: [xdg_toplevel::State; 4] = [
     xdg_toplevel::State::TiledLeft,
     xdg_toplevel::State::TiledRight,
     xdg_toplevel::State::TiledTop,

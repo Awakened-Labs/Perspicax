@@ -144,6 +144,97 @@ fn two_windows_grouped_share_one_place_and_the_one_behind_says_which_is_in_front
         .expect("the compositor failed");
 }
 
+/// Issue #10: a group has one state, and a tab coming forward takes it. Here
+/// a tab maximized while it was in front must not come back maximized into a
+/// group that has since been restored, nor be put back anywhere but the
+/// group's place.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_tab_coming_forward_takes_the_groups_state_not_its_own() {
+    let socket = format!("perspicax-tabstate-{}", std::process::id());
+    let facts = Facts::new();
+    let requests = Requests::new();
+    let stop = Stop::new();
+    let compositor = {
+        let (facts, requests, stop, socket) = (
+            facts.clone(),
+            requests.clone(),
+            stop.clone(),
+            socket.clone(),
+        );
+        thread::spawn(move || {
+            let config = Config {
+                backend: Backend::headless((1280, 1024)),
+                spawn: Vec::new(),
+                env: Vec::new(),
+                run_for: Some(Duration::from_secs(30)),
+                config: None,
+                socket: Some(socket),
+                xwayland: false,
+            };
+            perspicax_compositor::run(&config, &facts, &requests, &stop)
+        })
+    };
+    let perform = |action| {
+        requests
+            .command(Command::Perform(action))
+            .expect("the compositor is listening");
+    };
+
+    let client = connect(&socket);
+    let (globals, mut queue) = registry_queue_init(&client).expect("the registry");
+    let qh = queue.handle();
+    let mut desk = Desk::new(&globals, &qh);
+    desk.open_window(&qh, WindowDecorations::RequestServer, "first");
+    until(&mut queue, &mut desk, |desk| {
+        desk.drawn == 1 && desk.modes[0] == DecorationMode::Server
+    });
+    desk.open_window(&qh, WindowDecorations::RequestServer, "second");
+    until(&mut queue, &mut desk, |desk| {
+        desk.drawn == 2 && desk.modes[1] == DecorationMode::Server
+    });
+    let place = window(&wait_for(&facts, |facts| mapped(facts) == 2), "first").geometry;
+
+    // Grouped, the second in front. Maximize it, then bring the first
+    // forward: it is maximized too, as the group is.
+    perform(Action::TabWithPrevious);
+    wait_for(&facts, |facts| !window(facts, "first").mapped);
+    perform(Action::ToggleMaximize);
+    until(&mut queue, &mut desk, |desk| desk.maximized[1]);
+    perform(Action::CycleTab { forward: true });
+    until(&mut queue, &mut desk, |desk| desk.maximized[0]);
+
+    // Restore the group from the first, then bring the second back.
+    perform(Action::ToggleMaximize);
+    until(&mut queue, &mut desk, |desk| !desk.maximized[0]);
+    wait_for(&facts, |facts| window(facts, "first").geometry == place);
+    perform(Action::CycleTab { forward: true });
+    let back = wait_for(&facts, |facts| {
+        window(facts, "second").mapped && !window(facts, "first").mapped
+    });
+    until(&mut queue, &mut desk, |desk| !desk.maximized[1]);
+    assert_eq!(
+        window(&back, "second").geometry,
+        place,
+        "the second came back to the group's place, not maximized"
+    );
+
+    // And maximizing it again, then restoring, goes back to the group's
+    // place rather than a rect it remembered from before.
+    perform(Action::ToggleMaximize);
+    until(&mut queue, &mut desk, |desk| desk.maximized[1]);
+    perform(Action::ToggleMaximize);
+    until(&mut queue, &mut desk, |desk| !desk.maximized[1]);
+    wait_for(&facts, |facts| window(facts, "second").geometry == place);
+
+    stop.request();
+    drop((desk, queue));
+    compositor
+        .join()
+        .expect("the compositor thread panicked")
+        .expect("the compositor failed");
+}
+
 fn mapped(facts: &HostFacts) -> usize {
     facts
         .surfaces()
@@ -215,6 +306,8 @@ struct Desk {
     pool: SlotPool,
     windows: Vec<Window>,
     modes: Vec<DecorationMode>,
+    /// Whether each window's last configure said it was maximized.
+    maximized: Vec<bool>,
     drawn: usize,
 }
 
@@ -231,6 +324,7 @@ impl Desk {
             pool,
             windows: Vec::new(),
             modes: Vec::new(),
+            maximized: Vec::new(),
             drawn: 0,
         }
     }
@@ -278,11 +372,14 @@ impl WindowHandler for Desk {
             .iter()
             .position(|known| known == window)
             .expect("one of ours");
+        let maximized = configure.is_maximized();
         if let Some(mode) = self.modes.get_mut(index) {
             *mode = configure.decoration_mode;
+            self.maximized[index] = maximized;
             return;
         }
         self.modes.push(configure.decoration_mode);
+        self.maximized.push(maximized);
         let surface = window.wl_surface().clone();
         self.paint(&surface, WINDOW);
         window.xdg_surface().set_window_geometry(
