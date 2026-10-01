@@ -15,6 +15,7 @@ use std::{
 
 use perspicax_index::Consent;
 use perspicax_node::{Origin, Rect, SurfaceId};
+use perspicax_policy::Workspaces;
 
 use smithay::wayland::seat::WaylandFocus;
 
@@ -170,10 +171,21 @@ pub struct Compositor {
     /// Popups (menus, tooltips), tracked so they render and hit-test with
     /// their window and so a grab can dismiss them.
     pub(crate) popups: PopupManager,
-    /// Windows the person minimized: unmapped from the space, kept here in
+    /// Windows that are open and not on screen: minimized, or on a
+    /// workspace that is not showing. Unmapped from the space, kept here in
     /// the order they went, and described to the index as unmapped rather
-    /// than forgotten.
-    pub(crate) minimized: Vec<Window>,
+    /// than forgotten. Which of the two is in each window's
+    /// [`shell::Placement`]; see `shell::workspaces` for the one rule that
+    /// decides what is in the space and what is here.
+    pub(crate) parked: Vec<Window>,
+    /// Which workspace every window is on and which each monitor shows.
+    pub(crate) workspaces: Workspaces<SurfaceId, String>,
+    /// The window being moved with the pointer, while it is: an edge flip
+    /// takes it along to the next workspace.
+    pub(crate) dragging: Option<Window>,
+    /// Where the window being dragged would snap if let go now. See
+    /// `shell::snap`.
+    pub(crate) snap_preview: Option<shell::SnapPreview>,
     /// RAII handles for the primary-selection and xdg-activation globals.
     primary_selection: PrimarySelectionState,
     activation: XdgActivationState,
@@ -232,11 +244,11 @@ impl Compositor {
         let pointer = Some(seat.add_pointer());
 
         let consent = backend.consent();
-        let mut space = Space::default();
-        for output in backend.initial_outputs() {
-            let at = output.current_location();
-            space.map_output(&output, at);
-        }
+        let workspace_shape = backend.workspace_shape();
+        // Empty: outputs are mapped by `arrange_outputs`, once every one
+        // the backend starts with is known, so the first is placed knowing
+        // about the rest.
+        let space = Space::default();
 
         Self {
             display: display.clone(),
@@ -264,7 +276,10 @@ impl Compositor {
             generation: 0,
             next_surface: 0,
             popups: PopupManager::default(),
-            minimized: Vec::new(),
+            parked: Vec::new(),
+            workspaces: Workspaces::new(workspace_shape),
+            dragging: None,
+            snap_preview: None,
             primary_selection: PrimarySelectionState::new::<Self>(display),
             activation: XdgActivationState::new::<Self>(display),
             layer_shell: WlrLayerShellState::new::<Self>(display),
@@ -543,11 +558,11 @@ impl Compositor {
         self.started
     }
 
-    /// The window whose toplevel is this surface, mapped or minimized.
+    /// The window whose toplevel is this surface, mapped or parked.
     pub(crate) fn window_for(&self, surface: &WlSurface) -> Option<Window> {
         self.space
             .elements()
-            .chain(&self.minimized)
+            .chain(&self.parked)
             .find(|window| shell::is_toplevel_of(window, surface))
             .cloned()
     }
@@ -702,7 +717,8 @@ impl XdgShellHandler for Compositor {
         window.user_data().insert_if_missing(|| id);
 
         let at = self.place_new();
-        self.space.map_element(window, at, true);
+        self.space.map_element(window.clone(), at, true);
+        self.adopt(&window);
         tracing::info!(surface = id.0, at = ?at, "toplevel mapped");
 
         // Focus what just appeared. A newly mapped window taking focus is what
@@ -716,8 +732,7 @@ impl XdgShellHandler for Compositor {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(window) = self.window_for(surface.wl_surface()) {
-            self.space.unmap_elem(&window);
-            self.minimized.retain(|minimized| minimized != &window);
+            self.forget_window(&window);
         }
         self.refocus_after_close(Some(surface.wl_surface()));
         self.backend.redraw();

@@ -31,7 +31,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use perspicax::{desk::Desk, observe, session};
-use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop};
+use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop, Virtual};
 use perspicax_index::Change;
 
 /// How often the index takes what the accessibility bus has volunteered.
@@ -64,16 +64,18 @@ struct Cli {
     #[arg(long)]
     seat: bool,
 
-    /// The virtual output's size, as `WIDTHxHEIGHT`. Every global rectangle the
-    /// index reports is in this space. Headless only: a seat's outputs are the
-    /// size its monitors are.
+    /// A virtual output's size, as `WIDTHxHEIGHT`. Repeat it for more than one
+    /// monitor: they are named `HEADLESS-1`, `HEADLESS-2`, ... and placed left
+    /// to right in the order given. Every global rectangle the index reports
+    /// is in the space they make. Headless only: a seat's outputs are the size
+    /// its monitors are.
     #[arg(
         long,
         default_value = "1920x1080",
         value_parser = parse_size,
         conflicts_with = "seat"
     )]
-    size: (i32, i32),
+    size: Vec<(i32, i32)>,
 
     /// The session's config file, instead of
     /// `$XDG_CONFIG_HOME/perspicax/config.toml`. Seat only: headless reads no
@@ -145,7 +147,16 @@ fn main() -> Result<()> {
     let backend = if cli.seat {
         Backend::Seat
     } else {
-        Backend::Headless { size: cli.size }
+        Backend::Headless {
+            outputs: cli
+                .size
+                .iter()
+                .enumerate()
+                .map(|(at, &size)| Virtual::numbered(at + 1, size))
+                .collect(),
+            // One workspace: an agent's desk is whatever it spawned.
+            workspaces: Default::default(),
+        }
     };
     // First, before the accessibility bus is touched: a backend this binary
     // cannot run is the one thing worth saying, and it should not arrive

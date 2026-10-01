@@ -31,25 +31,29 @@ use smithay::{
             LoopHandle,
             timer::{TimeoutAction, Timer},
         },
-        wayland_server::DisplayHandle,
+        wayland_server::{DisplayHandle, backend::GlobalId},
     },
     utils::Transform,
 };
 
 use perspicax_index::Consent;
+use perspicax_policy::{Place, Shape};
 
 use crate::{Config, Error, FRAME_INTERVAL, state::Compositor};
 
 /// Where the compositor puts its output and gets its input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
-    /// No window system at all: one virtual output of this size in pixels, no
-    /// renderer, and input only from [`crate::Host`]. What CI and an agent
-    /// with no person present run.
+    /// No window system at all: virtual outputs, no renderer, and input only
+    /// from [`crate::Host`]. What CI and an agent with no person present run.
     Headless {
-        /// The virtual output's size. Every global rect in
-        /// [`perspicax_index::HostFacts`] is expressed in this space.
-        size: (i32, i32),
+        /// The virtual monitors, at least one. Placed the way a seat's are,
+        /// by [`perspicax_policy::arrange`], so a desk of several monitors can
+        /// be tested on a machine that has one, or none.
+        outputs: Vec<Virtual>,
+        /// How many workspaces and how they relate to the monitors, as a
+        /// seat's `[workspaces]` table would say. The default is one.
+        workspaces: Shape,
     },
     /// A real session: the outputs the GPU has connected, the keyboards and
     /// pointers libinput finds, device access negotiated through libseat.
@@ -57,13 +61,47 @@ pub enum Backend {
     Seat,
 }
 
+/// One virtual monitor of a headless compositor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Virtual {
+    /// Its connector name, as a client sees it in `wl_output.name`, and as
+    /// another virtual monitor names it to be placed beside it.
+    pub name: String,
+    /// Its size in pixels, at scale 1.
+    pub size: (i32, i32),
+    /// Where it goes, as a seat's `[[output]]` rule would say.
+    pub place: Place,
+}
+
+impl Virtual {
+    /// The `nth` virtual monitor, counting from 1, at `size`, placed to the
+    /// right of the ones before it.
+    #[must_use]
+    pub fn numbered(nth: usize, size: (i32, i32)) -> Self {
+        Self {
+            name: format!("HEADLESS-{nth}"),
+            size,
+            place: Place::Auto,
+        }
+    }
+}
+
 impl Default for Backend {
     fn default() -> Self {
-        Self::Headless { size: (1920, 1080) }
+        Self::headless((1920, 1080))
     }
 }
 
 impl Backend {
+    /// Headless, with one virtual monitor of `size`: what CI has always run.
+    #[must_use]
+    pub fn headless(size: (i32, i32)) -> Self {
+        Self::Headless {
+            outputs: vec![Virtual::numbered(1, size)],
+            workspaces: Shape::default(),
+        }
+    }
+
     /// Refuse a backend this binary was built without, naming the feature
     /// that would provide it.
     ///
@@ -75,7 +113,7 @@ impl Backend {
     /// # Errors
     ///
     /// [`Error::NotBuilt`] when the backend's feature is off.
-    pub fn ensure_built(self) -> Result<(), Error> {
+    pub fn ensure_built(&self) -> Result<(), Error> {
         match self {
             Self::Headless { .. } => Ok(()),
             Self::Seat if cfg!(feature = "seat") => Ok(()),
@@ -94,11 +132,12 @@ impl Backend {
 /// told to draw, whether a buffer is kept after commit -- and a generic would
 /// thread a parameter through every protocol handler to express that.
 pub(crate) enum Running {
-    /// One virtual output, created once and never changed.
+    /// Virtual outputs, each held with its placement and its global until
+    /// it is unplugged: dropping the global would withdraw the `wl_output`
+    /// from clients that already bound it.
     Headless {
-        /// Mapped at the origin once, then held: dropping it would withdraw
-        /// the `wl_output` global from clients that already bound it.
-        output: Output,
+        outputs: Vec<Plugged>,
+        workspaces: Shape,
     },
     /// The session, the GPU and the outputs on it. Boxed because it is large
     /// and the headless variant is not.
@@ -120,8 +159,14 @@ impl Running {
         event_loop: &LoopHandle<'static, Compositor>,
     ) -> Result<Self, Error> {
         config.backend.ensure_built()?;
-        match config.backend {
-            Backend::Headless { size } => Ok(Self::headless(display, size)),
+        match &config.backend {
+            Backend::Headless {
+                outputs,
+                workspaces,
+            } => Ok(Self::Headless {
+                outputs: outputs.iter().map(|out| plug(display, out)).collect(),
+                workspaces: *workspaces,
+            }),
             #[cfg(feature = "seat")]
             Backend::Seat => Ok(Self::Seat(Box::new(seat::Session::open(
                 event_loop,
@@ -132,41 +177,35 @@ impl Running {
         }
     }
 
-    /// The headless backend: one output of `size`, advertised to clients, at
-    /// the origin of the global space.
-    pub(crate) fn headless(display: &DisplayHandle, size: (i32, i32)) -> Self {
-        let output = Output::new(
-            "perspicax-headless".to_owned(),
-            PhysicalProperties {
-                size: (0, 0).into(),
-                subpixel: Subpixel::Unknown,
-                make: "perspicax".to_owned(),
-                model: "virtual".to_owned(),
-            },
-        );
-        let mode = Mode {
-            size: size.into(),
-            refresh: 60_000,
-        };
-        output.change_current_state(
-            Some(mode),
-            Some(Transform::Normal),
-            Some(Scale::Integer(1)),
-            Some((0, 0).into()),
-        );
-        output.set_preferred(mode);
-        output.create_global::<Compositor>(display);
-        Self::Headless { output }
+    /// Every lit output, with where its config says it goes. What
+    /// [`Compositor::arrange_outputs`] places.
+    pub(crate) fn placements(&self) -> Vec<(Output, Place)> {
+        match self {
+            Self::Headless { outputs, .. } => outputs
+                .iter()
+                .map(|plugged| (plugged.output.clone(), plugged.place.clone()))
+                .collect(),
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.placements(),
+        }
     }
 
-    /// The outputs to map when the compositor is built. The seat has none
-    /// yet: its outputs arrive from the first connector scan, by the same path
-    /// a hotplugged monitor takes.
-    pub(crate) fn initial_outputs(&self) -> Vec<Output> {
+    /// How many workspaces, and whether they span the monitors.
+    pub(crate) fn workspace_shape(&self) -> Shape {
         match self {
-            Self::Headless { output } => vec![output.clone()],
+            Self::Headless { workspaces, .. } => *workspaces,
             #[cfg(feature = "seat")]
-            Self::Seat(_) => Vec::new(),
+            Self::Seat(session) => session.settings.workspaces,
+        }
+    }
+
+    /// How dragging a window to an edge snaps it: the person's config on a
+    /// seat. Headless nobody drags anything.
+    pub(crate) fn snapping(&self) -> Option<perspicax_policy::Snapping> {
+        match self {
+            Self::Headless { .. } => None,
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => Some(session.settings.snapping),
         }
     }
 
@@ -209,6 +248,7 @@ impl Running {
     ) -> Result<(), Error> {
         match state.backend {
             Self::Headless { .. } => {
+                state.arrange_outputs();
                 event_loop
                     .insert_source(Timer::immediate(), |_, (), state: &mut Compositor| {
                         state.send_frames();
@@ -293,6 +333,114 @@ impl Running {
             #[cfg(feature = "seat")]
             Self::Seat(session) => session.exit_requested(),
         }
+    }
+}
+
+/// A virtual output a headless compositor is running.
+pub(crate) struct Plugged {
+    pub(crate) output: Output,
+    place: Place,
+    global: GlobalId,
+}
+
+/// Bring a virtual monitor up and advertise it. Where it goes is decided
+/// afterwards, with every other output, by [`Compositor::arrange_outputs`].
+fn plug(display: &DisplayHandle, virtual_output: &Virtual) -> Plugged {
+    let output = Output::new(
+        virtual_output.name.clone(),
+        PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: "perspicax".to_owned(),
+            model: "virtual".to_owned(),
+        },
+    );
+    let mode = Mode {
+        size: virtual_output.size.into(),
+        refresh: 60_000,
+    };
+    output.change_current_state(
+        Some(mode),
+        Some(Transform::Normal),
+        Some(Scale::Integer(1)),
+        None,
+    );
+    output.set_preferred(mode);
+    let global = output.create_global::<Compositor>(display);
+    Plugged {
+        output,
+        place: virtual_output.place.clone(),
+        global,
+    }
+}
+
+impl Compositor {
+    /// Carry out a [`crate::Command`].
+    pub(crate) fn command(&mut self, command: &crate::Command) {
+        match command {
+            crate::Command::Plug(virtual_output) => self.plug_virtual(virtual_output),
+            crate::Command::Unplug(name) => self.unplug_virtual(name),
+            crate::Command::Perform(action) => self.perform(action),
+        }
+    }
+
+    /// Plug a virtual monitor into a headless compositor, the way a person
+    /// plugs one into a desk. A seat's monitors are its hardware's, so there
+    /// this is refused in the log and changes nothing.
+    pub(crate) fn plug_virtual(&mut self, virtual_output: &Virtual) {
+        let outputs = match &mut self.backend {
+            Running::Headless { outputs, .. } => outputs,
+            #[cfg(feature = "seat")]
+            Running::Seat(_) => {
+                tracing::warn!(
+                    name = virtual_output.name,
+                    "only a headless compositor has virtual outputs"
+                );
+                return;
+            }
+        };
+        if outputs
+            .iter()
+            .any(|plugged| plugged.output.name() == virtual_output.name)
+        {
+            tracing::warn!(name = virtual_output.name, "already plugged in");
+            return;
+        }
+        outputs.push(plug(&self.display, virtual_output));
+        self.arrange_outputs();
+    }
+
+    /// Unplug a virtual monitor. Its windows are rescued onto the monitors
+    /// that remain, as they are when a seat's monitor is unplugged.
+    pub(crate) fn unplug_virtual(&mut self, name: &str) {
+        let outputs = match &mut self.backend {
+            Running::Headless { outputs, .. } => outputs,
+            #[cfg(feature = "seat")]
+            Running::Seat(_) => {
+                tracing::warn!(name, "only a headless compositor has virtual outputs");
+                return;
+            }
+        };
+        let Some(at) = outputs
+            .iter()
+            .position(|plugged| plugged.output.name() == name)
+        else {
+            tracing::warn!(name, "no virtual output by that name");
+            return;
+        };
+        if outputs.len() == 1 {
+            tracing::warn!(
+                name,
+                "the last output stays: a compositor with none has nowhere to put a window"
+            );
+            return;
+        }
+        let gone = outputs.remove(at);
+        self.workspaces.forget_output(&gone.output.name());
+        crate::layers::close_on(&gone.output);
+        self.space.unmap_output(&gone.output);
+        self.display.remove_global::<Compositor>(gone.global);
+        self.arrange_outputs();
     }
 }
 

@@ -42,6 +42,7 @@ pub mod host;
 mod layers;
 mod lock;
 mod origin;
+mod outputs;
 mod shell;
 pub mod state;
 #[cfg(feature = "xwayland")]
@@ -49,15 +50,15 @@ mod xwayland;
 
 pub use crate::{
     act::{ActError, Dispatched},
-    backend::Backend,
+    backend::{Backend, Virtual},
     facts::Facts,
-    host::{Host, Request, Requests},
+    host::{Command, Host, Request, Requests},
 };
 
 use std::{
     ffi::OsString,
     path::PathBuf,
-    process::{Child, Command},
+    process::Child,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -76,7 +77,7 @@ use smithay::{
     wayland::socket::ListeningSocketSource,
 };
 
-use crate::{backend::Running, state::Compositor};
+use crate::{backend::Running, host::Inbound, state::Compositor};
 
 /// How often a headless compositor tells clients they may draw again, and the
 /// longest the loop sleeps between checks for a stop. 60 Hz, because that is
@@ -272,8 +273,13 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         event_loop
             .handle()
             .insert_source(inbox, |event, (), state: &mut Compositor| {
-                let ChannelEvent::Msg(request) = event else {
-                    return;
+                let request = match event {
+                    ChannelEvent::Msg(Inbound::Act(request)) => request,
+                    ChannelEvent::Msg(Inbound::Command(command)) => {
+                        state.command(&command);
+                        return;
+                    }
+                    ChannelEvent::Closed => return,
                 };
                 let outcome = state.act(request.surface, &request.action);
                 if let Err(ref error) = outcome {
@@ -387,7 +393,7 @@ impl Launch {
             command: String::new(),
             source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "an empty command"),
         })?;
-        let mut command_line = Command::new(program);
+        let mut command_line = std::process::Command::new(program);
         command_line
             .args(arguments)
             .envs(self.env.iter().map(|(key, value)| (key, value)))

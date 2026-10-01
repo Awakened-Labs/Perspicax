@@ -13,8 +13,9 @@
 //! focus policy ([`perspicax_policy::Focus`]), whose decision is then carried
 //! out here.
 
-use perspicax_node::SurfaceId;
-use perspicax_policy::{Action, Button, Change, Decision, Drag, Mods, cycle, edges_near};
+use std::time::Duration;
+
+use perspicax_policy::{Action, Button, Drag, Mods, arrival, edge_at, edges_near};
 use smithay::{
     backend::{
         input::{
@@ -28,9 +29,13 @@ use smithay::{
     desktop::{Window, WindowSurfaceType},
     input::{
         keyboard::{FilterResult, Keycode, ModifiersState},
-        pointer::{AxisFrame, ButtonEvent, GrabStartData, MotionEvent},
+        pointer::{AxisFrame, ButtonEvent, GrabStartData, MotionEvent, PointerHandle},
     },
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    output::Output,
+    reexports::{
+        calloop::timer::{TimeoutAction, Timer},
+        wayland_server::protocol::wl_surface::WlSurface,
+    },
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
 };
 
@@ -165,7 +170,7 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
 
     match taken {
         Some(Taken::Hatch(hatch)) => escape(state, hatch),
-        Some(Taken::Bound(action)) => perform(state, &action),
+        Some(Taken::Bound(action)) => state.perform(&action),
         Some(Taken::Release) | None => {}
     }
 }
@@ -188,59 +193,6 @@ fn escape(state: &mut Compositor, hatch: Hatch) {
     }
 }
 
-/// Carry out a binding.
-fn perform(state: &mut Compositor, action: &Action) {
-    match action {
-        Action::Close => {
-            let window = state
-                .focused_surface()
-                .and_then(|id| state.window_for_id(id));
-            if let Some(toplevel) = window.as_ref().and_then(Window::toplevel) {
-                toplevel.send_close();
-            }
-            #[cfg(feature = "xwayland")]
-            if let Some(x11) = window.as_ref().and_then(Window::x11_surface) {
-                let _ = x11.close();
-            }
-        }
-        Action::Spawn(command) => {
-            let launch = state.launch.clone();
-            if let Running::Seat(session) = &mut state.backend {
-                session.spawn(launch.as_ref(), command);
-            }
-        }
-        Action::MoveToOutput(towards) => {
-            if let Some(window) = state
-                .focused_surface()
-                .and_then(|id| state.window_for_id(id))
-            {
-                state.move_to_output(&window, *towards);
-            }
-        }
-        Action::Reload => settings::reload(state),
-        Action::CycleFocus => {
-            // Minimized windows count as below the bottom of the stack, so
-            // cycling reaches them first and brings them back: without a
-            // taskbar (W4), this is how a minimized window returns.
-            let stack: Vec<SurfaceId> = state
-                .minimized
-                .iter()
-                .chain(state.space.elements())
-                .filter_map(id_of)
-                .collect();
-            if let Some(next) = cycle(&stack) {
-                apply(
-                    state,
-                    Decision {
-                        focus: Change::To(next),
-                        raise: Some(next),
-                    },
-                );
-            }
-        }
-    }
-}
-
 /// The pointer moved to `to`, before confinement.
 fn moved(state: &mut Compositor, to: Point<f64, Logical>, time: u32) {
     let Some(handle) = state.pointer.clone() else {
@@ -251,7 +203,10 @@ fn moved(state: &mut Compositor, to: Point<f64, Logical>, time: u32) {
         .outputs()
         .filter_map(|output| state.space.output_geometry(output))
         .collect();
-    let at = pointer::confine(to, &outputs);
+    let mut at = pointer::confine(to, &outputs);
+    if let Some(arrived) = rest_at_edge(state, at) {
+        at = arrived;
+    }
     let under = under(state, at);
     // The focus policy is about windows. Over a panel it has nothing to say:
     // passing it the panel as "no window" would make strict focus drop the
@@ -276,7 +231,7 @@ fn moved(state: &mut Compositor, to: Point<f64, Logical>, time: u32) {
         && !over_layer
     {
         let decision = focus.pointer_over(over, state.focused_surface());
-        apply(state, decision);
+        state.apply_focus(decision);
     }
     // The cursor itself moved, whatever the policy decided.
     state.backend.redraw();
@@ -295,6 +250,10 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
         state: pressed,
     };
     if pressed == ButtonState::Pressed {
+        // A click at the edge of the screen is a click, not a flip.
+        if let Running::Seat(session) = &mut state.backend {
+            session.dwell.cancel();
+        }
         let hit = under(state, at);
         // A panel or launcher that takes the keyboard on a click gets it,
         // without anything being raised: layers stack by layer, not by click.
@@ -310,7 +269,7 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
         // any desktop.
         if let Some(focus) = policy(state) {
             let decision = focus.pressed(over.as_ref().and_then(id_of), state.focused_surface());
-            apply(state, decision);
+            state.apply_focus(decision);
         }
         // With the drag modifier held, the press is the compositor's: it
         // starts a move or resize, and the client never sees it.
@@ -361,6 +320,9 @@ fn axis(state: &mut Compositor, event: &impl PointerAxisEvent<LibinputInputBacke
     let Some(handle) = state.pointer.clone() else {
         return;
     };
+    if scroll_flips(state, event) {
+        return;
+    }
     let mut frame = AxisFrame::new(event.time_msec()).source(event.source());
     for direction in [Axis::Horizontal, Axis::Vertical] {
         let discrete = event.amount_v120(direction);
@@ -386,48 +348,131 @@ fn axis(state: &mut Compositor, event: &impl PointerAxisEvent<LibinputInputBacke
     handle.frame(state);
 }
 
-/// Carry out a focus decision.
-fn apply(state: &mut Compositor, decision: Decision<SurfaceId>) {
-    if decision == Decision::none() {
+/// Milliseconds since the session started: the clock the edge dwell runs on.
+fn clock(state: &Compositor) -> u64 {
+    u64::try_from(state.started_at().elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The pointer is at `at`: feed the edge dwell, and flip the workspace if it
+/// has rested against an outer edge of the desk long enough. Returns where
+/// the pointer goes instead, across the desk, when it flipped.
+///
+/// Off while a button is held, unless that button is dragging a window and
+/// the config says a drag flips too; then the window goes with it.
+fn rest_at_edge(state: &mut Compositor, at: Point<f64, Logical>) -> Option<Point<f64, Logical>> {
+    let Running::Seat(session) = &state.backend else {
+        return None;
+    };
+    let flipping = session.settings.flipping;
+    let grabbed = state
+        .pointer
+        .as_ref()
+        .is_some_and(PointerHandle::is_grabbed);
+    let carrying = state.dragging.clone();
+    let allowed = flipping.edge && (!grabbed || (carrying.is_some() && flipping.while_dragging));
+    let edge = if allowed {
+        edge_at((at.x, at.y), &state.output_rects())
+    } else {
+        None
+    };
+    let now = clock(state);
+    let Running::Seat(session) = &mut state.backend else {
+        return None;
+    };
+    let flip = session.dwell.feed(edge, now);
+    arm_dwell(session, now);
+    let direction = flip?;
+
+    let output = state.space.output_under(at).next()?.clone();
+    if !state.flip(&output.name(), direction, carrying.as_ref()) {
+        return None;
+    }
+    // Spanning, the desk is one big screen and the pointer comes round to
+    // its far side. Per output, only this monitor flipped, and the pointer
+    // comes round to the far side of this monitor.
+    let rects = match state.workspaces.shape().mode {
+        perspicax_policy::Mode::Spanning => state.output_rects(),
+        perspicax_policy::Mode::PerOutput => {
+            vec![crate::shell::rect(state.space.output_geometry(&output)?)]
+        }
+    };
+    Some(arrival((at.x, at.y), direction, &rects).into())
+}
+
+/// Arm a timer for when the edge dwell is due, if it is due and no timer is
+/// armed for that moment already. A pointer resting against an edge sends no
+/// motion, so without this the rest would never be noticed to have lasted.
+fn arm_dwell(session: &mut super::Session, now: u64) {
+    let due = session.dwell.due();
+    if due.is_none() || due == session.dwell_armed {
         return;
     }
-    let targets = [
-        match decision.focus {
-            Change::To(id) => Some(id),
-            _ => None,
-        },
-        decision.raise,
-    ];
-    let parked: Vec<_> = targets
-        .into_iter()
-        .flatten()
-        .filter_map(|id| state.minimized_with(id))
-        .collect();
-    for window in parked {
-        state.restore(&window);
-    }
-    match decision.focus {
-        Change::Keep => {}
-        Change::To(id) => {
-            let surface = state
-                .window_for_id(id)
-                .and_then(|window| crate::shell::surface_of(&window));
-            if let Some(surface) = surface {
-                state.focus_surface(surface, id);
+    session.dwell_armed = due;
+    let wait = Duration::from_millis(due.unwrap_or(now).saturating_sub(now));
+    let armed = session
+        .handle
+        .insert_source(Timer::from_duration(wait), |_, (), state| {
+            if let Running::Seat(session) = &mut state.backend {
+                session.dwell_armed = None;
             }
-        }
-        Change::Clear => {
-            if let Some(keyboard) = state.keyboard.clone() {
-                keyboard.set_focus(state, None, SERIAL_COUNTER.next_serial());
+            if let Some(at) = state.pointer.as_ref().map(PointerHandle::current_location) {
+                // Through `moved`, so a flip warps the pointer exactly as a
+                // motion that flipped would.
+                let time = u32::try_from(clock(state)).unwrap_or(u32::MAX);
+                moved(state, at, time);
             }
+            TimeoutAction::Drop
+        });
+    if let Err(error) = armed {
+        tracing::warn!(%error, "could not arm the edge-flip timer");
+    }
+}
+
+/// A scroll over the desktop, with scroll flipping on: step the workspace
+/// under the pointer once per notch, down and right forward, up and left
+/// back. Returns whether the scroll was the compositor's, in which case no
+/// client hears of it.
+fn scroll_flips(
+    state: &mut Compositor,
+    event: &impl PointerAxisEvent<LibinputInputBackend>,
+) -> bool {
+    let Running::Seat(session) = &state.backend else {
+        return false;
+    };
+    if !session.settings.flipping.scroll || state.lock.is_some() {
+        return false;
+    }
+    let Some(pointer) = state.pointer.clone() else {
+        return false;
+    };
+    if pointer.is_grabbed() {
+        return false;
+    }
+    let at = pointer.current_location();
+    let over_root = state.layer_surface_under(&layers::ABOVE, at).is_none()
+        && state.space.element_under(at).is_none();
+    if !over_root {
+        return false;
+    }
+    let Some(output) = state.space.output_under(at).next().map(Output::name) else {
+        return false;
+    };
+    let Running::Seat(session) = &mut state.backend else {
+        return false;
+    };
+    let mut notches = 0;
+    for axis in [Axis::Vertical, Axis::Horizontal] {
+        if event.source() == AxisSource::Finger && event.amount(axis) == Some(0.0) {
+            session.notches.reset();
         }
+        notches += session
+            .notches
+            .feed(event.amount_v120(axis), event.amount(axis).unwrap_or(0.0));
     }
-    if let Some(window) = decision.raise.and_then(|id| state.window_for_id(id)) {
-        state.space.raise_element(&window, false);
-        state.backend.redraw();
+    for _ in 0..notches.unsigned_abs() {
+        state.scroll_workspace(&output, notches > 0);
     }
-    // Focus and stacking are both facts the index judges against.
-    state.publish_facts();
+    true
 }
 
 /// What the pointer is over.

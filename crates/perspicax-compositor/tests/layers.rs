@@ -59,7 +59,7 @@ fn a_panel_on_the_top_layer_occludes_the_window_beneath_it() {
         let (facts, stop, socket) = (facts.clone(), stop.clone(), socket.clone());
         thread::spawn(move || {
             let config = Config {
-                backend: Backend::Headless { size: (800, 600) },
+                backend: Backend::headless((800, 600)),
                 spawn: Vec::new(),
                 env: Vec::new(),
                 run_for: Some(Duration::from_secs(30)),

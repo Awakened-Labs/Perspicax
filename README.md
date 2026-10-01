@@ -49,7 +49,7 @@ perspicax              the composition root — one binary, `perspicax --headles
 perspicax-mcp          MCP server (rmcp, stdio) — six tools, DTOs, receipts  [portable]
 perspicax-index        node cache, stable ids, selectors, deltas, refusals  [portable]
 perspicax-node         node schema — AccessKit types plus Origin and Visibility
-perspicax-policy       WM decisions as data — focus, bindings, placement, resize  [portable]
+perspicax-policy       WM decisions as data — focus, bindings, placement, monitors, workspaces, snapping  [portable]
 perspicax-config       config.toml — schema, classic/minimal profiles, feature check  [portable]
 perspicax-atspi        impl Ingest — AT-SPI2 over D-Bus
 perspicax-compositor   impl HostView — Smithay: outputs, seat, damage. Headless draws nothing.
@@ -86,8 +86,8 @@ feature, never silently ignored.
 
 | | | |
 |---|---|---|
-| **W1** | A usable session: DRM from a TTY, libinput, move/resize, keybinds, multi-monitor, clipboard, layer-shell and session-lock (so waybar, fuzzel and swaylock work), Xwayland | in progress |
-| **W2** | Config profiles (`classic`, `minimal`) and policy: focus models, a workspace grid with edge flipping, moving between screens, snapping | |
+| **W1** | A usable session: DRM from a TTY, libinput, move/resize, keybinds, multi-monitor, clipboard, layer-shell and session-lock (so waybar, fuzzel and swaylock work), Xwayland | done |
+| **W2** | Config profiles (`classic`, `minimal`) and policy: focus models, a workspace grid with edge flipping, moving between screens, snapping | done |
 | **W3** | Server-side decorations, then tabbed window groups | |
 | **W4** | Protocols Smithay lacks: foreign-toplevel management, ext-workspace, screencopy, output management — and `screenshot` stops refusing | |
 | **W5** | `perspicax-shell`, a separate process: wallpaper, panel, tray, start menu, root menu, desktop icons — each a feature and a toggle | |
@@ -229,7 +229,10 @@ so a recoverable situation does not become a retry loop:
 ```
 
 `observe` reports the same verdict per node, as `actable` plus `refused`, so an
-agent sees an occlusion before it spends a call discovering one.
+agent sees an occlusion before it spends a call discovering one. A window on a
+workspace that is not showing is refused as `other_workspace`, naming the
+workspace, and a node hanging off the edge of every monitor as `off_screen`.
+Neither is cleared by the agent switching the person's screen on its own.
 
 **Text an application rendered is marked as such.** Every string reaches an
 agent under `untrusted_text`, beside the credentials of the process that drew
@@ -309,10 +312,23 @@ X11 window's origin says so: the X client's pid comes from the X server's
 X-Resource answer rather than the kernel, and every X client shares one consent
 decision, because X11 lets them read and drive each other.
 
-The session reads `$XDG_CONFIG_HOME/perspicax/config.toml` (or `--config PATH`).
-Without one it runs the `classic` profile: click to focus, Alt+F4, Alt+Tab,
-Alt+drag to move and Alt+right-drag to resize, Logo+Shift+Left/Right to move a
-window between screens, Logo+Shift+R to reload. Every key below is optional and
+The session reads `$XDG_CONFIG_HOME/perspicax/config.toml` (or `--config PATH`),
+and reads it again whenever it is saved. Without one it runs the `classic`
+profile, which is Plasma's and Windows' habits:
+
+- click to focus, Alt+F4, Alt+Tab;
+- Alt+drag to move and Alt+right-drag to resize;
+- four workspaces in a row: Ctrl+Logo+arrows switches, add Shift to take the
+  focused window along, Ctrl+F1…F4 goes straight to one;
+- dragging a window to an edge of the desk snaps it to half the monitor, a
+  corner to a quarter, the top to maximized, with Logo+arrows to do the same
+  from the keyboard;
+- Logo+Shift+Left/Right moves a window between screens, Logo+Shift+R reloads.
+
+`minimal` is Fluxbox's and Enlightenment's: focus follows the pointer, a 2×2
+grid of workspaces that wraps, and resting the pointer against an edge of the
+desk flips to the next one, taking along a window being dragged, as does
+scrolling over the desktop. It does not snap. Every key below is optional and
 overrides the profile one setting at a time. A misspelled key, or a key for a
 feature this build left out, is refused with its name rather than ignored.
 
@@ -339,10 +355,31 @@ repeat-rate = 30
 natural-scroll = true
 tap-to-click = true
 
+[workspaces]
+mode = "spanning"              # one workspace across every monitor, switched
+                               # together; "per-output" flips each on its own
+grid = [3, 2]                  # columns, rows
+wrap = true
+
+[workspaces.flip]
+edge = true                    # rest the pointer on an outer edge of the desk
+delay-ms = 300
+while-dragging = true          # and take the window being dragged along
+scroll = true                  # scroll over the desktop
+
+[snap]
+drag = true
+threshold = 4                  # pixels from the edge
+
 [[output]]
 name = "DP-1"
 mode = "2560x1440@144"
-position = [0, 0]
+
+[[output]]
+name = "HDMI-A-1"
+right-of = "DP-1"              # or left-of, above, below; or position = [x, y]
+offset = 180                   # along the shared edge: lower a smaller monitor
+scale = 1.25
 
 [[output]]
 name = "eDP-1"
@@ -350,6 +387,20 @@ enable = false
 
 autostart = [["waybar"], ["swaybg", "-i", "/home/me/wall.png"]]
 ```
+
+Monitors are placed relative to each other, so the layout survives one being
+unplugged: a monitor beside one that is missing goes to the right of the
+rest, and windows left on a monitor that goes away come onto the nearest one
+that remains. Only the outer edges of the desk flip and snap; between two
+monitors the pointer passes through.
+
+None of that needs a second monitor to try. `--headless --size 2560x1440
+--size 1920x1080` runs two virtual ones, which is what the live tests in
+`crates/perspicax-compositor/tests/` do. On a seat, the kernel will light a
+connector with nothing plugged into it on request (`echo on | sudo tee
+/sys/class/drm/card1-HDMI-A-1/status`, and `detect` to undo it), and
+perspicax treats it as a monitor nobody can see: the pointer crosses into it,
+windows can be sent there and back, and unplugging it rescues them.
 
 Gates, in the order CI runs them:
 

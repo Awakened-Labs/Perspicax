@@ -211,8 +211,9 @@ impl From<Rect> for Bounds {
 /// recoverable situation into a retry loop.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Refused {
-    /// One of `occluded`, `clipped`, `unmapped`, `unjudged`, `unattributed`,
-    /// `stale`, `no_capability`, `ambiguous_selector`, `not_found`.
+    /// One of `occluded`, `clipped`, `unmapped`, `off_screen`,
+    /// `other_workspace`, `unjudged`, `unattributed`, `stale`,
+    /// `no_capability`, `ambiguous_selector`, `not_found`.
     pub kind: &'static str,
     /// The refusal in words.
     pub message: String,
@@ -227,6 +228,9 @@ pub struct Refused {
     /// index into it with `[n]`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matches: Option<usize>,
+    /// `other_workspace`: the workspace the window is on, counting from 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<u16>,
 }
 
 impl From<&Refusal> for Refused {
@@ -236,6 +240,8 @@ impl From<&Refusal> for Refused {
                 Refusal::Occluded { .. } => "occluded",
                 Refusal::Clipped => "clipped",
                 Refusal::Unmapped => "unmapped",
+                Refusal::OffScreen => "off_screen",
+                Refusal::OtherWorkspace { .. } => "other_workspace",
                 Refusal::Unjudged => "unjudged",
                 Refusal::Unattributed => "unattributed",
                 Refusal::Stale { .. } => "stale",
@@ -247,11 +253,13 @@ impl From<&Refusal> for Refused {
             occluded_by: None,
             frames: None,
             matches: None,
+            workspace: None,
         };
         match refusal {
             Refusal::Occluded { by } => refused.occluded_by = Some(by.0),
             Refusal::Stale { frames } => refused.frames = Some(*frames),
             Refusal::AmbiguousSelector { matches } => refused.matches = Some(*matches),
+            Refusal::OtherWorkspace { workspace } => refused.workspace = Some(*workspace),
             _ => {}
         }
         refused

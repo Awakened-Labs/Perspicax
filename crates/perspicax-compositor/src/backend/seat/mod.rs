@@ -23,8 +23,7 @@
 //! # What is not here yet
 //!
 //! One GPU: the primary. A second card's connectors are ignored, and said so
-//! in the log. Every output is at scale 1; scale and layout come with config
-//! (slice 5).
+//! in the log.
 
 use std::{path::PathBuf, sync::Once};
 
@@ -49,6 +48,7 @@ use smithay::{
                 Kind,
                 memory::MemoryRenderBufferRenderElement,
                 render_elements,
+                solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
             },
             gles::GlesRenderer,
@@ -83,18 +83,25 @@ use crate::{Error, state::Compositor};
 mod input;
 mod settings;
 
-pub(crate) use settings::populate;
+pub(crate) use settings::{populate, reload};
 
 type Allocator = GbmAllocator<DrmDeviceFd>;
 type Exporter = GbmFramebufferExporter<DrmDeviceFd>;
 
 render_elements! {
-    /// What one output shows, front to back: the pointer, then the windows.
+    /// What one output shows, front to back: the pointer, a snap preview,
+    /// then the windows.
     Elements<=GlesRenderer>;
     Space=SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
     Cursor=MemoryRenderBufferRenderElement<GlesRenderer>,
     CursorSurface=WaylandSurfaceRenderElement<GlesRenderer>,
+    Preview=SolidColorRenderElement,
 }
+
+/// Where a dragged window would snap: a pale wash over the zone, light enough
+/// to see the windows through, distinct enough from the backdrop to read.
+const PREVIEW: [f32; 4] = [0.55, 0.7, 0.95, 1.0];
+const PREVIEW_ALPHA: f32 = 0.25;
 
 /// What shows where no window is: a dark grey, so a working output is
 /// distinguishable from a dead one. The wallpaper is the shell's job (W5).
@@ -142,6 +149,9 @@ pub(crate) struct Session {
     /// Where it was read from, for the reload binding. `None` means the
     /// classic profile, with nothing to re-read.
     config_path: Option<PathBuf>,
+    /// A save of the config was heard and its reload is waiting for the
+    /// saves to settle.
+    reload_pending: bool,
     /// Every input device libinput has handed us, so pointer settings can be
     /// applied to each, and again on reload.
     devices: Vec<smithay::reexports::input::Device>,
@@ -149,6 +159,17 @@ pub(crate) struct Session {
     /// stopped with it and reaped as they exit.
     children: Vec<std::process::Child>,
     cursor: Cursor,
+    /// The snap preview's colour and size, kept so the damage tracker can
+    /// tell a preview that moved from one that did not.
+    preview: SolidColorBuffer,
+    /// The pointer resting against an edge of the desk, on its way to a
+    /// workspace flip. See [`input`].
+    pub(super) dwell: perspicax_policy::EdgeDwell,
+    /// When the timer for `dwell` is armed for, so a pointer pressed against
+    /// an edge arms one timer rather than one per motion event.
+    pub(super) dwell_armed: Option<u64>,
+    /// Scroll over the desktop, gathered into whole notches.
+    pub(super) notches: perspicax_policy::Notches,
     /// False while another VT has the seat: no device may be touched then.
     active: bool,
     pub(super) exit: bool,
@@ -281,6 +302,8 @@ impl Session {
             })
             .map_err(|error| Error::EventLoop(error.to_string()))?;
 
+        let dwell = perspicax_policy::EdgeDwell::new(settings.flipping.delay_ms);
+        settings::watch(handle, config_path.as_deref());
         Ok(Self {
             seat,
             libinput,
@@ -292,9 +315,14 @@ impl Session {
             swallowed: Vec::new(),
             settings,
             config_path,
+            reload_pending: false,
             devices: Vec::new(),
             children: Vec::new(),
             cursor: Cursor::load(),
+            preview: SolidColorBuffer::new((1, 1), PREVIEW),
+            dwell,
+            dwell_armed: None,
+            notches: perspicax_policy::Notches::default(),
             active: true,
             exit: false,
         })
@@ -319,6 +347,24 @@ impl Session {
 
     pub(crate) fn exit_requested(&self) -> bool {
         self.exit
+    }
+
+    /// Every lit monitor, with where its `[[output]]` rule places it.
+    pub(crate) fn placements(&self) -> Vec<(Output, perspicax_policy::Place)> {
+        self.heads
+            .iter()
+            .map(|head| {
+                let name = head.output.name();
+                let place = self
+                    .settings
+                    .outputs
+                    .iter()
+                    .find(|rule| rule.name == name)
+                    .map(|rule| rule.place.clone())
+                    .unwrap_or_default();
+                (head.output.clone(), place)
+            })
+            .collect()
     }
 }
 
@@ -413,7 +459,8 @@ fn renderer(gbm: &GbmDevice<DrmDeviceFd>) -> Result<GlesRenderer, Error> {
 }
 
 /// Scan the primary GPU's connectors and bring the outputs into line: tear
-/// down what was unplugged, light what was plugged in.
+/// down what was unplugged, light what was plugged in, then place them all
+/// (see [`Compositor::arrange_outputs`]).
 fn rescan(state: &mut Compositor) {
     let Running::Seat(session) = &mut state.backend else {
         return;
@@ -472,21 +519,10 @@ fn rescan(state: &mut Compositor) {
         let Some((info, _)) = connected.iter().find(|(info, _)| info.handle() == handle) else {
             continue;
         };
-        // Without a position in config, the right edge of what is already
-        // mapped, so monitors line up left to right in the order they were
-        // found.
-        let x = state
-            .space
-            .outputs()
-            .filter_map(|output| state.space.output_geometry(output))
-            .map(|geometry| geometry.loc.x + geometry.size.w)
-            .max()
-            .unwrap_or(0);
-        match light(session, &state.display, info, crtc, (x, 0)) {
+        // Lit now, placed below once every new monitor's size is known.
+        match light(session, &state.display, info, crtc) {
             Ok(Some(head)) => {
-                let at = head.output.current_location();
-                tracing::info!(output = head.output.name(), ?at, "monitor lit");
-                state.space.map_output(&head.output, at);
+                tracing::info!(output = head.output.name(), "monitor lit");
                 session.heads.push(head);
             }
             Ok(None) => {}
@@ -494,6 +530,7 @@ fn rescan(state: &mut Compositor) {
         }
     }
     session.request_frames();
+    state.arrange_outputs();
 }
 
 /// Tear every output down and light them again from the config. A modeset
@@ -511,15 +548,14 @@ fn relight(state: &mut Compositor) {
     rescan(state);
 }
 
-/// Bring one connector up on one CRTC, as its config rule says: at the mode,
-/// position and scale asked for, or the preferred mode at `beside`. `Ok(None)`
-/// for a monitor the config turned off.
+/// Bring one connector up on one CRTC, as its config rule says: at the mode
+/// and scale asked for, or the preferred mode. Where it goes is decided after,
+/// with every other monitor. `Ok(None)` for a monitor the config turned off.
 fn light(
     session: &mut Session,
     display: &smithay::reexports::wayland_server::DisplayHandle,
     info: &connector::Info,
     crtc: crtc::Handle,
-    beside: (i32, i32),
 ) -> Result<Option<Head>, String> {
     let name = format!("{}-{}", info.interface().as_str(), info.interface_id());
     let rule = session
@@ -581,14 +617,8 @@ fn light(
         Some(scale) => Scale::Fractional(scale),
         None => Scale::Integer(1),
     };
-    let position = rule.and_then(|rule| rule.position).unwrap_or(beside);
     output.set_preferred(wl_mode);
-    output.change_current_state(
-        Some(wl_mode),
-        Some(Transform::Normal),
-        Some(scale),
-        Some(position.into()),
-    );
+    output.change_current_state(Some(wl_mode), Some(Transform::Normal), Some(scale), None);
 
     let drm = session
         .outputs
@@ -628,6 +658,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         space,
         cursor: status,
         lock,
+        snap_preview,
         ..
     } = state;
     let Running::Seat(session) = backend else {
@@ -638,6 +669,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         heads,
         active,
         cursor,
+        preview,
         ..
     } = &mut **session;
     let Some(head) = heads.iter_mut().find(|head| head.crtc == crtc) else {
@@ -667,6 +699,25 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         }
         _ => Vec::new(),
     };
+    // Under the pointer and over the windows: where the window being dragged
+    // would snap, on the output it would snap on.
+    if let (Some(snap), Some(geometry), None) = (
+        snap_preview.as_ref(),
+        space.output_geometry(&head.output),
+        lock.as_ref(),
+    ) && snap.output == head.output
+    {
+        let scale = head.output.current_scale().fractional_scale();
+        preview.update(snap.area.size, PREVIEW);
+        let at = (snap.area.loc - geometry.loc).to_physical_precise_round(scale);
+        elements.push(Elements::Preview(SolidColorRenderElement::from_buffer(
+            preview,
+            at,
+            scale,
+            PREVIEW_ALPHA,
+            Kind::Unspecified,
+        )));
+    }
     // Locked: the lock surface for this output and nothing else. An output
     // whose lock surface has not arrived yet shows only the backdrop, never
     // the windows it is covering.

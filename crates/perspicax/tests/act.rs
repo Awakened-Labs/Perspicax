@@ -276,7 +276,7 @@ fn run(spawn: Vec<Vec<String>>) -> Drive {
     // so a `Host` built from a second channel would be one nobody hears.
     let requests = Requests::new();
     let config = Config {
-        backend: Backend::Headless { size: (1280, 800) },
+        backend: Backend::headless((1280, 800)),
         spawn,
         env: session::accessibility_env(),
         run_for: Some(Duration::from_secs(180)),

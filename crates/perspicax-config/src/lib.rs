@@ -23,7 +23,10 @@ mod keys;
 
 use std::path::{Path, PathBuf};
 
-use perspicax_policy::{Action, Bindings, Chord, Focus, FocusModel, Keysym, Mods, Towards};
+use perspicax_policy::{
+    Action, Bindings, Chord, Direction, Flipping, Focus, FocusModel, Grid, Keysym, Mods, Place,
+    Shape, Side, Snapping, Towards,
+};
 use serde::Deserialize;
 
 /// Which cargo features this binary was built with, as far as config cares.
@@ -58,11 +61,21 @@ pub struct Config {
     pub pointer: Pointer,
     /// Per-output settings, matched by connector name (`DP-1`, `HDMI-A-1`).
     /// An output with no rule is lit at its preferred mode, to the right of
-    /// the others.
+    /// the others. Where each one goes is resolved by
+    /// [`perspicax_policy::arrange`] once every monitor's size is known.
     pub outputs: Vec<OutputRule>,
     /// Programs to start once the session is up, each a program and its
     /// arguments. The person's programs: none is granted agent consent.
     pub autostart: Vec<Vec<String>>,
+    /// How many workspaces, in what grid, and whether one spans every
+    /// monitor or each monitor has its own.
+    pub workspaces: Shape,
+    /// Changing workspace with the pointer: resting it on an edge of the
+    /// desk, or scrolling over the desktop.
+    pub flipping: Flipping,
+    /// Dragging a window to an edge of the desk to give it half or a quarter
+    /// of a monitor.
+    pub snapping: Snapping,
     /// Whether X11 applications get an Xwayland. Only meaningful in a build
     /// with the `xwayland` feature; saying `true` in one without it is an
     /// error.
@@ -111,6 +124,10 @@ pub struct Pointer {
     pub left_handed: Option<bool>,
 }
 
+/// The most workspaces along one side of the grid. Generous: past this, a
+/// grid is a typo, and a 1000x1000 one would be a million workspaces.
+const GRID_SIDE: u16 = 16;
+
 /// What to do with one output.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputRule {
@@ -120,9 +137,10 @@ pub struct OutputRule {
     pub enable: bool,
     /// A mode to use instead of the preferred one.
     pub mode: Option<Mode>,
-    /// Where its top-left corner goes in the global space, instead of to the
-    /// right of the outputs already lit.
-    pub position: Option<(i32, i32)>,
+    /// Where it goes: beside another output (`right-of = "DP-1"`, with an
+    /// `offset` along the shared edge), at an absolute `position`, or, with
+    /// neither, to the right of the others.
+    pub place: Place,
     pub scale: Option<f64>,
 }
 
@@ -180,7 +198,7 @@ impl Config {
             },
             key,
         };
-        let bindings = Bindings::classic()
+        let mut bindings = Bindings::classic()
             .bind(
                 logo_shift(Keysym::Right),
                 Action::MoveToOutput(Towards::Next),
@@ -190,6 +208,100 @@ impl Config {
                 Action::MoveToOutput(Towards::Previous),
             )
             .bind(logo_shift(Keysym::r), Action::Reload);
+
+        // Workspaces. Ctrl+Logo+arrows switches and, with Shift, takes the
+        // focused window along, in both profiles: Plasma's keys, and Windows'
+        // for left and right. Classic adds Plasma's Ctrl+F1..F4; minimal adds
+        // Ctrl+Alt+arrows, the old X window managers' habit.
+        let arrows = [
+            (Keysym::Left, Direction::Left),
+            (Keysym::Right, Direction::Right),
+            (Keysym::Up, Direction::Up),
+            (Keysym::Down, Direction::Down),
+        ];
+        let held = |ctrl, alt, shift, logo| Mods {
+            ctrl,
+            alt,
+            shift,
+            logo,
+        };
+        for (key, direction) in arrows {
+            bindings = bindings
+                .bind(
+                    Chord {
+                        mods: held(true, false, false, true),
+                        key,
+                    },
+                    Action::Workspace(direction),
+                )
+                .bind(
+                    Chord {
+                        mods: held(true, false, true, true),
+                        key,
+                    },
+                    Action::CarryToWorkspace(direction),
+                );
+            if profile == Profile::Minimal {
+                bindings = bindings
+                    .bind(
+                        Chord {
+                            mods: held(true, true, false, false),
+                            key,
+                        },
+                        Action::Workspace(direction),
+                    )
+                    .bind(
+                        Chord {
+                            mods: held(true, true, true, false),
+                            key,
+                        },
+                        Action::CarryToWorkspace(direction),
+                    );
+            }
+        }
+        if profile == Profile::Classic {
+            // Windows' snapping keys.
+            for (key, direction) in arrows {
+                bindings = bindings.bind(
+                    Chord {
+                        mods: held(false, false, false, true),
+                        key,
+                    },
+                    Action::Snap(direction),
+                );
+            }
+            let f_keys = [Keysym::F1, Keysym::F2, Keysym::F3, Keysym::F4];
+            for (number, key) in (1..).zip(f_keys) {
+                bindings = bindings.bind(
+                    Chord {
+                        mods: held(true, false, false, false),
+                        key,
+                    },
+                    Action::GoToWorkspace(number),
+                );
+            }
+        }
+        let workspaces = match profile {
+            // Plasma's default since 5.x when more than one is asked for, and
+            // Windows' task view: a row, so left and right are all there is.
+            Profile::Classic => Shape {
+                mode: perspicax_policy::Mode::Spanning,
+                grid: Grid {
+                    columns: 4,
+                    rows: 1,
+                    wrap: false,
+                },
+            },
+            // A square to flip around, wrapping, as Fluxbox and E do.
+            Profile::Minimal => Shape {
+                mode: perspicax_policy::Mode::Spanning,
+                grid: Grid {
+                    columns: 2,
+                    rows: 2,
+                    wrap: true,
+                },
+            },
+        };
         Self {
             profile,
             focus,
@@ -198,6 +310,22 @@ impl Config {
             pointer: Pointer::default(),
             outputs: Vec::new(),
             autostart: Vec::new(),
+            workspaces,
+            snapping: Snapping {
+                drag: profile == Profile::Classic,
+                ..Snapping::default()
+            },
+            flipping: match profile {
+                Profile::Classic => Flipping::default(),
+                // The Fluxbox and Enlightenment habit: the desk is a loop the
+                // pointer travels round, window in hand or not.
+                Profile::Minimal => Flipping {
+                    edge: true,
+                    delay_ms: 300,
+                    while_dragging: true,
+                    scroll: true,
+                },
+            },
             xwayland: built.xwayland,
         }
     }
@@ -266,6 +394,43 @@ struct Raw {
     #[serde(default)]
     autostart: Vec<Vec<String>>,
     xwayland: Option<bool>,
+    workspaces: Option<RawWorkspaces>,
+    snap: Option<RawSnap>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawSnap {
+    drag: Option<bool>,
+    threshold: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawWorkspaces {
+    mode: Option<RawSpread>,
+    grid: Option<[u16; 2]>,
+    wrap: Option<bool>,
+    flip: Option<RawFlip>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawFlip {
+    edge: Option<bool>,
+    delay_ms: Option<u64>,
+    while_dragging: Option<bool>,
+    scroll: Option<bool>,
+}
+
+/// Longer than this and a person would think edge flipping was broken.
+const FLIP_DELAY_MAX_MS: u64 = 5000;
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawSpread {
+    Spanning,
+    PerOutput,
 }
 
 #[derive(Debug, Deserialize)]
@@ -326,12 +491,17 @@ struct RawPointer {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct RawOutput {
     name: String,
     enable: Option<bool>,
     mode: Option<String>,
     position: Option<[i32; 2]>,
+    left_of: Option<String>,
+    right_of: Option<String>,
+    above: Option<String>,
+    below: Option<String>,
+    offset: Option<i32>,
     scale: Option<f64>,
 }
 
@@ -429,6 +599,65 @@ impl Raw {
             seen.push(output.name.clone());
             config.outputs.push(output.apply()?);
         }
+        if let Some(name) = cycle(&config.outputs) {
+            return Err(invalid(
+                format!("output.{name}"),
+                "is placed beside an output that is, in the end, placed beside it".to_owned(),
+            ));
+        }
+
+        if let Some(workspaces) = self.workspaces {
+            if let Some(mode) = workspaces.mode {
+                config.workspaces.mode = match mode {
+                    RawSpread::Spanning => perspicax_policy::Mode::Spanning,
+                    RawSpread::PerOutput => perspicax_policy::Mode::PerOutput,
+                };
+            }
+            if let Some([columns, rows]) = workspaces.grid {
+                if !(1..=GRID_SIDE).contains(&columns) || !(1..=GRID_SIDE).contains(&rows) {
+                    return Err(invalid(
+                        "workspaces.grid".to_owned(),
+                        format!(
+                            "[{columns}, {rows}] is not a grid; each side is 1 to {GRID_SIDE} \
+                             workspaces, columns first"
+                        ),
+                    ));
+                }
+                config.workspaces.grid.columns = columns;
+                config.workspaces.grid.rows = rows;
+            }
+            if let Some(wrap) = workspaces.wrap {
+                config.workspaces.grid.wrap = wrap;
+            }
+            if let Some(flip) = workspaces.flip {
+                if let Some(delay) = flip.delay_ms {
+                    if delay > FLIP_DELAY_MAX_MS {
+                        return Err(invalid(
+                            "workspaces.flip.delay-ms".to_owned(),
+                            format!("{delay} is more than {FLIP_DELAY_MAX_MS} milliseconds"),
+                        ));
+                    }
+                    config.flipping.delay_ms = delay;
+                }
+                let flipping = &mut config.flipping;
+                flipping.edge = flip.edge.unwrap_or(flipping.edge);
+                flipping.while_dragging = flip.while_dragging.unwrap_or(flipping.while_dragging);
+                flipping.scroll = flip.scroll.unwrap_or(flipping.scroll);
+            }
+        }
+
+        if let Some(snap) = self.snap {
+            if let Some(threshold) = snap.threshold {
+                if !(1..=64).contains(&threshold) {
+                    return Err(invalid(
+                        "snap.threshold".to_owned(),
+                        format!("{threshold} is outside 1 to 64 pixels"),
+                    ));
+                }
+                config.snapping.threshold = threshold;
+            }
+            config.snapping.drag = snap.drag.unwrap_or(config.snapping.drag);
+        }
 
         if let Some(empty) = self.autostart.iter().position(Vec::is_empty) {
             return Err(invalid(
@@ -485,14 +714,91 @@ impl RawOutput {
                 format!("{scale} is outside 0.5 to 4"),
             ));
         }
+        let place = self.place(&key)?;
         Ok(OutputRule {
             name: self.name,
             enable: self.enable.unwrap_or(true),
             mode,
-            position: self.position.map(|[x, y]| (x, y)),
+            place,
             scale: self.scale,
         })
     }
+
+    /// At most one of `position`, `left-of`, `right-of`, `above` and `below`,
+    /// and an `offset` only with a side to be offset along.
+    fn place(&self, key: &str) -> Result<Place, Error> {
+        let sides = [
+            ("left-of", Side::LeftOf, &self.left_of),
+            ("right-of", Side::RightOf, &self.right_of),
+            ("above", Side::Above, &self.above),
+            ("below", Side::Below, &self.below),
+        ];
+        let mut written = sides
+            .iter()
+            .filter_map(|(word, side, of)| of.as_ref().map(|of| (*word, *side, of)));
+        let beside = written.next();
+        if let Some((second, _, _)) = written.next() {
+            return Err(invalid(
+                format!("{key}.{second}"),
+                format!(
+                    "an output goes on one side of another; `{}` is already written",
+                    beside.map_or("", |(word, _, _)| word)
+                ),
+            ));
+        }
+        match (self.position, beside) {
+            (Some(_), Some((word, _, _))) => Err(invalid(
+                format!("{key}.{word}"),
+                "`position` already says where this output goes; write one or the other".to_owned(),
+            )),
+            (Some(_), None) | (None, None) if self.offset.is_some() => Err(invalid(
+                format!("{key}.offset"),
+                "an offset is along the edge shared with another output; say which, with \
+                 left-of, right-of, above or below"
+                    .to_owned(),
+            )),
+            (Some([x, y]), None) => Ok(Place::At(x, y)),
+            (None, Some((word, _, of))) if *of == self.name => Err(invalid(
+                format!("{key}.{word}"),
+                "an output cannot be placed beside itself".to_owned(),
+            )),
+            (None, Some((_, side, of))) => Ok(Place::Beside {
+                side,
+                of: of.clone(),
+                offset: self.offset.unwrap_or(0),
+            }),
+            (None, None) => Ok(Place::Auto),
+        }
+    }
+}
+
+/// The first output whose chain of `beside`s comes back to it, if any.
+/// Following a chain at most as many steps as there are rules is enough: a
+/// longer chain has visited some rule twice.
+fn cycle(outputs: &[OutputRule]) -> Option<&str> {
+    let of = |name: &str| {
+        outputs
+            .iter()
+            .find(|rule| rule.name == name)
+            .and_then(|rule| match &rule.place {
+                Place::Beside { of, .. } => Some(of.as_str()),
+                _ => None,
+            })
+    };
+    outputs
+        .iter()
+        .map(|rule| rule.name.as_str())
+        .find(|&start| {
+            let mut at = of(start);
+            for _ in 0..outputs.len() {
+                match at {
+                    Some(name) if name == start => return true,
+                    Some(name) => at = of(name),
+                    None => return false,
+                }
+            }
+            false
+        })
 }
 
 fn action_for(action: RawAction) -> Result<Option<Action>, String> {
@@ -508,15 +814,46 @@ fn action_for(action: RawAction) -> Result<Option<Action>, String> {
             "move-to-next-output" => Action::MoveToOutput(Towards::Next),
             "move-to-previous-output" => Action::MoveToOutput(Towards::Previous),
             "reload" => Action::Reload,
-            other => {
-                return Err(format!(
-                    "`{other}` is not an action; use close, cycle-focus, \
-                     move-to-next-output, move-to-previous-output, reload, none, \
-                     or {{ spawn = [...] }}"
-                ));
-            }
+            "toggle-sticky" => Action::ToggleSticky,
+            other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
+                format!(
+                    "`{other}` is not an action; use close, cycle-focus, reload, \
+                         toggle-sticky, move-to-next-output, move-to-previous-output, \
+                         move-to-output-<side>, workspace-<side>, workspace-<number>, \
+                         send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
+                         none, or \
+                         {{ spawn = [...] }}, where <side> is left, right, up or down"
+                )
+            })?,
         },
     }))
+}
+
+/// An action that takes a side: `workspace-left`, `move-to-output-down`.
+fn directed(name: &str) -> Option<Action> {
+    let (verb, side) = name.rsplit_once('-')?;
+    let direction = match side {
+        "left" => Direction::Left,
+        "right" => Direction::Right,
+        "up" => Direction::Up,
+        "down" => Direction::Down,
+        _ => return None,
+    };
+    Some(match verb {
+        "workspace" => Action::Workspace(direction),
+        "send-to-workspace" => Action::SendToWorkspace(direction),
+        "carry-to-workspace" => Action::CarryToWorkspace(direction),
+        "move-to-output" => Action::MoveToOutput(Towards::Side(direction)),
+        "snap" => Action::Snap(direction),
+        _ => return None,
+    })
+}
+
+/// `workspace-3`. Any positive number is accepted here: whether the grid has
+/// that many is a question for the grid, which a later reload may change.
+fn numbered(name: &str) -> Option<Action> {
+    let number: u16 = name.strip_prefix("workspace-")?.parse().ok()?;
+    (number > 0).then_some(Action::GoToWorkspace(number))
 }
 
 /// `"WxH"` or `"WxH@Hz"`.
@@ -711,8 +1048,81 @@ mod tests {
                 refresh: Some(143.9)
             })
         );
-        assert_eq!(config.outputs[0].position, Some((1920, 0)));
+        assert_eq!(config.outputs[0].place, Place::At(1920, 0));
         assert!(!config.outputs[1].enable);
+    }
+
+    #[test]
+    fn an_output_is_placed_beside_another_with_an_offset() {
+        let config = parse(
+            r#"
+            [[output]]
+            name = "DP-1"
+
+            [[output]]
+            name = "HDMI-A-1"
+            right-of = "DP-1"
+            offset = -180
+            "#,
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(config.outputs[0].place, Place::Auto);
+        assert_eq!(
+            config.outputs[1].place,
+            Place::Beside {
+                side: Side::RightOf,
+                of: "DP-1".to_owned(),
+                offset: -180
+            }
+        );
+    }
+
+    #[test]
+    fn an_output_beside_one_with_no_rule_is_allowed() {
+        // The anchor may simply be a monitor that needs no settings.
+        let config = parse("[[output]]\nname = \"eDP-1\"\nbelow = \"DP-1\"", SEAT).unwrap();
+        assert!(matches!(
+            config.outputs[0].place,
+            Place::Beside {
+                side: Side::Below,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn two_sides_for_one_output_are_refused() {
+        let text = "[[output]]\nname = \"A\"\nleft-of = \"B\"\nabove = \"C\"";
+        let error = parse(text, SEAT).unwrap_err();
+        assert!(error.to_string().contains("output.A.above"), "{error}");
+    }
+
+    #[test]
+    fn a_position_and_a_side_together_are_refused() {
+        let text = "[[output]]\nname = \"A\"\nposition = [0, 0]\nright-of = \"B\"";
+        let error = parse(text, SEAT).unwrap_err();
+        assert!(error.to_string().contains("output.A.right-of"), "{error}");
+    }
+
+    #[test]
+    fn an_offset_with_no_side_is_refused() {
+        let error = parse("[[output]]\nname = \"A\"\noffset = 10", SEAT).unwrap_err();
+        assert!(error.to_string().contains("output.A.offset"), "{error}");
+    }
+
+    #[test]
+    fn an_output_beside_itself_is_refused() {
+        assert!(parse("[[output]]\nname = \"A\"\nbelow = \"A\"", SEAT).is_err());
+    }
+
+    #[test]
+    fn outputs_placed_beside_each_other_in_a_circle_are_refused() {
+        let text = "[[output]]\nname = \"A\"\nright-of = \"B\"\n\
+                    [[output]]\nname = \"B\"\nbelow = \"C\"\n\
+                    [[output]]\nname = \"C\"\nleft-of = \"A\"";
+        let error = parse(text, SEAT).unwrap_err();
+        assert!(error.to_string().contains("output.A"), "{error}");
     }
 
     #[test]
@@ -748,6 +1158,156 @@ mod tests {
     #[test]
     fn an_empty_autostart_command_is_refused() {
         assert!(parse("autostart = [[]]", SEAT).is_err());
+    }
+
+    #[test]
+    fn both_profiles_span_every_monitor_and_differ_in_their_grid() {
+        let classic = Config::profile(Profile::Classic, SEAT).workspaces;
+        let minimal = Config::profile(Profile::Minimal, SEAT).workspaces;
+        assert_eq!(classic.mode, perspicax_policy::Mode::Spanning);
+        assert_eq!((classic.grid.columns, classic.grid.rows), (4, 1));
+        assert_eq!(minimal.mode, perspicax_policy::Mode::Spanning);
+        assert_eq!((minimal.grid.columns, minimal.grid.rows), (2, 2));
+        assert!(minimal.grid.wrap);
+    }
+
+    #[test]
+    fn workspaces_can_be_per_output_on_a_grid_of_their_own() {
+        let config = parse("[workspaces]\nmode = \"per-output\"\ngrid = [3, 2]", SEAT).unwrap();
+        assert_eq!(config.workspaces.mode, perspicax_policy::Mode::PerOutput);
+        assert_eq!(config.workspaces.grid.len(), 6);
+        assert!(
+            !config.workspaces.grid.wrap,
+            "the classic profile's, untouched"
+        );
+    }
+
+    #[test]
+    fn the_minimal_profile_flips_at_the_edge_and_classic_does_not() {
+        assert!(!Config::profile(Profile::Classic, SEAT).flipping.edge);
+        let minimal = Config::profile(Profile::Minimal, SEAT).flipping;
+        assert!(minimal.edge && minimal.while_dragging && minimal.scroll);
+    }
+
+    #[test]
+    fn edge_flipping_is_turned_on_with_its_own_delay() {
+        let config = parse("[workspaces.flip]\nedge = true\ndelay-ms = 500", SEAT).unwrap();
+        assert!(config.flipping.edge);
+        assert_eq!(config.flipping.delay_ms, 500);
+        assert!(!config.flipping.scroll, "the profile's, untouched");
+    }
+
+    #[test]
+    fn a_flip_delay_of_minutes_is_refused() {
+        let error = parse("[workspaces.flip]\ndelay-ms = 600000", SEAT).unwrap_err();
+        assert!(
+            error.to_string().contains("workspaces.flip.delay-ms"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn classic_snaps_by_drag_and_by_logo_arrows_and_minimal_does_not() {
+        let classic = Config::profile(Profile::Classic, SEAT);
+        assert!(classic.snapping.drag);
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            classic.bindings.resolve(logo, &[Keysym::Left]),
+            Some(&Action::Snap(Direction::Left))
+        );
+        let minimal = Config::profile(Profile::Minimal, SEAT);
+        assert!(!minimal.snapping.drag);
+        assert_eq!(minimal.bindings.resolve(logo, &[Keysym::Left]), None);
+    }
+
+    #[test]
+    fn snapping_is_configured_in_its_own_table() {
+        let config = parse("[snap]\ndrag = false\nthreshold = 12", SEAT).unwrap();
+        assert!(!config.snapping.drag);
+        assert_eq!(config.snapping.threshold, 12);
+        assert!(parse("[snap]\nthreshold = 0", SEAT).is_err());
+    }
+
+    #[test]
+    fn an_empty_or_huge_grid_is_refused() {
+        for grid in ["[0, 2]", "[2, 99]"] {
+            let error = parse(&format!("[workspaces]\ngrid = {grid}"), SEAT).unwrap_err();
+            assert!(error.to_string().contains("workspaces.grid"), "{error}");
+        }
+    }
+
+    #[test]
+    fn ctrl_logo_arrows_switch_workspace_and_with_shift_carry_the_window() {
+        let config = Config::profile(Profile::Classic, SEAT);
+        let held = Mods {
+            ctrl: true,
+            logo: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(held, &[Keysym::Right]),
+            Some(&Action::Workspace(Direction::Right))
+        );
+        let shifted = Mods {
+            shift: true,
+            ..held
+        };
+        assert_eq!(
+            config.bindings.resolve(shifted, &[Keysym::Left]),
+            Some(&Action::CarryToWorkspace(Direction::Left))
+        );
+    }
+
+    #[test]
+    fn workspace_actions_are_named_by_side_and_by_number() {
+        let config = parse(
+            r#"
+            [keys]
+            "Logo+1" = "workspace-1"
+            "Logo+Shift+Up" = "send-to-workspace-up"
+            "Logo+Ctrl+Down" = "move-to-output-down"
+            "Logo+s" = "toggle-sticky"
+            "#,
+            SEAT,
+        )
+        .unwrap();
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::_1]),
+            Some(&Action::GoToWorkspace(1))
+        );
+        assert_eq!(
+            config.bindings.resolve(
+                Mods {
+                    shift: true,
+                    ..logo
+                },
+                &[Keysym::Up]
+            ),
+            Some(&Action::SendToWorkspace(Direction::Up))
+        );
+        assert_eq!(
+            config
+                .bindings
+                .resolve(Mods { ctrl: true, ..logo }, &[Keysym::Down]),
+            Some(&Action::MoveToOutput(Towards::Side(Direction::Down)))
+        );
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::s]),
+            Some(&Action::ToggleSticky)
+        );
+    }
+
+    #[test]
+    fn workspace_zero_and_a_side_that_is_not_one_are_refused() {
+        assert!(parse("[keys]\n\"Logo+0\" = \"workspace-0\"", SEAT).is_err());
+        assert!(parse("[keys]\n\"Logo+0\" = \"workspace-sideways\"", SEAT).is_err());
     }
 
     #[test]
