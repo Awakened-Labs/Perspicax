@@ -100,6 +100,20 @@ render_elements! {
 /// distinguishable from a dead one. The wallpaper is the shell's job (W5).
 const BACKDROP: [f32; 4] = [0.12, 0.12, 0.14, 1.0];
 
+/// Which hardware planes a frame may use: the primary plane only, with the
+/// cursor and every window composited into it.
+///
+/// Not the default, which also puts the cursor on the cursor plane and client
+/// buffers on overlay planes. On a VT switch the next session takes the
+/// display and repaints the primary plane, but planes it does not use keep
+/// whatever was on them. The first hardware run left perspicax's cursor frozen
+/// on top of Enlightenment's. It cannot be cleared on the way out: libseat
+/// disables the seat before the pause event reaches us, so by the time we hear
+/// of it the device is gone. Composite everything, and nothing is left behind.
+/// The GPU does a little more work per frame; direct scanout of a fullscreen
+/// client on the primary plane is still allowed.
+const PLANES: FrameFlags = FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT;
+
 /// Scanout formats, in order of preference: 8 bits per channel with and
 /// without alpha. Every GPU Mesa drives supports these; 10-bit formats are a
 /// later refinement and a common source of black screens on older drivers.
@@ -680,10 +694,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
             }
         },
     }
-    match head
-        .drm
-        .render_frame(renderer, &elements, BACKDROP, FrameFlags::DEFAULT)
-    {
+    match head.drm.render_frame(renderer, &elements, BACKDROP, PLANES) {
         Ok(frame) if !frame.is_empty => match head.drm.queue_frame(()) {
             Ok(()) => head.queued = true,
             Err(error) => tracing::warn!(output = head.output.name(), %error, "frame not queued"),

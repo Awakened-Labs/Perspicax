@@ -178,10 +178,6 @@ impl Session {
 
     /// Start a program for the person, and keep it to stop with the session.
     pub(super) fn spawn(&mut self, launch: Option<&Launch>, command: &[String]) {
-        // Reap what has exited since last time, so a session that starts a
-        // terminal a hundred times does not keep a hundred zombies.
-        self.children
-            .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
         let Some(launch) = launch else {
             return;
         };
@@ -189,6 +185,15 @@ impl Session {
             Ok(child) => self.children.push(child),
             Err(error) => tracing::warn!(%error, "could not start"),
         }
+    }
+}
+
+impl Session {
+    /// Collect children that have exited, so a session that starts a
+    /// terminal a hundred times does not keep a hundred zombies.
+    pub(crate) fn reap(&mut self) {
+        self.children
+            .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
     }
 }
 

@@ -534,6 +534,12 @@ impl Compositor {
         if let Some(window) = self.x11_window(x11) {
             self.space.unmap_elem(&window);
             self.minimized.retain(|minimized| minimized != &window);
+            let held = self.keyboard_focus().is_some_and(|surface| {
+                x11.wl_surface().as_ref() != Some(&surface) && surface.is_alive()
+            });
+            if !held {
+                self.focus_top_window();
+            }
             self.backend.redraw();
             self.publish_facts();
         }

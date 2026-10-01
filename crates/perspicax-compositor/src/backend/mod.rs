@@ -277,6 +277,15 @@ impl Running {
         }
     }
 
+    /// Collect the session's own children that have exited.
+    pub(crate) fn reap(&mut self) {
+        match self {
+            Self::Headless { .. } => {}
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.reap(),
+        }
+    }
+
     /// Whether the person at the keyboard asked the session to end.
     pub(crate) fn exit_requested(&self) -> bool {
         match self {

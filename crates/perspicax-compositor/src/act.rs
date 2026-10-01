@@ -280,7 +280,7 @@ impl Compositor {
         let Some(surface) = crate::shell::surface_of(window) else {
             return Ok(());
         };
-        let focus = Some((surface, origin.into()));
+        let focus = Some((surface.into(), origin.into()));
         let time = self.now_ms();
 
         pointer.motion(
@@ -327,7 +327,7 @@ impl Compositor {
 
         pointer.motion(
             self,
-            Some((surface, origin.into())),
+            Some((surface.into(), origin.into())),
             &MotionEvent {
                 location: global.into(),
                 serial: SERIAL_COUNTER.next_serial(),
