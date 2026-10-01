@@ -89,7 +89,7 @@ feature, never silently ignored.
 | **W1** | A usable session: DRM from a TTY, libinput, move/resize, keybinds, multi-monitor, clipboard, layer-shell and session-lock (so waybar, fuzzel and swaylock work), Xwayland | done |
 | **W2** | Config profiles (`classic`, `minimal`) and policy: focus models, a workspace grid with edge flipping, moving between screens, snapping | done |
 | **W3** | Server-side decorations, then tabbed window groups | done |
-| **W4** | Protocols Smithay lacks: foreign-toplevel management, ext-workspace, screencopy, output management — and `screenshot` stops refusing; agent verbs to close a window and bring a tab forward | |
+| **W4** | Protocols Smithay lacks: foreign-toplevel management, ext-workspace, screencopy, output management — and `screenshot` stops refusing; agent verbs to close a window and bring a tab forward | done |
 | **W5** | `perspicax-shell`, a separate process: wallpaper, panel, tray, start menu, root menu, desktop icons — each a feature and a toggle | |
 | **W6** | Polish: themes, keymaps, a session entry for display managers | |
 
@@ -439,6 +439,22 @@ reading pixels and moving monitors is for the usual tools, by name. A name is
 whatever the kernel says the client is running, which any program can be
 called, so a full path is the stricter form. Whatever this says, all of them
 are inert while the screen is locked.
+
+| Protocol | `[protocols]` key | Spoken by | While locked | When the rule narrows |
+|---|---|---|---|---|
+| `ext-foreign-toplevel-list-v1` | `foreign-toplevel-list` | window lists | nothing new is told; told on unlock | every window closed, list finished |
+| `wlr-foreign-toplevel-management-unstable-v1` v3 | `foreign-toplevel-management` | waybar `wlr/taskbar` | requests ignored | every handle closed, manager finished |
+| `ext-workspace-v1` | `workspace` | waybar `ext/workspaces` | switches ignored | everything removed, manager finished |
+| `wlr-screencopy-unstable-v1` v3 (shm) | `screencopy` | grim, wf-recorder, xdg-desktop-portal-wlr | every copy fails | waiting frames fail |
+| `wlr-output-management-unstable-v1` v4 | `output-management` | wlr-randr, kanshi, wdisplays | every configuration fails | manager finished |
+
+A rule a reload changes applies to the next client that looks, with no
+global torn down, and what a client already holds is withdrawn as above.
+`screencopy` needs the `capture` feature (part of `desktop`). A display tool's
+change to the monitors lasts for the session: it is put in force as the output
+rules, exactly as if `[[output]]` had said it, and a reload that changes
+`[[output]]` puts the file back in charge. Moving a monitor just moves it; a
+new mode, scale, or a monitor turned on or off lights the monitors again.
 
 Monitors are placed relative to each other, so the layout survives one being
 unplugged: a monitor beside one that is missing goes to the right of the
