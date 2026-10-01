@@ -212,7 +212,7 @@ impl From<Rect> for Bounds {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Refused {
     /// One of `occluded`, `clipped`, `unmapped`, `off_screen`,
-    /// `other_workspace`, `unjudged`, `unattributed`, `stale`,
+    /// `other_workspace`, `inactive_tab`, `unjudged`, `unattributed`, `stale`,
     /// `no_capability`, `ambiguous_selector`, `not_found`.
     pub kind: &'static str,
     /// The refusal in words.
@@ -231,6 +231,9 @@ pub struct Refused {
     /// `other_workspace`: the workspace the window is on, counting from 1.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<u16>,
+    /// `inactive_tab`: the tab in front, which has the group's place.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shown_tab: Option<u64>,
 }
 
 impl From<&Refusal> for Refused {
@@ -242,6 +245,7 @@ impl From<&Refusal> for Refused {
                 Refusal::Unmapped => "unmapped",
                 Refusal::OffScreen => "off_screen",
                 Refusal::OtherWorkspace { .. } => "other_workspace",
+                Refusal::InactiveTab { .. } => "inactive_tab",
                 Refusal::Unjudged => "unjudged",
                 Refusal::Unattributed => "unattributed",
                 Refusal::Stale { .. } => "stale",
@@ -254,12 +258,14 @@ impl From<&Refusal> for Refused {
             frames: None,
             matches: None,
             workspace: None,
+            shown_tab: None,
         };
         match refusal {
             Refusal::Occluded { by } => refused.occluded_by = Some(by.0),
             Refusal::Stale { frames } => refused.frames = Some(*frames),
             Refusal::AmbiguousSelector { matches } => refused.matches = Some(*matches),
             Refusal::OtherWorkspace { workspace } => refused.workspace = Some(*workspace),
+            Refusal::InactiveTab { shown } => refused.shown_tab = Some(shown.0),
             _ => {}
         }
         refused

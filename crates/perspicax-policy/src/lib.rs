@@ -19,7 +19,8 @@
 //! where a window goes and how big (`geometry`); where each monitor sits
 //! (`layout`); which workspace shows which windows (`workspace`); changing
 //! workspace with the pointer (`flip`); snapping to halves and quarters
-//! (`snap`); and the frame drawn around a window (`frame`). `perspicax-config`
+//! (`snap`); the frame drawn around a window (`frame`); and tab groups
+//! (`tabs`). `perspicax-config`
 //! builds their settings from `config.toml` and the `classic`/`minimal`
 //! profiles.
 
@@ -30,6 +31,7 @@ mod frame;
 mod geometry;
 mod layout;
 mod snap;
+mod tabs;
 mod workspace;
 
 pub use crate::{
@@ -43,6 +45,7 @@ pub use crate::{
     geometry::{Edges, Rect, anchor, carry, edges_near, neighbour, place, resize, unmaximized_at},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
     snap::{Snapping, Zone, keyed, zone},
+    tabs::Groups,
     workspace::{Cell, Direction, Grid, Home, Mode, Shape, Workspaces},
 };
 

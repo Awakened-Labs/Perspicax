@@ -211,6 +211,23 @@ impl Config {
             )
             .bind(logo_shift(Keysym::r), Action::Reload);
 
+        // Tabs, in both profiles: Logo+Tab steps through the focused
+        // window's group, and Logo+G groups the focused window with the one
+        // focused before it, which is the keyboard's way to do what dragging
+        // one titlebar onto another does.
+        let logo = |key| Chord {
+            mods: Mods {
+                logo: true,
+                ..Mods::default()
+            },
+            key,
+        };
+        bindings = bindings
+            .bind(logo(Keysym::Tab), Action::CycleTab { forward: true })
+            .bind(logo_shift(Keysym::Tab), Action::CycleTab { forward: false })
+            .bind(logo(Keysym::g), Action::TabWithPrevious)
+            .bind(logo_shift(Keysym::g), Action::DetachTab);
+
         // Workspaces. Ctrl+Logo+arrows switches and, with Shift, takes the
         // focused window along, in both profiles: Plasma's keys, and Windows'
         // for left and right. Classic adds Plasma's Ctrl+F1..F4; minimal adds
@@ -887,10 +904,15 @@ fn action_for(action: RawAction) -> Result<Option<Action>, String> {
             "toggle-sticky" => Action::ToggleSticky,
             "toggle-maximize" => Action::ToggleMaximize,
             "minimize" => Action::Minimize,
+            "next-tab" => Action::CycleTab { forward: true },
+            "previous-tab" => Action::CycleTab { forward: false },
+            "tab-with-previous" => Action::TabWithPrevious,
+            "detach-tab" => Action::DetachTab,
             other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
                 format!(
                     "`{other}` is not an action; use close, cycle-focus, reload, \
-                         toggle-sticky, toggle-maximize, minimize, \
+                         toggle-sticky, toggle-maximize, minimize, next-tab, previous-tab, \
+                         tab-with-previous, detach-tab, \
                          move-to-next-output, move-to-previous-output, \
                          move-to-output-<side>, workspace-<side>, workspace-<number>, \
                          send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
@@ -1406,6 +1428,46 @@ mod tests {
         assert_eq!(
             config.bindings.resolve(logo, &[Keysym::s]),
             Some(&Action::ToggleSticky)
+        );
+    }
+
+    #[test]
+    fn logo_tab_steps_through_tabs_and_logo_g_groups_in_both_profiles() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let bindings = Config::profile(profile, SEAT).bindings;
+            let logo = Mods {
+                logo: true,
+                ..Mods::default()
+            };
+            let shift = Mods {
+                shift: true,
+                ..logo
+            };
+            assert_eq!(
+                bindings.resolve(logo, &[Keysym::Tab]),
+                Some(&Action::CycleTab { forward: true })
+            );
+            assert_eq!(
+                bindings.resolve(shift, &[Keysym::Tab]),
+                Some(&Action::CycleTab { forward: false })
+            );
+            assert_eq!(
+                bindings.resolve(logo, &[Keysym::g]),
+                Some(&Action::TabWithPrevious)
+            );
+            assert_eq!(
+                bindings.resolve(shift, &[Keysym::g]),
+                Some(&Action::DetachTab)
+            );
+        }
+        let config = parse("[keys]\n\"Alt+t\" = \"next-tab\"", SEAT).unwrap();
+        let alt = Mods {
+            alt: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(alt, &[Keysym::t]),
+            Some(&Action::CycleTab { forward: true })
         );
     }
 

@@ -30,6 +30,9 @@ impl Compositor {
                     self.toggle_maximize(&window);
                 }
             }
+            Action::CycleTab { forward } => self.cycle_tab(*forward),
+            Action::TabWithPrevious => self.tab_with_previous(),
+            Action::DetachTab => self.detach_tab(),
             Action::Minimize => {
                 if let Some(window) = focused {
                     self.minimize(&window);

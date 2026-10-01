@@ -252,6 +252,11 @@ impl Compositor {
                 .as_ref()
                 .map(regions)
         });
+        let hidden = if parked {
+            self.hidden_why(window)
+        } else {
+            (None, None)
+        };
 
         Some(SurfaceFacts {
             id,
@@ -285,11 +290,8 @@ impl Compositor {
             focused_at: self.focused_at(id),
             damage_generation: self.damage_generation(id),
             damage: self.damage_history(id),
-            off_workspace: if parked {
-                self.off_workspace(window)
-            } else {
-                None
-            },
+            off_workspace: hidden.0,
+            behind_tab: hidden.1,
             // A parked window draws nothing, frame included.
             frame: if parked {
                 Vec::new()
@@ -340,6 +342,7 @@ impl Compositor {
             damage_generation: self.damage_generation(id),
             damage: self.damage_history(id),
             off_workspace: None,
+            behind_tab: None,
             frame: Vec::new(),
         }
     }
@@ -376,7 +379,7 @@ impl Compositor {
         };
         if self.parked.contains(window) {
             facts.mapped = false;
-            facts.off_workspace = self.off_workspace(window);
+            (facts.off_workspace, facts.behind_tab) = self.hidden_why(window);
         } else {
             facts.frame = self.frame_facts(window, placed);
         }

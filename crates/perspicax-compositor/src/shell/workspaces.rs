@@ -32,6 +32,7 @@ impl Compositor {
     /// A window has closed: off the screen, out of the parked list, and out
     /// of the workspaces' bookkeeping.
     pub(crate) fn forget_window(&mut self, window: &Framed) {
+        self.tab_closing(window);
         self.space.unmap_elem(window);
         self.parked.retain(|parked| parked != window);
         if let Some(id) = id_of(window) {
@@ -60,6 +61,7 @@ impl Compositor {
                 continue;
             };
             let belongs = !Self::is_minimized(&window)
+                && self.tabs.is_front(id)
                 && self
                     .monitor_of(&window)
                     .is_none_or(|output| self.workspaces.shows(id, &output));

@@ -154,6 +154,10 @@ pub struct SurfaceFacts {
     /// it is turns a refusal an agent can do nothing about into one it can:
     /// the window is not gone, it is on workspace 3.
     pub off_workspace: Option<u16>,
+    /// The tab showing in front of this one, when this window is a tab behind
+    /// it in a tab group. The window is unmapped then, and as with a
+    /// workspace, saying which tab is in front tells an agent where it went.
+    pub behind_tab: Option<SurfaceId>,
     /// What the host drew around this surface, in global space: a titlebar
     /// and a border, outside `geometry`.
     ///
@@ -184,6 +188,7 @@ impl SurfaceFacts {
             damage_generation: 0,
             damage: Vec::new(),
             off_workspace: None,
+            behind_tab: None,
             frame: Vec::new(),
         }
     }
@@ -224,6 +229,15 @@ impl SurfaceFacts {
     pub fn on_workspace(mut self, number: u16) -> Self {
         self.mapped = false;
         self.off_workspace = Some(number);
+        self
+    }
+
+    /// The same surface, unmapped because it is a tab behind `shown` in its
+    /// tab group.
+    #[must_use]
+    pub fn behind_tab(mut self, shown: SurfaceId) -> Self {
+        self.mapped = false;
+        self.behind_tab = Some(shown);
         self
     }
 
@@ -495,7 +509,9 @@ impl Judgement {
 /// 2. An unmapped surface is `Unmapped` before any arithmetic, because the
 ///    geometry of a surface that is not on screen means nothing -- or
 ///    `OtherWorkspace`, when it is unmapped only because the workspace it is
-///    on is not the one showing.
+///    on is not the one showing, or `InactiveTab`, when it is a tab behind
+///    another. A tab behind another in a group on a hidden workspace is
+///    `OtherWorkspace`: the coarser reason, and the one to clear first.
 /// 3. A zero-area rect is `Clipped`. Toolkits report `0x0` extents for widgets
 ///    they have realised but not laid out, and for children scrolled out of a
 ///    viewport; a zero-area rect is also the one input for which every
@@ -519,9 +535,10 @@ pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
         return Judgement::proven(Visibility::Unknown);
     };
     if !target.mapped {
-        return Judgement::proven(match target.off_workspace {
-            Some(workspace) => Visibility::OtherWorkspace { workspace },
-            None => Visibility::Unmapped,
+        return Judgement::proven(match (target.off_workspace, target.behind_tab) {
+            (Some(workspace), _) => Visibility::OtherWorkspace { workspace },
+            (None, Some(shown)) => Visibility::InactiveTab { shown },
+            (None, None) => Visibility::Unmapped,
         });
     }
     if rect.abs().is_empty() {
@@ -625,7 +642,9 @@ impl Tally {
             Visibility::Visible => self.visible += 1,
             Visibility::Occluded { .. } => self.occluded += 1,
             Visibility::Clipped => self.clipped += 1,
-            Visibility::Unmapped | Visibility::OtherWorkspace { .. } => self.unmapped += 1,
+            Visibility::Unmapped
+            | Visibility::OtherWorkspace { .. }
+            | Visibility::InactiveTab { .. } => self.unmapped += 1,
             Visibility::OffScreen => self.off_screen += 1,
             Visibility::Unknown => self.unjudged += 1,
         }
@@ -699,6 +718,29 @@ mod tests {
         assert_eq!(
             verdict(&facts).visibility,
             Visibility::OtherWorkspace { workspace: 3 }
+        );
+    }
+
+    #[test]
+    fn a_tab_behind_another_names_the_one_in_front() {
+        let facts = HostFacts::bottom_to_top([window().behind_tab(SurfaceId(7))], 1);
+        assert_eq!(
+            verdict(&facts),
+            Judgement::proven(Visibility::InactiveTab {
+                shown: SurfaceId(7)
+            })
+        );
+    }
+
+    /// Both at once: the group is on another workspace, which is the reason
+    /// to clear first, so it is the one given.
+    #[test]
+    fn a_hidden_workspace_outranks_a_hidden_tab() {
+        let facts =
+            HostFacts::bottom_to_top([window().behind_tab(SurfaceId(7)).on_workspace(2)], 1);
+        assert_eq!(
+            verdict(&facts).visibility,
+            Visibility::OtherWorkspace { workspace: 2 }
         );
     }
 

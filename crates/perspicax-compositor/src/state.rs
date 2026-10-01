@@ -185,6 +185,9 @@ pub struct Compositor {
     pub(crate) parked: Vec<Framed>,
     /// Which workspace every window is on and which each monitor shows.
     pub(crate) workspaces: Workspaces<SurfaceId, String>,
+    /// Which windows are tabs of one another, and which tab of each group is
+    /// in front. See `shell::tabs`.
+    pub(crate) tabs: perspicax_policy::Groups<SurfaceId>,
     /// The window being moved with the pointer, while it is: an edge flip
     /// takes it along to the next workspace.
     pub(crate) dragging: Option<Framed>,
@@ -284,6 +287,7 @@ impl Compositor {
             popups: PopupManager::default(),
             parked: Vec::new(),
             workspaces: Workspaces::new(workspace_shape),
+            tabs: perspicax_policy::Groups::default(),
             dragging: None,
             snap_preview: None,
             primary_selection: PrimarySelectionState::new::<Self>(display),

@@ -297,6 +297,14 @@ impl<W: Copy + PartialEq, O: Clone + PartialEq> Workspaces<W, O> {
         self.set(window, home);
     }
 
+    /// Put `window` wherever `with` lives: a tab coming to the front of its
+    /// group takes over the group's workspace.
+    pub fn share(&mut self, window: W, with: W) {
+        if let Some(home) = self.home(with) {
+            self.set(window, home);
+        }
+    }
+
     /// A window has been moved to another monitor. In per-output mode it
     /// joins the workspace that monitor is showing, so it stays in front of
     /// the person who moved it. In spanning mode nothing changes: every

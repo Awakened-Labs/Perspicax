@@ -19,6 +19,7 @@
 mod actions;
 mod grabs;
 mod snap;
+mod tabs;
 mod workspaces;
 
 use std::cell::RefCell;

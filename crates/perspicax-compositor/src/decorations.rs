@@ -125,9 +125,19 @@ impl Compositor {
 
     /// How far `window`'s frame would reach in `look`: what a window about to
     /// be maximized has to leave room for.
+    ///
+    /// A window that draws its own frame has none of ours, unless it is a
+    /// tab: then it has a strip of tabs above it, as tall as a titlebar, so
+    /// every tab of a group starts at the same height.
     pub(crate) fn insets_as(&self, window: &Framed, look: Look) -> Insets {
+        let decorations = self.backend.decorations();
         if Self::is_server_decorated(window) {
-            Insets::of(&self.backend.decorations(), look)
+            Insets::of(&decorations, look)
+        } else if look != Look::Fullscreen && self.is_tabbed(window) {
+            Insets {
+                top: decorations.title,
+                ..Insets::NONE
+            }
         } else {
             Insets::NONE
         }

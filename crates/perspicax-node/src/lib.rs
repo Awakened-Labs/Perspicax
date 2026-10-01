@@ -144,6 +144,11 @@ pub enum Visibility {
     /// agent is told where it is rather than left to wonder; whether to switch
     /// the person's screen to it is not the agent's call to make silently.
     OtherWorkspace { workspace: u16 },
+    /// Its window is a tab behind another in a tab group: `shown` is the tab
+    /// in front, which has the group's place on screen. Activating the tab
+    /// would show it; as with a workspace, that is the person's screen to
+    /// change, not an agent's to change silently.
+    InactiveTab { shown: SurfaceId },
 }
 
 impl Visibility {

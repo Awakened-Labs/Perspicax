@@ -71,6 +71,8 @@ pub enum Refusal {
     OffScreen,
     /// On a workspace that is not showing, numbered from 1.
     OtherWorkspace { workspace: u16 },
+    /// A tab behind another in its window's tab group: `shown` is in front.
+    InactiveTab { shown: SurfaceId },
     /// No compositor has judged this node's visibility. Fails closed.
     Unjudged,
     /// No compositor has attributed this node to a process, so no capability
@@ -95,6 +97,11 @@ impl core::fmt::Display for Refusal {
             Self::Clipped => write!(f, "node is scrolled out of its own viewport"),
             Self::Unmapped => write!(f, "node's surface is not mapped"),
             Self::OffScreen => write!(f, "node is not wholly on any output"),
+            Self::InactiveTab { shown } => write!(
+                f,
+                "node's window is a tab behind surface {}, the one showing in its group",
+                shown.0
+            ),
             Self::OtherWorkspace { workspace } => {
                 write!(
                     f,
@@ -193,6 +200,7 @@ pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
         Visibility::OtherWorkspace { workspace } => Err(Refusal::OtherWorkspace {
             workspace: *workspace,
         }),
+        Visibility::InactiveTab { shown } => Err(Refusal::InactiveTab { shown: *shown }),
         Visibility::Unknown => Err(Refusal::Unjudged),
     }
 }
