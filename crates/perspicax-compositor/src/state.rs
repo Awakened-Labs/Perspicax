@@ -180,6 +180,9 @@ pub struct Compositor {
     pub(crate) parked: Vec<Window>,
     /// Which workspace every window is on and which each monitor shows.
     pub(crate) workspaces: Workspaces<SurfaceId, String>,
+    /// The window being moved with the pointer, while it is: an edge flip
+    /// takes it along to the next workspace.
+    pub(crate) dragging: Option<Window>,
     /// RAII handles for the primary-selection and xdg-activation globals.
     primary_selection: PrimarySelectionState,
     activation: XdgActivationState,
@@ -272,6 +275,7 @@ impl Compositor {
             popups: PopupManager::default(),
             parked: Vec::new(),
             workspaces: Workspaces::new(workspace_shape),
+            dragging: None,
             primary_selection: PrimarySelectionState::new::<Self>(display),
             activation: XdgActivationState::new::<Self>(display),
             layer_shell: WlrLayerShellState::new::<Self>(display),

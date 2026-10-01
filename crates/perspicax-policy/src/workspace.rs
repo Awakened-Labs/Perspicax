@@ -95,6 +95,20 @@ impl Grid {
         Some(Cell(row * columns + column))
     }
 
+    /// The workspace after `from` in reading order (left to right, then top
+    /// to bottom), or before it when `forward` is false: what a scroll steps
+    /// through. `None` past either end of a grid that does not wrap.
+    #[must_use]
+    pub fn next(&self, from: Cell, forward: bool) -> Option<Cell> {
+        let len = self.len();
+        match (forward, from.0) {
+            (true, at) if at + 1 < len => Some(Cell(at + 1)),
+            (true, _) => self.wrap.then_some(Cell(0)),
+            (false, 0) => self.wrap.then(|| Cell(len - 1)),
+            (false, at) => Some(Cell(at - 1)),
+        }
+    }
+
     /// The workspace a person calls `number`, counting from 1, if it exists.
     #[must_use]
     pub fn numbered(&self, number: u16) -> Option<Cell> {
@@ -360,6 +374,23 @@ mod tests {
         };
         assert_eq!(row.step(Cell(2), Direction::Right), Some(Cell(3)));
         assert_eq!(row.step(Cell(2), Direction::Up), None);
+    }
+
+    #[test]
+    fn scrolling_reads_through_the_grid_row_by_row() {
+        assert_eq!(
+            TWO_BY_TWO.next(Cell(1), true),
+            Some(Cell(2)),
+            "onto the next row"
+        );
+        assert_eq!(TWO_BY_TWO.next(Cell(3), true), None);
+        assert_eq!(TWO_BY_TWO.next(Cell(0), false), None);
+        let wrapping = Grid {
+            wrap: true,
+            ..TWO_BY_TWO
+        };
+        assert_eq!(wrapping.next(Cell(3), true), Some(Cell(0)));
+        assert_eq!(wrapping.next(Cell(0), false), Some(Cell(3)));
     }
 
     #[test]

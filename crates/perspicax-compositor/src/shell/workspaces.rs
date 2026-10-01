@@ -92,6 +92,48 @@ impl Compositor {
         }
     }
 
+    /// Flip the workspace on `output` one step, as the pointer resting on an
+    /// edge of the desk does, taking the window being dragged along if there
+    /// is one. Whether it flipped: not off the edge of a grid that does not
+    /// wrap.
+    #[cfg_attr(
+        not(feature = "seat"),
+        expect(dead_code, reason = "the seat's pointer")
+    )]
+    pub(crate) fn flip(
+        &mut self,
+        output: &str,
+        direction: Direction,
+        carrying: Option<&Window>,
+    ) -> bool {
+        let output = output.to_owned();
+        let flipped = match carrying.and_then(id_of) {
+            Some(id) => self.workspaces.carry(id, &output, direction),
+            None => self.workspaces.switch(&output, direction),
+        };
+        if flipped.is_some() {
+            self.workspace_changed();
+        }
+        flipped.is_some()
+    }
+
+    /// Step the workspace on `output` to the next one in reading order, or
+    /// the previous, as a scroll over the desktop does.
+    #[cfg_attr(
+        not(feature = "seat"),
+        expect(dead_code, reason = "the seat's pointer")
+    )]
+    pub(crate) fn scroll_workspace(&mut self, output: &str, forward: bool) {
+        let output = output.to_owned();
+        let grid = self.workspaces.shape().grid;
+        let Some(to) = grid.next(self.workspaces.current(&output), forward) else {
+            return;
+        };
+        if self.workspaces.go_to(&output, to).is_some() {
+            self.workspace_changed();
+        }
+    }
+
     /// Show the workspace a person calls `number`.
     pub(crate) fn go_to_workspace(&mut self, number: u16) {
         let (Some(output), Some(cell)) = (

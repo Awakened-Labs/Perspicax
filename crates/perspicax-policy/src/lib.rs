@@ -20,6 +20,7 @@
 //! compositor uses [`Focus::default`] and [`Bindings::classic`].
 
 mod binds;
+mod flip;
 mod focus;
 mod geometry;
 mod layout;
@@ -27,6 +28,7 @@ mod workspace;
 
 pub use crate::{
     binds::{Action, Bindings, Button, Chord, Drag, Mods, Towards},
+    flip::{EdgeDwell, Flipping, NOTCH_PIXELS, Notches, arrival, edge_at},
     focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},
     geometry::{Edges, Rect, anchor, carry, edges_near, neighbour, place, resize, unmaximized_at},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},

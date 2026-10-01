@@ -258,7 +258,9 @@ impl PointerGrab<Compositor> for MoveGrab {
         &self.start
     }
 
-    fn unset(&mut self, _data: &mut Compositor) {}
+    fn unset(&mut self, data: &mut Compositor) {
+        data.dragging = None;
+    }
 }
 
 impl PointerGrab<Compositor> for ResizeGrab {

@@ -24,8 +24,8 @@ mod keys;
 use std::path::{Path, PathBuf};
 
 use perspicax_policy::{
-    Action, Bindings, Chord, Direction, Focus, FocusModel, Grid, Keysym, Mods, Place, Shape, Side,
-    Towards,
+    Action, Bindings, Chord, Direction, Flipping, Focus, FocusModel, Grid, Keysym, Mods, Place,
+    Shape, Side, Towards,
 };
 use serde::Deserialize;
 
@@ -70,6 +70,9 @@ pub struct Config {
     /// How many workspaces, in what grid, and whether one spans every
     /// monitor or each monitor has its own.
     pub workspaces: Shape,
+    /// Changing workspace with the pointer: resting it on an edge of the
+    /// desk, or scrolling over the desktop.
+    pub flipping: Flipping,
     /// Whether X11 applications get an Xwayland. Only meaningful in a build
     /// with the `xwayland` feature; saying `true` in one without it is an
     /// error.
@@ -295,6 +298,17 @@ impl Config {
             outputs: Vec::new(),
             autostart: Vec::new(),
             workspaces,
+            flipping: match profile {
+                Profile::Classic => Flipping::default(),
+                // The Fluxbox and Enlightenment habit: the desk is a loop the
+                // pointer travels round, window in hand or not.
+                Profile::Minimal => Flipping {
+                    edge: true,
+                    delay_ms: 300,
+                    while_dragging: true,
+                    scroll: true,
+                },
+            },
             xwayland: built.xwayland,
         }
     }
@@ -372,7 +386,20 @@ struct RawWorkspaces {
     mode: Option<RawSpread>,
     grid: Option<[u16; 2]>,
     wrap: Option<bool>,
+    flip: Option<RawFlip>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawFlip {
+    edge: Option<bool>,
+    delay_ms: Option<u64>,
+    while_dragging: Option<bool>,
+    scroll: Option<bool>,
+}
+
+/// Longer than this and a person would think edge flipping was broken.
+const FLIP_DELAY_MAX_MS: u64 = 5000;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -576,6 +603,21 @@ impl Raw {
             }
             if let Some(wrap) = workspaces.wrap {
                 config.workspaces.grid.wrap = wrap;
+            }
+            if let Some(flip) = workspaces.flip {
+                if let Some(delay) = flip.delay_ms {
+                    if delay > FLIP_DELAY_MAX_MS {
+                        return Err(invalid(
+                            "workspaces.flip.delay-ms".to_owned(),
+                            format!("{delay} is more than {FLIP_DELAY_MAX_MS} milliseconds"),
+                        ));
+                    }
+                    config.flipping.delay_ms = delay;
+                }
+                let flipping = &mut config.flipping;
+                flipping.edge = flip.edge.unwrap_or(flipping.edge);
+                flipping.while_dragging = flip.while_dragging.unwrap_or(flipping.while_dragging);
+                flipping.scroll = flip.scroll.unwrap_or(flipping.scroll);
             }
         }
 
@@ -1097,6 +1139,30 @@ mod tests {
         assert!(
             !config.workspaces.grid.wrap,
             "the classic profile's, untouched"
+        );
+    }
+
+    #[test]
+    fn the_minimal_profile_flips_at_the_edge_and_classic_does_not() {
+        assert!(!Config::profile(Profile::Classic, SEAT).flipping.edge);
+        let minimal = Config::profile(Profile::Minimal, SEAT).flipping;
+        assert!(minimal.edge && minimal.while_dragging && minimal.scroll);
+    }
+
+    #[test]
+    fn edge_flipping_is_turned_on_with_its_own_delay() {
+        let config = parse("[workspaces.flip]\nedge = true\ndelay-ms = 500", SEAT).unwrap();
+        assert!(config.flipping.edge);
+        assert_eq!(config.flipping.delay_ms, 500);
+        assert!(!config.flipping.scroll, "the profile's, untouched");
+    }
+
+    #[test]
+    fn a_flip_delay_of_minutes_is_refused() {
+        let error = parse("[workspaces.flip]\ndelay-ms = 600000", SEAT).unwrap_err();
+        assert!(
+            error.to_string().contains("workspaces.flip.delay-ms"),
+            "{error}"
         );
     }
 

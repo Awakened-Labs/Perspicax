@@ -360,6 +360,8 @@ impl Compositor {
         };
         let grab = MoveGrab::new(start, window.clone(), origin);
         pointer.set_grab(self, grab, serial, Focus::Clear);
+        // After, not before: replacing a grab unsets the one before it.
+        self.dragging = Some(window.clone());
     }
 
     /// Start resizing a window with the pointer.

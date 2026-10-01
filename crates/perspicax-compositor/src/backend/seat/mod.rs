@@ -148,6 +148,14 @@ pub(crate) struct Session {
     /// stopped with it and reaped as they exit.
     children: Vec<std::process::Child>,
     cursor: Cursor,
+    /// The pointer resting against an edge of the desk, on its way to a
+    /// workspace flip. See [`input`].
+    pub(super) dwell: perspicax_policy::EdgeDwell,
+    /// When the timer for `dwell` is armed for, so a pointer pressed against
+    /// an edge arms one timer rather than one per motion event.
+    pub(super) dwell_armed: Option<u64>,
+    /// Scroll over the desktop, gathered into whole notches.
+    pub(super) notches: perspicax_policy::Notches,
     /// False while another VT has the seat: no device may be touched then.
     active: bool,
     pub(super) exit: bool,
@@ -280,6 +288,7 @@ impl Session {
             })
             .map_err(|error| Error::EventLoop(error.to_string()))?;
 
+        let dwell = perspicax_policy::EdgeDwell::new(settings.flipping.delay_ms);
         Ok(Self {
             seat,
             libinput,
@@ -294,6 +303,9 @@ impl Session {
             devices: Vec::new(),
             children: Vec::new(),
             cursor: Cursor::load(),
+            dwell,
+            dwell_armed: None,
+            notches: perspicax_policy::Notches::default(),
             active: true,
             exit: false,
         })

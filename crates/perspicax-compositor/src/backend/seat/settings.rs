@@ -126,6 +126,9 @@ pub(crate) fn reload(state: &mut Compositor) {
     let keyboard_changed = fresh.keyboard != session.settings.keyboard;
     let outputs_changed = fresh.outputs != session.settings.outputs;
     let workspaces = fresh.workspaces;
+    if fresh.flipping.delay_ms != session.settings.flipping.delay_ms {
+        session.dwell = perspicax_policy::EdgeDwell::new(fresh.flipping.delay_ms);
+    }
     session.settings = fresh;
     let pointer = session.settings.pointer;
     for device in &mut session.devices {
