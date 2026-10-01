@@ -414,7 +414,7 @@ impl Compositor {
 /// A string the application chooses for itself and may change to anything,
 /// which is why the join treats it as something that separates candidates
 /// rather than as something that admits them.
-fn title(
+pub(crate) fn title(
     surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
 ) -> Option<String> {
     with_states(surface, |states| {

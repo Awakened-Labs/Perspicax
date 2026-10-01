@@ -161,6 +161,16 @@ impl Compositor {
         })
     }
 
+    /// The title a window's client set, if it set one.
+    #[cfg(feature = "seat")]
+    pub(crate) fn window_title(window: &Framed) -> Option<String> {
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = window.x11_surface() {
+            return Some(x11.title()).filter(|title| !title.is_empty());
+        }
+        crate::facts::title(window.toplevel()?.wl_surface())
+    }
+
     /// Tell every window on screen how its frame looks, for drawing it:
     /// how far it reaches, and whether it is the one with the keyboard.
     #[cfg(feature = "seat")]
@@ -173,7 +183,11 @@ impl Compositor {
             } else {
                 decorations.unfocused
             };
-            window.wear(self.insets(window), colour);
+            let insets = self.insets(window);
+            let size = crate::shell::extent_size(window);
+            let client = perspicax_policy::Rect::new(0, 0, size.w, size.h);
+            let title_at = perspicax_policy::title_rect(client, insets, &decorations);
+            window.wear(insets, colour, title_at);
         }
     }
 

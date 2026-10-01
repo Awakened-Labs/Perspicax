@@ -82,6 +82,7 @@ use crate::{Error, state::Compositor};
 
 mod input;
 mod settings;
+mod titles;
 
 pub(crate) use settings::{populate, reload};
 
@@ -159,6 +160,8 @@ pub(crate) struct Session {
     /// stopped with it and reaped as they exit.
     children: Vec<std::process::Child>,
     cursor: Cursor,
+    /// The fonts window titles are written in. See [`titles`].
+    titles: titles::Titles,
     /// The snap preview's colour and size, kept so the damage tracker can
     /// tell a preview that moved from one that did not.
     preview: SolidColorBuffer,
@@ -319,6 +322,7 @@ impl Session {
             devices: Vec::new(),
             children: Vec::new(),
             cursor: Cursor::load(),
+            titles: titles::Titles::new(),
             preview: SolidColorBuffer::new((1, 1), PREVIEW),
             dwell,
             dwell_armed: None,
@@ -671,6 +675,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         active,
         cursor,
         preview,
+        titles,
         ..
     } = &mut **session;
     let Some(head) = heads.iter_mut().find(|head| head.crtc == crtc) else {
@@ -683,6 +688,15 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         return;
     }
     head.dirty = false;
+
+    // Titles before the windows are drawn: writing one needs the fonts,
+    // which drawing a window has no way to reach.
+    let whole = crate::framed::whole_scale(head.output.current_scale().fractional_scale());
+    for window in space.elements_for_output(&head.output) {
+        if let Some(text) = Compositor::window_title(window) {
+            titles.prepare(window, &text, whole);
+        }
+    }
 
     // A client's cursor surface that has since been destroyed falls back to
     // the compositor's arrow rather than to nothing.

@@ -37,6 +37,20 @@ impl Colour {
         let byte = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).ok();
         Some(Self::rgb(byte(0)?, byte(2)?, byte(4)?))
     }
+
+    /// Black or white, whichever reads better written on this colour: the
+    /// title's ink, so a person who picks a light titlebar does not also have
+    /// to pick dark text for it.
+    #[must_use]
+    pub fn ink(self) -> Self {
+        // Rec. 709 luma: green counts most, blue least, as the eye weighs them.
+        let luma = 2126 * u32::from(self.r) + 7152 * u32::from(self.g) + 722 * u32::from(self.b);
+        if luma > 128 * 10_000 {
+            Self::rgb(0, 0, 0)
+        } else {
+            Self::rgb(0xff, 0xff, 0xff)
+        }
+    }
 }
 
 /// How windows are decorated: the `[decorations]` table.
@@ -61,7 +75,7 @@ impl Default for Decorations {
             server: true,
             title: 24,
             border: 2,
-            focused: Colour::rgb(0x3d, 0xae, 0xe9),
+            focused: Colour::rgb(0x2d, 0x6f, 0xa3),
             unfocused: Colour::rgb(0x47, 0x50, 0x57),
         }
     }
@@ -166,6 +180,15 @@ pub fn frame_rects(client: Rect, insets: Insets) -> Vec<Rect> {
     .collect()
 }
 
+/// Where the title is written: the titlebar's own height, directly above the
+/// client and as wide as it, so the border is never written over. `None` for a
+/// frame with no titlebar.
+#[must_use]
+pub fn title_rect(client: Rect, insets: Insets, decorations: &Decorations) -> Option<Rect> {
+    let height = decorations.title.min(insets.top);
+    (height > 0 && client.w > 0).then(|| Rect::new(client.x, client.y - height, client.w, height))
+}
+
 /// Where a window placed with its client at `at` has to go so that the top
 /// and left of its frame are inside `area`: a titlebar above the top of the
 /// screen cannot be grabbed to bring it back.
@@ -261,6 +284,37 @@ mod tests {
         assert_eq!(fit((0, 32), framed(), area), (2, 58));
         assert_eq!(fit((300, 400), framed(), area), (300, 400), "already in");
         assert_eq!(fit((0, 32), Insets::NONE, area), (0, 32));
+    }
+
+    #[test]
+    fn the_title_is_written_in_the_titlebar_above_the_client_not_on_the_border() {
+        let decorations = Decorations::default();
+        let client = Rect::new(100, 100, 400, 300);
+        assert_eq!(
+            title_rect(client, framed(), &decorations),
+            Some(Rect::new(100, 76, 400, 24))
+        );
+        let maximized = Insets::of(&decorations, Look::Maximized);
+        assert_eq!(
+            title_rect(Rect::new(0, 24, 1920, 1056), maximized, &decorations),
+            Some(Rect::new(0, 0, 1920, 24))
+        );
+        assert_eq!(title_rect(client, Insets::NONE, &decorations), None);
+    }
+
+    #[test]
+    fn the_title_is_inked_in_whichever_of_black_and_white_reads() {
+        let white = Colour::rgb(0xff, 0xff, 0xff);
+        let black = Colour::rgb(0, 0, 0);
+        assert_eq!(Decorations::default().focused.ink(), white);
+        assert_eq!(Decorations::default().unfocused.ink(), white);
+        assert_eq!(Colour::rgb(0xee, 0xee, 0xee).ink(), black);
+        assert_eq!(
+            Colour::rgb(0xff, 0xff, 0x00).ink(),
+            black,
+            "yellow is light"
+        );
+        assert_eq!(Colour::rgb(0x00, 0x00, 0xff).ink(), white, "blue is dark");
     }
 
     #[test]
