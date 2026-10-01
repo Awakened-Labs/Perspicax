@@ -787,7 +787,16 @@ impl XdgShellHandler for Compositor {
     /// Titles are not double-buffered, so a new one arrives without a
     /// commit: published now, or the facts and every taskbar would keep the
     /// old title until the window next drew.
-    fn title_changed(&mut self, _surface: ToplevelSurface) {
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        tracing::debug!(
+            surface = self
+                .window_for(surface.wl_surface())
+                .as_ref()
+                .and_then(shell::id_of)
+                .map(|id| id.0),
+            title = crate::facts::title(surface.wl_surface()),
+            "title changed"
+        );
         self.publish_facts();
     }
 

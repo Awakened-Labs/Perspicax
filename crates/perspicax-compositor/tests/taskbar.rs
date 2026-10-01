@@ -185,3 +185,22 @@ fn a_narrowed_rule_takes_the_controls_back() {
 
     session.stop((desk, queue));
 }
+
+/// A taskbar watching must not stop titles reaching it, or the facts, or the
+/// titlebar: found on hardware with waybar, where a retitle went nowhere.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_retitle_reaches_the_taskbar_and_the_facts() {
+    let session = session("taskbar-retitle");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.bind_list(&globals, &qh);
+    desk.open_window(&qh, "first", "first");
+    until(&mut queue, &mut desk, |desk| desk.task("first").is_some());
+
+    desk.windows[0].set_title("hello");
+    until(&mut queue, &mut desk, |desk| desk.task("hello").is_some());
+    session.wait_for(|facts| window(facts, "hello").is_some());
+
+    session.stop((desk, queue));
+}
