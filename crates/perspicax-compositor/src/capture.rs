@@ -38,6 +38,9 @@ impl Compositor {
 }
 
 #[cfg(feature = "capture")]
+pub(crate) use taking::{Pixels, draw_output};
+
+#[cfg(feature = "capture")]
 mod taking {
     use perspicax_index::{Drawn, Shot, ShotTarget};
     use perspicax_node::{Origin, Rect, SurfaceId};
@@ -81,10 +84,10 @@ mod taking {
     const REDACTED: [f32; 4] = [0.35, 0.35, 0.38, 1.0];
 
     /// A picture's pixels: top row first, RGBA.
-    struct Pixels {
-        width: u32,
-        height: u32,
-        rgba: Vec<u8>,
+    pub(crate) struct Pixels {
+        pub(crate) width: u32,
+        pub(crate) height: u32,
+        pub(crate) rgba: Vec<u8>,
     }
 
     /// What will be drawn, and in what order, before the renderer is touched.
@@ -126,6 +129,17 @@ mod taking {
             drawn: plan.drawn,
             redacted: plan.redacted,
         })
+    }
+
+    /// Draw a monitor as it looks, with nothing painted over: what the
+    /// person's own screenshot tool is given. Consent is the agent's, and
+    /// this is not the agent asking.
+    pub(crate) fn draw_output(state: &mut Compositor, output: &str) -> Result<Pixels, ActError> {
+        let mut plan = plan_output(state, Some(output))?;
+        for placed in &mut plan.windows {
+            placed.redacted = false;
+        }
+        render(state, &plan)
     }
 
     /// Who drew a surface, from what was last published, and whether the

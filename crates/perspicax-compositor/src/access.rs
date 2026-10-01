@@ -62,6 +62,8 @@ impl crate::state::Compositor {
         for protocol in self.gate.set(access) {
             match protocol {
                 Protocol::Workspace => self.revoke_pager(),
+                #[cfg(feature = "capture")]
+                Protocol::Screencopy => self.revoke_screencopy(),
                 _ => self.revoke_toplevels(protocol),
             }
         }

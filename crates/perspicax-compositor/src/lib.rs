@@ -48,6 +48,8 @@ mod lock;
 mod origin;
 mod outputs;
 mod pager;
+#[cfg(feature = "capture")]
+mod screencopy;
 mod shell;
 pub mod state;
 mod toplevels;

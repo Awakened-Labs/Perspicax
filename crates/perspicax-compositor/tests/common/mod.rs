@@ -56,9 +56,15 @@ use wayland_protocols::ext::{
         ext_workspace_manager_v1::{self, ExtWorkspaceManagerV1},
     },
 };
-use wayland_protocols_wlr::foreign_toplevel::v1::client::{
-    zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
-    zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
+use wayland_protocols_wlr::{
+    foreign_toplevel::v1::client::{
+        zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
+        zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
+    },
+    screencopy::v1::client::{
+        zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+        zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+    },
 };
 
 pub const WINDOW: (u32, u32) = (400, 300);
@@ -237,6 +243,18 @@ pub struct PagedGroup {
     pub removed: bool,
 }
 
+/// One screencopy frame, as grim would see it.
+pub struct Grab {
+    pub frame: ZwlrScreencopyFrameV1,
+    /// Format, width, height and stride, each buffer the frame offered.
+    pub offered: Vec<(u32, u32, u32, u32)>,
+    pub buffer_done: bool,
+    pub ready: bool,
+    pub failed: bool,
+    pub damaged: bool,
+    pub buffer: Option<smithay_client_toolkit::shm::slot::Buffer>,
+}
+
 /// The test's client: windows of its own, drawn once in a flat colour, and
 /// whichever of the watching protocols a test binds.
 pub struct Desk {
@@ -266,6 +284,8 @@ pub struct Desk {
     pub pager_finished: bool,
     pub groups: Vec<PagedGroup>,
     pub paged: Vec<Paged>,
+    pub screencopy: Option<ZwlrScreencopyManagerV1>,
+    pub grabs: Vec<Grab>,
 }
 
 impl Desk {
@@ -297,6 +317,8 @@ impl Desk {
             pager_finished: false,
             groups: Vec::new(),
             paged: Vec::new(),
+            screencopy: None,
+            grabs: Vec::new(),
         }
     }
 
@@ -424,6 +446,74 @@ impl Desk {
             .expect("a workspace of that name");
         paged.handle.activate();
         self.pager.as_ref().expect("bind_pager first").commit();
+    }
+
+    /// Whether no monitor has been announced yet.
+    pub fn outputs_empty(&self) -> bool {
+        self.outputs.outputs().next().is_none()
+    }
+
+    /// Bind screencopy. Panics if it is not advertised.
+    pub fn bind_screencopy(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.screencopy = Some(
+            globals
+                .bind::<ZwlrScreencopyManagerV1, _, _>(qh, 1..=3, ())
+                .expect("zwlr_screencopy_manager_v1"),
+        );
+    }
+
+    /// Ask for a frame of the first monitor, or a region of it; returns
+    /// which grab it is.
+    pub fn grab(&mut self, qh: &QueueHandle<Self>, region: Option<(i32, i32, i32, i32)>) -> usize {
+        let manager = self.screencopy.as_ref().expect("bind_screencopy first");
+        let output = self.outputs.outputs().next().expect("a monitor");
+        let frame = match region {
+            None => manager.capture_output(0, &output, qh, ()),
+            Some((x, y, w, h)) => manager.capture_output_region(0, &output, x, y, w, h, qh, ()),
+        };
+        self.grabs.push(Grab {
+            frame,
+            offered: Vec::new(),
+            buffer_done: false,
+            ready: false,
+            failed: false,
+            damaged: false,
+            buffer: None,
+        });
+        self.grabs.len() - 1
+    }
+
+    /// Bring a buffer of the first format and size offered -- or one
+    /// `narrower` pixels narrower, which is the wrong one -- and copy into
+    /// it, waiting for damage or not.
+    pub fn copy(&mut self, grab: usize, narrower: i32, damage: bool) {
+        let (format, width, height, _) = self.grabs[grab].offered[0];
+        let width = i32::try_from(width).unwrap() - narrower;
+        let (buffer, _) = self
+            .pool
+            .create_buffer(
+                width,
+                i32::try_from(height).unwrap(),
+                width * 4,
+                wl_shm::Format::try_from(format).unwrap(),
+            )
+            .expect("a buffer");
+        let grabbing = &mut self.grabs[grab];
+        if damage {
+            grabbing.frame.copy_with_damage(buffer.wl_buffer());
+        } else {
+            grabbing.frame.copy(buffer.wl_buffer());
+        }
+        grabbing.buffer = Some(buffer);
+    }
+
+    /// A copied pixel, as RGBA, from the grab's buffer.
+    pub fn grabbed(&mut self, grab: usize, x: usize, y: usize) -> [u8; 4] {
+        let (_, width, _, _) = self.grabs[grab].offered[0];
+        let buffer = self.grabs[grab].buffer.as_ref().expect("copied");
+        let canvas = self.pool.canvas(buffer).expect("the buffer's memory");
+        let at = (y * width as usize + x) * 4;
+        [canvas[at + 2], canvas[at + 1], canvas[at], canvas[at + 3]]
     }
 
     /// Lock the session, as swaylock does.
@@ -650,6 +740,52 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for Desk {
                     .is_ok_and(|state| state.contains(ext_workspace_handle_v1::State::Active));
             }
             Event::Removed => paged.removed = true,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwlrScreencopyManagerV1, ()> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &ZwlrScreencopyManagerV1,
+        _: <ZwlrScreencopyManagerV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZwlrScreencopyFrameV1, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        frame: &ZwlrScreencopyFrameV1,
+        event: zwlr_screencopy_frame_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use zwlr_screencopy_frame_v1::Event;
+        let Some(grab) = desk.grabs.iter_mut().find(|grab| grab.frame == *frame) else {
+            return;
+        };
+        match event {
+            Event::Buffer {
+                format,
+                width,
+                height,
+                stride,
+            } => grab.offered.push((
+                format.into_result().map_or(0, u32::from),
+                width,
+                height,
+                stride,
+            )),
+            Event::BufferDone => grab.buffer_done = true,
+            Event::Ready { .. } => grab.ready = true,
+            Event::Failed => grab.failed = true,
+            Event::Damage { .. } => grab.damaged = true,
             _ => {}
         }
     }

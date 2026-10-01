@@ -228,10 +228,17 @@ pub struct Compositor {
     /// The workspaces, as the pager protocol has been told them. See
     /// [`crate::pager`].
     pub(crate) pager: crate::pager::Pager,
+    /// Screenshot tools' frames waiting for something to change. See
+    /// [`crate::screencopy`].
+    #[cfg(feature = "capture")]
+    pub(crate) screencopy: crate::screencopy::Screencopy,
     /// The event loop, for the handlers that must schedule work on it.
     #[cfg_attr(
-        not(feature = "xwayland"),
-        expect(dead_code, reason = "Xwayland's selections")
+        not(any(feature = "xwayland", feature = "capture")),
+        expect(
+            dead_code,
+            reason = "Xwayland's selections, and screencopy's waiting frames"
+        )
     )]
     pub(crate) loop_handle: LoopHandle<'static, Self>,
     /// How to start a program against this compositor. Set by `run` once the
@@ -269,6 +276,8 @@ impl Compositor {
         let gate = crate::access::Gate::new(backend.access());
         let toplevels = crate::toplevels::Toplevels::new(display, &gate);
         let pager = crate::pager::Pager::new(display, &gate);
+        #[cfg(feature = "capture")]
+        let screencopy = crate::screencopy::Screencopy::new(display, &gate);
         // Empty: outputs are mapped by `arrange_outputs`, once every one
         // the backend starts with is known, so the first is placed knowing
         // about the rest.
@@ -323,6 +332,8 @@ impl Compositor {
             gate,
             toplevels,
             pager,
+            #[cfg(feature = "capture")]
+            screencopy,
             loop_handle: event_loop,
             idle_inhibit: IdleInhibitManagerState::new::<Self>(display),
             inhibitors: Vec::new(),
@@ -725,6 +736,13 @@ impl CompositorHandler for Compositor {
         self.space.refresh();
         self.backend.redraw();
         self.publish_facts();
+        // Something changed, so a screenshot tool waiting for a change gets
+        // its frame -- once this commit has been taken in, not halfway.
+        #[cfg(feature = "capture")]
+        if !self.screencopy.waiting.is_empty() {
+            self.loop_handle
+                .insert_idle(|state: &mut Self| state.flush_screencopy());
+        }
     }
 }
 
