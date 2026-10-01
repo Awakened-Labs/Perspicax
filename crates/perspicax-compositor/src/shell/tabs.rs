@@ -106,8 +106,10 @@ impl Compositor {
         pointer.set_grab(self, grab, serial, smithay::input::pointer::Focus::Clear);
     }
 
-    /// The window whose titlebar a tab dragged to `at` would join, and that
-    /// titlebar: not a tab of its own group, and not itself.
+    /// The window whose titlebar a tab dragged to `at` would join, and the
+    /// whole of that window's frame, to outline while it is the target. Not
+    /// the dragged window itself, which is under the pointer as it moves, and
+    /// not another tab of its own group.
     #[cfg(feature = "seat")]
     pub(crate) fn tab_target(
         &self,
@@ -118,35 +120,41 @@ impl Compositor {
         smithay::utils::Rectangle<i32, smithay::utils::Logical>,
     )> {
         use perspicax_policy::Part;
-        let dragged = id_of(dragged)?;
-        let (window, _) = self.space.element_under(at)?;
+        let dragged_id = id_of(dragged)?;
+        let window = self.space.elements().rev().find(|window| {
+            *window != dragged
+                && self
+                    .space
+                    .element_bbox(window)
+                    .is_some_and(|bbox| bbox.to_f64().contains(at))
+                && matches!(
+                    self.frame_part(window, at),
+                    Some(Part::Title | Part::Tab(_))
+                )
+        })?;
         let target = id_of(window)?;
-        if self.tabs.front(dragged) == target || target == dragged {
-            return None;
-        }
-        if !matches!(
-            self.frame_part(window, at),
-            Some(Part::Title | Part::Tab(_))
-        ) {
+        if self.tabs.front(dragged_id) == self.tabs.front(target) {
             return None;
         }
         let client = self.extent(window)?;
-        let bar = perspicax_policy::titlebar(
-            super::rect(client),
-            self.insets(window),
-            &self.backend.decorations(),
-        )?;
+        let outer = perspicax_policy::outset(super::rect(client), self.insets(window));
         Some((
             target,
-            smithay::utils::Rectangle::new((bar.x, bar.y).into(), (bar.w, bar.h).into()),
+            smithay::utils::Rectangle::new((outer.x, outer.y).into(), (outer.w, outer.h).into()),
         ))
     }
 
-    /// A dragged tab let go at `at`: onto another window's titlebar, it joins
-    /// that window's group; anywhere else, it leaves its own, and opens where
-    /// it was dropped.
+    /// A tab dragged with the middle button was let go at `at`, having been
+    /// picked up from `home`. Onto another window's titlebar, it joins that
+    /// window's group. Anywhere else, it leaves its own group, where it was
+    /// dropped, and the tab after it takes the group's place at `home`.
     #[cfg(feature = "seat")]
-    pub(crate) fn drop_tab(&mut self, dragged: &Framed, at: Point<f64, smithay::utils::Logical>) {
+    pub(crate) fn drop_tab(
+        &mut self,
+        dragged: &Framed,
+        at: Point<f64, smithay::utils::Logical>,
+        home: Point<i32, smithay::utils::Logical>,
+    ) {
         let Some(id) = id_of(dragged) else {
             return;
         };
@@ -154,20 +162,19 @@ impl Compositor {
             self.attach_tab(id, target);
             return;
         }
-        if self.tabs.tabs(id).is_none() {
-            return;
+        let dropped = self.space.element_location(dragged);
+        if self.tabs.tabs(id).is_some() {
+            // The tab after it takes the group's place, which is where the
+            // dragged one was picked up from, not where it is now.
+            self.space.map_element(dragged.clone(), home, false);
+            if let Some(heir) = self.tabs.detach(id).and_then(|heir| self.any_window(heir)) {
+                self.bring_forward(&heir, dragged);
+            }
+            self.show_what_belongs();
+            if let Some(dropped) = dropped {
+                self.space.map_element(dragged.clone(), dropped, false);
+            }
         }
-        let place = self.any_window(self.tabs.front(id));
-        if let (Some(heir), Some(place)) = (self.tabs.detach(id), place)
-            && let Some(heir) = self.any_window(heir)
-        {
-            self.bring_forward(&heir, &place);
-        }
-        self.show_what_belongs();
-        // Hung from the pointer by the middle of its titlebar.
-        let width = extent_size(dragged).w;
-        let to = Point::from((at.x as i32 - width / 2, at.y as i32 + 12));
-        self.space.map_element(dragged.clone(), to, false);
         self.fit_frame(dragged);
         self.window_moved(dragged);
         self.space.raise_element(dragged, false);

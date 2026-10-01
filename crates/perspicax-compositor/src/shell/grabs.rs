@@ -214,18 +214,27 @@ fn limits(window: &Framed) -> Option<(Size<i32, Logical>, Size<i32, Logical>)> {
 }
 
 /// A tab being dragged by its titlebar with the middle button, to join
-/// another window's group or leave its own. The window does not move while
-/// it is dragged; where it would go is drawn, and it goes there on release.
+/// another window's group or leave its own. Once the press has become a drag,
+/// the tab comes to the front of its group and follows the pointer, and the
+/// window it would join is outlined.
 #[cfg(feature = "seat")]
 pub(crate) struct TabDragGrab {
     start: GrabStartData<Compositor>,
     tab: Framed,
+    /// Where the tab was when the drag began, and so where its group stays.
+    /// `None` until the press has travelled far enough to be a drag: a
+    /// middle click on a titlebar does nothing.
+    home: Option<Point<i32, Logical>>,
 }
 
 #[cfg(feature = "seat")]
 impl TabDragGrab {
     pub(crate) fn new(start: GrabStartData<Compositor>, tab: Framed) -> Self {
-        Self { start, tab }
+        Self {
+            start,
+            tab,
+            home: None,
+        }
     }
 }
 
@@ -239,9 +248,28 @@ impl PointerGrab<Compositor> for TabDragGrab {
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
-        data.tab_drop = data
-            .tab_target(&self.tab, event.location)
-            .map(|(_, bar)| bar);
+        let (from, now) = (self.start.location, event.location);
+        let home = match self.home {
+            Some(home) => home,
+            None if dragged((from.x, from.y), (now.x, now.y)) => {
+                // A tab behind its group comes forward to be dragged.
+                data.activate_tab(&self.tab);
+                let Some(home) = data.space.element_location(&self.tab) else {
+                    return;
+                };
+                self.home = Some(home);
+                home
+            }
+            None => return,
+        };
+        let to = (home.to_f64() + (now - from)).to_i32_round();
+        data.space.map_element(self.tab.clone(), to, false);
+        data.space.raise_element(&self.tab, false);
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = self.tab.x11_surface() {
+            let _ = x11.configure(smithay::utils::Rectangle::new(to, x11.geometry().size));
+        }
+        data.tab_drop = data.tab_target(&self.tab, now).map(|(_, outline)| outline);
         data.backend.redraw();
     }
 
@@ -256,7 +284,9 @@ impl PointerGrab<Compositor> for TabDragGrab {
             let at = handle.current_location();
             data.tab_drop = None;
             handle.unset_grab(self, data, event.serial, event.time, true);
-            data.drop_tab(&self.tab, at);
+            if let Some(home) = self.home {
+                data.drop_tab(&self.tab, at, home);
+            }
         }
     }
 
