@@ -354,18 +354,28 @@ impl Compositor {
         let Some(pointer) = self.pointer.clone() else {
             return;
         };
-        // A maximized window dragged by its titlebar comes out of maximized
-        // under the pointer, rather than being moved while still claiming to
-        // fill the screen.
+        let Some(origin) = self.space.element_location(window) else {
+            return;
+        };
+        // A maximized or snapped window is not restored yet: only once the
+        // pointer has really moved (see `MoveGrab`), so a click on its
+        // titlebar leaves it as it is.
+        let filled = window.toplevel().is_some_and(Self::is_filling) || Self::is_snapped(window);
+        let grab = MoveGrab::new(start, window.clone(), origin, filled);
+        pointer.set_grab(self, grab, serial, Focus::Clear);
+        // After, not before: replacing a grab unsets the one before it.
+        self.dragging = Some(window.clone());
+    }
+
+    /// Take a maximized or snapped window out of its fill as a drag starts:
+    /// back to its own size, hanging from the pointer at `at` where it was
+    /// grabbed, rather than moving while still claiming to fill the screen.
+    pub(crate) fn release_fill(&mut self, window: &Framed, at: Point<f64, Logical>) {
         if let Some(toplevel) = window.toplevel().filter(|t| Self::is_filling(t)).cloned() {
             let filled = self.space.element_geometry(window);
             let restored = placement(window, |placement| placement.restore.map(|r| r.size));
             if let (Some(filled), Some(restored)) = (filled, restored) {
-                let at = unmaximized_at(
-                    (start.location.x, start.location.y),
-                    rect(filled),
-                    (restored.w, restored.h),
-                );
+                let at = unmaximized_at((at.x, at.y), rect(filled), (restored.w, restored.h));
                 toplevel.with_pending_state(|pending| {
                     pending.states.unset(xdg_toplevel::State::Fullscreen);
                 });
@@ -377,21 +387,10 @@ impl Compositor {
             let snapped = self.extent(window);
             let restored = placement(window, |placement| placement.restore.map(|r| r.size));
             if let (Some(snapped), Some(restored)) = (snapped, restored) {
-                let (x, _) = unmaximized_at(
-                    (start.location.x, start.location.y),
-                    rect(snapped),
-                    (restored.w, restored.h),
-                );
+                let (x, _) = unmaximized_at((at.x, at.y), rect(snapped), (restored.w, restored.h));
                 self.unsnap(window, Some((x, snapped.loc.y).into()));
             }
         }
-        let Some(origin) = self.space.element_location(window) else {
-            return;
-        };
-        let grab = MoveGrab::new(start, window.clone(), origin);
-        pointer.set_grab(self, grab, serial, Focus::Clear);
-        // After, not before: replacing a grab unsets the one before it.
-        self.dragging = Some(window.clone());
     }
 
     /// Start resizing a window with the pointer.
