@@ -5,7 +5,7 @@
 //! under the pointer should light up as it passes. Everything a grab does not
 //! care about (scrolling, gestures) is passed through unchanged.
 
-use perspicax_policy::{Edges, Rect, resize};
+use perspicax_policy::{Edges, Rect, dragged, resize};
 use smithay::{
     input::pointer::{
         AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
@@ -121,6 +121,10 @@ pub(crate) struct MoveGrab {
     start: GrabStartData<Compositor>,
     window: Framed,
     origin: Point<i32, Logical>,
+    /// The window is maximized or snapped, and has not been restored yet: it
+    /// is, once the pointer has travelled far enough to make the press a
+    /// drag. Until then nothing moves, so a click is only a click.
+    filled: bool,
 }
 
 impl MoveGrab {
@@ -128,11 +132,13 @@ impl MoveGrab {
         start: GrabStartData<Compositor>,
         window: Framed,
         origin: Point<i32, Logical>,
+        filled: bool,
     ) -> Self {
         Self {
             start,
             window,
             origin,
+            filled,
         }
     }
 }
@@ -280,6 +286,17 @@ impl PointerGrab<Compositor> for MoveGrab {
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
+        if self.filled {
+            let (from, now) = (self.start.location, event.location);
+            if !dragged((from.x, from.y), (now.x, now.y)) {
+                return;
+            }
+            self.filled = false;
+            data.release_fill(&self.window, from);
+            if let Some(origin) = data.space.element_location(&self.window) {
+                self.origin = origin;
+            }
+        }
         let to = (self.origin.to_f64() + (event.location - self.start.location)).to_i32_round();
         data.space.map_element(self.window.clone(), to, false);
         // An X client keeps its own idea of where it is, and places its

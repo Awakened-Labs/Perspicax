@@ -129,6 +129,17 @@ pub fn edges_near(at: (i32, i32), size: (i32, i32)) -> Edges {
     edges
 }
 
+/// How far, in logical pixels, the pointer has to travel with a button held
+/// before a press is a drag. Below it, a press is a click, and a click on a
+/// maximized window's titlebar must not restore it.
+pub const DRAG_THRESHOLD: f64 = 6.0;
+
+/// Whether the pointer pressed at `from` and now at `to` has been dragged.
+#[must_use]
+pub fn dragged(from: (f64, f64), to: (f64, f64)) -> bool {
+    (to.0 - from.0).hypot(to.1 - from.1) >= DRAG_THRESHOLD
+}
+
 /// Where a maximized window goes when it is dragged out of maximized.
 ///
 /// Its restored size is smaller than the output it filled, so it is placed
@@ -219,6 +230,17 @@ pub fn carry(window: Rect, from: Rect, to: Rect) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_press_is_a_drag_only_once_the_pointer_has_travelled() {
+        assert!(!dragged((100.0, 100.0), (100.0, 100.0)), "a click");
+        assert!(
+            !dragged((100.0, 100.0), (103.0, 104.0)),
+            "a shaky click: 5 px"
+        );
+        assert!(dragged((100.0, 100.0), (106.0, 100.0)));
+        assert!(dragged((100.0, 100.0), (96.0, 95.0)), "in any direction");
+    }
 
     const FHD: Rect = Rect {
         x: 0,

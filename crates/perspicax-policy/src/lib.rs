@@ -42,7 +42,10 @@ pub use crate::{
         Colour, Decorations, FrameButton, GRIP, Insets, Look, Part, Press, buttons, buttons_in,
         fit, frame_rects, inset, is_double, outset, part_at, tab_rects, titlebar,
     },
-    geometry::{Edges, Rect, anchor, carry, edges_near, neighbour, place, resize, unmaximized_at},
+    geometry::{
+        DRAG_THRESHOLD, Edges, Rect, anchor, carry, dragged, edges_near, neighbour, place, resize,
+        unmaximized_at,
+    },
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
     snap::{Snapping, Zone, keyed, zone},
     tabs::Groups,
