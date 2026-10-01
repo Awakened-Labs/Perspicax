@@ -14,10 +14,7 @@ use smithay::{
         GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData, MotionEvent, PointerGrab,
         PointerInnerHandle, RelativeMotionEvent,
     },
-    reexports::{
-        wayland_protocols::xdg::shell::server::xdg_toplevel,
-        wayland_server::protocol::wl_surface::WlSurface,
-    },
+    reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
     utils::{Logical, Point, Size},
     wayland::{compositor::with_states, shell::xdg::SurfaceCachedState},
 };
@@ -33,7 +30,7 @@ macro_rules! pass_through {
             &mut self,
             data: &mut Compositor,
             handle: &mut PointerInnerHandle<'_, Compositor>,
-            focus: Option<(WlSurface, Point<f64, Logical>)>,
+            focus: Option<(crate::focus::FocusTarget, Point<f64, Logical>)>,
             event: &RelativeMotionEvent,
         ) {
             handle.relative_motion(data, focus, event);
@@ -222,7 +219,7 @@ impl PointerGrab<Compositor> for MoveGrab {
         &mut self,
         data: &mut Compositor,
         handle: &mut PointerInnerHandle<'_, Compositor>,
-        _focus: Option<(WlSurface, Point<f64, Logical>)>,
+        _focus: Option<(crate::focus::FocusTarget, Point<f64, Logical>)>,
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
@@ -266,7 +263,7 @@ impl PointerGrab<Compositor> for ResizeGrab {
         &mut self,
         data: &mut Compositor,
         handle: &mut PointerInnerHandle<'_, Compositor>,
-        _focus: Option<(WlSurface, Point<f64, Logical>)>,
+        _focus: Option<(crate::focus::FocusTarget, Point<f64, Logical>)>,
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);

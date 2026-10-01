@@ -263,7 +263,7 @@ fn moved(state: &mut Compositor, to: Point<f64, Logical>, time: u32) {
         .and_then(id_of);
     handle.motion(
         state,
-        under.map(|hit| (hit.surface, hit.origin)),
+        under.map(|hit| (hit.surface.into(), hit.origin)),
         &MotionEvent {
             location: at,
             serial: SERIAL_COUNTER.next_serial(),

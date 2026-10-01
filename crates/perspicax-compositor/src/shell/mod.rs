@@ -421,7 +421,10 @@ impl Compositor {
         else {
             return;
         };
-        let Ok(mut grab) = self.popups.grab_popup::<Self>(root, kind, seat, serial) else {
+        let Ok(mut grab) = self
+            .popups
+            .grab_popup::<Self>(root.into(), kind, seat, serial)
+        else {
             return;
         };
         if let Some(keyboard) = seat.get_keyboard() {

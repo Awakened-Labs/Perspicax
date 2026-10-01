@@ -16,7 +16,9 @@ use std::{
 use perspicax_index::Consent;
 use perspicax_node::{Origin, Rect, SurfaceId};
 
-use crate::{act::Keys, backend::Running, facts::Facts, origin, shell};
+use smithay::wayland::seat::WaylandFocus;
+
+use crate::{act::Keys, backend::Running, facts::Facts, focus::FocusTarget, origin, shell};
 
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_output, delegate_primary_selection,
@@ -393,14 +395,39 @@ impl Compositor {
 
     /// The surface holding the keyboard, whatever kind it is.
     pub(crate) fn keyboard_focus(&self) -> Option<WlSurface> {
-        self.keyboard.as_ref()?.current_focus()
+        self.keyboard
+            .as_ref()?
+            .current_focus()?
+            .wl_surface()
+            .map(std::borrow::Cow::into_owned)
     }
 
     /// Give the keyboard to a surface that is not a window: a launcher, a
     /// lock screen.
     pub(crate) fn focus_plain(&mut self, surface: WlSurface) {
         if let Some(keyboard) = self.keyboard.clone() {
-            keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+            keyboard.set_focus(self, Some(surface.into()), SERIAL_COUNTER.next_serial());
+        }
+    }
+
+    /// A window closed. If it held the keyboard, the keyboard goes to the
+    /// window now on top, as on any desktop; a launcher or lock screen that
+    /// holds it keeps it. Only with a person at the seat: headless keeps the
+    /// M2 contract that focus moves only when something asks it to.
+    ///
+    /// `closing` is the closed window's surface, compared rather than asked
+    /// whether it is alive: a client destroys its window role before the
+    /// surface, so at this point the surface still is, and an aliveness check
+    /// concluded the keyboard was still held. Found on the first hardware run.
+    pub(crate) fn refocus_after_close(&mut self, closing: Option<&WlSurface>) {
+        if !self.backend.has_person() {
+            return;
+        }
+        let held = self
+            .keyboard_focus()
+            .is_some_and(|focus| focus.is_alive() && Some(&focus) != closing);
+        if !held {
+            self.focus_top_window();
         }
     }
 
@@ -427,12 +454,30 @@ impl Compositor {
     }
 
     /// Give a surface keyboard focus, and remember when.
+    ///
+    /// An X11 window is focused as an X11 window, so the X server's input
+    /// focus moves with it. See [`crate::focus`].
     pub(crate) fn focus_surface(&mut self, surface: WlSurface, id: SurfaceId) {
         let Some(keyboard) = self.keyboard.clone() else {
             return;
         };
-        keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+        let target = self.focus_target(surface, id);
+        keyboard.set_focus(self, Some(target), SERIAL_COUNTER.next_serial());
         self.focused_at.insert(id, Instant::now());
+    }
+
+    /// The focus target for a window's surface: the X11 window itself if
+    /// that is what it is, the surface otherwise.
+    #[cfg_attr(not(feature = "xwayland"), expect(unused_variables, reason = "X11's"))]
+    fn focus_target(&self, surface: WlSurface, id: SurfaceId) -> FocusTarget {
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = self
+            .window_for_id(id)
+            .and_then(|window| window.x11_surface().cloned())
+        {
+            return FocusTarget::X11(x11);
+        }
+        FocusTarget::Wayland(surface)
     }
 
     /// When this surface was last focused.
@@ -486,7 +531,7 @@ impl Compositor {
     /// surface being the ordinary one -- and a cached answer would then
     /// describe a window that is gone.
     pub(crate) fn focused_surface(&self) -> Option<SurfaceId> {
-        let surface = self.keyboard.as_ref()?.current_focus()?;
+        let surface = self.keyboard_focus()?;
         let window = self.window_for(&surface)?;
         window.user_data().get::<SurfaceId>().copied()
     }
@@ -674,6 +719,7 @@ impl XdgShellHandler for Compositor {
             self.space.unmap_elem(&window);
             self.minimized.retain(|minimized| minimized != &window);
         }
+        self.refocus_after_close(Some(surface.wl_surface()));
         self.backend.redraw();
         self.publish_facts();
     }
@@ -805,7 +851,7 @@ impl Compositor {
         // The press must have landed on this client's window, or a client
         // could drag a window it does not own.
         let (focus, _) = start.focus.as_ref()?;
-        if !focus.id().same_client_as(&surface.wl_surface().id()) {
+        if !focus.same_client_as(&surface.wl_surface().id()) {
             return None;
         }
         Some((self.window_for(surface.wl_surface())?, start))
@@ -813,8 +859,8 @@ impl Compositor {
 }
 
 impl SeatHandler for Compositor {
-    type KeyboardFocus = WlSurface;
-    type PointerFocus = WlSurface;
+    type KeyboardFocus = FocusTarget;
+    type PointerFocus = FocusTarget;
     type TouchFocus = WlSurface;
 
     fn seat_state(&mut self) -> &mut SeatState<Self> {
@@ -825,7 +871,12 @@ impl SeatHandler for Compositor {
     /// active, and no other. Headless leaves every toplevel activated from the
     /// start (see `new_toplevel`), because the toolkits it hosts for reading
     /// render differently when they believe they are in the background.
-    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&FocusTarget>) {
+        let focused = focused
+            .and_then(WaylandFocus::wl_surface)
+            .map(std::borrow::Cow::into_owned);
+        let focused = focused.as_ref();
+        tracing::debug!(surface = ?focused.map(|surface| surface.id()), "keyboard focus changed");
         // The clipboard and the primary selection belong to whoever has the
         // keyboard: a client may only read a selection while focused. On both
         // backends, because an agent pasting is as real as a person pasting.
@@ -840,10 +891,11 @@ impl SeatHandler for Compositor {
             let active = shell::surface_of(window).as_ref() == focused;
             // An X11 window is told at once; an xdg toplevel needs the
             // configure that carries its new state.
-            if window.set_activated(active)
-                && let Some(toplevel) = window.toplevel()
-            {
-                toplevel.send_pending_configure();
+            if window.set_activated(active) {
+                tracing::debug!(window = ?shell::id_of(window), active, "activation changed");
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.send_pending_configure();
+                }
             }
         }
     }

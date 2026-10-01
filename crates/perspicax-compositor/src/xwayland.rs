@@ -534,6 +534,7 @@ impl Compositor {
         if let Some(window) = self.x11_window(x11) {
             self.space.unmap_elem(&window);
             self.minimized.retain(|minimized| minimized != &window);
+            self.refocus_after_close(x11.wl_surface().as_ref());
             self.backend.redraw();
             self.publish_facts();
         }
