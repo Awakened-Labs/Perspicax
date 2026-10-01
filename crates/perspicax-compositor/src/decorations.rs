@@ -281,10 +281,9 @@ impl Compositor {
         self.publish_facts();
     }
 
-    /// The `[decorations]` settings changed: refit every window on screen to
-    /// the frame it now has. A window that is off screen is fitted when it
-    /// comes back.
-    #[cfg(feature = "seat")]
+    /// The `[decorations]` settings changed, or the room panels leave did:
+    /// refit every window on screen to the frame and the room it now has. A
+    /// window that is off screen is fitted when it comes back.
     pub(crate) fn refit_frames(&mut self) {
         let windows: Vec<Framed> = self.space.elements().cloned().collect();
         for window in &windows {

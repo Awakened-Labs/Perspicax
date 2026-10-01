@@ -85,15 +85,23 @@ impl WlrLayerShellHandler for Compositor {
     }
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
+        let mut freed = false;
         for output in self.space.outputs().cloned().collect::<Vec<_>>() {
             let mut map = layer_map_for_output(&output);
+            let before = map.non_exclusive_zone();
             let gone = map
                 .layers()
                 .find(|layer| layer.layer_surface() == &surface)
                 .cloned();
             if let Some(layer) = gone {
                 map.unmap_layer(&layer);
+                map.arrange();
+                freed |= map.non_exclusive_zone() != before;
             }
+        }
+        // A panel that went gives its room back to the windows that fill.
+        if freed {
+            self.refit_frames();
         }
         // A launcher that held the keyboard gives it back to the window
         // beneath.
@@ -117,11 +125,16 @@ impl Compositor {
                 .is_some()
         })?;
         let output = output.clone();
-        let layer = {
+        let (layer, reserved) = {
             let mut map = layer_map_for_output(&output);
+            let before = map.non_exclusive_zone();
             map.arrange();
-            map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)?
-                .clone()
+            let reserved = map.non_exclusive_zone() != before;
+            (
+                map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)?
+                    .clone(),
+                reserved,
+            )
         };
         let configured = with_states(surface, |states| {
             states
@@ -142,8 +155,13 @@ impl Compositor {
         if exclusive && self.keyboard_focus().as_ref() != Some(surface) && self.lock.is_none() {
             self.focus_plain(surface.clone());
         }
-        // The usable area may have changed under the windows: a panel
-        // appearing shrinks it.
+        // The usable area changed under the windows: a panel appearing
+        // shrinks it. Windows that fill it are fitted to what is left, and
+        // a window whose titlebar the panel now covers comes out from under
+        // it, so a bar started after the windows does not hide their frames.
+        if reserved {
+            self.refit_frames();
+        }
         self.backend.redraw();
         layer.user_data().get::<SurfaceId>().copied()
     }
