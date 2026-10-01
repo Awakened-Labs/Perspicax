@@ -32,7 +32,6 @@ use std::sync::{Arc, PoisonError, RwLock};
 use perspicax_index::{HostFacts, SurfaceFacts};
 use perspicax_node::{Origin, Rect, SurfaceId, Vec2};
 use smithay::{
-    desktop::Window,
     reexports::wayland_server::{Resource as _, protocol::wl_surface::WlSurface},
     utils::IsAlive,
     wayland::{
@@ -41,7 +40,10 @@ use smithay::{
     },
 };
 
-use crate::state::{ClientState, Compositor};
+use crate::{
+    framed::Framed,
+    state::{ClientState, Compositor},
+};
 
 /// A handle to whatever the compositor last published.
 ///
@@ -197,7 +199,7 @@ impl Compositor {
 
     /// One window's facts, or `None` if it has no id yet -- which means it has
     /// not been mapped through `new_toplevel` and is not ours to describe.
-    fn facts_for(&self, window: &Window) -> Option<SurfaceFacts> {
+    fn facts_for(&self, window: &Framed) -> Option<SurfaceFacts> {
         let id = *window.user_data().get::<SurfaceId>()?;
         #[cfg(feature = "xwayland")]
         if let Some(x11) = window.x11_surface() {
@@ -340,7 +342,7 @@ impl Compositor {
     fn x11_facts(
         &self,
         id: SurfaceId,
-        window: &Window,
+        window: &Framed,
         x11: &smithay::xwayland::X11Surface,
     ) -> Option<SurfaceFacts> {
         let location = match self.space.element_location(window) {
@@ -378,7 +380,7 @@ impl Compositor {
     /// socket at the moment it was accepted, and re-deriving them later from a
     /// pid that may have been recycled would be strictly worse information
     /// wearing a fresher timestamp.
-    fn origin_of(&self, window: &Window) -> Origin {
+    fn origin_of(&self, window: &Framed) -> Origin {
         let Some(toplevel) = window.toplevel() else {
             return Origin::Unattributed;
         };

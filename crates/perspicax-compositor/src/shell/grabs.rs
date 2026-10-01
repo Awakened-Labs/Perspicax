@@ -7,7 +7,6 @@
 
 use perspicax_policy::{Edges, Rect, resize};
 use smithay::{
-    desktop::Window,
     input::pointer::{
         AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
         GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
@@ -20,7 +19,7 @@ use smithay::{
 };
 
 use super::{Resize, placement};
-use crate::state::Compositor;
+use crate::{framed::Framed, state::Compositor};
 
 /// The half of `PointerGrab` neither grab changes: scrolling, frames and
 /// gestures go wherever they would have gone.
@@ -120,14 +119,14 @@ macro_rules! pass_through {
 /// Moving a window: it follows the pointer from where it was grabbed.
 pub(crate) struct MoveGrab {
     start: GrabStartData<Compositor>,
-    window: Window,
+    window: Framed,
     origin: Point<i32, Logical>,
 }
 
 impl MoveGrab {
     pub(crate) fn new(
         start: GrabStartData<Compositor>,
-        window: Window,
+        window: Framed,
         origin: Point<i32, Logical>,
     ) -> Self {
         Self {
@@ -142,7 +141,7 @@ impl MoveGrab {
 /// client's commits are anchored by [`Compositor::settle_resize`].
 pub(crate) struct ResizeGrab {
     start: GrabStartData<Compositor>,
-    window: Window,
+    window: Framed,
     edges: Edges,
     from: Rect,
     last: (i32, i32),
@@ -151,7 +150,7 @@ pub(crate) struct ResizeGrab {
 impl ResizeGrab {
     pub(crate) fn new(
         start: GrabStartData<Compositor>,
-        window: Window,
+        window: Framed,
         edges: Edges,
         from: Rect,
     ) -> Self {
@@ -190,7 +189,7 @@ impl ResizeGrab {
 
 /// The smallest and largest size a window declared, `0` meaning no limit:
 /// from its xdg cached state, or an X client's size hints.
-fn limits(window: &Window) -> Option<(Size<i32, Logical>, Size<i32, Logical>)> {
+fn limits(window: &Framed) -> Option<(Size<i32, Logical>, Size<i32, Logical>)> {
     if let Some(toplevel) = window.toplevel() {
         return Some(with_states(toplevel.wl_surface(), |states| {
             let mut cached = states.cached_state.get::<SurfaceCachedState>();

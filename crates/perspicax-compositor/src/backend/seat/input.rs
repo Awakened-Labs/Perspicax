@@ -26,7 +26,7 @@ use smithay::{
         libinput::LibinputInputBackend,
         session::Session as _,
     },
-    desktop::{Window, WindowSurfaceType},
+    desktop::WindowSurfaceType,
     input::{
         keyboard::{FilterResult, Keycode, ModifiersState},
         pointer::{AxisFrame, ButtonEvent, GrabStartData, MotionEvent, PointerHandle},
@@ -48,7 +48,7 @@ use super::{
     settings,
 };
 use crate::layers;
-use crate::{shell::id_of, state::Compositor};
+use crate::{framed::Framed, shell::id_of, state::Compositor};
 
 /// Linux button codes, from `linux/input-event-codes.h`.
 const BTN_LEFT: u32 = 0x110;
@@ -478,7 +478,7 @@ fn scroll_flips(
 /// What the pointer is over.
 struct Hit {
     /// Set when it is a window, which is all the focus policy decides about.
-    window: Option<Window>,
+    window: Option<Framed>,
     /// Set when it is a layer surface that may take the keyboard on a click.
     takes_focus: bool,
     /// The surface there (a subsurface, a popup, the thing itself) and its

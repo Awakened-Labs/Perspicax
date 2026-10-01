@@ -8,7 +8,7 @@
 
 use perspicax_node::SurfaceId;
 use perspicax_policy::{Action, Change, Decision, cycle};
-use smithay::{desktop::Window, utils::SERIAL_COUNTER};
+use smithay::utils::SERIAL_COUNTER;
 
 use super::{id_of, surface_of};
 use crate::state::Compositor;
@@ -19,11 +19,11 @@ impl Compositor {
         let focused = self.focused_surface().and_then(|id| self.window_for_id(id));
         match action {
             Action::Close => {
-                if let Some(toplevel) = focused.as_ref().and_then(Window::toplevel) {
+                if let Some(toplevel) = focused.as_ref().and_then(|window| window.toplevel()) {
                     toplevel.send_close();
                 }
                 #[cfg(feature = "xwayland")]
-                if let Some(x11) = focused.as_ref().and_then(Window::x11_surface) {
+                if let Some(x11) = focused.as_ref().and_then(|window| window.x11_surface()) {
                     let _ = x11.close();
                 }
             }

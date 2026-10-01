@@ -27,7 +27,7 @@ use perspicax_node::SurfaceId;
 use perspicax_policy::{Edges, Rect, Towards, carry, neighbour, place, unmaximized_at};
 use smithay::{
     desktop::{
-        PopupKeyboardGrab, PopupKind, PopupPointerGrab, PopupUngrabStrategy, Window,
+        PopupKeyboardGrab, PopupKind, PopupPointerGrab, PopupUngrabStrategy,
         find_popup_root_surface, get_popup_toplevel_coords,
     },
     input::{
@@ -46,7 +46,7 @@ use smithay::{
     },
 };
 
-use crate::state::Compositor;
+use crate::{framed::Framed, state::Compositor};
 
 pub(crate) use grabs::{MoveGrab, ResizeGrab};
 pub(crate) use snap::SnapPreview;
@@ -84,7 +84,7 @@ pub(crate) struct Resize {
 }
 
 /// This window's placement record, created on first use.
-pub(crate) fn placement<T>(window: &Window, f: impl FnOnce(&mut Placement) -> T) -> T {
+pub(crate) fn placement<T>(window: &Framed, f: impl FnOnce(&mut Placement) -> T) -> T {
     window
         .user_data()
         .insert_if_missing(|| RefCell::new(Placement::default()));
@@ -128,13 +128,13 @@ impl Compositor {
     /// headless every window is `0x0` there, and nothing could tell which
     /// output one is on. An X11 window's geometry comes from the X server, and
     /// a client that declared nothing falls back to the buffer's.
-    pub(crate) fn extent(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
+    pub(crate) fn extent(&self, window: &Framed) -> Option<Rectangle<i32, Logical>> {
         let location = self.space.element_location(window)?;
         Some(Rectangle::new(location, extent_size(window)))
     }
 
     /// The output a window is mostly on, or the one under the pointer.
-    pub(crate) fn output_of(&self, window: &Window) -> Option<Output> {
+    pub(crate) fn output_of(&self, window: &Framed) -> Option<Output> {
         let bounds = self.extent(window);
         let overlap = |output: &&Output| {
             let (Some(bounds), Some(area)) = (bounds, self.space.output_geometry(output)) else {
@@ -241,7 +241,7 @@ impl Compositor {
     /// fullscreen window fills its new output; any other keeps its distance
     /// from the corner (see `perspicax_policy::carry`). Per output, it joins
     /// the workspace its new monitor is showing.
-    pub(crate) fn move_to_output(&mut self, window: &Window, towards: Towards) {
+    pub(crate) fn move_to_output(&mut self, window: &Framed, towards: Towards) {
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
         let areas: Vec<Rect> = outputs
             .iter()
@@ -280,7 +280,7 @@ impl Compositor {
 
     /// Take a window off the screen, keeping its place. Focus moves to
     /// whatever is on top now, as it would if the window had closed.
-    pub(crate) fn minimize(&mut self, window: &Window) {
+    pub(crate) fn minimize(&mut self, window: &Framed) {
         placement(window, |placement| placement.minimized = true);
         self.show_what_belongs();
         self.backend.redraw();
@@ -292,7 +292,7 @@ impl Compositor {
     /// a window on another desktop does on every desktop that has them. It
     /// comes back where it was, or onto the nearest monitor if that one is
     /// gone. The caller raises and focuses it, if that is what it wants.
-    pub(crate) fn restore(&mut self, window: &Window) {
+    pub(crate) fn restore(&mut self, window: &Framed) {
         placement(window, |placement| placement.minimized = false);
         self.go_to_workspace_of(window);
         self.show_what_belongs();
@@ -300,7 +300,7 @@ impl Compositor {
     }
 
     /// A parked window with this id: minimized, or on another workspace.
-    pub(crate) fn parked_with(&self, id: SurfaceId) -> Option<Window> {
+    pub(crate) fn parked_with(&self, id: SurfaceId) -> Option<Framed> {
         self.parked
             .iter()
             .find(|window| id_of(window) == Some(id))
@@ -308,13 +308,13 @@ impl Compositor {
     }
 
     /// Whether the person minimized this window.
-    pub(crate) fn is_minimized(window: &Window) -> bool {
+    pub(crate) fn is_minimized(window: &Framed) -> bool {
         placement(window, |placement| placement.minimized)
     }
 
     /// The last commit of a resize from the left or top: move the window so
     /// its *opposite* edge stays still, at whatever size the client chose.
-    pub(crate) fn settle_resize(&mut self, window: &Window) {
+    pub(crate) fn settle_resize(&mut self, window: &Framed) {
         let Some(resize) = placement(window, |placement| placement.resize) else {
             return;
         };
@@ -335,7 +335,7 @@ impl Compositor {
     /// or a modifier-drag.
     pub(crate) fn start_move(
         &mut self,
-        window: &Window,
+        window: &Framed,
         start: GrabStartData<Self>,
         serial: Serial,
     ) {
@@ -385,7 +385,7 @@ impl Compositor {
     /// Start resizing a window with the pointer.
     pub(crate) fn start_resize(
         &mut self,
-        window: &Window,
+        window: &Framed,
         edges: Edges,
         start: GrabStartData<Self>,
         serial: Serial,
@@ -478,7 +478,7 @@ impl Compositor {
 
 /// A window's size, as [`Compositor::extent`] measures it, whether it is on
 /// screen or parked.
-pub(crate) fn extent_size(window: &Window) -> Size<i32, Logical> {
+pub(crate) fn extent_size(window: &Framed) -> Size<i32, Logical> {
     let declared = window
         .toplevel()
         .and_then(|toplevel| crate::state::declared_geometry(toplevel.wl_surface()))
@@ -494,7 +494,7 @@ pub(crate) fn extent_size(window: &Window) -> Size<i32, Logical> {
     }
 }
 
-pub(crate) fn id_of(window: &Window) -> Option<SurfaceId> {
+pub(crate) fn id_of(window: &Framed) -> Option<SurfaceId> {
     window.user_data().get::<SurfaceId>().copied()
 }
 
@@ -511,12 +511,12 @@ pub(crate) fn edges(edge: xdg_toplevel::ResizeEdge) -> Edges {
 
 /// Whether `surface` is this window's own surface -- its xdg toplevel, or the
 /// surface Xwayland associated with its X11 window.
-pub(crate) fn is_toplevel_of(window: &Window, surface: &WlSurface) -> bool {
+pub(crate) fn is_toplevel_of(window: &Framed, surface: &WlSurface) -> bool {
     window.wl_surface().is_some_and(|own| *own == *surface)
 }
 
 /// A window's own surface, whichever protocol it came in by. `None` for an
 /// X11 window Xwayland has not yet associated with a surface.
-pub(crate) fn surface_of(window: &Window) -> Option<WlSurface> {
+pub(crate) fn surface_of(window: &Framed) -> Option<WlSurface> {
     window.wl_surface().map(std::borrow::Cow::into_owned)
 }

@@ -12,14 +12,13 @@
 
 use perspicax_policy::{Direction, Snapping, Zone, keyed, zone};
 use smithay::{
-    desktop::Window,
     output::Output,
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
     utils::{Logical, Point, Rectangle},
 };
 
 use super::{placement, rect};
-use crate::state::Compositor;
+use crate::{framed::Framed, state::Compositor};
 
 /// The xdg-shell states a zone is tiled against.
 const TILED: [xdg_toplevel::State; 4] = [
@@ -55,7 +54,7 @@ pub(crate) struct SnapPreview {
 impl Compositor {
     /// Snap a window to a zone of `output`, or of the output it is mostly
     /// on.
-    pub(crate) fn snap(&mut self, window: &Window, zone: Zone, output: Option<Output>) {
+    pub(crate) fn snap(&mut self, window: &Framed, zone: Zone, output: Option<Output>) {
         if zone == Zone::Top {
             self.clear_tiling(window);
             // Maximized on the output it is mostly on, which for a window
@@ -108,7 +107,7 @@ impl Compositor {
 
     /// Take a window out of its zone: back to the size it had before it was
     /// snapped, at `at`, or where it was.
-    pub(crate) fn unsnap(&mut self, window: &Window, at: Option<Point<i32, Logical>>) {
+    pub(crate) fn unsnap(&mut self, window: &Framed, at: Option<Point<i32, Logical>>) {
         let restore = placement(window, |placement| {
             placement.snapped = None;
             placement.restore.take()
@@ -163,7 +162,7 @@ impl Compositor {
     }
 
     /// Whether this window is snapped to a half or a quarter.
-    pub(crate) fn is_snapped(window: &Window) -> bool {
+    pub(crate) fn is_snapped(window: &Framed) -> bool {
         placement(window, |placement| placement.snapped.is_some())
     }
 
@@ -198,14 +197,14 @@ impl Compositor {
     }
 
     /// The drag ended: snap where the preview said, if anywhere.
-    pub(crate) fn finish_snap(&mut self, window: &Window) {
+    pub(crate) fn finish_snap(&mut self, window: &Framed) {
         if let Some(preview) = self.snap_preview.take() {
             self.snap(window, preview.zone, Some(preview.output));
             self.backend.redraw();
         }
     }
 
-    fn clear_tiling(&mut self, window: &Window) {
+    fn clear_tiling(&mut self, window: &Framed) {
         placement(window, |placement| placement.snapped = None);
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|pending| {
