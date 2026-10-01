@@ -60,7 +60,10 @@ impl crate::state::Compositor {
     /// the clients that hold it.
     pub(crate) fn set_access(&mut self, access: Access) {
         for protocol in self.gate.set(access) {
-            self.revoke_toplevels(protocol);
+            match protocol {
+                Protocol::Workspace => self.revoke_pager(),
+                _ => self.revoke_toplevels(protocol),
+            }
         }
     }
 }

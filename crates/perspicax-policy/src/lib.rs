@@ -52,7 +52,7 @@ pub use crate::{
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
     snap::{Snapping, Zone, keyed, zone},
     tabs::Groups,
-    workspace::{Cell, Direction, Grid, Home, Mode, Shape, Workspaces},
+    workspace::{Cell, Direction, Grid, GroupView, Home, Mode, Shape, WorkspaceView, Workspaces},
 };
 
 /// Keysyms, re-exported so a caller spells chords with the same type this

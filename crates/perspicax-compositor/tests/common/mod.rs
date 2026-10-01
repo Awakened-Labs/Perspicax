@@ -50,6 +50,11 @@ use wayland_protocols::ext::{
         ext_session_lock_manager_v1::ExtSessionLockManagerV1,
         ext_session_lock_v1::{self, ExtSessionLockV1},
     },
+    workspace::v1::client::{
+        ext_workspace_group_handle_v1::{self, ExtWorkspaceGroupHandleV1},
+        ext_workspace_handle_v1::{self, ExtWorkspaceHandleV1},
+        ext_workspace_manager_v1::{self, ExtWorkspaceManagerV1},
+    },
 };
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
@@ -212,6 +217,26 @@ impl Tasked {
     }
 }
 
+/// One workspace as a pager was told it.
+#[derive(Debug, Clone)]
+pub struct Paged {
+    pub handle: ExtWorkspaceHandleV1,
+    pub id: String,
+    pub name: String,
+    pub coordinates: Vec<u32>,
+    pub active: bool,
+    pub removed: bool,
+}
+
+/// One group of workspaces as a pager was told it.
+#[derive(Debug, Clone)]
+pub struct PagedGroup {
+    pub handle: ExtWorkspaceGroupHandleV1,
+    pub outputs: usize,
+    pub workspaces: Vec<ObjectId>,
+    pub removed: bool,
+}
+
 /// The test's client: windows of its own, drawn once in a flat colour, and
 /// whichever of the watching protocols a test binds.
 pub struct Desk {
@@ -234,6 +259,11 @@ pub struct Desk {
     pub seat: Option<wl_seat::WlSeat>,
     /// How many times the compositor asked one of our windows to close.
     pub asked_to_close: usize,
+    pub pager: Option<ExtWorkspaceManagerV1>,
+    pub pager_done: usize,
+    pub pager_finished: bool,
+    pub groups: Vec<PagedGroup>,
+    pub paged: Vec<Paged>,
 }
 
 impl Desk {
@@ -259,6 +289,11 @@ impl Desk {
             tasked: Vec::new(),
             seat: None,
             asked_to_close: 0,
+            pager: None,
+            pager_done: 0,
+            pager_finished: false,
+            groups: Vec::new(),
+            paged: Vec::new(),
         }
     }
 
@@ -339,6 +374,41 @@ impl Desk {
             .expect("a known window")
             .handle
             .activate(seat);
+    }
+
+    /// Bind the pager. Panics if it is not advertised.
+    pub fn bind_pager(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.pager = Some(
+            globals
+                .bind::<ExtWorkspaceManagerV1, _, _>(qh, 1..=1, ())
+                .expect("ext_workspace_manager_v1"),
+        );
+    }
+
+    /// The groups the pager knows, not removed.
+    pub fn live_groups(&self) -> Vec<&PagedGroup> {
+        self.groups.iter().filter(|group| !group.removed).collect()
+    }
+
+    /// The names of the workspaces showing, in every group.
+    pub fn active_workspaces(&self) -> Vec<String> {
+        self.paged
+            .iter()
+            .filter(|paged| !paged.removed && paged.active)
+            .map(|paged| paged.name.clone())
+            .collect()
+    }
+
+    /// Ask to switch to the workspace named `name` in the first group that
+    /// has one, and commit.
+    pub fn switch_to(&self, name: &str) {
+        let paged = self
+            .paged
+            .iter()
+            .find(|paged| !paged.removed && paged.name == name)
+            .expect("a workspace of that name");
+        paged.handle.activate();
+        self.pager.as_ref().expect("bind_pager first").commit();
     }
 
     /// Lock the session, as swaylock does.
@@ -469,6 +539,102 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for Desk {
             Event::Parent { parent } => tasked.parent = parent.map(|parent| parent.id()),
             Event::Done => tasked.done += 1,
             Event::Closed => tasked.closed = true,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ExtWorkspaceManagerV1, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        _: &ExtWorkspaceManagerV1,
+        event: ext_workspace_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use ext_workspace_manager_v1::Event;
+        match event {
+            Event::WorkspaceGroup { workspace_group } => desk.groups.push(PagedGroup {
+                handle: workspace_group,
+                outputs: 0,
+                workspaces: Vec::new(),
+                removed: false,
+            }),
+            Event::Workspace { workspace } => desk.paged.push(Paged {
+                handle: workspace,
+                id: String::new(),
+                name: String::new(),
+                coordinates: Vec::new(),
+                active: false,
+                removed: false,
+            }),
+            Event::Done => desk.pager_done += 1,
+            Event::Finished => desk.pager_finished = true,
+            _ => {}
+        }
+    }
+
+    event_created_child!(Desk, ExtWorkspaceManagerV1, [
+        ext_workspace_manager_v1::EVT_WORKSPACE_GROUP_OPCODE => (ExtWorkspaceGroupHandleV1, ()),
+        ext_workspace_manager_v1::EVT_WORKSPACE_OPCODE => (ExtWorkspaceHandleV1, ())
+    ]);
+}
+
+impl Dispatch<ExtWorkspaceGroupHandleV1, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        handle: &ExtWorkspaceGroupHandleV1,
+        event: ext_workspace_group_handle_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use ext_workspace_group_handle_v1::Event;
+        let Some(group) = desk.groups.iter_mut().find(|group| group.handle == *handle) else {
+            return;
+        };
+        match event {
+            Event::OutputEnter { .. } => group.outputs += 1,
+            Event::OutputLeave { .. } => group.outputs -= 1,
+            Event::WorkspaceEnter { workspace } => group.workspaces.push(workspace.id()),
+            Event::WorkspaceLeave { workspace } => {
+                group.workspaces.retain(|id| *id != workspace.id());
+            }
+            Event::Removed => group.removed = true,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ExtWorkspaceHandleV1, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        handle: &ExtWorkspaceHandleV1,
+        event: ext_workspace_handle_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use ext_workspace_handle_v1::Event;
+        let Some(paged) = desk.paged.iter_mut().find(|paged| paged.handle == *handle) else {
+            return;
+        };
+        match event {
+            Event::Id { id } => paged.id = id,
+            Event::Name { name } => paged.name = name,
+            Event::Coordinates { coordinates } => {
+                paged.coordinates = coordinates
+                    .chunks_exact(4)
+                    .filter_map(|bytes| Some(u32::from_le_bytes(bytes.try_into().ok()?)))
+                    .collect();
+            }
+            Event::State { state } => {
+                paged.active = state
+                    .into_result()
+                    .is_ok_and(|state| state.contains(ext_workspace_handle_v1::State::Active));
+            }
+            Event::Removed => paged.removed = true,
             _ => {}
         }
     }

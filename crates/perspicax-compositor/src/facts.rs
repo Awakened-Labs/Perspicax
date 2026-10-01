@@ -203,6 +203,7 @@ impl Compositor {
     /// that could matter to them.
     fn announce(&mut self) {
         self.sync_toplevels();
+        self.sync_workspaces();
     }
 
     /// What a window's facts say about where it belongs, beyond where it

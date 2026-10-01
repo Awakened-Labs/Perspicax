@@ -133,6 +133,27 @@ pub enum Home {
     Sticky,
 }
 
+/// A set of workspaces that switch together, as a pager is told them: every
+/// monitor's, in spanning mode, or one monitor's in per-output mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupView<O> {
+    /// The monitor this group is, or `None` for the one spanning them all.
+    pub on: Option<O>,
+    /// The monitors it shows on.
+    pub outputs: Vec<O>,
+    pub workspaces: Vec<WorkspaceView>,
+}
+
+/// One workspace, as a pager is told it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkspaceView {
+    pub cell: Cell,
+    /// Column and row, from 0.
+    pub coordinates: [u32; 2],
+    /// Whether it is the one showing.
+    pub active: bool,
+}
+
 /// Every window's workspace and every monitor's current one.
 ///
 /// Generic over the window handle `W` and the monitor key `O`, so the
@@ -321,6 +342,37 @@ impl<W: Copy + PartialEq, O: Clone + PartialEq> Workspaces<W, O> {
     /// plugged in under the same name starts on the default.
     pub fn forget_output(&mut self, output: &O) {
         self.per_output.retain(|(key, _)| key != output);
+    }
+
+    /// The workspaces as a pager is told them, given the monitors there are:
+    /// one group across all of them in spanning mode, one each per output.
+    #[must_use]
+    pub fn groups(&self, outputs: &[O]) -> Vec<GroupView<O>> {
+        let columns = self.grid.columns.max(1);
+        let views = |current: Cell| -> Vec<WorkspaceView> {
+            (0..self.grid.len())
+                .map(|index| WorkspaceView {
+                    cell: Cell(index),
+                    coordinates: [u32::from(index % columns), u32::from(index / columns)],
+                    active: Cell(index) == current,
+                })
+                .collect()
+        };
+        match self.mode {
+            Mode::Spanning => vec![GroupView {
+                on: None,
+                outputs: outputs.to_vec(),
+                workspaces: views(self.spanning),
+            }],
+            Mode::PerOutput => outputs
+                .iter()
+                .map(|output| GroupView {
+                    on: Some(output.clone()),
+                    outputs: vec![output.clone()],
+                    workspaces: views(self.current(output)),
+                })
+                .collect(),
+        }
     }
 
     fn set(&mut self, window: W, home: Home) {
@@ -532,5 +584,45 @@ mod tests {
         assert_eq!(desk.home(2), Some(Home::On(Cell(1))));
         assert_eq!(desk.current(&"DP-1"), Cell(1));
         assert_eq!(desk.home(1), Some(Home::On(Cell(0))), "untouched");
+    }
+
+    #[test]
+    fn spanning_is_one_group_over_every_monitor() {
+        let mut workspaces = spanning();
+        workspaces.go_to(&"left", Cell(3));
+        let groups = workspaces.groups(&["left", "right"]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].on, None);
+        assert_eq!(groups[0].outputs, ["left", "right"]);
+        let active: Vec<_> = groups[0]
+            .workspaces
+            .iter()
+            .filter(|view| view.active)
+            .map(|view| view.cell)
+            .collect();
+        assert_eq!(active, [Cell(3)]);
+    }
+
+    #[test]
+    fn per_output_is_a_group_each_with_its_own_current_workspace() {
+        let mut workspaces = per_output();
+        workspaces.go_to(&"right", Cell(1));
+        let groups = workspaces.groups(&["left", "right"]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[1].on, Some("right"));
+        assert!(groups[0].workspaces[0].active);
+        assert!(groups[1].workspaces[1].active);
+        assert!(!groups[1].workspaces[0].active);
+    }
+
+    #[test]
+    fn coordinates_follow_the_grid_column_first() {
+        let groups = spanning().groups(&["only"]);
+        let coordinates: Vec<_> = groups[0]
+            .workspaces
+            .iter()
+            .map(|view| view.coordinates)
+            .collect();
+        assert_eq!(coordinates, [[0, 0], [1, 0], [0, 1], [1, 1]]);
     }
 }

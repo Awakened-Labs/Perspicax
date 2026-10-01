@@ -46,6 +46,7 @@ mod layers;
 mod lock;
 mod origin;
 mod outputs;
+mod pager;
 mod shell;
 pub mod state;
 mod toplevels;

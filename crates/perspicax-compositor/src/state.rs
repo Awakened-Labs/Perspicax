@@ -225,6 +225,9 @@ pub struct Compositor {
     /// Every window, as the taskbar protocols have been told it. See
     /// [`crate::toplevels`].
     pub(crate) toplevels: crate::toplevels::Toplevels,
+    /// The workspaces, as the pager protocol has been told them. See
+    /// [`crate::pager`].
+    pub(crate) pager: crate::pager::Pager,
     /// The event loop, for the handlers that must schedule work on it.
     #[cfg_attr(
         not(feature = "xwayland"),
@@ -265,6 +268,7 @@ impl Compositor {
         let workspace_shape = backend.workspace_shape();
         let gate = crate::access::Gate::new(backend.access());
         let toplevels = crate::toplevels::Toplevels::new(display, &gate);
+        let pager = crate::pager::Pager::new(display, &gate);
         // Empty: outputs are mapped by `arrange_outputs`, once every one
         // the backend starts with is known, so the first is placed knowing
         // about the rest.
@@ -318,6 +322,7 @@ impl Compositor {
             xwayland_shell: None,
             gate,
             toplevels,
+            pager,
             loop_handle: event_loop,
             idle_inhibit: IdleInhibitManagerState::new::<Self>(display),
             inhibitors: Vec::new(),
