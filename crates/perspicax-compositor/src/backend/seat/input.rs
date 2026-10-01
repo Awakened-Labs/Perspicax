@@ -13,8 +13,7 @@
 //! focus policy ([`perspicax_policy::Focus`]), whose decision is then carried
 //! out here.
 
-use perspicax_node::SurfaceId;
-use perspicax_policy::{Action, Button, Change, Decision, Drag, Mods, cycle, edges_near};
+use perspicax_policy::{Action, Button, Drag, Mods, edges_near};
 use smithay::{
     backend::{
         input::{
@@ -165,7 +164,7 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
 
     match taken {
         Some(Taken::Hatch(hatch)) => escape(state, hatch),
-        Some(Taken::Bound(action)) => perform(state, &action),
+        Some(Taken::Bound(action)) => state.perform(&action),
         Some(Taken::Release) | None => {}
     }
 }
@@ -183,59 +182,6 @@ fn escape(state: &mut Compositor, hatch: Hatch) {
             tracing::info!(vt, "switching VT");
             if let Err(error) = session.seat.change_vt(vt) {
                 tracing::warn!(vt, %error, "could not switch VT");
-            }
-        }
-    }
-}
-
-/// Carry out a binding.
-fn perform(state: &mut Compositor, action: &Action) {
-    match action {
-        Action::Close => {
-            let window = state
-                .focused_surface()
-                .and_then(|id| state.window_for_id(id));
-            if let Some(toplevel) = window.as_ref().and_then(Window::toplevel) {
-                toplevel.send_close();
-            }
-            #[cfg(feature = "xwayland")]
-            if let Some(x11) = window.as_ref().and_then(Window::x11_surface) {
-                let _ = x11.close();
-            }
-        }
-        Action::Spawn(command) => {
-            let launch = state.launch.clone();
-            if let Running::Seat(session) = &mut state.backend {
-                session.spawn(launch.as_ref(), command);
-            }
-        }
-        Action::MoveToOutput(towards) => {
-            if let Some(window) = state
-                .focused_surface()
-                .and_then(|id| state.window_for_id(id))
-            {
-                state.move_to_output(&window, *towards);
-            }
-        }
-        Action::Reload => settings::reload(state),
-        Action::CycleFocus => {
-            // Minimized windows count as below the bottom of the stack, so
-            // cycling reaches them first and brings them back: without a
-            // taskbar (W4), this is how a minimized window returns.
-            let stack: Vec<SurfaceId> = state
-                .minimized
-                .iter()
-                .chain(state.space.elements())
-                .filter_map(id_of)
-                .collect();
-            if let Some(next) = cycle(&stack) {
-                apply(
-                    state,
-                    Decision {
-                        focus: Change::To(next),
-                        raise: Some(next),
-                    },
-                );
             }
         }
     }
@@ -276,7 +222,7 @@ fn moved(state: &mut Compositor, to: Point<f64, Logical>, time: u32) {
         && !over_layer
     {
         let decision = focus.pointer_over(over, state.focused_surface());
-        apply(state, decision);
+        state.apply_focus(decision);
     }
     // The cursor itself moved, whatever the policy decided.
     state.backend.redraw();
@@ -310,7 +256,7 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
         // any desktop.
         if let Some(focus) = policy(state) {
             let decision = focus.pressed(over.as_ref().and_then(id_of), state.focused_surface());
-            apply(state, decision);
+            state.apply_focus(decision);
         }
         // With the drag modifier held, the press is the compositor's: it
         // starts a move or resize, and the client never sees it.
@@ -384,50 +330,6 @@ fn axis(state: &mut Compositor, event: &impl PointerAxisEvent<LibinputInputBacke
     }
     handle.axis(state, frame);
     handle.frame(state);
-}
-
-/// Carry out a focus decision.
-fn apply(state: &mut Compositor, decision: Decision<SurfaceId>) {
-    if decision == Decision::none() {
-        return;
-    }
-    let targets = [
-        match decision.focus {
-            Change::To(id) => Some(id),
-            _ => None,
-        },
-        decision.raise,
-    ];
-    let parked: Vec<_> = targets
-        .into_iter()
-        .flatten()
-        .filter_map(|id| state.minimized_with(id))
-        .collect();
-    for window in parked {
-        state.restore(&window);
-    }
-    match decision.focus {
-        Change::Keep => {}
-        Change::To(id) => {
-            let surface = state
-                .window_for_id(id)
-                .and_then(|window| crate::shell::surface_of(&window));
-            if let Some(surface) = surface {
-                state.focus_surface(surface, id);
-            }
-        }
-        Change::Clear => {
-            if let Some(keyboard) = state.keyboard.clone() {
-                keyboard.set_focus(state, None, SERIAL_COUNTER.next_serial());
-            }
-        }
-    }
-    if let Some(window) = decision.raise.and_then(|id| state.window_for_id(id)) {
-        state.space.raise_element(&window, false);
-        state.backend.redraw();
-    }
-    // Focus and stacking are both facts the index judges against.
-    state.publish_facts();
 }
 
 /// What the pointer is over.

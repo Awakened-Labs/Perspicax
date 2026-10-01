@@ -139,6 +139,11 @@ pub enum Visibility {
     /// all of it, is where no person can see it and no pointer can reach.
     /// Move the window onto a monitor and try again.
     OffScreen,
+    /// Its window is on a workspace that is not showing: workspace
+    /// `workspace`, counting from 1. Not unmapped in the sense of gone, and an
+    /// agent is told where it is rather than left to wonder; whether to switch
+    /// the person's screen to it is not the agent's call to make silently.
+    OtherWorkspace { workspace: u16 },
 }
 
 impl Visibility {
@@ -216,6 +221,7 @@ mod tests {
         assert!(!Visibility::Clipped.is_actable());
         assert!(!Visibility::Unmapped.is_actable());
         assert!(!Visibility::OffScreen.is_actable());
+        assert!(!Visibility::OtherWorkspace { workspace: 2 }.is_actable());
     }
 
     /// The default must be un-actable. An ingest path that forgets to set

@@ -72,6 +72,12 @@ pub enum Command {
     /// Unplug a virtual monitor by name, rescuing its windows onto the ones
     /// that remain. Headless only, and never the last one.
     Unplug(String),
+    /// Do what a key binding does: switch workspace, send the focused window
+    /// somewhere, close it. The same code a person's keys run, so a test can
+    /// drive window management with no keyboard. Not an MCP tool: an agent
+    /// rearranging a person's desk is a capability decision that waits for
+    /// the workspace protocols (W4).
+    Perform(perspicax_policy::Action),
 }
 
 /// What arrives on the compositor's inbound channel.

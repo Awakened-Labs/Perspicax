@@ -112,7 +112,7 @@ pub(super) fn configure(device: &mut Device, pointer: &Pointer) {
 /// Re-read the config and apply whatever changed. A config that no longer
 /// parses is reported and the old one kept: a typo mid-session must not cost
 /// the person their bindings.
-pub(super) fn reload(state: &mut Compositor) {
+pub(crate) fn reload(state: &mut Compositor) {
     let Running::Seat(session) = &mut state.backend else {
         return;
     };
@@ -125,6 +125,7 @@ pub(super) fn reload(state: &mut Compositor) {
     };
     let keyboard_changed = fresh.keyboard != session.settings.keyboard;
     let outputs_changed = fresh.outputs != session.settings.outputs;
+    let workspaces = fresh.workspaces;
     session.settings = fresh;
     let pointer = session.settings.pointer;
     for device in &mut session.devices {
@@ -135,6 +136,12 @@ pub(super) fn reload(state: &mut Compositor) {
     }
     if outputs_changed {
         relight(state);
+    }
+    if workspaces != state.workspaces.shape() {
+        state.workspaces.reshape(workspaces);
+        state.show_what_belongs();
+        state.backend.redraw();
+        state.publish_facts();
     }
     tracing::info!(keyboard_changed, outputs_changed, "config reloaded");
 }
@@ -177,7 +184,7 @@ impl Session {
     }
 
     /// Start a program for the person, and keep it to stop with the session.
-    pub(super) fn spawn(&mut self, launch: Option<&Launch>, command: &[String]) {
+    pub(crate) fn spawn(&mut self, launch: Option<&Launch>, command: &[String]) {
         let Some(launch) = launch else {
             return;
         };

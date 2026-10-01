@@ -24,7 +24,8 @@ mod keys;
 use std::path::{Path, PathBuf};
 
 use perspicax_policy::{
-    Action, Bindings, Chord, Focus, FocusModel, Keysym, Mods, Place, Side, Towards,
+    Action, Bindings, Chord, Direction, Focus, FocusModel, Grid, Keysym, Mods, Place, Shape, Side,
+    Towards,
 };
 use serde::Deserialize;
 
@@ -66,6 +67,9 @@ pub struct Config {
     /// Programs to start once the session is up, each a program and its
     /// arguments. The person's programs: none is granted agent consent.
     pub autostart: Vec<Vec<String>>,
+    /// How many workspaces, in what grid, and whether one spans every
+    /// monitor or each monitor has its own.
+    pub workspaces: Shape,
     /// Whether X11 applications get an Xwayland. Only meaningful in a build
     /// with the `xwayland` feature; saying `true` in one without it is an
     /// error.
@@ -113,6 +117,10 @@ pub struct Pointer {
     pub tap_to_click: Option<bool>,
     pub left_handed: Option<bool>,
 }
+
+/// The most workspaces along one side of the grid. Generous: past this, a
+/// grid is a typo, and a 1000x1000 one would be a million workspaces.
+const GRID_SIDE: u16 = 16;
 
 /// What to do with one output.
 #[derive(Debug, Clone, PartialEq)]
@@ -184,7 +192,7 @@ impl Config {
             },
             key,
         };
-        let bindings = Bindings::classic()
+        let mut bindings = Bindings::classic()
             .bind(
                 logo_shift(Keysym::Right),
                 Action::MoveToOutput(Towards::Next),
@@ -194,6 +202,90 @@ impl Config {
                 Action::MoveToOutput(Towards::Previous),
             )
             .bind(logo_shift(Keysym::r), Action::Reload);
+
+        // Workspaces. Ctrl+Logo+arrows switches and, with Shift, takes the
+        // focused window along, in both profiles: Plasma's keys, and Windows'
+        // for left and right. Classic adds Plasma's Ctrl+F1..F4; minimal adds
+        // Ctrl+Alt+arrows, the old X window managers' habit.
+        let arrows = [
+            (Keysym::Left, Direction::Left),
+            (Keysym::Right, Direction::Right),
+            (Keysym::Up, Direction::Up),
+            (Keysym::Down, Direction::Down),
+        ];
+        let held = |ctrl, alt, shift, logo| Mods {
+            ctrl,
+            alt,
+            shift,
+            logo,
+        };
+        for (key, direction) in arrows {
+            bindings = bindings
+                .bind(
+                    Chord {
+                        mods: held(true, false, false, true),
+                        key,
+                    },
+                    Action::Workspace(direction),
+                )
+                .bind(
+                    Chord {
+                        mods: held(true, false, true, true),
+                        key,
+                    },
+                    Action::CarryToWorkspace(direction),
+                );
+            if profile == Profile::Minimal {
+                bindings = bindings
+                    .bind(
+                        Chord {
+                            mods: held(true, true, false, false),
+                            key,
+                        },
+                        Action::Workspace(direction),
+                    )
+                    .bind(
+                        Chord {
+                            mods: held(true, true, true, false),
+                            key,
+                        },
+                        Action::CarryToWorkspace(direction),
+                    );
+            }
+        }
+        if profile == Profile::Classic {
+            let f_keys = [Keysym::F1, Keysym::F2, Keysym::F3, Keysym::F4];
+            for (number, key) in (1..).zip(f_keys) {
+                bindings = bindings.bind(
+                    Chord {
+                        mods: held(true, false, false, false),
+                        key,
+                    },
+                    Action::GoToWorkspace(number),
+                );
+            }
+        }
+        let workspaces = match profile {
+            // Plasma's default since 5.x when more than one is asked for, and
+            // Windows' task view: a row, so left and right are all there is.
+            Profile::Classic => Shape {
+                mode: perspicax_policy::Mode::Spanning,
+                grid: Grid {
+                    columns: 4,
+                    rows: 1,
+                    wrap: false,
+                },
+            },
+            // A square to flip around, wrapping, as Fluxbox and E do.
+            Profile::Minimal => Shape {
+                mode: perspicax_policy::Mode::Spanning,
+                grid: Grid {
+                    columns: 2,
+                    rows: 2,
+                    wrap: true,
+                },
+            },
+        };
         Self {
             profile,
             focus,
@@ -202,6 +294,7 @@ impl Config {
             pointer: Pointer::default(),
             outputs: Vec::new(),
             autostart: Vec::new(),
+            workspaces,
             xwayland: built.xwayland,
         }
     }
@@ -270,6 +363,22 @@ struct Raw {
     #[serde(default)]
     autostart: Vec<Vec<String>>,
     xwayland: Option<bool>,
+    workspaces: Option<RawWorkspaces>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawWorkspaces {
+    mode: Option<RawSpread>,
+    grid: Option<[u16; 2]>,
+    wrap: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawSpread {
+    Spanning,
+    PerOutput,
 }
 
 #[derive(Debug, Deserialize)]
@@ -445,6 +554,31 @@ impl Raw {
             ));
         }
 
+        if let Some(workspaces) = self.workspaces {
+            if let Some(mode) = workspaces.mode {
+                config.workspaces.mode = match mode {
+                    RawSpread::Spanning => perspicax_policy::Mode::Spanning,
+                    RawSpread::PerOutput => perspicax_policy::Mode::PerOutput,
+                };
+            }
+            if let Some([columns, rows]) = workspaces.grid {
+                if !(1..=GRID_SIDE).contains(&columns) || !(1..=GRID_SIDE).contains(&rows) {
+                    return Err(invalid(
+                        "workspaces.grid".to_owned(),
+                        format!(
+                            "[{columns}, {rows}] is not a grid; each side is 1 to {GRID_SIDE} \
+                             workspaces, columns first"
+                        ),
+                    ));
+                }
+                config.workspaces.grid.columns = columns;
+                config.workspaces.grid.rows = rows;
+            }
+            if let Some(wrap) = workspaces.wrap {
+                config.workspaces.grid.wrap = wrap;
+            }
+        }
+
         if let Some(empty) = self.autostart.iter().position(Vec::is_empty) {
             return Err(invalid(
                 format!("autostart[{empty}]"),
@@ -600,15 +734,44 @@ fn action_for(action: RawAction) -> Result<Option<Action>, String> {
             "move-to-next-output" => Action::MoveToOutput(Towards::Next),
             "move-to-previous-output" => Action::MoveToOutput(Towards::Previous),
             "reload" => Action::Reload,
-            other => {
-                return Err(format!(
-                    "`{other}` is not an action; use close, cycle-focus, \
-                     move-to-next-output, move-to-previous-output, reload, none, \
-                     or {{ spawn = [...] }}"
-                ));
-            }
+            "toggle-sticky" => Action::ToggleSticky,
+            other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
+                format!(
+                    "`{other}` is not an action; use close, cycle-focus, reload, \
+                         toggle-sticky, move-to-next-output, move-to-previous-output, \
+                         move-to-output-<side>, workspace-<side>, workspace-<number>, \
+                         send-to-workspace-<side>, carry-to-workspace-<side>, none, or \
+                         {{ spawn = [...] }}, where <side> is left, right, up or down"
+                )
+            })?,
         },
     }))
+}
+
+/// An action that takes a side: `workspace-left`, `move-to-output-down`.
+fn directed(name: &str) -> Option<Action> {
+    let (verb, side) = name.rsplit_once('-')?;
+    let direction = match side {
+        "left" => Direction::Left,
+        "right" => Direction::Right,
+        "up" => Direction::Up,
+        "down" => Direction::Down,
+        _ => return None,
+    };
+    Some(match verb {
+        "workspace" => Action::Workspace(direction),
+        "send-to-workspace" => Action::SendToWorkspace(direction),
+        "carry-to-workspace" => Action::CarryToWorkspace(direction),
+        "move-to-output" => Action::MoveToOutput(Towards::Side(direction)),
+        _ => return None,
+    })
+}
+
+/// `workspace-3`. Any positive number is accepted here: whether the grid has
+/// that many is a question for the grid, which a later reload may change.
+fn numbered(name: &str) -> Option<Action> {
+    let number: u16 = name.strip_prefix("workspace-")?.parse().ok()?;
+    (number > 0).then_some(Action::GoToWorkspace(number))
 }
 
 /// `"WxH"` or `"WxH@Hz"`.
@@ -913,6 +1076,107 @@ mod tests {
     #[test]
     fn an_empty_autostart_command_is_refused() {
         assert!(parse("autostart = [[]]", SEAT).is_err());
+    }
+
+    #[test]
+    fn both_profiles_span_every_monitor_and_differ_in_their_grid() {
+        let classic = Config::profile(Profile::Classic, SEAT).workspaces;
+        let minimal = Config::profile(Profile::Minimal, SEAT).workspaces;
+        assert_eq!(classic.mode, perspicax_policy::Mode::Spanning);
+        assert_eq!((classic.grid.columns, classic.grid.rows), (4, 1));
+        assert_eq!(minimal.mode, perspicax_policy::Mode::Spanning);
+        assert_eq!((minimal.grid.columns, minimal.grid.rows), (2, 2));
+        assert!(minimal.grid.wrap);
+    }
+
+    #[test]
+    fn workspaces_can_be_per_output_on_a_grid_of_their_own() {
+        let config = parse("[workspaces]\nmode = \"per-output\"\ngrid = [3, 2]", SEAT).unwrap();
+        assert_eq!(config.workspaces.mode, perspicax_policy::Mode::PerOutput);
+        assert_eq!(config.workspaces.grid.len(), 6);
+        assert!(
+            !config.workspaces.grid.wrap,
+            "the classic profile's, untouched"
+        );
+    }
+
+    #[test]
+    fn an_empty_or_huge_grid_is_refused() {
+        for grid in ["[0, 2]", "[2, 99]"] {
+            let error = parse(&format!("[workspaces]\ngrid = {grid}"), SEAT).unwrap_err();
+            assert!(error.to_string().contains("workspaces.grid"), "{error}");
+        }
+    }
+
+    #[test]
+    fn ctrl_logo_arrows_switch_workspace_and_with_shift_carry_the_window() {
+        let config = Config::profile(Profile::Classic, SEAT);
+        let held = Mods {
+            ctrl: true,
+            logo: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(held, &[Keysym::Right]),
+            Some(&Action::Workspace(Direction::Right))
+        );
+        let shifted = Mods {
+            shift: true,
+            ..held
+        };
+        assert_eq!(
+            config.bindings.resolve(shifted, &[Keysym::Left]),
+            Some(&Action::CarryToWorkspace(Direction::Left))
+        );
+    }
+
+    #[test]
+    fn workspace_actions_are_named_by_side_and_by_number() {
+        let config = parse(
+            r#"
+            [keys]
+            "Logo+1" = "workspace-1"
+            "Logo+Shift+Up" = "send-to-workspace-up"
+            "Logo+Ctrl+Down" = "move-to-output-down"
+            "Logo+s" = "toggle-sticky"
+            "#,
+            SEAT,
+        )
+        .unwrap();
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::_1]),
+            Some(&Action::GoToWorkspace(1))
+        );
+        assert_eq!(
+            config.bindings.resolve(
+                Mods {
+                    shift: true,
+                    ..logo
+                },
+                &[Keysym::Up]
+            ),
+            Some(&Action::SendToWorkspace(Direction::Up))
+        );
+        assert_eq!(
+            config
+                .bindings
+                .resolve(Mods { ctrl: true, ..logo }, &[Keysym::Down]),
+            Some(&Action::MoveToOutput(Towards::Side(Direction::Down)))
+        );
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::s]),
+            Some(&Action::ToggleSticky)
+        );
+    }
+
+    #[test]
+    fn workspace_zero_and_a_side_that_is_not_one_are_refused() {
+        assert!(parse("[keys]\n\"Logo+0\" = \"workspace-0\"", SEAT).is_err());
+        assert!(parse("[keys]\n\"Logo+0\" = \"workspace-sideways\"", SEAT).is_err());
     }
 
     #[test]

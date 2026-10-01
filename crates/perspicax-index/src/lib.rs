@@ -69,6 +69,8 @@ pub enum Refusal {
     Unmapped,
     /// Not wholly on any monitor. Move its window onto one and try again.
     OffScreen,
+    /// On a workspace that is not showing, numbered from 1.
+    OtherWorkspace { workspace: u16 },
     /// No compositor has judged this node's visibility. Fails closed.
     Unjudged,
     /// No compositor has attributed this node to a process, so no capability
@@ -93,6 +95,12 @@ impl core::fmt::Display for Refusal {
             Self::Clipped => write!(f, "node is scrolled out of its own viewport"),
             Self::Unmapped => write!(f, "node's surface is not mapped"),
             Self::OffScreen => write!(f, "node is not wholly on any output"),
+            Self::OtherWorkspace { workspace } => {
+                write!(
+                    f,
+                    "node's window is on workspace {workspace}, which is not showing"
+                )
+            }
             Self::Unjudged => write!(f, "node visibility has not been judged by a compositor"),
             Self::Unattributed => write!(f, "node has no attributed origin"),
             Self::Stale { frames: 0 } => {
@@ -182,6 +190,9 @@ pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
         Visibility::Clipped => Err(Refusal::Clipped),
         Visibility::Unmapped => Err(Refusal::Unmapped),
         Visibility::OffScreen => Err(Refusal::OffScreen),
+        Visibility::OtherWorkspace { workspace } => Err(Refusal::OtherWorkspace {
+            workspace: *workspace,
+        }),
         Visibility::Unknown => Err(Refusal::Unjudged),
     }
 }

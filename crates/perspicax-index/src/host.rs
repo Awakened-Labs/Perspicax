@@ -149,6 +149,11 @@ pub struct SurfaceFacts {
     /// reaches back to what a reader reconciled, the answer is the whole
     /// surface -- see [`SurfaceFacts::damage_since`].
     pub damage: Vec<(u64, Rect)>,
+    /// The workspace this window is on, numbered from 1, when that is not a
+    /// workspace being shown. The window is unmapped then, and saying where
+    /// it is turns a refusal an agent can do nothing about into one it can:
+    /// the window is not gone, it is on workspace 3.
+    pub off_workspace: Option<u16>,
 }
 
 impl SurfaceFacts {
@@ -169,6 +174,7 @@ impl SurfaceFacts {
             focused_at: None,
             damage_generation: 0,
             damage: Vec::new(),
+            off_workspace: None,
         }
     }
 
@@ -199,6 +205,15 @@ impl SurfaceFacts {
     #[must_use]
     pub fn unmapped(mut self) -> Self {
         self.mapped = false;
+        self
+    }
+
+    /// The same surface, unmapped because it is on workspace `number`, which
+    /// is not showing.
+    #[must_use]
+    pub fn on_workspace(mut self, number: u16) -> Self {
+        self.mapped = false;
+        self.off_workspace = Some(number);
         self
     }
 
@@ -460,7 +475,9 @@ impl Judgement {
 ///    the gate refuses. Not `Unmapped` -- "I do not know" and "it is not on
 ///    screen" are different claims and only one of them is true.
 /// 2. An unmapped surface is `Unmapped` before any arithmetic, because the
-///    geometry of a surface that is not on screen means nothing.
+///    geometry of a surface that is not on screen means nothing -- or
+///    `OtherWorkspace`, when it is unmapped only because the workspace it is
+///    on is not the one showing.
 /// 3. A zero-area rect is `Clipped`. Toolkits report `0x0` extents for widgets
 ///    they have realised but not laid out, and for children scrolled out of a
 ///    viewport; a zero-area rect is also the one input for which every
@@ -480,7 +497,10 @@ pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
         return Judgement::proven(Visibility::Unknown);
     };
     if !target.mapped {
-        return Judgement::proven(Visibility::Unmapped);
+        return Judgement::proven(match target.off_workspace {
+            Some(workspace) => Visibility::OtherWorkspace { workspace },
+            None => Visibility::Unmapped,
+        });
     }
     if rect.abs().is_empty() {
         return Judgement::proven(Visibility::Clipped);
@@ -577,7 +597,7 @@ impl Tally {
             Visibility::Visible => self.visible += 1,
             Visibility::Occluded { .. } => self.occluded += 1,
             Visibility::Clipped => self.clipped += 1,
-            Visibility::Unmapped => self.unmapped += 1,
+            Visibility::Unmapped | Visibility::OtherWorkspace { .. } => self.unmapped += 1,
             Visibility::OffScreen => self.off_screen += 1,
             Visibility::Unknown => self.unjudged += 1,
         }
@@ -642,6 +662,15 @@ mod tests {
         assert_eq!(
             judge(&facts, SurfaceId(99), BUTTON).visibility,
             Visibility::Unknown
+        );
+    }
+
+    #[test]
+    fn a_window_on_another_workspace_says_which() {
+        let facts = HostFacts::bottom_to_top([window().on_workspace(3)], 1);
+        assert_eq!(
+            verdict(&facts).visibility,
+            Visibility::OtherWorkspace { workspace: 3 }
         );
     }
 

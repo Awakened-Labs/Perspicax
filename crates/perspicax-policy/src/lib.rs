@@ -23,12 +23,14 @@ mod binds;
 mod focus;
 mod geometry;
 mod layout;
+mod workspace;
 
 pub use crate::{
     binds::{Action, Bindings, Button, Chord, Drag, Mods, Towards},
     focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},
     geometry::{Edges, Rect, anchor, carry, edges_near, neighbour, place, resize, unmaximized_at},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
+    workspace::{Cell, Direction, Grid, Home, Mode, Shape, Workspaces},
 };
 
 /// Keysyms, re-exported so a caller spells chords with the same type this

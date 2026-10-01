@@ -148,24 +148,60 @@ pub fn unmaximized_at(pointer: (f64, f64), maximized: Rect, restored: (i32, i32)
     (x, maximized.y)
 }
 
-/// The output next to `from` in the row, the way `towards` points,
-/// wrapping at either end. Outputs are ordered left to right by their left
-/// edge, then top to bottom, which is the order a person sees them in. `None`
-/// with fewer than two outputs, since there is nowhere to go.
+/// The output `towards` points at from `from`. `None` with fewer than two
+/// outputs, or with none on that side.
+///
+/// [`Towards::Next`] and [`Towards::Previous`] go round in reading order, left
+/// to right by left edge and then top to bottom, wrapping at either end.
+/// [`Towards::Side`] looks at the desk: of the outputs whose centre is on
+/// that side of this one's, the nearest, counting distance across the
+/// direction of travel double so that the screen straight to the right beats
+/// one up and to the right that happens to be closer.
+///
+/// [`Towards::Next`]: crate::Towards::Next
+/// [`Towards::Previous`]: crate::Towards::Previous
+/// [`Towards::Side`]: crate::Towards::Side
 #[must_use]
 pub fn neighbour(outputs: &[Rect], from: usize, towards: crate::Towards) -> Option<usize> {
     if outputs.len() < 2 || from >= outputs.len() {
         return None;
     }
-    let mut order: Vec<usize> = (0..outputs.len()).collect();
-    order.sort_by_key(|&i| (outputs[i].x, outputs[i].y));
-    let at = order.iter().position(|&i| i == from)?;
-    let len = order.len();
-    let next = match towards {
-        crate::Towards::Next => (at + 1) % len,
-        crate::Towards::Previous => (at + len - 1) % len,
+    let side = match towards {
+        crate::Towards::Side(direction) => direction,
+        crate::Towards::Next | crate::Towards::Previous => {
+            let mut order: Vec<usize> = (0..outputs.len()).collect();
+            order.sort_by_key(|&i| (outputs[i].x, outputs[i].y));
+            let at = order.iter().position(|&i| i == from)?;
+            let len = order.len();
+            let next = if towards == crate::Towards::Next {
+                (at + 1) % len
+            } else {
+                (at + len - 1) % len
+            };
+            return Some(order[next]);
+        }
     };
-    Some(order[next])
+    let centre = |r: Rect| {
+        (
+            i64::from(r.x) * 2 + i64::from(r.w),
+            i64::from(r.y) * 2 + i64::from(r.h),
+        )
+    };
+    let (fx, fy) = centre(outputs[from]);
+    (0..outputs.len())
+        .filter(|&i| i != from)
+        .filter_map(|i| {
+            let (x, y) = centre(outputs[i]);
+            let (along, across) = match side {
+                crate::Direction::Right => (x - fx, y - fy),
+                crate::Direction::Left => (fx - x, y - fy),
+                crate::Direction::Down => (y - fy, x - fx),
+                crate::Direction::Up => (fy - y, x - fx),
+            };
+            (along > 0).then_some((i, along + 2 * across.abs()))
+        })
+        .min_by_key(|&(_, cost)| cost)
+        .map(|(i, _)| i)
 }
 
 /// Where a window at `window` on output `from` goes on output `to`: at the
@@ -351,6 +387,30 @@ mod tests {
             neighbour(&row, 1, crate::Towards::Previous),
             Some(2),
             "wraps to the rightmost"
+        );
+    }
+
+    #[test]
+    fn the_output_to_a_side_is_found_on_a_desk_shaped_like_an_l() {
+        // A big monitor, a smaller one to its right, a laptop below the big one.
+        let desk = [
+            Rect::new(0, 0, 2560, 1440),
+            Rect::new(2560, 180, 1920, 1080),
+            Rect::new(320, 1440, 1920, 1080),
+        ];
+        let side = |d| crate::Towards::Side(d);
+        assert_eq!(neighbour(&desk, 0, side(crate::Direction::Right)), Some(1));
+        assert_eq!(neighbour(&desk, 0, side(crate::Direction::Down)), Some(2));
+        assert_eq!(neighbour(&desk, 2, side(crate::Direction::Up)), Some(0));
+        assert_eq!(
+            neighbour(&desk, 1, side(crate::Direction::Left)),
+            Some(0),
+            "straight across, not the laptop down and to the left"
+        );
+        assert_eq!(
+            neighbour(&desk, 0, side(crate::Direction::Left)),
+            None,
+            "a side does not wrap"
         );
     }
 

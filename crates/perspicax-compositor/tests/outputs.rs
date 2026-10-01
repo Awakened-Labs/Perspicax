@@ -66,9 +66,7 @@ fn windows_move_with_their_monitor_and_are_rescued_when_it_is_unplugged() {
         );
         thread::spawn(move || {
             let config = Config {
-                backend: Backend::Headless {
-                    outputs: vec![Virtual::numbered(1, (1280, 1024))],
-                },
+                backend: Backend::headless((1280, 1024)),
                 spawn: Vec::new(),
                 env: Vec::new(),
                 run_for: Some(Duration::from_secs(30)),

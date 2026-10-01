@@ -7,6 +7,8 @@
 
 use xkeysym::Keysym;
 
+use crate::Direction;
+
 /// Modifiers, as far as a binding cares. Caps Lock and Num Lock are left out
 /// on purpose: a binding that stopped working because Num Lock was on is a
 /// bug every window manager has shipped at least once.
@@ -47,6 +49,17 @@ pub enum Action {
     /// Send the focused window to the neighbouring output. See
     /// [`crate::neighbour`] and [`crate::carry`].
     MoveToOutput(Towards),
+    /// Show the workspace one step across the grid. See
+    /// [`crate::Workspaces::switch`].
+    Workspace(Direction),
+    /// Show the workspace a person calls this number, counting from 1.
+    GoToWorkspace(u16),
+    /// Move the focused window one workspace across the grid, and stay.
+    SendToWorkspace(Direction),
+    /// Move the focused window one workspace across the grid, and go with it.
+    CarryToWorkspace(Direction),
+    /// Put the focused window on every workspace, or back on one.
+    ToggleSticky,
     /// Start a program, as a program and its arguments. The person's own
     /// program: it is never granted agent consent.
     Spawn(Vec<String>),
@@ -54,13 +67,17 @@ pub enum Action {
     Reload,
 }
 
-/// Which way along the row of outputs.
+/// Which output, from the one a window is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Towards {
-    /// Rightward, wrapping to the leftmost.
+    /// The next in reading order (left to right, then top to bottom),
+    /// wrapping to the first.
     Next,
-    /// Leftward, wrapping to the rightmost.
+    /// The previous in reading order, wrapping to the last.
     Previous,
+    /// The nearest on that side, as the monitors sit on the desk. No
+    /// wrapping: there is nothing left of the leftmost monitor.
+    Side(Direction),
 }
 
 /// A pointer button, as far as a binding cares.

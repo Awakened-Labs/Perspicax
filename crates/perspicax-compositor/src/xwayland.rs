@@ -232,7 +232,7 @@ impl Compositor {
         let window = self
             .space
             .elements()
-            .chain(&self.minimized)
+            .chain(&self.parked)
             .find(|window| {
                 window
                     .x11_surface()
@@ -289,11 +289,11 @@ impl Compositor {
         }
     }
 
-    /// The mapped or minimized window wrapping this X11 surface.
+    /// The mapped or parked window wrapping this X11 surface.
     fn x11_window(&self, surface: &X11Surface) -> Option<Window> {
         self.space
             .elements()
-            .chain(&self.minimized)
+            .chain(&self.parked)
             .find(|window| window.x11_surface() == Some(surface))
             .cloned()
     }
@@ -363,6 +363,7 @@ impl XwmHandler for Compositor {
         let size = x11.geometry().size;
         let _ = x11.configure(Rectangle::new(at, size));
         self.space.map_element(window.clone(), at, false);
+        self.adopt(&window);
         if let Some(wm) = self.xwayland.wm.as_mut() {
             let _ = wm.raise_window(&x11);
         }
@@ -532,8 +533,7 @@ impl XwmHandler for Compositor {
 impl Compositor {
     fn forget_x11(&mut self, x11: &X11Surface) {
         if let Some(window) = self.x11_window(x11) {
-            self.space.unmap_elem(&window);
-            self.minimized.retain(|minimized| minimized != &window);
+            self.forget_window(&window);
             self.refocus_after_close(x11.wl_surface().as_ref());
             self.backend.redraw();
             self.publish_facts();

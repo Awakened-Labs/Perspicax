@@ -243,6 +243,9 @@ impl PointerGrab<Compositor> for MoveGrab {
         handle.button(data, event);
         if handle.current_pressed().is_empty() {
             handle.unset_grab(self, data, event.serial, event.time, true);
+            // Per output, a window dragged onto another monitor joins the
+            // workspace that monitor is showing.
+            data.window_moved(&self.window);
             // Once, where it landed, rather than on every motion: occlusion
             // is judged against where a window is, not everywhere it passed.
             data.publish_facts();

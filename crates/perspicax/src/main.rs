@@ -154,6 +154,8 @@ fn main() -> Result<()> {
                 .enumerate()
                 .map(|(at, &size)| Virtual::numbered(at + 1, size))
                 .collect(),
+            // One workspace: an agent's desk is whatever it spawned.
+            workspaces: Default::default(),
         }
     };
     // First, before the accessibility bus is touched: a backend this binary

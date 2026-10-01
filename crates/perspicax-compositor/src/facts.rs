@@ -142,10 +142,11 @@ impl Compositor {
         // `HostFacts::bottom_to_top` wants. The two agree by construction
         // rather than through a conversion somebody has to keep right.
         //
-        // Minimized windows first, as unmapped: below everything, and judged
-        // `Unmapped` rather than forgotten, so an agent asking about a node in
-        // one is told the window is hidden -- which it can do something about
-        // -- rather than that no such surface exists.
+        // Parked windows first, as unmapped: below everything, and judged
+        // `Unmapped` (minimized) or `OtherWorkspace` rather than forgotten,
+        // so an agent asking about a node in one is told the window is hidden
+        // or where it is -- which it can do something about -- rather than
+        // that no such surface exists.
         //
         // Layer surfaces around them, where the person sees them: background
         // and bottom under every window, top and overlay over. A panel on
@@ -171,7 +172,7 @@ impl Compositor {
             .iter()
             .filter_map(layer)
             .chain(
-                self.minimized
+                self.parked
                     .iter()
                     .chain(self.space.elements())
                     .filter_map(|window| self.facts_for(window)),
@@ -206,8 +207,8 @@ impl Compositor {
         let surface = toplevel.wl_surface();
 
         // Where we put it, which is a fact this compositor owns outright. A
-        // minimized window is described where it will come back to.
-        let minimized = self.minimized.contains(window);
+        // parked window is described where it will come back to.
+        let parked = self.parked.contains(window);
         let location = match self.space.element_location(window) {
             Some(location) => location,
             None => crate::shell::placement(window, |placement| placement.parked)?,
@@ -256,7 +257,7 @@ impl Compositor {
             // created but never presented a buffer is a window in name only,
             // and reporting it as mapped would let a node be judged visible on
             // a surface with nothing on it.
-            mapped: window.alive() && self.has_presented(id) && !minimized,
+            mapped: window.alive() && self.has_presented(id) && !parked,
             geometry: Rect::new(
                 f64::from(location.x),
                 f64::from(location.y),
@@ -282,6 +283,11 @@ impl Compositor {
             focused_at: self.focused_at(id),
             damage_generation: self.damage_generation(id),
             damage: self.damage_history(id),
+            off_workspace: if parked {
+                self.off_workspace(window)
+            } else {
+                None
+            },
         })
     }
 
@@ -322,6 +328,7 @@ impl Compositor {
             focused_at: self.focused_at(id),
             damage_generation: self.damage_generation(id),
             damage: self.damage_history(id),
+            off_workspace: None,
         }
     }
 
@@ -355,7 +362,10 @@ impl Compositor {
             )
             .unmapped(),
         };
-        facts.mapped &= !self.minimized.contains(window);
+        if self.parked.contains(window) {
+            facts.mapped = false;
+            facts.off_workspace = self.off_workspace(window);
+        }
         facts.origin = Self::x11_origin(window);
         facts.title = Some(x11.title()).filter(|title| !title.is_empty());
         Some(facts)

@@ -18,7 +18,7 @@ use smithay::{
     desktop::Window,
     output::Output,
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
-    utils::{Logical, Point, Size},
+    utils::{Logical, Point, Rectangle, Size},
 };
 
 use crate::{shell::rect, state::Compositor};
@@ -84,6 +84,9 @@ impl Compositor {
             }
         }
         self.rescue_windows();
+        // Per output, a rescued window joined its new monitor's workspace,
+        // and a monitor that is gone took its own workspace with it.
+        self.show_what_belongs();
 
         self.backend.redraw();
         self.publish_facts();
@@ -119,6 +122,7 @@ impl Compositor {
         for (window, at) in strays {
             tracing::info!(?at, "a window on no output is brought back onto one");
             self.space.map_element(window.clone(), at, false);
+            self.window_moved(&window);
             let Some(toplevel) = window.toplevel().filter(|t| Self::is_filling(t)).cloned() else {
                 continue;
             };
@@ -149,7 +153,11 @@ impl Compositor {
     /// any. Unlike `output_of`, no fallback to the pointer's: a window on no
     /// output is exactly what has to be told apart here.
     fn mostly_on(&self, window: &Window) -> Option<Output> {
-        let bounds = self.extent(window)?;
+        self.output_at(self.extent(window)?)
+    }
+
+    /// The output most of `bounds` is on, or `None` if none of it is.
+    pub(crate) fn output_at(&self, bounds: Rectangle<i32, Logical>) -> Option<Output> {
         self.space
             .outputs()
             .filter_map(|output| {

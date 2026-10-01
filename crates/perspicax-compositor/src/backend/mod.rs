@@ -37,7 +37,7 @@ use smithay::{
 };
 
 use perspicax_index::Consent;
-use perspicax_policy::Place;
+use perspicax_policy::{Place, Shape};
 
 use crate::{Config, Error, FRAME_INTERVAL, state::Compositor};
 
@@ -51,6 +51,9 @@ pub enum Backend {
         /// by [`perspicax_policy::arrange`], so a desk of several monitors can
         /// be tested on a machine that has one, or none.
         outputs: Vec<Virtual>,
+        /// How many workspaces and how they relate to the monitors, as a
+        /// seat's `[workspaces]` table would say. The default is one.
+        workspaces: Shape,
     },
     /// A real session: the outputs the GPU has connected, the keyboards and
     /// pointers libinput finds, device access negotiated through libseat.
@@ -95,6 +98,7 @@ impl Backend {
     pub fn headless(size: (i32, i32)) -> Self {
         Self::Headless {
             outputs: vec![Virtual::numbered(1, size)],
+            workspaces: Shape::default(),
         }
     }
 
@@ -131,7 +135,10 @@ pub(crate) enum Running {
     /// Virtual outputs, each held with its placement and its global until
     /// it is unplugged: dropping the global would withdraw the `wl_output`
     /// from clients that already bound it.
-    Headless { outputs: Vec<Plugged> },
+    Headless {
+        outputs: Vec<Plugged>,
+        workspaces: Shape,
+    },
     /// The session, the GPU and the outputs on it. Boxed because it is large
     /// and the headless variant is not.
     #[cfg(feature = "seat")]
@@ -153,8 +160,12 @@ impl Running {
     ) -> Result<Self, Error> {
         config.backend.ensure_built()?;
         match &config.backend {
-            Backend::Headless { outputs } => Ok(Self::Headless {
+            Backend::Headless {
+                outputs,
+                workspaces,
+            } => Ok(Self::Headless {
                 outputs: outputs.iter().map(|out| plug(display, out)).collect(),
+                workspaces: *workspaces,
             }),
             #[cfg(feature = "seat")]
             Backend::Seat => Ok(Self::Seat(Box::new(seat::Session::open(
@@ -170,12 +181,21 @@ impl Running {
     /// [`Compositor::arrange_outputs`] places.
     pub(crate) fn placements(&self) -> Vec<(Output, Place)> {
         match self {
-            Self::Headless { outputs } => outputs
+            Self::Headless { outputs, .. } => outputs
                 .iter()
                 .map(|plugged| (plugged.output.clone(), plugged.place.clone()))
                 .collect(),
             #[cfg(feature = "seat")]
             Self::Seat(session) => session.placements(),
+        }
+    }
+
+    /// How many workspaces, and whether they span the monitors.
+    pub(crate) fn workspace_shape(&self) -> Shape {
+        match self {
+            Self::Headless { workspaces, .. } => *workspaces,
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.settings.workspaces,
         }
     }
 
@@ -350,6 +370,7 @@ impl Compositor {
         match command {
             crate::Command::Plug(virtual_output) => self.plug_virtual(virtual_output),
             crate::Command::Unplug(name) => self.unplug_virtual(name),
+            crate::Command::Perform(action) => self.perform(action),
         }
     }
 
@@ -358,7 +379,7 @@ impl Compositor {
     /// this is refused in the log and changes nothing.
     pub(crate) fn plug_virtual(&mut self, virtual_output: &Virtual) {
         let outputs = match &mut self.backend {
-            Running::Headless { outputs } => outputs,
+            Running::Headless { outputs, .. } => outputs,
             #[cfg(feature = "seat")]
             Running::Seat(_) => {
                 tracing::warn!(
@@ -383,7 +404,7 @@ impl Compositor {
     /// that remain, as they are when a seat's monitor is unplugged.
     pub(crate) fn unplug_virtual(&mut self, name: &str) {
         let outputs = match &mut self.backend {
-            Running::Headless { outputs } => outputs,
+            Running::Headless { outputs, .. } => outputs,
             #[cfg(feature = "seat")]
             Running::Seat(_) => {
                 tracing::warn!(name, "only a headless compositor has virtual outputs");
@@ -405,6 +426,7 @@ impl Compositor {
             return;
         }
         let gone = outputs.remove(at);
+        self.workspaces.forget_output(&gone.output.name());
         crate::layers::close_on(&gone.output);
         self.space.unmap_output(&gone.output);
         self.display.remove_global::<Compositor>(gone.global);

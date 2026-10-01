@@ -16,7 +16,9 @@
 //! instead of the index. So every entry point that would move or resize a
 //! window checks [`crate::backend::Running::has_person`] first.
 
+mod actions;
 mod grabs;
+mod workspaces;
 
 use std::cell::RefCell;
 
@@ -36,7 +38,7 @@ use smithay::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface},
     },
-    utils::{Logical, Point, Rectangle, Serial},
+    utils::{Logical, Point, Rectangle, Serial, Size},
     wayland::{
         seat::WaylandFocus as _,
         shell::xdg::{PopupSurface, ToplevelSurface},
@@ -54,9 +56,13 @@ pub(crate) struct Placement {
     /// Where the window was, at what size, before it was maximized or made
     /// fullscreen, so unmaximizing can put it back.
     pub(crate) restore: Option<Rectangle<i32, Logical>>,
-    /// Where it was when it was minimized. A minimized window is unmapped
-    /// from the space, and this is how it gets its place back.
+    /// Where it was when it was parked: minimized, or hidden with its
+    /// workspace. A parked window is unmapped from the space, and this is how
+    /// it gets its place back.
     pub(crate) parked: Option<Point<i32, Logical>>,
+    /// The person minimized it. It stays off screen whichever workspace is
+    /// showing, until it is restored.
+    pub(crate) minimized: bool,
     /// A resize in progress, or finished and waiting for the client's last
     /// commit. See [`Compositor::settle_resize`].
     pub(crate) resize: Option<Resize>,
@@ -119,19 +125,7 @@ impl Compositor {
     /// a client that declared nothing falls back to the buffer's.
     pub(crate) fn extent(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
         let location = self.space.element_location(window)?;
-        let declared = window
-            .toplevel()
-            .and_then(|toplevel| crate::state::declared_geometry(toplevel.wl_surface()))
-            .filter(|declared| !declared.is_empty());
-        let size = match declared {
-            Some(declared) => (
-                (declared.x1 - declared.x0).round() as i32,
-                (declared.y1 - declared.y0).round() as i32,
-            )
-                .into(),
-            None => window.geometry().size,
-        };
-        Some(Rectangle::new(location, size))
+        Some(Rectangle::new(location, extent_size(window)))
     }
 
     /// The output a window is mostly on, or the one under the pointer.
@@ -240,11 +234,8 @@ impl Compositor {
 
     /// Send a window to the output beside the one it is on. A maximized or
     /// fullscreen window fills its new output; any other keeps its distance
-    /// from the corner (see `perspicax_policy::carry`).
-    #[cfg_attr(
-        not(feature = "seat"),
-        expect(dead_code, reason = "the seat's bindings")
-    )]
+    /// from the corner (see `perspicax_policy::carry`). Per output, it joins
+    /// the workspace its new monitor is showing.
     pub(crate) fn move_to_output(&mut self, window: &Window, towards: Towards) {
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
         let areas: Vec<Rect> = outputs
@@ -277,6 +268,7 @@ impl Compositor {
             let at = carry(rect(bounds), areas[from], areas[to]);
             self.space.map_element(window.clone(), at, false);
         }
+        self.window_moved(window);
         self.backend.redraw();
         self.publish_facts();
     }
@@ -284,52 +276,35 @@ impl Compositor {
     /// Take a window off the screen, keeping its place. Focus moves to
     /// whatever is on top now, as it would if the window had closed.
     pub(crate) fn minimize(&mut self, window: &Window) {
-        let Some(at) = self.space.element_location(window) else {
-            return;
-        };
-        placement(window, |placement| placement.parked = Some(at));
-        self.space.unmap_elem(window);
-        self.minimized.push(window.clone());
-        let top = self.space.elements().last().cloned();
-        match top
-            .as_ref()
-            .and_then(|top| Some((top.wl_surface()?.into_owned(), id_of(top)?)))
-        {
-            Some((surface, id)) => self.focus_surface(surface, id),
-            None => {
-                if let Some(keyboard) = self.keyboard.clone() {
-                    keyboard.set_focus(self, None, smithay::utils::SERIAL_COUNTER.next_serial());
-                }
-            }
-        }
+        placement(window, |placement| placement.minimized = true);
+        self.show_what_belongs();
         self.backend.redraw();
         self.publish_facts();
     }
 
-    /// Put a minimized window back where it was, or onto the nearest monitor
-    /// if the one it was on is gone. The caller raises and focuses it, if
-    /// that is what it wants.
+    /// Bring a parked window back: un-minimize it, and if it is on a
+    /// workspace that is not showing, show that workspace, the way activating
+    /// a window on another desktop does on every desktop that has them. It
+    /// comes back where it was, or onto the nearest monitor if that one is
+    /// gone. The caller raises and focuses it, if that is what it wants.
     pub(crate) fn restore(&mut self, window: &Window) {
-        let Some(at) = self.minimized.iter().position(|w| w == window) else {
-            return;
-        };
-        let window = self.minimized.remove(at);
-        let parked = placement(&window, |placement| placement.parked.take());
-        let at = self.unpark(&window, parked.unwrap_or_default());
-        self.space.map_element(window, at, false);
+        placement(window, |placement| placement.minimized = false);
+        self.go_to_workspace_of(window);
+        self.show_what_belongs();
         self.backend.redraw();
     }
 
-    /// A minimized window with this id.
-    #[cfg_attr(
-        not(feature = "seat"),
-        expect(dead_code, reason = "the seat's input path")
-    )]
-    pub(crate) fn minimized_with(&self, id: SurfaceId) -> Option<Window> {
-        self.minimized
+    /// A parked window with this id: minimized, or on another workspace.
+    pub(crate) fn parked_with(&self, id: SurfaceId) -> Option<Window> {
+        self.parked
             .iter()
             .find(|window| id_of(window) == Some(id))
             .cloned()
+    }
+
+    /// Whether the person minimized this window.
+    pub(crate) fn is_minimized(window: &Window) -> bool {
+        placement(window, |placement| placement.minimized)
     }
 
     /// The last commit of a resize from the left or top: move the window so
@@ -478,6 +453,24 @@ impl Compositor {
         self.pointer
             .as_ref()
             .map(|pointer| pointer.current_location())
+    }
+}
+
+/// A window's size, as [`Compositor::extent`] measures it, whether it is on
+/// screen or parked.
+pub(crate) fn extent_size(window: &Window) -> Size<i32, Logical> {
+    let declared = window
+        .toplevel()
+        .and_then(|toplevel| crate::state::declared_geometry(toplevel.wl_surface()))
+        .filter(|declared| !declared.is_empty());
+    match declared {
+        // Whole logical pixels: xdg window geometry is declared in them.
+        Some(declared) => (
+            (declared.x1 - declared.x0).round() as i32,
+            (declared.y1 - declared.y0).round() as i32,
+        )
+            .into(),
+        None => window.geometry().size,
     }
 }
 
