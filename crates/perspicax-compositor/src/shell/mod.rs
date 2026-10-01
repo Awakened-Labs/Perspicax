@@ -24,7 +24,9 @@ mod workspaces;
 use std::cell::RefCell;
 
 use perspicax_node::SurfaceId;
-use perspicax_policy::{Edges, Rect, Towards, carry, neighbour, place, unmaximized_at};
+use perspicax_policy::{
+    Edges, Look, Rect, Towards, carry, inset, neighbour, place, unmaximized_at,
+};
 use smithay::{
     desktop::{
         PopupKeyboardGrab, PopupKind, PopupPointerGrab, PopupUngrabStrategy,
@@ -188,6 +190,15 @@ impl Compositor {
             surface.send_configure();
             return;
         };
+        // The client gets what its frame leaves: the titlebar of a maximized
+        // window is inside the area, not above it.
+        let look = if state == xdg_toplevel::State::Fullscreen {
+            Look::Fullscreen
+        } else {
+            Look::Maximized
+        };
+        let client = inset(rect(area), self.insets_as(&window, look));
+        let area = Rectangle::new((client.x, client.y).into(), (client.w, client.h).into());
         if let Some(current) = self.space.element_geometry(&window) {
             placement(&window, |placement| {
                 placement.restore.get_or_insert(current);

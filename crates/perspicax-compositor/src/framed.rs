@@ -20,22 +20,86 @@
 //! [`Space`]: smithay::desktop::Space
 //! [`bbox`]: SpaceElement::bbox
 
-use std::ops::Deref;
+use std::{cell::RefCell, ops::Deref};
 
+use perspicax_policy::{Insets, Rect, frame_rects};
 use smithay::{
     backend::renderer::{
         ImportAll, Renderer,
-        element::{AsRenderElements, surface::WaylandSurfaceRenderElement},
+        element::{
+            AsRenderElements, Kind,
+            solid::{SolidColorBuffer, SolidColorRenderElement},
+            surface::WaylandSurfaceRenderElement,
+        },
     },
     desktop::{Window, space::SpaceElement},
     output::Output,
     utils::{IsAlive, Logical, Physical, Point, Rectangle, Scale},
 };
 
+smithay::backend::renderer::element::render_elements! {
+    /// What a framed window draws as: the client's surfaces, and the frame's
+    /// strips.
+    pub(crate) FramedElement<R> where R: ImportAll;
+    Surface=WaylandSurfaceRenderElement<R>,
+    Bar=SolidColorRenderElement,
+}
+
+/// How a window's frame looks right now, set by the compositor before each
+/// frame is drawn (see `Compositor::dress_frames`), and read while drawing,
+/// which cannot ask the compositor anything.
+///
+/// The buffers are kept rather than made each frame: a buffer's id is what
+/// damage tracking compares, and a new one every frame would redraw every
+/// frame in full.
+#[derive(Debug, Default)]
+struct Dress {
+    insets: Insets,
+    colour: [f32; 4],
+    strips: Vec<SolidColorBuffer>,
+}
+
+#[cfg(feature = "seat")]
+fn rgba(colour: perspicax_policy::Colour) -> [f32; 4] {
+    let channel = |value: u8| f32::from(value) / 255.0;
+    [channel(colour.r), channel(colour.g), channel(colour.b), 1.0]
+}
+
 /// A client window, as the space holds it. Cheap to clone: [`Window`] is a
 /// handle, and so is this.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Framed(Window);
+
+impl Framed {
+    fn dress<T>(&self, f: impl FnOnce(&mut Dress) -> T) -> T {
+        self.user_data()
+            .insert_if_missing(|| RefCell::new(Dress::default()));
+        let cell = self
+            .user_data()
+            .get::<RefCell<Dress>>()
+            .expect("inserted on the line above");
+        f(&mut cell.borrow_mut())
+    }
+
+    /// Set how the frame looks: how far it reaches, and in what colour.
+    #[cfg(feature = "seat")]
+    pub(crate) fn wear(&self, insets: Insets, colour: perspicax_policy::Colour) {
+        self.dress(|dress| {
+            dress.insets = insets;
+            dress.colour = rgba(colour);
+        });
+    }
+
+    /// The frame's outside, in the same coordinates as the window's own
+    /// geometry.
+    fn outer(&self) -> Rectangle<i32, Logical> {
+        let insets = self.dress(|dress| dress.insets);
+        let mut outer = self.0.geometry();
+        outer.loc -= Point::from((insets.left, insets.top));
+        outer.size += (insets.left + insets.right, insets.top + insets.bottom).into();
+        outer
+    }
+}
 
 impl From<Window> for Framed {
     fn from(window: Window) -> Self {
@@ -63,7 +127,7 @@ impl SpaceElement for Framed {
     }
 
     fn bbox(&self) -> Rectangle<i32, Logical> {
-        SpaceElement::bbox(&self.0)
+        SpaceElement::bbox(&self.0).merge(self.outer())
     }
 
     fn is_in_input_region(&self, point: &Point<f64, Logical>) -> bool {
@@ -96,8 +160,10 @@ where
     R: Renderer + ImportAll,
     R::TextureId: Clone + 'static,
 {
-    type RenderElement = WaylandSurfaceRenderElement<R>;
+    type RenderElement = FramedElement<R>;
 
+    /// The client's surfaces, then the frame: front to back, so popups,
+    /// which come first among the client's, still draw over the titlebar.
     fn render_elements<C: From<Self::RenderElement>>(
         &self,
         renderer: &mut R,
@@ -105,6 +171,37 @@ where
         scale: Scale<f64>,
         alpha: f32,
     ) -> Vec<C> {
-        self.0.render_elements(renderer, location, scale, alpha)
+        let mut elements: Vec<C> = self
+            .0
+            .render_elements::<WaylandSurfaceRenderElement<R>>(renderer, location, scale, alpha)
+            .into_iter()
+            .map(|element| C::from(FramedElement::Surface(element)))
+            .collect();
+
+        // `location` is where the surface's own origin goes; the client
+        // geometry, which the frame is measured from, is offset within it.
+        let geometry = self.0.geometry();
+        let origin = location + geometry.loc.to_physical_precise_round(scale);
+        let client = Rect::new(0, 0, geometry.size.w, geometry.size.h);
+        self.dress(|dress| {
+            let strips = frame_rects(client, dress.insets);
+            dress
+                .strips
+                .resize_with(strips.len(), || SolidColorBuffer::new((0, 0), [0.0; 4]));
+            for (strip, buffer) in strips.iter().zip(&mut dress.strips) {
+                buffer.update((strip.w, strip.h), dress.colour);
+                let at = origin + Point::from((strip.x, strip.y)).to_physical_precise_round(scale);
+                elements.push(C::from(FramedElement::Bar(
+                    SolidColorRenderElement::from_buffer(
+                        buffer,
+                        at,
+                        scale,
+                        alpha,
+                        Kind::Unspecified,
+                    ),
+                )));
+            }
+        });
+        elements
     }
 }

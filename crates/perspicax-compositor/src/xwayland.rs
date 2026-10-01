@@ -363,6 +363,9 @@ impl XwmHandler for Compositor {
         let size = x11.geometry().size;
         let _ = x11.configure(Rectangle::new(at, size));
         self.space.map_element(window.clone(), at, false);
+        // Its Motif hints are in by now, so whether it is framed is known,
+        // and the titlebar has to start on screen.
+        self.fit_frame(&window);
         self.adopt(&window);
         if let Some(wm) = self.xwayland.wm.as_mut() {
             let _ = wm.raise_window(&x11);

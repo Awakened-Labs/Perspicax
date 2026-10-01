@@ -18,13 +18,15 @@
 //! The decisions, by module: focus and what a chord means (`focus`, `binds`);
 //! where a window goes and how big (`geometry`); where each monitor sits
 //! (`layout`); which workspace shows which windows (`workspace`); changing
-//! workspace with the pointer (`flip`); and snapping to halves and quarters
-//! (`snap`). `perspicax-config` builds their settings from `config.toml` and
-//! the `classic`/`minimal` profiles.
+//! workspace with the pointer (`flip`); snapping to halves and quarters
+//! (`snap`); and the frame drawn around a window (`frame`). `perspicax-config`
+//! builds their settings from `config.toml` and the `classic`/`minimal`
+//! profiles.
 
 mod binds;
 mod flip;
 mod focus;
+mod frame;
 mod geometry;
 mod layout;
 mod snap;
@@ -34,6 +36,7 @@ pub use crate::{
     binds::{Action, Bindings, Button, Chord, Drag, Mods, Towards},
     flip::{EdgeDwell, Flipping, NOTCH_PIXELS, Notches, arrival, edge_at},
     focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},
+    frame::{Colour, Decorations, Insets, Look, fit, frame_rects, inset, outset},
     geometry::{Edges, Rect, anchor, carry, edges_near, neighbour, place, resize, unmaximized_at},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
     snap::{Snapping, Zone, keyed, zone},

@@ -154,6 +154,15 @@ pub struct SurfaceFacts {
     /// it is turns a refusal an agent can do nothing about into one it can:
     /// the window is not gone, it is on workspace 3.
     pub off_workspace: Option<u16>,
+    /// What the host drew around this surface, in global space: a titlebar
+    /// and a border, outside `geometry`.
+    ///
+    /// No client drew these pixels, so no client's opaque region can speak
+    /// for them, and they are opaque by construction: the host drew them
+    /// solid. A node of another window under a titlebar is therefore covered
+    /// as a matter of proof, not policy. Empty for a surface that draws its
+    /// own frame, or has none.
+    pub frame: Vec<Rect>,
 }
 
 impl SurfaceFacts {
@@ -175,6 +184,7 @@ impl SurfaceFacts {
             damage_generation: 0,
             damage: Vec::new(),
             off_workspace: None,
+            frame: Vec::new(),
         }
     }
 
@@ -214,6 +224,14 @@ impl SurfaceFacts {
     pub fn on_workspace(mut self, number: u16) -> Self {
         self.mapped = false;
         self.off_workspace = Some(number);
+        self
+    }
+
+    /// The same surface, with a frame the host drew around it, in global
+    /// space.
+    #[must_use]
+    pub fn framed(mut self, frame: impl IntoIterator<Item = Rect>) -> Self {
+        self.frame = frame.into_iter().collect();
         self
     }
 
@@ -490,7 +508,11 @@ impl Judgement {
 ///    Before occlusion, because raising a window over it would still leave it
 ///    where nobody can see it.
 /// 6. Only then, occlusion, from the top down, so the surface named is the one
-///    an agent has to deal with first.
+///    an agent has to deal with first. A surface's frame is part of it: a
+///    titlebar over the node occludes it, and proves it, because the host
+///    drew the titlebar solid. A window's own frame never covers its own
+///    nodes, because it is outside the window and test 4 has already said
+///    `Clipped` of anything out there.
 #[must_use]
 pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
     let Some(target) = facts.surface(surface) else {
@@ -522,7 +544,13 @@ pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
         .position(|candidate| candidate.id == surface);
     let above = position.map_or(0, |index| index + 1);
     for candidate in facts.surfaces()[above..].iter().rev() {
-        if !candidate.mapped || !overlaps(candidate.geometry, global) {
+        if !candidate.mapped {
+            continue;
+        }
+        if candidate.frame.iter().any(|strip| overlaps(*strip, global)) {
+            return Judgement::proven(Visibility::Occluded { by: candidate.id });
+        }
+        if !overlaps(candidate.geometry, global) {
             continue;
         }
         if candidate.proves_transparent(global) {
@@ -713,6 +741,36 @@ mod tests {
                 unproven: true,
             }
         );
+    }
+
+    /// A titlebar is pixels no client drew. One over a node covers it, and
+    /// proves it, even when the window it belongs to declared its own
+    /// surface fully transparent: the frame is not the surface.
+    #[test]
+    fn a_titlebar_over_a_node_occludes_it_as_a_matter_of_proof() {
+        let below = rect(0.0, 150.0, 400.0, 400.0);
+        let titlebar = rect(0.0, 124.0, 400.0, 150.0);
+        let cover = SurfaceFacts::new(SurfaceId(2), below)
+            .declaring_opaque([])
+            .framed([titlebar]);
+        let facts = HostFacts::bottom_to_top([window(), cover], 1);
+        assert_eq!(
+            verdict(&facts),
+            Judgement::proven(Visibility::Occluded { by: SurfaceId(2) })
+        );
+
+        let elsewhere = SurfaceFacts::new(SurfaceId(2), rect(500.0, 500.0, 600.0, 600.0))
+            .framed([rect(500.0, 474.0, 600.0, 500.0)]);
+        let facts = HostFacts::bottom_to_top([window(), elsewhere], 1);
+        assert_eq!(verdict(&facts), Judgement::proven(Visibility::Visible));
+    }
+
+    /// A window's own titlebar is not something its nodes can be under.
+    #[test]
+    fn a_window_is_not_occluded_by_its_own_frame() {
+        let framed = window().framed([rect(0.0, -26.0, 400.0, 0.0)]);
+        let facts = HostFacts::bottom_to_top([framed], 1);
+        assert_eq!(verdict(&facts), Judgement::proven(Visibility::Visible));
     }
 
     /// And the other half: a client that *did* declare where it is opaque is

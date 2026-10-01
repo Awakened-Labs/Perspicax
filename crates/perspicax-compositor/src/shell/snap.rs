@@ -10,7 +10,7 @@
 //! where it was in the same [`super::Placement::restore`] maximize uses, so
 //! dragging it out of its zone gives it back its size, whichever it was.
 
-use perspicax_policy::{Direction, Snapping, Zone, keyed, zone};
+use perspicax_policy::{Direction, Look, Snapping, Zone, inset, keyed, zone};
 use smithay::{
     output::Output,
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
@@ -70,7 +70,7 @@ impl Compositor {
         let Some(area) = self.usable_area(&output) else {
             return;
         };
-        let target = zone.rect(rect(area));
+        let target = inset(zone.rect(rect(area)), self.insets_as(window, Look::Normal));
         if let Some(current) = self.extent(window) {
             placement(window, |placement| {
                 placement.restore.get_or_insert(current);

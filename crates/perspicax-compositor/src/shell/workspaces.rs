@@ -235,6 +235,7 @@ impl Compositor {
         let parked = placement(window, |placement| placement.parked.take());
         let at = self.unpark(window, parked.unwrap_or_default());
         self.space.map_element(window.clone(), at, false);
+        self.fit_frame(window);
     }
 
     /// The monitor a window is on, by name, whether it is on screen or

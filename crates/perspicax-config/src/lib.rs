@@ -24,8 +24,8 @@ mod keys;
 use std::path::{Path, PathBuf};
 
 use perspicax_policy::{
-    Action, Bindings, Chord, Direction, Flipping, Focus, FocusModel, Grid, Keysym, Mods, Place,
-    Shape, Side, Snapping, Towards,
+    Action, Bindings, Chord, Colour, Decorations, Direction, Flipping, Focus, FocusModel, Grid,
+    Keysym, Mods, Place, Shape, Side, Snapping, Towards,
 };
 use serde::Deserialize;
 
@@ -76,6 +76,8 @@ pub struct Config {
     /// Dragging a window to an edge of the desk to give it half or a quarter
     /// of a monitor.
     pub snapping: Snapping,
+    /// Who draws a window's titlebar and border, and what they look like.
+    pub decorations: Decorations,
     /// Whether X11 applications get an Xwayland. Only meaningful in a build
     /// with the `xwayland` feature; saying `true` in one without it is an
     /// error.
@@ -326,6 +328,7 @@ impl Config {
                     scroll: true,
                 },
             },
+            decorations: Decorations::default(),
             xwayland: built.xwayland,
         }
     }
@@ -396,6 +399,26 @@ struct Raw {
     xwayland: Option<bool>,
     workspaces: Option<RawWorkspaces>,
     snap: Option<RawSnap>,
+    decorations: Option<RawDecorations>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawDecorations {
+    mode: Option<RawDecorationMode>,
+    title_height: Option<i32>,
+    border: Option<i32>,
+    focused: Option<String>,
+    unfocused: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawDecorationMode {
+    /// This compositor draws the frame, unless a client asks to draw its own.
+    Server,
+    /// Every client draws its own.
+    Client,
 }
 
 #[derive(Debug, Deserialize)]
@@ -659,6 +682,10 @@ impl Raw {
             config.snapping.drag = snap.drag.unwrap_or(config.snapping.drag);
         }
 
+        if let Some(decorations) = self.decorations {
+            config.decorations = decorations.apply(config.decorations)?;
+        }
+
         if let Some(empty) = self.autostart.iter().position(Vec::is_empty) {
             return Err(invalid(
                 format!("autostart[{empty}]"),
@@ -667,6 +694,49 @@ impl Raw {
         }
         config.autostart = self.autostart;
         Ok(config)
+    }
+}
+
+impl RawDecorations {
+    fn apply(self, mut decorations: Decorations) -> Result<Decorations, Error> {
+        if let Some(mode) = self.mode {
+            decorations.server = matches!(mode, RawDecorationMode::Server);
+        }
+        let pixels = |key: &str, value: i32, range: std::ops::RangeInclusive<i32>| {
+            if range.contains(&value) {
+                Ok(value)
+            } else {
+                Err(invalid(
+                    format!("decorations.{key}"),
+                    format!(
+                        "{value} is outside {} to {} pixels",
+                        range.start(),
+                        range.end()
+                    ),
+                ))
+            }
+        };
+        if let Some(title) = self.title_height {
+            decorations.title = pixels("title-height", title, 8..=96)?;
+        }
+        if let Some(border) = self.border {
+            decorations.border = pixels("border", border, 0..=32)?;
+        }
+        let colour = |key: &str, text: String| {
+            Colour::parse(&text).ok_or_else(|| {
+                invalid(
+                    format!("decorations.{key}"),
+                    format!("{text:?} is not a colour; write one as \"#rrggbb\""),
+                )
+            })
+        };
+        if let Some(focused) = self.focused {
+            decorations.focused = colour("focused", focused)?;
+        }
+        if let Some(unfocused) = self.unfocused {
+            decorations.unfocused = colour("unfocused", unfocused)?;
+        }
+        Ok(decorations)
     }
 }
 
@@ -1229,6 +1299,38 @@ mod tests {
         assert!(!config.snapping.drag);
         assert_eq!(config.snapping.threshold, 12);
         assert!(parse("[snap]\nthreshold = 0", SEAT).is_err());
+    }
+
+    #[test]
+    fn decorations_are_configured_in_their_own_table() {
+        assert_eq!(
+            Config::profile(Profile::Minimal, SEAT).decorations,
+            Decorations::default()
+        );
+        let config = parse(
+            "[decorations]\nmode = \"client\"\ntitle-height = 30\nborder = 0\n\
+             focused = \"#ff8800\"",
+            SEAT,
+        )
+        .unwrap();
+        let decorations = config.decorations;
+        assert!(!decorations.server);
+        assert_eq!((decorations.title, decorations.border), (30, 0));
+        assert_eq!(decorations.focused, Colour::rgb(0xff, 0x88, 0x00));
+        assert_eq!(decorations.unfocused, Decorations::default().unfocused);
+    }
+
+    #[test]
+    fn a_decoration_that_cannot_be_drawn_is_refused_by_name() {
+        for (text, key) in [
+            ("title-height = 2", "decorations.title-height"),
+            ("border = -1", "decorations.border"),
+            ("focused = \"orange\"", "decorations.focused"),
+        ] {
+            let error = parse(&format!("[decorations]\n{text}"), SEAT).unwrap_err();
+            assert!(error.to_string().contains(key), "{error}");
+        }
+        assert!(parse("[decorations]\nmode = \"both\"", SEAT).is_err());
     }
 
     #[test]

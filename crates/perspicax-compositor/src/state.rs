@@ -142,6 +142,9 @@ pub struct Compositor {
     /// which is the order `perspicax_index::HostFacts` wants, so the two agree
     /// by construction rather than by a conversion someone has to keep right.
     pub(crate) space: Space<Framed>,
+    /// Who draws each window's frame: the two protocols that negotiate it.
+    /// See [`crate::decorations`].
+    pub(crate) decorations: crate::decorations::DecorationStates,
     /// What this compositor last told the rest of the process. See
     /// [`crate::facts`] for why the boundary is a published copy.
     pub(crate) facts: Facts,
@@ -262,6 +265,7 @@ impl Compositor {
             seat_state,
             seat,
             space,
+            decorations: crate::decorations::DecorationStates::new(display, &backend.decorations()),
             backend,
             #[cfg(feature = "seat")]
             dmabuf: smithay::wayland::dmabuf::DmabufState::new(),

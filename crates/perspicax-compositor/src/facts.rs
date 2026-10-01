@@ -290,6 +290,15 @@ impl Compositor {
             } else {
                 None
             },
+            // A parked window draws nothing, frame included.
+            frame: if parked {
+                Vec::new()
+            } else {
+                self.frame_facts(
+                    window,
+                    smithay::utils::Rectangle::new(location, declared.size),
+                )
+            },
         })
     }
 
@@ -331,6 +340,7 @@ impl Compositor {
             damage_generation: self.damage_generation(id),
             damage: self.damage_history(id),
             off_workspace: None,
+            frame: Vec::new(),
         }
     }
 
@@ -367,6 +377,8 @@ impl Compositor {
         if self.parked.contains(window) {
             facts.mapped = false;
             facts.off_workspace = self.off_workspace(window);
+        } else {
+            facts.frame = self.frame_facts(window, placed);
         }
         facts.origin = Self::x11_origin(window);
         facts.title = Some(x11.title()).filter(|title| !title.is_empty());

@@ -123,6 +123,7 @@ impl Compositor {
             self.space.map_element(window.clone(), at, false);
             self.window_moved(&window);
             let Some(toplevel) = window.toplevel().filter(|t| Self::is_filling(t)).cloned() else {
+                self.fit_frame(&window);
                 continue;
             };
             let state = if toplevel.with_pending_state(|pending| {

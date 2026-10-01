@@ -92,7 +92,7 @@ render_elements! {
     /// What one output shows, front to back: the pointer, a snap preview,
     /// then the windows.
     Elements<=GlesRenderer>;
-    Space=SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
+    Space=SpaceRenderElements<GlesRenderer, crate::framed::FramedElement<GlesRenderer>>,
     Cursor=MemoryRenderBufferRenderElement<GlesRenderer>,
     CursorSurface=WaylandSurfaceRenderElement<GlesRenderer>,
     Preview=SolidColorRenderElement,
@@ -648,6 +648,7 @@ fn light(
 /// Render one output, queue it for scanout if anything changed, and let the
 /// clients on it draw again.
 fn render(state: &mut Compositor, crtc: crtc::Handle) {
+    state.dress_frames();
     let now = state.started_at().elapsed();
     let pointer_at = state
         .pointer
