@@ -38,6 +38,7 @@ impl Compositor {
             Action::SendToWorkspace(direction) => self.send_to_workspace(*direction, false),
             Action::CarryToWorkspace(direction) => self.send_to_workspace(*direction, true),
             Action::ToggleSticky => self.toggle_sticky(),
+            Action::Snap(direction) => self.snap_focused(*direction),
             Action::Reload => self.reload(),
             Action::CycleFocus => {
                 // Minimized windows on this workspace count as below the

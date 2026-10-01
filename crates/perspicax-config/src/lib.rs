@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use perspicax_policy::{
     Action, Bindings, Chord, Direction, Flipping, Focus, FocusModel, Grid, Keysym, Mods, Place,
-    Shape, Side, Towards,
+    Shape, Side, Snapping, Towards,
 };
 use serde::Deserialize;
 
@@ -73,6 +73,9 @@ pub struct Config {
     /// Changing workspace with the pointer: resting it on an edge of the
     /// desk, or scrolling over the desktop.
     pub flipping: Flipping,
+    /// Dragging a window to an edge of the desk to give it half or a quarter
+    /// of a monitor.
+    pub snapping: Snapping,
     /// Whether X11 applications get an Xwayland. Only meaningful in a build
     /// with the `xwayland` feature; saying `true` in one without it is an
     /// error.
@@ -257,6 +260,16 @@ impl Config {
             }
         }
         if profile == Profile::Classic {
+            // Windows' snapping keys.
+            for (key, direction) in arrows {
+                bindings = bindings.bind(
+                    Chord {
+                        mods: held(false, false, false, true),
+                        key,
+                    },
+                    Action::Snap(direction),
+                );
+            }
             let f_keys = [Keysym::F1, Keysym::F2, Keysym::F3, Keysym::F4];
             for (number, key) in (1..).zip(f_keys) {
                 bindings = bindings.bind(
@@ -298,6 +311,10 @@ impl Config {
             outputs: Vec::new(),
             autostart: Vec::new(),
             workspaces,
+            snapping: Snapping {
+                drag: profile == Profile::Classic,
+                ..Snapping::default()
+            },
             flipping: match profile {
                 Profile::Classic => Flipping::default(),
                 // The Fluxbox and Enlightenment habit: the desk is a loop the
@@ -378,6 +395,14 @@ struct Raw {
     autostart: Vec<Vec<String>>,
     xwayland: Option<bool>,
     workspaces: Option<RawWorkspaces>,
+    snap: Option<RawSnap>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawSnap {
+    drag: Option<bool>,
+    threshold: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -621,6 +646,19 @@ impl Raw {
             }
         }
 
+        if let Some(snap) = self.snap {
+            if let Some(threshold) = snap.threshold {
+                if !(1..=64).contains(&threshold) {
+                    return Err(invalid(
+                        "snap.threshold".to_owned(),
+                        format!("{threshold} is outside 1 to 64 pixels"),
+                    ));
+                }
+                config.snapping.threshold = threshold;
+            }
+            config.snapping.drag = snap.drag.unwrap_or(config.snapping.drag);
+        }
+
         if let Some(empty) = self.autostart.iter().position(Vec::is_empty) {
             return Err(invalid(
                 format!("autostart[{empty}]"),
@@ -782,7 +820,8 @@ fn action_for(action: RawAction) -> Result<Option<Action>, String> {
                     "`{other}` is not an action; use close, cycle-focus, reload, \
                          toggle-sticky, move-to-next-output, move-to-previous-output, \
                          move-to-output-<side>, workspace-<side>, workspace-<number>, \
-                         send-to-workspace-<side>, carry-to-workspace-<side>, none, or \
+                         send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
+                         none, or \
                          {{ spawn = [...] }}, where <side> is left, right, up or down"
                 )
             })?,
@@ -805,6 +844,7 @@ fn directed(name: &str) -> Option<Action> {
         "send-to-workspace" => Action::SendToWorkspace(direction),
         "carry-to-workspace" => Action::CarryToWorkspace(direction),
         "move-to-output" => Action::MoveToOutput(Towards::Side(direction)),
+        "snap" => Action::Snap(direction),
         _ => return None,
     })
 }
@@ -1164,6 +1204,31 @@ mod tests {
             error.to_string().contains("workspaces.flip.delay-ms"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn classic_snaps_by_drag_and_by_logo_arrows_and_minimal_does_not() {
+        let classic = Config::profile(Profile::Classic, SEAT);
+        assert!(classic.snapping.drag);
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            classic.bindings.resolve(logo, &[Keysym::Left]),
+            Some(&Action::Snap(Direction::Left))
+        );
+        let minimal = Config::profile(Profile::Minimal, SEAT);
+        assert!(!minimal.snapping.drag);
+        assert_eq!(minimal.bindings.resolve(logo, &[Keysym::Left]), None);
+    }
+
+    #[test]
+    fn snapping_is_configured_in_its_own_table() {
+        let config = parse("[snap]\ndrag = false\nthreshold = 12", SEAT).unwrap();
+        assert!(!config.snapping.drag);
+        assert_eq!(config.snapping.threshold, 12);
+        assert!(parse("[snap]\nthreshold = 0", SEAT).is_err());
     }
 
     #[test]

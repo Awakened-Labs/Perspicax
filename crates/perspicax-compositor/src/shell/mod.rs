@@ -18,6 +18,7 @@
 
 mod actions;
 mod grabs;
+mod snap;
 mod workspaces;
 
 use std::cell::RefCell;
@@ -48,6 +49,7 @@ use smithay::{
 use crate::state::Compositor;
 
 pub(crate) use grabs::{MoveGrab, ResizeGrab};
+pub(crate) use snap::SnapPreview;
 
 /// What the compositor remembers about one window's placement, kept in the
 /// window's own user data so it lives and dies with the window.
@@ -63,6 +65,9 @@ pub(crate) struct Placement {
     /// The person minimized it. It stays off screen whichever workspace is
     /// showing, until it is restored.
     pub(crate) minimized: bool,
+    /// Snapped to a half or a quarter of its monitor. `restore` holds where
+    /// it was before.
+    pub(crate) snapped: Option<perspicax_policy::Zone>,
     /// A resize in progress, or finished and waiting for the client's last
     /// commit. See [`Compositor::settle_resize`].
     pub(crate) resize: Option<Resize>,
@@ -353,6 +358,19 @@ impl Compositor {
                     pending.states.unset(xdg_toplevel::State::Fullscreen);
                 });
                 self.unfill(&toplevel, xdg_toplevel::State::Maximized, Some(at.into()));
+            }
+        } else if Self::is_snapped(window) {
+            // The same for a window snapped to a half or a quarter: it comes
+            // out at the size it had before, hanging from the pointer.
+            let snapped = self.extent(window);
+            let restored = placement(window, |placement| placement.restore.map(|r| r.size));
+            if let (Some(snapped), Some(restored)) = (snapped, restored) {
+                let (x, _) = unmaximized_at(
+                    (start.location.x, start.location.y),
+                    rect(snapped),
+                    (restored.w, restored.h),
+                );
+                self.unsnap(window, Some((x, snapped.loc.y).into()));
             }
         }
         let Some(origin) = self.space.element_location(window) else {

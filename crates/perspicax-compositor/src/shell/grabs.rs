@@ -231,6 +231,8 @@ impl PointerGrab<Compositor> for MoveGrab {
         if let Some(x11) = self.window.x11_surface() {
             let _ = x11.configure(smithay::utils::Rectangle::new(to, x11.geometry().size));
         }
+        let snapping = data.backend.snapping();
+        data.track_snap(event.location, snapping);
         data.backend.redraw();
     }
 
@@ -242,6 +244,8 @@ impl PointerGrab<Compositor> for MoveGrab {
     ) {
         handle.button(data, event);
         if handle.current_pressed().is_empty() {
+            // Before the grab is unset, which forgets the preview.
+            data.finish_snap(&self.window);
             handle.unset_grab(self, data, event.serial, event.time, true);
             // Per output, a window dragged onto another monitor joins the
             // workspace that monitor is showing.
@@ -260,6 +264,9 @@ impl PointerGrab<Compositor> for MoveGrab {
 
     fn unset(&mut self, data: &mut Compositor) {
         data.dragging = None;
+        if data.snap_preview.take().is_some() {
+            data.backend.redraw();
+        }
     }
 }
 

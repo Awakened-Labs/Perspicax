@@ -24,6 +24,7 @@ mod flip;
 mod focus;
 mod geometry;
 mod layout;
+mod snap;
 mod workspace;
 
 pub use crate::{
@@ -32,6 +33,7 @@ pub use crate::{
     focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},
     geometry::{Edges, Rect, anchor, carry, edges_near, neighbour, place, resize, unmaximized_at},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
+    snap::{Snapping, Zone, keyed, zone},
     workspace::{Cell, Direction, Grid, Home, Mode, Shape, Workspaces},
 };
 

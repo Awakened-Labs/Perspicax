@@ -48,6 +48,7 @@ use smithay::{
                 Kind,
                 memory::MemoryRenderBufferRenderElement,
                 render_elements,
+                solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
             },
             gles::GlesRenderer,
@@ -88,12 +89,19 @@ type Allocator = GbmAllocator<DrmDeviceFd>;
 type Exporter = GbmFramebufferExporter<DrmDeviceFd>;
 
 render_elements! {
-    /// What one output shows, front to back: the pointer, then the windows.
+    /// What one output shows, front to back: the pointer, a snap preview,
+    /// then the windows.
     Elements<=GlesRenderer>;
     Space=SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
     Cursor=MemoryRenderBufferRenderElement<GlesRenderer>,
     CursorSurface=WaylandSurfaceRenderElement<GlesRenderer>,
+    Preview=SolidColorRenderElement,
 }
+
+/// Where a dragged window would snap: a pale wash over the zone, light enough
+/// to see the windows through, distinct enough from the backdrop to read.
+const PREVIEW: [f32; 4] = [0.55, 0.7, 0.95, 1.0];
+const PREVIEW_ALPHA: f32 = 0.25;
 
 /// What shows where no window is: a dark grey, so a working output is
 /// distinguishable from a dead one. The wallpaper is the shell's job (W5).
@@ -148,6 +156,9 @@ pub(crate) struct Session {
     /// stopped with it and reaped as they exit.
     children: Vec<std::process::Child>,
     cursor: Cursor,
+    /// The snap preview's colour and size, kept so the damage tracker can
+    /// tell a preview that moved from one that did not.
+    preview: SolidColorBuffer,
     /// The pointer resting against an edge of the desk, on its way to a
     /// workspace flip. See [`input`].
     pub(super) dwell: perspicax_policy::EdgeDwell,
@@ -303,6 +314,7 @@ impl Session {
             devices: Vec::new(),
             children: Vec::new(),
             cursor: Cursor::load(),
+            preview: SolidColorBuffer::new((1, 1), PREVIEW),
             dwell,
             dwell_armed: None,
             notches: perspicax_policy::Notches::default(),
@@ -641,6 +653,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         space,
         cursor: status,
         lock,
+        snap_preview,
         ..
     } = state;
     let Running::Seat(session) = backend else {
@@ -651,6 +664,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         heads,
         active,
         cursor,
+        preview,
         ..
     } = &mut **session;
     let Some(head) = heads.iter_mut().find(|head| head.crtc == crtc) else {
@@ -680,6 +694,25 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         }
         _ => Vec::new(),
     };
+    // Under the pointer and over the windows: where the window being dragged
+    // would snap, on the output it would snap on.
+    if let (Some(snap), Some(geometry), None) = (
+        snap_preview.as_ref(),
+        space.output_geometry(&head.output),
+        lock.as_ref(),
+    ) && snap.output == head.output
+    {
+        let scale = head.output.current_scale().fractional_scale();
+        preview.update(snap.area.size, PREVIEW);
+        let at = (snap.area.loc - geometry.loc).to_physical_precise_round(scale);
+        elements.push(Elements::Preview(SolidColorRenderElement::from_buffer(
+            preview,
+            at,
+            scale,
+            PREVIEW_ALPHA,
+            Kind::Unspecified,
+        )));
+    }
     // Locked: the lock surface for this output and nothing else. An output
     // whose lock surface has not arrived yet shows only the backdrop, never
     // the windows it is covering.

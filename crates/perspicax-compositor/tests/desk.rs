@@ -1,4 +1,5 @@
-//! Workspaces across two monitors, on a compositor with no screen.
+//! Window management across two monitors, on a compositor with no screen:
+//! workspaces, and snapping.
 //!
 //! What a person sees when they switch workspace, checked through the facts
 //! an agent reads: the windows of the workspace left behind are judged
@@ -6,7 +7,8 @@
 //! visible again. Both ways monitors can share workspaces are run: spanning,
 //! where one switch changes both monitors, and per output, where each monitor
 //! flips on its own and a window sent to the other monitor joins whatever
-//! that one is showing.
+//! that one is showing. And Logo and an arrow, giving a window half its
+//! monitor and back.
 //!
 //! Driven by `Command::Perform`, the same code a person's key bindings run,
 //! because a headless compositor has no keyboard. Like the other live tests
@@ -130,6 +132,26 @@ fn per_output_each_monitor_flips_alone_and_a_moved_window_joins_the_other() {
     session.stop(desk, queue);
 }
 
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn logo_and_an_arrow_snap_the_focused_window_to_a_half_and_back() {
+    let session = Session::start("snap", Mode::Spanning);
+    let (mut desk, mut queue, qh) = session.client();
+
+    desk.open_window(&qh, "first");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    session.wait_for(|facts| seen(facts, "first") == Visibility::Visible);
+
+    // The right half of the left monitor, which is 1280 wide.
+    session.perform(Action::Snap(Direction::Right));
+    session.wait_for(|facts| geometry(facts, "first").x0 == 640.0);
+    // And back from the right half to where it was, as Windows does.
+    session.perform(Action::Snap(Direction::Left));
+    session.wait_for(|facts| geometry(facts, "first").x0 == 0.0);
+
+    session.stop(desk, queue);
+}
+
 /// A compositor on a thread: two virtual monitors side by side, a grid of
 /// 2x2 workspaces, and a channel to perform bindings with.
 struct Session {
@@ -142,7 +164,7 @@ struct Session {
 
 impl Session {
     fn start(name: &str, mode: Mode) -> Self {
-        let socket = format!("perspicax-workspaces-{name}-{}", std::process::id());
+        let socket = format!("perspicax-desk-{name}-{}", std::process::id());
         let facts = Facts::new();
         let requests = Requests::new();
         let stop = Stop::new();

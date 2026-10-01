@@ -60,6 +60,9 @@ pub enum Action {
     CarryToWorkspace(Direction),
     /// Put the focused window on every workspace, or back on one.
     ToggleSticky,
+    /// Snap the focused window towards a side: halves, quarters, maximized,
+    /// stepping as Windows does. See [`crate::keyed`].
+    Snap(Direction),
     /// Start a program, as a program and its arguments. The person's own
     /// program: it is never granted agent consent.
     Spawn(Vec<String>),

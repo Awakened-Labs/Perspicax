@@ -183,6 +183,9 @@ pub struct Compositor {
     /// The window being moved with the pointer, while it is: an edge flip
     /// takes it along to the next workspace.
     pub(crate) dragging: Option<Window>,
+    /// Where the window being dragged would snap if let go now. See
+    /// `shell::snap`.
+    pub(crate) snap_preview: Option<shell::SnapPreview>,
     /// RAII handles for the primary-selection and xdg-activation globals.
     primary_selection: PrimarySelectionState,
     activation: XdgActivationState,
@@ -276,6 +279,7 @@ impl Compositor {
             parked: Vec::new(),
             workspaces: Workspaces::new(workspace_shape),
             dragging: None,
+            snap_preview: None,
             primary_selection: PrimarySelectionState::new::<Self>(display),
             activation: XdgActivationState::new::<Self>(display),
             layer_shell: WlrLayerShellState::new::<Self>(display),

@@ -199,6 +199,16 @@ impl Running {
         }
     }
 
+    /// How dragging a window to an edge snaps it: the person's config on a
+    /// seat. Headless nobody drags anything.
+    pub(crate) fn snapping(&self) -> Option<perspicax_policy::Snapping> {
+        match self {
+            Self::Headless { .. } => None,
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => Some(session.settings.snapping),
+        }
+    }
+
     /// Whether this backend reads client buffers after commit. The renderer
     /// does; headless never looks at a pixel and releases each buffer as it
     /// arrives. See [`Compositor`]'s `commit`.
