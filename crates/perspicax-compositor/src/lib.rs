@@ -34,6 +34,7 @@
 //! libinput. It is a second backend beside this one, not a replacement for
 //! it: the headless compositor stays renderer-free, and it stays what CI runs.
 
+mod access;
 pub mod act;
 mod backend;
 mod decorations;
@@ -47,6 +48,7 @@ mod origin;
 mod outputs;
 mod shell;
 pub mod state;
+mod toplevels;
 #[cfg(feature = "xwayland")]
 mod xwayland;
 

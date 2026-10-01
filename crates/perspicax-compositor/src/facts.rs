@@ -195,6 +195,14 @@ impl Compositor {
                     )
                 })),
         );
+        self.announce();
+    }
+
+    /// Tell the clients that watch other programs' windows what changed.
+    /// After every publication, because a publication follows every change
+    /// that could matter to them.
+    fn announce(&mut self) {
+        self.sync_toplevels();
     }
 
     /// One window's facts, or `None` if it has no id yet -- which means it has

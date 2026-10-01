@@ -219,6 +219,12 @@ pub struct Compositor {
     pub(crate) xwayland: crate::xwayland::Xwayland,
     #[cfg(feature = "xwayland")]
     pub(crate) xwayland_shell: Option<smithay::wayland::xwayland_shell::XWaylandShellState>,
+    /// Who may use the protocols that reach past their own windows. See
+    /// [`crate::access`].
+    pub(crate) gate: crate::access::Gate,
+    /// Every window, as the taskbar protocols have been told it. See
+    /// [`crate::toplevels`].
+    pub(crate) toplevels: crate::toplevels::Toplevels,
     /// The event loop, for the handlers that must schedule work on it.
     #[cfg_attr(
         not(feature = "xwayland"),
@@ -257,6 +263,8 @@ impl Compositor {
 
         let consent = backend.consent();
         let workspace_shape = backend.workspace_shape();
+        let gate = crate::access::Gate::new(backend.access());
+        let toplevels = crate::toplevels::Toplevels::new(display, &gate);
         // Empty: outputs are mapped by `arrange_outputs`, once every one
         // the backend starts with is known, so the first is placed knowing
         // about the rest.
@@ -308,6 +316,8 @@ impl Compositor {
             xwayland: crate::xwayland::Xwayland::default(),
             #[cfg(feature = "xwayland")]
             xwayland_shell: None,
+            gate,
+            toplevels,
             loop_handle: event_loop,
             idle_inhibit: IdleInhibitManagerState::new::<Self>(display),
             inhibitors: Vec::new(),
@@ -743,6 +753,17 @@ impl XdgShellHandler for Compositor {
         // which window is active agree with ours -- which is the pair of
         // observations the join weighs.
         self.focus_surface(wl_surface, id);
+        self.publish_facts();
+    }
+
+    /// Titles are not double-buffered, so a new one arrives without a
+    /// commit: published now, or the facts and every taskbar would keep the
+    /// old title until the window next drew.
+    fn title_changed(&mut self, _surface: ToplevelSurface) {
+        self.publish_facts();
+    }
+
+    fn app_id_changed(&mut self, _surface: ToplevelSurface) {
         self.publish_facts();
     }
 

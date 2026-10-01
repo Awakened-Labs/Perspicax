@@ -37,7 +37,7 @@ use smithay::{
 };
 
 use perspicax_index::Consent;
-use perspicax_policy::{Place, Shape};
+use perspicax_policy::{Access, Place, Shape};
 
 use crate::{Config, Error, FRAME_INTERVAL, state::Compositor};
 
@@ -54,6 +54,10 @@ pub enum Backend {
         /// How many workspaces and how they relate to the monitors, as a
         /// seat's `[workspaces]` table would say. The default is one.
         workspaces: Shape,
+        /// Which clients may use the protocols that reach past their own
+        /// windows, as a seat's `[protocols]` table would say. The default
+        /// is any client: headless hosts only what it was told to start.
+        access: Access,
     },
     /// A real session: the outputs the GPU has connected, the keyboards and
     /// pointers libinput finds, device access negotiated through libseat.
@@ -99,6 +103,7 @@ impl Backend {
         Self::Headless {
             outputs: vec![Virtual::numbered(1, size)],
             workspaces: Shape::default(),
+            access: Access::open(),
         }
     }
 
@@ -138,6 +143,7 @@ pub(crate) enum Running {
     Headless {
         outputs: Vec<Plugged>,
         workspaces: Shape,
+        access: Access,
     },
     /// The session, the GPU and the outputs on it. Boxed because it is large
     /// and the headless variant is not.
@@ -163,9 +169,11 @@ impl Running {
             Backend::Headless {
                 outputs,
                 workspaces,
+                access,
             } => Ok(Self::Headless {
                 outputs: outputs.iter().map(|out| plug(display, out)).collect(),
                 workspaces: *workspaces,
+                access: access.clone(),
             }),
             #[cfg(feature = "seat")]
             Backend::Seat => Ok(Self::Seat(Box::new(seat::Session::open(
@@ -196,6 +204,16 @@ impl Running {
             Self::Headless { workspaces, .. } => *workspaces,
             #[cfg(feature = "seat")]
             Self::Seat(session) => session.settings.workspaces,
+        }
+    }
+
+    /// Who may use the protocols that reach past their own windows: the
+    /// person's `[protocols]` on a seat.
+    pub(crate) fn access(&self) -> Access {
+        match self {
+            Self::Headless { access, .. } => access.clone(),
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.settings.protocols.clone(),
         }
     }
 
@@ -392,6 +410,7 @@ impl Compositor {
             crate::Command::Plug(virtual_output) => self.plug_virtual(virtual_output),
             crate::Command::Unplug(name) => self.unplug_virtual(name),
             crate::Command::Perform(action) => self.perform(action),
+            crate::Command::Protocols(access) => self.set_access(access.clone()),
         }
     }
 

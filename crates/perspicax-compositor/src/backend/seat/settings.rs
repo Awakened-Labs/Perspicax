@@ -235,6 +235,7 @@ pub(crate) fn reload(state: &mut Compositor) {
     let keyboard_changed = fresh.keyboard != session.settings.keyboard;
     let outputs_changed = fresh.outputs != session.settings.outputs;
     let decorations_changed = fresh.decorations != session.settings.decorations;
+    let access = (fresh.protocols != session.settings.protocols).then(|| fresh.protocols.clone());
     let workspaces = fresh.workspaces;
     if fresh.flipping.delay_ms != session.settings.flipping.delay_ms {
         session.dwell = perspicax_policy::EdgeDwell::new(fresh.flipping.delay_ms);
@@ -261,10 +262,15 @@ pub(crate) fn reload(state: &mut Compositor) {
     if decorations_changed {
         state.refit_frames();
     }
+    let access_changed = access.is_some();
+    if let Some(access) = access {
+        state.set_access(access);
+    }
     tracing::info!(
         keyboard_changed,
         outputs_changed,
         decorations_changed,
+        access_changed,
         "config reloaded"
     );
 }

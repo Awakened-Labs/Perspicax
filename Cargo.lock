@@ -1321,6 +1321,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "wayland-client",
+ "wayland-protocols",
  "x11rb",
  "xcursor",
 ]

@@ -81,3 +81,7 @@ xwayland = ["smithay/xwayland", "dep:x11rb"]
 [dev-dependencies]
 smithay-client-toolkit = { version = "0.20", default-features = false }
 wayland-client = "0.31"
+# The client side of the protocols sctk has no helpers for: a taskbar's
+# window list and session lock, spoken raw. The same crate and version the
+# server side already uses through smithay; only the features differ.
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }

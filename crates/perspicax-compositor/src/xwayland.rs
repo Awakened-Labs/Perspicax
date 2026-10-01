@@ -57,7 +57,7 @@ use smithay::{
     },
     xwayland::{
         X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler,
-        xwm::{Reorder, ResizeEdge, XwmId},
+        xwm::{Reorder, ResizeEdge, WmWindowProperty, XwmId},
     },
 };
 
@@ -346,6 +346,16 @@ impl XwmHandler for Compositor {
     }
 
     fn new_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
+
+    /// A title or class changed: published now, as a Wayland window's is,
+    /// rather than whenever the window next draws.
+    fn property_notify(&mut self, _xwm: XwmId, x11: X11Surface, property: WmWindowProperty) {
+        if matches!(property, WmWindowProperty::Title | WmWindowProperty::Class)
+            && self.x11_window(&x11).is_some()
+        {
+            self.publish_facts();
+        }
+    }
     fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
     /// A managed X11 window wants to be seen: place it as any new window is

@@ -78,6 +78,11 @@ pub enum Command {
     /// rearranging a person's desk is a capability decision that waits for
     /// the workspace protocols (W4).
     Perform(perspicax_policy::Action),
+    /// Put new `[protocols]` rules in force, as a seat does when the person
+    /// saves a changed config: who may use the protocols that reach past
+    /// their own windows. A client the new rules leave out loses what it
+    /// held.
+    Protocols(perspicax_policy::Access),
 }
 
 /// What arrives on the compositor's inbound channel.
