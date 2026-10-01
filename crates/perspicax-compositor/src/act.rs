@@ -421,9 +421,9 @@ impl Compositor {
     }
 
     /// Where to put the pointer for a window-relative rect: the rect's centre
-    /// in global space, and the window's own origin in global space.
+    /// in global space, and the window's surface origin in global space.
     ///
-    /// # The second number is the window's origin, and getting that wrong is silent
+    /// # The second number is the surface's origin, and getting that wrong is silent
     ///
     /// [`PointerHandle::motion`] takes the pointer's location in compositor
     /// space *and* the focus target's origin in compositor space, and works out
@@ -442,15 +442,31 @@ impl Compositor {
     /// been clicked while the receipt reported `DamageWitness::Quiet` --
     /// the receipt being right about it is the whole argument for receipts.
     ///
+    /// It happened a second time, more quietly, on the first real seat. The
+    /// window's *geometry* origin was passed where its *surface* origin
+    /// belongs -- the two differ by the client-side-decoration shadow, and
+    /// only once a renderer gives Smithay real buffer sizes, so headless never
+    /// saw it. The click landed just above a zenity button. This time the
+    /// receipt said `on_target`, because the near miss repainted the button;
+    /// it was caught by the dialog not closing. Damage on target is evidence
+    /// that something under the click changed, not that the click landed.
+    ///
     /// [`PointerHandle::motion`]: smithay::input::pointer::PointerHandle::motion
     fn point_in(&self, window: &Window, at: Rect) -> ((f64, f64), (f64, f64)) {
         let local = (at.x0 + (at.x1 - at.x0) / 2.0, at.y0 + (at.y1 - at.y0) / 2.0);
-        let origin = self
-            .space
-            .element_location(window)
-            .map_or((0.0, 0.0), |point| (f64::from(point.x), f64::from(point.y)));
-        let global = (local.0 + origin.0, local.1 + origin.1);
-        (global, origin)
+        let placed = self.space.element_location(window).unwrap_or_default();
+        // `at` is relative to the window geometry, which sits at `placed`.
+        let global = (local.0 + f64::from(placed.x), local.1 + f64::from(placed.y));
+        // The focus origin is the *surface's* origin, which is the geometry's
+        // pushed back by the geometry's own offset into the surface -- the
+        // client-side-decoration shadow. It is where Smithay itself renders the
+        // surface and hit-tests it from. Using the geometry origin instead puts
+        // every click short by the shadow's width: on the first real seat that
+        // was enough to land a click just above a zenity button and repaint it
+        // without pressing it. Headless the offset is zero,
+        // because without a renderer Smithay's window geometry is empty.
+        let surface = placed - window.geometry().loc;
+        (global, (f64::from(surface.x), f64::from(surface.y)))
     }
 
     /// Milliseconds since this compositor started, which is the clock every
