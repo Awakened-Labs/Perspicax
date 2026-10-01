@@ -35,7 +35,7 @@ use smithay::{
     },
     input::{
         Seat,
-        pointer::{Focus, GrabStartData},
+        pointer::{CursorIcon, CursorImageStatus, Focus, GrabStartData},
     },
     output::Output,
     reexports::{
@@ -96,6 +96,20 @@ pub(crate) fn placement<T>(window: &Framed, f: impl FnOnce(&mut Placement) -> T)
         .get::<RefCell<Placement>>()
         .expect("inserted on the line above");
     f(&mut cell.borrow_mut())
+}
+
+/// The resize arrow for dragging `edges`.
+pub(crate) fn resize_cursor(edges: Edges) -> CursorIcon {
+    match (edges.top, edges.bottom, edges.left, edges.right) {
+        (true, _, true, _) => CursorIcon::NwResize,
+        (true, _, _, true) => CursorIcon::NeResize,
+        (_, true, true, _) => CursorIcon::SwResize,
+        (_, true, _, true) => CursorIcon::SeResize,
+        (true, ..) => CursorIcon::NResize,
+        (_, true, ..) => CursorIcon::SResize,
+        (.., true, _) => CursorIcon::WResize,
+        _ => CursorIcon::EResize,
+    }
 }
 
 /// Smithay's rectangle as policy's.
@@ -412,6 +426,9 @@ impl Compositor {
         };
         let grab = ResizeGrab::new(start, window.clone(), edges, rect(bounds));
         pointer.set_grab(self, grab, serial, Focus::Clear);
+        // The arrow for these edges for the whole resize, however it began:
+        // from a frame, with the drag modifier, or asked for by a client.
+        self.cursor = CursorImageStatus::Named(resize_cursor(edges));
     }
 
     /// Keep a popup on screen: flip or slide it, as its positioner allows, so
@@ -530,4 +547,46 @@ pub(crate) fn is_toplevel_of(window: &Framed, surface: &WlSurface) -> bool {
 /// X11 window Xwayland has not yet associated with a surface.
 pub(crate) fn surface_of(window: &Framed) -> Option<WlSurface> {
     window.wl_surface().map(std::borrow::Cow::into_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edges(top: bool, bottom: bool, left: bool, right: bool) -> Edges {
+        Edges {
+            top,
+            bottom,
+            left,
+            right,
+        }
+    }
+
+    #[test]
+    fn each_edge_and_corner_resizes_under_its_own_arrow() {
+        assert_eq!(
+            resize_cursor(edges(true, false, true, false)),
+            CursorIcon::NwResize
+        );
+        assert_eq!(
+            resize_cursor(edges(false, true, false, true)),
+            CursorIcon::SeResize
+        );
+        assert_eq!(
+            resize_cursor(edges(true, false, false, false)),
+            CursorIcon::NResize
+        );
+        assert_eq!(
+            resize_cursor(edges(false, false, true, false)),
+            CursorIcon::WResize
+        );
+        assert_eq!(
+            resize_cursor(edges(false, false, false, true)),
+            CursorIcon::EResize
+        );
+        assert_eq!(
+            resize_cursor(edges(false, true, false, false)),
+            CursorIcon::SResize
+        );
+    }
 }

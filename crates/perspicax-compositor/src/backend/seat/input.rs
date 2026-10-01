@@ -224,13 +224,18 @@ fn moved(state: &mut Compositor, to: Point<f64, Logical>, time: u32) {
     // Over a frame no client has the pointer: the one it left is told so,
     // and the compositor picks the cursor.
     // Over nothing at all, no client is drawing the cursor either, and a
-    // resize arrow left over from a frame must not stay.
-    match under.as_ref() {
-        Some(Hit {
-            frame: Some(part), ..
-        }) => state.cursor = CursorImageStatus::Named(cursor_for(*part)),
-        None => state.cursor = CursorImageStatus::default_named(),
-        Some(_) => {}
+    // resize arrow left over from a frame must not stay. While a grab holds
+    // the pointer, the cursor is the grab's: a resize keeps its arrow even
+    // when the window lags behind and the pointer runs out over something
+    // else.
+    if !handle.is_grabbed() {
+        match under.as_ref() {
+            Some(Hit {
+                frame: Some(part), ..
+            }) => state.cursor = CursorImageStatus::Named(cursor_for(*part)),
+            None => state.cursor = CursorImageStatus::default_named(),
+            Some(_) => {}
+        }
     }
     handle.motion(
         state,
@@ -405,18 +410,9 @@ fn released_frame(state: &mut Compositor, at: Point<f64, Logical>) {
 
 /// The cursor for a part of a frame: a resize arrow at an edge.
 fn cursor_for(part: Part) -> CursorIcon {
-    let Part::Edge(edges) = part else {
-        return CursorIcon::Default;
-    };
-    match (edges.top, edges.bottom, edges.left, edges.right) {
-        (true, _, true, _) => CursorIcon::NwResize,
-        (true, _, _, true) => CursorIcon::NeResize,
-        (_, true, true, _) => CursorIcon::SwResize,
-        (_, true, _, true) => CursorIcon::SeResize,
-        (true, ..) => CursorIcon::NResize,
-        (_, true, ..) => CursorIcon::SResize,
-        (.., true, _) => CursorIcon::WResize,
-        _ => CursorIcon::EResize,
+    match part {
+        Part::Edge(edges) => crate::shell::resize_cursor(edges),
+        _ => CursorIcon::Default,
     }
 }
 
