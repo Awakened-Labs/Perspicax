@@ -660,6 +660,16 @@ fn light(
 /// clients on it draw again.
 fn render(state: &mut Compositor, crtc: crtc::Handle) {
     state.dress_frames();
+    // Every titlebar's labels, while the compositor can still be asked: a
+    // window's tabs name its whole group.
+    let labels: Vec<_> = state
+        .space
+        .elements()
+        .map(|window| {
+            let (labels, front) = state.tab_labels(window);
+            (window.clone(), labels, front)
+        })
+        .collect();
     let now = state.started_at().elapsed();
     let pointer_at = state
         .pointer
@@ -671,6 +681,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         cursor: status,
         lock,
         snap_preview,
+        tab_drop,
         ..
     } = state;
     let Running::Seat(session) = backend else {
@@ -699,9 +710,9 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     // Titles before the windows are drawn: writing one needs the fonts,
     // which drawing a window has no way to reach.
     let whole = crate::framed::whole_scale(head.output.current_scale().fractional_scale());
-    for window in space.elements_for_output(&head.output) {
-        if let Some(text) = Compositor::window_title(window) {
-            titles.prepare(window, &text, whole);
+    for (window, labels, front) in labels {
+        if space.outputs_for_element(&window).contains(&head.output) {
+            titles.prepare(&window, labels, front, whole);
         }
     }
 
@@ -722,16 +733,20 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         _ => Vec::new(),
     };
     // Under the pointer and over the windows: where the window being dragged
-    // would snap, on the output it would snap on.
-    if let (Some(snap), Some(geometry), None) = (
-        snap_preview.as_ref(),
-        space.output_geometry(&head.output),
-        lock.as_ref(),
-    ) && snap.output == head.output
+    // would snap, on the output it would snap on, or the titlebar the tab
+    // being dragged would join.
+    let target = snap_preview
+        .as_ref()
+        .filter(|snap| snap.output == head.output)
+        .map(|snap| snap.area)
+        .or(*tab_drop);
+    if let (Some(area), Some(geometry), None) =
+        (target, space.output_geometry(&head.output), lock.as_ref())
+        && area.overlaps(geometry)
     {
         let scale = head.output.current_scale().fractional_scale();
-        preview.update(snap.area.size, PREVIEW);
-        let at = (snap.area.loc - geometry.loc).to_physical_precise_round(scale);
+        preview.update(area.size, PREVIEW);
+        let at = (area.loc - geometry.loc).to_physical_precise_round(scale);
         elements.push(Elements::Preview(SolidColorRenderElement::from_buffer(
             preview,
             at,

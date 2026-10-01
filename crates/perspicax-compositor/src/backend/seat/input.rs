@@ -289,9 +289,25 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
             let decision = focus.pressed(over.as_ref().and_then(id_of), state.focused_surface());
             state.apply_focus(decision);
         }
-        // A press on a frame is the compositor's, and no client sees it.
+        // A press on a frame is the compositor's, and no client sees it. The
+        // middle button on a title or a tab picks the tab up, to drop on
+        // another window's titlebar or away from its own.
         if let (Some(window), Some(part), BTN_LEFT) = (over.as_ref(), frame, code) {
             pressed_frame(state, window, part, at, time, event.serial);
+        } else if let (Some(window), Some(Part::Title | Part::Tab(_)), BTN_MIDDLE) =
+            (over.as_ref(), frame, code)
+        {
+            let tab = match frame {
+                Some(Part::Tab(n)) => state.tab_at(window, n),
+                _ => None,
+            }
+            .unwrap_or_else(|| window.clone());
+            let start = GrabStartData {
+                focus: None,
+                button: code,
+                location: at,
+            };
+            state.start_tab_drag(&tab, start, event.serial);
         }
         // With the drag modifier held, the press is the compositor's: it
         // starts a move or resize, and the client never sees it.
@@ -358,6 +374,13 @@ fn pressed_frame(
         }
         Part::Edge(edges) => state.start_resize(window, edges, start, serial),
         Part::Button(button) => session.button_press = Some((window.clone(), button)),
+        // A tab behind comes to the front, and the press then moves the
+        // group, as a press on a title does.
+        Part::Tab(n) => {
+            let tab = state.tab_at(window, n).unwrap_or_else(|| window.clone());
+            state.activate_tab(&tab);
+            state.start_move(&tab, start, serial);
+        }
     }
 }
 

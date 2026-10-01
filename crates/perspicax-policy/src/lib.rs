@@ -40,7 +40,7 @@ pub use crate::{
     focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},
     frame::{
         Colour, Decorations, FrameButton, GRIP, Insets, Look, Part, Press, buttons, buttons_in,
-        fit, frame_rects, inset, is_double, outset, part_at, titlebar,
+        fit, frame_rects, inset, is_double, outset, part_at, tab_rects, titlebar,
     },
     geometry::{Edges, Rect, anchor, carry, edges_near, neighbour, place, resize, unmaximized_at},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},

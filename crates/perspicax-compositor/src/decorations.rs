@@ -220,6 +220,9 @@ impl Compositor {
             self.insets(window),
             &self.backend.decorations(),
             Self::look(window) == Look::Normal,
+            crate::shell::id_of(window)
+                .and_then(|id| self.tabs.tabs(id))
+                .map_or(1, <[_]>::len),
         )
     }
 

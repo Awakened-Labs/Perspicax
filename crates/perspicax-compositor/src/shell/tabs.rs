@@ -45,6 +45,137 @@ impl Compositor {
         id_of(window).is_some_and(|id| self.tabs.tabs(id).is_some())
     }
 
+    /// What `window`'s titlebar says: one label per tab of its group, and
+    /// which is in front, or its own title alone.
+    #[cfg(feature = "seat")]
+    pub(crate) fn tab_labels(&self, window: &Framed) -> (Vec<String>, usize) {
+        let title = |window: &Framed| Self::window_title(window).unwrap_or_default();
+        let group = id_of(window).and_then(|id| Some((id, self.tabs.tabs(id)?)));
+        let Some((id, members)) = group else {
+            return (vec![title(window)], 0);
+        };
+        let front = self.tabs.front(id);
+        let labels = members
+            .iter()
+            .map(|member| {
+                self.any_window(*member)
+                    .map(|tab| title(&tab))
+                    .unwrap_or_default()
+            })
+            .collect();
+        let at = members.iter().position(|member| *member == front);
+        (labels, at.unwrap_or(0))
+    }
+
+    /// The `n`th tab of `window`'s group, counting from the left.
+    #[cfg(feature = "seat")]
+    pub(crate) fn tab_at(&self, window: &Framed, n: usize) -> Option<Framed> {
+        let id = id_of(window)?;
+        self.any_window(*self.tabs.tabs(id)?.get(n)?)
+    }
+
+    /// Bring `tab` to the front of its group, in the group's place.
+    #[cfg(feature = "seat")]
+    pub(crate) fn activate_tab(&mut self, tab: &Framed) {
+        let Some(id) = id_of(tab) else {
+            return;
+        };
+        let front = self.tabs.front(id);
+        if front == id {
+            return;
+        }
+        let Some(place) = self.any_window(front) else {
+            return;
+        };
+        self.tabs.activate(id);
+        self.bring_forward(tab, &place);
+    }
+
+    /// Start dragging `tab` by its titlebar with the middle button.
+    #[cfg(feature = "seat")]
+    pub(crate) fn start_tab_drag(
+        &mut self,
+        tab: &Framed,
+        start: smithay::input::pointer::GrabStartData<Self>,
+        serial: smithay::utils::Serial,
+    ) {
+        let Some(pointer) = self.pointer.clone() else {
+            return;
+        };
+        let grab = super::grabs::TabDragGrab::new(start, tab.clone());
+        pointer.set_grab(self, grab, serial, smithay::input::pointer::Focus::Clear);
+    }
+
+    /// The window whose titlebar a tab dragged to `at` would join, and that
+    /// titlebar: not a tab of its own group, and not itself.
+    #[cfg(feature = "seat")]
+    pub(crate) fn tab_target(
+        &self,
+        dragged: &Framed,
+        at: Point<f64, smithay::utils::Logical>,
+    ) -> Option<(
+        SurfaceId,
+        smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    )> {
+        use perspicax_policy::Part;
+        let dragged = id_of(dragged)?;
+        let (window, _) = self.space.element_under(at)?;
+        let target = id_of(window)?;
+        if self.tabs.front(dragged) == target || target == dragged {
+            return None;
+        }
+        if !matches!(
+            self.frame_part(window, at),
+            Some(Part::Title | Part::Tab(_))
+        ) {
+            return None;
+        }
+        let client = self.extent(window)?;
+        let bar = perspicax_policy::titlebar(
+            super::rect(client),
+            self.insets(window),
+            &self.backend.decorations(),
+        )?;
+        Some((
+            target,
+            smithay::utils::Rectangle::new((bar.x, bar.y).into(), (bar.w, bar.h).into()),
+        ))
+    }
+
+    /// A dragged tab let go at `at`: onto another window's titlebar, it joins
+    /// that window's group; anywhere else, it leaves its own, and opens where
+    /// it was dropped.
+    #[cfg(feature = "seat")]
+    pub(crate) fn drop_tab(&mut self, dragged: &Framed, at: Point<f64, smithay::utils::Logical>) {
+        let Some(id) = id_of(dragged) else {
+            return;
+        };
+        if let Some((target, _)) = self.tab_target(dragged, at) {
+            self.attach_tab(id, target);
+            return;
+        }
+        if self.tabs.tabs(id).is_none() {
+            return;
+        }
+        let place = self.any_window(self.tabs.front(id));
+        if let (Some(heir), Some(place)) = (self.tabs.detach(id), place)
+            && let Some(heir) = self.any_window(heir)
+        {
+            self.bring_forward(&heir, &place);
+        }
+        self.show_what_belongs();
+        // Hung from the pointer by the middle of its titlebar.
+        let width = extent_size(dragged).w;
+        let to = Point::from((at.x as i32 - width / 2, at.y as i32 + 12));
+        self.space.map_element(dragged.clone(), to, false);
+        self.fit_frame(dragged);
+        self.window_moved(dragged);
+        self.space.raise_element(dragged, false);
+        self.focus_window(dragged);
+        self.backend.redraw();
+        self.publish_facts();
+    }
+
     /// Make the focused window a tab of the window focused before it.
     pub(crate) fn tab_with_previous(&mut self) {
         let Some(focused) = self.focused_surface() else {

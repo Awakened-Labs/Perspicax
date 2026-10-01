@@ -207,6 +207,64 @@ fn limits(window: &Framed) -> Option<(Size<i32, Logical>, Size<i32, Logical>)> {
     None
 }
 
+/// A tab being dragged by its titlebar with the middle button, to join
+/// another window's group or leave its own. The window does not move while
+/// it is dragged; where it would go is drawn, and it goes there on release.
+#[cfg(feature = "seat")]
+pub(crate) struct TabDragGrab {
+    start: GrabStartData<Compositor>,
+    tab: Framed,
+}
+
+#[cfg(feature = "seat")]
+impl TabDragGrab {
+    pub(crate) fn new(start: GrabStartData<Compositor>, tab: Framed) -> Self {
+        Self { start, tab }
+    }
+}
+
+#[cfg(feature = "seat")]
+impl PointerGrab<Compositor> for TabDragGrab {
+    fn motion(
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
+        _focus: Option<(crate::focus::FocusTarget, Point<f64, Logical>)>,
+        event: &MotionEvent,
+    ) {
+        handle.motion(data, None, event);
+        data.tab_drop = data
+            .tab_target(&self.tab, event.location)
+            .map(|(_, bar)| bar);
+        data.backend.redraw();
+    }
+
+    fn button(
+        &mut self,
+        data: &mut Compositor,
+        handle: &mut PointerInnerHandle<'_, Compositor>,
+        event: &ButtonEvent,
+    ) {
+        handle.button(data, event);
+        if handle.current_pressed().is_empty() {
+            let at = handle.current_location();
+            data.tab_drop = None;
+            handle.unset_grab(self, data, event.serial, event.time, true);
+            data.drop_tab(&self.tab, at);
+        }
+    }
+
+    pass_through!();
+
+    fn start_data(&self) -> &GrabStartData<Compositor> {
+        &self.start
+    }
+
+    fn unset(&mut self, data: &mut Compositor) {
+        data.tab_drop = None;
+    }
+}
+
 /// Round a pointer delta to whole logical pixels.
 fn whole(delta: Point<f64, Logical>) -> (i32, i32) {
     let delta = delta.to_i32_round();

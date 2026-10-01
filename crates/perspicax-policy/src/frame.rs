@@ -193,6 +193,8 @@ pub enum FrameButton {
 pub enum Part {
     /// The titlebar, where a press moves the window.
     Title,
+    /// One of a tab group's tabs on the titlebar, counting from the left.
+    Tab(usize),
     Button(FrameButton),
     /// An edge or corner, where a press resizes.
     Edge(Edges),
@@ -248,11 +250,28 @@ pub fn buttons_in(bar: Rect) -> Vec<(FrameButton, Rect)> {
     .collect()
 }
 
+/// The tabs on a titlebar that is `bar`, for a group of `count`: the room
+/// the buttons leave, shared out evenly, left to right. One tab, the whole
+/// room, for a window in no group.
+#[must_use]
+pub fn tab_rects(bar: Rect, count: usize) -> Vec<Rect> {
+    let taken: i32 = buttons_in(bar).iter().map(|(_, button)| button.w).sum();
+    let room = (bar.w - taken).max(0);
+    let count = i32::try_from(count.max(1)).unwrap_or(1);
+    (0..count)
+        .map(|n| {
+            let (from, to) = (room * n / count, room * (n + 1) / count);
+            Rect::new(bar.x + from, bar.y, to - from, bar.h)
+        })
+        .collect()
+}
+
 /// What part of the frame of a window with this client rect `point` is on,
 /// or `None` if it is on the client or off the frame altogether.
 ///
 /// `resizable` is false for a maximized window: it keeps its titlebar, and
-/// has no edge to drag. Otherwise every edge can be grabbed from the border
+/// has no edge to drag. `tabs` is how many tabs its group has, one for a
+/// window in no group, which has a title and no tabs. Otherwise every edge can be grabbed from the border
 /// and up to [`GRIP`] pixels outside it, and a corner from [`CORNER`] pixels
 /// along either side of it, so the titlebar's two ends resize diagonally.
 #[must_use]
@@ -262,6 +281,7 @@ pub fn part_at(
     insets: Insets,
     decorations: &Decorations,
     resizable: bool,
+    tabs: usize,
 ) -> Option<Part> {
     if insets.is_none() {
         return None;
@@ -300,12 +320,16 @@ pub fn part_at(
         }
     }
     let on = |rect: Rect| within(rect, 0);
-    Some(
-        buttons(client, insets, decorations)
-            .into_iter()
-            .find(|(_, rect)| on(*rect))
-            .map_or(Part::Title, |(button, _)| Part::Button(button)),
-    )
+    if let Some((button, _)) = buttons(client, insets, decorations)
+        .into_iter()
+        .find(|(_, rect)| on(*rect))
+    {
+        return Some(Part::Button(button));
+    }
+    let tab = titlebar(client, insets, decorations)
+        .filter(|_| tabs > 1)
+        .and_then(|bar| tab_rects(bar, tabs).into_iter().position(on));
+    Some(tab.map_or(Part::Title, Part::Tab))
 }
 
 /// A press of a button: when, in milliseconds, and where.
@@ -462,7 +486,7 @@ mod tests {
     fn a_point_on_the_frame_says_which_part() {
         let decorations = Decorations::default();
         let client = Rect::new(100, 100, 400, 300);
-        let at = |x: f64, y: f64| part_at((x, y), client, framed(), &decorations, true);
+        let at = |x: f64, y: f64| part_at((x, y), client, framed(), &decorations, true, 1);
         assert_eq!(at(200.0, 90.0), Some(Part::Title));
         assert_eq!(at(488.0, 88.0), Some(Part::Button(FrameButton::Close)));
         assert_eq!(at(440.0, 88.0), Some(Part::Button(FrameButton::Minimize)));
@@ -505,11 +529,37 @@ mod tests {
     }
 
     #[test]
+    fn tabs_share_the_room_the_buttons_leave() {
+        let bar = Rect::new(100, 76, 400, 24);
+        assert_eq!(tab_rects(bar, 1), vec![Rect::new(100, 76, 328, 24)]);
+        assert_eq!(
+            tab_rects(bar, 3),
+            vec![
+                Rect::new(100, 76, 109, 24),
+                Rect::new(209, 76, 109, 24),
+                Rect::new(318, 76, 110, 24),
+            ],
+            "evenly, with the odd pixel at the end"
+        );
+        let decorations = Decorations::default();
+        let client = Rect::new(100, 100, 400, 300);
+        let at = |x: f64, tabs| part_at((x, 88.0), client, framed(), &decorations, true, tabs);
+        assert_eq!(at(150.0, 3), Some(Part::Tab(0)));
+        assert_eq!(at(400.0, 3), Some(Part::Tab(2)));
+        assert_eq!(
+            at(400.0, 1),
+            Some(Part::Title),
+            "one window: a title, not a tab"
+        );
+        assert_eq!(at(488.0, 3), Some(Part::Button(FrameButton::Close)));
+    }
+
+    #[test]
     fn a_maximized_titlebar_has_no_edges() {
         let decorations = Decorations::default();
         let maximized = Insets::of(&decorations, Look::Maximized);
         let client = Rect::new(0, 24, 1920, 1056);
-        let at = |x: f64, y: f64| part_at((x, y), client, maximized, &decorations, false);
+        let at = |x: f64, y: f64| part_at((x, y), client, maximized, &decorations, false, 1);
         assert_eq!(at(0.0, 0.0), Some(Part::Title));
         assert_eq!(at(1910.0, 10.0), Some(Part::Button(FrameButton::Close)));
         assert_eq!(at(10.0, 500.0), None);

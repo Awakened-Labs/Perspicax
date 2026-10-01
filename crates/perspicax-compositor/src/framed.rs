@@ -57,7 +57,10 @@ pub(crate) struct Title {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TitleKey {
-    pub(crate) text: String,
+    /// One label per tab, the window's own title when it is in no group.
+    pub(crate) labels: Vec<String>,
+    /// Which tab is in front.
+    pub(crate) front: usize,
     /// The titlebar's size, in logical pixels.
     pub(crate) size: (i32, i32),
     pub(crate) ink: perspicax_policy::Colour,

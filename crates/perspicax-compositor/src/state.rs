@@ -194,6 +194,10 @@ pub struct Compositor {
     /// Where the window being dragged would snap if let go now. See
     /// `shell::snap`.
     pub(crate) snap_preview: Option<shell::SnapPreview>,
+    /// The titlebar a tab being dragged would join if let go now: drawn like
+    /// a snap preview. See `shell::tabs`.
+    #[cfg(feature = "seat")]
+    pub(crate) tab_drop: Option<smithay::utils::Rectangle<i32, smithay::utils::Logical>>,
     /// RAII handles for the primary-selection and xdg-activation globals.
     primary_selection: PrimarySelectionState,
     activation: XdgActivationState,
@@ -290,6 +294,8 @@ impl Compositor {
             tabs: perspicax_policy::Groups::default(),
             dragging: None,
             snap_preview: None,
+            #[cfg(feature = "seat")]
+            tab_drop: None,
             primary_selection: PrimarySelectionState::new::<Self>(display),
             activation: XdgActivationState::new::<Self>(display),
             layer_shell: WlrLayerShellState::new::<Self>(display),
