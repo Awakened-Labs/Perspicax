@@ -44,8 +44,14 @@ use crate::{
 const VERSION: u32 = 3;
 
 /// The formats a frame may be copied into: the two every client knows,
-/// four bytes a pixel.
+/// four bytes a pixel, written the same way.
 const FORMATS: [wl_shm::Format; 2] = [wl_shm::Format::Xrgb8888, wl_shm::Format::Argb8888];
+
+/// The one format a frame offers. One, not both: before version 3 there is
+/// no `buffer_done`, and a client of an earlier version -- grim 1.4 is one --
+/// copies on every `buffer` event, so a second offer is a second copy of the
+/// same frame, which is a protocol error. Either format is still accepted.
+const OFFERED: wl_shm::Format = wl_shm::Format::Xrgb8888;
 
 /// What a frame is of, and whether it has been used.
 #[derive(Debug)]
@@ -288,9 +294,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
             return;
         };
         let (width, height) = (region.size.w.unsigned_abs(), region.size.h.unsigned_abs());
-        for format in FORMATS {
-            frame.buffer(format, width, height, width * 4);
-        }
+        frame.buffer(OFFERED, width, height, width * 4);
         if frame.version() >= 3 {
             frame.buffer_done();
         }

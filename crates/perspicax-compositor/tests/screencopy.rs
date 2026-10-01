@@ -62,6 +62,9 @@ fn grim_gets_the_monitor_with_the_window_on_it() {
 
     let grab = desk.grab(&qh, None);
     until(&mut queue, &mut desk, |desk| desk.grabs[grab].buffer_done);
+    // One offer: a client older than version 3 copies on every one, and a
+    // second copy of a frame is a protocol error (grim 1.4 hit it).
+    assert_eq!(desk.grabs[grab].offered.len(), 1);
     let (_, width, height, stride) = desk.grabs[grab].offered[0];
     assert_eq!((width, height, stride), (800, 600, 3200));
 
