@@ -228,6 +228,9 @@ pub struct Compositor {
     /// The workspaces, as the pager protocol has been told them. See
     /// [`crate::pager`].
     pub(crate) pager: crate::pager::Pager,
+    /// The monitors, as the display tools have been told them. See
+    /// [`crate::output_management`].
+    pub(crate) displays: crate::output_management::Displays,
     /// Screenshot tools' frames waiting for something to change. See
     /// [`crate::screencopy`].
     #[cfg(feature = "capture")]
@@ -276,6 +279,7 @@ impl Compositor {
         let gate = crate::access::Gate::new(backend.access());
         let toplevels = crate::toplevels::Toplevels::new(display, &gate);
         let pager = crate::pager::Pager::new(display, &gate);
+        let displays = crate::output_management::Displays::new(display, &gate);
         #[cfg(feature = "capture")]
         let screencopy = crate::screencopy::Screencopy::new(display, &gate);
         // Empty: outputs are mapped by `arrange_outputs`, once every one
@@ -332,6 +336,7 @@ impl Compositor {
             gate,
             toplevels,
             pager,
+            displays,
             #[cfg(feature = "capture")]
             screencopy,
             loop_handle: event_loop,

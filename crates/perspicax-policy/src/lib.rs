@@ -21,7 +21,8 @@
 //! workspace with the pointer (`flip`); snapping to halves and quarters
 //! (`snap`); the frame drawn around a window (`frame`); and tab groups
 //! (`tabs`); and which programs may use the protocols that reach past their
-//! own windows (`access`). `perspicax-config`
+//! own windows (`access`); and whether a display tool's request for the
+//! monitors can be carried out (`heads`). `perspicax-config`
 //! builds their settings from `config.toml` and the `classic`/`minimal`
 //! profiles.
 
@@ -31,6 +32,7 @@ mod flip;
 mod focus;
 mod frame;
 mod geometry;
+mod heads;
 mod layout;
 mod snap;
 mod tabs;
@@ -49,6 +51,7 @@ pub use crate::{
         DRAG_THRESHOLD, Edges, Rect, anchor, carry, dragged, edges_near, neighbour, place, resize,
         unmaximized_at,
     },
+    heads::{Head, HeadChange, HeadMode, ModeChoice, Rejection, check_heads},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
     snap::{Snapping, Zone, keyed, zone},
     tabs::Groups,

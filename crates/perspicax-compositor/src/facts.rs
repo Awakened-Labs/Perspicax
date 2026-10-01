@@ -204,6 +204,7 @@ impl Compositor {
     fn announce(&mut self) {
         self.sync_toplevels();
         self.sync_workspaces();
+        self.sync_heads();
     }
 
     /// What a window's facts say about where it belongs, beyond where it

@@ -144,6 +144,9 @@ pub(crate) enum Running {
         outputs: Vec<Plugged>,
         workspaces: Shape,
         access: Access,
+        /// Virtual monitors a display tool turned off, kept so it can turn
+        /// them on again.
+        dark: Vec<Virtual>,
         /// The software renderer pictures are drawn with, made the first
         /// time one is asked for. See [`crate::capture`]. Boxed, as the
         /// seat's session is: it is large, and the rest of this is not.
@@ -179,6 +182,7 @@ impl Running {
                 outputs: outputs.iter().map(|out| plug(display, out)).collect(),
                 workspaces: *workspaces,
                 access: access.clone(),
+                dark: Vec::new(),
                 #[cfg(feature = "capture")]
                 pixman: None,
             }),
@@ -381,13 +385,13 @@ impl Running {
 /// A virtual output a headless compositor is running.
 pub(crate) struct Plugged {
     pub(crate) output: Output,
-    place: Place,
-    global: GlobalId,
+    pub(crate) place: Place,
+    pub(crate) global: GlobalId,
 }
 
 /// Bring a virtual monitor up and advertise it. Where it goes is decided
 /// afterwards, with every other output, by [`Compositor::arrange_outputs`].
-fn plug(display: &DisplayHandle, virtual_output: &Virtual) -> Plugged {
+pub(crate) fn plug(display: &DisplayHandle, virtual_output: &Virtual) -> Plugged {
     let output = Output::new(
         virtual_output.name.clone(),
         PhysicalProperties {

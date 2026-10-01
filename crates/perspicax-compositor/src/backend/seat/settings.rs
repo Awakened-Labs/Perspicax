@@ -248,6 +248,11 @@ pub(crate) fn reload(state: &mut Compositor) {
         apply_keyboard(state);
     }
     if outputs_changed {
+        // The file says where the monitors go now, over anything a display
+        // tool asked for since.
+        if let Running::Seat(session) = &mut state.backend {
+            session.runtime = None;
+        }
         relight(state);
     }
     if workspaces != state.workspaces.shape() {

@@ -61,6 +61,13 @@ use wayland_protocols_wlr::{
         zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
         zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
     },
+    output_management::v1::client::{
+        zwlr_output_configuration_head_v1::ZwlrOutputConfigurationHeadV1,
+        zwlr_output_configuration_v1::{self, ZwlrOutputConfigurationV1},
+        zwlr_output_head_v1::{self, ZwlrOutputHeadV1},
+        zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
+        zwlr_output_mode_v1::{self, ZwlrOutputModeV1},
+    },
     screencopy::v1::client::{
         zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
         zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
@@ -255,6 +262,28 @@ pub struct Grab {
     pub buffer: Option<smithay_client_toolkit::shm::slot::Buffer>,
 }
 
+/// One monitor as a display tool was told it.
+#[derive(Debug, Clone)]
+pub struct Shown {
+    pub head: ZwlrOutputHeadV1,
+    pub name: String,
+    pub enabled: bool,
+    pub modes: Vec<ObjectId>,
+    pub current: Option<ObjectId>,
+    pub position: (i32, i32),
+    pub scale: f64,
+    pub finished: bool,
+}
+
+/// One mode as a display tool was told it.
+#[derive(Debug, Clone)]
+pub struct ShownMode {
+    pub mode: ZwlrOutputModeV1,
+    pub size: (i32, i32),
+    pub refresh: i32,
+    pub finished: bool,
+}
+
 /// The test's client: windows of its own, drawn once in a flat colour, and
 /// whichever of the watching protocols a test binds.
 pub struct Desk {
@@ -286,6 +315,12 @@ pub struct Desk {
     pub paged: Vec<Paged>,
     pub screencopy: Option<ZwlrScreencopyManagerV1>,
     pub grabs: Vec<Grab>,
+    pub displays: Option<ZwlrOutputManagerV1>,
+    pub display_serial: Option<u32>,
+    pub shown: Vec<Shown>,
+    pub shown_modes: Vec<ShownMode>,
+    /// `succeeded`, `failed` or `cancelled`, for the last configuration.
+    pub configured: Option<&'static str>,
 }
 
 impl Desk {
@@ -319,6 +354,11 @@ impl Desk {
             paged: Vec::new(),
             screencopy: None,
             grabs: Vec::new(),
+            displays: None,
+            display_serial: None,
+            shown: Vec::new(),
+            shown_modes: Vec::new(),
+            configured: None,
         }
     }
 
@@ -514,6 +554,56 @@ impl Desk {
         let canvas = self.pool.canvas(buffer).expect("the buffer's memory");
         let at = (y * width as usize + x) * 4;
         [canvas[at + 2], canvas[at + 1], canvas[at], canvas[at + 3]]
+    }
+
+    /// Bind output management. Panics if it is not advertised.
+    pub fn bind_displays(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.displays = Some(
+            globals
+                .bind::<ZwlrOutputManagerV1, _, _>(qh, 1..=4, ())
+                .expect("zwlr_output_manager_v1"),
+        );
+    }
+
+    /// The monitor of this name, as last told.
+    pub fn head_named(&self, name: &str) -> &Shown {
+        self.shown
+            .iter()
+            .find(|shown| shown.name == name && !shown.finished)
+            .expect("a head of that name")
+    }
+
+    /// The size of the mode a head is showing.
+    pub fn current_size(&self, name: &str) -> Option<(i32, i32)> {
+        let current = self.head_named(name).current.clone()?;
+        self.shown_modes
+            .iter()
+            .find(|mode| mode.mode.id() == current)
+            .map(|mode| mode.size)
+    }
+
+    /// A configuration against `serial`, or the last one announced.
+    pub fn configuration(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        serial: Option<u32>,
+    ) -> ZwlrOutputConfigurationV1 {
+        self.configured = None;
+        let serial = serial.or(self.display_serial).expect("a serial");
+        self.displays
+            .as_ref()
+            .expect("bind_displays first")
+            .create_configuration(serial, qh, ())
+    }
+
+    /// Enable a head in a configuration, to set what it should be.
+    pub fn enable(
+        &self,
+        configuration: &ZwlrOutputConfigurationV1,
+        name: &str,
+        qh: &QueueHandle<Self>,
+    ) -> ZwlrOutputConfigurationHeadV1 {
+        configuration.enable_head(&self.head_named(name).head, qh, ())
     }
 
     /// Lock the session, as swaylock does.
@@ -788,6 +878,128 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for Desk {
             Event::Damage { .. } => grab.damaged = true,
             _ => {}
         }
+    }
+}
+
+impl Dispatch<ZwlrOutputManagerV1, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        _: &ZwlrOutputManagerV1,
+        event: zwlr_output_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_output_manager_v1::Event::Head { head } => desk.shown.push(Shown {
+                head,
+                name: String::new(),
+                enabled: false,
+                modes: Vec::new(),
+                current: None,
+                position: (0, 0),
+                scale: 1.0,
+                finished: false,
+            }),
+            zwlr_output_manager_v1::Event::Done { serial } => desk.display_serial = Some(serial),
+            _ => {}
+        }
+    }
+
+    event_created_child!(Desk, ZwlrOutputManagerV1, [
+        zwlr_output_manager_v1::EVT_HEAD_OPCODE => (ZwlrOutputHeadV1, ())
+    ]);
+}
+
+impl Dispatch<ZwlrOutputHeadV1, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        head: &ZwlrOutputHeadV1,
+        event: zwlr_output_head_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use zwlr_output_head_v1::Event;
+        if let Event::Mode { mode } = &event {
+            desk.shown_modes.push(ShownMode {
+                mode: mode.clone(),
+                size: (0, 0),
+                refresh: 0,
+                finished: false,
+            });
+        }
+        let Some(shown) = desk.shown.iter_mut().find(|shown| shown.head == *head) else {
+            return;
+        };
+        match event {
+            Event::Name { name } => shown.name = name,
+            Event::Mode { mode } => shown.modes.push(mode.id()),
+            Event::Enabled { enabled } => shown.enabled = enabled != 0,
+            Event::CurrentMode { mode } => shown.current = Some(mode.id()),
+            Event::Position { x, y } => shown.position = (x, y),
+            Event::Scale { scale } => shown.scale = scale,
+            Event::Finished => shown.finished = true,
+            _ => {}
+        }
+    }
+
+    event_created_child!(Desk, ZwlrOutputHeadV1, [
+        zwlr_output_head_v1::EVT_MODE_OPCODE => (ZwlrOutputModeV1, ())
+    ]);
+}
+
+impl Dispatch<ZwlrOutputModeV1, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        mode: &ZwlrOutputModeV1,
+        event: zwlr_output_mode_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let Some(shown) = desk
+            .shown_modes
+            .iter_mut()
+            .find(|shown| shown.mode == *mode)
+        else {
+            return;
+        };
+        match event {
+            zwlr_output_mode_v1::Event::Size { width, height } => shown.size = (width, height),
+            zwlr_output_mode_v1::Event::Refresh { refresh } => shown.refresh = refresh,
+            zwlr_output_mode_v1::Event::Finished => shown.finished = true,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwlrOutputConfigurationV1, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        _: &ZwlrOutputConfigurationV1,
+        event: zwlr_output_configuration_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        desk.configured = Some(match event {
+            zwlr_output_configuration_v1::Event::Succeeded => "succeeded",
+            zwlr_output_configuration_v1::Event::Failed => "failed",
+            _ => "cancelled",
+        });
+    }
+}
+
+impl Dispatch<ZwlrOutputConfigurationHeadV1, ()> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &ZwlrOutputConfigurationHeadV1,
+        _: <ZwlrOutputConfigurationHeadV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
     }
 }
 

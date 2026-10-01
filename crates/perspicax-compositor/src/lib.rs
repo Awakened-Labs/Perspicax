@@ -42,10 +42,12 @@ mod decorations;
 pub mod facts;
 mod focus;
 mod framed;
+mod heads;
 pub mod host;
 mod layers;
 mod lock;
 mod origin;
+mod output_management;
 mod outputs;
 mod pager;
 #[cfg(feature = "capture")]
