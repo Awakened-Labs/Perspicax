@@ -23,8 +23,7 @@
 //! # What is not here yet
 //!
 //! One GPU: the primary. A second card's connectors are ignored, and said so
-//! in the log. Every output is at scale 1; scale and layout come with config
-//! (slice 5).
+//! in the log.
 
 use std::{path::PathBuf, sync::Once};
 
@@ -320,6 +319,24 @@ impl Session {
     pub(crate) fn exit_requested(&self) -> bool {
         self.exit
     }
+
+    /// Every lit monitor, with where its `[[output]]` rule places it.
+    pub(crate) fn placements(&self) -> Vec<(Output, perspicax_policy::Place)> {
+        self.heads
+            .iter()
+            .map(|head| {
+                let name = head.output.name();
+                let place = self
+                    .settings
+                    .outputs
+                    .iter()
+                    .find(|rule| rule.name == name)
+                    .map(|rule| rule.place.clone())
+                    .unwrap_or_default();
+                (head.output.clone(), place)
+            })
+            .collect()
+    }
 }
 
 /// Finish bringing the seat up, now the compositor exists: advertise dmabuf,
@@ -413,7 +430,8 @@ fn renderer(gbm: &GbmDevice<DrmDeviceFd>) -> Result<GlesRenderer, Error> {
 }
 
 /// Scan the primary GPU's connectors and bring the outputs into line: tear
-/// down what was unplugged, light what was plugged in.
+/// down what was unplugged, light what was plugged in, then place them all
+/// (see [`Compositor::arrange_outputs`]).
 fn rescan(state: &mut Compositor) {
     let Running::Seat(session) = &mut state.backend else {
         return;
@@ -472,21 +490,10 @@ fn rescan(state: &mut Compositor) {
         let Some((info, _)) = connected.iter().find(|(info, _)| info.handle() == handle) else {
             continue;
         };
-        // Without a position in config, the right edge of what is already
-        // mapped, so monitors line up left to right in the order they were
-        // found.
-        let x = state
-            .space
-            .outputs()
-            .filter_map(|output| state.space.output_geometry(output))
-            .map(|geometry| geometry.loc.x + geometry.size.w)
-            .max()
-            .unwrap_or(0);
-        match light(session, &state.display, info, crtc, (x, 0)) {
+        // Lit now, placed below once every new monitor's size is known.
+        match light(session, &state.display, info, crtc) {
             Ok(Some(head)) => {
-                let at = head.output.current_location();
-                tracing::info!(output = head.output.name(), ?at, "monitor lit");
-                state.space.map_output(&head.output, at);
+                tracing::info!(output = head.output.name(), "monitor lit");
                 session.heads.push(head);
             }
             Ok(None) => {}
@@ -494,6 +501,7 @@ fn rescan(state: &mut Compositor) {
         }
     }
     session.request_frames();
+    state.arrange_outputs();
 }
 
 /// Tear every output down and light them again from the config. A modeset
@@ -511,15 +519,14 @@ fn relight(state: &mut Compositor) {
     rescan(state);
 }
 
-/// Bring one connector up on one CRTC, as its config rule says: at the mode,
-/// position and scale asked for, or the preferred mode at `beside`. `Ok(None)`
-/// for a monitor the config turned off.
+/// Bring one connector up on one CRTC, as its config rule says: at the mode
+/// and scale asked for, or the preferred mode. Where it goes is decided after,
+/// with every other monitor. `Ok(None)` for a monitor the config turned off.
 fn light(
     session: &mut Session,
     display: &smithay::reexports::wayland_server::DisplayHandle,
     info: &connector::Info,
     crtc: crtc::Handle,
-    beside: (i32, i32),
 ) -> Result<Option<Head>, String> {
     let name = format!("{}-{}", info.interface().as_str(), info.interface_id());
     let rule = session
@@ -581,14 +588,8 @@ fn light(
         Some(scale) => Scale::Fractional(scale),
         None => Scale::Integer(1),
     };
-    let position = rule.and_then(|rule| rule.position).unwrap_or(beside);
     output.set_preferred(wl_mode);
-    output.change_current_state(
-        Some(wl_mode),
-        Some(Transform::Normal),
-        Some(scale),
-        Some(position.into()),
-    );
+    output.change_current_state(Some(wl_mode), Some(Transform::Normal), Some(scale), None);
 
     let drm = session
         .outputs

@@ -148,7 +148,7 @@ fn run_demo() -> Reading {
     let facts = Facts::new();
     let stop = Stop::new();
     let config = Config {
-        backend: Backend::Headless { size: (1280, 800) },
+        backend: Backend::headless((1280, 800)),
         spawn: vec![
             vec![gallery.to_string_lossy().into_owned()],
             vec!["gtk4-widget-factory".to_owned()],

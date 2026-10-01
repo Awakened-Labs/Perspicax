@@ -23,7 +23,9 @@ mod keys;
 
 use std::path::{Path, PathBuf};
 
-use perspicax_policy::{Action, Bindings, Chord, Focus, FocusModel, Keysym, Mods, Towards};
+use perspicax_policy::{
+    Action, Bindings, Chord, Focus, FocusModel, Keysym, Mods, Place, Side, Towards,
+};
 use serde::Deserialize;
 
 /// Which cargo features this binary was built with, as far as config cares.
@@ -58,7 +60,8 @@ pub struct Config {
     pub pointer: Pointer,
     /// Per-output settings, matched by connector name (`DP-1`, `HDMI-A-1`).
     /// An output with no rule is lit at its preferred mode, to the right of
-    /// the others.
+    /// the others. Where each one goes is resolved by
+    /// [`perspicax_policy::arrange`] once every monitor's size is known.
     pub outputs: Vec<OutputRule>,
     /// Programs to start once the session is up, each a program and its
     /// arguments. The person's programs: none is granted agent consent.
@@ -120,9 +123,10 @@ pub struct OutputRule {
     pub enable: bool,
     /// A mode to use instead of the preferred one.
     pub mode: Option<Mode>,
-    /// Where its top-left corner goes in the global space, instead of to the
-    /// right of the outputs already lit.
-    pub position: Option<(i32, i32)>,
+    /// Where it goes: beside another output (`right-of = "DP-1"`, with an
+    /// `offset` along the shared edge), at an absolute `position`, or, with
+    /// neither, to the right of the others.
+    pub place: Place,
     pub scale: Option<f64>,
 }
 
@@ -326,12 +330,17 @@ struct RawPointer {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct RawOutput {
     name: String,
     enable: Option<bool>,
     mode: Option<String>,
     position: Option<[i32; 2]>,
+    left_of: Option<String>,
+    right_of: Option<String>,
+    above: Option<String>,
+    below: Option<String>,
+    offset: Option<i32>,
     scale: Option<f64>,
 }
 
@@ -429,6 +438,12 @@ impl Raw {
             seen.push(output.name.clone());
             config.outputs.push(output.apply()?);
         }
+        if let Some(name) = cycle(&config.outputs) {
+            return Err(invalid(
+                format!("output.{name}"),
+                "is placed beside an output that is, in the end, placed beside it".to_owned(),
+            ));
+        }
 
         if let Some(empty) = self.autostart.iter().position(Vec::is_empty) {
             return Err(invalid(
@@ -485,14 +500,91 @@ impl RawOutput {
                 format!("{scale} is outside 0.5 to 4"),
             ));
         }
+        let place = self.place(&key)?;
         Ok(OutputRule {
             name: self.name,
             enable: self.enable.unwrap_or(true),
             mode,
-            position: self.position.map(|[x, y]| (x, y)),
+            place,
             scale: self.scale,
         })
     }
+
+    /// At most one of `position`, `left-of`, `right-of`, `above` and `below`,
+    /// and an `offset` only with a side to be offset along.
+    fn place(&self, key: &str) -> Result<Place, Error> {
+        let sides = [
+            ("left-of", Side::LeftOf, &self.left_of),
+            ("right-of", Side::RightOf, &self.right_of),
+            ("above", Side::Above, &self.above),
+            ("below", Side::Below, &self.below),
+        ];
+        let mut written = sides
+            .iter()
+            .filter_map(|(word, side, of)| of.as_ref().map(|of| (*word, *side, of)));
+        let beside = written.next();
+        if let Some((second, _, _)) = written.next() {
+            return Err(invalid(
+                format!("{key}.{second}"),
+                format!(
+                    "an output goes on one side of another; `{}` is already written",
+                    beside.map_or("", |(word, _, _)| word)
+                ),
+            ));
+        }
+        match (self.position, beside) {
+            (Some(_), Some((word, _, _))) => Err(invalid(
+                format!("{key}.{word}"),
+                "`position` already says where this output goes; write one or the other".to_owned(),
+            )),
+            (Some(_), None) | (None, None) if self.offset.is_some() => Err(invalid(
+                format!("{key}.offset"),
+                "an offset is along the edge shared with another output; say which, with \
+                 left-of, right-of, above or below"
+                    .to_owned(),
+            )),
+            (Some([x, y]), None) => Ok(Place::At(x, y)),
+            (None, Some((word, _, of))) if *of == self.name => Err(invalid(
+                format!("{key}.{word}"),
+                "an output cannot be placed beside itself".to_owned(),
+            )),
+            (None, Some((_, side, of))) => Ok(Place::Beside {
+                side,
+                of: of.clone(),
+                offset: self.offset.unwrap_or(0),
+            }),
+            (None, None) => Ok(Place::Auto),
+        }
+    }
+}
+
+/// The first output whose chain of `beside`s comes back to it, if any.
+/// Following a chain at most as many steps as there are rules is enough: a
+/// longer chain has visited some rule twice.
+fn cycle(outputs: &[OutputRule]) -> Option<&str> {
+    let of = |name: &str| {
+        outputs
+            .iter()
+            .find(|rule| rule.name == name)
+            .and_then(|rule| match &rule.place {
+                Place::Beside { of, .. } => Some(of.as_str()),
+                _ => None,
+            })
+    };
+    outputs
+        .iter()
+        .map(|rule| rule.name.as_str())
+        .find(|&start| {
+            let mut at = of(start);
+            for _ in 0..outputs.len() {
+                match at {
+                    Some(name) if name == start => return true,
+                    Some(name) => at = of(name),
+                    None => return false,
+                }
+            }
+            false
+        })
 }
 
 fn action_for(action: RawAction) -> Result<Option<Action>, String> {
@@ -711,8 +803,81 @@ mod tests {
                 refresh: Some(143.9)
             })
         );
-        assert_eq!(config.outputs[0].position, Some((1920, 0)));
+        assert_eq!(config.outputs[0].place, Place::At(1920, 0));
         assert!(!config.outputs[1].enable);
+    }
+
+    #[test]
+    fn an_output_is_placed_beside_another_with_an_offset() {
+        let config = parse(
+            r#"
+            [[output]]
+            name = "DP-1"
+
+            [[output]]
+            name = "HDMI-A-1"
+            right-of = "DP-1"
+            offset = -180
+            "#,
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(config.outputs[0].place, Place::Auto);
+        assert_eq!(
+            config.outputs[1].place,
+            Place::Beside {
+                side: Side::RightOf,
+                of: "DP-1".to_owned(),
+                offset: -180
+            }
+        );
+    }
+
+    #[test]
+    fn an_output_beside_one_with_no_rule_is_allowed() {
+        // The anchor may simply be a monitor that needs no settings.
+        let config = parse("[[output]]\nname = \"eDP-1\"\nbelow = \"DP-1\"", SEAT).unwrap();
+        assert!(matches!(
+            config.outputs[0].place,
+            Place::Beside {
+                side: Side::Below,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn two_sides_for_one_output_are_refused() {
+        let text = "[[output]]\nname = \"A\"\nleft-of = \"B\"\nabove = \"C\"";
+        let error = parse(text, SEAT).unwrap_err();
+        assert!(error.to_string().contains("output.A.above"), "{error}");
+    }
+
+    #[test]
+    fn a_position_and_a_side_together_are_refused() {
+        let text = "[[output]]\nname = \"A\"\nposition = [0, 0]\nright-of = \"B\"";
+        let error = parse(text, SEAT).unwrap_err();
+        assert!(error.to_string().contains("output.A.right-of"), "{error}");
+    }
+
+    #[test]
+    fn an_offset_with_no_side_is_refused() {
+        let error = parse("[[output]]\nname = \"A\"\noffset = 10", SEAT).unwrap_err();
+        assert!(error.to_string().contains("output.A.offset"), "{error}");
+    }
+
+    #[test]
+    fn an_output_beside_itself_is_refused() {
+        assert!(parse("[[output]]\nname = \"A\"\nbelow = \"A\"", SEAT).is_err());
+    }
+
+    #[test]
+    fn outputs_placed_beside_each_other_in_a_circle_are_refused() {
+        let text = "[[output]]\nname = \"A\"\nright-of = \"B\"\n\
+                    [[output]]\nname = \"B\"\nbelow = \"C\"\n\
+                    [[output]]\nname = \"C\"\nleft-of = \"A\"";
+        let error = parse(text, SEAT).unwrap_err();
+        assert!(error.to_string().contains("output.A"), "{error}");
     }
 
     #[test]

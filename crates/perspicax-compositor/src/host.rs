@@ -61,6 +61,25 @@ pub struct Request {
     pub reply: SyncSender<Result<crate::act::Dispatched, ActError>>,
 }
 
+/// A change to the desk itself rather than to a window: what happens to a
+/// session that no client asked for. Fire and forget; what it changed shows
+/// up in the next [`Facts`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    /// Plug in a virtual monitor. Headless only: a seat's monitors are the
+    /// ones its hardware has.
+    Plug(crate::Virtual),
+    /// Unplug a virtual monitor by name, rescuing its windows onto the ones
+    /// that remain. Headless only, and never the last one.
+    Unplug(String),
+}
+
+/// What arrives on the compositor's inbound channel.
+pub(crate) enum Inbound {
+    Act(Request),
+    Command(Command),
+}
+
 /// The inbound half of the compositor's boundary, symmetric with [`Facts`].
 ///
 /// Cloneable and cheap, like `Facts` and `Stop`, so the caller can hold it,
@@ -68,11 +87,11 @@ pub struct Request {
 /// the receiving end out of it exactly once.
 #[derive(Clone)]
 pub struct Requests {
-    sender: Sender<Request>,
+    sender: Sender<Inbound>,
     /// The receiving end, waiting to be claimed by a running loop. `Option`
     /// because a `Channel` cannot be cloned or shared: exactly one loop may own
     /// it, and taking it is how that is enforced rather than hoped for.
-    inbox: Arc<Mutex<Option<Channel<Request>>>>,
+    inbox: Arc<Mutex<Option<Channel<Inbound>>>>,
 }
 
 impl Requests {
@@ -87,8 +106,20 @@ impl Requests {
     }
 
     /// Claim the receiving end. The second caller gets `None`.
-    pub(crate) fn take_inbox(&self) -> Option<Channel<Request>> {
+    pub(crate) fn take_inbox(&self) -> Option<Channel<Inbound>> {
         self.inbox.lock().ok()?.take()
+    }
+
+    /// Send a [`Command`] to the compositor. Nothing comes back: whether it
+    /// did anything is in the facts it publishes next.
+    ///
+    /// # Errors
+    ///
+    /// [`ActError::Unreachable`] if no loop will ever receive it.
+    pub fn command(&self, command: Command) -> Result<(), ActError> {
+        self.sender
+            .send(Inbound::Command(command))
+            .map_err(|_| ActError::Unreachable)
     }
 }
 
@@ -151,11 +182,11 @@ impl Host {
         let (reply, answer) = mpsc::sync_channel(1);
         self.requests
             .sender
-            .send(Request {
+            .send(Inbound::Act(Request {
                 surface,
                 action: action.clone(),
                 reply,
-            })
+            }))
             .map_err(|_| ActError::Unreachable)?;
 
         match answer.recv_timeout(self.timeout) {
@@ -235,7 +266,10 @@ mod tests {
         let inbox = requests.take_inbox().expect("the inbox is unclaimed");
         thread::spawn(move || {
             let mut served = 0;
-            while let Ok(request) = inbox.recv() {
+            while let Ok(inbound) = inbox.recv() {
+                let Inbound::Act(request) = inbound else {
+                    continue;
+                };
                 served += 1;
                 let _ = request.reply.send(outcome.clone());
             }

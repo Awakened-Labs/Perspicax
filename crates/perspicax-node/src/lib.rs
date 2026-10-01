@@ -135,6 +135,10 @@ pub enum Visibility {
     Clipped,
     /// Its own surface is not mapped -- a hidden window, a closed menu.
     Unmapped,
+    /// Mapped and unobstructed, and not wholly on any monitor: part of it, or
+    /// all of it, is where no person can see it and no pointer can reach.
+    /// Move the window onto a monitor and try again.
+    OffScreen,
 }
 
 impl Visibility {
@@ -211,6 +215,7 @@ mod tests {
         assert!(!Visibility::Occluded { by: SurfaceId(1) }.is_actable());
         assert!(!Visibility::Clipped.is_actable());
         assert!(!Visibility::Unmapped.is_actable());
+        assert!(!Visibility::OffScreen.is_actable());
     }
 
     /// The default must be un-actable. An ingest path that forgets to set

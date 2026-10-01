@@ -67,6 +67,8 @@ pub enum Refusal {
     Clipped,
     /// Its surface is not mapped -- a hidden window, an unopened menu.
     Unmapped,
+    /// Not wholly on any monitor. Move its window onto one and try again.
+    OffScreen,
     /// No compositor has judged this node's visibility. Fails closed.
     Unjudged,
     /// No compositor has attributed this node to a process, so no capability
@@ -90,6 +92,7 @@ impl core::fmt::Display for Refusal {
             Self::Occluded { by } => write!(f, "node occluded by surface {}", by.0),
             Self::Clipped => write!(f, "node is scrolled out of its own viewport"),
             Self::Unmapped => write!(f, "node's surface is not mapped"),
+            Self::OffScreen => write!(f, "node is not wholly on any output"),
             Self::Unjudged => write!(f, "node visibility has not been judged by a compositor"),
             Self::Unattributed => write!(f, "node has no attributed origin"),
             Self::Stale { frames: 0 } => {
@@ -178,6 +181,7 @@ pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
         Visibility::Occluded { by } => Err(Refusal::Occluded { by: *by }),
         Visibility::Clipped => Err(Refusal::Clipped),
         Visibility::Unmapped => Err(Refusal::Unmapped),
+        Visibility::OffScreen => Err(Refusal::OffScreen),
         Visibility::Unknown => Err(Refusal::Unjudged),
     }
 }

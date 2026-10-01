@@ -181,7 +181,16 @@ impl Compositor {
             .collect();
 
         self.facts.publish(
-            HostFacts::bottom_to_top(surfaces, generation).with_consent(self.consent.clone()),
+            HostFacts::bottom_to_top(surfaces, generation)
+                .with_consent(self.consent.clone())
+                .with_outputs(self.output_rects().into_iter().map(|area| {
+                    Rect::new(
+                        f64::from(area.x),
+                        f64::from(area.y),
+                        f64::from(area.x + area.w),
+                        f64::from(area.y + area.h),
+                    )
+                })),
         );
     }
 

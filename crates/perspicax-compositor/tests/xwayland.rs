@@ -36,7 +36,7 @@ fn an_x11_window_is_attributed_to_its_client_through_xres() {
         let (facts, stop) = (facts.clone(), stop.clone());
         thread::spawn(move || {
             let config = Config {
-                backend: Backend::Headless { size: (800, 600) },
+                backend: Backend::headless((800, 600)),
                 spawn: Vec::new(),
                 env: Vec::new(),
                 run_for: Some(Duration::from_secs(30)),

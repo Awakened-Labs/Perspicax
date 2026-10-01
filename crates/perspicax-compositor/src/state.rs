@@ -232,11 +232,10 @@ impl Compositor {
         let pointer = Some(seat.add_pointer());
 
         let consent = backend.consent();
-        let mut space = Space::default();
-        for output in backend.initial_outputs() {
-            let at = output.current_location();
-            space.map_output(&output, at);
-        }
+        // Empty: outputs are mapped by `arrange_outputs`, once every one
+        // the backend starts with is known, so the first is placed knowing
+        // about the rest.
+        let space = Space::default();
 
         Self {
             display: display.clone(),

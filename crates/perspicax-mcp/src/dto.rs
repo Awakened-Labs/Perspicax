@@ -211,8 +211,9 @@ impl From<Rect> for Bounds {
 /// recoverable situation into a retry loop.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Refused {
-    /// One of `occluded`, `clipped`, `unmapped`, `unjudged`, `unattributed`,
-    /// `stale`, `no_capability`, `ambiguous_selector`, `not_found`.
+    /// One of `occluded`, `clipped`, `unmapped`, `off_screen`, `unjudged`,
+    /// `unattributed`, `stale`, `no_capability`, `ambiguous_selector`,
+    /// `not_found`.
     pub kind: &'static str,
     /// The refusal in words.
     pub message: String,
@@ -236,6 +237,7 @@ impl From<&Refusal> for Refused {
                 Refusal::Occluded { .. } => "occluded",
                 Refusal::Clipped => "clipped",
                 Refusal::Unmapped => "unmapped",
+                Refusal::OffScreen => "off_screen",
                 Refusal::Unjudged => "unjudged",
                 Refusal::Unattributed => "unattributed",
                 Refusal::Stale { .. } => "stale",

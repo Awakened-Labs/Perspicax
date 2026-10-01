@@ -352,6 +352,7 @@ pub struct HostFacts {
     surfaces: Vec<SurfaceFacts>,
     generation: u64,
     consent: Consent,
+    outputs: Vec<Rect>,
 }
 
 impl HostFacts {
@@ -369,7 +370,23 @@ impl HostFacts {
             surfaces: surfaces.into_iter().collect(),
             generation,
             consent: Consent::Nobody,
+            outputs: Vec::new(),
         }
+    }
+
+    /// The same facts, with the monitors' rects in the global space. Without
+    /// this, nothing is judged [`Visibility::OffScreen`]: a host that says
+    /// nothing about its outputs is not claiming that a window is on none.
+    #[must_use]
+    pub fn with_outputs(mut self, outputs: impl IntoIterator<Item = Rect>) -> Self {
+        self.outputs = outputs.into_iter().collect();
+        self
+    }
+
+    /// Every output's rect in the global space, as the host published them.
+    #[must_use]
+    pub fn outputs(&self) -> &[Rect] {
+        &self.outputs
     }
 
     /// The same facts, with the host's [`Consent`] policy. Without this,
@@ -451,7 +468,11 @@ impl Judgement {
 /// 4. A rect not wholly inside its own surface is `Clipped` -- the
 ///    application's own doing, and a different remedy from occlusion: scroll it
 ///    into view rather than raise anything.
-/// 5. Only then, occlusion, from the top down, so the surface named is the one
+/// 5. A rect not wholly on the monitors is `OffScreen`: its window hangs
+///    past the edge of the desk, or was left on a monitor that is gone.
+///    Before occlusion, because raising a window over it would still leave it
+///    where nobody can see it.
+/// 6. Only then, occlusion, from the top down, so the surface named is the one
 ///    an agent has to deal with first.
 #[must_use]
 pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
@@ -468,6 +489,9 @@ pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
     let global = target.to_global(rect);
     if !contains(target.geometry, global) {
         return Judgement::proven(Visibility::Clipped);
+    }
+    if !facts.outputs.is_empty() && !on_outputs(&facts.outputs, global) {
+        return Judgement::proven(Visibility::OffScreen);
     }
 
     // Top down: with two surfaces over one node, raising the topmost is what
@@ -499,6 +523,17 @@ pub(crate) fn overlaps(a: Rect, b: Rect) -> bool {
     !a.intersect(b).is_empty()
 }
 
+/// Whether every point of `rect` is on some output. Measured as area, which
+/// is exact for outputs that do not overlap, and only ever generous for ones
+/// that do: a mirror counts its shared part twice.
+fn on_outputs(outputs: &[Rect], rect: Rect) -> bool {
+    let covered: f64 = outputs
+        .iter()
+        .map(|output| output.intersect(rect).area())
+        .sum();
+    covered >= rect.area()
+}
+
 /// Whether `inner` lies wholly within `outer`.
 fn contains(outer: Rect, inner: Rect) -> bool {
     inner.x0 >= outer.x0 && inner.y0 >= outer.y0 && inner.x1 <= outer.x1 && inner.y1 <= outer.y1
@@ -524,6 +559,8 @@ pub struct Tally {
     pub clipped: usize,
     /// On a surface that is not mapped.
     pub unmapped: usize,
+    /// Not wholly on any output.
+    pub off_screen: usize,
     /// Not judged at all: no surface joined, no bounds reported, or a surface
     /// the host has never heard of.
     pub unjudged: usize,
@@ -541,6 +578,7 @@ impl Tally {
             Visibility::Occluded { .. } => self.occluded += 1,
             Visibility::Clipped => self.clipped += 1,
             Visibility::Unmapped => self.unmapped += 1,
+            Visibility::OffScreen => self.off_screen += 1,
             Visibility::Unknown => self.unjudged += 1,
         }
     }
@@ -551,13 +589,14 @@ impl core::fmt::Display for Tally {
         write!(
             f,
             "{} judged: {} visible, {} occluded ({} unproven), {} clipped, \
-             {} unmapped, {} unjudged",
+             {} unmapped, {} off screen, {} unjudged",
             self.judged,
             self.visible,
             self.occluded,
             self.unproven,
             self.clipped,
             self.unmapped,
+            self.off_screen,
             self.unjudged
         )
     }
@@ -683,6 +722,29 @@ mod tests {
             SurfaceFacts::new(SurfaceId(2), rect(150.0, 120.0, 300.0, 200.0)).declaring_opaque([]);
         let facts = HostFacts::bottom_to_top([window(), ghost], 1);
         assert_eq!(verdict(&facts), Judgement::proven(Visibility::Visible));
+    }
+
+    #[test]
+    fn a_node_past_the_edge_of_the_monitors_is_off_screen() {
+        // The window hangs off the right of a 150-wide output.
+        let facts =
+            HostFacts::bottom_to_top([window()], 1).with_outputs([rect(0.0, 0.0, 150.0, 300.0)]);
+        assert_eq!(verdict(&facts).visibility, Visibility::OffScreen);
+    }
+
+    #[test]
+    fn a_node_across_two_monitors_is_on_screen() {
+        let facts = HostFacts::bottom_to_top([window()], 1)
+            .with_outputs([rect(0.0, 0.0, 150.0, 300.0), rect(150.0, 0.0, 400.0, 300.0)]);
+        assert_eq!(verdict(&facts).visibility, Visibility::Visible);
+    }
+
+    #[test]
+    fn a_node_in_the_dead_strip_below_a_shorter_monitor_is_off_screen() {
+        // The right monitor stops at y = 120; the button reaches 140.
+        let facts = HostFacts::bottom_to_top([window()], 1)
+            .with_outputs([rect(0.0, 0.0, 150.0, 300.0), rect(150.0, 0.0, 400.0, 120.0)]);
+        assert_eq!(verdict(&facts).visibility, Visibility::OffScreen);
     }
 
     #[test]
@@ -867,7 +929,7 @@ mod tests {
         assert_eq!(
             tally.to_string(),
             "4 judged: 1 visible, 2 occluded (1 unproven), 0 clipped, \
-             0 unmapped, 1 unjudged"
+             0 unmapped, 0 off screen, 1 unjudged"
         );
     }
 }

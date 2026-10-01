@@ -225,10 +225,6 @@ impl Compositor {
 
 /// An output is going away: tell its layer surfaces, so a panel can move
 /// itself to a screen that is still there.
-#[cfg_attr(
-    not(feature = "seat"),
-    expect(dead_code, reason = "the seat's hotplug path")
-)]
 pub(crate) fn close_on(output: &Output) {
     for layer in layer_map_for_output(output).layers() {
         layer.layer_surface().send_close();

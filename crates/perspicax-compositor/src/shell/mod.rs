@@ -109,9 +109,34 @@ impl Compositor {
         at.into()
     }
 
+    /// Where a window is and how big, in the global space: where it was
+    /// mapped, at the size the client declared for it.
+    ///
+    /// Not `Space::element_geometry`, for the reason `publish_facts` gives:
+    /// Smithay sizes a window from buffers only the seat backend records, so
+    /// headless every window is `0x0` there, and nothing could tell which
+    /// output one is on. An X11 window's geometry comes from the X server, and
+    /// a client that declared nothing falls back to the buffer's.
+    pub(crate) fn extent(&self, window: &Window) -> Option<Rectangle<i32, Logical>> {
+        let location = self.space.element_location(window)?;
+        let declared = window
+            .toplevel()
+            .and_then(|toplevel| crate::state::declared_geometry(toplevel.wl_surface()))
+            .filter(|declared| !declared.is_empty());
+        let size = match declared {
+            Some(declared) => (
+                (declared.x1 - declared.x0).round() as i32,
+                (declared.y1 - declared.y0).round() as i32,
+            )
+                .into(),
+            None => window.geometry().size,
+        };
+        Some(Rectangle::new(location, size))
+    }
+
     /// The output a window is mostly on, or the one under the pointer.
     pub(crate) fn output_of(&self, window: &Window) -> Option<Output> {
-        let bounds = self.space.element_geometry(window);
+        let bounds = self.extent(window);
         let overlap = |output: &&Output| {
             let (Some(bounds), Some(area)) = (bounds, self.space.output_geometry(output)) else {
                 return 0;
@@ -232,10 +257,8 @@ impl Compositor {
         else {
             return;
         };
-        let (Some(to), Some(bounds)) = (
-            neighbour(&areas, from, towards),
-            self.space.element_geometry(window),
-        ) else {
+        let (Some(to), Some(bounds)) = (neighbour(&areas, from, towards), self.extent(window))
+        else {
             return;
         };
         let filled = window.toplevel().filter(|t| Self::is_filling(t)).cloned();
@@ -283,16 +306,17 @@ impl Compositor {
         self.publish_facts();
     }
 
-    /// Put a minimized window back where it was. The caller raises and
-    /// focuses it, if that is what it wants.
+    /// Put a minimized window back where it was, or onto the nearest monitor
+    /// if the one it was on is gone. The caller raises and focuses it, if
+    /// that is what it wants.
     pub(crate) fn restore(&mut self, window: &Window) {
         let Some(at) = self.minimized.iter().position(|w| w == window) else {
             return;
         };
         let window = self.minimized.remove(at);
         let parked = placement(&window, |placement| placement.parked.take());
-        self.space
-            .map_element(window, parked.unwrap_or_default(), false);
+        let at = self.unpark(&window, parked.unwrap_or_default());
+        self.space.map_element(window, at, false);
         self.backend.redraw();
     }
 
