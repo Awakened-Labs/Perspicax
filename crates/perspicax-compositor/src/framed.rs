@@ -47,8 +47,8 @@ smithay::backend::renderer::element::render_elements! {
     Bar=SolidColorRenderElement,
 }
 
-/// A title, rasterised, and what it was rasterised from: when any of that
-/// changes, it is drawn again.
+/// A titlebar's title and buttons, rasterised, and what they were rasterised
+/// from: when any of that changes, they are drawn again.
 #[derive(Debug)]
 pub(crate) struct Title {
     pub(crate) key: TitleKey,
@@ -58,7 +58,7 @@ pub(crate) struct Title {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TitleKey {
     pub(crate) text: String,
-    /// The space it is written in, in logical pixels.
+    /// The titlebar's size, in logical pixels.
     pub(crate) size: (i32, i32),
     pub(crate) ink: perspicax_policy::Colour,
     /// The whole scale it is rasterised at. A buffer's scale is whole, so a
@@ -86,9 +86,13 @@ const TITLES: usize = 2;
 #[derive(Debug, Default)]
 struct Dress {
     insets: Insets,
+    /// How far outside the frame the pointer can still grab an edge: zero
+    /// for a window that cannot be resized from its frame.
+    grip: i32,
     colour: [f32; 4],
     strips: Vec<SolidColorBuffer>,
-    /// Where the title is written, relative to the client's geometry.
+    /// The titlebar, where the title and its buttons are drawn, relative to
+    /// the client's geometry.
     title_at: Option<Rect>,
     /// What the title is written in: whichever of black and white reads on
     /// the bar. `None` until the frame is first dressed.
@@ -125,11 +129,13 @@ impl Framed {
     pub(crate) fn wear(
         &self,
         insets: Insets,
+        grip: i32,
         colour: perspicax_policy::Colour,
         title_at: Option<Rect>,
     ) {
         self.dress(|dress| {
             dress.insets = insets;
+            dress.grip = grip;
             dress.colour = rgba(colour);
             dress.title_at = title_at;
             dress.ink = Some(colour.ink());
@@ -169,14 +175,21 @@ impl Framed {
         });
     }
 
-    /// The frame's outside, in the same coordinates as the window's own
-    /// geometry.
-    fn outer(&self) -> Rectangle<i32, Logical> {
-        let insets = self.dress(|dress| dress.insets);
+    /// The frame's outside, and the grip beyond it, in the same coordinates
+    /// as the window's own geometry. Nothing for a window with no frame.
+    fn outer(&self) -> Option<Rectangle<i32, Logical>> {
+        let (insets, grip) = self.dress(|dress| (dress.insets, dress.grip));
+        if insets.is_none() {
+            return None;
+        }
         let mut outer = self.0.geometry();
-        outer.loc -= Point::from((insets.left, insets.top));
-        outer.size += (insets.left + insets.right, insets.top + insets.bottom).into();
-        outer
+        outer.loc -= Point::from((insets.left + grip, insets.top + grip));
+        outer.size += (
+            insets.left + insets.right + 2 * grip,
+            insets.top + insets.bottom + 2 * grip,
+        )
+            .into();
+        Some(outer)
     }
 }
 
@@ -206,11 +219,18 @@ impl SpaceElement for Framed {
     }
 
     fn bbox(&self) -> Rectangle<i32, Logical> {
-        SpaceElement::bbox(&self.0).merge(self.outer())
+        let window = SpaceElement::bbox(&self.0);
+        self.outer().map_or(window, |outer| window.merge(outer))
     }
 
+    /// The client's input region, and the frame: a press on the titlebar is
+    /// the compositor's to handle, and must not fall through to whatever is
+    /// under the window.
     fn is_in_input_region(&self, point: &Point<f64, Logical>) -> bool {
         SpaceElement::is_in_input_region(&self.0, point)
+            || self
+                .outer()
+                .is_some_and(|outer| outer.to_f64().contains(*point))
     }
 
     fn z_index(&self) -> u8 {

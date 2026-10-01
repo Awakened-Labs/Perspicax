@@ -186,9 +186,31 @@ impl Compositor {
             let insets = self.insets(window);
             let size = crate::shell::extent_size(window);
             let client = perspicax_policy::Rect::new(0, 0, size.w, size.h);
-            let title_at = perspicax_policy::title_rect(client, insets, &decorations);
-            window.wear(insets, colour, title_at);
+            let title_at = perspicax_policy::titlebar(client, insets, &decorations);
+            let grip = if Self::look(window) == Look::Normal {
+                perspicax_policy::GRIP
+            } else {
+                0
+            };
+            window.wear(insets, grip, colour, title_at);
         }
+    }
+
+    /// What part of `window`'s frame the pointer at `at` is on, if any.
+    #[cfg(feature = "seat")]
+    pub(crate) fn frame_part(
+        &self,
+        window: &Framed,
+        at: smithay::utils::Point<f64, Logical>,
+    ) -> Option<perspicax_policy::Part> {
+        let client = self.extent(window)?;
+        perspicax_policy::part_at(
+            (at.x, at.y),
+            rect(client),
+            self.insets(window),
+            &self.backend.decorations(),
+            Self::look(window) == Look::Normal,
+        )
     }
 
     /// The frame's strips in global space, for the facts: nothing for a

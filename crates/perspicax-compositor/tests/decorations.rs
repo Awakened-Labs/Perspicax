@@ -15,9 +15,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use perspicax_compositor::{Backend, Config, Facts, Requests, Stop};
+use perspicax_compositor::{Backend, Command, Config, Facts, Requests, Stop};
 use perspicax_index::{HostFacts, judge};
 use perspicax_node::{Rect, Visibility};
+use perspicax_policy::Action;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_output, delegate_registry, delegate_shm, delegate_xdg_shell,
@@ -51,9 +52,15 @@ const TOP: f64 = 26.0;
 fn a_titlebar_is_negotiated_published_and_covers_what_is_under_it() {
     let socket = format!("perspicax-test-{}", std::process::id());
     let facts = Facts::new();
+    let requests = Requests::new();
     let stop = Stop::new();
     let compositor = {
-        let (facts, stop, socket) = (facts.clone(), stop.clone(), socket.clone());
+        let (facts, requests, stop, socket) = (
+            facts.clone(),
+            requests.clone(),
+            stop.clone(),
+            socket.clone(),
+        );
         thread::spawn(move || {
             let config = Config {
                 backend: Backend::headless((800, 600)),
@@ -64,7 +71,7 @@ fn a_titlebar_is_negotiated_published_and_covers_what_is_under_it() {
                 socket: Some(socket),
                 xwayland: false,
             };
-            perspicax_compositor::run(&config, &facts, &Requests::new(), &stop)
+            perspicax_compositor::run(&config, &facts, &requests, &stop)
         })
     };
 
@@ -122,6 +129,27 @@ fn a_titlebar_is_negotiated_published_and_covers_what_is_under_it() {
         "a node under another window's titlebar is covered"
     );
     assert!(!verdict.unproven, "and the frame proves it");
+
+    // Maximized, the second window keeps its titlebar, inside the monitor,
+    // and loses its border; put back, it has both again.
+    let perform = |action| {
+        requests
+            .command(Command::Perform(action))
+            .expect("the compositor is listening");
+    };
+    perform(Action::ToggleMaximize);
+    let published = wait_for(&facts, |facts| {
+        facts.surfaces()[1].frame.len() == 1 && facts.surfaces()[1].geometry.y0 == TOP - 2.0
+    });
+    let maximized = &published.surfaces()[1];
+    assert_eq!(maximized.geometry.x0, 0.0, "{:?}", maximized.geometry);
+    assert_eq!(
+        (maximized.frame[0].y0, maximized.frame[0].y1),
+        (0.0, TOP - 2.0),
+        "the titlebar is at the top of the monitor"
+    );
+    perform(Action::ToggleMaximize);
+    wait_for(&facts, |facts| facts.surfaces()[1].frame.len() == 4);
 
     // A client that asks for nothing draws its own frame.
     desk.open_window(&qh, WindowDecorations::None);

@@ -8,10 +8,12 @@
 
 use perspicax_node::SurfaceId;
 use perspicax_policy::{Action, Change, Decision, cycle};
-use smithay::utils::SERIAL_COUNTER;
+use smithay::{
+    reexports::wayland_protocols::xdg::shell::server::xdg_toplevel, utils::SERIAL_COUNTER,
+};
 
 use super::{id_of, surface_of};
-use crate::state::Compositor;
+use crate::{framed::Framed, state::Compositor};
 
 impl Compositor {
     /// Carry out a binding.
@@ -19,12 +21,18 @@ impl Compositor {
         let focused = self.focused_surface().and_then(|id| self.window_for_id(id));
         match action {
             Action::Close => {
-                if let Some(toplevel) = focused.as_ref().and_then(|window| window.toplevel()) {
-                    toplevel.send_close();
+                if let Some(window) = focused {
+                    Self::close(&window);
                 }
-                #[cfg(feature = "xwayland")]
-                if let Some(x11) = focused.as_ref().and_then(|window| window.x11_surface()) {
-                    let _ = x11.close();
+            }
+            Action::ToggleMaximize => {
+                if let Some(window) = focused {
+                    self.toggle_maximize(&window);
+                }
+            }
+            Action::Minimize => {
+                if let Some(window) = focused {
+                    self.minimize(&window);
                 }
             }
             Action::Spawn(command) => self.spawn_for_person(command),
@@ -63,6 +71,40 @@ impl Compositor {
                 }
             }
         }
+    }
+
+    /// Ask a window to close. A request the client may decline, never a
+    /// kill.
+    pub(crate) fn close(window: &Framed) {
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.send_close();
+        }
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = window.x11_surface() {
+            let _ = x11.close();
+        }
+    }
+
+    /// Maximize a window, or put a maximized one back where it was. An X11
+    /// window has no xdg state to carry it, so it is snapped to the whole
+    /// monitor instead, which is the same rect by the same path.
+    pub(crate) fn toggle_maximize(&mut self, window: &Framed) {
+        if let Some(toplevel) = window.toplevel().cloned() {
+            let maximized = toplevel.with_pending_state(|pending| {
+                pending.states.contains(xdg_toplevel::State::Maximized)
+            });
+            if maximized {
+                self.unfill(&toplevel, xdg_toplevel::State::Maximized, None);
+            } else {
+                self.fill(&toplevel, xdg_toplevel::State::Maximized, None);
+            }
+        } else if Self::is_snapped(window) {
+            self.unsnap(window, None);
+        } else {
+            self.snap(window, perspicax_policy::Zone::Top, None);
+        }
+        self.backend.redraw();
+        self.publish_facts();
     }
 
     /// Carry out a focus decision. A parked window being focused or raised

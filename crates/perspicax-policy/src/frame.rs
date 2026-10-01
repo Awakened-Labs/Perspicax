@@ -11,7 +11,7 @@
 //! Which windows get a frame is the compositor's question: a client that draws
 //! its own, or a fullscreen one, has [`Insets::NONE`].
 
-use crate::Rect;
+use crate::{Edges, Rect};
 
 /// An RGB colour, as `config.toml` writes it: `"#rrggbb"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,13 +180,146 @@ pub fn frame_rects(client: Rect, insets: Insets) -> Vec<Rect> {
     .collect()
 }
 
-/// Where the title is written: the titlebar's own height, directly above the
-/// client and as wide as it, so the border is never written over. `None` for a
-/// frame with no titlebar.
+/// A button on the titlebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameButton {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+/// What part of a frame a point is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    /// The titlebar, where a press moves the window.
+    Title,
+    Button(FrameButton),
+    /// An edge or corner, where a press resizes.
+    Edge(Edges),
+}
+
+/// How far outside the drawn frame the pointer can still grab an edge: a
+/// two-pixel border is too thin a target to resize by.
+pub const GRIP: i32 = 6;
+
+/// How far along an edge from a corner still counts as the corner.
+const CORNER: i32 = 16;
+
+/// The titlebar's own strip, without the border above it: directly above the
+/// client and as wide as it. `None` for a frame with no titlebar.
 #[must_use]
-pub fn title_rect(client: Rect, insets: Insets, decorations: &Decorations) -> Option<Rect> {
+pub fn titlebar(client: Rect, insets: Insets, decorations: &Decorations) -> Option<Rect> {
     let height = decorations.title.min(insets.top);
     (height > 0 && client.w > 0).then(|| Rect::new(client.x, client.y - height, client.w, height))
+}
+
+/// The titlebar's buttons, square, at its right-hand end: minimize, maximize,
+/// close, with close in the corner. As many as fit, close first, so a narrow
+/// window can still be closed.
+#[must_use]
+pub fn buttons(
+    client: Rect,
+    insets: Insets,
+    decorations: &Decorations,
+) -> Vec<(FrameButton, Rect)> {
+    titlebar(client, insets, decorations).map_or_else(Vec::new, buttons_in)
+}
+
+/// The buttons on a titlebar that is `bar`, as [`buttons`] places them.
+#[must_use]
+pub fn buttons_in(bar: Rect) -> Vec<(FrameButton, Rect)> {
+    let side = bar.h;
+    let fit = usize::try_from(bar.w / side.max(1)).unwrap_or(0);
+    [
+        FrameButton::Close,
+        FrameButton::Maximize,
+        FrameButton::Minimize,
+    ]
+    .into_iter()
+    .take(fit)
+    .enumerate()
+    .map(|(n, button)| {
+        let n = i32::try_from(n).unwrap_or(0) + 1;
+        (
+            button,
+            Rect::new(bar.x + bar.w - n * side, bar.y, side, side),
+        )
+    })
+    .collect()
+}
+
+/// What part of the frame of a window with this client rect `point` is on,
+/// or `None` if it is on the client or off the frame altogether.
+///
+/// `resizable` is false for a maximized window: it keeps its titlebar, and
+/// has no edge to drag. Otherwise every edge can be grabbed from the border
+/// and up to [`GRIP`] pixels outside it, and a corner from [`CORNER`] pixels
+/// along either side of it, so the titlebar's two ends resize diagonally.
+#[must_use]
+pub fn part_at(
+    point: (f64, f64),
+    client: Rect,
+    insets: Insets,
+    decorations: &Decorations,
+    resizable: bool,
+) -> Option<Part> {
+    if insets.is_none() {
+        return None;
+    }
+    let outer = outset(client, insets);
+    let grip = if resizable { GRIP } else { 0 };
+    let (x, y) = point;
+    let within = |rect: Rect, margin: i32| {
+        x >= f64::from(rect.x - margin)
+            && x < f64::from(rect.x + rect.w + margin)
+            && y >= f64::from(rect.y - margin)
+            && y < f64::from(rect.y + rect.h + margin)
+    };
+    if !within(outer, grip) || within(client, 0) {
+        return None;
+    }
+    if resizable {
+        let top_border = insets.top - decorations.title.min(insets.top);
+        let mut edges = Edges {
+            left: x < f64::from(client.x),
+            right: x >= f64::from(client.x + client.w),
+            top: y < f64::from(outer.y + top_border),
+            bottom: y >= f64::from(client.y + client.h),
+        };
+        let near = |value: f64, from: i32| (value - f64::from(from)).abs() < f64::from(CORNER);
+        if edges.top || edges.bottom {
+            edges.left |= near(x, outer.x);
+            edges.right |= near(x, outer.x + outer.w);
+        }
+        if edges.left || edges.right {
+            edges.top |= near(y, outer.y);
+            edges.bottom |= near(y, outer.y + outer.h);
+        }
+        if edges != Edges::default() {
+            return Some(Part::Edge(edges));
+        }
+    }
+    let on = |rect: Rect| within(rect, 0);
+    Some(
+        buttons(client, insets, decorations)
+            .into_iter()
+            .find(|(_, rect)| on(*rect))
+            .map_or(Part::Title, |(button, _)| Part::Button(button)),
+    )
+}
+
+/// A press of a button: when, in milliseconds, and where.
+pub type Press = (u32, (f64, f64));
+
+/// Whether a press at `second` makes a double-click of the press at
+/// `first`: soon enough after, and near enough, that a hand meant the two as
+/// one gesture.
+#[must_use]
+pub fn is_double(first: Press, second: Press) -> bool {
+    const WITHIN_MS: u32 = 400;
+    const WITHIN_PIXELS: f64 = 6.0;
+    let ((then, (x0, y0)), (now, (x1, y1))) = (first, second);
+    now.wrapping_sub(then) <= WITHIN_MS && (x1 - x0).hypot(y1 - y0) <= WITHIN_PIXELS
 }
 
 /// Where a window placed with its client at `at` has to go so that the top
@@ -287,19 +420,116 @@ mod tests {
     }
 
     #[test]
-    fn the_title_is_written_in_the_titlebar_above_the_client_not_on_the_border() {
+    fn the_titlebar_is_above_the_client_not_on_the_border() {
         let decorations = Decorations::default();
         let client = Rect::new(100, 100, 400, 300);
         assert_eq!(
-            title_rect(client, framed(), &decorations),
+            titlebar(client, framed(), &decorations),
             Some(Rect::new(100, 76, 400, 24))
         );
         let maximized = Insets::of(&decorations, Look::Maximized);
         assert_eq!(
-            title_rect(Rect::new(0, 24, 1920, 1056), maximized, &decorations),
+            titlebar(Rect::new(0, 24, 1920, 1056), maximized, &decorations),
             Some(Rect::new(0, 0, 1920, 24))
         );
-        assert_eq!(title_rect(client, Insets::NONE, &decorations), None);
+        assert_eq!(titlebar(client, Insets::NONE, &decorations), None);
+    }
+
+    #[test]
+    fn the_buttons_sit_at_the_right_with_close_in_the_corner() {
+        let decorations = Decorations::default();
+        let client = Rect::new(100, 100, 400, 300);
+        assert_eq!(
+            buttons(client, framed(), &decorations),
+            vec![
+                (FrameButton::Close, Rect::new(476, 76, 24, 24)),
+                (FrameButton::Maximize, Rect::new(452, 76, 24, 24)),
+                (FrameButton::Minimize, Rect::new(428, 76, 24, 24)),
+            ]
+        );
+        let narrow = Rect::new(0, 100, 50, 50);
+        assert_eq!(
+            buttons(narrow, framed(), &decorations)
+                .iter()
+                .map(|(button, _)| *button)
+                .collect::<Vec<_>>(),
+            vec![FrameButton::Close, FrameButton::Maximize],
+            "a narrow window keeps close first"
+        );
+    }
+
+    #[test]
+    fn a_point_on_the_frame_says_which_part() {
+        let decorations = Decorations::default();
+        let client = Rect::new(100, 100, 400, 300);
+        let at = |x: f64, y: f64| part_at((x, y), client, framed(), &decorations, true);
+        assert_eq!(at(200.0, 90.0), Some(Part::Title));
+        assert_eq!(at(488.0, 88.0), Some(Part::Button(FrameButton::Close)));
+        assert_eq!(at(440.0, 88.0), Some(Part::Button(FrameButton::Minimize)));
+        assert_eq!(at(200.0, 200.0), None, "the client is the client's");
+        assert_eq!(at(200.0, 500.0), None, "and far off is nothing");
+        let edge = |left, right, top, bottom| {
+            Some(Part::Edge(Edges {
+                top,
+                bottom,
+                left,
+                right,
+            }))
+        };
+        assert_eq!(
+            at(97.0, 200.0),
+            edge(true, false, false, false),
+            "the border"
+        );
+        assert_eq!(
+            at(93.0, 200.0),
+            edge(true, false, false, false),
+            "just outside it"
+        );
+        assert_eq!(at(300.0, 405.0), edge(false, false, false, true));
+        assert_eq!(
+            at(300.0, 72.0),
+            edge(false, false, true, false),
+            "above the title"
+        );
+        assert_eq!(
+            at(99.0, 80.0),
+            edge(true, false, true, false),
+            "a titlebar's end"
+        );
+        assert_eq!(
+            at(506.0, 406.0),
+            edge(false, true, false, true),
+            "outside the corner"
+        );
+    }
+
+    #[test]
+    fn a_maximized_titlebar_has_no_edges() {
+        let decorations = Decorations::default();
+        let maximized = Insets::of(&decorations, Look::Maximized);
+        let client = Rect::new(0, 24, 1920, 1056);
+        let at = |x: f64, y: f64| part_at((x, y), client, maximized, &decorations, false);
+        assert_eq!(at(0.0, 0.0), Some(Part::Title));
+        assert_eq!(at(1910.0, 10.0), Some(Part::Button(FrameButton::Close)));
+        assert_eq!(at(10.0, 500.0), None);
+    }
+
+    #[test]
+    fn two_presses_close_in_time_and_place_are_a_double_click() {
+        assert!(is_double((1000, (10.0, 10.0)), (1300, (12.0, 11.0))));
+        assert!(
+            !is_double((1000, (10.0, 10.0)), (1500, (10.0, 10.0))),
+            "too slow"
+        );
+        assert!(
+            !is_double((1000, (10.0, 10.0)), (1100, (40.0, 10.0))),
+            "too far"
+        );
+        assert!(
+            is_double((u32::MAX - 100, (0.0, 0.0)), (100, (0.0, 0.0))),
+            "across the clock wrapping"
+        );
     }
 
     #[test]

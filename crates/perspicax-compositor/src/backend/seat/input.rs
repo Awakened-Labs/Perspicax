@@ -15,7 +15,9 @@
 
 use std::time::Duration;
 
-use perspicax_policy::{Action, Button, Drag, Mods, arrival, edge_at, edges_near};
+use perspicax_policy::{
+    Action, Button, Drag, FrameButton, Mods, Part, arrival, edge_at, edges_near, is_double,
+};
 use smithay::{
     backend::{
         input::{
@@ -29,7 +31,10 @@ use smithay::{
     desktop::WindowSurfaceType,
     input::{
         keyboard::{FilterResult, Keycode, ModifiersState},
-        pointer::{AxisFrame, ButtonEvent, GrabStartData, MotionEvent, PointerHandle},
+        pointer::{
+            AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, GrabStartData, MotionEvent,
+            PointerHandle,
+        },
     },
     output::Output,
     reexports::{
@@ -216,9 +221,20 @@ fn moved(state: &mut Compositor, to: Point<f64, Logical>, time: u32) {
         .as_ref()
         .and_then(|hit| hit.window.as_ref())
         .and_then(id_of);
+    // Over a frame no client has the pointer: the one it left is told so,
+    // and the compositor picks the cursor.
+    // Over nothing at all, no client is drawing the cursor either, and a
+    // resize arrow left over from a frame must not stay.
+    match under.as_ref() {
+        Some(Hit {
+            frame: Some(part), ..
+        }) => state.cursor = CursorImageStatus::Named(cursor_for(*part)),
+        None => state.cursor = CursorImageStatus::default_named(),
+        Some(_) => {}
+    }
     handle.motion(
         state,
-        under.map(|hit| (hit.surface.into(), hit.origin)),
+        under.and_then(|hit| Some((hit.surface?.into(), hit.origin))),
         &MotionEvent {
             location: at,
             serial: SERIAL_COUNTER.next_serial(),
@@ -257,12 +273,14 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
         let hit = under(state, at);
         // A panel or launcher that takes the keyboard on a click gets it,
         // without anything being raised: layers stack by layer, not by click.
-        if let Some(hit) = hit
+        if let Some(surface) = hit
             .as_ref()
             .filter(|hit| hit.window.is_none() && hit.takes_focus)
+            .and_then(|hit| hit.surface.clone())
         {
-            state.focus_plain(hit.surface.clone());
+            state.focus_plain(surface);
         }
+        let frame = hit.as_ref().and_then(|hit| hit.frame);
         let over = hit.and_then(|hit| hit.window);
         // Focus and raise before the press is delivered, so the client
         // receives its click already on top and focused, as it would under
@@ -271,9 +289,13 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
             let decision = focus.pressed(over.as_ref().and_then(id_of), state.focused_surface());
             state.apply_focus(decision);
         }
+        // A press on a frame is the compositor's, and no client sees it.
+        if let (Some(window), Some(part), BTN_LEFT) = (over.as_ref(), frame, code) {
+            pressed_frame(state, window, part, at, time, event.serial);
+        }
         // With the drag modifier held, the press is the compositor's: it
         // starts a move or resize, and the client never sees it.
-        if let (Some(window), Some(drag)) = (over, drag(state, code)) {
+        else if let (Some(window), Some(drag)) = (over, drag(state, code)) {
             let start = GrabStartData {
                 focus: None,
                 button: code,
@@ -292,10 +314,87 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
             }
         }
     }
+    if pressed == ButtonState::Released && code == BTN_LEFT {
+        released_frame(state, at);
+    }
     // Delivered to the client, or to the grab just started, which is how the
     // grab learns which button to wait for the release of.
     handle.button(state, &event);
     handle.frame(state);
+}
+
+/// The left button went down on `window`'s frame.
+///
+/// The titlebar moves the window, or with a second press soon after,
+/// maximizes it. An edge resizes. A button waits for the release, so a press
+/// dragged off a button before it is let go does nothing, as everywhere else.
+fn pressed_frame(
+    state: &mut Compositor,
+    window: &Framed,
+    part: Part,
+    at: Point<f64, Logical>,
+    time: u32,
+    serial: smithay::utils::Serial,
+) {
+    let start = GrabStartData {
+        focus: None,
+        button: BTN_LEFT,
+        location: at,
+    };
+    let Running::Seat(session) = &mut state.backend else {
+        return;
+    };
+    let id = id_of(window);
+    let press = (time, (at.x, at.y));
+    let double = session
+        .title_press
+        .take()
+        .is_some_and(|(was, first)| was == id && is_double(first, press));
+    match part {
+        Part::Title if double => state.toggle_maximize(window),
+        Part::Title => {
+            session.title_press = Some((id, press));
+            state.start_move(window, start, serial);
+        }
+        Part::Edge(edges) => state.start_resize(window, edges, start, serial),
+        Part::Button(button) => session.button_press = Some((window.clone(), button)),
+    }
+}
+
+/// The left button came up: if it went down on a frame's button and comes up
+/// on the same one, that button does its job.
+fn released_frame(state: &mut Compositor, at: Point<f64, Logical>) {
+    let Running::Seat(session) = &mut state.backend else {
+        return;
+    };
+    let Some((window, button)) = session.button_press.take() else {
+        return;
+    };
+    if state.frame_part(&window, at) != Some(Part::Button(button)) {
+        return;
+    }
+    match button {
+        FrameButton::Close => Compositor::close(&window),
+        FrameButton::Maximize => state.toggle_maximize(&window),
+        FrameButton::Minimize => state.minimize(&window),
+    }
+}
+
+/// The cursor for a part of a frame: a resize arrow at an edge.
+fn cursor_for(part: Part) -> CursorIcon {
+    let Part::Edge(edges) = part else {
+        return CursorIcon::Default;
+    };
+    match (edges.top, edges.bottom, edges.left, edges.right) {
+        (true, _, true, _) => CursorIcon::NwResize,
+        (true, _, _, true) => CursorIcon::NeResize,
+        (_, true, true, _) => CursorIcon::SwResize,
+        (_, true, _, true) => CursorIcon::SeResize,
+        (true, ..) => CursorIcon::NResize,
+        (_, true, ..) => CursorIcon::SResize,
+        (.., true, _) => CursorIcon::WResize,
+        _ => CursorIcon::EResize,
+    }
 }
 
 /// Whether pressing this button, with the modifiers held now, is a drag.
@@ -483,8 +582,11 @@ struct Hit {
     takes_focus: bool,
     /// The surface there (a subsurface, a popup, the thing itself) and its
     /// origin in global space -- the pair `PointerHandle::motion` wants.
-    surface: WlSurface,
+    /// `None` on a window's frame, which no client drew.
+    surface: Option<WlSurface>,
     origin: Point<f64, Logical>,
+    /// Set when it is the frame this compositor drew around a window.
+    frame: Option<Part>,
 }
 
 /// The topmost thing at `at`, in the order the person sees them: while
@@ -496,8 +598,9 @@ fn under(state: &Compositor, at: Point<f64, Logical>) -> Option<Hit> {
         return Some(Hit {
             window: None,
             takes_focus: true,
-            surface,
+            surface: Some(surface),
             origin,
+            frame: None,
         });
     }
     let layer = |layers: &[_]| {
@@ -506,20 +609,33 @@ fn under(state: &Compositor, at: Point<f64, Logical>) -> Option<Hit> {
             .map(|(layer, surface, origin)| Hit {
                 window: None,
                 takes_focus: layer.can_receive_keyboard_focus(),
-                surface,
+                surface: Some(surface),
                 origin,
+                frame: None,
             })
     };
     layer(&layers::ABOVE)
         .or_else(|| {
             let (window, location) = state.space.element_under(at)?;
-            let (surface, offset) =
-                window.surface_under(at - location.to_f64(), WindowSurfaceType::ALL)?;
+            // The client first, so a popup hanging over the titlebar gets
+            // its clicks; then the frame around it.
+            if let Some((surface, offset)) =
+                window.surface_under(at - location.to_f64(), WindowSurfaceType::ALL)
+            {
+                return Some(Hit {
+                    window: Some(window.clone()),
+                    takes_focus: false,
+                    surface: Some(surface),
+                    origin: (location + offset).to_f64(),
+                    frame: None,
+                });
+            }
             Some(Hit {
                 window: Some(window.clone()),
                 takes_focus: false,
-                surface,
-                origin: (location + offset).to_f64(),
+                surface: None,
+                origin: location.to_f64(),
+                frame: Some(state.frame_part(window, at)?),
             })
         })
         .or_else(|| layer(&layers::BELOW))

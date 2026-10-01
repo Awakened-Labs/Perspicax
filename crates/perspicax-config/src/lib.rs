@@ -885,10 +885,13 @@ fn action_for(action: RawAction) -> Result<Option<Action>, String> {
             "move-to-previous-output" => Action::MoveToOutput(Towards::Previous),
             "reload" => Action::Reload,
             "toggle-sticky" => Action::ToggleSticky,
+            "toggle-maximize" => Action::ToggleMaximize,
+            "minimize" => Action::Minimize,
             other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
                 format!(
                     "`{other}` is not an action; use close, cycle-focus, reload, \
-                         toggle-sticky, move-to-next-output, move-to-previous-output, \
+                         toggle-sticky, toggle-maximize, minimize, \
+                         move-to-next-output, move-to-previous-output, \
                          move-to-output-<side>, workspace-<side>, workspace-<number>, \
                          send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
                          none, or \
@@ -1403,6 +1406,27 @@ mod tests {
         assert_eq!(
             config.bindings.resolve(logo, &[Keysym::s]),
             Some(&Action::ToggleSticky)
+        );
+    }
+
+    #[test]
+    fn the_titlebar_buttons_are_actions_a_key_can_have_too() {
+        let config = parse(
+            "[keys]\n\"Logo+m\" = \"toggle-maximize\"\n\"Logo+n\" = \"minimize\"",
+            SEAT,
+        )
+        .unwrap();
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::m]),
+            Some(&Action::ToggleMaximize)
+        );
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::n]),
+            Some(&Action::Minimize)
         );
     }
 

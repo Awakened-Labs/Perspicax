@@ -66,6 +66,10 @@ pub enum Action {
     /// Start a program, as a program and its arguments. The person's own
     /// program: it is never granted agent consent.
     Spawn(Vec<String>),
+    /// Maximize the focused window, or put a maximized one back.
+    ToggleMaximize,
+    /// Take the focused window off the screen until it is cycled back to.
+    Minimize,
     /// Read the config file again and apply it.
     Reload,
 }

@@ -1,4 +1,5 @@
-//! Window titles, shaped and rasterised for the titlebar.
+//! Window titles, shaped and rasterised for the titlebar, with the
+//! titlebar's buttons beside them.
 //!
 //! cosmic-text does the text: it shapes complex scripts and, when the first
 //! font has no glyph for a character, falls back across the system's fonts,
@@ -6,6 +7,10 @@
 //! Finding the fonts is a scan of the system's font directories, done once
 //! when the seat starts. It is the one slow thing here, and headless never
 //! does it, because headless draws nothing.
+//!
+//! The buttons are drawn as shapes rather than as characters from a font:
+//! a font that lacks a ballot X would leave a window that cannot be closed
+//! from its frame.
 //!
 //! A title is drawn again only when what it was drawn from changes: its text,
 //! the room it has, the colour it is inked in, or the whole scale of the
@@ -16,6 +21,7 @@ use cosmic_text::{
     Align, Attrs, Buffer, Color, Ellipsize, EllipsizeHeightLimit, Family, FontSystem, Metrics,
     Shaping, SwashCache, Wrap,
 };
+use perspicax_policy::{FrameButton, Rect, buttons_in};
 use smithay::{
     backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
     utils::Transform,
@@ -76,18 +82,39 @@ impl Titles {
         )
     }
 
-    /// `key`'s text as premultiplied ARGB8888, and its size in pixels.
+    /// `key`'s titlebar as premultiplied ARGB8888, and its size in pixels.
     fn pixels(&mut self, key: &TitleKey) -> (Vec<u8>, (i32, i32)) {
         let (width, height) = (
             (key.size.0 * key.scale).max(1),
             (key.size.1 * key.scale).max(1),
         );
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        let ink = Color::rgb(key.ink.r, key.ink.g, key.ink.b);
+
+        // The buttons, in pixels: the same places the pointer finds them.
+        let bar = Rect::new(0, 0, key.size.0, key.size.1);
+        let buttons = buttons_in(bar);
+        for (button, place) in &buttons {
+            let place = Rect::new(
+                place.x * key.scale,
+                place.y * key.scale,
+                place.w * key.scale,
+                place.h * key.scale,
+            );
+            draw_button(&mut pixels, width, *button, place, ink, key.scale);
+        }
+        let taken: i32 = buttons.iter().map(|(_, place)| place.w * key.scale).sum();
+
         let padding = PADDING * key.scale;
         let line = height as f32;
         let mut text = Buffer::new(&mut self.fonts, Metrics::new(line * TEXT_SHARE, line));
         text.set_wrap(Wrap::None);
         text.set_ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)));
-        text.set_size(Some((width - 2 * padding).max(1) as f32), Some(line));
+        let room = width - taken - 2 * padding;
+        if room <= 0 {
+            return (pixels, (width, height));
+        }
+        text.set_size(Some(room as f32), Some(line));
         text.set_text(
             &key.text,
             &Attrs::new().family(Family::SansSerif),
@@ -95,15 +122,14 @@ impl Titles {
             Some(Align::Left),
         );
 
-        let mut pixels = vec![0u8; (width * height * 4) as usize];
-        let ink = Color::rgb(key.ink.r, key.ink.g, key.ink.b);
+        let limit = padding + room;
         text.draw(
             &mut self.fonts,
             &mut self.glyphs,
             ink,
             |x, y, w, h, colour| {
                 for row in y.max(0)..(y + h as i32).min(height) {
-                    for column in (x + padding).max(0)..(x + padding + w as i32).min(width) {
+                    for column in (x + padding).max(0)..(x + padding + w as i32).min(limit) {
                         let at = ((row * width + column) * 4) as usize;
                         over(&mut pixels[at..at + 4], colour);
                     }
@@ -111,6 +137,50 @@ impl Titles {
             },
         );
         (pixels, (width, height))
+    }
+}
+
+/// Draw `button`'s symbol, centred in `place`, in pixels of a buffer
+/// `width` wide: a cross to close, a square to maximize, a bar to minimize.
+/// Each pixel is inked by how much of it the shape covers, so the diagonals
+/// of the cross are smooth.
+fn draw_button(
+    pixels: &mut [u8],
+    width: i32,
+    button: FrameButton,
+    place: Rect,
+    ink: Color,
+    scale: i32,
+) {
+    let half = place.h as f32 * 0.2;
+    let stroke = 1.5 * scale as f32;
+    let (cx, cy) = (
+        place.x as f32 + place.w as f32 / 2.0,
+        place.y as f32 + place.h as f32 / 2.0,
+    );
+    // How far a pixel's centre is from the shape's line, as `x, y` from the
+    // middle of the button.
+    let distance = |x: f32, y: f32| match button {
+        FrameButton::Close if x.abs() <= half && y.abs() <= half => {
+            (x - y).abs().min((x + y).abs()) / std::f32::consts::SQRT_2
+        }
+        FrameButton::Maximize if x.abs() <= half && y.abs() <= half => half - x.abs().max(y.abs()),
+        FrameButton::Minimize if x.abs() <= half => (y - half).abs(),
+        _ => f32::INFINITY,
+    };
+    for row in place.y..place.y + place.h {
+        for column in place.x..(place.x + place.w).min(width) {
+            let (x, y) = (column as f32 + 0.5 - cx, row as f32 + 0.5 - cy);
+            let cover = (stroke / 2.0 + 0.5 - distance(x, y)).clamp(0.0, 1.0);
+            if cover > 0.0 {
+                let alpha = (cover * f32::from(ink.a())) as u8;
+                let at = ((row * width + column) * 4) as usize;
+                over(
+                    &mut pixels[at..at + 4],
+                    Color::rgba(ink.r(), ink.g(), ink.b(), alpha),
+                );
+            }
+        }
     }
 }
 
@@ -157,13 +227,22 @@ mod tests {
             "nothing in the left padding"
         );
 
+        // Three buttons of the bar's height at the right, and the padding
+        // before them, which a long title stops short of.
+        let buttons = 3 * height;
         let (long, _) = titles.pixels(&key(&"a very long title ".repeat(20)));
-        let right_padding = (width - PADDING * 2)..width;
+        let column_inked = |pixels: &[u8], column: i32| {
+            (0..height).any(|row| pixels[((row * width + column) * 4 + 3) as usize] > 0)
+        };
+        let gap = (width - buttons - PADDING * 2)..(width - buttons);
         assert!(
-            right_padding.clone().all(|column| {
-                (0..height).all(|row| long[((row * width + column) * 4 + 3) as usize] == 0)
-            }),
-            "a long title stops before the right padding"
+            gap.clone().all(|column| !column_inked(&long, column)),
+            "a long title stops before the buttons' padding"
+        );
+        let close = (width - height)..width;
+        assert!(
+            close.clone().any(|column| column_inked(&long, column)),
+            "and the close button is drawn in the corner"
         );
     }
 

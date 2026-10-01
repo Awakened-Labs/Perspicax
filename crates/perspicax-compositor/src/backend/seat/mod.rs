@@ -162,6 +162,11 @@ pub(crate) struct Session {
     cursor: Cursor,
     /// The fonts window titles are written in. See [`titles`].
     titles: titles::Titles,
+    /// The last press on a titlebar, by window, time and place: the first
+    /// half of a double-click.
+    pub(super) title_press: Option<(Option<perspicax_node::SurfaceId>, perspicax_policy::Press)>,
+    /// A titlebar button pressed and not yet let go.
+    pub(super) button_press: Option<(crate::framed::Framed, perspicax_policy::FrameButton)>,
     /// The snap preview's colour and size, kept so the damage tracker can
     /// tell a preview that moved from one that did not.
     preview: SolidColorBuffer,
@@ -323,6 +328,8 @@ impl Session {
             children: Vec::new(),
             cursor: Cursor::load(),
             titles: titles::Titles::new(),
+            title_press: None,
+            button_press: None,
             preview: SolidColorBuffer::new((1, 1), PREVIEW),
             dwell,
             dwell_armed: None,
@@ -794,19 +801,20 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
 /// nothing if it asked for none.
 fn pointer_elements(
     renderer: &mut GlesRenderer,
-    cursor: &Cursor,
+    cursor: &mut Cursor,
     status: &CursorImageStatus,
     at: Point<f64, Logical>,
     scale: f64,
 ) -> Vec<Elements> {
     match status {
         CursorImageStatus::Hidden => Vec::new(),
-        CursorImageStatus::Named(_) => {
-            let origin = (at - cursor.hotspot.to_f64()).to_physical(scale);
+        CursorImageStatus::Named(icon) => {
+            let image = cursor.image(*icon);
+            let origin = (at - image.hotspot.to_f64()).to_physical(scale);
             MemoryRenderBufferRenderElement::from_buffer(
                 renderer,
                 origin,
-                &cursor.image,
+                &image.image,
                 None,
                 None,
                 None,
