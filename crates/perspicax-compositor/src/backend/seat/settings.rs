@@ -1,5 +1,5 @@
 //! The person's config, applied to the seat: read at start, re-read on the
-//! reload binding.
+//! reload binding, and re-read whenever the file is saved.
 //!
 //! A reload applies what it can without disturbing what did not change. Focus
 //! and bindings are just values, and are swapped. The keyboard is recompiled
@@ -7,14 +7,28 @@
 //! Outputs are relit only if their rules changed, because relighting is a
 //! modeset and the screens blink. Autostart is not re-run: those programs are
 //! already running.
+//!
+//! Saving is watched with inotify on the file's *directory*, not the file:
+//! most editors save by writing a new file and renaming it over the old one,
+//! and a watch on the old file's inode would hear nothing after the first
+//! save. A save is often several writes in a row, so a reload waits a moment
+//! after the last of them.
 
-use std::{path::Path, process::Child};
+use std::{mem::MaybeUninit, path::Path, process::Child, time::Duration};
 
 use perspicax_config::{Built, Config, Pointer};
 use smithay::{
     input::keyboard::XkbConfig,
-    reexports::calloop::LoopHandle,
+    reexports::calloop::{
+        Interest, LoopHandle, Mode, PostAction,
+        generic::Generic,
+        timer::{TimeoutAction, Timer},
+    },
     reexports::input::{Device, DeviceCapability},
+    reexports::rustix::{
+        fs::inotify::{self, CreateFlags, ReadFlags, Reader, WatchFlags},
+        io::Errno,
+    },
 };
 
 use super::{Session, relight};
@@ -25,6 +39,99 @@ const BUILT: Built = Built {
     seat: true,
     xwayland: cfg!(feature = "xwayland"),
 };
+
+/// How long a save has to be quiet before it is read: long enough for an
+/// editor's write-then-rename to finish, short enough to feel immediate.
+const SETTLE: Duration = Duration::from_millis(200);
+
+/// Reload whenever the config file is saved. Nothing to watch without a
+/// path, or when its directory does not exist yet: the reload binding still
+/// works once it does.
+pub(super) fn watch(handle: &LoopHandle<'static, Compositor>, path: Option<&Path>) {
+    let Some(path) = path else {
+        return;
+    };
+    let (Some(directory), Some(name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let name = name.to_owned();
+    let watched = inotify::init(CreateFlags::NONBLOCK | CreateFlags::CLOEXEC).and_then(|fd| {
+        inotify::add_watch(
+            &fd,
+            directory,
+            WatchFlags::CLOSE_WRITE | WatchFlags::MOVED_TO | WatchFlags::CREATE,
+        )?;
+        Ok(fd)
+    });
+    let fd = match watched {
+        Ok(fd) => fd,
+        Err(error) => {
+            tracing::info!(
+                directory = %directory.display(),
+                %error,
+                "the config is not watched; the reload binding still re-reads it"
+            );
+            return;
+        }
+    };
+    let registered = handle.insert_source(
+        Generic::new(fd, Interest::READ, Mode::Level),
+        move |_, fd, state: &mut Compositor| {
+            let mut buffer = [MaybeUninit::<u8>::uninit(); 4096];
+            let mut reader = Reader::new(fd.as_ref(), &mut buffer);
+            let mut saved = false;
+            loop {
+                match reader.next() {
+                    Ok(event) => {
+                        saved |= !event.events().contains(ReadFlags::IGNORED)
+                            && event
+                                .file_name()
+                                .is_some_and(|file| file.to_bytes() == name.as_encoded_bytes());
+                    }
+                    Err(Errno::WOULDBLOCK | Errno::INTR) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, "reading the config watch failed");
+                        break;
+                    }
+                }
+            }
+            if saved {
+                settle_then_reload(state);
+            }
+            Ok(PostAction::Continue)
+        },
+    );
+    match registered {
+        Ok(_) => tracing::info!(config = %path.display(), "watching the config for saves"),
+        Err(error) => tracing::warn!(%error, "could not watch the config"),
+    }
+}
+
+/// Reload once saves have been quiet for [`SETTLE`]. A save arriving while
+/// one is already waiting changes nothing: the wait reads the file as it is
+/// at the end.
+fn settle_then_reload(state: &mut Compositor) {
+    let Running::Seat(session) = &mut state.backend else {
+        return;
+    };
+    if session.reload_pending {
+        return;
+    }
+    session.reload_pending = true;
+    let armed = session
+        .handle
+        .insert_source(Timer::from_duration(SETTLE), |_, (), state| {
+            if let Running::Seat(session) = &mut state.backend {
+                session.reload_pending = false;
+            }
+            tracing::info!("the config was saved");
+            reload(state);
+            TimeoutAction::Drop
+        });
+    if let Err(error) = armed {
+        tracing::warn!(%error, "could not schedule the config reload");
+    }
+}
 
 /// Read the config, or the classic profile without a path.
 pub(super) fn load(path: Option<&Path>) -> Result<Config, Error> {

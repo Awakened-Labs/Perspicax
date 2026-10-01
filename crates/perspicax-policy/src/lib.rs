@@ -15,9 +15,12 @@
 //! window handle, so the compositor passes its own ids and the tests pass
 //! integers.
 //!
-//! Config (`perspicax-config`, W1 slice 5) will build these values from
-//! `config.toml` and the `classic`/`minimal` profiles. Until then the
-//! compositor uses [`Focus::default`] and [`Bindings::classic`].
+//! The decisions, by module: focus and what a chord means (`focus`, `binds`);
+//! where a window goes and how big (`geometry`); where each monitor sits
+//! (`layout`); which workspace shows which windows (`workspace`); changing
+//! workspace with the pointer (`flip`); and snapping to halves and quarters
+//! (`snap`). `perspicax-config` builds their settings from `config.toml` and
+//! the `classic`/`minimal` profiles.
 
 mod binds;
 mod flip;

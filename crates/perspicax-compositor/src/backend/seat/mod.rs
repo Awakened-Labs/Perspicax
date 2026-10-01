@@ -149,6 +149,9 @@ pub(crate) struct Session {
     /// Where it was read from, for the reload binding. `None` means the
     /// classic profile, with nothing to re-read.
     config_path: Option<PathBuf>,
+    /// A save of the config was heard and its reload is waiting for the
+    /// saves to settle.
+    reload_pending: bool,
     /// Every input device libinput has handed us, so pointer settings can be
     /// applied to each, and again on reload.
     devices: Vec<smithay::reexports::input::Device>,
@@ -300,6 +303,7 @@ impl Session {
             .map_err(|error| Error::EventLoop(error.to_string()))?;
 
         let dwell = perspicax_policy::EdgeDwell::new(settings.flipping.delay_ms);
+        settings::watch(handle, config_path.as_deref());
         Ok(Self {
             seat,
             libinput,
@@ -311,6 +315,7 @@ impl Session {
             swallowed: Vec::new(),
             settings,
             config_path,
+            reload_pending: false,
             devices: Vec::new(),
             children: Vec::new(),
             cursor: Cursor::load(),
