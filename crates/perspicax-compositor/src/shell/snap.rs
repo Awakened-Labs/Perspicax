@@ -70,7 +70,15 @@ impl Compositor {
         let Some(area) = self.usable_area(&output) else {
             return;
         };
-        let target = inset(zone.rect(rect(area)), self.insets_as(window, Look::Normal));
+        // The top zone is the whole monitor: maximized, framed as maximized,
+        // with the titlebar and no border. Only an X11 window gets here with
+        // it; an xdg window is filled above.
+        let look = if zone == Zone::Top {
+            Look::Maximized
+        } else {
+            Look::Normal
+        };
+        let target = inset(zone.rect(rect(area)), self.insets_as(window, look));
         if let Some(current) = self.extent(window) {
             placement(window, |placement| {
                 placement.restore.get_or_insert(current);
@@ -93,6 +101,8 @@ impl Compositor {
         }
         #[cfg(feature = "xwayland")]
         if let Some(x11) = window.x11_surface() {
+            // Said to the X client too, which also decides the frame's look.
+            let _ = x11.set_maximized(zone == Zone::Top);
             let _ = x11.configure(Rectangle::new(
                 (target.x, target.y).into(),
                 (target.w, target.h).into(),
@@ -112,6 +122,10 @@ impl Compositor {
             placement.snapped = None;
             placement.restore.take()
         });
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = window.x11_surface() {
+            let _ = x11.set_maximized(false);
+        }
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|pending| {
                 for state in TILED {
