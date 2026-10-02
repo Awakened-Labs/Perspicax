@@ -31,9 +31,13 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use perspicax_compositor::{Facts, Host};
-use perspicax_index::{Delta, HostFacts, Index, Receipt, Selector, Verb};
+use perspicax_compositor::{ActError, Facts, Host};
+use perspicax_index::{
+    Delta, HostFacts, Index, Receipt, Selector, Shot, ShotTarget, Verb, WindowReceipt, WindowVerb,
+    check_readable,
+};
 use perspicax_mcp::{Denied, Desktop};
+use perspicax_node::SurfaceId;
 
 use crate::act;
 
@@ -141,17 +145,39 @@ impl Desktop for Desk {
             verb,
             act::DAMAGE_WINDOW,
         )
-        .map_err(|failure| match failure {
-            // The gate's answer, carried through unchanged: it names what is in
-            // the way and what would clear it, and paraphrasing it here would
-            // cost the agent exactly the part it can act on.
-            act::Failure::Refused(refusal) => Denied::Refused(refusal),
-            // A statement about this compositor rather than about the target.
-            // Flattened to its message because `perspicax-mcp` deliberately
-            // cannot see the crate the type comes from, and because there is
-            // nothing an agent can do with it but report it.
-            act::Failure::Dispatch(error) => Denied::Undispatched(error.to_string()),
+        .map_err(denied)
+    }
+
+    fn act_window(&self, surface: SurfaceId, verb: WindowVerb) -> Result<WindowReceipt, Denied> {
+        act::act_window(&self.host, &self.facts, surface, verb, act::DAMAGE_WINDOW).map_err(denied)
+    }
+
+    /// A window's picture is gated like reading it; a monitor's is not,
+    /// because whatever the agent may not see in it is painted over by the
+    /// compositor, which holds the same consent.
+    fn capture(&self, target: ShotTarget) -> Result<Shot, Denied> {
+        if let ShotTarget::Window(surface) = &target {
+            check_readable(&self.facts.read(), *surface)?;
+        }
+        self.host.capture(target).map_err(|error| match error {
+            ActError::NotBuilt(feature) => Denied::NotBuilt(feature.to_owned()),
+            error => Denied::Undispatched(error.to_string()),
         })
+    }
+}
+
+/// A failure to act, as the MCP server reports it.
+fn denied(failure: act::Failure) -> Denied {
+    match failure {
+        // The gate's answer, carried through unchanged: it names what is in
+        // the way and what would clear it, and paraphrasing it here would
+        // cost the agent exactly the part it can act on.
+        act::Failure::Refused(refusal) => Denied::Refused(refusal),
+        // A statement about this compositor rather than about the target.
+        // Flattened to its message because `perspicax-mcp` deliberately
+        // cannot see the crate the type comes from, and because there is
+        // nothing an agent can do with it but report it.
+        act::Failure::Dispatch(error) => Denied::Undispatched(error.to_string()),
     }
 }
 
@@ -330,5 +356,21 @@ mod tests {
         let mut refusal = None;
         desk.read(&mut |index, _| refusal = index.actable(CANCEL).err());
         assert_eq!(refusal, Some(Refusal::Stale { frames: 0 }));
+    }
+
+    /// A window's picture is gated like reading it, here, before the
+    /// compositor is asked: the host below has nobody listening, so a
+    /// picture that reached it would come back `Unreachable`, not refused.
+    #[test]
+    fn a_picture_of_a_window_the_agent_may_not_read_is_refused_before_it_is_taken() {
+        let desk = desk(&clear().with_consent(Consent::Spawned(vec![1])));
+        assert!(matches!(
+            desk.capture(ShotTarget::Window(WINDOW)),
+            Err(Denied::Refused(Refusal::NoCapability { .. }))
+        ));
+        assert_eq!(
+            desk.capture(ShotTarget::Window(SurfaceId(99))),
+            Err(Denied::Refused(Refusal::NotFound))
+        );
     }
 }

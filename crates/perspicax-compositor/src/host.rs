@@ -75,16 +75,34 @@ pub enum Command {
     /// Do what a key binding does: switch workspace, send the focused window
     /// somewhere, close it. The same code a person's keys run, so a test can
     /// drive window management with no keyboard. Not an MCP tool: an agent
-    /// rearranging a person's desk is a capability decision that waits for
-    /// the workspace protocols (W4).
+    /// rearranging a person's desk wholesale is not something it may do.
+    /// What it may do to a window is narrower and gated, and goes through
+    /// [`Request`] as `Action::Close` and `Action::Forward`.
     Perform(perspicax_policy::Action),
+    /// Put new `[protocols]` rules in force, as a seat does when the person
+    /// saves a changed config: who may use the protocols that reach past
+    /// their own windows. A client the new rules leave out loses what it
+    /// held.
+    Protocols(perspicax_policy::Access),
+}
+
+/// A picture asked for, with somewhere to put it.
+pub(crate) struct CaptureRequest {
+    pub(crate) target: perspicax_index::ShotTarget,
+    pub(crate) reply: SyncSender<Result<perspicax_index::Shot, ActError>>,
 }
 
 /// What arrives on the compositor's inbound channel.
 pub(crate) enum Inbound {
     Act(Request),
     Command(Command),
+    Capture(CaptureRequest),
 }
+
+/// How long a picture may take. Far longer than an act: drawing a 4K monitor
+/// in software is real work, and an agent waiting a little longer for a
+/// picture is better served than one told the compositor did not answer.
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The inbound half of the compositor's boundary, symmetric with [`Facts`].
 ///
@@ -205,6 +223,26 @@ impl Host {
                 Err(ActError::Unreachable)
             }
         }
+    }
+
+    /// Ask the compositor for a picture and wait for it.
+    ///
+    /// # Errors
+    ///
+    /// [`ActError::Unreachable`] if no loop answers in time; otherwise why
+    /// the compositor would not or could not take it.
+    pub fn capture(
+        &self,
+        target: perspicax_index::ShotTarget,
+    ) -> Result<perspicax_index::Shot, ActError> {
+        let (reply, answer) = mpsc::sync_channel(1);
+        self.requests
+            .sender
+            .send(Inbound::Capture(CaptureRequest { target, reply }))
+            .map_err(|_| ActError::Unreachable)?;
+        answer
+            .recv_timeout(CAPTURE_TIMEOUT.max(self.timeout))
+            .unwrap_or(Err(ActError::Unreachable))
     }
 }
 

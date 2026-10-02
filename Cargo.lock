@@ -12,6 +12,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -527,6 +533,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32fast"
+version = "1.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -728,10 +743,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "fdeflate"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
+dependencies = [
+ "simd-adler32",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
+
+[[package]]
+name = "flate2"
+version = "1.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
+dependencies = [
+ "crc32fast",
+ "miniz_oxide 0.9.1",
+ "zlib-rs",
+]
 
 [[package]]
 name = "font-types"
@@ -1216,6 +1251,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "miniz_oxide"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
+
+[[package]]
+name = "miniz_oxide"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
+
+[[package]]
 name = "mio"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1270,6 +1325,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
 
 [[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
 name = "pastey"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1287,8 +1348,9 @@ dependencies = [
  "perspicax-index",
  "perspicax-mcp",
  "perspicax-node",
+ "rmcp",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1302,7 +1364,7 @@ dependencies = [
  "futures-util",
  "perspicax-index",
  "perspicax-node",
- "thiserror",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
 ]
@@ -1318,9 +1380,11 @@ dependencies = [
  "perspicax-policy",
  "smithay",
  "smithay-client-toolkit",
- "thiserror",
+ "thiserror 2.0.20",
  "tracing",
  "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
  "x11rb",
  "xcursor",
 ]
@@ -1331,7 +1395,7 @@ version = "0.1.0"
 dependencies = [
  "perspicax-policy",
  "serde",
- "thiserror",
+ "thiserror 2.0.20",
  "toml",
 ]
 
@@ -1346,13 +1410,15 @@ dependencies = [
 name = "perspicax-mcp"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "perspicax-index",
  "perspicax-node",
+ "png",
  "rmcp",
  "schemars",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
 ]
@@ -1402,10 +1468,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "pixman"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cea217d496c19ac0a8e502b37078e1f683d16344adee9eb247a5d57c165e1edf"
+dependencies = [
+ "drm-fourcc",
+ "paste",
+ "pixman-sys",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "pixman-sys"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1a0483e89e81d7915defe83c51f23f6800594d64f6f4a21253ce87fd8444ada"
+
+[[package]]
 name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "png"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
+dependencies = [
+ "bitflags",
+ "crc32fast",
+ "fdeflate",
+ "flate2",
+ "miniz_oxide 0.8.9",
+]
 
 [[package]]
 name = "polling"
@@ -1607,7 +1704,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tracing",
@@ -1820,6 +1917,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "simd-adler32"
+version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+
+[[package]]
 name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1892,6 +1995,7 @@ dependencies = [
  "libc",
  "libloading",
  "libseat",
+ "pixman",
  "pkg-config",
  "profiling",
  "rand",
@@ -1900,7 +2004,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.20",
  "tracing",
  "udev",
  "wayland-protocols",
@@ -1923,7 +2027,7 @@ dependencies = [
  "log",
  "memmap2",
  "rustix 1.1.4",
- "thiserror",
+ "thiserror 2.0.20",
  "wayland-backend",
  "wayland-client",
  "wayland-csd-frame",
@@ -2021,11 +2125,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.20",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2886,6 +3010,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zmij"

@@ -80,6 +80,15 @@ pub enum ActError {
     /// different about any of them.
     #[error("no compositor loop answered")]
     Unreachable,
+    /// No monitor of this name.
+    #[error("no output named {0}")]
+    NoSuchOutput(String),
+    /// A picture was asked of a build that cannot take one.
+    #[error("this build has no `{0}` feature")]
+    NotBuilt(&'static str),
+    /// The renderer could not draw or read back the picture.
+    #[error("the picture could not be taken: {0}")]
+    Capture(String),
 }
 
 /// What the compositor did, as it alone can report it.
@@ -232,9 +241,14 @@ impl Compositor {
         if self.person_is_active() {
             return Err(ActError::PersonActive);
         }
-        let window = self
-            .window_for_id(surface)
-            .ok_or(ActError::NoSuchSurface(surface.0))?;
+        // A window verb addresses a window wherever it is: a tab behind
+        // another is parked, and closing a window on a hidden workspace is
+        // still closing it. Input goes only to what is on screen.
+        let window = match action {
+            Action::Close | Action::Forward => self.any_window(surface),
+            _ => self.window_for_id(surface),
+        }
+        .ok_or(ActError::NoSuchSurface(surface.0))?;
         let focus_before = self.focused_surface();
 
         match action {
@@ -242,6 +256,14 @@ impl Compositor {
             Action::Click { at, button } => self.act_click(&window, *at, *button),
             Action::Scroll { at, dx, dy } => self.act_scroll(&window, *at, *dx, *dy),
             Action::Type { text } => self.act_type(text),
+            Action::Close => {
+                Self::close(&window);
+                Ok(())
+            }
+            Action::Forward => {
+                self.activate_tab(&window);
+                Ok(())
+            }
         }?;
 
         Ok(Dispatched {

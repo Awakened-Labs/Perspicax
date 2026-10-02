@@ -219,10 +219,29 @@ pub struct Compositor {
     pub(crate) xwayland: crate::xwayland::Xwayland,
     #[cfg(feature = "xwayland")]
     pub(crate) xwayland_shell: Option<smithay::wayland::xwayland_shell::XWaylandShellState>,
+    /// Who may use the protocols that reach past their own windows. See
+    /// [`crate::access`].
+    pub(crate) gate: crate::access::Gate,
+    /// Every window, as the taskbar protocols have been told it. See
+    /// [`crate::toplevels`].
+    pub(crate) toplevels: crate::toplevels::Toplevels,
+    /// The workspaces, as the pager protocol has been told them. See
+    /// [`crate::pager`].
+    pub(crate) pager: crate::pager::Pager,
+    /// The monitors, as the display tools have been told them. See
+    /// [`crate::output_management`].
+    pub(crate) displays: crate::output_management::Displays,
+    /// Screenshot tools' frames waiting for something to change. See
+    /// [`crate::screencopy`].
+    #[cfg(feature = "capture")]
+    pub(crate) screencopy: crate::screencopy::Screencopy,
     /// The event loop, for the handlers that must schedule work on it.
     #[cfg_attr(
-        not(feature = "xwayland"),
-        expect(dead_code, reason = "Xwayland's selections")
+        not(any(feature = "xwayland", feature = "capture")),
+        expect(
+            dead_code,
+            reason = "Xwayland's selections, and screencopy's waiting frames"
+        )
     )]
     pub(crate) loop_handle: LoopHandle<'static, Self>,
     /// How to start a program against this compositor. Set by `run` once the
@@ -257,6 +276,12 @@ impl Compositor {
 
         let consent = backend.consent();
         let workspace_shape = backend.workspace_shape();
+        let gate = crate::access::Gate::new(backend.access());
+        let toplevels = crate::toplevels::Toplevels::new(display, &gate);
+        let pager = crate::pager::Pager::new(display, &gate);
+        let displays = crate::output_management::Displays::new(display, &gate);
+        #[cfg(feature = "capture")]
+        let screencopy = crate::screencopy::Screencopy::new(display, &gate);
         // Empty: outputs are mapped by `arrange_outputs`, once every one
         // the backend starts with is known, so the first is placed knowing
         // about the rest.
@@ -308,6 +333,12 @@ impl Compositor {
             xwayland: crate::xwayland::Xwayland::default(),
             #[cfg(feature = "xwayland")]
             xwayland_shell: None,
+            gate,
+            toplevels,
+            pager,
+            displays,
+            #[cfg(feature = "capture")]
+            screencopy,
             loop_handle: event_loop,
             idle_inhibit: IdleInhibitManagerState::new::<Self>(display),
             inhibitors: Vec::new(),
@@ -621,7 +652,7 @@ impl CompositorHandler for Compositor {
     /// same on both paths, so the facts a seat publishes are the facts CI
     /// tested.
     fn commit(&mut self, surface: &WlSurface) {
-        let renders = self.backend.renders();
+        let renders = self.backend.keeps_buffers();
         let whole = declared_geometry(surface);
         let (presented, damaged) = with_states(surface, |states| {
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
@@ -658,7 +689,7 @@ impl CompositorHandler for Compositor {
             }
             (presented, damaged)
         });
-        #[cfg(feature = "seat")]
+        #[cfg(any(feature = "seat", feature = "capture"))]
         if renders {
             smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
             // What the renderer did not take -- damage committed without a new
@@ -710,6 +741,13 @@ impl CompositorHandler for Compositor {
         self.space.refresh();
         self.backend.redraw();
         self.publish_facts();
+        // Something changed, so a screenshot tool waiting for a change gets
+        // its frame -- once this commit has been taken in, not halfway.
+        #[cfg(feature = "capture")]
+        if !self.screencopy.waiting.is_empty() {
+            self.loop_handle
+                .insert_idle(|state: &mut Self| state.flush_screencopy());
+        }
     }
 }
 
@@ -743,6 +781,30 @@ impl XdgShellHandler for Compositor {
         // which window is active agree with ours -- which is the pair of
         // observations the join weighs.
         self.focus_surface(wl_surface, id);
+        self.publish_facts();
+    }
+
+    /// Titles are not double-buffered, so a new one arrives without a
+    /// commit: published now, and the titlebar drawn again now, or the facts,
+    /// every taskbar and the titlebar would keep the old title until the
+    /// window next drew. A shell that sets the title from its prompt does so
+    /// milliseconds after the program before it did, with nothing drawn in
+    /// between, and the titlebar went on showing the program's title.
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        tracing::debug!(
+            surface = self
+                .window_for(surface.wl_surface())
+                .as_ref()
+                .and_then(shell::id_of)
+                .map(|id| id.0),
+            title = crate::facts::title(surface.wl_surface()),
+            "title changed"
+        );
+        self.backend.redraw();
+        self.publish_facts();
+    }
+
+    fn app_id_changed(&mut self, _surface: ToplevelSurface) {
         self.publish_facts();
     }
 

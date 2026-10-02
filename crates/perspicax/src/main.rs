@@ -156,6 +156,7 @@ fn main() -> Result<()> {
                 .collect(),
             // One workspace: an agent's desk is whatever it spawned.
             workspaces: Default::default(),
+            access: Default::default(),
         }
     };
     // First, before the accessibility bus is touched: a backend this binary

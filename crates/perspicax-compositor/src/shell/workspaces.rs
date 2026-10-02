@@ -214,7 +214,7 @@ impl Compositor {
         }
     }
 
-    fn workspace_changed(&mut self) {
+    pub(crate) fn workspace_changed(&mut self) {
         self.show_what_belongs();
         self.backend.redraw();
         self.publish_facts();

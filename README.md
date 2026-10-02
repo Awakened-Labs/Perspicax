@@ -46,7 +46,7 @@ compositor:
 
 ```
 perspicax              the composition root — one binary, `perspicax --headless`
-perspicax-mcp          MCP server (rmcp, stdio) — six tools, DTOs, receipts  [portable]
+perspicax-mcp          MCP server (rmcp, stdio) — eight tools, DTOs, receipts  [portable]
 perspicax-index        node cache, stable ids, selectors, deltas, refusals  [portable]
 perspicax-node         node schema — AccessKit types plus Origin and Visibility
 perspicax-policy       WM decisions as data — focus, bindings, placement, monitors, workspaces, snapping  [portable]
@@ -89,7 +89,7 @@ feature, never silently ignored.
 | **W1** | A usable session: DRM from a TTY, libinput, move/resize, keybinds, multi-monitor, clipboard, layer-shell and session-lock (so waybar, fuzzel and swaylock work), Xwayland | done |
 | **W2** | Config profiles (`classic`, `minimal`) and policy: focus models, a workspace grid with edge flipping, moving between screens, snapping | done |
 | **W3** | Server-side decorations, then tabbed window groups | done |
-| **W4** | Protocols Smithay lacks: foreign-toplevel management, ext-workspace, screencopy, output management — and `screenshot` stops refusing; agent verbs to close a window and bring a tab forward | |
+| **W4** | Protocols Smithay lacks: foreign-toplevel management, ext-workspace, screencopy, output management — and `screenshot` stops refusing; agent verbs to close a window and bring a tab forward | done |
 | **W5** | `perspicax-shell`, a separate process: wallpaper, panel, tray, start menu, root menu, desktop icons — each a feature and a toggle | |
 | **W6** | Polish: themes, keymaps, a session entry for display managers | |
 
@@ -193,8 +193,12 @@ reason is reported rather than logged.
 perspicax --headless --mcp --spawn gtk4-widget-factory
 ```
 
-That is an MCP server on stdin and stdout with a compositor behind it. Six
-tools: `window_list`, `observe`, `resolve`, `act`, `deltas`, `screenshot`.
+That is an MCP server on stdin and stdout with a compositor behind it. Eight
+tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
+`tab_forward`, `deltas`, `screenshot`. The two window verbs act on a whole
+window by its surface: a close is a request the application may answer with a
+dialog, and a tab is brought forward only where the person can already see its
+group, never by switching what they are looking at.
 
 An agent names a control and never a coordinate — the rectangle comes from the
 index and turning it into anything global is the compositor's job, so an agent
@@ -259,12 +263,17 @@ screen. There an agent may act only on what perspicax itself spawned
 (`Refusal::NoCapability` otherwise), and not at all while the person is using the
 keyboard or pointer: an act in the middle of their typing would race it.
 
-**`screenshot` ships declared and always refusing.** There is no renderer in
-the headless build at all — occlusion needs geometry, z-order, regions and damage, and
-none of those need pixels. It is listed so that a model can tell the fallback
-from the mechanism, and its refusal reports the count of nodes under rendering
-no semantic event explained, which is the only honest trigger for a pixel path
-and a number the compositor already computes.
+**`screenshot` is the fallback, and says so.** Occlusion needs geometry,
+z-order, regions and damage, none of which need pixels, so nothing is drawn
+for the index and a picture is rendered only when one is asked for: in
+software with pixman headless, with the GPU on a seat, behind the `capture`
+feature (a build without it answers `not_built`). Every answer carries the
+count of nodes under damage no semantic event explained, which is the honest
+trigger for a pixel path. A picture comes with an account of every surface in
+it and the process that drew it, so no pixel is anonymous, and a window drawn
+by a process the agent holds no consent for is painted over in grey and listed
+as redacted rather than shown: a picture is a way of reading, and the gate on
+reading applies to it.
 
 ## What a toolkit renders without explaining
 
@@ -413,7 +422,39 @@ name = "eDP-1"
 enable = false
 
 autostart = [["waybar"], ["swaybg", "-i", "/home/me/wall.png"]]
+
+[protocols]                    # who may reach past their own windows:
+foreign-toplevel-management = "any"   # "any", "off", or a list of programs
+workspace = "any"
+screencopy = ["grim", "/usr/bin/wf-recorder"]   # a name, or a full path
+output-management = ["kanshi", "wlr-randr"]
 ```
+
+`[protocols]` names the programs that may use the protocols reaching past
+their own windows: a taskbar's list of windows (`foreign-toplevel-list`, and
+`foreign-toplevel-management` to activate and close them), a pager
+(`workspace`), a screenshot tool (`screencopy`) and a display tool
+(`output-management`). Listing windows and workspaces is open by default;
+reading pixels and moving monitors is for the usual tools, by name. A name is
+whatever the kernel says the client is running, which any program can be
+called, so a full path is the stricter form. Whatever this says, all of them
+are inert while the screen is locked.
+
+| Protocol | `[protocols]` key | Spoken by | While locked | When the rule narrows |
+|---|---|---|---|---|
+| `ext-foreign-toplevel-list-v1` | `foreign-toplevel-list` | window lists | nothing new is told; told on unlock | every window closed, list finished |
+| `wlr-foreign-toplevel-management-unstable-v1` v3 | `foreign-toplevel-management` | waybar `wlr/taskbar` | requests ignored | every handle closed, manager finished |
+| `ext-workspace-v1` | `workspace` | waybar `ext/workspaces` | switches ignored | everything removed, manager finished |
+| `wlr-screencopy-unstable-v1` v3 (shm) | `screencopy` | grim, wf-recorder, xdg-desktop-portal-wlr | every copy fails | waiting frames fail |
+| `wlr-output-management-unstable-v1` v4 | `output-management` | wlr-randr, kanshi, wdisplays | every configuration fails | manager finished |
+
+A rule a reload changes applies to the next client that looks, with no
+global torn down, and what a client already holds is withdrawn as above.
+`screencopy` needs the `capture` feature (part of `desktop`). A display tool's
+change to the monitors lasts for the session: it is put in force as the output
+rules, exactly as if `[[output]]` had said it, and a reload that changes
+`[[output]]` puts the file back in charge. Moving a monitor just moves it; a
+new mode, scale, or a monitor turned on or off lights the monitors again.
 
 Monitors are placed relative to each other, so the layout survives one being
 unplugged: a monitor beside one that is missing goes to the right of the

@@ -18,6 +18,10 @@
 # pkg-config and vendors none of its C sources, so the line below still tells
 # the truth about what is compiled into the binary. A new `-sys` crate gets the
 # same read before it lands.
+#
+# The `capture` feature brought pixman-sys (MIT): its build script is one
+# `rustc-link-lib=pixman-1` against the system libpixman-1 (MIT), and it
+# vendors no C. Read 2026-10-01.
 
 [licenses]
 # Exhaustive rather than permissive-by-pattern, and deliberately short. A new

@@ -30,7 +30,10 @@
 //! lexical form. Ids are minted from one, so the 2^53 ceiling a JSON reader
 //! imposes is not a ceiling anything can reach.
 
-use perspicax_index::{DamageWitness, Delta, HostFacts, Index, Receipt, Refusal, SurfaceFacts};
+use perspicax_index::{
+    DamageWitness, Delta, Drawn, HostFacts, Index, Receipt, Refusal, Shot, SurfaceFacts,
+    WindowReceipt, WindowWitness,
+};
 use perspicax_node::{
     NodeId, ObservedNode, Orientation, Origin, Rect, SurfaceId, Toggled, X11Basis,
 };
@@ -456,6 +459,27 @@ pub struct Window {
     /// rate, not a total: an idle GTK window repaints about forty times a
     /// second and an idle Qt one about once every two.
     pub damage_frames: u64,
+    /// The app id the client set, under a key that says who set it, as the
+    /// title is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub untrusted_app_id: Option<String>,
+    /// The workspace it belongs to, counting from 1, whether or not that
+    /// workspace is showing. Absent for a window on every workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<u16>,
+    /// Its tab group, when it is in one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tabs: Option<Tabs>,
+}
+
+/// A window's tab group: every tab, and which is in front.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Tabs {
+    /// Every tab's surface, in tab order.
+    pub members: Vec<u64>,
+    /// The tab in front, which has the group's place on screen. Any other
+    /// can be brought forward with `tab_forward`.
+    pub front: u64,
 }
 
 impl Window {
@@ -496,6 +520,12 @@ impl Window {
             rendered_by: Provenance::of(&facts.origin),
             untrusted_title: facts.title.clone(),
             damage_frames: facts.damage_generation,
+            untrusted_app_id: facts.app_id.clone(),
+            workspace: facts.workspace,
+            tabs: (!facts.tabs.is_empty()).then(|| Tabs {
+                members: facts.tabs.iter().map(|tab| tab.0).collect(),
+                front: facts.behind_tab.unwrap_or(facts.id).0,
+            }),
         }
     }
 }
@@ -579,6 +609,167 @@ impl From<&Receipt> for Acted {
             },
         }
     }
+}
+
+/// What became of a window an agent closed or brought forward.
+///
+/// No `success`, for the reason [`Acted`] has none: `witness` is what was
+/// seen once the window had been given `window_ms` to react.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WindowActed {
+    /// The window acted on.
+    pub surface: u64,
+    /// Who owns it, from its connection credentials.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rendered_by: Option<Provenance>,
+    /// `close` or `forward`.
+    pub verb: &'static str,
+    /// The round trip to the compositor's thread and back.
+    pub dispatch_ms: f64,
+    /// Which surface held keyboard focus before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_before: Option<u64>,
+    /// And after.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_after: Option<u64>,
+    /// `gone`, `still_open`, `in_front` or `still_behind`.
+    pub witness: &'static str,
+    /// `still_open`: windows of the same process that appeared meanwhile --
+    /// a dialog asking about unsaved work, typically. Observe it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub appeared: Vec<u64>,
+    /// `still_behind`: the tab still in front.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shown_tab: Option<u64>,
+    /// How long the window was given to react.
+    pub window_ms: u64,
+}
+
+impl From<&WindowReceipt> for WindowActed {
+    fn from(receipt: &WindowReceipt) -> Self {
+        let (witness, appeared, shown_tab) = match &receipt.witness {
+            WindowWitness::Gone => ("gone", Vec::new(), None),
+            WindowWitness::StillOpen { appeared } => (
+                "still_open",
+                appeared.iter().map(|surface| surface.0).collect(),
+                None,
+            ),
+            WindowWitness::InFront => ("in_front", Vec::new(), None),
+            WindowWitness::StillBehind { shown } => ("still_behind", Vec::new(), Some(shown.0)),
+        };
+        Self {
+            surface: receipt.surface.0,
+            rendered_by: Provenance::of(&receipt.origin),
+            verb: receipt.verb.name(),
+            dispatch_ms: receipt.dispatch.as_secs_f64() * 1000.0,
+            focus_before: receipt.focus_before.map(|surface| surface.0),
+            focus_after: receipt.focus_after.map(|surface| surface.0),
+            witness,
+            appeared,
+            shown_tab,
+            window_ms: u64::try_from(receipt.window.as_millis()).unwrap_or(u64::MAX),
+        }
+    }
+}
+
+/// One surface in a picture: where it is in it, and who drew it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Pictured {
+    pub surface: u64,
+    /// Where it is in the picture, in logical units from the top left;
+    /// multiply by `scale` for pixels.
+    pub bounds: Bounds,
+    /// Who drew it, from its connection credentials.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rendered_by: Option<Provenance>,
+    /// The title its client set. Absent for a surface painted over: the
+    /// picture does not show it, and the account of it does not either.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub untrusted_title: Option<String>,
+}
+
+/// A picture's account of itself, beside the image.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Screenshot {
+    pub captured: bool,
+    /// In pixels.
+    pub width: u32,
+    pub height: u32,
+    /// Pixels per logical unit.
+    pub scale: f64,
+    /// The monitor it is of, for a monitor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// For a window: whether the person can see it now. A window's picture
+    /// is of the window alone, so it shows the same whether anything is over
+    /// it, or it is on another workspace, or minimized; this says which.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mapped: Option<bool>,
+    /// Every surface in the picture, front first.
+    pub drawn: Vec<Pictured>,
+    /// Surfaces painted over, because the agent holds no consent for whoever
+    /// drew them. The picture shows a grey block where each one is.
+    pub redacted: Vec<Pictured>,
+    /// Nodes under damage no accessibility event explained: what a picture is
+    /// for. Zero means the accessible tree already describes everything that
+    /// changed.
+    pub unexplained: usize,
+}
+
+impl Screenshot {
+    #[must_use]
+    pub fn of(
+        shot: &Shot,
+        facts: &HostFacts,
+        window: Option<SurfaceId>,
+        unexplained: usize,
+    ) -> Self {
+        let pictured = |drawn: &Drawn, shown: bool| Pictured {
+            surface: drawn.surface.0,
+            bounds: drawn.rect.into(),
+            rendered_by: Provenance::of(&drawn.origin),
+            untrusted_title: shown
+                .then(|| facts.surface(drawn.surface)?.title.clone())
+                .flatten(),
+        };
+        Self {
+            captured: true,
+            width: shot.width,
+            height: shot.height,
+            scale: shot.scale,
+            output: shot.output.clone(),
+            mapped: window.and_then(|id| Some(facts.surface(id)?.mapped)),
+            drawn: shot
+                .drawn
+                .iter()
+                .map(|drawn| pictured(drawn, true))
+                .collect(),
+            redacted: shot
+                .redacted
+                .iter()
+                .map(|drawn| pictured(drawn, false))
+                .collect(),
+            unexplained,
+        }
+    }
+}
+
+/// A picture as a PNG.
+///
+/// # Errors
+///
+/// When the pixels are not the size the picture says.
+pub fn png(shot: &Shot) -> Result<Vec<u8>, String> {
+    let mut encoded = Vec::new();
+    let mut encoder = png::Encoder::new(&mut encoded, shot.width, shot.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
+    writer
+        .write_image_data(&shot.rgba)
+        .map_err(|error| error.to_string())?;
+    writer.finish().map_err(|error| error.to_string())?;
+    Ok(encoded)
 }
 
 /// Something that changed since the last time anyone asked.

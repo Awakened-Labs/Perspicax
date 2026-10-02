@@ -1,8 +1,9 @@
 //! The agent interface -- an MCP server over stdio.
 //!
-//! Six tools: `window_list`, `observe`, `resolve`, `act`, `deltas` and
-//! `screenshot`. Everything above them is `rmcp` and everything below them is
-//! [`Desktop`], a trait with three methods that this crate never implements.
+//! Eight tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
+//! `tab_forward`, `deltas` and `screenshot`. Everything above them is `rmcp`
+//! and everything below them is [`Desktop`], a trait with five methods that
+//! this crate never implements.
 //!
 //! # What this crate can and cannot see
 //!
@@ -11,7 +12,7 @@
 //! restraint `perspicax-index` observes and it is load-bearing for the same
 //! reason: the agent interface is portable, so a port of this project to a
 //! GNOME extension or a KWin plugin re-implements [`Desktop`] and gets these
-//! six tools unchanged. A crate that cannot see a compositor cannot come to
+//! eight tools unchanged. A crate that cannot see a compositor cannot come to
 //! depend on one.
 //!
 //! The consequence is that the act path is **injected, not imported**.
@@ -47,16 +48,20 @@ mod fixture;
 
 use std::sync::Arc;
 
-use perspicax_index::{Delta, HostFacts, Index, Receipt, Refusal, Selector, Verb};
+use perspicax_index::{
+    Delta, HostFacts, Index, Receipt, Refusal, Selector, Shot, ShotTarget, Verb, WindowReceipt,
+    WindowVerb,
+};
+use perspicax_node::SurfaceId;
 
-pub use crate::server::Perspicax;
+pub use crate::server::{Perspicax, ScreenshotParams};
 
 /// What an MCP server needs from the process hosting it.
 ///
-/// Three methods, and the split between them is the crate boundary this
+/// Five methods, and the split between them is the crate boundary this
 /// project's architecture rests on: two questions about the past, which any
-/// reader can answer from a snapshot, and one act, which only the thread that
-/// owns the compositor can carry out.
+/// reader can answer from a snapshot, and three things only the thread that
+/// owns the compositor can do -- two acts and a picture.
 ///
 /// `Send + Sync + 'static` because the server is handed round an async runtime
 /// and its tools run on the blocking pool. Implementors are expected to be
@@ -95,6 +100,24 @@ pub trait Desktop: Send + Sync + 'static {
     /// [`Denied::Refused`] when the gate said no, [`Denied::Undispatched`] when
     /// the compositor could not carry it out.
     fn act(&self, selector: &Selector, verb: &Verb) -> Result<Receipt, Denied>;
+
+    /// Close a window or bring a tab forward, and report what became of it.
+    ///
+    /// Blocks, like [`Desktop::act`], for long enough to see the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Desktop::act`].
+    fn act_window(&self, surface: SurfaceId, verb: WindowVerb) -> Result<WindowReceipt, Denied>;
+
+    /// Take a picture of a monitor or a window.
+    ///
+    /// # Errors
+    ///
+    /// [`Denied::Refused`] for a window the gate will not let the agent read,
+    /// [`Denied::NotBuilt`] from a build that cannot take pictures, and
+    /// [`Denied::Undispatched`] when the compositor could not.
+    fn capture(&self, target: ShotTarget) -> Result<Shot, Denied>;
 }
 
 /// Why an act produced no receipt.
@@ -114,6 +137,9 @@ pub enum Denied {
     /// The compositor could not carry it out.
     #[error("not dispatched: {0}")]
     Undispatched(String),
+    /// This build has no such capability: the cargo feature named.
+    #[error("not built: this perspicax has no `{0}` feature")]
+    NotBuilt(String),
 }
 
 /// Why the server stopped.
@@ -134,7 +160,7 @@ pub enum ServeError {
     Stopped(String),
 }
 
-/// Serve the six tools over stdio until the client goes away.
+/// Serve the eight tools over stdio until the client goes away.
 ///
 /// # stdout is the wire
 ///

@@ -24,8 +24,8 @@ mod keys;
 use std::path::{Path, PathBuf};
 
 use perspicax_policy::{
-    Action, Bindings, Chord, Colour, Decorations, Direction, Flipping, Focus, FocusModel, Grid,
-    Keysym, Mods, Place, Shape, Side, Snapping, Towards,
+    Access, Action, Bindings, Chord, Colour, Decorations, Direction, Flipping, Focus, FocusModel,
+    Grid, Keysym, Mods, Place, Program, Protocol, Rule, Shape, Side, Snapping, Towards,
 };
 use serde::Deserialize;
 
@@ -36,6 +36,8 @@ use serde::Deserialize;
 pub struct Built {
     pub seat: bool,
     pub xwayland: bool,
+    /// Rendering on demand for a screenshot, which `screencopy` needs.
+    pub capture: bool,
 }
 
 /// The starting point a config file layers onto.
@@ -82,6 +84,9 @@ pub struct Config {
     /// with the `xwayland` feature; saying `true` in one without it is an
     /// error.
     pub xwayland: bool,
+    /// Which programs may use the protocols that reach past their own
+    /// windows: taskbars, pagers, screenshot and display tools.
+    pub protocols: Access,
 }
 
 /// The keyboard layout and key repeat.
@@ -347,8 +352,32 @@ impl Config {
             },
             decorations: Decorations::default(),
             xwayland: built.xwayland,
+            protocols: protocols(built),
         }
     }
+}
+
+/// The `[protocols]` defaults, the same in both profiles: a profile is a
+/// window manager's habits, not a security posture. Listing windows and
+/// workspaces is open to any client, as every panel expects. Reading pixels
+/// and moving monitors is for the programs that are known to do it, by name,
+/// which anything can claim; a person who wants it tighter writes full
+/// paths.
+fn protocols(built: Built) -> Access {
+    let only = |names: &[&str]| Rule::Only(names.iter().map(|name| Program::parse(name)).collect());
+    Access::open()
+        .with(
+            Protocol::Screencopy,
+            if built.capture {
+                only(&["grim", "wf-recorder", "xdg-desktop-portal-wlr"])
+            } else {
+                Rule::Off
+            },
+        )
+        .with(
+            Protocol::OutputManagement,
+            only(&["wlr-randr", "kanshi", "wdisplays", "nwg-displays"]),
+        )
 }
 
 /// Where the config file lives: `$XDG_CONFIG_HOME/perspicax/config.toml`,
@@ -417,6 +446,25 @@ struct Raw {
     workspaces: Option<RawWorkspaces>,
     snap: Option<RawSnap>,
     decorations: Option<RawDecorations>,
+    protocols: Option<RawProtocols>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawProtocols {
+    foreign_toplevel_list: Option<RawRule>,
+    foreign_toplevel_management: Option<RawRule>,
+    workspace: Option<RawRule>,
+    screencopy: Option<RawRule>,
+    output_management: Option<RawRule>,
+}
+
+/// `"any"`, `"off"`, or a list of programs.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawRule {
+    Word(String),
+    List(Vec<String>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -703,6 +751,10 @@ impl Raw {
             config.decorations = decorations.apply(config.decorations)?;
         }
 
+        if let Some(protocols) = self.protocols {
+            config.protocols = protocols.apply(config.protocols, built)?;
+        }
+
         if let Some(empty) = self.autostart.iter().position(Vec::is_empty) {
             return Err(invalid(
                 format!("autostart[{empty}]"),
@@ -754,6 +806,66 @@ impl RawDecorations {
             decorations.unfocused = colour("unfocused", unfocused)?;
         }
         Ok(decorations)
+    }
+}
+
+impl RawProtocols {
+    fn apply(self, mut access: Access, built: Built) -> Result<Access, Error> {
+        let written = [
+            (Protocol::ForeignToplevelList, self.foreign_toplevel_list),
+            (
+                Protocol::ForeignToplevelManagement,
+                self.foreign_toplevel_management,
+            ),
+            (Protocol::Workspace, self.workspace),
+            (Protocol::Screencopy, self.screencopy),
+            (Protocol::OutputManagement, self.output_management),
+        ];
+        for (protocol, raw) in written {
+            let Some(raw) = raw else { continue };
+            let rule = raw.rule(protocol)?;
+            if protocol == Protocol::Screencopy && rule != Rule::Off && !built.capture {
+                return Err(Error::NotBuilt {
+                    key: "protocols.screencopy",
+                    feature: "capture",
+                });
+            }
+            access = access.with(protocol, rule);
+        }
+        Ok(access)
+    }
+}
+
+impl RawRule {
+    fn rule(self, protocol: Protocol) -> Result<Rule, Error> {
+        let key = || format!("protocols.{}", protocol.key());
+        match self {
+            Self::Word(word) => match word.as_str() {
+                "any" => Ok(Rule::Any),
+                "off" => Ok(Rule::Off),
+                other => Err(invalid(
+                    key(),
+                    format!(
+                        "`{other}` is not a rule; write \"any\", \"off\", or a list of \
+                         programs such as [\"grim\", \"/usr/bin/kanshi\"]"
+                    ),
+                )),
+            },
+            Self::List(programs) if programs.is_empty() => Err(invalid(
+                key(),
+                "an empty list admits nobody; write \"off\"".to_owned(),
+            )),
+            Self::List(programs) => match programs.iter().position(|entry| entry.trim().is_empty())
+            {
+                Some(blank) => Err(invalid(
+                    format!("{}[{blank}]", key()),
+                    "an empty program name".to_owned(),
+                )),
+                None => Ok(Rule::Only(
+                    programs.iter().map(|entry| Program::parse(entry)).collect(),
+                )),
+            },
+        }
     }
 }
 
@@ -977,6 +1089,7 @@ mod tests {
     const SEAT: Built = Built {
         seat: true,
         xwayland: true,
+        capture: true,
     };
 
     fn alt(key: Keysym) -> (Mods, [Keysym; 1]) {
@@ -1023,6 +1136,7 @@ mod tests {
         let built = Built {
             seat: true,
             xwayland: false,
+            capture: true,
         };
         let error = parse("xwayland = true", built).unwrap_err();
         assert!(
@@ -1036,6 +1150,7 @@ mod tests {
         let built = Built {
             seat: true,
             xwayland: false,
+            capture: true,
         };
         assert!(!parse("xwayland = false", built).unwrap().xwayland);
     }
@@ -1502,5 +1617,85 @@ mod tests {
     fn a_missing_file_is_the_classic_profile() {
         let config = load(Path::new("/nonexistent/perspicax/config.toml"), SEAT).unwrap();
         assert_eq!(config.profile, Profile::Classic);
+    }
+
+    #[test]
+    fn protocols_default_is_the_same_in_both_profiles() {
+        let classic = Config::profile(Profile::Classic, SEAT).protocols;
+        assert_eq!(classic, Config::profile(Profile::Minimal, SEAT).protocols);
+        assert!(classic.admits(Protocol::ForeignToplevelManagement, None));
+        assert!(classic.admits(Protocol::Screencopy, Some("/usr/bin/grim")));
+        assert!(!classic.admits(Protocol::Screencopy, Some("/usr/bin/firefox")));
+        assert!(classic.admits(Protocol::OutputManagement, Some("/usr/bin/kanshi")));
+    }
+
+    #[test]
+    fn a_protocol_key_layers_on_the_profile() {
+        let config = parse(
+            r#"
+            [protocols]
+            workspace = "off"
+            screencopy = ["/usr/bin/grim", "flameshot"]
+            "#,
+            SEAT,
+        )
+        .unwrap();
+        let access = config.protocols;
+        assert!(!access.admits(Protocol::Workspace, Some("/usr/bin/waybar")));
+        assert!(access.admits(Protocol::Screencopy, Some("/usr/bin/grim")));
+        assert!(!access.admits(Protocol::Screencopy, Some("/tmp/grim")));
+        assert!(access.admits(Protocol::Screencopy, Some("/opt/x/flameshot")));
+        assert!(
+            access.admits(Protocol::ForeignToplevelList, None),
+            "from the profile"
+        );
+    }
+
+    #[test]
+    fn screencopy_without_capture_names_the_feature() {
+        let built = Built {
+            capture: false,
+            ..SEAT
+        };
+        assert_eq!(
+            Config::profile(Profile::Classic, built)
+                .protocols
+                .rule(Protocol::Screencopy),
+            &Rule::Off
+        );
+        let error = parse("[protocols]\nscreencopy = \"any\"", built).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::NotBuilt {
+                    key: "protocols.screencopy",
+                    feature: "capture"
+                }
+            ),
+            "{error}"
+        );
+        assert!(parse("[protocols]\nscreencopy = \"off\"", built).is_ok());
+    }
+
+    #[test]
+    fn an_unknown_protocol_key_is_named() {
+        let error = parse("[protocols]\nscreenshot = \"any\"", SEAT).unwrap_err();
+        assert!(error.to_string().contains("screenshot"), "{error}");
+    }
+
+    #[test]
+    fn an_empty_allowlist_is_refused() {
+        let error = parse("[protocols]\noutput-management = []", SEAT).unwrap_err();
+        assert!(
+            error.to_string().contains("protocols.output-management"),
+            "{error}"
+        );
+        assert!(parse("[protocols]\nworkspace = [\"\"]", SEAT).is_err());
+    }
+
+    #[test]
+    fn a_word_other_than_any_or_off_is_refused() {
+        let error = parse("[protocols]\nworkspace = \"all\"", SEAT).unwrap_err();
+        assert!(error.to_string().contains("`all` is not a rule"), "{error}");
     }
 }

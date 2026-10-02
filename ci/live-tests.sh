@@ -131,3 +131,11 @@ if ! command -v Xwayland >/dev/null; then
 fi
 cargo test --locked -p perspicax-compositor --features xwayland --test xwayland \
     -- --ignored --nocapture
+
+# Pictures, and the whole compositor suite again beside them. With `capture`
+# the headless compositor keeps every client's last buffer to draw from
+# instead of releasing it on arrival, which changes what every other live
+# test runs against -- so they all run again under it, not only the tests of
+# pictures.
+cargo test --locked -p perspicax-compositor --features capture \
+    -- --ignored --test-threads=1 --nocapture

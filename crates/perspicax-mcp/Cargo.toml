@@ -25,6 +25,11 @@ tokio.workspace = true
 tracing.workspace = true
 perspicax-index = { path = "../perspicax-index", version = "0.1.0" }
 perspicax-node = { path = "../perspicax-node", version = "0.1.0" }
+# `screenshot` answers with a PNG, base64 inside the JSON-RPC frame as MCP's
+# image content requires. Both pure Rust, and both portable: a picture is a
+# value here, not a renderer.
+base64 = "0.23"
+png = "0.18"
 
 # The protocol test speaks JSON-RPC down a `tokio::io::duplex` pair, which needs
 # two features the library itself does not: `io-util` for the pipe and the split,

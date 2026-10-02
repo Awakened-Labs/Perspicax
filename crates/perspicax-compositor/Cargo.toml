@@ -74,6 +74,13 @@ seat = [
 # our side (x11rb speaks the protocol; Xwayland itself is a program we spawn,
 # not a library we link), so it costs the headless build nothing to carry.
 xwayland = ["smithay/xwayland", "dep:x11rb"]
+# Pictures of the screen, rendered when one is asked for and never otherwise:
+# the MCP `screenshot` tool and wlr-screencopy. A seat draws them with the
+# GPU it already has. Headless draws them in software, with pixman (MIT, the
+# system libpixman-1 found by pkg-config), so that CI tests the same path;
+# it is a feature so the headless build still needs nothing but
+# libxkbcommon unless a picture is wanted.
+capture = ["smithay/renderer_pixman"]
 
 # A real Wayland client for the live tests, so a layer-shell test needs no
 # panel program installed. MIT; default features off, since the tests need
@@ -81,3 +88,8 @@ xwayland = ["smithay/xwayland", "dep:x11rb"]
 [dev-dependencies]
 smithay-client-toolkit = { version = "0.20", default-features = false }
 wayland-client = "0.31"
+# The client side of the protocols sctk has no helpers for: a taskbar's
+# window list and controls, and session lock, spoken raw. The same crate and version the
+# server side already uses through smithay; only the features differ.
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }

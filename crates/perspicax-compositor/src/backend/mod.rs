@@ -37,7 +37,7 @@ use smithay::{
 };
 
 use perspicax_index::Consent;
-use perspicax_policy::{Place, Shape};
+use perspicax_policy::{Access, Place, Shape};
 
 use crate::{Config, Error, FRAME_INTERVAL, state::Compositor};
 
@@ -54,6 +54,10 @@ pub enum Backend {
         /// How many workspaces and how they relate to the monitors, as a
         /// seat's `[workspaces]` table would say. The default is one.
         workspaces: Shape,
+        /// Which clients may use the protocols that reach past their own
+        /// windows, as a seat's `[protocols]` table would say. The default
+        /// is any client: headless hosts only what it was told to start.
+        access: Access,
     },
     /// A real session: the outputs the GPU has connected, the keyboards and
     /// pointers libinput finds, device access negotiated through libseat.
@@ -99,6 +103,7 @@ impl Backend {
         Self::Headless {
             outputs: vec![Virtual::numbered(1, size)],
             workspaces: Shape::default(),
+            access: Access::open(),
         }
     }
 
@@ -138,6 +143,15 @@ pub(crate) enum Running {
     Headless {
         outputs: Vec<Plugged>,
         workspaces: Shape,
+        access: Access,
+        /// Virtual monitors a display tool turned off, kept so it can turn
+        /// them on again.
+        dark: Vec<Virtual>,
+        /// The software renderer pictures are drawn with, made the first
+        /// time one is asked for. See [`crate::capture`]. Boxed, as the
+        /// seat's session is: it is large, and the rest of this is not.
+        #[cfg(feature = "capture")]
+        pixman: Option<Box<smithay::backend::renderer::pixman::PixmanRenderer>>,
     },
     /// The session, the GPU and the outputs on it. Boxed because it is large
     /// and the headless variant is not.
@@ -163,9 +177,14 @@ impl Running {
             Backend::Headless {
                 outputs,
                 workspaces,
+                access,
             } => Ok(Self::Headless {
                 outputs: outputs.iter().map(|out| plug(display, out)).collect(),
                 workspaces: *workspaces,
+                access: access.clone(),
+                dark: Vec::new(),
+                #[cfg(feature = "capture")]
+                pixman: None,
             }),
             #[cfg(feature = "seat")]
             Backend::Seat => Ok(Self::Seat(Box::new(seat::Session::open(
@@ -199,6 +218,16 @@ impl Running {
         }
     }
 
+    /// Who may use the protocols that reach past their own windows: the
+    /// person's `[protocols]` on a seat.
+    pub(crate) fn access(&self) -> Access {
+        match self {
+            Self::Headless { access, .. } => access.clone(),
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.settings.protocols.clone(),
+        }
+    }
+
     /// How dragging a window to an edge snaps it: the person's config on a
     /// seat. Headless nobody drags anything.
     pub(crate) fn snapping(&self) -> Option<perspicax_policy::Snapping> {
@@ -220,12 +249,14 @@ impl Running {
         }
     }
 
-    /// Whether this backend reads client buffers after commit. The renderer
-    /// does; headless never looks at a pixel and releases each buffer as it
+    /// Whether this backend keeps client buffers after commit, to draw from.
+    /// The seat's renderer does, and so does headless when it can take
+    /// pictures, which are drawn from the buffers last committed. Otherwise
+    /// headless never looks at a pixel and releases each buffer as it
     /// arrives. See [`Compositor`]'s `commit`.
-    pub(crate) fn renders(&self) -> bool {
+    pub(crate) fn keeps_buffers(&self) -> bool {
         match self {
-            Self::Headless { .. } => false,
+            Self::Headless { .. } => cfg!(feature = "capture"),
             #[cfg(feature = "seat")]
             Self::Seat(_) => true,
         }
@@ -293,7 +324,11 @@ impl Running {
     /// popup grabs. Headless keeps the deterministic M2 behaviour its tests
     /// are written against. See `crate::shell`.
     pub(crate) fn has_person(&self) -> bool {
-        self.renders()
+        match self {
+            Self::Headless { .. } => false,
+            #[cfg(feature = "seat")]
+            Self::Seat(_) => true,
+        }
     }
 
     /// Start what the session runs besides its windows: Xwayland, if built
@@ -350,13 +385,13 @@ impl Running {
 /// A virtual output a headless compositor is running.
 pub(crate) struct Plugged {
     pub(crate) output: Output,
-    place: Place,
-    global: GlobalId,
+    pub(crate) place: Place,
+    pub(crate) global: GlobalId,
 }
 
 /// Bring a virtual monitor up and advertise it. Where it goes is decided
 /// afterwards, with every other output, by [`Compositor::arrange_outputs`].
-fn plug(display: &DisplayHandle, virtual_output: &Virtual) -> Plugged {
+pub(crate) fn plug(display: &DisplayHandle, virtual_output: &Virtual) -> Plugged {
     let output = Output::new(
         virtual_output.name.clone(),
         PhysicalProperties {
@@ -392,6 +427,7 @@ impl Compositor {
             crate::Command::Plug(virtual_output) => self.plug_virtual(virtual_output),
             crate::Command::Unplug(name) => self.unplug_virtual(name),
             crate::Command::Perform(action) => self.perform(action),
+            crate::Command::Protocols(access) => self.set_access(access.clone()),
         }
     }
 

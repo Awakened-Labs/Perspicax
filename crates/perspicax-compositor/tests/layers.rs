@@ -4,7 +4,8 @@
 //! surface on the `top` layer sits over every window, so the part of a window
 //! under a panel is occluded *by the panel*. This test puts a real window and a
 //! real panel on a headless compositor, through the real protocols, and asks
-//! the index's own judge.
+//! the index's own judge. And a panel that reserves room for itself moves the
+//! windows already there out from under it.
 //!
 //! The client is written here with smithay-client-toolkit, not borrowed from
 //! waybar, so the test needs nothing installed beyond what CI already has. Like
@@ -49,10 +50,16 @@ use wayland_client::{
 const WINDOW: (u32, u32) = (400, 300);
 const PANEL_HEIGHT: u32 = 40;
 
-#[test]
-#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
-fn a_panel_on_the_top_layer_occludes_the_window_beneath_it() {
-    let socket = format!("perspicax-test-{}", std::process::id());
+/// A headless compositor on a thread, and the means to stop it.
+fn start(
+    name: &str,
+) -> (
+    String,
+    Facts,
+    Stop,
+    thread::JoinHandle<Result<(), perspicax_compositor::Error>>,
+) {
+    let socket = format!("perspicax-test-{name}-{}", std::process::id());
     let facts = Facts::new();
     let stop = Stop::new();
     let compositor = {
@@ -70,27 +77,37 @@ fn a_panel_on_the_top_layer_occludes_the_window_beneath_it() {
             perspicax_compositor::run(&config, &facts, &Requests::new(), &stop)
         })
     };
+    (socket, facts, stop, compositor)
+}
 
-    let client = connect(&socket);
-    let (globals, mut queue) = registry_queue_init(&client).expect("the registry");
-    let qh = queue.handle();
-    let mut desk = Desk::new(&globals, &qh);
-    // The window first, so the cascade puts it at the origin under where the
-    // panel will go -- a panel mapped first would make the window open below
-    // its exclusive zone, which is correct and not what this test is about.
-    desk.open_window(&qh);
-    until(&mut queue, &mut desk, |desk| desk.windows_drawn == 1);
-    desk.open_panel(&qh);
-    until(&mut queue, &mut desk, |desk| desk.panel_drawn);
-
-    let published = wait_for(&facts, |facts| {
+fn mapped(facts: &Facts, count: usize) -> HostFacts {
+    wait_for(facts, |facts| {
         facts
             .surfaces()
             .iter()
             .filter(|surface| surface.mapped)
             .count()
-            == 2
-    });
+            == count
+    })
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_panel_on_the_top_layer_occludes_the_window_beneath_it() {
+    let (socket, facts, stop, compositor) = start("occludes");
+    let client = connect(&socket);
+    let (globals, mut queue) = registry_queue_init(&client).expect("the registry");
+    let qh = queue.handle();
+    let mut desk = Desk::new(&globals, &qh);
+    // The window first, so the cascade puts it at the origin under where the
+    // panel will go. A panel that reserves no room leaves it there; one that
+    // does would move it out from under itself, which is the next test.
+    desk.open_window(&qh);
+    until(&mut queue, &mut desk, |desk| desk.windows_drawn == 1);
+    desk.open_panel(&qh, false);
+    until(&mut queue, &mut desk, |desk| desk.panel_drawn);
+
+    let published = mapped(&facts, 2);
     let surfaces = published.surfaces();
     let (window, panel) = (&surfaces[0], &surfaces[1]);
     assert!(
@@ -112,22 +129,51 @@ fn a_panel_on_the_top_layer_occludes_the_window_beneath_it() {
         "and one further down is in the clear"
     );
 
-    // And a window opened once the panel is up is placed below its exclusive
-    // zone, never under it.
+    stop.request();
+    drop((desk, queue));
+    compositor
+        .join()
+        .expect("the compositor thread panicked")
+        .expect("the compositor failed");
+}
+
+/// A bar started after the windows -- waybar from a key, as people do --
+/// must not leave their tops under it: the window comes out from under the
+/// room the panel reserves, and one opened afterwards opens below it.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_panel_that_reserves_room_moves_windows_out_from_under_it() {
+    let (socket, facts, stop, compositor) = start("reserves");
+    let client = connect(&socket);
+    let (globals, mut queue) = registry_queue_init(&client).expect("the registry");
+    let qh = queue.handle();
+    let mut desk = Desk::new(&globals, &qh);
     desk.open_window(&qh);
-    until(&mut queue, &mut desk, |desk| desk.windows_drawn == 2);
+    until(&mut queue, &mut desk, |desk| desk.windows_drawn == 1);
+    let first = mapped(&facts, 1).surfaces()[0].id;
+    desk.open_panel(&qh, true);
+    until(&mut queue, &mut desk, |desk| desk.panel_drawn);
+
     let published = wait_for(&facts, |facts| {
         facts
-            .surfaces()
-            .iter()
-            .filter(|surface| surface.mapped)
-            .count()
-            == 3
+            .surface(first)
+            .is_some_and(|window| window.geometry.y0 >= f64::from(PANEL_HEIGHT))
     });
+    let window = published.surface(first).expect("the window");
+    assert_eq!(
+        judge(&published, first, Rect::new(10.0, 10.0, 60.0, 30.0)).visibility,
+        Visibility::Visible,
+        "its top is in the clear now: {:?}",
+        window.geometry
+    );
+
+    desk.open_window(&qh);
+    until(&mut queue, &mut desk, |desk| desk.windows_drawn == 2);
+    let published = mapped(&facts, 3);
     let second = published
         .surfaces()
         .iter()
-        .find(|surface| surface.id != window.id && surface.id != panel.id)
+        .find(|surface| surface.id != first && surface.geometry.y1 - surface.geometry.y0 > 100.0)
         .expect("the second window");
     assert!(
         second.geometry.y0 >= f64::from(PANEL_HEIGHT),
@@ -230,14 +276,17 @@ impl Desk {
         self.windows.push(window);
     }
 
-    fn open_panel(&mut self, qh: &QueueHandle<Self>) {
+    /// A strip across the top: reserving its height for itself, or not.
+    fn open_panel(&mut self, qh: &QueueHandle<Self>, reserve: bool) {
         let surface = self.compositor.create_surface(qh);
         let panel = self
             .layers
             .create_layer_surface(qh, surface, Layer::Top, Some("panel"), None);
         panel.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
         panel.set_size(0, PANEL_HEIGHT);
-        panel.set_exclusive_zone(i32::try_from(PANEL_HEIGHT).unwrap());
+        if reserve {
+            panel.set_exclusive_zone(i32::try_from(PANEL_HEIGHT).unwrap());
+        }
         panel.commit();
         self.panel = Some(panel);
     }

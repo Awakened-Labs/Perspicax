@@ -197,6 +197,7 @@ impl Session {
                                 wrap: false,
                             },
                         },
+                        access: perspicax_policy::Access::open(),
                     },
                     spawn: Vec::new(),
                     env: Vec::new(),

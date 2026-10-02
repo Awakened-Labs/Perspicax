@@ -177,7 +177,7 @@ impl Compositor {
                 self.parked
                     .iter()
                     .chain(self.space.elements())
-                    .filter_map(|window| self.facts_for(window)),
+                    .filter_map(|window| Some(self.grouped(window, self.facts_for(window)?))),
             )
             .chain(above.iter().filter_map(layer))
             .chain(covers)
@@ -195,6 +195,32 @@ impl Compositor {
                     )
                 })),
         );
+        self.announce();
+    }
+
+    /// Tell the clients that watch other programs' windows what changed.
+    /// After every publication, because a publication follows every change
+    /// that could matter to them.
+    fn announce(&mut self) {
+        self.sync_toplevels();
+        self.sync_workspaces();
+        self.sync_heads();
+    }
+
+    /// What a window's facts say about where it belongs, beyond where it
+    /// is: its app id, its tab group and its workspace.
+    fn grouped(&self, window: &Framed, mut facts: SurfaceFacts) -> SurfaceFacts {
+        facts.app_id = crate::toplevels::app_id(window);
+        facts.tabs = self
+            .tabs
+            .tabs(facts.id)
+            .map(<[_]>::to_vec)
+            .unwrap_or_default();
+        facts.workspace = match self.workspaces.home(facts.id) {
+            Some(perspicax_policy::Home::On(cell)) => Some(cell.0 + 1),
+            _ => None,
+        };
+        facts
     }
 
     /// One window's facts, or `None` if it has no id yet -- which means it has
@@ -301,6 +327,10 @@ impl Compositor {
                     smithay::utils::Rectangle::new(location, declared.size),
                 )
             },
+            // Filled by `grouped`, for X11 windows too.
+            app_id: None,
+            tabs: Vec::new(),
+            workspace: None,
         })
     }
 
@@ -344,6 +374,9 @@ impl Compositor {
             off_workspace: None,
             behind_tab: None,
             frame: Vec::new(),
+            app_id: None,
+            tabs: Vec::new(),
+            workspace: None,
         }
     }
 

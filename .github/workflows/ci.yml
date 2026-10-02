@@ -86,10 +86,16 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libudev-dev libinput-dev libseat-dev \
-            libgbm-dev libdrm-dev libegl-dev libgles-dev
+            libgbm-dev libdrm-dev libegl-dev libgles-dev libpixman-1-dev
 
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets --features perspicax/desktop -- -D warnings
+
+      # Pictures without a seat: the headless compositor drawing them in
+      # software. A combination `desktop` does not build, so it is linted
+      # on its own.
+      - name: clippy (headless capture)
+        run: cargo clippy --locked --workspace --all-targets --features perspicax/capture -- -D warnings
 
       - name: test
         run: cargo test --locked --workspace --features perspicax/desktop

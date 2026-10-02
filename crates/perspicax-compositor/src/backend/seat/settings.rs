@@ -38,6 +38,7 @@ use crate::{Error, Launch, act::Keys, backend::Running, state::Compositor};
 const BUILT: Built = Built {
     seat: true,
     xwayland: cfg!(feature = "xwayland"),
+    capture: cfg!(feature = "capture"),
 };
 
 /// How long a save has to be quiet before it is read: long enough for an
@@ -233,6 +234,7 @@ pub(crate) fn reload(state: &mut Compositor) {
     let keyboard_changed = fresh.keyboard != session.settings.keyboard;
     let outputs_changed = fresh.outputs != session.settings.outputs;
     let decorations_changed = fresh.decorations != session.settings.decorations;
+    let access = (fresh.protocols != session.settings.protocols).then(|| fresh.protocols.clone());
     let workspaces = fresh.workspaces;
     if fresh.flipping.delay_ms != session.settings.flipping.delay_ms {
         session.dwell = perspicax_policy::EdgeDwell::new(fresh.flipping.delay_ms);
@@ -246,6 +248,11 @@ pub(crate) fn reload(state: &mut Compositor) {
         apply_keyboard(state);
     }
     if outputs_changed {
+        // The file says where the monitors go now, over anything a display
+        // tool asked for since.
+        if let Running::Seat(session) = &mut state.backend {
+            session.runtime = None;
+        }
         relight(state);
     }
     if workspaces != state.workspaces.shape() {
@@ -259,10 +266,15 @@ pub(crate) fn reload(state: &mut Compositor) {
     if decorations_changed {
         state.refit_frames();
     }
+    let access_changed = access.is_some();
+    if let Some(access) = access {
+        state.set_access(access);
+    }
     tracing::info!(
         keyboard_changed,
         outputs_changed,
         decorations_changed,
+        access_changed,
         "config reloaded"
     );
 }

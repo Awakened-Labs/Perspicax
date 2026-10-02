@@ -104,10 +104,6 @@ render_elements! {
 const PREVIEW: [f32; 4] = [0.55, 0.7, 0.95, 1.0];
 const PREVIEW_ALPHA: f32 = 0.25;
 
-/// What shows where no window is: a dark grey, so a working output is
-/// distinguishable from a dead one. The wallpaper is the shell's job (W5).
-const BACKDROP: [f32; 4] = [0.12, 0.12, 0.14, 1.0];
-
 /// Which hardware planes a frame may use: the primary plane only, with the
 /// cursor and every window composited into it.
 ///
@@ -181,6 +177,12 @@ pub(crate) struct Session {
     /// False while another VT has the seat: no device may be touched then.
     active: bool,
     pub(super) exit: bool,
+    /// The output rules a display tool put in force, instead of the
+    /// config's, until a reload changes `[[output]]`. See `crate::heads`.
+    pub(super) runtime: Option<Vec<perspicax_config::OutputRule>>,
+    /// Connected monitors left dark, by name, with the modes each offers: so
+    /// a display tool can turn one on.
+    dark: Vec<(String, Vec<connectors::Offered>)>,
 }
 
 /// One connected monitor, driven by one CRTC.
@@ -190,6 +192,9 @@ struct Head {
     output: Output,
     global: GlobalId,
     drm: DrmOutput<Allocator, Exporter, (), DrmDeviceFd>,
+    /// The modes the monitor offers, and which it is showing.
+    modes: Vec<connectors::Offered>,
+    mode: usize,
     /// Something was committed since this output last rendered.
     dirty: bool,
     /// A render is waiting for the loop's next idle turn.
@@ -336,6 +341,8 @@ impl Session {
             notches: perspicax_policy::Notches::default(),
             active: true,
             exit: false,
+            runtime: None,
+            dark: Vec::new(),
         })
     }
 
@@ -367,8 +374,7 @@ impl Session {
             .map(|head| {
                 let name = head.output.name();
                 let place = self
-                    .settings
-                    .outputs
+                    .rules()
                     .iter()
                     .find(|rule| rule.name == name)
                     .map(|rule| rule.place.clone())
@@ -447,6 +453,66 @@ fn gpu_path(seat: &str) -> Result<PathBuf, Error> {
     }
 }
 
+impl Session {
+    /// The output rules in force: a display tool's, or the config's.
+    fn rules(&self) -> &[perspicax_config::OutputRule] {
+        self.runtime.as_deref().unwrap_or(&self.settings.outputs)
+    }
+
+    /// Every monitor, lit or dark, as a display tool sees it.
+    pub(crate) fn heads(
+        &self,
+        space: &smithay::desktop::Space<crate::framed::Framed>,
+    ) -> Vec<perspicax_policy::Head> {
+        let modes = |offered: &[connectors::Offered]| -> Vec<perspicax_policy::HeadMode> {
+            offered
+                .iter()
+                .map(|mode| perspicax_policy::HeadMode {
+                    width: i32::from(mode.width),
+                    height: i32::from(mode.height),
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "a refresh rate in millihertz fits an i32 many times over"
+                    )]
+                    refresh: (mode.refresh * 1000.0).round() as i32,
+                    preferred: mode.preferred,
+                })
+                .collect()
+        };
+        self.heads
+            .iter()
+            .map(|head| perspicax_policy::Head {
+                name: head.output.name(),
+                enabled: true,
+                modes: modes(&head.modes),
+                current: Some(head.mode),
+                position: space
+                    .output_geometry(&head.output)
+                    .map_or((0, 0), |area| (area.loc.x, area.loc.y)),
+                scale: head.output.current_scale().fractional_scale(),
+            })
+            .chain(
+                self.dark
+                    .iter()
+                    .map(|(name, offered)| perspicax_policy::Head {
+                        name: name.clone(),
+                        enabled: false,
+                        modes: modes(offered),
+                        current: None,
+                        position: (0, 0),
+                        scale: 1.0,
+                    }),
+            )
+            .collect()
+    }
+
+    /// The renderer, for drawing something other than a frame: a picture.
+    #[cfg(feature = "capture")]
+    pub(crate) fn renderer(&mut self) -> &mut GlesRenderer {
+        &mut self.renderer
+    }
+}
+
 /// EGL on the GBM device, and GLES on that.
 fn renderer(gbm: &GbmDevice<DrmDeviceFd>) -> Result<GlesRenderer, Error> {
     // `eglGetPlatformDisplay` returns the same display for the same device to
@@ -476,6 +542,9 @@ fn rescan(state: &mut Compositor) {
     let Running::Seat(session) = &mut state.backend else {
         return;
     };
+    // Every connector not lit is offered again below, and says again
+    // whether it is dark.
+    session.dark.clear();
     let device = session.outputs.device();
     let resources = match device.resource_handles() {
         Ok(resources) => resources,
@@ -544,6 +613,69 @@ fn rescan(state: &mut Compositor) {
     state.arrange_outputs();
 }
 
+/// Put a display tool's request in force: the rules it implies, as if the
+/// config had said them. Only where monitors go changed, and they are moved;
+/// anything else, and they are lit again, which is a modeset.
+pub(crate) fn apply_heads(state: &mut Compositor, changes: &[perspicax_policy::HeadChange]) {
+    let Running::Seat(session) = &mut state.backend else {
+        return;
+    };
+    let current = session.heads(&state.space);
+    let mut rules = session.rules().to_vec();
+    let mut moved_only = true;
+    for change in changes {
+        let Some(head) = current.iter().find(|head| head.name == change.name) else {
+            continue;
+        };
+        let at = match rules.iter().position(|rule| rule.name == change.name) {
+            Some(at) => at,
+            None => {
+                rules.push(perspicax_config::OutputRule {
+                    name: change.name.clone(),
+                    enable: true,
+                    mode: None,
+                    place: perspicax_policy::Place::Auto,
+                    scale: None,
+                });
+                rules.len() - 1
+            }
+        };
+        let rule = &mut rules[at];
+        if change.enabled != head.enabled {
+            moved_only = false;
+        }
+        rule.enable = change.enabled;
+        if let Some(perspicax_policy::ModeChoice::Listed(index)) = change.mode
+            && let Some(mode) = head.modes.get(index)
+        {
+            if head.current != Some(index) {
+                moved_only = false;
+            }
+            rule.mode = Some(perspicax_config::Mode {
+                width: u16::try_from(mode.width).unwrap_or(0),
+                height: u16::try_from(mode.height).unwrap_or(0),
+                refresh: Some(f64::from(mode.refresh) / 1000.0),
+            });
+        }
+        if let Some(scale) = change.scale {
+            if (scale - head.scale).abs() > f64::EPSILON {
+                moved_only = false;
+            }
+            rule.scale = Some(scale);
+        }
+        if let Some((x, y)) = change.position {
+            rule.place = perspicax_policy::Place::At(x, y);
+        }
+    }
+    session.runtime = Some(rules);
+    if moved_only {
+        state.arrange_outputs();
+    } else {
+        relight(state);
+        state.refit_frames();
+    }
+}
+
 /// Tear every output down and light them again from the config. A modeset
 /// on every monitor, which is why reload only does it when the output rules
 /// changed.
@@ -569,16 +701,6 @@ fn light(
     crtc: crtc::Handle,
 ) -> Result<Option<Head>, String> {
     let name = format!("{}-{}", info.interface().as_str(), info.interface_id());
-    let rule = session
-        .settings
-        .outputs
-        .iter()
-        .find(|rule| rule.name == name);
-    if rule.is_some_and(|rule| !rule.enable) {
-        tracing::info!(output = name, "left dark by config");
-        return Ok(None);
-    }
-
     let offered: Vec<_> = info
         .modes()
         .iter()
@@ -592,6 +714,17 @@ fn light(
             }
         })
         .collect();
+    let rule = session
+        .rules()
+        .iter()
+        .find(|rule| rule.name == name)
+        .cloned();
+    if rule.as_ref().is_some_and(|rule| !rule.enable) {
+        tracing::info!(output = name, "left dark by config");
+        session.dark.push((name, offered));
+        return Ok(None);
+    }
+    let rule = rule.as_ref();
     let wanted = rule
         .and_then(|rule| rule.mode)
         .map(|mode| (mode.width, mode.height, mode.refresh));
@@ -650,6 +783,8 @@ fn light(
         output,
         global,
         drm,
+        modes: offered,
+        mode: at,
         dirty: true,
         scheduled: false,
         queued: false,
@@ -782,7 +917,10 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
             }
         },
     }
-    match head.drm.render_frame(renderer, &elements, BACKDROP, PLANES) {
+    match head
+        .drm
+        .render_frame(renderer, &elements, crate::BACKDROP, PLANES)
+    {
         Ok(frame) if !frame.is_empty => match head.drm.queue_frame(()) {
             Ok(()) => head.queued = true,
             Err(error) => tracing::warn!(output = head.output.name(), %error, "frame not queued"),

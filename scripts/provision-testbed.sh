@@ -50,8 +50,11 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
 # An earlier version of this script installed the whole DRM/GBM/EGL/libinput
 # set on the assumption a compositor must need it. It does not, and installing
 # them hides the fact that this tree builds on a box with no GPU at all.
+# libpixman-1 is the `capture` feature's: pictures drawn in software,
+# headless.
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    build-essential pkg-config curl git rsync ca-certificates libxkbcommon-dev
+    build-essential pkg-config curl git rsync ca-certificates libxkbcommon-dev \
+    libpixman-1-dev
 
 # Headless path, so the CI shape can be reproduced here without a container.
 # `xauth` is a Recommends of xvfb rather than a dependency, and `xvfb-run` exits
