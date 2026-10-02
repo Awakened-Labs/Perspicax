@@ -49,7 +49,6 @@ mod taking {
             allocator::Fourcc,
             renderer::{
                 Bind, ExportMem, ImportAll, ImportMem, Offscreen, Renderer, Texture,
-                TextureMapping,
                 damage::OutputDamageTracker,
                 element::{
                     AsRenderElements, Kind,
@@ -392,7 +391,11 @@ mod taking {
         let mapping = renderer
             .copy_framebuffer(&framebuffer, Rectangle::from_size(buffer), Fourcc::Abgr8888)
             .map_err(|error| failed(&error))?;
-        let flipped = mapping.flipped();
+        // Rows come back top first from both renderers. GLES's mapping says
+        // `flipped()` unconditionally, but the damage tracker drawing into an
+        // offscreen texture has already put the image the right way up, and
+        // turning it over again gave upside-down pictures on a seat (found on
+        // hardware; pixman headless says false and was always right).
         let bytes = renderer
             .map_texture(&mapping)
             .map_err(|error| failed(&error))?;
@@ -404,32 +407,7 @@ mod taking {
         Ok(Pixels {
             width,
             height,
-            rgba: upright(bytes, width as usize * 4, flipped),
+            rgba: bytes.to_vec(),
         })
-    }
-
-    /// Rows top first, whichever way up the renderer read them.
-    fn upright(bytes: &[u8], stride: usize, flipped: bool) -> Vec<u8> {
-        if !flipped || stride == 0 {
-            return bytes.to_vec();
-        }
-        bytes
-            .chunks_exact(stride)
-            .rev()
-            .flatten()
-            .copied()
-            .collect()
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::upright;
-
-        #[test]
-        fn a_flipped_read_is_turned_the_right_way_up() {
-            let rows = [1, 1, 2, 2, 3, 3];
-            assert_eq!(upright(&rows, 2, true), [3, 3, 2, 2, 1, 1]);
-            assert_eq!(upright(&rows, 2, false), rows);
-        }
     }
 }
