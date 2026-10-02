@@ -785,8 +785,11 @@ impl XdgShellHandler for Compositor {
     }
 
     /// Titles are not double-buffered, so a new one arrives without a
-    /// commit: published now, or the facts and every taskbar would keep the
-    /// old title until the window next drew.
+    /// commit: published now, and the titlebar drawn again now, or the facts,
+    /// every taskbar and the titlebar would keep the old title until the
+    /// window next drew. A shell that sets the title from its prompt does so
+    /// milliseconds after the program before it did, with nothing drawn in
+    /// between, and the titlebar went on showing the program's title.
     fn title_changed(&mut self, surface: ToplevelSurface) {
         tracing::debug!(
             surface = self
@@ -797,6 +800,7 @@ impl XdgShellHandler for Compositor {
             title = crate::facts::title(surface.wl_surface()),
             "title changed"
         );
+        self.backend.redraw();
         self.publish_facts();
     }
 

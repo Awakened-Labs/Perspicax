@@ -353,6 +353,7 @@ impl XwmHandler for Compositor {
         if matches!(property, WmWindowProperty::Title | WmWindowProperty::Class)
             && self.x11_window(&x11).is_some()
         {
+            self.backend.redraw();
             self.publish_facts();
         }
     }
