@@ -186,8 +186,8 @@ pub enum Error {
 pub struct Config {
     /// Where output goes and input comes from. See [`Backend`].
     pub backend: Backend,
-    /// Commands to start once the socket exists, each as a program and its
-    /// arguments.
+    /// Commands to start once the socket exists -- and Xwayland, when this
+    /// compositor starts one -- each as a program and its arguments.
     pub spawn: Vec<Vec<String>>,
     /// Environment every spawned child gets on top of this process's own.
     ///
@@ -332,14 +332,17 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         env: config.env.clone(),
         x11_display: None,
     });
-    let mut children = spawn_all(&config.spawn, &config.env, &socket_name)?;
-    // What we started is what an agent may act on, on a seat. Headless, this
-    // changes nothing: consent there is already everyone.
-    state.grant(children.iter().map(Child::id));
-    // The person's own programs, after the agent's: never granted consent.
-    // On a seat with Xwayland, they wait for it, so an X11 program in the
-    // autostart list finds a `DISPLAY`.
-    Running::populate(&mut state, &event_loop.handle(), config.xwayland)?;
+    // The agent's programs, then on a seat the person's own, which are never
+    // granted consent. Where this compositor starts an Xwayland both wait for
+    // it, so an X11 program -- or one started from a spawned terminal --
+    // finds a `DISPLAY`. Its number is not known until it is ready.
+    let spawn = config.spawn.clone();
+    Running::populate(
+        &mut state,
+        &event_loop.handle(),
+        config.xwayland,
+        move |state| spawn_all(state, &spawn),
+    )?;
 
     let deadline = config.run_for.map(|run_for| Instant::now() + run_for);
     let result = loop {
@@ -353,10 +356,17 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         // Collect children that have exited, so they do not sit as zombies
         // until the session ends. A spawned program that finished is gone
         // from this list, and nothing is left to kill for it at the end.
-        children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+        state
+            .spawned
+            .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
         state.backend.reap();
         if let Err(error) = display.flush_clients() {
             break Err(Error::Io(error));
+        }
+        // Before the stops, so a deadline cannot pass off a session that
+        // never started what it was asked to as one that ran.
+        if let Some(error) = state.spawn_failed.take() {
+            break Err(error);
         }
         if stop.requested()
             || state.backend.exit_requested()
@@ -369,35 +379,47 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
     // Children are killed rather than left behind. A compositor that exits
     // owing a live GTK window to a socket nobody is listening on has produced a
     // process that will never be told to stop.
-    for child in &mut children {
+    for child in &mut state.spawned {
         let _ = child.kill();
         let _ = child.wait();
     }
     result
 }
 
-/// Start every `--spawn` command against this compositor's socket.
+/// Start every `--spawn` command against this compositor's socket, as a key
+/// binding would: `DISPLAY` included, once there is an Xwayland to name.
+///
+/// What starts is what an agent may act on, on a seat, so consent is granted
+/// here, the moment each pid exists. Headless, that changes nothing: consent
+/// there is already everyone.
+///
+/// The first command that will not start stops the rest, and is left for
+/// `run` to return. What did start is kept in `state.spawned`, so it is
+/// killed with the session rather than left behind.
 ///
 /// The two toolkit variables are set because the default is not "whatever is
 /// running": a GTK or Qt client with `DISPLAY` set and no instruction will pick
 /// X11, connect to whatever X server is around, and map its window somewhere
 /// this compositor cannot see -- which looks exactly like a client that failed
 /// to start.
-fn spawn_all(
-    commands: &[Vec<String>],
-    env: &[(String, String)],
-    socket: &OsString,
-) -> Result<Vec<Child>, Error> {
-    let launch = Launch {
-        socket: socket.clone(),
-        env: env.to_vec(),
-        x11_display: None,
+fn spawn_all(state: &mut Compositor, commands: &[Vec<String>]) {
+    let Some(launch) = state.launch.clone() else {
+        return;
     };
-    commands
-        .iter()
-        .filter(|command| !command.is_empty())
-        .map(|command| launch.spawn(command))
-        .collect()
+    let mut started = Vec::new();
+    for command in commands.iter().filter(|command| !command.is_empty()) {
+        match launch.spawn(command) {
+            Ok(child) => {
+                started.push(child.id());
+                state.spawned.push(child);
+            }
+            Err(error) => {
+                state.spawn_failed = Some(error);
+                break;
+            }
+        }
+    }
+    state.grant(started);
 }
 
 /// What a program started by this compositor needs to find it: the socket,

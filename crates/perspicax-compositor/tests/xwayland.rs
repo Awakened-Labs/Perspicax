@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use perspicax_compositor::{Backend, Command, Config, Facts, Requests, Stop};
+use perspicax_compositor::{Backend, Command, Config, Error, Facts, Requests, Stop};
 use perspicax_node::{Origin, X11Basis};
 use perspicax_policy::Action;
 use x11rb::{
@@ -122,6 +122,89 @@ fn an_x11_window_is_attributed_to_its_client_through_xres() {
         .join()
         .expect("the compositor thread panicked")
         .expect("the compositor failed");
+}
+
+/// Issue #21: a `--spawn` program starts once Xwayland is ready, so it finds
+/// `DISPLAY`, and so does whatever it starts in turn: the shell in a spawned
+/// terminal, say. It used to start first, with `DISPLAY` removed.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_spawned_program_finds_xwaylands_display() {
+    let written = std::env::temp_dir().join(format!("perspicax-display-{}", std::process::id()));
+    let _ = std::fs::remove_file(&written);
+    let facts = Facts::new();
+    let stop = Stop::new();
+    let compositor = {
+        let (facts, stop, written) = (facts.clone(), stop.clone(), written.clone());
+        thread::spawn(move || {
+            let config = Config {
+                backend: Backend::headless((800, 600)),
+                spawn: vec![vec![
+                    "sh".to_owned(),
+                    "-c".to_owned(),
+                    r#"echo "$DISPLAY" > "$PERSPICAX_WRITE_DISPLAY_TO""#.to_owned(),
+                ]],
+                env: vec![(
+                    "PERSPICAX_WRITE_DISPLAY_TO".to_owned(),
+                    written.display().to_string(),
+                )],
+                run_for: Some(Duration::from_secs(30)),
+                config: None,
+                socket: None,
+                xwayland: true,
+            };
+            perspicax_compositor::run(&config, &facts, &Requests::new(), &stop)
+        })
+    };
+
+    let display = eventually(Duration::from_secs(15), || facts.x11_display())
+        .expect("Xwayland never became ready");
+    // The whole line, not a file the shell has opened and not yet written.
+    let seen = eventually(Duration::from_secs(10), || {
+        std::fs::read_to_string(&written)
+            .ok()
+            .filter(|line| line.ends_with('\n'))
+    });
+    let _ = std::fs::remove_file(&written);
+
+    stop.request();
+    compositor
+        .join()
+        .expect("the compositor thread panicked")
+        .expect("the compositor failed");
+    assert_eq!(
+        seen.as_deref(),
+        Some(format!(":{display}\n").as_str()),
+        "the spawned program saw Xwayland's DISPLAY"
+    );
+}
+
+/// A `--spawn` command that will not start is still `run`'s error when it
+/// was only tried once Xwayland was ready: not a warning in a log beside a
+/// session that started nothing.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_command_that_does_not_exist_is_named_after_waiting_for_xwayland() {
+    let config = Config {
+        backend: Backend::headless((800, 600)),
+        spawn: vec![vec![
+            "perspicax-no-such-program".to_owned(),
+            "--flag".to_owned(),
+        ]],
+        env: Vec::new(),
+        run_for: Some(Duration::from_secs(20)),
+        config: None,
+        socket: None,
+        xwayland: true,
+    };
+
+    match perspicax_compositor::run(&config, &Facts::new(), &Requests::new(), &Stop::new()) {
+        Err(Error::Spawn { command, source }) => {
+            assert_eq!(command, "perspicax-no-such-program --flag");
+            assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+        }
+        other => panic!("expected a spawn failure naming the command, got {other:?}"),
+    }
 }
 
 fn eventually<T>(within: Duration, mut probe: impl FnMut() -> Option<T>) -> Option<T> {

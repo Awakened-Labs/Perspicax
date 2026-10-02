@@ -326,7 +326,8 @@ Two chords always work, whatever the configuration says:
 **Ctrl+Alt+Backspace** ends the session, and **Ctrl+Alt+F1…F12** switches VT.
 
 X11 applications run under an Xwayland the session starts (`xwayland = false`
-in the config turns it off), with `DISPLAY` set for everything it launches. An
+in the config turns it off), with `DISPLAY` set for everything it launches:
+`--spawn` programs and the autostart list start once Xwayland is ready. An
 X11 window's origin says so: the X client's pid comes from the X server's
 X-Resource answer rather than the kernel, and every X client shares one consent
 decision, because X11 lets them read and drive each other.

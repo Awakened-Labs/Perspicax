@@ -332,9 +332,10 @@ impl Running {
     }
 
     /// Start what the session runs besides its windows: Xwayland, if built
-    /// and wanted, then (on a seat) the autostart list once `DISPLAY` exists.
-    /// Headless starts Xwayland only when the caller asked for it, and has no
-    /// autostart.
+    /// and wanted, then `ready` -- the agent's programs -- and (on a seat)
+    /// the autostart list, once `DISPLAY` exists. Without Xwayland, `ready`
+    /// runs at once. Headless starts Xwayland only when the caller asked for
+    /// it, and has no autostart.
     ///
     /// # Errors
     ///
@@ -351,15 +352,19 @@ impl Running {
             expect(unused_variables, reason = "Xwayland's")
         )]
         headless_xwayland: bool,
+        ready: impl FnOnce(&mut Compositor) + 'static,
     ) -> Result<(), Error> {
         match state.backend {
             #[cfg(feature = "xwayland")]
             Self::Headless { .. } if headless_xwayland => {
-                crate::xwayland::start(state, event_loop, |_| {})
+                crate::xwayland::start(state, event_loop, ready)
             }
-            Self::Headless { .. } => Ok(()),
+            Self::Headless { .. } => {
+                ready(state);
+                Ok(())
+            }
             #[cfg(feature = "seat")]
-            Self::Seat(_) => seat::populate(state, event_loop),
+            Self::Seat(_) => seat::populate(state, event_loop, ready),
         }
     }
 

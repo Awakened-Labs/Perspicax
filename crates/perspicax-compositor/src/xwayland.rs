@@ -76,7 +76,7 @@ pub(crate) struct Xwayland {
 
 /// Start Xwayland, and become its window manager once it is ready. `ready`
 /// runs then, with the display number, so whatever needs `DISPLAY` -- the
-/// autostart list -- waits for it.
+/// agent's `--spawn` programs and the autostart list -- waits for it.
 pub(crate) fn start(
     state: &mut Compositor,
     handle: &LoopHandle<'static, Compositor>,
