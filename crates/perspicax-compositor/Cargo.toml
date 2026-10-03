@@ -31,6 +31,9 @@ perspicax-node = { path = "../perspicax-node", version = "0.1.0" }
 # The window-management decisions. Pure, so both backends share them: one
 # placement rule headless and on a seat, rather than two that drift apart.
 perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
+# perspicax's own protocols, the server side: the channel to the desktop
+# shell. Generated from XML by wayland-scanner, as smithay's are.
+perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", features = ["server"] }
 # Xwayland-only: a second X connection, for the X-Resource extension's
 # QueryClientIds -- the X server's own word on which process drew a window.
 # Already in the tree under Smithay's own Xwayland support; MIT OR Apache-2.0.
@@ -96,3 +99,6 @@ wayland-client = "0.31"
 # server side already uses through smithay; only the features differ.
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# The shell's side of perspicax's own protocol, spoken by the tests as the
+# shell will.
+perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", features = ["client"] }

@@ -16,6 +16,7 @@ members = [
     "crates/perspicax-node",
     "crates/perspicax-policy",
     "crates/perspicax-probe",
+    "crates/perspicax-protocols",
 ]
 
 [workspace.package]
@@ -27,7 +28,7 @@ license = "Apache-2.0"
 # string is the one piece of the manifest that is wrong in a way no test can
 # catch: it points somewhere, and a reader believes it.
 repository = "https://github.com/Awakened-Labs/Perspicax"
-# One README for all nine crates.io pages. Inherited from here, cargo copies it
+# One README for all ten crates.io pages. Inherited from here, cargo copies it
 # into every package, so a reader who lands on `perspicax-index` from a search
 # meets the argument for the whole tree rather than an empty page -- and each
 # crate's own `//!` docs say where it sits in that argument.
@@ -36,11 +37,14 @@ keywords = ["wayland", "compositor", "accessibility", "mcp", "agent"]
 categories = ["accessibility", "gui", "os::linux-apis"]
 
 [workspace.lints.rust]
-# `forbid`, not `deny`, everywhere except the one crate that genuinely cannot
+# `forbid`, not `deny`, everywhere except the two crates that genuinely cannot
 # hold the line. A compositor talks to DRM, GBM and libinput through C, so
 # `perspicax-compositor` downgrades this to `deny` in its own manifest with the
-# reason written there. Every other crate in the tree -- including the two that
-# will eventually parse text an untrusted process rendered -- stays at `forbid`.
+# reason written there. `perspicax-protocols` holds wayland-scanner's output,
+# whose interface tables for libwayland are raw-pointer statics; it does the
+# same, with one `#[allow]` around the generated module. Every other crate in
+# the tree -- including the two that will eventually parse text an untrusted
+# process rendered -- stays at `forbid`.
 unsafe_code = "forbid"
 
 [workspace.dependencies]

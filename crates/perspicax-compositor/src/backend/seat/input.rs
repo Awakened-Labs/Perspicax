@@ -8,6 +8,11 @@
 //! 2. the bindings ([`perspicax_policy::Bindings`]);
 //! 3. the focused client.
 //!
+//! A tap of the Logo key is a binding too, but one known only once the key
+//! comes back up with nothing pressed in between
+//! ([`perspicax_policy::LogoTap`]). Its press and release still reach the
+//! client, as any modifier's do.
+//!
 //! The pointer is confined to the outputs ([`super::super::pointer`]),
 //! hit-tested against the stack, and every motion and press is put to the
 //! focus policy ([`perspicax_policy::Focus`]), whose decision is then carried
@@ -16,7 +21,7 @@
 use std::time::Duration;
 
 use perspicax_policy::{
-    Action, Button, Drag, FrameButton, Mods, Part, arrival, edge_at, edges_near, is_double,
+    Action, Button, Drag, FrameButton, Mods, Part, arrival, edge_at, edges_near, is_double, is_logo,
 };
 use smithay::{
     backend::{
@@ -125,6 +130,9 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
         return;
     };
     let serial = SERIAL_COUNTER.next_serial();
+    // A tap of the Logo key, finished by this release: done once the client
+    // has seen the release, so it never believes the key is still down.
+    let mut tapped = None;
     let taken = keyboard.input(
         state,
         keycode,
@@ -135,7 +143,13 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
             let Running::Seat(session) = &mut state.backend else {
                 return FilterResult::Forward;
             };
+            let raw = keysym.raw_syms();
+            let logo = raw.iter().copied().any(is_logo);
+            let locked = state.lock.is_some();
             if pressed == KeyState::Released {
+                if session.logo_tap.release(logo) && !locked {
+                    tapped = session.settings.bindings.tap().cloned();
+                }
                 return match session.swallowed.iter().position(|&k| k == keycode) {
                     Some(at) => {
                         session.swallowed.swap_remove(at);
@@ -144,8 +158,7 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
                     None => FilterResult::Forward,
                 };
             }
-            let raw = keysym.raw_syms();
-            let locked = state.lock.is_some();
+            session.logo_tap.press(logo, mods(modifiers));
             // While locked, only the escape hatches: a binding that opened a
             // terminal over the lock screen would be an unlock.
             let taken = hatch::classify(modifiers, keysym.modified_sym(), &raw)
@@ -177,6 +190,9 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
         Some(Taken::Hatch(hatch)) => escape(state, hatch),
         Some(Taken::Bound(action)) => state.perform(&action),
         Some(Taken::Release) | None => {}
+    }
+    if let Some(action) = tapped {
+        state.perform(&action);
     }
 }
 
@@ -271,9 +287,11 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
         state: pressed,
     };
     if pressed == ButtonState::Pressed {
-        // A click at the edge of the screen is a click, not a flip.
+        // A click at the edge of the screen is a click, not a flip, and a
+        // click with Logo held is not a tap of it.
         if let Running::Seat(session) = &mut state.backend {
             session.dwell.cancel();
+            session.logo_tap.interrupt();
         }
         let hit = under(state, at);
         // A panel or launcher that takes the keyboard on a click gets it,
@@ -438,6 +456,10 @@ fn axis(state: &mut Compositor, event: &impl PointerAxisEvent<LibinputInputBacke
     let Some(handle) = state.pointer.clone() else {
         return;
     };
+    // Logo held while scrolling is a gesture, not a tap.
+    if let Running::Seat(session) = &mut state.backend {
+        session.logo_tap.interrupt();
+    }
     if scroll_flips(state, event) {
         return;
     }

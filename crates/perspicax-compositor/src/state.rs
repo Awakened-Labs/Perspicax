@@ -231,6 +231,11 @@ pub struct Compositor {
     /// The monitors, as the display tools have been told them. See
     /// [`crate::output_management`].
     pub(crate) displays: crate::output_management::Displays,
+    /// The desktop shells listening for the menus a person asks for. See
+    /// [`crate::shell_protocol`].
+    pub(crate) shells: crate::shell_protocol::Shells,
+    /// The shell asked to end the session: the person chose to log out.
+    pub(crate) exit_asked: bool,
     /// Screenshot tools' frames waiting for something to change. See
     /// [`crate::screencopy`].
     #[cfg(feature = "capture")]
@@ -287,6 +292,7 @@ impl Compositor {
         let toplevels = crate::toplevels::Toplevels::new(display, &gate);
         let pager = crate::pager::Pager::new(display, &gate);
         let displays = crate::output_management::Displays::new(display, &gate);
+        let shells = crate::shell_protocol::Shells::new(display, &gate);
         #[cfg(feature = "capture")]
         let screencopy = crate::screencopy::Screencopy::new(display, &gate);
         // Empty: outputs are mapped by `arrange_outputs`, once every one
@@ -344,6 +350,8 @@ impl Compositor {
             toplevels,
             pager,
             displays,
+            shells,
+            exit_asked: false,
             #[cfg(feature = "capture")]
             screencopy,
             loop_handle: event_loop,

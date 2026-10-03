@@ -284,6 +284,9 @@ impl Config {
             }
         }
         if profile == Profile::Classic {
+            // The start menu, opened as on Plasma and Windows: a tap of the
+            // Logo key on its own.
+            bindings = bindings.bind_tap(Action::StartMenu);
             // Windows' snapping keys.
             for (key, direction) in arrows {
                 bindings = bindings.bind(
@@ -359,10 +362,10 @@ impl Config {
 
 /// The `[protocols]` defaults, the same in both profiles: a profile is a
 /// window manager's habits, not a security posture. Listing windows and
-/// workspaces is open to any client, as every panel expects. Reading pixels
-/// and moving monitors is for the programs that are known to do it, by name,
-/// which anything can claim; a person who wants it tighter writes full
-/// paths.
+/// workspaces is open to any client, as every panel expects. Reading pixels,
+/// moving monitors and speaking for the desktop shell are for the programs
+/// that are known to do it, by name, which anything can claim; a person who
+/// wants it tighter writes full paths.
 fn protocols(built: Built) -> Access {
     let only = |names: &[&str]| Rule::Only(names.iter().map(|name| Program::parse(name)).collect());
     Access::open()
@@ -378,6 +381,7 @@ fn protocols(built: Built) -> Access {
             Protocol::OutputManagement,
             only(&["wlr-randr", "kanshi", "wdisplays", "nwg-displays"]),
         )
+        .with(Protocol::Shell, only(&["perspicax-shell"]))
 }
 
 /// Where the config file lives: `$XDG_CONFIG_HOME/perspicax/config.toml`,
@@ -457,6 +461,7 @@ struct RawProtocols {
     workspace: Option<RawRule>,
     screencopy: Option<RawRule>,
     output_management: Option<RawRule>,
+    shell: Option<RawRule>,
 }
 
 /// `"any"`, `"off"`, or a list of programs.
@@ -636,13 +641,15 @@ impl Raw {
         }
 
         for (written, action) in self.keys {
-            let chord = keys::chord(&written)
+            let trigger = keys::trigger(&written)
                 .map_err(|reason| invalid(format!("keys.{written}"), reason))?;
-            config.bindings = match action_for(action)
-                .map_err(|reason| invalid(format!("keys.{written}"), reason))?
-            {
-                Some(action) => config.bindings.bind(chord, action),
-                None => config.bindings.unbind(chord),
+            let action =
+                action_for(action).map_err(|reason| invalid(format!("keys.{written}"), reason))?;
+            config.bindings = match (trigger, action) {
+                (keys::Trigger::Chord(chord), Some(action)) => config.bindings.bind(chord, action),
+                (keys::Trigger::Chord(chord), None) => config.bindings.unbind(chord),
+                (keys::Trigger::LogoTap, Some(action)) => config.bindings.bind_tap(action),
+                (keys::Trigger::LogoTap, None) => config.bindings.unbind_tap(),
             };
         }
         if let Some(drag) = self.drag {
@@ -820,6 +827,7 @@ impl RawProtocols {
             (Protocol::Workspace, self.workspace),
             (Protocol::Screencopy, self.screencopy),
             (Protocol::OutputManagement, self.output_management),
+            (Protocol::Shell, self.shell),
         ];
         for (protocol, raw) in written {
             let Some(raw) = raw else { continue };
@@ -1020,11 +1028,13 @@ fn action_for(action: RawAction) -> Result<Option<Action>, String> {
             "previous-tab" => Action::CycleTab { forward: false },
             "tab-with-previous" => Action::TabWithPrevious,
             "detach-tab" => Action::DetachTab,
+            "start-menu" => Action::StartMenu,
+            "root-menu" => Action::RootMenu,
             other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
                 format!(
                     "`{other}` is not an action; use close, cycle-focus, reload, \
                          toggle-sticky, toggle-maximize, minimize, next-tab, previous-tab, \
-                         tab-with-previous, detach-tab, \
+                         tab-with-previous, detach-tab, start-menu, root-menu, \
                          move-to-next-output, move-to-previous-output, \
                          move-to-output-<side>, workspace-<side>, workspace-<number>, \
                          send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
@@ -1611,6 +1621,67 @@ mod tests {
     fn workspace_zero_and_a_side_that_is_not_one_are_refused() {
         assert!(parse("[keys]\n\"Logo+0\" = \"workspace-0\"", SEAT).is_err());
         assert!(parse("[keys]\n\"Logo+0\" = \"workspace-sideways\"", SEAT).is_err());
+    }
+
+    #[test]
+    fn logo_on_its_own_binds_a_tap() {
+        let config = parse("[keys]\n\"Super\" = \"root-menu\"", SEAT).unwrap();
+        assert_eq!(config.bindings.tap(), Some(&Action::RootMenu));
+        let config = parse("[keys]\n\"Logo\" = \"none\"", SEAT).unwrap();
+        assert_eq!(
+            config.bindings.tap(),
+            None,
+            "none takes the profile's tap away"
+        );
+    }
+
+    #[test]
+    fn only_logo_can_be_bound_on_its_own() {
+        let error = parse("[keys]\n\"Alt\" = \"start-menu\"", SEAT).unwrap_err();
+        assert!(error.to_string().contains("keys.Alt"), "{error}");
+        assert!(error.to_string().contains("only Logo"), "{error}");
+    }
+
+    #[test]
+    fn classic_taps_logo_for_the_start_menu_and_minimal_does_not() {
+        assert_eq!(
+            Config::profile(Profile::Classic, SEAT).bindings.tap(),
+            Some(&Action::StartMenu)
+        );
+        assert_eq!(Config::profile(Profile::Minimal, SEAT).bindings.tap(), None);
+    }
+
+    #[test]
+    fn the_menus_are_actions_a_chord_can_have() {
+        let config = parse(
+            "[keys]\n\"Alt+F1\" = \"root-menu\"\n\"Logo+Space\" = \"start-menu\"",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(
+            config.bindings.resolve(Mods::alt(), &[Keysym::F1]),
+            Some(&Action::RootMenu)
+        );
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::space]),
+            Some(&Action::StartMenu)
+        );
+    }
+
+    #[test]
+    fn the_shell_protocol_defaults_to_perspicax_shell_in_both_profiles() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let access = Config::profile(profile, SEAT).protocols;
+            assert!(access.admits(Protocol::Shell, Some("/usr/bin/perspicax-shell")));
+            assert!(!access.admits(Protocol::Shell, Some("/usr/bin/waybar")));
+            assert!(!access.admits(Protocol::Shell, None));
+        }
+        let config = parse("[protocols]\nshell = \"off\"", SEAT).unwrap();
+        assert_eq!(config.protocols.rule(Protocol::Shell), &Rule::Off);
     }
 
     #[test]

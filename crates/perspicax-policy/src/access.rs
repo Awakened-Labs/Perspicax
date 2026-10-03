@@ -2,9 +2,10 @@
 //!
 //! Most of Wayland confines a client to what it drew. A handful of protocols
 //! do not: a taskbar lists and closes other programs' windows, a screenshot
-//! tool reads every pixel, a display tool moves monitors. Each of those is
-//! granted per protocol, in one of three forms: to nobody, to any client, or
-//! to the programs named in a list.
+//! tool reads every pixel, a display tool moves monitors, and perspicax's own
+//! shell protocol can end the session. Each of those is granted per protocol,
+//! in one of three forms: to nobody, to any client, or to the programs named
+//! in a list.
 //!
 //! A program is named by the executable the kernel says it runs, so a name
 //! here is evidence and not proof: anything can be called `grim`. A full path
@@ -34,16 +35,20 @@ pub enum Protocol {
     /// `wlr-output-management-unstable-v1`: monitors' modes, scale and
     /// placement.
     OutputManagement,
+    /// `perspicax-shell-v1`: the menus a person asks for by key, and ending
+    /// the session. perspicax's own, for its desktop shell.
+    Shell,
 }
 
 impl Protocol {
     /// Every protocol, in the order a config file lists them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::ForeignToplevelList,
         Self::ForeignToplevelManagement,
         Self::Workspace,
         Self::Screencopy,
         Self::OutputManagement,
+        Self::Shell,
     ];
 
     /// Its key in the `[protocols]` table.
@@ -55,6 +60,7 @@ impl Protocol {
             Self::Workspace => "workspace",
             Self::Screencopy => "screencopy",
             Self::OutputManagement => "output-management",
+            Self::Shell => "shell",
         }
     }
 
@@ -122,7 +128,7 @@ impl Rule {
 /// A rule for every protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Access {
-    rules: [Rule; 5],
+    rules: [Rule; Protocol::ALL.len()],
 }
 
 impl Access {
@@ -131,7 +137,7 @@ impl Access {
     #[must_use]
     pub fn open() -> Self {
         Self {
-            rules: [const { Rule::Any }; 5],
+            rules: [const { Rule::Any }; Protocol::ALL.len()],
         }
     }
 

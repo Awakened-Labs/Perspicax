@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="perspicax_shell_v1">
+  <copyright>
+    Copyright 2026 Awakened Labs Inc.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+  </copyright>
+
+  <description summary="the compositor's channel to its desktop shell">
+    What passes between perspicax and perspicax-shell that no standard
+    protocol carries: the person asked for a menu, the config changed, the
+    session should end.
+
+    Everything else the shell does, it does as any other client would.
+    Its wallpaper, panel and menus are layer-shell surfaces, its taskbar
+    speaks wlr-foreign-toplevel-management and its pager ext-workspace.
+    That keeps this protocol small, and every piece of the shell
+    replaceable by a program that speaks only the standard ones.
+
+    The global is privileged: the compositor offers it only to the
+    programs its [protocols] shell rule admits, and withdraws it, with
+    finished, from a client a reload no longer admits. While the session
+    is locked the compositor sends nothing and ignores every request.
+  </description>
+
+  <interface name="perspicax_shell_v1" version="1">
+    <description summary="a shell's binding to the compositor">
+      Bound once by a shell. Several shells may bind it; each is told the
+      same things.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="stop listening">
+        The shell is done with this object. Nothing more is sent on it.
+      </description>
+    </request>
+
+    <request name="exit_session">
+      <description summary="end the session">
+        The person chose to log out. The compositor ends the session, as
+        Ctrl+Alt+Backspace does, taking every client with it.
+      </description>
+    </request>
+
+    <event name="start_menu">
+      <description summary="the person asked for the start menu">
+        A binding asked for the start menu: a tap of the Logo key, say.
+        A shell shows its start menu on this monitor, or hides it if it
+        is already showing, as a second tap does on Plasma.
+
+        The output is the monitor under the pointer, or null if this
+        client has not bound that monitor's wl_output.
+      </description>
+      <arg name="output" type="object" interface="wl_output" allow-null="true"
+           summary="the monitor to show it on"/>
+    </event>
+
+    <event name="root_menu">
+      <description summary="the person asked for the root menu">
+        A binding asked for the root menu, the desktop's own menu that a
+        right-click on the wallpaper also opens. A shell shows it at x, y,
+        in logical pixels from the monitor's top-left corner, or hides it
+        if it is already showing.
+
+        The position is where the pointer is, which a shell cannot see for
+        itself while the pointer is over another client's window.
+      </description>
+      <arg name="output" type="object" interface="wl_output" allow-null="true"
+           summary="the monitor the pointer is on"/>
+      <arg name="x" type="int" summary="from the monitor's left edge"/>
+      <arg name="y" type="int" summary="from the monitor's top edge"/>
+    </event>
+
+    <event name="reconfigure">
+      <description summary="the config file changed">
+        The person saved a config file whose shell settings differ from
+        the ones this shell started with. A shell reads the file again and
+        applies it in place.
+      </description>
+    </event>
+
+    <event name="finished">
+      <description summary="the compositor withdrew this object">
+        This client is no longer admitted: a reload changed the rule. The
+        compositor sends nothing more and ignores every request; the shell
+        should destroy the object.
+      </description>
+    </event>
+  </interface>
+</protocol>

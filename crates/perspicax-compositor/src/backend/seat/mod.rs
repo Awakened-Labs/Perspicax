@@ -174,6 +174,9 @@ pub(crate) struct Session {
     pub(super) dwell_armed: Option<u64>,
     /// Scroll over the desktop, gathered into whole notches.
     pub(super) notches: perspicax_policy::Notches,
+    /// The Logo key, down and on its way to being a tap, unless another
+    /// key, a button or the wheel comes first. See [`input`].
+    pub(super) logo_tap: perspicax_policy::LogoTap,
     /// False while another VT has the seat: no device may be touched then.
     active: bool,
     pub(super) exit: bool,
@@ -339,6 +342,7 @@ impl Session {
             dwell,
             dwell_armed: None,
             notches: perspicax_policy::Notches::default(),
+            logo_tap: perspicax_policy::LogoTap::default(),
             active: true,
             exit: false,
             runtime: None,
@@ -1038,6 +1042,8 @@ fn resume(state: &mut Compositor) {
     }
     session.active = true;
     session.swallowed.clear();
+    // A Logo key let go on another VT never came back up here.
+    session.logo_tap = perspicax_policy::LogoTap::default();
     for head in &mut session.heads {
         // Whatever was queued when we left will never see its vblank.
         head.queued = false;

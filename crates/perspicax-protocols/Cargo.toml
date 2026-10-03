@@ -1,0 +1,37 @@
+[package]
+name = "perspicax-protocols"
+description = "perspicax's own Wayland protocols, generated for the compositor and its shell."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints.rust]
+# The second crate in the tree that cannot hold `forbid`, and for a narrower
+# reason than the compositor's. wayland-scanner emits the interface tables
+# libwayland reads as statics of raw pointers, marked `unsafe impl Sync` and
+# read through `unsafe` blocks. None of it is written here: the one `#[allow]`
+# in `src/lib.rs` wraps the generated module and nothing else.
+unsafe_code = "deny"
+
+# The same crates and versions the rest of the tree already uses for Wayland:
+# smithay re-exports wayland-server 0.31 to the compositor, and the shell and
+# the tests speak wayland-client 0.31. MIT.
+[dependencies]
+wayland-backend = "0.3"
+wayland-scanner = "0.31"
+wayland-client = { version = "0.31", optional = true }
+wayland-server = { version = "0.31", optional = true }
+
+[features]
+# The compositor's side.
+server = ["dep:wayland-server"]
+# The shell's side.
+client = ["dep:wayland-client"]
+
+[package.metadata.docs.rs]
+all-features = true

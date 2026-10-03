@@ -18,6 +18,7 @@ use std::{
 use perspicax_compositor::{Backend, Command, Config, Facts, Requests, Stop};
 use perspicax_index::HostFacts;
 use perspicax_policy::Action;
+use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_output, delegate_registry, delegate_shm, delegate_xdg_shell,
@@ -141,6 +142,11 @@ impl Session {
 
     pub fn wait_for(&self, ready: impl Fn(&HostFacts) -> bool) -> HostFacts {
         wait_for(&self.facts, ready)
+    }
+
+    /// Whether the compositor has stopped on its own: a session that ended.
+    pub fn ended(&self) -> bool {
+        self.thread.is_finished()
     }
 
     pub fn stop<D>(self, clients: D) {
@@ -284,6 +290,16 @@ pub struct ShownMode {
     pub finished: bool,
 }
 
+/// What the shell channel told the client, in the order it was told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Told {
+    /// The start menu, on the monitor of this name, if the client knows it.
+    StartMenu(Option<String>),
+    /// The root menu, on the monitor of this name, at this point on it.
+    RootMenu(Option<String>, i32, i32),
+    Reconfigure,
+}
+
 /// The test's client: windows of its own, drawn once in a flat colour, and
 /// whichever of the watching protocols a test binds.
 pub struct Desk {
@@ -321,6 +337,9 @@ pub struct Desk {
     pub shown_modes: Vec<ShownMode>,
     /// `succeeded`, `failed` or `cancelled`, for the last configuration.
     pub configured: Option<&'static str>,
+    pub shell: Option<PerspicaxShellV1>,
+    pub told: Vec<Told>,
+    pub shell_finished: bool,
 }
 
 impl Desk {
@@ -359,6 +378,9 @@ impl Desk {
             shown: Vec::new(),
             shown_modes: Vec::new(),
             configured: None,
+            shell: None,
+            told: Vec::new(),
+            shell_finished: false,
         }
     }
 
@@ -606,6 +628,21 @@ impl Desk {
         configuration.enable_head(&self.head_named(name).head, qh, ())
     }
 
+    /// Bind the shell channel, as perspicax-shell does. Panics if it is not
+    /// advertised.
+    pub fn bind_shell(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.shell = Some(
+            globals
+                .bind::<PerspicaxShellV1, _, _>(qh, 1..=1, ())
+                .expect("perspicax_shell_v1"),
+        );
+    }
+
+    /// The name of a monitor this client was told of.
+    fn output_name(&self, output: &wl_output::WlOutput) -> Option<String> {
+        self.outputs.info(output).and_then(|info| info.name)
+    }
+
     /// Lock the session, as swaylock does.
     pub fn lock(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
         let manager = globals
@@ -734,6 +771,32 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for Desk {
             Event::Parent { parent } => tasked.parent = parent.map(|parent| parent.id()),
             Event::Done => tasked.done += 1,
             Event::Closed => tasked.closed = true,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<PerspicaxShellV1, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        _: &PerspicaxShellV1,
+        event: perspicax_shell_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use perspicax_shell_v1::Event;
+        match event {
+            Event::StartMenu { output } => {
+                let name = output.and_then(|output| desk.output_name(&output));
+                desk.told.push(Told::StartMenu(name));
+            }
+            Event::RootMenu { output, x, y } => {
+                let name = output.and_then(|output| desk.output_name(&output));
+                desk.told.push(Told::RootMenu(name, x, y));
+            }
+            Event::Reconfigure => desk.told.push(Told::Reconfigure),
+            Event::Finished => desk.shell_finished = true,
             _ => {}
         }
     }

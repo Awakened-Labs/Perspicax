@@ -53,6 +53,7 @@ mod pager;
 #[cfg(feature = "capture")]
 mod screencopy;
 mod shell;
+mod shell_protocol;
 pub mod state;
 mod toplevels;
 #[cfg(feature = "xwayland")]
@@ -369,6 +370,7 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
             break Err(error);
         }
         if stop.requested()
+            || state.exit_asked
             || state.backend.exit_requested()
             || deadline.is_some_and(|deadline| Instant::now() >= deadline)
         {

@@ -53,6 +53,7 @@ perspicax-policy       WM decisions as data — focus, bindings, placement, moni
 perspicax-config       config.toml — schema, classic/minimal profiles, feature check  [portable]
 perspicax-atspi        impl Ingest — AT-SPI2 over D-Bus
 perspicax-compositor   impl HostView — Smithay: outputs, seat, damage. Headless draws nothing.
+perspicax-protocols    perspicax's own Wayland protocols — the channel to the desktop shell
 perspicax-probe        dev CLI — dump a tree, time a read, explain a refusal
 ```
 
@@ -344,6 +345,7 @@ profile, which is Plasma's and Windows' habits:
   corner to a quarter, the top to maximized, with Logo+arrows to do the same
   from the keyboard;
 - Logo+Shift+Left/Right moves a window between screens, Logo+Shift+R reloads;
+- a tap of Logo on its own asks the desktop shell for its start menu;
 - a titlebar drawn by the compositor for a client that asks for one (Qt, foot,
   GTK 3 without a headerbar, and X11 applications): drag it to move,
   double-click it to maximize, and minimize, maximize and close at its right;
@@ -372,6 +374,9 @@ autoraise = false
 "Logo+Return" = { spawn = ["foot"] }
 "Logo+d" = { spawn = ["fuzzel"] }
 "Alt+F4" = "none"              # hand a profile's chord back to the client
+"Alt+F1" = "root-menu"         # or "start-menu": the desktop shell's menus
+"Logo" = "none"                # Logo alone is a tap: pressed, let go, nothing
+                               # in between; no other modifier can be tapped
 
 drag = "Logo"                  # the drag modifier; "none" turns drags off
 
@@ -429,14 +434,17 @@ foreign-toplevel-management = "any"   # "any", "off", or a list of programs
 workspace = "any"
 screencopy = ["grim", "/usr/bin/wf-recorder"]   # a name, or a full path
 output-management = ["kanshi", "wlr-randr"]
+shell = ["/usr/local/bin/perspicax-shell"]
 ```
 
 `[protocols]` names the programs that may use the protocols reaching past
 their own windows: a taskbar's list of windows (`foreign-toplevel-list`, and
 `foreign-toplevel-management` to activate and close them), a pager
-(`workspace`), a screenshot tool (`screencopy`) and a display tool
-(`output-management`). Listing windows and workspaces is open by default;
-reading pixels and moving monitors is for the usual tools, by name. A name is
+(`workspace`), a screenshot tool (`screencopy`), a display tool
+(`output-management`) and the desktop shell (`shell`), which is told when a
+key asks for a menu and may end the session. Listing windows and workspaces
+is open by default; reading pixels, moving monitors and speaking for the shell
+are for the usual programs, by name. A name is
 whatever the kernel says the client is running, which any program can be
 called, so a full path is the stricter form. Whatever this says, all of them
 are inert while the screen is locked.
@@ -448,6 +456,7 @@ are inert while the screen is locked.
 | `ext-workspace-v1` | `workspace` | waybar `ext/workspaces` | switches ignored | everything removed, manager finished |
 | `wlr-screencopy-unstable-v1` v3 (shm) | `screencopy` | grim, wf-recorder, xdg-desktop-portal-wlr | every copy fails | waiting frames fail |
 | `wlr-output-management-unstable-v1` v4 | `output-management` | wlr-randr, kanshi, wdisplays | every configuration fails | manager finished |
+| `perspicax-shell-v1` (perspicax's own) | `shell` | perspicax-shell | told nothing; log-out ignored | finished |
 
 A rule a reload changes applies to the next client that looks, with no
 global torn down, and what a client already holds is withdrawn as above.

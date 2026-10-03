@@ -22,7 +22,8 @@
 //! (`snap`); the frame drawn around a window (`frame`); and tab groups
 //! (`tabs`); and which programs may use the protocols that reach past their
 //! own windows (`access`); and whether a display tool's request for the
-//! monitors can be carried out (`heads`). `perspicax-config`
+//! monitors can be carried out (`heads`); and whether a press of the Logo key
+//! was a tap (`tap`). `perspicax-config`
 //! builds their settings from `config.toml` and the `classic`/`minimal`
 //! profiles.
 
@@ -36,6 +37,7 @@ mod heads;
 mod layout;
 mod snap;
 mod tabs;
+mod tap;
 mod workspace;
 
 pub use crate::{
@@ -55,6 +57,7 @@ pub use crate::{
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
     snap::{Snapping, Zone, keyed, zone},
     tabs::Groups,
+    tap::{LogoTap, is_logo},
     workspace::{Cell, Direction, Grid, GroupView, Home, Mode, Shape, WorkspaceView, Workspaces},
 };
 

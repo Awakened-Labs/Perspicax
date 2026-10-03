@@ -1378,6 +1378,7 @@ dependencies = [
  "perspicax-index",
  "perspicax-node",
  "perspicax-policy",
+ "perspicax-protocols",
  "smithay",
  "smithay-client-toolkit",
  "thiserror 2.0.20",
@@ -1448,6 +1449,16 @@ dependencies = [
  "perspicax-node",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "perspicax-protocols"
+version = "0.1.0"
+dependencies = [
+ "wayland-backend",
+ "wayland-client",
+ "wayland-scanner",
+ "wayland-server",
 ]
 
 [[package]]

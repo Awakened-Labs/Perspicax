@@ -1,4 +1,5 @@
-//! Chords as a person writes them: `"Logo+Shift+Return"`.
+//! Chords as a person writes them: `"Logo+Shift+Return"`. And `"Logo"` on
+//! its own, which is a tap of that key rather than a chord.
 //!
 //! The key is either a single character (`a`, `1`, `/`) or a name from
 //! [`NAMED`]. The table is written out here rather than looked up in xkb's
@@ -69,6 +70,34 @@ pub(crate) fn modifiers(text: &str) -> Result<Option<Mods>, String> {
         modifier(part.trim(), &mut mods)?;
     }
     Ok(Some(mods))
+}
+
+/// What a `[keys]` entry binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Trigger {
+    Chord(Chord),
+    /// `"Logo"` on its own: pressed and let go with nothing else in between.
+    /// See [`perspicax_policy::LogoTap`].
+    LogoTap,
+}
+
+/// Parse a `[keys]` entry: `"Mod+Mod+Key"`, or a lone `"Logo"` for a tap.
+/// Other modifiers cannot be tapped: Ctrl, Alt and Shift on their own are
+/// pressed far too often on the way to a chord.
+pub(crate) fn trigger(text: &str) -> Result<Trigger, String> {
+    let lone = text.trim();
+    let mut mods = Mods::default();
+    if modifier(lone, &mut mods).is_ok() {
+        return if mods.logo {
+            Ok(Trigger::LogoTap)
+        } else {
+            Err(format!(
+                "`{lone}` on its own cannot be bound; only Logo can be tapped, so add a \
+                 key, as in `{lone}+F1`"
+            ))
+        };
+    }
+    chord(text).map(Trigger::Chord)
 }
 
 /// Parse `"Mod+Mod+Key"`.
@@ -175,6 +204,21 @@ mod tests {
     #[test]
     fn a_chord_with_no_key_is_refused() {
         assert!(chord("Alt+").is_err());
+    }
+
+    #[test]
+    fn logo_super_meta_and_win_alone_are_a_tap_of_logo() {
+        for name in ["Logo", "super", "Meta", "WIN"] {
+            assert_eq!(trigger(name).unwrap(), Trigger::LogoTap, "{name}");
+        }
+        assert!(matches!(trigger("Logo+a").unwrap(), Trigger::Chord(_)));
+    }
+
+    #[test]
+    fn another_modifier_alone_is_refused_by_name() {
+        let error = trigger("Alt").unwrap_err();
+        assert!(error.contains("`Alt` on its own"), "{error}");
+        assert!(trigger("Ctrl").is_err());
     }
 
     #[test]
