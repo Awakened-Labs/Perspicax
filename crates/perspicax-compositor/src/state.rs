@@ -247,6 +247,13 @@ pub struct Compositor {
     /// How to start a program against this compositor. Set by `run` once the
     /// socket exists, so `None` only before any client could connect.
     pub(crate) launch: Option<crate::Launch>,
+    /// The agent's programs, started by `--spawn`: reaped as they exit and
+    /// killed when `run` ends. The person's are the seat session's.
+    pub(crate) spawned: Vec<std::process::Child>,
+    /// A `--spawn` command that would not start, waiting for `run` to return
+    /// it. It may have been tried only once Xwayland was ready, inside the
+    /// loop, where nothing can return an error.
+    pub(crate) spawn_failed: Option<crate::Error>,
     /// How many windows have been placed, for the cascade.
     pub(crate) placed: u32,
     started: Instant,
@@ -343,6 +350,8 @@ impl Compositor {
             idle_inhibit: IdleInhibitManagerState::new::<Self>(display),
             inhibitors: Vec::new(),
             launch: None,
+            spawned: Vec::new(),
+            spawn_failed: None,
             placed: 0,
             started: Instant::now(),
         }

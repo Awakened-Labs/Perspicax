@@ -280,8 +280,9 @@ pub(crate) fn reload(state: &mut Compositor) {
 }
 
 /// Bring up the person's session around the windows: Xwayland if this build
-/// has it and the config wants it, then the autostart list -- after Xwayland
-/// is ready, so an X11 program in it finds `DISPLAY` set.
+/// has it and the config wants it, then `ready` -- the agent's programs --
+/// and the autostart list, the agent's first. Both wait for Xwayland, so an
+/// X11 program in either finds `DISPLAY` set.
 pub(crate) fn populate(
     state: &mut Compositor,
     #[cfg_attr(
@@ -289,12 +290,21 @@ pub(crate) fn populate(
         expect(unused_variables, reason = "Xwayland's")
     )]
     event_loop: &LoopHandle<'static, Compositor>,
+    ready: impl FnOnce(&mut Compositor) + 'static,
 ) -> Result<(), Error> {
+    let ready = move |state: &mut Compositor| {
+        ready(state);
+        // A `--spawn` that would not start ends the session: nothing of the
+        // person's is worth starting only to stop.
+        if state.spawn_failed.is_none() {
+            autostart(state);
+        }
+    };
     #[cfg(feature = "xwayland")]
     if matches!(&state.backend, Running::Seat(session) if session.settings.xwayland) {
-        return crate::xwayland::start(state, event_loop, autostart);
+        return crate::xwayland::start(state, event_loop, ready);
     }
-    autostart(state);
+    ready(state);
     Ok(())
 }
 
