@@ -1,11 +1,14 @@
 [package]
 name = "perspicax"
-description = "The composition root: one binary that runs the compositor, and from M3 the MCP server beside it."
+description = "An agent-native Wayland compositor: everything on screen as a typed, addressable API, served to agents over MCP."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 # A binary, not a library, and its own crate rather than a `[[bin]]` inside
 # `perspicax-compositor`. The composition root is where independent pieces are
