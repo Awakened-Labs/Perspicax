@@ -5,6 +5,10 @@
 //! covers the whole monitor and ignores the room a panel reserves. Its
 //! namespace is `perspicax-desktop-<connector>`, which is how an agent tells
 //! one monitor's desktop from another's and from a window.
+//!
+//! A changed config repaints the same surfaces, so an agent holding a
+//! desktop's id still holds it afterwards. Only turning the wallpaper off
+//! takes them away, and turning it on puts them back.
 
 use std::path::Path;
 
@@ -12,7 +16,7 @@ use perspicax_config::{Shell, Wallpaper};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
     delegate_compositor, delegate_layer, delegate_shm,
-    output::OutputInfo,
+    output::{OutputInfo, OutputState},
     shell::{
         WaylandSurface,
         wlr_layer::{
@@ -40,7 +44,8 @@ pub(super) struct Desktops {
     pool: SlotPool,
     /// `None` is no wallpaper, and then no desktop either.
     wallpaper: Option<Wallpaper>,
-    /// The wallpaper's image, read once.
+    /// The wallpaper's image, read once, and again when the config names
+    /// another.
     image: Option<Pixmap>,
     each: Vec<Desktop>,
 }
@@ -72,10 +77,7 @@ impl Desktops {
         let pool = SlotPool::new(1920 * 1080 * 4, &shm)
             .map_err(|error| Error::Wayland(error.to_string()))?;
         let wallpaper = shell.wallpaper.clone();
-        let image = wallpaper
-            .as_ref()
-            .and_then(|wallpaper| wallpaper.image.as_deref())
-            .and_then(|written| read(written, config));
+        let image = image_of(wallpaper.as_ref(), config);
         Ok(Self {
             compositor,
             layers,
@@ -85,6 +87,38 @@ impl Desktops {
             image,
             each: Vec::new(),
         })
+    }
+
+    /// Show the wallpaper `shell` asks for now. Every desktop is painted
+    /// again where it is, unless the wallpaper was turned off, which takes
+    /// them all away, or on, which puts one on every monitor.
+    pub(super) fn reconfigure(
+        &mut self,
+        qh: &QueueHandle<App>,
+        shell: &Shell,
+        config: Option<&Path>,
+        outputs: &OutputState,
+    ) {
+        if shell.wallpaper == self.wallpaper {
+            return;
+        }
+        if named(shell.wallpaper.as_ref()) != named(self.wallpaper.as_ref()) {
+            self.image = image_of(shell.wallpaper.as_ref(), config);
+        }
+        let was_on = self.wallpaper.is_some();
+        self.wallpaper = shell.wallpaper.clone();
+        match (was_on, self.wallpaper.is_some()) {
+            (true, true) => (0..self.each.len()).for_each(|at| self.draw(at)),
+            (true, false) => self.each.clear(),
+            (false, true) => {
+                for output in outputs.outputs() {
+                    if let Some(info) = outputs.info(&output) {
+                        self.add(qh, output, &info);
+                    }
+                }
+            }
+            (false, false) => {}
+        }
     }
 
     /// Put a desktop on a monitor the compositor just announced.
@@ -193,6 +227,16 @@ impl Desktops {
         surface.damage_buffer(0, 0, wide, high);
         desktop.layer.commit();
     }
+}
+
+/// The image `wallpaper` names, as the config writes it.
+fn named(wallpaper: Option<&Wallpaper>) -> Option<&Path> {
+    wallpaper?.image.as_deref()
+}
+
+/// The image `wallpaper` names, if it names one that can be read.
+fn image_of(wallpaper: Option<&Wallpaper>, config: Option<&Path>) -> Option<Pixmap> {
+    read(named(wallpaper)?, config)
 }
 
 /// Read the image `written` in the config, or say why not and go without.

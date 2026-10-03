@@ -433,6 +433,7 @@ impl Compositor {
             crate::Command::Unplug(name) => self.unplug_virtual(name),
             crate::Command::Perform(action) => self.perform(action),
             crate::Command::Protocols(access) => self.set_access(access.clone()),
+            crate::Command::ReconfigureShell => self.reconfigure_shells(),
         }
     }
 

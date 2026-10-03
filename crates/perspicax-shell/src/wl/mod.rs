@@ -49,9 +49,10 @@ pub(crate) fn run(
         channel: channel::bind(&globals, &qh),
         #[cfg(feature = "wallpaper")]
         desktops: desktop::Desktops::new(&globals, &qh, &shell, config.as_deref())?,
+        config,
     };
     #[cfg(not(feature = "wallpaper"))]
-    let _ = (shell, config);
+    let _ = shell;
     loop {
         if let Err(error) = event_loop.dispatch(None, &mut app) {
             return ended(&connection, &error);
@@ -85,12 +86,36 @@ pub(crate) struct App {
     channel: Option<perspicax_protocols::shell::v1::client::perspicax_shell_v1::PerspicaxShellV1>,
     #[cfg(feature = "wallpaper")]
     desktops: desktop::Desktops,
+    /// The config file, read again when perspicax says it changed.
+    config: Option<PathBuf>,
 }
 
 impl App {
     /// A monitor's connector name, `DP-1`, as the compositor gave it.
     fn output_name(&self, output: &wl_output::WlOutput) -> Option<String> {
         self.outputs.info(output).and_then(|info| info.name)
+    }
+
+    /// The config file changed: read it again, and show what it says now on
+    /// the surfaces already there. A file that can no longer be used is
+    /// reported, and the desktop stays as it is: a typo mid-session must not
+    /// take the wallpaper away.
+    fn reconfigure(&mut self, qh: &QueueHandle<Self>) {
+        let shell = match crate::read(self.config.as_deref()) {
+            Ok(shell) => shell,
+            Err(error) => {
+                tracing::warn!(
+                    "the config changed and cannot be used: {error}; keeping what is shown"
+                );
+                return;
+            }
+        };
+        tracing::info!("the config changed; applying it");
+        #[cfg(feature = "wallpaper")]
+        self.desktops
+            .reconfigure(qh, &shell, self.config.as_deref(), &self.outputs);
+        #[cfg(not(feature = "wallpaper"))]
+        let _ = (qh, shell);
     }
 }
 

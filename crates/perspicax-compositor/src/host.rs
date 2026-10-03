@@ -84,6 +84,10 @@ pub enum Command {
     /// their own windows. A client the new rules leave out loses what it
     /// held.
     Protocols(perspicax_policy::Access),
+    /// Tell every shell on `perspicax-shell-v1` to read its config file
+    /// again, as a seat does when a save changes the `[shell]` table. For a
+    /// test, which has no seat to save to.
+    ReconfigureShell,
 }
 
 /// A picture asked for, with somewhere to put it.

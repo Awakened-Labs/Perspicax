@@ -1,6 +1,6 @@
 //! `perspicax-shell-v1`, the channel from perspicax: the person asked for a
-//! menu, the config changed. For now the shell only says what it was told;
-//! the menus that answer it come later.
+//! menu, the config changed. A changed config is applied in place; of the
+//! menus the shell only says what it was told, until they are drawn.
 
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 use wayland_client::{Connection, Dispatch, QueueHandle, globals::GlobalList};
@@ -26,7 +26,7 @@ impl Dispatch<PerspicaxShellV1, ()> for App {
         event: perspicax_shell_v1::Event,
         _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         use perspicax_shell_v1::Event;
         match event {
@@ -38,7 +38,7 @@ impl Dispatch<PerspicaxShellV1, ()> for App {
                 let output = output.and_then(|output| app.output_name(&output));
                 tracing::info!(output, x, y, "asked for the root menu");
             }
-            Event::Reconfigure => tracing::info!("the config file changed"),
+            Event::Reconfigure => app.reconfigure(qh),
             Event::Finished => {
                 tracing::info!("perspicax withdrew the shell channel");
                 channel.destroy();

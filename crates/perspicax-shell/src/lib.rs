@@ -23,7 +23,7 @@ mod model;
 mod paint;
 mod wl;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use perspicax_config::{Profile, Shell, ShellBuilt};
 use wayland_client::Connection;
@@ -91,13 +91,19 @@ impl Error {
 /// compositor ending the session.
 pub fn run(options: Options) -> Result<(), Error> {
     let path = options.config.or_else(perspicax_config::default_path);
-    let shell = match &path {
-        Some(path) => perspicax_config::load_shell(path, BUILT)?,
-        None => Shell::profile(Profile::Classic, BUILT),
-    };
+    let shell = read(path.as_deref())?;
     let connection = match options.connection {
         Some(connection) => connection,
         None => Connection::connect_to_env()?,
     };
     wl::run(connection, shell, path)
+}
+
+/// The `[shell]` table of the config file at `path`, as this build reads it,
+/// or the classic profile's with no file to read.
+fn read(path: Option<&Path>) -> Result<Shell, perspicax_config::Error> {
+    match path {
+        Some(path) => perspicax_config::load_shell(path, BUILT),
+        None => Ok(Shell::profile(Profile::Classic, BUILT)),
+    }
 }

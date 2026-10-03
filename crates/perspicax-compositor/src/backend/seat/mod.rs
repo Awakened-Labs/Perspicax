@@ -82,6 +82,7 @@ use crate::{Error, state::Compositor};
 
 mod input;
 mod settings;
+mod supervise;
 mod titles;
 
 pub(crate) use settings::{populate, reload};
@@ -155,6 +156,8 @@ pub(crate) struct Session {
     /// Programs this session started for the person (autostart, bindings),
     /// stopped with it and reaped as they exit.
     children: Vec<std::process::Child>,
+    /// perspicax-shell, started again when it stops. See [`supervise`].
+    shell: supervise::Supervisor,
     cursor: Cursor,
     /// The fonts window titles are written in. See [`titles`].
     titles: titles::Titles,
@@ -334,6 +337,7 @@ impl Session {
             reload_pending: false,
             devices: Vec::new(),
             children: Vec::new(),
+            shell: supervise::Supervisor::new(),
             cursor: Cursor::load(),
             titles: titles::Titles::new(),
             title_press: None,

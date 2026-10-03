@@ -7,8 +7,9 @@
 //!
 //! It puts a wallpaper on every monitor, on a monitor plugged in after it
 //! started too, and each one is a surface on the `background` layer named
-//! for its monitor. Like the other live tests it binds a real Wayland
-//! socket, so it needs `XDG_RUNTIME_DIR`, and is `#[ignore]`d for
+//! for its monitor. Told its config changed, it repaints those surfaces
+//! rather than making new ones. Like the other live tests it binds a real
+//! Wayland socket, so it needs `XDG_RUNTIME_DIR`, and is `#[ignore]`d for
 //! `ci/live-tests.sh` to run.
 
 mod common;
@@ -18,7 +19,7 @@ use std::{path::PathBuf, thread};
 use common::{Session, connect};
 use perspicax_compositor::{Backend, Command, Virtual};
 use perspicax_index::{HostFacts, Layer, SurfaceKind};
-use perspicax_node::Rect;
+use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::{Access, Place, Shape, Side};
 
 /// The shell, running on a thread against a session.
@@ -44,6 +45,11 @@ impl Shell {
             thread: thread::spawn(move || perspicax_shell::run(options)),
             config: path,
         }
+    }
+
+    /// Write `config` over the config file, as a person saving it does.
+    fn rewrite(&self, config: &str) {
+        std::fs::write(&self.config, config).expect("the config file rewritten");
     }
 
     /// Stop the session, which stops the shell, as logging out does; and
@@ -91,6 +97,37 @@ fn desktops(facts: &HostFacts) -> Vec<(String, Rect)> {
         .collect();
     desktops.sort_by(|a, b| a.0.cmp(&b.0));
     desktops
+}
+
+/// Every desktop's id, with how many times it has been painted.
+fn painted(facts: &HostFacts) -> Vec<(SurfaceId, u64)> {
+    facts
+        .surfaces()
+        .iter()
+        .filter(|surface| surface.mapped)
+        .filter(|surface| {
+            matches!(
+                surface.kind,
+                SurfaceKind::Layer {
+                    layer: Layer::Background,
+                    ..
+                }
+            )
+        })
+        .map(|surface| (surface.id, surface.damage_generation))
+        .collect()
+}
+
+/// The colour of the pixel at `x`, `y` in a picture of the first monitor.
+#[cfg(feature = "capture")]
+fn colour_at(session: &Session, x: usize, y: usize) -> [u8; 4] {
+    use perspicax_compositor::Host;
+    use perspicax_index::ShotTarget;
+
+    let host = Host::new(&session.facts, &session.requests);
+    let shot = host.capture(ShotTarget::Output(None)).expect("a picture");
+    let at = (y * shot.width as usize + x) * 4;
+    shot.rgba[at..at + 4].try_into().unwrap()
 }
 
 fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
@@ -195,6 +232,41 @@ fn a_picture_of_the_desktop_shows_the_wallpaper_not_the_backdrop() {
     assert!(
         shot.drawn.iter().any(|drawn| drawn.surface == desktop),
         "and the picture says the desktop drew it"
+    );
+
+    shell.stop_with(session);
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_reconfigured_shell_changes_its_wallpaper_without_a_new_surface() {
+    let session = Session::start("shell-reconfigure", Backend::headless((800, 600)));
+    let shell = Shell::start(&session, "reconfigure", "[shell]\nwallpaper = \"#336699\"");
+    let facts = session.wait_for(|facts| painted(facts).len() == 1);
+    let [(desktop, before)] = painted(&facts)[..] else {
+        unreachable!("one desktop, waited for")
+    };
+
+    shell.rewrite("[shell]\nwallpaper = \"#996633\"");
+    session.command(Command::ReconfigureShell);
+    let facts = session.wait_for(|facts| {
+        painted(facts)
+            .iter()
+            .any(|&(id, times)| id == desktop && times > before)
+    });
+    assert_eq!(
+        painted(&facts)
+            .iter()
+            .map(|&(id, _)| id)
+            .collect::<Vec<_>>(),
+        [desktop],
+        "painted again where it was, and nothing new beside it"
+    );
+    #[cfg(feature = "capture")]
+    assert_eq!(
+        colour_at(&session, 400, 300),
+        [0x99, 0x66, 0x33, 0xff],
+        "in the colour the file says now"
     );
 
     shell.stop_with(session);

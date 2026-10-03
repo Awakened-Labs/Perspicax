@@ -7,6 +7,9 @@
 //! pointer only while it is over the client's own surfaces. The other way,
 //! the shell may end the session when the person chooses to log out.
 //!
+//! When a save changes the config's `[shell]` table, every shell is told to
+//! read it again, and applies it in place.
+//!
 //! Gated like the taskbar protocols: offered only to the programs the
 //! `[protocols] shell` rule admits, withdrawn with `finished` from a client
 //! a reload no longer admits, and silent while the session is locked. A
@@ -88,6 +91,26 @@ impl Compositor {
                 Menu::Root => shell.root_menu(wl_output.as_ref(), local.x, local.y),
             }
         }
+    }
+
+    /// The config's `[shell]` table changed: tell every shell to read the
+    /// file again.
+    pub(crate) fn reconfigure_shells(&self) {
+        for shell in &self.shells.bound {
+            shell.reconfigure();
+        }
+    }
+
+    /// Whether process `pid` holds the channel, and so hears a
+    /// `reconfigure`.
+    #[cfg_attr(not(feature = "seat"), expect(dead_code, reason = "the seat's"))]
+    pub(crate) fn shell_listening(&self, pid: u32) -> bool {
+        self.shells.bound.iter().any(|shell| {
+            self.display
+                .get_client(shell.id())
+                .and_then(|client| client.get_credentials(&self.display))
+                .is_ok_and(|credentials| u32::try_from(credentials.pid) == Ok(pid))
+        })
     }
 
     /// Withdraw the channel from every shell the rules no longer admit.

@@ -6,7 +6,8 @@
 //! only if its layout or repeat changed. Pointer settings go to every device.
 //! Outputs are relit only if their rules changed, because relighting is a
 //! modeset and the screens blink. Autostart is not re-run: those programs are
-//! already running.
+//! already running. The shell is told when its own table changed, and is
+//! started or stopped when `enabled` was turned on or off (see [`supervise`]).
 //!
 //! Saving is watched with inotify on the file's *directory*, not the file:
 //! most editors save by writing a new file and renaming it over the old one,
@@ -31,7 +32,7 @@ use smithay::{
     },
 };
 
-use super::{Session, relight};
+use super::{Session, relight, supervise};
 use crate::{Error, Launch, act::Keys, backend::Running, state::Compositor};
 
 /// What this build can honour, for the config's feature check.
@@ -235,6 +236,8 @@ pub(crate) fn reload(state: &mut Compositor) {
     let outputs_changed = fresh.outputs != session.settings.outputs;
     let decorations_changed = fresh.decorations != session.settings.decorations;
     let access = (fresh.protocols != session.settings.protocols).then(|| fresh.protocols.clone());
+    let shell_changed = fresh.shell != session.settings.shell;
+    let shell = session.settings.shell.clone();
     let workspaces = fresh.workspaces;
     if fresh.flipping.delay_ms != session.settings.flipping.delay_ms {
         session.dwell = perspicax_policy::EdgeDwell::new(fresh.flipping.delay_ms);
@@ -270,19 +273,23 @@ pub(crate) fn reload(state: &mut Compositor) {
     if let Some(access) = access {
         state.set_access(access);
     }
+    // After the rules, so a shell they no longer admit is not counted as
+    // listening.
+    supervise::reloaded(state, &shell);
     tracing::info!(
         keyboard_changed,
         outputs_changed,
         decorations_changed,
         access_changed,
+        shell_changed,
         "config reloaded"
     );
 }
 
 /// Bring up the person's session around the windows: Xwayland if this build
 /// has it and the config wants it, then `ready` -- the agent's programs --
-/// and the autostart list, the agent's first. Both wait for Xwayland, so an
-/// X11 program in either finds `DISPLAY` set.
+/// then the shell and the autostart list, the agent's first. All wait for
+/// Xwayland, so an X11 program in any of them finds `DISPLAY` set.
 pub(crate) fn populate(
     state: &mut Compositor,
     #[cfg_attr(
@@ -297,6 +304,7 @@ pub(crate) fn populate(
         // A `--spawn` that would not start ends the session: nothing of the
         // person's is worth starting only to stop.
         if state.spawn_failed.is_none() {
+            supervise::start(state);
             autostart(state);
         }
     };
@@ -344,6 +352,7 @@ impl Session {
     pub(crate) fn reap(&mut self) {
         self.children
             .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+        self.reap_shell();
     }
 }
 
@@ -358,7 +367,7 @@ impl Drop for Session {
     }
 }
 
-fn stop(child: &mut Child) {
+pub(super) fn stop(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
