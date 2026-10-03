@@ -83,6 +83,12 @@ allow = [
 #     it. Read 2026-10-03.
 #   - arrayref: BSD-2-Clause, which is BSD-3-Clause without the endorsement
 #     clause. tiny-skia takes it for fixed-size views of its pixel slices.
+#
+# And with the shell's accessibility trees, under the same rule:
+#
+#   - foldhash: Zlib, as slotmap is. hashbrown's default hasher, which
+#     accesskit_consumer turns on for the shell's trees; every hashbrown in
+#     the tree then takes it.
 exceptions = [
     { crate = "encoding_rs", allow = ["BSD-3-Clause"] },
     { crate = "libloading", allow = ["ISC"] },
@@ -90,6 +96,7 @@ exceptions = [
     { crate = "tiny-skia", allow = ["BSD-3-Clause"] },
     { crate = "tiny-skia-path", allow = ["BSD-3-Clause"] },
     { crate = "arrayref", allow = ["BSD-2-Clause"] },
+    { crate = "foldhash", allow = ["Zlib"] },
 ]
 # A crate with no licence expression at all is a licensing unknown, not a
 # permissive default.

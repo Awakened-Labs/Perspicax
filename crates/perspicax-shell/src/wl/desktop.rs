@@ -4,7 +4,8 @@
 //! Each is anchored to all four edges with an exclusive zone of -1, so it
 //! covers the whole monitor and ignores the room a panel reserves. Its
 //! namespace is `perspicax-desktop-<connector>`, which is how an agent tells
-//! one monitor's desktop from another's and from a window.
+//! one monitor's desktop from another's and from a window; its accessibility
+//! window carries the same name, which is how perspicax joins the two.
 //!
 //! A changed config repaints the same surfaces, so an agent holding a
 //! desktop's id still holds it afterwards. Only turning the wallpaper off
@@ -34,7 +35,12 @@ use wayland_client::{
 };
 
 use super::App;
-use crate::{Error, model::wallpaper, paint};
+use crate::{
+    Error,
+    a11y::{self, adapter::Served},
+    model::wallpaper,
+    paint,
+};
 
 /// Every monitor's desktop, and what they are painted from.
 pub(super) struct Desktops {
@@ -54,6 +60,10 @@ pub(super) struct Desktops {
 struct Desktop {
     output: wl_output::WlOutput,
     layer: LayerSurface,
+    /// `perspicax-desktop-<connector>`: the surface's and its window's.
+    namespace: String,
+    /// Its tree, on the accessibility bus.
+    a11y: Served,
     /// The monitor's whole scale: the buffer is this many pixels to each of
     /// the surface's.
     scale: u32,
@@ -135,12 +145,13 @@ impl Desktops {
             .name
             .clone()
             .unwrap_or_else(|| output.id().protocol_id().to_string());
+        let namespace = format!("perspicax-desktop-{name}");
         let surface = self.compositor.create_surface(qh);
         let layer = self.layers.create_layer_surface(
             qh,
             surface,
             Layer::Background,
-            Some(format!("perspicax-desktop-{name}")),
+            Some(namespace.clone()),
             Some(&output),
         );
         layer.set_anchor(Anchor::all());
@@ -151,6 +162,8 @@ impl Desktops {
         self.each.push(Desktop {
             output,
             layer,
+            a11y: Served::new(a11y::desktop(&namespace, None)),
+            namespace,
             scale: whole(info.scale_factor),
             size: None,
         });
@@ -182,7 +195,11 @@ impl Desktops {
         if width == 0 || height == 0 {
             return;
         }
-        self.each[at].size = Some((width, height));
+        let desktop = &mut self.each[at];
+        desktop.size = Some((width, height));
+        desktop
+            .a11y
+            .show(a11y::desktop(&desktop.namespace, desktop.size));
         self.draw(at);
     }
 

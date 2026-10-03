@@ -13,10 +13,16 @@
 //! picture is copied into a `wl_shm` buffer. A desktop changes rarely, and
 //! software draws it on any machine, under any compositor, in CI.
 //!
+//! Everything it draws is also described on the accessibility bus, through
+//! AccessKit, one tree per surface, so an agent reads the shell as it reads
+//! any application.
+//!
 //! [`run`] is the whole shell. The binary calls it with the person's session;
 //! the compositor's live tests call it on a thread, with a connection to a
 //! compositor of their own.
 
+#[cfg(feature = "wallpaper")]
+mod a11y;
 #[cfg(feature = "wallpaper")]
 mod model;
 #[cfg(feature = "wallpaper")]

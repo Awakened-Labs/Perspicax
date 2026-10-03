@@ -36,6 +36,13 @@ smithay-client-toolkit = { workspace = true, features = ["calloop"] }
 wayland-client.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# What an agent reads: each surface's tree, served on the accessibility bus.
+# The tokio executor rather than the default async-io, because atspi turns on
+# zbus's tokio feature for the whole workspace. With it, accesskit_unix runs
+# the bus on a thread and a current-thread runtime of its own, so the shell
+# itself needs no runtime.
+accesskit = { workspace = true, optional = true }
+accesskit_unix = { version = "0.24", default-features = false, features = ["tokio"], optional = true }
 # Binary-only.
 clap.workspace = true
 tracing-subscriber.workspace = true
@@ -60,7 +67,7 @@ perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
 # naming its feature. None is on by default; `full` is all of them.
 [features]
 # A picture or a colour behind the windows, on every monitor.
-wallpaper = ["dep:tiny-skia", "dep:png", "dep:zune-jpeg"]
+wallpaper = ["dep:tiny-skia", "dep:png", "dep:zune-jpeg", "dep:accesskit", "dep:accesskit_unix"]
 # A bar along an edge of each monitor: start button, taskbar, pager, clock.
 panel = []
 # The start menu and the root menu, of the installed applications.
