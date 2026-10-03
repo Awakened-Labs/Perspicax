@@ -32,7 +32,7 @@
 
 use perspicax_index::{
     DamageWitness, Delta, Drawn, HostFacts, Index, Receipt, Refusal, Shot, SurfaceFacts,
-    WindowReceipt, WindowWitness,
+    SurfaceKind, WindowReceipt, WindowWitness,
 };
 use perspicax_node::{
     NodeId, ObservedNode, Orientation, Origin, Rect, SurfaceId, Toggled, X11Basis,
@@ -255,6 +255,7 @@ impl From<&Refusal> for Refused {
                 Refusal::NoCapability { .. } => "no_capability",
                 Refusal::AmbiguousSelector { .. } => "ambiguous_selector",
                 Refusal::NotFound => "not_found",
+                Refusal::NotAWindow => "not_a_window",
             },
             message: refusal.to_string(),
             occluded_by: None,
@@ -434,6 +435,18 @@ impl Node {
 pub struct Window {
     /// The compositor surface.
     pub surface: u64,
+    /// What it is: `window`, an application's; `layer`, part of the desk
+    /// such as a panel, a wallpaper or a menu; or `lock_cover`, a screen
+    /// locker's. `window_close` and `tab_forward` are for windows only.
+    pub kind: &'static str,
+    /// For a layer surface, which layer it stacks in: `background` and
+    /// `bottom` under every window, `top` and `overlay` over them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<&'static str>,
+    /// For a layer surface, the namespace its client gave it, under a key
+    /// that says who chose it, as the title is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub untrusted_namespace: Option<String>,
     /// The shallowest accessible node drawn on it -- the window's own node.
     /// Pass it to `observe` as `root` to read this window and nothing else.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -511,8 +524,18 @@ impl Window {
                 .get(**id)
                 .is_some_and(|node| node.surface == Some(facts.id))
         };
+        let (kind, layer, namespace) = match &facts.kind {
+            SurfaceKind::Window => ("window", None, None),
+            SurfaceKind::Layer { layer, namespace } => {
+                ("layer", Some(layer.name()), Some(namespace.clone()))
+            }
+            SurfaceKind::LockCover => ("lock_cover", None, None),
+        };
         Self {
             surface: facts.id.0,
+            kind,
+            layer,
+            untrusted_namespace: namespace,
             node: order.iter().find(on_this_surface).map(|id| id.0),
             nodes: order.iter().filter(on_this_surface).count(),
             mapped: facts.mapped,

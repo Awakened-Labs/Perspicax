@@ -201,6 +201,12 @@ window by its surface: a close is a request the application may answer with a
 dialog, and a tab is brought forward only where the person can already see its
 group, never by switching what they are looking at.
 
+`window_list` lists the desk as well as the windows: a panel, a wallpaper or a
+menu is `kind: layer`, with the `layer` it stacks in and the
+`untrusted_namespace` its program gave it, and a screen locker's cover is
+`kind: lock_cover`. An agent can read and click a panel as it would a window;
+a window verb aimed at one is refused as `not_a_window`.
+
 An agent names a control and never a coordinate — the rectangle comes from the
 index and turning it into anything global is the compositor's job, so an agent
 that cannot name a pixel cannot name the wrong one. The input then goes onto the
@@ -246,8 +252,8 @@ under a titlebar is refused as `occluded`, naming the window the titlebar
 belongs to, and the verdict is proof rather than policy: the frame is drawn
 solid. A window's own frame sits outside it and never covers its own nodes.
 One cost of drawing the frame: a toolkit that would have drawn close and
-maximize buttons no longer does, so they are not in its accessibility tree,
-and there is no agent verb yet to close a window or bring a tab forward (W4).
+maximize buttons no longer does, so they are not in its accessibility tree;
+`window_close` and `tab_forward` are the agent's way to do what they did.
 
 **Text an application rendered is marked as such.** Every string reaches an
 agent under `untrusted_text`, beside the credentials of the process that drew

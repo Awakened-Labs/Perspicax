@@ -77,6 +77,58 @@ use crate::{Consent, join::SurfaceClaim};
 
 /// One surface, as its host currently sees it.
 ///
+/// What sort of surface a [`SurfaceFacts`] describes.
+///
+/// An application's window is what most of this crate is about. A desktop
+/// also has surfaces no application window owns: the panel along the bottom,
+/// the wallpaper behind everything, a launcher or a menu over the top, all
+/// layer-shell surfaces, and the cover a screen locker puts over every
+/// monitor. An agent listing the desk needs to tell them apart, and the join
+/// needs something other than a title to tell one layer surface from another.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SurfaceKind {
+    /// An application's toplevel: an xdg-shell window, or an X11 one.
+    #[default]
+    Window,
+    /// A layer-shell surface: a panel, a wallpaper, a launcher, a menu.
+    Layer {
+        /// Which layer it stacks in.
+        layer: Layer,
+        /// The namespace its client gave it, as `waybar` or
+        /// `perspicax-panel-DP-1`: a string the client chose, like a title.
+        namespace: String,
+    },
+    /// What a screen locker drew over a monitor while the session is locked.
+    LockCover,
+}
+
+/// The four layers of `wlr-layer-shell`, bottom to top. Windows stack between
+/// [`Layer::Bottom`] and [`Layer::Top`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Layer {
+    /// Under everything: a wallpaper.
+    Background,
+    /// Over the wallpaper and under every window: desktop icons.
+    Bottom,
+    /// Over the windows: a panel.
+    Top,
+    /// Over everything, fullscreen windows included: a launcher, a menu.
+    Overlay,
+}
+
+impl Layer {
+    /// Its name as `wlr-layer-shell` spells it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Background => "background",
+            Self::Bottom => "bottom",
+            Self::Top => "top",
+            Self::Overlay => "overlay",
+        }
+    }
+}
+
 /// Built by a host on every change it notices and published as a whole
 /// [`HostFacts`]; never mutated in place by anything above the host. Every
 /// default is the fail-closed one, so a producer that forgets a field cannot
@@ -177,6 +229,9 @@ pub struct SurfaceFacts {
     /// it is showing. `None` for a window on every workspace, or one no
     /// workspace has been decided for.
     pub workspace: Option<u16>,
+    /// Whether this is an application's window, a layer-shell surface, or a
+    /// lock cover.
+    pub kind: SurfaceKind,
 }
 
 impl SurfaceFacts {
@@ -203,6 +258,7 @@ impl SurfaceFacts {
             app_id: None,
             tabs: Vec::new(),
             workspace: None,
+            kind: SurfaceKind::Window,
         }
     }
 
@@ -212,11 +268,22 @@ impl SurfaceFacts {
     /// unattributed surface has no pid, and the join's own gate refuses to
     /// match on an absent one, so the two rules meet without either having to
     /// know about the other.
+    ///
+    /// A layer surface has no title, so its namespace stands in for one: a
+    /// shell that names each accessibility window after its surface's
+    /// namespace is then joined surface by surface, where one process with a
+    /// wallpaper, a panel and a menu would otherwise be ambiguous. Like a
+    /// title it only separates surfaces the pid has already admitted, so a
+    /// namespace can never join a window to another process's surface.
     #[must_use]
     pub fn claim(&self) -> SurfaceClaim {
+        let namespace = match &self.kind {
+            SurfaceKind::Layer { namespace, .. } => Some(namespace.clone()),
+            SurfaceKind::Window | SurfaceKind::LockCover => None,
+        };
         SurfaceClaim {
             surface: self.id,
-            title: self.title.clone(),
+            title: self.title.clone().or(namespace),
             pid: match &self.origin {
                 Origin::Process(process) => Some(process.pid),
                 // The X client's pid, however it was learned: the join uses
@@ -281,6 +348,23 @@ impl SurfaceFacts {
     #[must_use]
     pub fn tabbed(mut self, tabs: impl IntoIterator<Item = SurfaceId>) -> Self {
         self.tabs = tabs.into_iter().collect();
+        self
+    }
+
+    /// The same surface, a layer-shell surface in `layer` with `namespace`.
+    #[must_use]
+    pub fn layered(mut self, layer: Layer, namespace: impl Into<String>) -> Self {
+        self.kind = SurfaceKind::Layer {
+            layer,
+            namespace: namespace.into(),
+        };
+        self
+    }
+
+    /// The same surface, a screen locker's cover.
+    #[must_use]
+    pub fn lock_cover(mut self) -> Self {
+        self.kind = SurfaceKind::LockCover;
         self
     }
 
@@ -692,7 +776,8 @@ impl core::fmt::Display for Tally {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perspicax_node::ProcessOrigin;
+    use crate::join::{Finding, WindowClaim, join};
+    use perspicax_node::{NodeId, ProcessOrigin};
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Rect {
         Rect::new(x0, y0, x1, y1)
@@ -1080,5 +1165,84 @@ mod tests {
             "4 judged: 1 visible, 2 occluded (1 unproven), 0 clipped, \
              0 unmapped, 0 off screen, 1 unjudged"
         );
+    }
+
+    fn process(pid: u32) -> Origin {
+        Origin::Process(Box::new(ProcessOrigin {
+            pid,
+            exe: Some("/usr/bin/perspicax-shell".into()),
+            cgroup: None,
+            sandbox: None,
+        }))
+    }
+
+    fn named(node: u64, title: &str, pid: u32) -> WindowClaim {
+        WindowClaim {
+            node: NodeId(node),
+            title: Some(title.to_owned()),
+            bus_pid: Some(pid),
+            active_at: None,
+        }
+    }
+
+    #[test]
+    fn a_layer_surface_is_claimed_by_its_namespace() {
+        let panel = window()
+            .layered(Layer::Top, "perspicax-panel-DP-1")
+            .owned_by(process(7));
+        assert_eq!(panel.claim().title.as_deref(), Some("perspicax-panel-DP-1"));
+        assert_eq!(window().lock_cover().claim().title, None);
+        assert_eq!(
+            window().titled("Files").claim().title.as_deref(),
+            Some("Files")
+        );
+    }
+
+    #[test]
+    fn two_layer_surfaces_of_one_process_are_told_apart_by_namespace() {
+        let wallpaper = SurfaceFacts::new(SurfaceId(1), rect(0.0, 0.0, 1920.0, 1080.0))
+            .layered(Layer::Background, "perspicax-desktop-DP-1")
+            .owned_by(process(7));
+        let panel = SurfaceFacts::new(SurfaceId(2), rect(0.0, 1040.0, 1920.0, 1080.0))
+            .layered(Layer::Top, "perspicax-panel-DP-1")
+            .owned_by(process(7));
+        let (joins, findings) = join(
+            &[
+                named(10, "perspicax-panel-DP-1", 7),
+                named(11, "perspicax-desktop-DP-1", 7),
+            ],
+            &[wallpaper.claim(), panel.claim()],
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+        let surface_of = |node| {
+            joins
+                .iter()
+                .find(|join| join.node == NodeId(node))
+                .map(|join| join.surface)
+        };
+        assert_eq!(surface_of(10), Some(SurfaceId(2)));
+        assert_eq!(surface_of(11), Some(SurfaceId(1)));
+    }
+
+    #[test]
+    fn a_namespace_never_joins_across_processes() {
+        let panel = window()
+            .layered(Layer::Top, "perspicax-panel-DP-1")
+            .owned_by(process(7));
+        let (joins, findings) = join(&[named(10, "perspicax-panel-DP-1", 8)], &[panel.claim()]);
+        assert!(joins.is_empty());
+        assert!(
+            matches!(findings[..], [Finding::Contradiction { .. }]),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn layers_are_named_as_layer_shell_spells_them() {
+        let names: Vec<_> = [Layer::Background, Layer::Bottom, Layer::Top, Layer::Overlay]
+            .into_iter()
+            .map(Layer::name)
+            .collect();
+        assert_eq!(names, ["background", "bottom", "top", "overlay"]);
     }
 }

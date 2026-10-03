@@ -69,12 +69,7 @@ impl Compositor {
             .pointer
             .as_ref()
             .map_or_else(Point::default, |pointer| pointer.current_location());
-        let output = self
-            .space
-            .output_under(at)
-            .next()
-            .or_else(|| self.space.outputs().next())
-            .cloned();
+        let output = self.output_under_pointer();
         let local = output
             .as_ref()
             .and_then(|output| self.space.output_geometry(output))
