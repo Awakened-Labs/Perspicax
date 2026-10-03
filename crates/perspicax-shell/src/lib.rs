@@ -1,8 +1,9 @@
 //! perspicax-shell: the desktop a person logs in to.
 //!
-//! A wallpaper on every monitor, to be joined by a panel, menus, a tray and
-//! desktop icons: each a cargo feature, and each a key in the `[shell]`
-//! table of perspicax's own config file. perspicax starts it, but it is an
+//! A wallpaper on every monitor, and a menu of the installed applications on
+//! a right-click, to be joined by a panel, a tray and desktop icons: each a
+//! cargo feature, and each a key in the `[shell]` table of perspicax's own
+//! config file. perspicax starts it, but it is an
 //! ordinary Wayland client: its surfaces are layer-shell surfaces, its
 //! taskbar speaks wlr-foreign-toplevel-management, and the one thing it
 //! needs from perspicax alone, being told that the person asked for a menu,
@@ -21,12 +22,18 @@
 //! the compositor's live tests call it on a thread, with a connection to a
 //! compositor of their own.
 
-#[cfg(feature = "wallpaper")]
+#[cfg(any(feature = "wallpaper", feature = "menus"))]
 mod a11y;
-#[cfg(feature = "wallpaper")]
+#[cfg(feature = "menus")]
+mod launch;
+#[cfg(feature = "menus")]
+mod layout;
+#[cfg(any(feature = "wallpaper", feature = "menus"))]
 mod model;
-#[cfg(feature = "wallpaper")]
+#[cfg(any(feature = "wallpaper", feature = "menus"))]
 mod paint;
+#[cfg(feature = "menus")]
+mod update;
 mod wl;
 
 use std::path::{Path, PathBuf};

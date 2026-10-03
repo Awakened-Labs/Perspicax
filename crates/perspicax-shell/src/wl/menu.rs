@@ -1,0 +1,432 @@
+//! The menus' surface: while a menu is open, one surface on the `overlay`
+//! layer of its monitor, over everything, a fullscreen window included.
+//!
+//! It covers the whole monitor and is clear but for the menus, so a click
+//! anywhere off them lands on it and closes them, as a click away from a
+//! menu does on any desktop. It takes the keyboard while it is up, and says
+//! it is opaque only where a menu is, so an agent knows what it covers. Its
+//! namespace is `perspicax-menu-<connector>`, and its accessibility window
+//! carries the same name, which is how perspicax joins the two.
+//!
+//! It covers the whole monitor, panels included, rather than only the room
+//! panels leave: a point perspicax gives, or a click on the wallpaper, is
+//! from the monitor's corner, and a surface placed in what panels leave
+//! cannot know where that corner is. The shell's own panels will be cut out
+//! of where it takes clicks.
+//!
+//! The root menu is built from the installed applications when it first
+//! opens, and again on an open after an application was installed or
+//! removed, or the menu file changed: what it lists is never older than the
+//! last time it was opened.
+
+use std::{
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
+
+use accesskit::{Action, ActionHandler, ActionRequest};
+use perspicax_config::Shell;
+use smithay_client_toolkit::{
+    output::OutputState,
+    reexports::calloop::channel::Sender,
+    shell::{
+        WaylandSurface,
+        wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerSurface, LayerSurfaceConfigure},
+    },
+};
+use wayland_client::{QueueHandle, protocol::wl_output, protocol::wl_surface};
+
+use super::{
+    App,
+    canvas::{Area, Canvas, whole},
+};
+use crate::{
+    a11y::{self, adapter::Served},
+    launch::{self, Launcher},
+    layout::Rect,
+    model::{
+        apps::{self, Places, Run},
+        fs::{Disk, which},
+        icons::Icons,
+        image,
+        menu::{self, Session},
+        menu_file,
+    },
+    paint::{self, icons::Images, text::Fonts},
+    update::{Effect, Event, State},
+};
+
+/// The menus, and everything they are built and drawn from.
+pub(super) struct Menus {
+    state: State,
+    /// The surface, while a menu is open.
+    shown: Option<Shown>,
+    fonts: Fonts,
+    images: Images,
+    settings: Settings,
+    places: Places,
+    /// What the root menu was last built from; `None` to build it afresh.
+    built_from: Option<Vec<Option<SystemTime>>>,
+    /// Whether there is a compositor to ask to end the session.
+    log_out: bool,
+    pub(super) launcher: Launcher,
+    /// Where an assistive technology's requests are sent, to reach the loop.
+    actions: Sender<Event>,
+}
+
+/// What the config says of the menus.
+#[derive(Debug, Clone, PartialEq)]
+struct Settings {
+    root: bool,
+    menu_file: Option<PathBuf>,
+    icon_theme: Option<String>,
+    lock: Vec<String>,
+}
+
+/// The menus' surface.
+struct Shown {
+    /// The monitor's connector name.
+    name: String,
+    namespace: String,
+    layer: LayerSurface,
+    a11y: Served,
+    scale: u32,
+    /// In the surface's own units, once the compositor has said.
+    size: Option<(u32, u32)>,
+}
+
+impl Menus {
+    pub(super) fn new(
+        shell: &Shell,
+        config: Option<&Path>,
+        actions: Sender<Event>,
+        log_out: bool,
+    ) -> Self {
+        let places = Places::from_env();
+        let settings = Settings::of(shell, config);
+        let images = Images::new(icons(&settings, &places));
+        let terminal = shell
+            .terminal
+            .clone()
+            .or_else(|| launch::find_terminal(&Disk, &places.path));
+        Self {
+            state: State::new(menu::Menu::default()),
+            shown: None,
+            fonts: Fonts::find(),
+            images,
+            settings,
+            built_from: None,
+            log_out,
+            launcher: Launcher::new(terminal, home()),
+            places,
+            actions,
+        }
+    }
+
+    /// Take up a changed config. The root menu is built afresh when it next
+    /// opens.
+    pub(super) fn reconfigure(&mut self, shell: &Shell, config: Option<&Path>) {
+        let settings = Settings::of(shell, config);
+        if settings.icon_theme != self.settings.icon_theme {
+            self.images = Images::new(icons(&settings, &self.places));
+        }
+        self.settings = settings;
+        self.launcher.set_terminal(
+            shell
+                .terminal
+                .clone()
+                .or_else(|| launch::find_terminal(&Disk, &self.places.path)),
+        );
+        self.built_from = None;
+    }
+
+    /// Whether Log Out has a compositor to ask.
+    pub(super) fn set_log_out(&mut self, log_out: bool) {
+        if log_out != self.log_out {
+            self.log_out = log_out;
+            self.built_from = None;
+        }
+    }
+
+    /// Whether `surface` is the menus'.
+    pub(super) fn owns(&self, surface: &wl_surface::WlSurface) -> bool {
+        self.shown
+            .as_ref()
+            .is_some_and(|shown| shown.layer.wl_surface() == surface)
+    }
+
+    /// Handle `event`, and show what it changed. What is left to do, the
+    /// effects that reach past the menus, is returned.
+    pub(super) fn send(
+        &mut self,
+        canvas: &mut Canvas,
+        qh: &QueueHandle<App>,
+        outputs: &OutputState,
+        event: Event,
+    ) -> Vec<Effect> {
+        let opens = matches!(
+            event,
+            Event::RootMenu { .. }
+                | Event::DesktopPress {
+                    button: crate::update::Button::Right,
+                    ..
+                }
+        );
+        if opens && !self.state.is_open() {
+            if !self.settings.root {
+                return Vec::new();
+            }
+            self.refresh();
+        }
+        let effects = self.state.update(event, &mut self.fonts);
+        if effects.contains(&Effect::Redraw) {
+            self.sync(canvas, qh, outputs);
+        }
+        effects
+            .into_iter()
+            .filter(|effect| *effect != Effect::Redraw)
+            .collect()
+    }
+
+    /// Build the root menu again if what it is built from changed.
+    fn refresh(&mut self) {
+        let menu_file = self.settings.menu_file.as_deref();
+        let now = stamp(&self.places, menu_file);
+        if self.built_from.as_ref() == Some(&now) {
+            return;
+        }
+        let apps = apps::scan(&Disk, &self.places);
+        let file = menu_file.and_then(|path| match menu_file::read(path, home().as_deref()) {
+            Ok(file) => Some(file),
+            Err(error) => {
+                tracing::warn!(
+                    "the menu file {} cannot be used: {error}; showing the applications",
+                    path.display()
+                );
+                None
+            }
+        });
+        let lock = self
+            .settings
+            .lock
+            .first()
+            .filter(|program| which(&Disk, program, &self.places.path).is_some())
+            .map(|_| Run {
+                argv: self.settings.lock.clone(),
+                terminal: false,
+                dir: None,
+            });
+        let session = Session {
+            lock,
+            log_out: self.log_out,
+        };
+        self.state
+            .set_root(menu::root(&apps, file.as_ref(), &session));
+        tracing::debug!(applications = apps.len(), "the root menu was built");
+        self.built_from = Some(now);
+    }
+
+    /// Make the surface match what is open: take it away, put it up on the
+    /// monitor a menu opened on, or draw it again.
+    fn sync(&mut self, canvas: &mut Canvas, qh: &QueueHandle<App>, outputs: &OutputState) {
+        let Some(view) = self.state.view() else {
+            self.shown = None;
+            return;
+        };
+        if self
+            .shown
+            .as_ref()
+            .is_some_and(|shown| shown.name != view.output)
+        {
+            self.shown = None;
+        }
+        if self.shown.is_none() {
+            let found = outputs.outputs().find_map(|output| {
+                let info = outputs.info(&output)?;
+                (info.name.as_deref() == Some(view.output)).then_some((output, info.scale_factor))
+            });
+            let Some((output, scale)) = found else {
+                tracing::warn!(
+                    output = view.output,
+                    "a menu was opened on a monitor that is gone"
+                );
+                return;
+            };
+            let namespace = format!("perspicax-menu-{}", view.output);
+            self.shown = Some(Shown::put_up(
+                canvas,
+                qh,
+                &output,
+                view.output,
+                namespace,
+                whole(scale),
+                Forward(self.actions.clone()),
+            ));
+        }
+        self.draw(canvas);
+    }
+
+    /// Draw the open menus on the surface, once the compositor has given it
+    /// a size.
+    fn draw(&mut self, canvas: &mut Canvas) {
+        let (Some(shown), Some(view)) = (&mut self.shown, self.state.view()) else {
+            return;
+        };
+        let Some(size) = shown.size else {
+            return;
+        };
+        let opaque: Vec<Area> = view
+            .menus
+            .iter()
+            .map(|menu| (menu.rect.x, menu.rect.y, menu.rect.w, menu.rect.h))
+            .collect();
+        let text = self.fonts.get();
+        let images = &mut self.images;
+        let scale = shown.scale;
+        canvas.show(&shown.layer, size, scale, &opaque, |picture| {
+            paint::menu::paint(&view, picture, scale, text, images);
+        });
+        shown
+            .a11y
+            .show(a11y::menu(&shown.namespace, Some(size), Some(&view)));
+    }
+
+    /// The compositor sized the surface: lay the menus out on it and draw
+    /// them.
+    pub(super) fn configure(
+        &mut self,
+        canvas: &mut Canvas,
+        layer: &LayerSurface,
+        configure: &LayerSurfaceConfigure,
+    ) {
+        let Some(shown) = self.shown.as_mut().filter(|shown| shown.layer == *layer) else {
+            return;
+        };
+        let (width, height) = configure.new_size;
+        if width == 0 || height == 0 {
+            return;
+        }
+        shown.size = Some((width, height));
+        let area = Rect::new(0, 0, width as i32, height as i32);
+        self.state.update(Event::Resized(area), &mut self.fonts);
+        self.draw(canvas);
+    }
+
+    /// The compositor took the surface away: the monitor went.
+    pub(super) fn closed(&mut self, layer: &LayerSurface) {
+        if self
+            .shown
+            .as_ref()
+            .is_some_and(|shown| shown.layer == *layer)
+        {
+            self.shown = None;
+            self.state.update(Event::KeyboardLost, &mut self.fonts);
+        }
+    }
+
+    /// The keyboard came to `surface`, or left it.
+    pub(super) fn keyboard(&mut self, surface: &wl_surface::WlSurface, entered: bool) -> bool {
+        let Some(shown) = self
+            .shown
+            .as_mut()
+            .filter(|shown| shown.layer.wl_surface() == surface)
+        else {
+            return false;
+        };
+        shown.a11y.focused(entered);
+        true
+    }
+}
+
+impl Shown {
+    /// A clear surface over the whole of `output` that takes the keyboard.
+    fn put_up(
+        canvas: &Canvas,
+        qh: &QueueHandle<App>,
+        output: &wl_output::WlOutput,
+        name: &str,
+        namespace: String,
+        scale: u32,
+        actions: Forward,
+    ) -> Self {
+        let layer = canvas.layer(qh, Layer::Overlay, &namespace, output);
+        layer.set_anchor(Anchor::all());
+        layer.set_exclusive_zone(-1);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        layer.set_size(0, 0);
+        layer.commit();
+        Self {
+            name: name.to_owned(),
+            a11y: Served::acting(a11y::menu(&namespace, None, None), actions),
+            namespace,
+            layer,
+            scale,
+            size: None,
+        }
+    }
+}
+
+impl Settings {
+    fn of(shell: &Shell, config: Option<&Path>) -> Self {
+        let home = home();
+        Self {
+            root: shell.root_menu,
+            menu_file: shell
+                .menu_file
+                .as_deref()
+                .map(|written| image::locate(written, config, home.as_deref())),
+            icon_theme: shell.icon_theme.clone(),
+            lock: shell.lock.clone(),
+        }
+    }
+}
+
+/// The icon theme the config names, read.
+fn icons(settings: &Settings, places: &Places) -> Icons {
+    Icons::new(
+        &Disk,
+        settings.icon_theme.as_deref(),
+        &places.data,
+        home().as_deref(),
+    )
+}
+
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// When each folder of applications, and the menu file, last changed: a
+/// menu built from them is current while this stays the same.
+fn stamp(places: &Places, menu_file: Option<&Path>) -> Vec<Option<SystemTime>> {
+    places
+        .data
+        .iter()
+        .map(|dir| dir.join("applications"))
+        .chain(menu_file.map(Path::to_owned))
+        .map(|path| {
+            std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok()
+        })
+        .collect()
+}
+
+/// An assistive technology's requests of a menu, sent on to the shell's
+/// loop: clicking an item chooses it, focusing it selects it.
+struct Forward(Sender<Event>);
+
+impl ActionHandler for Forward {
+    fn do_action(&mut self, request: ActionRequest) {
+        let Some(route) = a11y::route_of(request.target_node) else {
+            return;
+        };
+        let event = match request.action {
+            Action::Click => Event::Choose(route),
+            Action::Focus => Event::Select(route),
+            _ => return,
+        };
+        if self.0.send(event).is_err() {
+            tracing::debug!("the shell is stopping; the request is dropped");
+        }
+    }
+}

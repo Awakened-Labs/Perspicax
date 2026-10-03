@@ -1,6 +1,8 @@
 //! perspicax-shell, as an agent reads it: the real binary, hosted headless,
 //! read off the accessibility bus and joined to its surfaces as any
-//! application is -- and read again when it comes and goes.
+//! application is -- and read again when it comes and goes. And as an agent
+//! uses it: a right-click on the wallpaper by selector, and the menu that
+//! opens read and clicked through to an application.
 //!
 //! Each test runs a compositor that keeps its desk current the way `--mcp`
 //! does, and starts shells against its socket as a person's session would,
@@ -21,7 +23,7 @@ use std::{
 
 use perspicax::{desk::Desk, keep::keep_current, session};
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop};
-use perspicax_index::{HostFacts, Index, Layer, SurfaceKind};
+use perspicax_index::{HostFacts, Index, Layer, PointerButton, Selector, SurfaceKind, Verb};
 use perspicax_mcp::Desktop;
 use perspicax_node::{NodeId, Origin, Role, SurfaceId};
 
@@ -117,6 +119,79 @@ fn a_restarted_shell_is_read_again() {
     });
 }
 
+#[test]
+#[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
+fn choosing_an_application_launches_it() {
+    host("launch", |hosted| {
+        // One application installed, and nothing else: data folders of the
+        // test's own, the system's left out.
+        let base =
+            std::env::temp_dir().join(format!("perspicax-shell-launch-{}", std::process::id()));
+        let (data, none) = (base.join("data"), base.join("none"));
+        let marker = base.join("launched");
+        std::fs::create_dir_all(data.join("applications")).expect("a data folder");
+        std::fs::create_dir_all(&none).expect("an empty one");
+        std::fs::write(
+            data.join("applications/marker.desktop"),
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Marker\nExec=touch {}\nCategories=Utility;\n",
+                marker.display()
+            ),
+        )
+        .expect("a desktop entry");
+        let shell = hosted.shell_with(&[
+            ("XDG_DATA_HOME", data.as_os_str()),
+            ("XDG_DATA_DIRS", none.as_os_str()),
+        ]);
+        hosted.wait_until("the desktop window joined", |index, facts| {
+            joined_desktop(index, facts, shell.id())
+        });
+
+        hosted.click(&format!("window:{DESKTOP}"), PointerButton::Right);
+        hosted.wait_until("the root menu read and joined", |index, facts| {
+            menu_item(index, facts, "Accessories")
+        });
+        hosted.click("menuitem:Accessories", PointerButton::Left);
+        hosted.wait_until("its submenu read", |index, facts| {
+            menu_item(index, facts, "Marker")
+        });
+        hosted.click("menuitem:Marker", PointerButton::Left);
+
+        let deadline = Instant::now() + PATIENCE;
+        while !marker.exists() {
+            assert!(Instant::now() < deadline, "the application started");
+            thread::sleep(Duration::from_millis(100));
+        }
+        hosted.wait_until("the menu gone", |index, facts| {
+            menu_item(index, facts, "Accessories")
+                .is_none()
+                .then_some(())
+        });
+        std::fs::remove_dir_all(&base).ok();
+    });
+}
+
+/// The menu item labelled `label`, if it is read and joined to the menus'
+/// surface on the overlay layer.
+fn menu_item(index: &Index, facts: &HostFacts, label: &str) -> Option<NodeId> {
+    index.preorder().into_iter().find(|&id| {
+        index.get(id).is_some_and(|node| {
+            node.node.role() == Role::MenuItem
+                && node.node.label() == Some(label)
+                && node
+                    .surface
+                    .and_then(|surface| facts.surface(surface))
+                    .is_some_and(|surface| {
+                        matches!(
+                            &surface.kind,
+                            SurfaceKind::Layer { layer: Layer::Overlay, namespace }
+                                if namespace == "perspicax-menu-HEADLESS-1"
+                        )
+                    })
+        })
+    })
+}
+
 /// The desktop window drawn by `pid`, if it is joined: its node, and the
 /// surface it is joined to, which must be `pid`'s background surface of the
 /// same name.
@@ -146,15 +221,41 @@ struct Hosted {
 impl Hosted {
     /// Start a shell against the compositor.
     fn shell(&self) -> Shell {
+        self.shell_with(&[])
+    }
+
+    /// Start a shell against the compositor, with `env` set for it.
+    fn shell_with(&self, env: &[(&str, &std::ffi::OsStr)]) -> Shell {
         let program = std::env::var_os("PERSPICAX_SHELL")
             .expect("PERSPICAX_SHELL names a perspicax-shell built with --features full");
         let child = Command::new(program)
             .arg("--config")
             .arg(&self.config)
             .env("WAYLAND_DISPLAY", &self.socket)
+            .envs(env.iter().copied())
             .spawn()
             .expect("the shell starts");
         Shell(child)
+    }
+
+    /// Click what `selector` names with `button`, as an agent does.
+    fn click(&self, selector: &str, button: PointerButton) {
+        let selector = Selector::parse(selector).expect("a selector");
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            match self.desk.act(&selector, &Verb::Click(button)) {
+                Ok(_) => return,
+                // Refused while the screen settles: a menu just drawn is
+                // stale until it is read again.
+                Err(refused) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "{selector:?} clicked: {refused:?}"
+                    );
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
     }
 
     /// Wait for `find` to find something on the desk.

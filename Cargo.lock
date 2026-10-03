@@ -1579,13 +1579,16 @@ dependencies = [
  "accesskit",
  "accesskit_unix",
  "clap",
+ "cosmic-text",
  "perspicax-config",
  "perspicax-policy",
  "perspicax-protocols",
  "png",
+ "serde",
  "smithay-client-toolkit",
  "thiserror 2.0.20",
  "tiny-skia",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "wayland-client",
@@ -2213,12 +2216,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0512da38f5e2b31201a93524adb8d3136276fa4fe4aafab4e1f727a82b534cc0"
 dependencies = [
  "bitflags",
+ "bytemuck",
  "calloop",
  "calloop-wayland-source",
  "cursor-icon",
  "libc",
  "log",
  "memmap2",
+ "pkg-config",
  "rustix 1.1.4",
  "thiserror 2.0.20",
  "wayland-backend",
@@ -2230,6 +2235,7 @@ dependencies = [
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
  "wayland-scanner",
+ "xkbcommon",
  "xkeysym",
 ]
 
@@ -3100,6 +3106,9 @@ name = "xkeysym"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "xml-rs"
