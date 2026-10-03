@@ -73,10 +73,23 @@ allow = [
 #     which draws titles on the seat, takes fontdb to find the system's fonts.
 #     Zlib asks only that the notice stay with the source and that altered
 #     versions say so; it has no reciprocal term.
+#
+# Added 2026-10-03 with W5's perspicax-shell, which draws its wallpaper,
+# panel and menus in software, under the same rule:
+#
+#   - tiny-skia and tiny-skia-path: BSD-3-Clause. A port of a subset of
+#     Skia, and Skia's licence with it: keep the notice, and do not use the
+#     authors' names to endorse a product. The shell draws every shape with
+#     it. Read 2026-10-03.
+#   - arrayref: BSD-2-Clause, which is BSD-3-Clause without the endorsement
+#     clause. tiny-skia takes it for fixed-size views of its pixel slices.
 exceptions = [
     { crate = "encoding_rs", allow = ["BSD-3-Clause"] },
     { crate = "libloading", allow = ["ISC"] },
     { crate = "slotmap", allow = ["Zlib"] },
+    { crate = "tiny-skia", allow = ["BSD-3-Clause"] },
+    { crate = "tiny-skia-path", allow = ["BSD-3-Clause"] },
+    { crate = "arrayref", allow = ["BSD-2-Clause"] },
 ]
 # A crate with no licence expression at all is a licensing unknown, not a
 # permissive default.

@@ -133,6 +133,12 @@ impl Session {
         (Desk::new(&globals, &qh), queue, qh, globals)
     }
 
+    /// The socket's name in `XDG_RUNTIME_DIR`, for a client of the test's
+    /// own to [`connect`] to.
+    pub fn socket(&self) -> &str {
+        &self.socket
+    }
+
     pub fn command(&self, command: Command) {
         self.requests
             .command(command)

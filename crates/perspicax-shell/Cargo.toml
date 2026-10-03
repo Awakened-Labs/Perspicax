@@ -1,0 +1,74 @@
+[package]
+name = "perspicax-shell"
+description = "The desktop for perspicax: wallpaper, panel, tray, start menu, root menu and desktop icons, each a cargo feature and a config toggle. A Wayland client of standard protocols, readable by agents."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+# A library and a binary from one crate, as `perspicax` is. The binary is what
+# the compositor starts. The library is what the compositor's live tests run
+# on a thread of their own, so a test of what the shell draws needs no binary
+# found on disk and no process supervised.
+[lib]
+name = "perspicax_shell"
+path = "src/lib.rs"
+
+[[bin]]
+name = "perspicax-shell"
+path = "src/main.rs"
+
+# No smithay here, ever: the shell is a client, and depends on the compositor
+# no more than waybar does. It talks to perspicax through standard protocols
+# and the one channel of its own, `perspicax-protocols`.
+[dependencies]
+perspicax-config = { path = "../perspicax-config", version = "0.1.0" }
+perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", features = ["client"] }
+# The event loop is calloop, the one smithay already brought into the tree.
+smithay-client-toolkit = { workspace = true, features = ["calloop"] }
+wayland-client.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Binary-only.
+clap.workspace = true
+tracing-subscriber.workspace = true
+
+# Shapes and images, drawn in software into shared-memory buffers.
+# BSD-3-Clause, with arrayref (BSD-2-Clause) beneath it; see deny.toml.
+# `png-format` is off: it would bring a second version of png, and the
+# wallpaper decodes with the one below.
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"], optional = true }
+# Wallpapers: PNG, with the version already in the tree for screenshots, and
+# JPEG, which is what most photographs are. Both pure Rust; zune-jpeg is MIT
+# OR Apache-2.0 OR Zlib.
+png = { version = "0.18", optional = true }
+zune-jpeg = { version = "0.5", optional = true }
+
+[dev-dependencies]
+# A wallpaper's colour, written as the config writes it.
+perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
+
+# Each component is a feature, so a person who wants only a wallpaper builds
+# only a wallpaper, and the config refuses a key for a component left out,
+# naming its feature. None is on by default; `full` is all of them.
+[features]
+# A picture or a colour behind the windows, on every monitor.
+wallpaper = ["dep:tiny-skia", "dep:png", "dep:zune-jpeg"]
+# A bar along an edge of each monitor: start button, taskbar, pager, clock.
+panel = []
+# The start menu and the root menu, of the installed applications.
+menus = []
+# Status icons from other programs, in the panel.
+tray = ["panel"]
+# The desktop folder's files, as icons on the wallpaper.
+icons = []
+# Icons drawn from SVG, as most icon themes ship them.
+svg = []
+full = ["wallpaper", "panel", "menus", "tray", "icons", "svg"]

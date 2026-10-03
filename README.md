@@ -54,6 +54,7 @@ perspicax-config       config.toml — schema, classic/minimal profiles, feature
 perspicax-atspi        impl Ingest — AT-SPI2 over D-Bus
 perspicax-compositor   impl HostView — Smithay: outputs, seat, damage. Headless draws nothing.
 perspicax-protocols    perspicax's own Wayland protocols — the channel to the desktop shell
+perspicax-shell        the desktop — wallpaper, panel, menus, tray, icons; a Wayland client, no Smithay
 perspicax-probe        dev CLI — dump a tree, time a read, explain a refusal
 ```
 

@@ -43,16 +43,9 @@ perspicax-config = { path = "../perspicax-config", version = "0.1.0", optional =
 # Seat-only: reads the person's Xcursor theme, and headless draws no cursor.
 # MIT, pure Rust, no dependencies.
 xcursor = { version = "0.3", optional = true }
-# Seat-only: window titles, shaped and rasterised. It shapes complex scripts
-# (harfrust) and falls back across the system's fonts (fontdb) for a glyph
-# the first font lacks, which a title in CJK or with an emoji needs.
-# `fontconfig` is a pure-Rust reader of fonts.conf, not libfontconfig. MIT OR
-# Apache-2.0; see deny.toml for the two Zlib crates beneath it.
-cosmic-text = { version = "0.19", default-features = false, features = [
-    "std",
-    "swash",
-    "fontconfig",
-], optional = true }
+# Seat-only: window titles, shaped and rasterised. See the workspace manifest
+# for what it brings.
+cosmic-text = { workspace = true, optional = true }
 
 # Backends, as cargo features, so a build carries only the system libraries it
 # will actually use. Neither is on by default: the four gates build the
@@ -92,13 +85,17 @@ capture = ["smithay/renderer_pixman"]
 # panel program installed. MIT; default features off, since the tests need
 # neither calloop nor xkbcommon on the client side.
 [dev-dependencies]
-smithay-client-toolkit = { version = "0.20", default-features = false }
-wayland-client = "0.31"
+smithay-client-toolkit.workspace = true
+wayland-client.workspace = true
 # The client side of the protocols sctk has no helpers for: a taskbar's
 # window list and controls, and session lock, spoken raw. The same crate and version the
 # server side already uses through smithay; only the features differ.
-wayland-protocols = { version = "0.32", features = ["client", "staging"] }
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols = { workspace = true, features = ["client", "staging"] }
+wayland-protocols-wlr = { workspace = true, features = ["client"] }
 # The shell's side of perspicax's own protocol, spoken by the tests as the
 # shell will.
 perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", features = ["client"] }
+# The shell itself, every component built, run in-process by `tests/shell.rs`
+# against a compositor on a thread: what it draws is checked in the facts and
+# in pictures, without a binary to find or a process to supervise.
+perspicax-shell = { path = "../perspicax-shell", version = "0.1.0", features = ["full"] }

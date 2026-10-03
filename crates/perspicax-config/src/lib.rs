@@ -20,6 +20,7 @@
 //! and a value (or an error) out.
 
 mod keys;
+mod shell;
 
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,11 @@ use perspicax_policy::{
     Grid, Keysym, Mods, Place, Program, Protocol, Rule, Shape, Side, Snapping, Towards,
 };
 use serde::Deserialize;
+
+use crate::shell::RawShell;
+pub use crate::shell::{
+    Edge, Item, Panel, PanelOutputs, Shell, ShellBuilt, TaskbarScope, Wallpaper, WallpaperMode,
+};
 
 /// Which cargo features this binary was built with, as far as config cares.
 /// The binary fills it in with `cfg!`; this crate cannot see the binary's
@@ -87,6 +93,10 @@ pub struct Config {
     /// Which programs may use the protocols that reach past their own
     /// windows: taskbars, pagers, screenshot and display tools.
     pub protocols: Access,
+    /// What perspicax-shell puts on the desktop, read as if the shell had
+    /// every component: which it was built with is for it to check, through
+    /// [`shell`].
+    pub shell: Shell,
 }
 
 /// The keyboard layout and key repeat.
@@ -178,6 +188,15 @@ pub enum Error {
          cargo feature (`--features perspicax/{feature}`)"
     )]
     NotBuilt {
+        key: &'static str,
+        feature: &'static str,
+    },
+    /// A `[shell]` key for a component perspicax-shell was built without.
+    #[error(
+        "`{key}` is not built into this perspicax-shell; rebuild it with the \
+         `{feature}` cargo feature (`--features perspicax-shell/{feature}`)"
+    )]
+    ShellNotBuilt {
         key: &'static str,
         feature: &'static str,
     },
@@ -356,6 +375,7 @@ impl Config {
             decorations: Decorations::default(),
             xwayland: built.xwayland,
             protocols: protocols(built),
+            shell: Shell::profile(profile, ShellBuilt::FULL),
         }
     }
 }
@@ -416,6 +436,45 @@ pub fn load(path: &Path, built: Built) -> Result<Config, Error> {
     }
 }
 
+/// Read a config file's `[shell]` table, as a perspicax-shell built with
+/// `built` does. A file that does not exist is the classic profile's shell,
+/// as it is for the compositor.
+///
+/// # Errors
+///
+/// [`Error::Read`] for a file that exists and cannot be read, and anything
+/// [`shell`] refuses.
+pub fn load_shell(path: &Path, built: ShellBuilt) -> Result<Shell, Error> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => shell(&text, built),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(Shell::profile(Profile::Classic, built))
+        }
+        Err(source) => Err(Error::Read {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+/// Parse a config file's `[shell]` table, with its profile, as a
+/// perspicax-shell built with `built` reads it. The rest of the file must be
+/// this schema, and is otherwise the compositor's to judge.
+///
+/// # Errors
+///
+/// [`Error::Parse`] for text that is not this schema,
+/// [`Error::ShellNotBuilt`] for a key the shell cannot honour,
+/// [`Error::Invalid`] for a value it cannot use.
+pub fn shell(text: &str, built: ShellBuilt) -> Result<Shell, Error> {
+    let raw: Raw = toml::from_str(text).map_err(|error| Error::Parse(error.to_string()))?;
+    let profile = Shell::profile(raw.profile, built);
+    match raw.shell {
+        Some(shell) => shell.apply(profile, built),
+        None => Ok(profile),
+    }
+}
+
 /// Parse a config file's text.
 ///
 /// # Errors
@@ -451,6 +510,7 @@ struct Raw {
     snap: Option<RawSnap>,
     decorations: Option<RawDecorations>,
     protocols: Option<RawProtocols>,
+    shell: Option<RawShell>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -760,6 +820,11 @@ impl Raw {
 
         if let Some(protocols) = self.protocols {
             config.protocols = protocols.apply(config.protocols, built)?;
+        }
+
+        // Whatever the shell was built with: see `shell`.
+        if let Some(shell) = self.shell {
+            config.shell = shell.apply(config.shell, ShellBuilt::FULL)?;
         }
 
         if let Some(empty) = self.autostart.iter().position(Vec::is_empty) {
