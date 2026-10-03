@@ -655,30 +655,37 @@ fn under(state: &Compositor, at: Point<f64, Logical>) -> Option<Hit> {
                 frame: None,
             })
     };
-    layer(&layers::ABOVE)
-        .or_else(|| {
-            let (window, location) = state.space.element_under(at)?;
-            // The client first, so a popup hanging over the titlebar gets
-            // its clicks; then the frame around it.
-            if let Some((surface, offset)) =
-                window.surface_under(at - location.to_f64(), WindowSurfaceType::ALL)
-            {
-                return Some(Hit {
-                    window: Some(window.clone()),
-                    takes_focus: false,
-                    surface: Some(surface),
-                    origin: (location + offset).to_f64(),
-                    frame: None,
-                });
-            }
-            Some(Hit {
+    // `raised`: only a window over the panels, the fullscreen one in use.
+    let window = |raised: bool| {
+        let (window, location) = state.space.element_under(at)?;
+        if raised && !crate::shell::covers_panels(window) {
+            return None;
+        }
+        // The client first, so a popup hanging over the titlebar gets its
+        // clicks; then the frame around it.
+        if let Some((surface, offset)) =
+            window.surface_under(at - location.to_f64(), WindowSurfaceType::ALL)
+        {
+            return Some(Hit {
                 window: Some(window.clone()),
                 takes_focus: false,
-                surface: None,
-                origin: location.to_f64(),
-                frame: Some(state.frame_part(window, at)?),
-            })
+                surface: Some(surface),
+                origin: (location + offset).to_f64(),
+                frame: None,
+            });
+        }
+        Some(Hit {
+            window: Some(window.clone()),
+            takes_focus: false,
+            surface: None,
+            origin: location.to_f64(),
+            frame: Some(state.frame_part(window, at)?),
         })
+    };
+    layer(&layers::OVERLAY)
+        .or_else(|| window(true))
+        .or_else(|| layer(&layers::TOP))
+        .or_else(|| window(false))
         .or_else(|| layer(&layers::BELOW))
 }
 

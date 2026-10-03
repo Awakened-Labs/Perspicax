@@ -419,12 +419,7 @@ impl Compositor {
             .unwrap_or(u32::MAX);
         let windows = self.space.elements().filter_map(shell::surface_of);
         let layers = self
-            .layers_in(&[
-                crate::layers::BELOW[0],
-                crate::layers::BELOW[1],
-                crate::layers::ABOVE[0],
-                crate::layers::ABOVE[1],
-            ])
+            .layers_in(&crate::layers::ALL)
             .into_iter()
             .map(|(layer, _)| layer.wl_surface().clone());
         let covers = self
@@ -993,6 +988,11 @@ impl SeatHandler for Compositor {
         let client = focused.and_then(|surface| self.display.get_client(surface.id()).ok());
         set_data_device_focus(&self.display, seat, client.clone());
         set_primary_focus(&self.display, seat, client);
+        // A fullscreen window covers the panels only while it is in use.
+        let window = focused
+            .and_then(|surface| self.window_for(surface))
+            .and_then(|window| shell::id_of(&window));
+        self.stack_fullscreen(window);
 
         if !self.backend.has_person() {
             return;

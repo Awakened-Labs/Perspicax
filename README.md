@@ -365,7 +365,9 @@ profile, which is Plasma's and Windows' habits:
 `minimal` is Fluxbox's and Enlightenment's: focus follows the pointer, a 2×2
 grid of workspaces that wraps, and resting the pointer against an edge of the
 desk flips to the next one, taking along a window being dragged, as does
-scrolling over the desktop. It does not snap. Every key below is optional and
+scrolling over the desktop. It does not snap. In both, a fullscreen window
+covers the panels while it is the one in use, and goes back under them when
+another window or a menu takes the keyboard. Every key below is optional and
 overrides the profile one setting at a time. A misspelled key, or a key for a
 feature this build left out, is refused with its name rather than ignored.
 

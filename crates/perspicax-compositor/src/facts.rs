@@ -137,6 +137,9 @@ impl Compositor {
     /// would mean an occlusion verdict computed against a window that had
     /// already moved.
     pub(crate) fn publish_facts(&mut self) {
+        // Every change a window's fullscreen state can come from ends here,
+        // so this is where it is settled whether one covers the panels.
+        self.stack_fullscreen(self.focused_surface());
         self.generation += 1;
         let generation = self.generation;
 
@@ -153,11 +156,19 @@ impl Compositor {
         // Layer surfaces around them, where the person sees them: background
         // and bottom under every window, top and overlay over. A panel on
         // `top` covering the foot of a maximized window is an occlusion the
-        // index has to know about. And while the session is locked, the lock
-        // surfaces go over everything, so every node beneath is honestly
-        // judged covered.
+        // index has to know about. A fullscreen window in use goes over the
+        // panels and under `overlay` (`crate::shell::covers_panels`). And
+        // while the session is locked, the lock surfaces go over everything,
+        // so every node beneath is honestly judged covered.
         let below = self.layers_in(&crate::layers::BELOW);
-        let above = self.layers_in(&crate::layers::ABOVE);
+        let top = self.layers_in(&crate::layers::TOP);
+        let overlay = self.layers_in(&crate::layers::OVERLAY);
+        let (raised, windows): (Vec<&crate::framed::Framed>, Vec<_>) = self
+            .space
+            .elements()
+            .partition(|window| crate::shell::covers_panels(window));
+        let window =
+            |window: &crate::framed::Framed| Some(self.grouped(window, self.facts_for(window)?));
         let layer = |(layer, placed): &(smithay::desktop::LayerSurface, _)| {
             let id = *layer.user_data().get::<SurfaceId>()?;
             let mut facts = self.plain_facts(id, layer.wl_surface(), *placed);
@@ -181,13 +192,10 @@ impl Compositor {
         let surfaces: Vec<SurfaceFacts> = below
             .iter()
             .filter_map(layer)
-            .chain(
-                self.parked
-                    .iter()
-                    .chain(self.space.elements())
-                    .filter_map(|window| Some(self.grouped(window, self.facts_for(window)?))),
-            )
-            .chain(above.iter().filter_map(layer))
+            .chain(self.parked.iter().chain(windows).filter_map(window))
+            .chain(top.iter().filter_map(layer))
+            .chain(raised.into_iter().filter_map(window))
+            .chain(overlay.iter().filter_map(layer))
             .chain(covers)
             .collect();
 

@@ -21,13 +21,16 @@ use perspicax_policy::Action;
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_output, delegate_registry, delegate_shm, delegate_xdg_shell,
-    delegate_xdg_window,
+    delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
+    delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     shell::{
         WaylandSurface,
+        wlr_layer::{
+            Anchor, Layer, LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
+        },
         xdg::{
             XdgShell, XdgSurface as _,
             window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
@@ -340,6 +343,10 @@ pub struct Desk {
     pub shell: Option<PerspicaxShellV1>,
     pub told: Vec<Told>,
     pub shell_finished: bool,
+    layer_shell: LayerShell,
+    /// Strips across the top of the screen, each with its colour and height.
+    pub layers: Vec<(LayerSurface, u32, u32)>,
+    pub layers_drawn: usize,
 }
 
 impl Desk {
@@ -381,7 +388,31 @@ impl Desk {
             shell: None,
             told: Vec::new(),
             shell_finished: false,
+            layer_shell: LayerShell::bind(globals, qh).expect("zwlr_layer_shell_v1"),
+            layers: Vec::new(),
+            layers_drawn: 0,
         }
+    }
+
+    /// A strip `height` tall across the top of the screen on `layer`, drawn
+    /// in one colour, ARGB, reserving no room: a panel, or a menu on
+    /// `overlay`.
+    pub fn open_strip(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        layer: Layer,
+        namespace: &str,
+        height: u32,
+        colour: u32,
+    ) {
+        let surface = self.compositor.create_surface(qh);
+        let strip =
+            self.layer_shell
+                .create_layer_surface(qh, surface, layer, Some(namespace), None);
+        strip.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
+        strip.set_size(0, height);
+        strip.commit();
+        self.layers.push((strip, colour, height));
     }
 
     pub fn open_window(&mut self, qh: &QueueHandle<Self>, title: &str, app_id: &str) {
@@ -1105,6 +1136,42 @@ impl Dispatch<ExtSessionLockV1, ()> for Desk {
     }
 }
 
+impl LayerShellHandler for Desk {
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {}
+
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        layer: &LayerSurface,
+        configure: LayerSurfaceConfigure,
+        _: u32,
+    ) {
+        let Some(&(_, colour, height)) = self.layers.iter().find(|(known, _, _)| known == layer)
+        else {
+            return;
+        };
+        let width = configure.new_size.0.max(1);
+        let (buffer, canvas) = self
+            .pool
+            .create_buffer(
+                i32::try_from(width).unwrap(),
+                i32::try_from(height).unwrap(),
+                i32::try_from(width * 4).unwrap(),
+                wl_shm::Format::Argb8888,
+            )
+            .expect("a buffer");
+        for pixel in canvas.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&colour.to_le_bytes());
+        }
+        let surface = layer.wl_surface();
+        buffer.attach_to(surface).expect("attach");
+        surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+        layer.commit();
+        self.layers_drawn += 1;
+    }
+}
+
 impl WindowHandler for Desk {
     fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {
         self.asked_to_close += 1;
@@ -1214,4 +1281,5 @@ delegate_output!(Desk);
 delegate_shm!(Desk);
 delegate_xdg_shell!(Desk);
 delegate_xdg_window!(Desk);
+delegate_layer!(Desk);
 delegate_registry!(Desk);

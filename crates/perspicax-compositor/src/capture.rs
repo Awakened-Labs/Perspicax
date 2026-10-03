@@ -94,9 +94,10 @@ mod taking {
         size: Size<i32, Physical>,
         scale: f64,
         output: Option<String>,
-        /// Front to back: panels over the windows, then the windows, then the
-        /// wallpaper beneath them.
-        upper: Vec<(LayerSurface, Point<i32, Logical>)>,
+        /// Front to back: `overlay` surfaces, a fullscreen window in use,
+        /// the panels, the windows, and the wallpaper beneath them.
+        overlay: Vec<(LayerSurface, Point<i32, Logical>)>,
+        top: Vec<(LayerSurface, Point<i32, Logical>)>,
         windows: Vec<Placed>,
         lower: Vec<(LayerSurface, Point<i32, Logical>)>,
         drawn: Vec<Drawn>,
@@ -111,6 +112,9 @@ mod taking {
         /// Its whole extent, frame included, in the picture.
         cover: Rectangle<i32, Logical>,
         redacted: bool,
+        /// Over the panels: the fullscreen window in use. See
+        /// `crate::shell::covers_panels`.
+        raised: bool,
     }
 
     pub(super) fn take(state: &mut Compositor, target: &ShotTarget) -> Result<Shot, ActError> {
@@ -198,7 +202,8 @@ mod taking {
         };
 
         let layers = layer_map_for_output(&output);
-        let mut upper = Vec::new();
+        let mut overlay = Vec::new();
+        let mut top = Vec::new();
         let mut lower = Vec::new();
         for layer in layers.layers().rev() {
             let Some(placed) = layers.layer_geometry(layer) else {
@@ -206,9 +211,13 @@ mod taking {
             };
             let id = layer.user_data().get::<SurfaceId>().copied();
             match layer.layer() {
-                Layer::Top | Layer::Overlay => {
+                Layer::Overlay => {
                     account(id, placed, false);
-                    upper.push((layer.clone(), placed.loc));
+                    overlay.push((layer.clone(), placed.loc));
+                }
+                Layer::Top => {
+                    account(id, placed, false);
+                    top.push((layer.clone(), placed.loc));
                 }
                 Layer::Background | Layer::Bottom => lower.push((layer.clone(), placed.loc)),
             }
@@ -235,6 +244,7 @@ mod taking {
                 at: location - window.geometry().loc - area.loc,
                 cover: Rectangle::new(bbox.loc - area.loc, bbox.size),
                 redacted: hidden,
+                raised: crate::shell::covers_panels(window),
             });
         }
 
@@ -251,7 +261,8 @@ mod taking {
             size,
             scale,
             output: Some(output.name()),
-            upper,
+            overlay,
+            top,
             windows,
             lower,
             drawn,
@@ -281,12 +292,14 @@ mod taking {
             size: (bbox.size.w, bbox.size.h).into(),
             scale: 1.0,
             output: None,
-            upper: Vec::new(),
+            overlay: Vec::new(),
+            top: Vec::new(),
             windows: vec![Placed {
                 window,
                 at,
                 cover: Rectangle::from_size(bbox.size),
                 redacted: false,
+                raised: false,
             }],
             lower: Vec::new(),
             drawn: vec![Drawn {
@@ -329,55 +342,57 @@ mod taking {
     {
         let failed = |error: &dyn std::fmt::Display| ActError::Capture(error.to_string());
         let scale = Scale::from(plan.scale);
-        let mut elements: Vec<Scene<R>> = Vec::new();
-        let layer = |renderer: &mut R, layer: &LayerSurface, at: Point<i32, Logical>| {
-            AsRenderElements::<R>::render_elements::<WaylandSurfaceRenderElement<R>>(
-                layer,
-                renderer,
-                at.to_physical_precise_round(scale),
-                scale,
-                1.0,
-            )
+        let layers = |renderer: &mut R, layers: &[(LayerSurface, Point<i32, Logical>)]| {
+            layers
+                .iter()
+                .flat_map(|(surface, at)| {
+                    AsRenderElements::<R>::render_elements::<WaylandSurfaceRenderElement<R>>(
+                        surface,
+                        renderer,
+                        at.to_physical_precise_round(scale),
+                        scale,
+                        1.0,
+                    )
+                })
+                .map(Scene::Surface)
+                .collect::<Vec<_>>()
         };
-        for (surface, at) in &plan.upper {
-            elements.extend(
-                layer(renderer, surface, *at)
-                    .into_iter()
-                    .map(Scene::Surface),
-            );
-        }
-        for placed in &plan.windows {
-            if placed.redacted {
-                let block = SolidColorBuffer::new(placed.cover.size, REDACTED);
-                elements.push(Scene::Solid(SolidColorRenderElement::from_buffer(
-                    &block,
-                    placed.cover.loc.to_physical_precise_round(scale),
-                    scale,
-                    1.0,
-                    Kind::Unspecified,
-                )));
-            } else {
-                elements.extend(
-                    placed
-                        .window
-                        .render_elements::<FramedElement<R>>(
-                            renderer,
-                            placed.at.to_physical_precise_round(scale),
-                            scale,
-                            1.0,
-                        )
-                        .into_iter()
-                        .map(Scene::Window),
-                );
+        // The windows over the panels, or the rest of them.
+        let windows = |renderer: &mut R, raised: bool| {
+            let mut elements = Vec::new();
+            for placed in plan.windows.iter().filter(|placed| placed.raised == raised) {
+                if placed.redacted {
+                    let block = SolidColorBuffer::new(placed.cover.size, REDACTED);
+                    elements.push(Scene::Solid(SolidColorRenderElement::from_buffer(
+                        &block,
+                        placed.cover.loc.to_physical_precise_round(scale),
+                        scale,
+                        1.0,
+                        Kind::Unspecified,
+                    )));
+                } else {
+                    elements.extend(
+                        placed
+                            .window
+                            .render_elements::<FramedElement<R>>(
+                                renderer,
+                                placed.at.to_physical_precise_round(scale),
+                                scale,
+                                1.0,
+                            )
+                            .into_iter()
+                            .map(Scene::Window),
+                    );
+                }
             }
-        }
-        for (surface, at) in &plan.lower {
-            elements.extend(
-                layer(renderer, surface, *at)
-                    .into_iter()
-                    .map(Scene::Surface),
-            );
-        }
+            elements
+        };
+        // Front to back.
+        let mut elements: Vec<Scene<R>> = layers(renderer, &plan.overlay);
+        elements.extend(windows(renderer, true));
+        elements.extend(layers(renderer, &plan.top));
+        elements.extend(windows(renderer, false));
+        elements.extend(layers(renderer, &plan.lower));
 
         let size = plan.size;
         let buffer: Size<i32, BufferCoord> = (size.w, size.h).into();
