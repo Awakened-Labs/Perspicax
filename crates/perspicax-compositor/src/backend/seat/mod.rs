@@ -917,10 +917,10 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
             .map(Elements::CursorSurface),
         ),
         Some(None) => {}
-        None => match space.render_elements_for_output(renderer, &head.output, 1.0) {
-            Ok(windows) => elements.extend(windows.into_iter().map(Elements::Space)),
-            Err(error) => {
-                tracing::warn!(output = head.output.name(), %error, "output is not mapped");
+        None => match crate::shell::stack(space, &head.output) {
+            Some(stack) => elements.extend(scene(renderer, &stack, scale)),
+            None => {
+                tracing::warn!(output = head.output.name(), "output is not mapped");
                 return;
             }
         },
@@ -955,6 +955,57 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     if let CursorImageStatus::Surface(surface) = status {
         send_frames_surface_tree(surface, &output, now, None, |_, _| Some(output.clone()));
     }
+}
+
+/// What `stack` shows, front to back, at `scale`: each layer surface and
+/// window where the stack puts it.
+fn scene(renderer: &mut GlesRenderer, stack: &crate::shell::Stack, scale: f64) -> Vec<Elements> {
+    use smithay::{
+        backend::renderer::element::{AsRenderElements, Wrap},
+        desktop::LayerSurface,
+        utils::{Logical, Point},
+    };
+
+    use crate::framed::{Framed, FramedElement};
+
+    let at_scale = smithay::utils::Scale::from(scale);
+    let layers = |renderer: &mut GlesRenderer, pieces: &[(LayerSurface, Point<i32, Logical>)]| {
+        pieces
+            .iter()
+            .flat_map(|(surface, at)| {
+                AsRenderElements::<GlesRenderer>::render_elements::<
+                    WaylandSurfaceRenderElement<GlesRenderer>,
+                >(
+                    surface,
+                    renderer,
+                    at.to_physical_precise_round(scale),
+                    at_scale,
+                    1.0,
+                )
+            })
+            .map(|element| Elements::Space(SpaceRenderElements::Surface(element)))
+            .collect::<Vec<_>>()
+    };
+    let windows = |renderer: &mut GlesRenderer, pieces: &[(Framed, Point<i32, Logical>)]| {
+        pieces
+            .iter()
+            .flat_map(|(window, at)| {
+                window.render_elements::<FramedElement<GlesRenderer>>(
+                    renderer,
+                    at.to_physical_precise_round(scale),
+                    at_scale,
+                    1.0,
+                )
+            })
+            .map(|element| Elements::Space(SpaceRenderElements::Element(Wrap::from(element))))
+            .collect::<Vec<_>>()
+    };
+    let mut elements = layers(renderer, &stack.overlay);
+    elements.extend(windows(renderer, &stack.raised));
+    elements.extend(layers(renderer, &stack.top));
+    elements.extend(windows(renderer, &stack.windows));
+    elements.extend(layers(renderer, &stack.lower));
+    elements
 }
 
 /// The pointer, drawn at `at` in the output's own coordinates: the client's

@@ -660,6 +660,20 @@ fn the_panel_reserves_its_height() {
         rect(0, 760, 1280, 40),
         "along the bottom, the monitor's width"
     );
+    // And drawn there: the screen and pictures stack the same way.
+    #[cfg(feature = "capture")]
+    {
+        assert_eq!(
+            colour_at(&session, 640, 790),
+            [0x23, 0x26, 0x29, 0xff],
+            "the panel's colour along the bottom"
+        );
+        assert_eq!(
+            colour_at(&session, 640, 10),
+            [0x1e, 0x4a, 0x73, 0xff],
+            "and classic's wallpaper at the top"
+        );
+    }
 
     // A window maximized is offered what the panel leaves.
     let (mut desk, mut queue, qh, _) = session.client();

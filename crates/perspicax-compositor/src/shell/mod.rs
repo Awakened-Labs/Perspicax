@@ -55,6 +55,8 @@ use crate::{framed::Framed, state::Compositor};
 pub(crate) use grabs::{MoveGrab, ResizeGrab};
 pub(crate) use snap::SnapPreview;
 pub(crate) use stacking::covers_panels;
+#[cfg(any(feature = "seat", feature = "capture"))]
+pub(crate) use stacking::{Stack, stack};
 
 /// What the compositor remembers about one window's placement, kept in the
 /// window's own user data so it lives and dies with the window.

@@ -61,12 +61,16 @@ mod taking {
         utils::{
             Buffer as BufferCoord, Logical, Physical, Point, Rectangle, Scale, Size, Transform,
         },
-        wayland::shell::wlr_layer::Layer,
     };
 
     use crate::{
-        BACKDROP, act::ActError, backend::Running, framed::Framed, framed::FramedElement,
-        shell::id_of, state::Compositor,
+        BACKDROP,
+        act::ActError,
+        backend::Running,
+        framed::Framed,
+        framed::FramedElement,
+        shell::{Stack, id_of},
+        state::Compositor,
     };
 
     smithay::backend::renderer::element::render_elements! {
@@ -201,38 +205,24 @@ mod taking {
             }
         };
 
+        let stack = crate::shell::stack(space, &output)
+            .ok_or_else(|| ActError::NoSuchOutput(output.name()))?;
         let layers = layer_map_for_output(&output);
-        let mut overlay = Vec::new();
-        let mut top = Vec::new();
-        let mut lower = Vec::new();
-        for layer in layers.layers().rev() {
-            let Some(placed) = layers.layer_geometry(layer) else {
-                continue;
-            };
+        for (layer, at) in stack.overlay.iter().chain(&stack.top) {
             let id = layer.user_data().get::<SurfaceId>().copied();
-            match layer.layer() {
-                Layer::Overlay => {
-                    account(id, placed, false);
-                    overlay.push((layer.clone(), placed.loc));
-                }
-                Layer::Top => {
-                    account(id, placed, false);
-                    top.push((layer.clone(), placed.loc));
-                }
-                Layer::Background | Layer::Bottom => lower.push((layer.clone(), placed.loc)),
+            if let Some(placed) = layers.layer_geometry(layer) {
+                account(id, Rectangle::new(*at, placed.size), false);
             }
         }
-        drop(layers);
 
         let mut windows = Vec::new();
-        for window in space.elements().rev() {
-            let Some(bbox) = space.element_bbox(window) else {
-                continue;
-            };
-            if !bbox.overlaps(area) {
-                continue;
-            }
-            let Some(location) = space.element_location(window) else {
+        let in_front = stack.raised.iter().map(|piece| (true, piece));
+        for (raised, (window, at)) in
+            in_front.chain(stack.windows.iter().map(|piece| (false, piece)))
+        {
+            let (Some(bbox), Some(location)) =
+                (space.element_bbox(window), space.element_location(window))
+            else {
                 continue;
             };
             let id = id_of(window);
@@ -241,21 +231,25 @@ mod taking {
             account(id, client, hidden);
             windows.push(Placed {
                 window: window.clone(),
-                at: location - window.geometry().loc - area.loc,
+                at: *at,
                 cover: Rectangle::new(bbox.loc - area.loc, bbox.size),
                 redacted: hidden,
-                raised: crate::shell::covers_panels(window),
+                raised,
             });
         }
-
-        let layers = layer_map_for_output(&output);
-        for (layer, at) in &lower {
+        for (layer, at) in &stack.lower {
             let id = layer.user_data().get::<SurfaceId>().copied();
             if let Some(placed) = layers.layer_geometry(layer) {
                 account(id, Rectangle::new(*at, placed.size), false);
             }
         }
         drop(layers);
+        let Stack {
+            overlay,
+            top,
+            lower,
+            ..
+        } = stack;
 
         Ok(Plan {
             size,
