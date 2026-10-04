@@ -183,8 +183,11 @@ pub(crate) struct App {
     )]
     handle: LoopHandle<'static, App>,
     #[cfg_attr(
-        not(feature = "menus"),
-        expect(dead_code, reason = "the menus' surface, made from the loop")
+        not(any(feature = "menus", feature = "panel")),
+        expect(
+            dead_code,
+            reason = "the menus' surface, and the panels' protocols, from the loop"
+        )
     )]
     qh: QueueHandle<App>,
 }

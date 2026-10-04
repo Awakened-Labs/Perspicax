@@ -275,7 +275,7 @@ pub(crate) fn reload(state: &mut Compositor) {
     }
     // After the rules, so a shell they no longer admit is not counted as
     // listening.
-    supervise::reloaded(state, &shell);
+    supervise::reloaded(state, &shell, access_changed);
     tracing::info!(
         keyboard_changed,
         outputs_changed,

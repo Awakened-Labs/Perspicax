@@ -32,8 +32,8 @@ use smithay_client_toolkit::{
     },
 };
 use wayland_client::{
-    QueueHandle,
-    protocol::{wl_output, wl_surface},
+    Connection, Dispatch, Proxy, QueueHandle,
+    protocol::{wl_output, wl_registry, wl_surface},
 };
 use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
@@ -531,6 +531,52 @@ impl App {
             Some(Part::Task(serial)) => self.press_task(serial, button),
             Some(Part::Workspace(serial)) => self.press_workspace(serial, button),
             Some(Part::Start) | None => {}
+        }
+    }
+}
+
+/// A listing of the compositor's globals, asked for afresh.
+pub(super) struct Relisted;
+
+impl App {
+    /// Take back the taskbar's or the pager's protocol, if one was taken away
+    /// and the rules now give it back. The compositor filters each listing of
+    /// its globals by the rules in force when it is asked for, so a listing
+    /// asked for now offers exactly what may be bound now, and binding from
+    /// it never binds what is still refused.
+    pub(super) fn take_back(&mut self, connection: &Connection) {
+        if self.panels.taskbar.is_none() || self.panels.pager.is_none() {
+            connection.display().get_registry(&self.qh, Relisted);
+        }
+    }
+}
+
+impl Dispatch<wl_registry::WlRegistry, Relisted> for App {
+    fn event(
+        app: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _: &Relisted,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        else {
+            return;
+        };
+        if interface == ZwlrForeignToplevelManagerV1::interface().name
+            && app.panels.taskbar.is_none()
+        {
+            tracing::info!("the taskbar's protocol is offered again; taking it back");
+            app.panels.taskbar = Some(registry.bind(name, version.min(3), qh, ()));
+        } else if interface == ExtWorkspaceManagerV1::interface().name && app.panels.pager.is_none()
+        {
+            tracing::info!("the pager's protocol is offered again; taking it back");
+            app.panels.pager = Some(registry.bind(name, version.min(1), qh, ()));
         }
     }
 }

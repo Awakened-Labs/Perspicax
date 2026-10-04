@@ -1,5 +1,6 @@
 //! `perspicax-shell-v1`, the channel from perspicax: the person asked for a
-//! menu, the config changed. A changed config is applied in place; the root
+//! menu, the config changed. A changed config is applied in place, and a
+//! protocol its rules give back is taken back; the root
 //! menu opens where perspicax says the pointer is, and the start menu from
 //! the start button of the monitor the pointer is on, or each closes if it
 //! is the one open.
@@ -74,14 +75,20 @@ impl Dispatch<PerspicaxShellV1, ()> for App {
         channel: &PerspicaxShellV1,
         event: perspicax_shell_v1::Event,
         _: &(),
-        _: &Connection,
+        connection: &Connection,
         qh: &QueueHandle<Self>,
     ) {
         use perspicax_shell_v1::Event;
         match event {
             Event::StartMenu { output } => app.start_menu_on(output),
             Event::RootMenu { output, x, y } => app.root_menu(output, x, y),
-            Event::Reconfigure => app.reconfigure(qh),
+            Event::Reconfigure => {
+                app.reconfigure(qh);
+                #[cfg(feature = "panel")]
+                app.take_back(connection);
+                #[cfg(not(feature = "panel"))]
+                let _ = connection;
+            }
             Event::Finished => {
                 tracing::info!("perspicax withdrew the shell channel");
                 channel.destroy();

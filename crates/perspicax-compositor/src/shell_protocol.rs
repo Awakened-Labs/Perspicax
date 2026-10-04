@@ -93,8 +93,9 @@ impl Compositor {
         }
     }
 
-    /// The config's `[shell]` table changed: tell every shell to read the
-    /// file again.
+    /// The config's `[shell]` table changed, or its `[protocols]` rules did:
+    /// tell every shell to read the file again, and to take back any
+    /// protocol the rules give back to it.
     pub(crate) fn reconfigure_shells(&self) {
         for shell in &self.shells.bound {
             shell.reconfigure();

@@ -965,3 +965,36 @@ fn with_the_taskbar_rule_off_the_panel_still_runs() {
     drop((desk, queue));
     shell.stop_with(session);
 }
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_taskbar_and_pager_taken_away_come_back_with_their_rules() {
+    let session = Session::start("shell-taskbar-back", four_workspaces());
+    // The taskbar from the left end, and the pager after it at the right.
+    let config = "profile = \"classic\"\n[shell.panel]\nitems = [\"taskbar\", \"pager\"]\n";
+    let shell = Shell::start(&session, "taskbar-back", config);
+    session.wait_for(|facts| panels(facts).len() == 1);
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_coloured(&qh, "orange", "orange", 0xffff_8000);
+    common::until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    let task = (TASK as usize - 4, 800 - 30);
+    let first_cell = (1280 - 218 + 4 + 4, 800 - 30);
+    until_colour(&session, task, LIT);
+    until_colour(&session, first_cell, LIT);
+
+    let off = Access::open()
+        .with(Protocol::ForeignToplevelManagement, Rule::Off)
+        .with(Protocol::Workspace, Rule::Off);
+    session.command(Command::Protocols(off));
+    until_colour(&session, task, BAR);
+    until_colour(&session, first_cell, BAR);
+
+    // Given back: the shell takes both back, with no restart.
+    session.command(Command::Protocols(Access::open()));
+    until_colour(&session, task, LIT);
+    until_colour(&session, first_cell, LIT);
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}

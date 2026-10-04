@@ -11,10 +11,13 @@
 //! short wait, a shell that refused its config waits for the file to be
 //! read again, and a clean exit is left alone.
 //!
-//! A save that changes `[shell]` reaches the shell as `reconfigure`. A shell
-//! that does not hold `perspicax-shell-v1` cannot hear that, so it is
-//! started again instead, which reads the file anew. Turning `enabled` off
-//! stops it, and turning it on starts it.
+//! A save that changes `[shell]` reaches the shell as `reconfigure`, and so
+//! does one that changes `[protocols]`, whose rules decide which of the
+//! taskbar's and the pager's protocols the shell may hold: told, it takes
+//! back any the rules give back. A shell that does not hold
+//! `perspicax-shell-v1` cannot hear that, so it is started again instead,
+//! which reads the file and the rules anew. Turning `enabled` off stops it,
+//! and turning it on starts it.
 //!
 //! Like everything else the person's session starts, it gets no agent
 //! consent: an agent can read it, but not click it.
@@ -77,8 +80,9 @@ pub(crate) fn start(state: &mut Compositor) {
 }
 
 /// The config was read again, and `before` is the `[shell]` table that was
-/// in force until now. Start, stop, tell or restart the shell to match.
-pub(crate) fn reloaded(state: &mut Compositor, before: &Shell) {
+/// in force until now; `rules_changed` says whether `[protocols]` changed
+/// too. Start, stop, tell or restart the shell to match.
+pub(crate) fn reloaded(state: &mut Compositor, before: &Shell, rules_changed: bool) {
     let Running::Seat(session) = &mut state.backend else {
         return;
     };
@@ -87,7 +91,7 @@ pub(crate) fn reloaded(state: &mut Compositor, before: &Shell) {
         return;
     }
     let waiting = session.shell.restarts.config_changed();
-    let changed = session.settings.shell != *before;
+    let changed = session.settings.shell != *before || rules_changed;
     let Some(pid) = session.shell.child.as_ref().map(Child::id) else {
         if waiting || !before.enabled {
             start(state);

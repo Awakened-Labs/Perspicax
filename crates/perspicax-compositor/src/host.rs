@@ -82,7 +82,7 @@ pub enum Command {
     /// Put new `[protocols]` rules in force, as a seat does when the person
     /// saves a changed config: who may use the protocols that reach past
     /// their own windows. A client the new rules leave out loses what it
-    /// held.
+    /// held, and every shell is told to look again at what it may hold.
     Protocols(perspicax_policy::Access),
     /// Tell every shell on `perspicax-shell-v1` to read its config file
     /// again, as a seat does when a save changes the `[shell]` table. For a
