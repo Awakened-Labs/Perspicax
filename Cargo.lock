@@ -1460,10 +1460,12 @@ dependencies = [
  "perspicax-node",
  "rmcp",
  "serde_json",
+ "smithay-client-toolkit",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wayland-client",
 ]
 
 [[package]]
@@ -1593,6 +1595,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
  "zune-jpeg",
 ]
 

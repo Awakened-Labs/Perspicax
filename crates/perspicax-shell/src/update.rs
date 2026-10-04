@@ -28,19 +28,11 @@ use crate::{
         menu::{self, Anchor, Line, Placed, Shown},
     },
     model::{
+        Button,
         apps::Run,
         menu::{Does, Item, Menu, Route},
     },
 };
-
-/// A pointer button.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Button {
-    Left,
-    Right,
-    Middle,
-    Other,
-}
 
 /// A key pressed while a menu has the keyboard.
 #[derive(Debug, Clone, PartialEq, Eq)]

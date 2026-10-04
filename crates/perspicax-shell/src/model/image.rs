@@ -30,6 +30,13 @@ pub(crate) enum LoadError {
 /// Where the image named `written` in the config file is. `~/` is the home
 /// folder, and a relative path is beside the config file, so a person can
 /// keep a wallpaper next to the config that names it.
+#[cfg_attr(
+    not(any(feature = "wallpaper", feature = "menus", test)),
+    expect(
+        dead_code,
+        reason = "a wallpaper or a menu file; a panel alone names no file"
+    )
+)]
 pub(crate) fn locate(written: &Path, config: Option<&Path>, home: Option<&Path>) -> PathBuf {
     if let (Ok(rest), Some(home)) = (written.strip_prefix("~"), home) {
         return home.join(rest);

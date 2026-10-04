@@ -1,9 +1,9 @@
 //! perspicax-shell: the desktop a person logs in to.
 //!
 //! A wallpaper on every monitor, a menu of the installed applications on a
-//! right-click, and a panel with a start menu and a clock, to be joined by a
-//! taskbar, a tray and desktop icons: each a cargo feature, and each a key
-//! in the `[shell]` table of perspicax's own config file. perspicax starts
+//! right-click, and a panel with a start menu, a taskbar, a pager and a
+//! clock, to be joined by a tray and desktop icons: each a cargo feature,
+//! and each a key in the `[shell]` table of perspicax's own config file. perspicax starts
 //! it, but it is an ordinary Wayland client: its surfaces are layer-shell
 //! surfaces, its taskbar speaks wlr-foreign-toplevel-management, and the one
 //! thing it needs from perspicax alone, being told that the person asked for

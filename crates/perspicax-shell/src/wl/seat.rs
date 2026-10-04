@@ -1,32 +1,44 @@
 //! The pointer and the keyboard, on the shell's surfaces.
 //!
 //! A button on a desktop is a click on the wallpaper: the right one opens
-//! the root menu where it was pressed. The left button on a panel's start
-//! button opens the start menu, or closes it; any other press on a panel
+//! the root menu where it was pressed. A button on a panel is the panel's:
+//! the left one on its start button opens the start menu, or closes it; on
+//! a task it brings that window forward, or puts it away if it is forward
+//! already, and the middle one closes it; the left one on a workspace
+//! switches to it. Any press on a panel other than the start button's
 //! closes the menus, as a click anywhere off them does. The pointer and the
 //! buttons on the menus' surface, and every key while it has the keyboard,
 //! are the menus'.
+//!
 //! The pointer is drawn as the cursor theme's arrow on every surface of the
 //! shell's, rather than as whatever the last window left it as.
 
+#[cfg(feature = "menus")]
 use smithay_client_toolkit::{
-    delegate_keyboard, delegate_pointer, delegate_seat,
+    delegate_keyboard,
+    seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
+};
+use smithay_client_toolkit::{
+    delegate_pointer, delegate_seat,
     seat::{
         Capability, SeatHandler, SeatState,
-        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
         pointer::{
             CursorIcon, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer,
         },
     },
 };
+#[cfg(feature = "menus")]
+use wayland_client::protocol::wl_keyboard;
 use wayland_client::{
     Connection, QueueHandle,
     globals::GlobalList,
-    protocol::{wl_keyboard, wl_pointer, wl_seat, wl_surface},
+    protocol::{wl_pointer, wl_seat, wl_surface},
 };
 
 use super::App;
-use crate::update::{Button, Event, Key};
+use crate::model::Button;
+#[cfg(feature = "menus")]
+use crate::update::{Event, Key};
 
 /// Linux's button codes, from `linux/input-event-codes.h`, which Wayland
 /// carries as they are.
@@ -36,8 +48,10 @@ const BTN_MIDDLE: u32 = 0x112;
 
 /// The seat, and the pointer and keyboard on it.
 pub(super) struct Seat {
-    state: SeatState,
+    pub(super) state: SeatState,
     pointer: Option<ThemedPointer>,
+    /// Only the menus take keys.
+    #[cfg(feature = "menus")]
     keyboard: Option<wl_keyboard::WlKeyboard>,
 }
 
@@ -46,11 +60,13 @@ impl Seat {
         Self {
             state: SeatState::new(globals, qh),
             pointer: None,
+            #[cfg(feature = "menus")]
             keyboard: None,
         }
     }
 }
 
+#[cfg(feature = "menus")]
 impl App {
     /// A key pressed, or repeating, on the menus.
     fn key(&mut self, event: &KeyEvent) {
@@ -58,9 +74,23 @@ impl App {
             self.menu_event(Event::Key(key));
         }
     }
+
+    /// Whether `surface` is the menus'.
+    fn on_menus(&self, surface: &wl_surface::WlSurface) -> bool {
+        self.menus.owns(surface)
+    }
+}
+
+#[cfg(not(feature = "menus"))]
+impl App {
+    /// No menus, so no surface is theirs.
+    fn on_menus(&self, _: &wl_surface::WlSurface) -> bool {
+        false
+    }
 }
 
 /// What a key is to a menu, if anything.
+#[cfg(feature = "menus")]
 fn key(event: &KeyEvent) -> Option<Key> {
     Some(match event.keysym {
         Keysym::Up | Keysym::KP_Up => Key::Up,
@@ -118,6 +148,7 @@ impl SeatHandler for App {
                     Err(error) => tracing::warn!("no pointer: {error}"),
                 }
             }
+            #[cfg(feature = "menus")]
             Capability::Keyboard if self.seat.keyboard.is_none() => {
                 match self.seat.state.get_keyboard_with_repeat(
                     qh,
@@ -147,6 +178,7 @@ impl SeatHandler for App {
                     pointer.pointer().release();
                 }
             }
+            #[cfg(feature = "menus")]
             Capability::Keyboard => {
                 if let Some(keyboard) = self.seat.keyboard.take() {
                     keyboard.release();
@@ -168,7 +200,7 @@ impl PointerHandler for App {
         events: &[PointerEvent],
     ) {
         for event in events {
-            let on_menus = self.menus.owns(&event.surface);
+            let on_menus = self.on_menus(&event.surface);
             let at = event.position;
             match event.kind {
                 PointerEventKind::Enter { .. } => {
@@ -177,14 +209,18 @@ impl PointerHandler for App {
                     {
                         tracing::debug!("no cursor drawn: {error}");
                     }
+                    #[cfg(feature = "menus")]
                     if on_menus {
                         self.menu_event(Event::Motion(at));
                     }
                 }
+                #[cfg(feature = "menus")]
                 PointerEventKind::Motion { .. } if on_menus => self.menu_event(Event::Motion(at)),
+                #[cfg(feature = "menus")]
                 PointerEventKind::Press { .. } if on_menus => self.menu_event(Event::Press(at)),
+                #[cfg(feature = "menus")]
                 PointerEventKind::Release { .. } if on_menus => self.menu_event(Event::Release(at)),
-                PointerEventKind::Press { button: code, .. } => {
+                PointerEventKind::Press { button: code, .. } if !on_menus => {
                     self.press_elsewhere(&event.surface, at, button(code));
                 }
                 _ => {}
@@ -197,37 +233,16 @@ impl App {
     /// A button went down on a surface of the shell's other than the menus'.
     fn press_elsewhere(&mut self, surface: &wl_surface::WlSurface, at: (f64, f64), button: Button) {
         #[cfg(feature = "panel")]
-        if self.panel_press(surface, at, button) {
+        if let Some((name, part)) = self.panels.at(surface, at) {
+            let name = name.to_owned();
+            self.panel_pressed(&name, part, button);
             return;
         }
         self.desktop_press(surface, at, button);
     }
 
-    /// A button went down on `surface`, if it is a panel's: say whether it
-    /// was.
-    #[cfg(feature = "panel")]
-    fn panel_press(
-        &mut self,
-        surface: &wl_surface::WlSurface,
-        at: (f64, f64),
-        button: Button,
-    ) -> bool {
-        let Some((name, item)) = self.panels.at(surface, at) else {
-            return false;
-        };
-        match (item, button) {
-            (Some(perspicax_config::Item::Start), Button::Left) => {
-                if let Some(output) = self.output_named(name) {
-                    self.start_menu(&output);
-                }
-            }
-            _ => self.menu_event(Event::PanelPress),
-        }
-        true
-    }
-
     /// A button went down on a desktop.
-    #[cfg(feature = "wallpaper")]
+    #[cfg(all(feature = "wallpaper", feature = "menus"))]
     fn desktop_press(&mut self, surface: &wl_surface::WlSurface, at: (f64, f64), button: Button) {
         let Some((output, (width, height))) = self.desktops.at(surface) else {
             return;
@@ -241,10 +256,12 @@ impl App {
         self.menu_event(event);
     }
 
-    #[cfg(not(feature = "wallpaper"))]
+    /// A button went down on a desktop, with no menu to open from it.
+    #[cfg(not(all(feature = "wallpaper", feature = "menus")))]
     fn desktop_press(&mut self, _: &wl_surface::WlSurface, _: (f64, f64), _: Button) {}
 }
 
+#[cfg(feature = "menus")]
 impl KeyboardHandler for App {
     fn enter(
         &mut self,
@@ -321,4 +338,5 @@ impl KeyboardHandler for App {
 
 delegate_seat!(App);
 delegate_pointer!(App);
+#[cfg(feature = "menus")]
 delegate_keyboard!(App);

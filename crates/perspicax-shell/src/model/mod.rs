@@ -3,22 +3,38 @@
 
 #[cfg(feature = "panel")]
 pub(crate) mod clock;
-#[cfg(any(feature = "wallpaper", feature = "menus"))]
+#[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
 pub(crate) mod image;
+#[cfg(feature = "panel")]
+pub(crate) mod pager;
+#[cfg(feature = "panel")]
+pub(crate) mod tasks;
 #[cfg(feature = "wallpaper")]
 pub(crate) mod wallpaper;
 
-#[cfg(feature = "menus")]
+// The installed applications and their icons: what the menus list, and
+// what the taskbar draws beside each window.
+#[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) mod apps;
 #[cfg(feature = "menus")]
 pub(crate) mod categories;
-#[cfg(feature = "menus")]
+#[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) mod desktop;
-#[cfg(feature = "menus")]
+#[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) mod fs;
-#[cfg(feature = "menus")]
+#[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) mod icons;
 #[cfg(feature = "menus")]
 pub(crate) mod menu;
 #[cfg(feature = "menus")]
 pub(crate) mod menu_file;
+
+/// A pointer button, as what the shell shows tells them apart.
+#[cfg(any(feature = "menus", feature = "panel"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Button {
+    Left,
+    Right,
+    Middle,
+    Other,
+}

@@ -67,3 +67,7 @@ serde_json.workspace = true
 # `screenshot` takes its parameters in rmcp's wrapper, and the demo calls the
 # tool itself rather than a projection of it.
 rmcp.workspace = true
+# The shell's tests open windows of their own, for its taskbar to list: an
+# application as small as a Wayland one can be, written in the test.
+smithay-client-toolkit.workspace = true
+wayland-client.workspace = true

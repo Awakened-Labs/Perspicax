@@ -181,10 +181,11 @@ mod menus {
         use crate::{
             layout::{self, Monospace},
             model::{
+                Button,
                 apps::{App, Run},
                 menu::{Session, root, start},
             },
-            update::{Button, Event, Key, State},
+            update::{Event, Key, State},
         };
 
         fn opened() -> State {
@@ -346,10 +347,8 @@ mod menus {
     }
 }
 
-#[cfg(all(feature = "panel", feature = "menus"))]
-pub(crate) use panels::START;
 #[cfg(feature = "panel")]
-pub(crate) use panels::panel;
+pub(crate) use panels::{panel, part_of};
 
 #[cfg(feature = "panel")]
 mod panels {
@@ -357,24 +356,52 @@ mod panels {
     use perspicax_config::Item;
 
     use super::{ROOT, rect, window};
-    use crate::layout::Rect;
+    use crate::layout::{
+        Rect,
+        panel::{Part, Placed},
+    };
 
     /// What the panel holds, as one bar.
     const TOOLBAR: NodeId = NodeId(1);
-    /// The start button.
-    pub(crate) const START: NodeId = NodeId(2);
+    const START: NodeId = NodeId(2);
     const CLOCK: NodeId = NodeId(3);
+    const TASKBAR: NodeId = NodeId(4);
+    const PAGER: NodeId = NodeId(5);
+    /// A task's node, and a workspace's: the serial of its window or its
+    /// workspace, which stays its own while it lasts, above one of these.
+    const TASK: u64 = 1;
+    const WORKSPACE: u64 = 2;
+    const SERIAL_BITS: u32 = 40;
+
+    /// What on a panel the node `id` is, if it is something to press.
+    pub(crate) fn part_of(id: NodeId) -> Option<Part> {
+        let serial = id.0 & ((1 << SERIAL_BITS) - 1);
+        match (id, id.0 >> SERIAL_BITS) {
+            (START, _) => Some(Part::Start),
+            (_, TASK) => Some(Part::Task(serial)),
+            (_, WORKSPACE) => Some(Part::Workspace(serial)),
+            _ => None,
+        }
+    }
+
+    fn node_of(kind: u64, serial: u64) -> NodeId {
+        NodeId(kind << SERIAL_BITS | serial)
+    }
 
     /// A panel: a window named `namespace` covering it, holding a `Toolbar`
     /// of what it holds, where it is `placed`. The start button is a
-    /// `Button` that opens a menu, expanded while the start menu is `open`;
-    /// the clock is a `Status` whose value is the `time` it shows, and whose
-    /// description is too, for a reader of names and descriptions alone (as
-    /// perspicax is, for now).
+    /// `Button` that opens a menu, expanded while the start menu is `open`.
+    /// The taskbar is a `TabList` of a `Tab` for each window, named by its
+    /// title, the one with the keyboard selected and a minimized one
+    /// described so; the pager is a `TabList` of a `Tab` for each workspace,
+    /// the one showing selected. The clock is a `Status` whose value is the
+    /// `time` it shows, and whose description is too, for a reader of names
+    /// and descriptions alone (as perspicax is, for now). What takes no room
+    /// on the panel is not in the tree.
     pub(crate) fn panel(
         namespace: &str,
         size: Option<(u32, u32)>,
-        placed: &[(Item, Rect)],
+        placed: &Placed,
         time: &str,
         open: bool,
     ) -> TreeUpdate {
@@ -385,7 +412,7 @@ mod panels {
             bar.set_bounds(rect(Rect::new(0, 0, width as i32, height as i32)));
         }
         let mut nodes = Vec::new();
-        for &(item, place) in placed {
+        for &(item, place) in placed.items.iter().filter(|(_, place)| place.w > 0) {
             let (id, mut node) = match item {
                 Item::Start => {
                     let mut button = Node::new(Role::Button);
@@ -402,7 +429,26 @@ mod panels {
                     clock.set_description(time);
                     (CLOCK, clock)
                 }
-                Item::Taskbar | Item::Pager | Item::Tray => continue,
+                Item::Taskbar => {
+                    let tabs = placed.tasks.iter().map(|(task, place)| {
+                        let mut tab = tab(&task.title, *place, task.active);
+                        if task.minimized {
+                            tab.set_description("Minimized");
+                        }
+                        (node_of(TASK, task.serial), tab)
+                    });
+                    (TASKBAR, tab_list("Taskbar", tabs, &mut nodes))
+                }
+                Item::Pager => {
+                    let tabs = placed.cells.iter().map(|(cell, place)| {
+                        (
+                            node_of(WORKSPACE, cell.serial),
+                            tab(&cell.name, *place, cell.active),
+                        )
+                    });
+                    (PAGER, tab_list("Workspaces", tabs, &mut nodes))
+                }
+                Item::Tray => continue,
             };
             node.set_bounds(rect(place));
             bar.push_child(id);
@@ -419,10 +465,38 @@ mod panels {
         }
     }
 
+    /// A list of `tabs` named `label`, each put in `nodes`.
+    fn tab_list(
+        label: &str,
+        tabs: impl Iterator<Item = (NodeId, Node)>,
+        nodes: &mut Vec<(NodeId, Node)>,
+    ) -> Node {
+        let mut list = Node::new(Role::TabList);
+        list.set_label(label);
+        for (id, tab) in tabs {
+            list.push_child(id);
+            nodes.push((id, tab));
+        }
+        list
+    }
+
+    /// A tab named `label`, at `place`, `selected` or not, pressed by a click.
+    fn tab(label: &str, place: Rect, selected: bool) -> Node {
+        let mut tab = Node::new(Role::Tab);
+        tab.set_label(label);
+        tab.set_bounds(rect(place));
+        tab.set_selected(selected);
+        tab.add_action(Action::Click);
+        tab
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::layout::{Monospace, panel::lay_out};
+        use crate::layout::{
+            Monospace,
+            panel::{Cell, Holding, Task, lay_out},
+        };
 
         fn node(tree: &TreeUpdate, id: NodeId) -> &Node {
             &tree
@@ -433,10 +507,19 @@ mod panels {
                 .1
         }
 
+        fn laid(tasks: Vec<Task>, cells: Vec<Cell>) -> Placed {
+            let items = [Item::Start, Item::Taskbar, Item::Pager, Item::Clock];
+            let holding = Holding {
+                time: "14:05",
+                tasks,
+                cells,
+            };
+            lay_out(&items, holding, (1280, 40), &mut Monospace(8.0))
+        }
+
         #[test]
         fn the_panel_is_a_toolbar_with_a_start_button_and_a_clock() {
-            let items = [Item::Start, Item::Taskbar, Item::Clock];
-            let placed = lay_out(&items, "14:05", (1280, 40), &mut Monospace(8.0));
+            let placed = laid(Vec::new(), Vec::new());
             let tree = panel(
                 "perspicax-panel-DP-1",
                 Some((1280, 40)),
@@ -452,13 +535,17 @@ mod panels {
             assert_eq!(bar.role(), Role::Toolbar);
             assert_eq!(
                 bar.children(),
-                [START, CLOCK],
-                "the taskbar shows nothing yet"
+                [START, TASKBAR, CLOCK],
+                "no pager with no workspaces to page"
             );
 
             let start = node(&tree, START);
             assert_eq!((start.role(), start.label()), (Role::Button, Some("Start")));
-            assert_eq!(start.bounds(), Some(rect(placed[0].1)), "where it is drawn");
+            assert_eq!(
+                start.bounds(),
+                Some(rect(placed.items[0].1)),
+                "where it is drawn"
+            );
             assert_eq!(start.has_popup(), Some(HasPopup::Menu));
             assert_eq!(start.is_expanded(), Some(false));
             let clock = node(&tree, CLOCK);
@@ -472,6 +559,89 @@ mod panels {
                 Some(true),
                 "expanded while the start menu is open"
             );
+        }
+
+        #[test]
+        fn the_taskbar_is_a_tab_list_with_the_active_window_selected() {
+            let task = |serial: u64, title: &str, active: bool, minimized: bool| Task {
+                serial,
+                title: title.to_owned(),
+                icon: None,
+                active,
+                minimized,
+            };
+            let cell = |serial: u64, name: &str, column: u32, active: bool| Cell {
+                serial,
+                name: name.to_owned(),
+                column,
+                row: 0,
+                active,
+            };
+            let placed = laid(
+                vec![
+                    task(3, "Editor", false, false),
+                    task(7, "Mail", true, false),
+                    task(9, "Notes", false, true),
+                ],
+                vec![cell(0, "1", 0, false), cell(1, "2", 1, true)],
+            );
+            let tree = panel("perspicax-panel-DP-1", None, &placed, "14:05", false);
+            assert_eq!(
+                node(&tree, TOOLBAR).children(),
+                [START, TASKBAR, PAGER, CLOCK]
+            );
+
+            let taskbar = node(&tree, TASKBAR);
+            assert_eq!(
+                (taskbar.role(), taskbar.label()),
+                (Role::TabList, Some("Taskbar"))
+            );
+            let tabs: Vec<_> = taskbar
+                .children()
+                .iter()
+                .map(|&id| {
+                    let tab = node(&tree, id);
+                    assert_eq!(tab.role(), Role::Tab);
+                    (
+                        tab.label().unwrap_or_default().to_owned(),
+                        tab.is_selected(),
+                        tab.description().map(str::to_owned),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                tabs,
+                [
+                    ("Editor".to_owned(), Some(false), None),
+                    ("Mail".to_owned(), Some(true), None),
+                    (
+                        "Notes".to_owned(),
+                        Some(false),
+                        Some("Minimized".to_owned())
+                    ),
+                ]
+            );
+            let mail = taskbar.children()[1];
+            assert_eq!(
+                node(&tree, mail).bounds(),
+                Some(rect(placed.tasks[1].1)),
+                "where it is drawn"
+            );
+            assert_eq!(part_of(mail), Some(Part::Task(7)), "known by its serial");
+            assert!(node(&tree, mail).supports_action(Action::Click));
+
+            let pager = node(&tree, PAGER);
+            assert_eq!(
+                (pager.role(), pager.label()),
+                (Role::TabList, Some("Workspaces"))
+            );
+            let second = pager.children()[1];
+            assert_eq!(node(&tree, second).label(), Some("2"));
+            assert_eq!(node(&tree, second).is_selected(), Some(true));
+            assert_eq!(part_of(second), Some(Part::Workspace(1)));
+            assert_eq!(part_of(START), Some(Part::Start));
+            assert_eq!(part_of(TASKBAR), None);
+            assert_eq!(part_of(ROOT), None);
         }
     }
 }

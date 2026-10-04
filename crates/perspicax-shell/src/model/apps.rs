@@ -116,6 +116,38 @@ pub(crate) fn scan(fs: &impl Fs, places: &Places) -> Vec<App> {
     apps
 }
 
+/// The application a window whose app id is `app_id` belongs to, as
+/// taskbars match them: the one whose desktop file ID it is; else the one
+/// whose `StartupWMClass` it is, which is how an X11 program or one with an
+/// unusual ID says so; else either of those ignoring case; else the one
+/// whose ID ends in it, as `org.gnome.Nautilus` does in `nautilus`.
+#[cfg_attr(
+    not(any(feature = "panel", test)),
+    expect(dead_code, reason = "the taskbar's; no panel, no taskbar")
+)]
+pub(crate) fn of_window<'a>(apps: &'a [App], app_id: &str) -> Option<&'a App> {
+    if app_id.is_empty() {
+        return None;
+    }
+    fn class(app: &App) -> Option<&str> {
+        app.wm_class.as_deref()
+    }
+    let tries: [&dyn Fn(&App) -> bool; 5] = [
+        &|app| app.id == app_id,
+        &|app| class(app) == Some(app_id),
+        &|app| app.id.eq_ignore_ascii_case(app_id),
+        &|app| class(app).is_some_and(|class| class.eq_ignore_ascii_case(app_id)),
+        &|app| {
+            app.id
+                .rsplit_once('.')
+                .is_some_and(|(_, last)| last.eq_ignore_ascii_case(app_id))
+        },
+    ];
+    tries
+        .iter()
+        .find_map(|matches| apps.iter().find(|app| matches(app)))
+}
+
 /// Every `.desktop` file below `dir`, with its ID, in a stable order.
 fn walk(fs: &impl Fs, dir: &Path, prefix: &str, found: &mut Vec<(String, PathBuf)>) {
     let mut entries = fs.list(dir);
@@ -286,6 +318,40 @@ mod tests {
                 &entry("Not an entry", "x", ""),
             );
         assert_eq!(names(&files), ["Fine"]);
+    }
+
+    #[test]
+    fn an_app_id_finds_its_entry_by_id_then_wm_class() {
+        let files = Files::default()
+            .with(
+                &format!("{SYSTEM}/org.gnome.Nautilus.desktop"),
+                &entry("Files", "nautilus", "Icon=org.gnome.Nautilus"),
+            )
+            .with(
+                &format!("{SYSTEM}/alacritty.desktop"),
+                &entry("Alacritty", "alacritty", "StartupWMClass=Alacritty"),
+            )
+            .with(
+                &format!("{SYSTEM}/terminal.desktop"),
+                &entry("Terminal", "xterm", "StartupWMClass=alacritty"),
+            )
+            .with(
+                &format!("{SYSTEM}/gimp.desktop"),
+                &entry("GIMP", "gimp", "StartupWMClass=Gimp-2.10"),
+            );
+        let apps = scan(&files, &places());
+        let found = |app_id: &str| of_window(&apps, app_id).map(|app| app.name.as_str());
+        assert_eq!(found("org.gnome.Nautilus"), Some("Files"), "by its ID");
+        assert_eq!(
+            found("alacritty"),
+            Some("Alacritty"),
+            "its ID before another's window class"
+        );
+        assert_eq!(found("Gimp-2.10"), Some("GIMP"), "by its window class");
+        assert_eq!(found("gimp-2.10"), Some("GIMP"), "ignoring case");
+        assert_eq!(found("nautilus"), Some("Files"), "by the end of its ID");
+        assert_eq!(found("firefox"), None);
+        assert_eq!(found(""), None, "a window with no app id is no one's");
     }
 
     #[test]

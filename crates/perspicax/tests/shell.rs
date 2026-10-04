@@ -3,7 +3,8 @@
 //! application is -- and read again when it comes and goes. And as an agent
 //! uses it: a right-click on the wallpaper by selector, and the menu that
 //! opens read and clicked through to an application; the panel's start
-//! button found by name, and the start menu it opens.
+//! button found by name, and the start menu it opens; a window found on the
+//! taskbar by its title, and brought forward by a click on its tab.
 //!
 //! Each test runs a compositor that keeps its desk current the way `--mcp`
 //! does, and starts shells against its socket as a person's session would,
@@ -15,6 +16,7 @@
 //! `ci/live-tests.sh` builds one and exports it.
 
 use std::{
+    os::unix::net::UnixStream,
     path::PathBuf,
     process::{Child, Command},
     sync::Arc,
@@ -226,6 +228,50 @@ fn an_agent_finds_the_start_button_by_name_and_it_opens_the_start_menu() {
     });
 }
 
+#[test]
+#[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
+fn the_taskbar_lists_a_window_by_title() {
+    host("taskbar", CLASSIC, |hosted| {
+        let _shell = hosted.shell();
+        let _window = hosted.window("Field notes");
+        hosted.wait_until(
+            "the window's tab read, joined and selected",
+            |index, facts| forward(index, facts, "Field notes"),
+        );
+    });
+}
+
+#[test]
+#[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
+fn an_agent_brings_a_window_forward_by_its_tab() {
+    host("tabs", CLASSIC, |hosted| {
+        let _shell = hosted.shell();
+        let _first = hosted.window("First");
+        hosted.wait_until("the first window forward", |index, facts| {
+            forward(index, facts, "First")
+        });
+        let _second = hosted.window("Second");
+        hosted.wait_until("the second window forward", |index, facts| {
+            forward(index, facts, "Second")
+        });
+
+        hosted.click("tablist:Taskbar>tab:First", PointerButton::Left);
+        hosted.wait_until("the first window forward again", |index, facts| {
+            forward(index, facts, "First")
+        });
+    });
+}
+
+/// The taskbar's tab for the window titled `title`, if it is read, joined
+/// to the panel, and selected: its window is the one with the keyboard.
+fn forward(index: &Index, facts: &HostFacts, title: &str) -> Option<NodeId> {
+    on_layer(index, facts, (Role::Tab, title), (Layer::Top, PANEL)).filter(|&tab| {
+        index
+            .get(tab)
+            .is_some_and(|node| node.node.is_selected() == Some(true))
+    })
+}
+
 /// The menu item labelled `label`, if it is read and joined to the menus'
 /// surface on the overlay layer.
 fn menu_item(index: &Index, facts: &HostFacts, label: &str) -> Option<NodeId> {
@@ -307,6 +353,15 @@ impl Hosted {
             .spawn()
             .expect("the shell starts");
         Shell(child)
+    }
+
+    /// Open a window titled `title`, as an application of the test's own
+    /// would, until what this returns is dropped.
+    fn window(&self, title: &str) -> window::Opened {
+        let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR"));
+        let stream =
+            UnixStream::connect(runtime.join(&self.socket)).expect("the compositor's socket");
+        window::open(stream, title)
     }
 
     /// Click what `selector` names with `button`, as an agent does.
@@ -429,4 +484,217 @@ impl Drop for StopOnDrop {
     fn drop(&mut self) {
         self.0.request();
     }
+}
+
+/// A window of the test's own: titled, white, and open until dropped. As
+/// small as a Wayland application can be, so a test of the taskbar needs no
+/// toolkit installed.
+mod window {
+    use std::{
+        os::unix::net::UnixStream,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+        time::Duration,
+    };
+
+    use smithay_client_toolkit::{
+        compositor::{CompositorHandler, CompositorState},
+        delegate_compositor, delegate_output, delegate_registry, delegate_shm, delegate_xdg_shell,
+        delegate_xdg_window,
+        output::{OutputHandler, OutputState},
+        registry::{ProvidesRegistryState, RegistryState},
+        registry_handlers,
+        shell::{
+            WaylandSurface,
+            xdg::{
+                XdgShell,
+                window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
+            },
+        },
+        shm::{Shm, ShmHandler, slot::SlotPool},
+    };
+    use wayland_client::{
+        Connection, QueueHandle,
+        globals::registry_queue_init,
+        protocol::{wl_output, wl_shm, wl_surface},
+    };
+
+    /// The size it draws itself, whatever it is offered.
+    const SIZE: (i32, i32) = (320, 200);
+
+    /// The window, open until this is dropped.
+    pub(super) struct Opened {
+        open: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl Drop for Opened {
+        fn drop(&mut self) {
+            self.open.store(false, Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// Open a window titled `title` on the compositor at the end of `stream`.
+    pub(super) fn open(stream: UnixStream, title: &str) -> Opened {
+        let open = Arc::new(AtomicBool::new(true));
+        let title = title.to_owned();
+        let thread = {
+            let open = Arc::clone(&open);
+            thread::spawn(move || run(stream, &title, &open))
+        };
+        Opened {
+            open,
+            thread: Some(thread),
+        }
+    }
+
+    fn run(stream: UnixStream, title: &str, open: &AtomicBool) {
+        let connection = Connection::from_socket(stream).expect("a connection");
+        let (globals, mut queue) = registry_queue_init::<Client>(&connection).expect("the globals");
+        let qh = queue.handle();
+        let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor");
+        let xdg = XdgShell::bind(&globals, &qh).expect("xdg_wm_base");
+        let shm = Shm::bind(&globals, &qh).expect("wl_shm");
+        let window =
+            xdg.create_window(compositor.create_surface(&qh), WindowDecorations::None, &qh);
+        window.set_title(title);
+        window.set_app_id("perspicax-test");
+        window.commit();
+        let mut client = Client {
+            registry: RegistryState::new(&globals),
+            outputs: OutputState::new(&globals, &qh),
+            pool: SlotPool::new((SIZE.0 * SIZE.1 * 4) as usize, &shm).expect("memory"),
+            shm,
+        };
+        // Until dropped, or until the compositor goes.
+        while open.load(Ordering::Relaxed) && queue.roundtrip(&mut client).is_ok() {
+            thread::sleep(Duration::from_millis(20));
+        }
+        drop(window);
+        let _ = connection.flush();
+    }
+
+    struct Client {
+        registry: RegistryState,
+        outputs: OutputState,
+        shm: Shm,
+        pool: SlotPool,
+    }
+
+    impl WindowHandler for Client {
+        fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {}
+
+        fn configure(
+            &mut self,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+            window: &Window,
+            _: WindowConfigure,
+            _: u32,
+        ) {
+            let (width, height) = SIZE;
+            let (buffer, canvas) = self
+                .pool
+                .create_buffer(width, height, width * 4, wl_shm::Format::Argb8888)
+                .expect("a buffer");
+            canvas.fill(0xff);
+            let surface = window.wl_surface();
+            buffer.attach_to(surface).expect("attached");
+            surface.damage_buffer(0, 0, width, height);
+            window.commit();
+        }
+    }
+
+    impl CompositorHandler for Client {
+        fn scale_factor_changed(
+            &mut self,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+            _: &wl_surface::WlSurface,
+            _: i32,
+        ) {
+        }
+
+        fn transform_changed(
+            &mut self,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+            _: &wl_surface::WlSurface,
+            _: wl_output::Transform,
+        ) {
+        }
+
+        fn frame(
+            &mut self,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+            _: &wl_surface::WlSurface,
+            _: u32,
+        ) {
+        }
+
+        fn surface_enter(
+            &mut self,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+            _: &wl_surface::WlSurface,
+            _: &wl_output::WlOutput,
+        ) {
+        }
+
+        fn surface_leave(
+            &mut self,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+            _: &wl_surface::WlSurface,
+            _: &wl_output::WlOutput,
+        ) {
+        }
+    }
+
+    impl ShmHandler for Client {
+        fn shm_state(&mut self) -> &mut Shm {
+            &mut self.shm
+        }
+    }
+
+    impl OutputHandler for Client {
+        fn output_state(&mut self) -> &mut OutputState {
+            &mut self.outputs
+        }
+
+        fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+
+        fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        }
+
+        fn output_destroyed(
+            &mut self,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+            _: wl_output::WlOutput,
+        ) {
+        }
+    }
+
+    impl ProvidesRegistryState for Client {
+        fn registry(&mut self) -> &mut RegistryState {
+            &mut self.registry
+        }
+
+        registry_handlers![OutputState];
+    }
+
+    delegate_compositor!(Client);
+    delegate_output!(Client);
+    delegate_shm!(Client);
+    delegate_xdg_shell!(Client);
+    delegate_xdg_window!(Client);
+    delegate_registry!(Client);
 }

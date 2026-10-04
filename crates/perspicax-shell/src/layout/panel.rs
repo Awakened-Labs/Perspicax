@@ -2,10 +2,11 @@
 //! where on it each thing it holds sits.
 //!
 //! A panel runs the whole width of its monitor, along the top or the
-//! bottom. The start button is a square as tall as the panel, and the clock
-//! is as wide as the time it shows. The taskbar takes whatever room is left;
-//! a panel without one keeps its last item at the right end, and the rest at
-//! the left.
+//! bottom. The start button is a square as tall as the panel, the pager as
+//! wide as its grid of workspaces, and the clock as wide as the time it
+//! shows. The taskbar takes whatever room is left, and shares it among the
+//! windows it lists, each no wider than [`TASK_WIDTH`]; a panel without one
+//! keeps its last item at the right end, and the rest at the left.
 
 use perspicax_config::{Edge, Item, PanelOutputs};
 
@@ -13,6 +14,64 @@ use super::{Measure, Rect};
 
 /// Room either side of the clock's time.
 pub(crate) const CLOCK_PAD: i32 = 10;
+/// The widest a task is: a few windows are each this wide, and many share
+/// the taskbar.
+pub(crate) const TASK_WIDTH: i32 = 200;
+/// Room around the pager's grid, and between its cells.
+pub(crate) const PAGER_PAD: i32 = 4;
+pub(crate) const PAGER_GAP: i32 = 2;
+
+/// A window the taskbar lists, as it is shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Task {
+    /// The window's, which stays its own while it is open.
+    pub(crate) serial: u64,
+    pub(crate) title: String,
+    /// Its application's icon, by name.
+    pub(crate) icon: Option<String>,
+    /// It has the keyboard.
+    pub(crate) active: bool,
+    pub(crate) minimized: bool,
+}
+
+/// A workspace the pager shows, as a cell of its grid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Cell {
+    /// The workspace's, which stays its own while it lasts.
+    pub(crate) serial: u64,
+    pub(crate) name: String,
+    pub(crate) column: u32,
+    pub(crate) row: u32,
+    /// It is the one showing.
+    pub(crate) active: bool,
+}
+
+/// What a panel shows beyond its start button: the time, the windows its
+/// taskbar lists, and its monitor's workspaces.
+pub(crate) struct Holding<'a> {
+    pub(crate) time: &'a str,
+    pub(crate) tasks: Vec<Task>,
+    pub(crate) cells: Vec<Cell>,
+}
+
+/// A panel, laid out: each thing it holds, and where, in its own logical
+/// pixels.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Placed {
+    pub(crate) items: Vec<(Item, Rect)>,
+    pub(crate) tasks: Vec<(Task, Rect)>,
+    pub(crate) cells: Vec<(Cell, Rect)>,
+}
+
+/// What on a panel a press can be on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Part {
+    Start,
+    /// The task of the window of this serial.
+    Task(u64),
+    /// The cell of the workspace of this serial.
+    Workspace(u64),
+}
 
 /// Which of `monitors`, each a connector name and where its top-left corner
 /// is on the desk, have a panel by `rule`, in the order given. The first
@@ -51,22 +110,24 @@ pub(crate) fn strip(edge: Edge, height: i32, monitor: Rect) -> Rect {
 }
 
 /// Where each of `items` sits on a panel `size` big, in its own logical
-/// pixels, with the clock showing `time`.
+/// pixels, holding what `holding` says.
 pub(crate) fn lay_out(
     items: &[Item],
-    time: &str,
+    holding: Holding<'_>,
     (width, height): (i32, i32),
     measure: &mut impl Measure,
-) -> Vec<(Item, Rect)> {
+) -> Placed {
+    let grid = Grid::of(&holding.cells, height);
     let widths: Vec<i32> = items
         .iter()
         .map(|item| match item {
             Item::Start => height,
-            Item::Clock => measure.width(time).ceil() as i32 + 2 * CLOCK_PAD,
+            Item::Clock => measure.width(holding.time).ceil() as i32 + 2 * CLOCK_PAD,
+            Item::Pager => grid.width(),
             // The taskbar's width is what the others leave.
             Item::Taskbar => 0,
             // Nothing to draw, so no room taken.
-            Item::Pager | Item::Tray => 0,
+            Item::Tray => 0,
         })
         .collect();
     let room = (width - widths.iter().sum::<i32>()).max(0);
@@ -75,7 +136,7 @@ pub(crate) fn lay_out(
         .position(|&item| item == Item::Taskbar)
         .unwrap_or(items.len().saturating_sub(1));
     let mut x = 0;
-    items
+    let items: Vec<(Item, Rect)> = items
         .iter()
         .zip(widths)
         .enumerate()
@@ -90,22 +151,135 @@ pub(crate) fn lay_out(
             x += w;
             (item, rect)
         })
-        .collect()
+        .collect();
+    let within = |wanted: Item| {
+        items
+            .iter()
+            .find(|&&(item, _)| item == wanted)
+            .map(|&(_, rect)| rect)
+    };
+    let tasks = within(Item::Taskbar).map_or_else(Vec::new, |taskbar| {
+        let each = match holding.tasks.len() {
+            0 => 0,
+            many => (taskbar.w / many as i32).min(TASK_WIDTH),
+        };
+        holding
+            .tasks
+            .into_iter()
+            .enumerate()
+            .map(|(at, task)| {
+                let x = taskbar.x + at as i32 * each;
+                (task, Rect::new(x, 0, each, height))
+            })
+            .collect()
+    });
+    let cells = within(Item::Pager).map_or_else(Vec::new, |pager| {
+        holding
+            .cells
+            .into_iter()
+            .map(|cell| {
+                let place = grid.cell(pager, &cell);
+                (cell, place)
+            })
+            .collect()
+    });
+    Placed {
+        items,
+        tasks,
+        cells,
+    }
 }
 
-/// What on a laid-out panel is at `point`, if anything is.
-#[cfg_attr(
-    not(any(feature = "menus", test)),
-    expect(
-        dead_code,
-        reason = "a start button to press; no menus, nothing to open"
-    )
-)]
-pub(crate) fn item_at(placed: &[(Item, Rect)], point: (f64, f64)) -> Option<(Item, Rect)> {
-    placed
-        .iter()
-        .copied()
-        .find(|(_, rect)| rect.contains(point))
+/// The pager's grid: how many columns and rows of cells, each how big.
+struct Grid {
+    columns: i32,
+    rows: i32,
+    cell: (i32, i32),
+    height: i32,
+}
+
+impl Grid {
+    /// The grid that holds `cells` on a panel `height` high: each cell the
+    /// shape of a monitor, 16 by 10, its rows filling the panel's height.
+    fn of(cells: &[Cell], height: i32) -> Self {
+        let extent = |at: fn(&Cell) -> u32| cells.iter().map(at).max().map_or(0, |most| most + 1);
+        let (columns, rows) = (
+            extent(|cell| cell.column) as i32,
+            extent(|cell| cell.row) as i32,
+        );
+        let tall = if rows == 0 {
+            0
+        } else {
+            ((height - 2 * PAGER_PAD - (rows - 1) * PAGER_GAP) / rows).max(1)
+        };
+        Self {
+            columns,
+            rows,
+            cell: (tall * 8 / 5, tall),
+            height,
+        }
+    }
+
+    /// How wide it is with its margins: nothing, with no cells.
+    fn width(&self) -> i32 {
+        if self.columns == 0 {
+            return 0;
+        }
+        2 * PAGER_PAD + self.columns * self.cell.0 + (self.columns - 1) * PAGER_GAP
+    }
+
+    /// Where `cell` is in the pager at `pager`, its grid in the middle of
+    /// the panel's height.
+    fn cell(&self, pager: Rect, cell: &Cell) -> Rect {
+        let (w, h) = self.cell;
+        let tall = self.rows * h + (self.rows - 1).max(0) * PAGER_GAP;
+        let top = (self.height - tall) / 2;
+        Rect::new(
+            pager.x + PAGER_PAD + cell.column as i32 * (w + PAGER_GAP),
+            top + cell.row as i32 * (h + PAGER_GAP),
+            w,
+            h,
+        )
+    }
+}
+
+impl Placed {
+    /// What a press at `point` is on, if anything there can be pressed.
+    pub(crate) fn at(&self, point: (f64, f64)) -> Option<Part> {
+        let task = self
+            .tasks
+            .iter()
+            .find(|(_, rect)| rect.contains(point))
+            .map(|(task, _)| Part::Task(task.serial));
+        let cell = || {
+            self.cells
+                .iter()
+                .find(|(_, rect)| rect.contains(point))
+                .map(|(cell, _)| Part::Workspace(cell.serial))
+        };
+        let start = || {
+            self.items
+                .iter()
+                .find(|&&(item, rect)| item == Item::Start && rect.contains(point))
+                .map(|_| Part::Start)
+        };
+        task.or_else(cell).or_else(start)
+    }
+
+    /// Where `item` is, if the panel holds it.
+    #[cfg_attr(
+        not(any(feature = "menus", test)),
+        expect(
+            dead_code,
+            reason = "where the start menu stands; no menus, no start menu"
+        )
+    )]
+    pub(crate) fn item(&self, wanted: Item) -> Option<Rect> {
+        self.items
+            .iter()
+            .find(|&&(item, _)| item == wanted)
+            .map(|&(_, rect)| rect)
+    }
 }
 
 #[cfg(test)]
@@ -115,8 +289,34 @@ mod tests {
 
     const PANEL: (i32, i32) = (1280, 40);
 
+    fn holding(tasks: usize, cells: &[(u32, u32)]) -> Holding<'static> {
+        Holding {
+            time: "14:05",
+            tasks: (0..tasks as u64)
+                .map(|serial| Task {
+                    serial,
+                    title: format!("Window {serial}"),
+                    icon: None,
+                    active: false,
+                    minimized: false,
+                })
+                .collect(),
+            cells: cells
+                .iter()
+                .zip(100..)
+                .map(|(&(column, row), serial)| Cell {
+                    serial,
+                    name: (serial - 99).to_string(),
+                    column,
+                    row,
+                    active: false,
+                })
+                .collect(),
+        }
+    }
+
     fn laid(items: &[Item]) -> Vec<(Item, Rect)> {
-        lay_out(items, "14:05", PANEL, &mut Monospace(8.0))
+        lay_out(items, holding(0, &[]), PANEL, &mut Monospace(8.0)).items
     }
 
     #[test]
@@ -127,7 +327,7 @@ mod tests {
         assert_eq!(
             placed[1],
             (Item::Taskbar, Rect::new(40, 0, 1280 - 40 - clock, 40)),
-            "the room between"
+            "the room between, with no workspaces to page"
         );
         assert_eq!(
             placed[3],
@@ -148,17 +348,97 @@ mod tests {
     }
 
     #[test]
-    fn a_point_finds_the_item_under_it() {
-        let placed = laid(&[Item::Start, Item::Taskbar, Item::Clock]);
+    fn tasks_share_the_taskbar_each_no_wider_than_a_task() {
+        let items = [Item::Start, Item::Taskbar];
+        let few = lay_out(&items, holding(2, &[]), PANEL, &mut Monospace(8.0));
+        let rects: Vec<Rect> = few.tasks.iter().map(|&(_, rect)| rect).collect();
         assert_eq!(
-            item_at(&placed, (20.0, 20.0)).map(|(item, _)| item),
-            Some(Item::Start)
+            rects,
+            [
+                Rect::new(40, 0, TASK_WIDTH, 40),
+                Rect::new(40 + TASK_WIDTH, 0, TASK_WIDTH, 40)
+            ],
+            "from the taskbar's left end, in order"
         );
+
+        let many = lay_out(&items, holding(16, &[]), PANEL, &mut Monospace(8.0));
+        let each = (1280 - 40) / 16;
+        assert!(each < TASK_WIDTH);
+        assert!(many.tasks.iter().all(|(_, rect)| rect.w == each));
+        assert!(
+            many.tasks.last().unwrap().1.right() <= 1280,
+            "every one in the panel"
+        );
+
+        let none = lay_out(&[Item::Start], holding(2, &[]), PANEL, &mut Monospace(8.0));
+        assert!(none.tasks.is_empty(), "no taskbar, no tasks");
+    }
+
+    #[test]
+    fn the_pager_is_a_grid_as_wide_as_its_workspaces() {
+        let items = [Item::Taskbar, Item::Pager];
+        let row = lay_out(
+            &items,
+            holding(0, &[(0, 0), (1, 0), (2, 0), (3, 0)]),
+            PANEL,
+            &mut Monospace(8.0),
+        );
+        // A row of cells as tall as the panel leaves, 16 by 10.
+        let (w, h) = (32 * 8 / 5, 40 - 2 * PAGER_PAD);
+        let wide = 2 * PAGER_PAD + 4 * w + 3 * PAGER_GAP;
         assert_eq!(
-            item_at(&placed, (1279.0, 1.0)).map(|(item, _)| item),
-            Some(Item::Clock)
+            row.items[1],
+            (Item::Pager, Rect::new(1280 - wide, 0, wide, 40))
         );
-        assert_eq!(item_at(&placed, (1300.0, 20.0)), None);
+        let cells: Vec<Rect> = row.cells.iter().map(|&(_, rect)| rect).collect();
+        let left = 1280 - wide + PAGER_PAD;
+        assert_eq!(cells[0], Rect::new(left, PAGER_PAD, w, h));
+        assert_eq!(cells[3].x, left + 3 * (w + PAGER_GAP));
+
+        let square = lay_out(
+            &items,
+            holding(0, &[(0, 0), (1, 0), (0, 1), (1, 1)]),
+            PANEL,
+            &mut Monospace(8.0),
+        );
+        let cells: Vec<Rect> = square.cells.iter().map(|&(_, rect)| rect).collect();
+        assert_eq!(cells[0].y, cells[1].y, "a row");
+        assert_eq!(cells[2].x, cells[0].x, "a column");
+        assert!(
+            cells[2].y > cells[0].bottom(),
+            "the second row below the first"
+        );
+        assert!(cells[3].bottom() <= 40 - PAGER_PAD + 1, "inside the panel");
+    }
+
+    #[test]
+    fn a_point_finds_what_is_under_it() {
+        let items = [Item::Start, Item::Taskbar, Item::Pager, Item::Clock];
+        let placed = lay_out(
+            &items,
+            holding(2, &[(0, 0), (1, 0)]),
+            PANEL,
+            &mut Monospace(8.0),
+        );
+        assert_eq!(placed.at((20.0, 20.0)), Some(Part::Start));
+        assert_eq!(placed.at((40.0 + 10.0, 20.0)), Some(Part::Task(0)));
+        assert_eq!(
+            placed.at((40.0 + f64::from(TASK_WIDTH) + 10.0, 20.0)),
+            Some(Part::Task(1))
+        );
+        let second = placed.cells[1].1;
+        assert_eq!(
+            placed.at((f64::from(second.x + 1), 20.0)),
+            Some(Part::Workspace(101))
+        );
+        assert_eq!(placed.at((1279.0, 1.0)), None, "the clock is not pressed");
+        assert_eq!(
+            placed.at((600.0, 20.0)),
+            None,
+            "nor the taskbar's empty end"
+        );
+        assert_eq!(placed.at((1300.0, 20.0)), None);
+        assert_eq!(placed.item(Item::Start), Some(Rect::new(0, 0, 40, 40)));
     }
 
     #[test]

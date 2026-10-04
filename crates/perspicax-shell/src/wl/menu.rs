@@ -38,24 +38,24 @@ use smithay_client_toolkit::{
 };
 use wayland_client::{QueueHandle, protocol::wl_output, protocol::wl_surface};
 
-use super::Asked;
 use super::{
-    App,
+    App, Asked,
     canvas::{Area, Canvas, whole},
+    installed::Installed,
 };
 use crate::{
     a11y::{self, adapter::Served},
     launch::{self, Launcher},
     layout::{Rect, usable},
     model::{
-        apps::{self, Places, Run},
+        Button,
+        apps::{Places, Run},
         fs::{Disk, which},
-        icons::Icons,
         image,
         menu::{self, Session},
         menu_file,
     },
-    paint::{self, icons::Images, text::Fonts},
+    paint::{self, Kit, text::Fonts},
     update::{Effect, Event, State},
 };
 
@@ -64,15 +64,16 @@ pub(super) struct Menus {
     state: State,
     /// The surface, while a menu is open.
     shown: Option<Shown>,
-    images: Images,
     /// The strip each of the shell's panels takes of its monitor, by the
     /// monitor's connector name: where no menu is drawn, and where the
     /// menus' surface takes no clicks.
     reserved: Vec<(String, Rect)>,
     settings: Settings,
-    places: Places,
-    /// What the root menu was last built from; `None` to build it afresh.
-    built_from: Option<Vec<Option<SystemTime>>>,
+    /// The folders programs are found in: Lock's, and a terminal.
+    path: Vec<PathBuf>,
+    /// What the menus were last built from: the read of the applications,
+    /// and when the menu file last changed. `None` to build them afresh.
+    built_from: Option<(u64, Option<SystemTime>)>,
     /// Whether there is a compositor to ask to end the session.
     log_out: bool,
     pub(super) launcher: Launcher,
@@ -85,7 +86,6 @@ pub(super) struct Menus {
 struct Settings {
     root: bool,
     menu_file: Option<PathBuf>,
-    icon_theme: Option<String>,
     lock: Vec<String>,
 }
 
@@ -105,12 +105,10 @@ impl Menus {
     pub(super) fn new(
         shell: &Shell,
         config: Option<&Path>,
+        places: &Places,
         actions: Sender<Asked>,
         log_out: bool,
     ) -> Self {
-        let places = Places::from_env();
-        let settings = Settings::of(shell, config);
-        let images = Images::new(icons(&settings, &places));
         let terminal = shell
             .terminal
             .clone()
@@ -118,30 +116,25 @@ impl Menus {
         Self {
             state: State::new(menu::Menu::default(), menu::Menu::default()),
             shown: None,
-            images,
             reserved: Vec::new(),
-            settings,
+            settings: Settings::of(shell, config),
+            path: places.path.clone(),
             built_from: None,
             log_out,
             launcher: Launcher::new(terminal, home()),
-            places,
             actions,
         }
     }
 
-    /// Take up a changed config. The root menu is built afresh when it next
+    /// Take up a changed config. The menus are built afresh when one next
     /// opens.
     pub(super) fn reconfigure(&mut self, shell: &Shell, config: Option<&Path>) {
-        let settings = Settings::of(shell, config);
-        if settings.icon_theme != self.settings.icon_theme {
-            self.images = Images::new(icons(&settings, &self.places));
-        }
-        self.settings = settings;
+        self.settings = Settings::of(shell, config);
         self.launcher.set_terminal(
             shell
                 .terminal
                 .clone()
-                .or_else(|| launch::find_terminal(&Disk, &self.places.path)),
+                .or_else(|| launch::find_terminal(&Disk, &self.path)),
         );
         self.built_from = None;
     }
@@ -185,14 +178,15 @@ impl Menus {
         canvas: &mut Canvas,
         qh: &QueueHandle<App>,
         outputs: &OutputState,
-        fonts: &mut Fonts,
+        kit: &mut Kit,
+        installed: &mut Installed,
         event: Event,
     ) -> Vec<Effect> {
         let root = matches!(
             event,
             Event::RootMenu { .. }
                 | Event::DesktopPress {
-                    button: crate::update::Button::Right,
+                    button: Button::Right,
                     ..
                 }
         );
@@ -200,11 +194,11 @@ impl Menus {
             return Vec::new();
         }
         if (root || matches!(event, Event::StartMenu { .. })) && !self.state.is_open() {
-            self.refresh();
+            self.refresh(installed);
         }
-        let effects = self.state.update(event, fonts);
+        let effects = self.state.update(event, &mut kit.fonts);
         if effects.contains(&Effect::Redraw) {
-            self.sync(canvas, qh, outputs, fonts);
+            self.sync(canvas, qh, outputs, kit);
         }
         effects
             .into_iter()
@@ -213,13 +207,13 @@ impl Menus {
     }
 
     /// Build the menus again if what they are built from changed.
-    fn refresh(&mut self) {
+    fn refresh(&mut self, installed: &mut Installed) {
         let menu_file = self.settings.menu_file.as_deref();
-        let now = stamp(&self.places, menu_file);
-        if self.built_from.as_ref() == Some(&now) {
+        let now = (installed.refresh(), modified(menu_file));
+        if self.built_from == Some(now) {
             return;
         }
-        let apps = apps::scan(&Disk, &self.places);
+        let apps = installed.apps();
         let file = menu_file.and_then(|path| match menu_file::read(path, home().as_deref()) {
             Ok(file) => Some(file),
             Err(error) => {
@@ -234,7 +228,7 @@ impl Menus {
             .settings
             .lock
             .first()
-            .filter(|program| which(&Disk, program, &self.places.path).is_some())
+            .filter(|program| which(&Disk, program, &self.path).is_some())
             .map(|_| Run {
                 argv: self.settings.lock.clone(),
                 terminal: false,
@@ -245,8 +239,8 @@ impl Menus {
             log_out: self.log_out,
         };
         self.state.set_menus(
-            menu::root(&apps, file.as_ref(), &session),
-            menu::start(&apps, &session),
+            menu::root(apps, file.as_ref(), &session),
+            menu::start(apps, &session),
         );
         tracing::debug!(applications = apps.len(), "the menus were built");
         self.built_from = Some(now);
@@ -259,7 +253,7 @@ impl Menus {
         canvas: &mut Canvas,
         qh: &QueueHandle<App>,
         outputs: &OutputState,
-        fonts: &mut Fonts,
+        kit: &mut Kit,
     ) {
         let Some(view) = self.state.view() else {
             self.shown = None;
@@ -295,12 +289,12 @@ impl Menus {
                 Forward(self.actions.clone()),
             ));
         }
-        self.draw(canvas, fonts);
+        self.draw(canvas, kit);
     }
 
     /// Draw the open menus on the surface, once the compositor has given it
     /// a size.
-    fn draw(&mut self, canvas: &mut Canvas, fonts: &mut Fonts) {
+    fn draw(&mut self, canvas: &mut Canvas, kit: &mut Kit) {
         let (Some(shown), Some(view)) = (&mut self.shown, self.state.view()) else {
             return;
         };
@@ -315,8 +309,8 @@ impl Menus {
             .iter()
             .map(|menu| (menu.rect.x, menu.rect.y, menu.rect.w, menu.rect.h))
             .collect();
+        let Kit { fonts, images } = kit;
         let text = fonts.get();
-        let images = &mut self.images;
         let scale = shown.scale;
         let started = Instant::now();
         canvas.show(&shown.layer, size, scale, &opaque, |picture| {
@@ -333,7 +327,7 @@ impl Menus {
     pub(super) fn configure(
         &mut self,
         canvas: &mut Canvas,
-        fonts: &mut Fonts,
+        kit: &mut Kit,
         layer: &LayerSurface,
         configure: &LayerSurfaceConfigure,
     ) {
@@ -347,8 +341,8 @@ impl Menus {
         shown.size = Some((width, height));
         let monitor = Rect::new(0, 0, width as i32, height as i32);
         let area = usable(monitor, reserved_on(&self.reserved, &shown.name));
-        self.state.update(Event::Resized(area), fonts);
-        self.draw(canvas, fonts);
+        self.state.update(Event::Resized(area), &mut kit.fonts);
+        self.draw(canvas, kit);
     }
 
     /// The compositor took the surface away: the monitor went.
@@ -414,7 +408,6 @@ impl Settings {
                 .menu_file
                 .as_deref()
                 .map(|written| image::locate(written, config, home.as_deref())),
-            icon_theme: shell.icon_theme.clone(),
             lock: shell.lock.clone(),
         }
     }
@@ -428,34 +421,16 @@ fn reserved_on(reserved: &[(String, Rect)], output: &str) -> Option<Rect> {
         .map(|&(_, strip)| strip)
 }
 
-/// The icon theme the config names, read.
-fn icons(settings: &Settings, places: &Places) -> Icons {
-    Icons::new(
-        &Disk,
-        settings.icon_theme.as_deref(),
-        &places.data,
-        home().as_deref(),
-    )
-}
-
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// When each folder of applications, and the menu file, last changed: a
-/// menu built from them is current while this stays the same.
-fn stamp(places: &Places, menu_file: Option<&Path>) -> Vec<Option<SystemTime>> {
-    places
-        .data
-        .iter()
-        .map(|dir| dir.join("applications"))
-        .chain(menu_file.map(Path::to_owned))
-        .map(|path| {
-            std::fs::metadata(path)
-                .and_then(|meta| meta.modified())
-                .ok()
-        })
-        .collect()
+/// When the menu file last changed, if there is one: a menu built from it
+/// is current while this stays the same.
+fn modified(menu_file: Option<&Path>) -> Option<SystemTime> {
+    std::fs::metadata(menu_file?)
+        .and_then(|meta| meta.modified())
+        .ok()
 }
 
 /// An assistive technology's requests of a menu, sent on to the shell's

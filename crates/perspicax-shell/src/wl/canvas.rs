@@ -55,7 +55,7 @@ impl Canvas {
         })
     }
 
-    #[cfg(feature = "menus")]
+    #[cfg(any(feature = "menus", feature = "panel"))]
     pub(super) fn shm(&self) -> &Shm {
         &self.shm
     }
@@ -169,7 +169,7 @@ impl LayerShellHandler for App {
         #[cfg(feature = "panel")]
         self.panels.closed(layer);
         #[cfg(feature = "menus")]
-        self.menus.closed(&mut self.fonts, layer);
+        self.menus.closed(&mut self.kit.fonts, layer);
     }
 
     fn configure(
@@ -184,10 +184,10 @@ impl LayerShellHandler for App {
         self.desktops.configure(&mut self.canvas, layer, &configure);
         #[cfg(feature = "panel")]
         self.panels
-            .configure(&mut self.canvas, &mut self.fonts, layer, &configure);
+            .configure(&mut self.canvas, &mut self.kit, layer, &configure);
         #[cfg(feature = "menus")]
         self.menus
-            .configure(&mut self.canvas, &mut self.fonts, layer, &configure);
+            .configure(&mut self.canvas, &mut self.kit, layer, &configure);
     }
 }
 

@@ -10,9 +10,14 @@
 //! The shapes are drawn rather than taken from a font, so they show with any
 //! font, or none.
 
-use tiny_skia::{FilterQuality, LineCap, PathBuilder, PixmapMut, PixmapPaint, Stroke, Transform};
+use tiny_skia::{LineCap, PathBuilder, PixmapMut, Stroke, Transform};
 
-use super::{fill, icons::Images, scaled, solid, text::Text};
+use super::{
+    fill,
+    icons::{self, Images},
+    scaled, solid,
+    text::Text,
+};
 use crate::{
     layout::{
         Rect, TEXT,
@@ -88,22 +93,7 @@ pub(crate) fn paint(
                 .as_deref()
                 .and_then(|name| images.get(name, ICON as u32, scale))
             {
-                let place = px(icon_box(line.rect));
-                let (sx, sy) = (
-                    place.w as f32 / image.width() as f32,
-                    place.h as f32 / image.height() as f32,
-                );
-                canvas.draw_pixmap(
-                    0,
-                    0,
-                    image.as_ref(),
-                    &PixmapPaint {
-                        quality: FilterQuality::Bicubic,
-                        ..PixmapPaint::default()
-                    },
-                    Transform::from_row(sx, 0.0, 0.0, sy, place.x as f32, place.y as f32),
-                    None,
-                );
+                icons::draw(canvas, image, px(icon_box(line.rect)));
             }
             let submenu = line.item.submenu().is_some();
             text.write(
@@ -190,10 +180,11 @@ mod tests {
     use crate::{
         layout::Monospace,
         model::{
+            Button,
             apps::{App, Run},
             menu::{Session, root, start},
         },
-        update::{Button, Event, Key, State},
+        update::{Event, Key, State},
     };
 
     fn state() -> State {

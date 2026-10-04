@@ -13,8 +13,11 @@
 //! choosing an item in it runs the item's program. In the classic profile a
 //! panel along the bottom of each monitor keeps windows above it, and its
 //! start button, or the start menu's key, opens the start menu standing on
-//! it. Like the other live tests it binds a real Wayland socket, so it needs
-//! `XDG_RUNTIME_DIR`, and is `#[ignore]`d for `ci/live-tests.sh` to run.
+//! it. Its taskbar lists the windows, and a click on one brings it forward,
+//! puts it away or closes it; its pager shows the workspaces, follows a
+//! switch, and switches on a click. Like the other live tests it binds a
+//! real Wayland socket, so it needs `XDG_RUNTIME_DIR`, and is `#[ignore]`d
+//! for `ci/live-tests.sh` to run.
 //!
 //! The menus here are a menu file's, so that what they hold does not hang
 //! on what is installed on the machine running the test.
@@ -23,11 +26,12 @@ mod common;
 
 use std::{path::PathBuf, thread};
 
-use common::{Session, connect};
+use common::{Desk, Session, connect};
 use perspicax_compositor::{Backend, Command, Host, Virtual};
 use perspicax_index::{Action as Verb, HostFacts, Layer, PointerButton, SurfaceKind};
 use perspicax_node::{Rect, SurfaceId};
-use perspicax_policy::{Access, Action, Place, Shape, Side};
+use perspicax_policy::{Access, Action, Place, Protocol, Rule, Shape, Side};
+use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::State;
 
 /// The shell, running on a thread against a session.
 struct Shell {
@@ -250,6 +254,76 @@ fn colour_at(session: &Session, x: usize, y: usize) -> [u8; 4] {
     let shot = host.capture(ShotTarget::Output(None)).expect("a picture");
     let at = (y * shot.width as usize + x) * 4;
     shot.rgba[at..at + 4].try_into().unwrap()
+}
+
+/// The panel's colours where its tasks and workspaces are: a task's face,
+/// and a workspace's not showing; the face of the window with the keyboard,
+/// and of the workspace showing; and the bar, where neither is.
+#[cfg(feature = "capture")]
+const FACE: [u8; 4] = [0x31, 0x36, 0x3b, 0xff];
+#[cfg(feature = "capture")]
+const LIT: [u8; 4] = [0x2b, 0x4f, 0x63, 0xff];
+#[cfg(feature = "capture")]
+const BAR: [u8; 4] = [0x23, 0x26, 0x29, 0xff];
+
+/// How wide a task is, with few windows open.
+#[cfg(feature = "capture")]
+const TASK: f64 = 200.0;
+
+/// Wait until the pixel at `x`, `y` of the first monitor is `colour`: what
+/// the panel shows once the shell has heard the news and drawn it.
+#[cfg(feature = "capture")]
+fn until_colour(session: &Session, (x, y): (usize, usize), colour: [u8; 4]) {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let now = colour_at(session, x, y);
+        if now == colour {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "({x}, {y}) is {now:02x?}, not {colour:02x?}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Whether the window titled `title` has the keyboard, as a taskbar is told.
+fn activated(desk: &Desk, title: &str) -> bool {
+    desk.task(title)
+        .is_some_and(|task| task.is(State::Activated))
+}
+
+/// One 1280 by 800 monitor, and four workspaces in a row across it.
+#[cfg(feature = "capture")]
+fn four_workspaces() -> Backend {
+    Backend::Headless {
+        outputs: vec![Virtual::numbered(1, (1280, 800))],
+        workspaces: Shape {
+            mode: perspicax_policy::Mode::Spanning,
+            grid: perspicax_policy::Grid {
+                columns: 4,
+                rows: 1,
+                wrap: false,
+            },
+        },
+        access: Access::open(),
+    }
+}
+
+/// A panel of the pager and the clock alone, so the pager is at its left
+/// end whatever the clock's font makes its width.
+#[cfg(feature = "capture")]
+const PAGER_FIRST: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"pager\", \"clock\"]\n";
+
+/// The middle of the left end of workspace `at`'s cell in a pager at the
+/// left end of a 40 pixel panel, clear of its name: the cells are 51 by 32,
+/// 4 in from the panel's edges and 2 apart.
+#[cfg(feature = "capture")]
+fn cell(at: usize) -> (f64, f64) {
+    (f64::from(4 + 53 * at as i32 + 4), 20.0)
 }
 
 fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
@@ -750,5 +824,144 @@ fn an_agents_click_on_the_start_button_opens_it() {
     click(&session, panel, start, PointerButton::Left);
     session.wait_for(|facts| menu(facts).is_none());
 
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_agents_click_on_a_task_brings_its_window_forward() {
+    let session = Session::start("shell-task", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "task", CLASSIC);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.open_coloured(&qh, "first", "first", 0xffff_8000);
+    desk.open_coloured(&qh, "second", "second", 0xff00_80ff);
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.task("first").is_some() && activated(desk, "second")
+    });
+
+    // The tasks stand in the order their windows opened, from the start
+    // button's right: the second lit, as it has the keyboard. Each is read
+    // at its right end, clear of its icon and its title.
+    let (first, second) = (PANEL_HEIGHT + TASK / 2.0, PANEL_HEIGHT + TASK * 1.5);
+    let face = |middle: f64| ((middle + TASK / 2.0) as usize - 4, 800 - 30);
+    until_colour(&session, face(first), FACE);
+    until_colour(&session, face(second), LIT);
+
+    // A click on the first brings it forward.
+    click(&session, panel, (first, 20.0), PointerButton::Left);
+    common::until(&mut queue, &mut desk, |desk| activated(desk, "first"));
+    until_colour(&session, face(first), LIT);
+
+    // Another puts it away, since it was forward already.
+    click(&session, panel, (first, 20.0), PointerButton::Left);
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.task("first")
+            .is_some_and(|task| task.is(State::Minimized))
+    });
+
+    // And a middle click asks the second to close.
+    click(&session, panel, (second, 20.0), PointerButton::Middle);
+    common::until(&mut queue, &mut desk, |desk| desk.asked_to_close == 1);
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_pager_follows_a_switch_by_key() {
+    let session = Session::start("shell-pager-key", four_workspaces());
+    let shell = Shell::start(&session, "pager-key", PAGER_FIRST);
+    session.wait_for(|facts| panels(facts).len() == 1);
+    let on_screen = |(x, y): (f64, f64)| (x as usize, 800 - 40 + y as usize);
+
+    // Four cells at the panel's left end, the first workspace's lit.
+    until_colour(&session, on_screen(cell(0)), LIT);
+    until_colour(&session, on_screen(cell(1)), FACE);
+    until_colour(&session, on_screen(cell(3)), FACE);
+
+    // Twice, so that a panel drawn again for some other reason cannot pass
+    // for one that follows.
+    session.perform(Action::GoToWorkspace(2));
+    until_colour(&session, on_screen(cell(1)), LIT);
+    until_colour(&session, on_screen(cell(0)), FACE);
+    session.perform(Action::GoToWorkspace(4));
+    until_colour(&session, on_screen(cell(3)), LIT);
+    until_colour(&session, on_screen(cell(1)), FACE);
+
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_agents_click_on_a_workspace_switches_to_it() {
+    let session = Session::start("shell-pager-click", four_workspaces());
+    let shell = Shell::start(&session, "pager-click", PAGER_FIRST);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_pager(&globals, &qh);
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.active_workspaces() == ["1"]
+    });
+    // Drawn, so there are cells to click.
+    until_colour(&session, (cell(0).0 as usize, 770), LIT);
+
+    click(&session, panel, cell(2), PointerButton::Left);
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.active_workspaces() == ["3"]
+    });
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn with_the_taskbar_rule_off_the_panel_still_runs() {
+    let session = Session::start("shell-taskbar-off", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "taskbar-off", CLASSIC);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.bind_pager(&globals, &qh);
+    desk.open_coloured(&qh, "orange", "orange", 0xffff_8000);
+    common::until(&mut queue, &mut desk, |desk| activated(desk, "orange"));
+    #[cfg(feature = "capture")]
+    let task = ((PANEL_HEIGHT + TASK) as usize - 4, 800 - 30);
+    #[cfg(feature = "capture")]
+    until_colour(&session, task, LIT);
+
+    // The taskbar's and the pager's protocols taken from every program, the
+    // shell among them, as a person narrowing `[protocols]` does.
+    session.command(Command::Protocols(
+        Access::open()
+            .with(Protocol::ForeignToplevelManagement, Rule::Off)
+            .with(Protocol::Workspace, Rule::Off),
+    ));
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.taskbar_finished && desk.pager_finished
+    });
+
+    // The window is gone from the panel, and the panel is still there: its
+    // start button still opens the start menu.
+    #[cfg(feature = "capture")]
+    until_colour(&session, task, BAR);
+    click(
+        &session,
+        panel,
+        (PANEL_HEIGHT / 2.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Left,
+    );
+    session.wait_for(|facts| menu(facts).is_some());
+
+    drop((desk, queue));
     shell.stop_with(session);
 }

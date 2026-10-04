@@ -11,41 +11,62 @@
 //! still holds it; only the monitors that no longer have one lose theirs.
 //! Which monitor is the first is worked out again whenever one comes or
 //! goes.
+//!
+//! Every panel lists its windows and pages its workspaces from what the
+//! compositor tells the shell over the taskbar's and the pager's protocols
+//! (see `taskbar` and `pager`). News of either draws the panels again once
+//! the loop has nothing else to do, so a batch of it is drawn once.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use perspicax_config::{Edge, Item, Panel, Shell};
-#[cfg(feature = "menus")]
-use smithay_client_toolkit::reexports::calloop::channel::Sender;
 use smithay_client_toolkit::{
     output::OutputState,
+    reexports::calloop::channel::Sender,
     shell::{
         WaylandSurface,
         wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerSurface, LayerSurfaceConfigure},
     },
 };
-#[cfg(feature = "menus")]
-use wayland_client::protocol::wl_surface;
-use wayland_client::{QueueHandle, protocol::wl_output};
+use wayland_client::{
+    QueueHandle,
+    protocol::{wl_output, wl_surface},
+};
+use wayland_protocols::ext::workspace::v1::client::{
+    ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
+    ext_workspace_handle_v1::ExtWorkspaceHandleV1, ext_workspace_manager_v1::ExtWorkspaceManagerV1,
+};
+use wayland_protocols_wlr::foreign_toplevel::v1::client::{
+    zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+    zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
+};
 
 use super::{
-    App,
+    App, Asked,
     canvas::{Canvas, whole},
 };
+#[cfg(feature = "menus")]
+use crate::layout::Rect;
 use crate::{
     a11y::{self, adapter::Served},
-    layout::{
-        Rect,
-        panel::{chosen, lay_out},
+    layout::panel::{Cell, Holding, Part, Placed, Task, chosen, lay_out},
+    model::{
+        Button,
+        apps::{self, App as Application},
+        clock::Clock,
+        pager::Pager,
+        tasks::{Tasks, Window},
     },
-    model::clock::Clock,
-    paint::{self, text::Fonts},
+    paint::{self, Kit},
 };
 
 /// What every panel's namespace starts with, before its monitor's name.
 const NAMESPACE: &str = "perspicax-panel-";
 
-/// Every monitor's panel, and the clock they show.
+/// Every monitor's panel, and what they show.
 pub(super) struct Panels {
     /// `None` is no panel, and then no surface either.
     panel: Option<Panel>,
@@ -55,9 +76,23 @@ pub(super) struct Panels {
     each: Vec<Bar>,
     /// The monitor whose start menu is open, for its button to show it.
     open_on: Option<String>,
-    /// Where an assistive technology's press of a start button is sent.
-    #[cfg(feature = "menus")]
-    actions: Sender<super::Asked>,
+    /// The windows, as the compositor tells a taskbar them, and what it
+    /// tells them with: `None` if it does not, or stopped.
+    pub(super) tasks: Tasks<ZwlrForeignToplevelHandleV1, wl_output::WlOutput>,
+    pub(super) taskbar: Option<ZwlrForeignToplevelManagerV1>,
+    /// The workspaces, as it tells a pager them, likewise.
+    pub(super) workspaces:
+        Pager<ExtWorkspaceGroupHandleV1, ExtWorkspaceHandleV1, wl_output::WlOutput>,
+    pub(super) pager: Option<ExtWorkspaceManagerV1>,
+    /// Each window's icon, by the app id it gives, as found in the
+    /// applications' read of number `icons_from`.
+    icons: HashMap<String, Option<String>>,
+    icons_from: u64,
+    /// The panels are to be drawn again once the loop is idle.
+    stale: bool,
+    /// Where an assistive technology's press of something on a panel is
+    /// sent.
+    actions: Sender<Asked>,
 }
 
 /// One monitor's panel.
@@ -72,13 +107,15 @@ struct Bar {
     /// In the surface's own units, once the compositor has said.
     size: Option<(u32, u32)>,
     /// What it holds, where it was last drawn.
-    placed: Vec<(Item, Rect)>,
+    placed: Placed,
 }
 
 impl Panels {
     pub(super) fn new(
         shell: &Shell,
-        #[cfg(feature = "menus")] actions: Sender<super::Asked>,
+        actions: Sender<Asked>,
+        taskbar: Option<ZwlrForeignToplevelManagerV1>,
+        pager: Option<ExtWorkspaceManagerV1>,
     ) -> Self {
         let clock = Clock::new(shell.panel.as_ref().map_or("%H:%M", |panel| &panel.clock));
         Self {
@@ -87,7 +124,13 @@ impl Panels {
             time: String::new(),
             each: Vec::new(),
             open_on: None,
-            #[cfg(feature = "menus")]
+            tasks: Tasks::default(),
+            taskbar,
+            workspaces: Pager::default(),
+            pager,
+            icons: HashMap::new(),
+            icons_from: 0,
+            stale: false,
             actions,
         }
     }
@@ -100,7 +143,7 @@ impl Panels {
         qh: &QueueHandle<App>,
         shell: &Shell,
         outputs: &OutputState,
-        fonts: &mut Fonts,
+        kit: &mut Kit,
     ) {
         if shell.panel == self.panel {
             return;
@@ -122,7 +165,7 @@ impl Panels {
         }
         self.sync(canvas, qh, outputs, None);
         if !moved {
-            (0..self.each.len()).for_each(|at| self.draw(canvas, fonts, at));
+            self.redraw(canvas, kit);
         }
     }
 
@@ -174,18 +217,17 @@ impl Panels {
                     layer,
                     scale: whole(scale),
                     size: None,
-                    placed: Vec::new(),
+                    placed: Placed::default(),
                 });
             }
         }
     }
 
-    /// A panel's tree on the bus, its start button pressable for the start
-    /// menu of the monitor named `name`.
-    #[cfg(feature = "menus")]
+    /// A panel's tree on the bus, what can be pressed on it pressable on the
+    /// panel of the monitor named `name`.
     fn served(&self, namespace: &str, name: &str) -> Served {
         Served::acting(
-            a11y::panel(namespace, None, &[], &self.time, false),
+            a11y::panel(namespace, None, &Placed::default(), &self.time, false),
             Press {
                 output: name.to_owned(),
                 actions: self.actions.clone(),
@@ -193,17 +235,11 @@ impl Panels {
         )
     }
 
-    /// A panel's tree on the bus, with no menu to open from it.
-    #[cfg(not(feature = "menus"))]
-    fn served(&self, namespace: &str, _: &str) -> Served {
-        Served::new(a11y::panel(namespace, None, &[], &self.time, false))
-    }
-
     /// Draw a monitor's panel again if its scale changed.
     pub(super) fn rescale(
         &mut self,
         canvas: &mut Canvas,
-        fonts: &mut Fonts,
+        kit: &mut Kit,
         output: &wl_output::WlOutput,
         scale: i32,
     ) {
@@ -214,8 +250,14 @@ impl Panels {
             .position(|bar| bar.output == *output && bar.scale != scale)
         {
             self.each[at].scale = scale;
-            self.draw(canvas, fonts, at);
+            self.draw(canvas, kit, at);
         }
+    }
+
+    /// A monitor was unplugged: no window or workspace is on it now.
+    pub(super) fn gone(&mut self, output: &wl_output::WlOutput) {
+        self.tasks.gone(output);
+        self.workspaces.gone(output);
     }
 
     pub(super) fn closed(&mut self, layer: &LayerSurface) {
@@ -226,7 +268,7 @@ impl Panels {
     pub(super) fn configure(
         &mut self,
         canvas: &mut Canvas,
-        fonts: &mut Fonts,
+        kit: &mut Kit,
         layer: &LayerSurface,
         configure: &LayerSurfaceConfigure,
     ) {
@@ -238,17 +280,17 @@ impl Panels {
             return;
         }
         self.each[at].size = Some((width, height));
-        self.draw(canvas, fonts, at);
+        self.draw(canvas, kit, at);
     }
 
     /// Read the clock, and draw the panels again if what it shows changed.
     /// How long until it next might.
-    pub(super) fn tick(&mut self, canvas: &mut Canvas, fonts: &mut Fonts) -> Duration {
+    pub(super) fn tick(&mut self, canvas: &mut Canvas, kit: &mut Kit) -> Duration {
         let now = chrono::Local::now();
         let time = self.clock.show(&now);
         if time != self.time {
             self.time = time;
-            (0..self.each.len()).for_each(|at| self.draw(canvas, fonts, at));
+            self.redraw(canvas, kit);
         }
         self.clock.until_next(&now)
     }
@@ -256,7 +298,7 @@ impl Panels {
     /// Show the start button of the monitor `on` as open, and every other as
     /// shut.
     #[cfg(feature = "menus")]
-    pub(super) fn set_open(&mut self, canvas: &mut Canvas, fonts: &mut Fonts, on: Option<&str>) {
+    pub(super) fn set_open(&mut self, canvas: &mut Canvas, kit: &mut Kit, on: Option<&str>) {
         if self.open_on.as_deref() == on {
             return;
         }
@@ -264,27 +306,70 @@ impl Panels {
         for at in 0..self.each.len() {
             let name = Some(self.each[at].name.as_str());
             if name == was.as_deref() || name == on {
-                self.draw(canvas, fonts, at);
+                self.draw(canvas, kit, at);
+            }
+        }
+    }
+
+    /// Mark the panels to be drawn again, and say whether they were not
+    /// marked already.
+    pub(super) fn mark_stale(&mut self) -> bool {
+        !std::mem::replace(&mut self.stale, true)
+    }
+
+    /// Draw every panel again, if they were marked to be.
+    pub(super) fn draw_if_stale(&mut self, canvas: &mut Canvas, kit: &mut Kit) {
+        if std::mem::take(&mut self.stale) {
+            self.redraw(canvas, kit);
+        }
+    }
+
+    /// Whether a taskbar lists a window whose application's icon has not
+    /// been looked for yet.
+    pub(super) fn icon_unknown(&self) -> bool {
+        let taskbar = self
+            .panel
+            .as_ref()
+            .is_some_and(|panel| panel.items.contains(&Item::Taskbar));
+        let icons = &self.icons;
+        taskbar
+            && self
+                .tasks
+                .windows()
+                .any(|window| !icons.contains_key(&window.app_id))
+    }
+
+    /// Look for the icon of each window's application in `apps`, the
+    /// applications' read of number `read`.
+    pub(super) fn find_icons(&mut self, read: u64, apps: &[Application]) {
+        if read != self.icons_from {
+            self.icons.clear();
+            self.icons_from = read;
+        }
+        for window in self.tasks.windows() {
+            if !self.icons.contains_key(&window.app_id) {
+                let icon = apps::of_window(apps, &window.app_id)
+                    .and_then(|app| app.icon.clone())
+                    // Many an application names its icon as it names its
+                    // windows, entry or none.
+                    .or_else(|| Some(window.app_id.clone()).filter(|id| !id.is_empty()));
+                self.icons.insert(window.app_id.clone(), icon);
             }
         }
     }
 
     /// The monitor of the panel that is `surface`, and what on it is at
     /// `point`, if `surface` is a panel's.
-    #[cfg(feature = "menus")]
     pub(super) fn at(
         &self,
         surface: &wl_surface::WlSurface,
         point: (f64, f64),
-    ) -> Option<(&str, Option<Item>)> {
+    ) -> Option<(&str, Option<Part>)> {
         let bar = self
             .each
             .iter()
             .find(|bar| bar.layer.wl_surface() == surface)?;
-        Some((
-            &bar.name,
-            crate::layout::panel::item_at(&bar.placed, point).map(|(item, _)| item),
-        ))
+        Some((&bar.name, bar.placed.at(point)))
     }
 
     /// The edge the panels are along, if there are panels.
@@ -310,14 +395,17 @@ impl Panels {
     pub(super) fn start_button(&self, name: &str, monitor: Rect) -> Option<Rect> {
         let strip = self.strip(name, monitor)?;
         let bar = self.each.iter().find(|bar| bar.name == name)?;
-        bar.placed
-            .iter()
-            .find(|(item, _)| *item == Item::Start)
-            .map(|&(_, at)| Rect::new(strip.x + at.x, strip.y + at.y, at.w, at.h))
+        let at = bar.placed.item(Item::Start)?;
+        Some(Rect::new(strip.x + at.x, strip.y + at.y, at.w, at.h))
+    }
+
+    /// Draw every panel.
+    fn redraw(&mut self, canvas: &mut Canvas, kit: &mut Kit) {
+        (0..self.each.len()).for_each(|at| self.draw(canvas, kit, at));
     }
 
     /// Draw panel `at`, once the compositor has given it a size.
-    fn draw(&mut self, canvas: &mut Canvas, fonts: &mut Fonts, at: usize) {
+    fn draw(&mut self, canvas: &mut Canvas, kit: &mut Kit, at: usize) {
         let Some(panel) = &self.panel else {
             return;
         };
@@ -326,8 +414,37 @@ impl Panels {
             return;
         };
         let (width, height) = (size.0 as i32, size.1 as i32);
+        let tasks = self
+            .tasks
+            .listed(&bar.output, panel.taskbar)
+            .map(|(serial, window)| Task {
+                serial,
+                title: title(window),
+                icon: self.icons.get(&window.app_id).cloned().flatten(),
+                active: window.active,
+                minimized: window.minimized,
+            })
+            .collect();
+        let cells = self
+            .workspaces
+            .on(&bar.output)
+            .into_iter()
+            .map(|(workspace, (column, row))| Cell {
+                serial: workspace.serial,
+                name: workspace.name.clone(),
+                column,
+                row,
+                active: workspace.active,
+            })
+            .collect();
+        let holding = Holding {
+            time: &self.time,
+            tasks,
+            cells,
+        };
+        let Kit { fonts, images } = kit;
         let text = fonts.get();
-        bar.placed = lay_out(&panel.items, &self.time, (width, height), &mut *text);
+        bar.placed = lay_out(&panel.items, holding, (width, height), &mut *text);
         let open = self.open_on.as_deref() == Some(bar.name.as_str());
         let shown = paint::panel::Shown {
             size: (width, height),
@@ -344,7 +461,7 @@ impl Panels {
             bar.scale,
             &[(0, 0, width, height)],
             |picture| {
-                paint::panel::paint(&shown, picture, bar.scale, text);
+                paint::panel::paint(&shown, picture, bar.scale, text, images);
             },
         );
         tracing::debug!(output = bar.name, took = ?started.elapsed(), "a panel was drawn");
@@ -358,6 +475,14 @@ impl Panels {
     }
 }
 
+/// What a window's task is called: its title, or with none, its app id.
+fn title<O>(window: &Window<O>) -> String {
+    [&window.title, &window.app_id]
+        .into_iter()
+        .find(|name| !name.is_empty())
+        .map_or_else(|| "Window".to_owned(), String::clone)
+}
+
 /// Put `layer` along the panel's edge, as tall as it, keeping windows out.
 fn place(layer: &LayerSurface, panel: &Panel) {
     let edge = match panel.edge {
@@ -369,25 +494,67 @@ fn place(layer: &LayerSurface, panel: &Panel) {
     layer.set_exclusive_zone(panel.height as i32);
 }
 
-/// An assistive technology's press of a panel's start button, sent on to
-/// the shell's loop.
-#[cfg(feature = "menus")]
-struct Press {
-    output: String,
-    actions: Sender<super::Asked>,
-}
-
-#[cfg(feature = "menus")]
-impl accesskit::ActionHandler for Press {
-    fn do_action(&mut self, request: accesskit::ActionRequest) {
-        if request.action != accesskit::Action::Click || request.target_node != a11y::START {
+impl App {
+    /// The panels' news changed what they show: draw them again once the
+    /// loop is idle, with the icon of any application new to them.
+    pub(super) fn panels_changed(&mut self) {
+        if !self.panels.mark_stale() {
             return;
         }
-        if self
-            .actions
-            .send(super::Asked::StartMenu(self.output.clone()))
-            .is_err()
+        self.handle.insert_idle(|app| {
+            if app.panels.icon_unknown() {
+                let read = app.installed.refresh();
+                app.panels.find_icons(read, app.installed.apps());
+            }
+            app.panels.draw_if_stale(&mut app.canvas, &mut app.kit);
+        });
+    }
+
+    /// A button went down on the panel of the monitor named `name`, on
+    /// `part` of it, or on none.
+    pub(super) fn panel_pressed(&mut self, name: &str, part: Option<Part>, button: Button) {
+        #[cfg(feature = "menus")]
         {
+            if (part, button) == (Some(Part::Start), Button::Left) {
+                if let Some(output) = self.output_named(name) {
+                    self.start_menu(&output);
+                }
+                return;
+            }
+            // Anything else on a panel closes the menus, as a press anywhere
+            // off them does.
+            self.menu_event(crate::update::Event::PanelPress);
+        }
+        #[cfg(not(feature = "menus"))]
+        let _ = name;
+        match part {
+            Some(Part::Task(serial)) => self.press_task(serial, button),
+            Some(Part::Workspace(serial)) => self.press_workspace(serial, button),
+            Some(Part::Start) | None => {}
+        }
+    }
+}
+
+/// An assistive technology's click on a panel: on its start button, a task
+/// or a workspace, sent on to the shell's loop as a left click there.
+struct Press {
+    output: String,
+    actions: Sender<Asked>,
+}
+
+impl accesskit::ActionHandler for Press {
+    fn do_action(&mut self, request: accesskit::ActionRequest) {
+        if request.action != accesskit::Action::Click {
+            return;
+        }
+        let Some(part) = a11y::part_of(request.target_node) else {
+            return;
+        };
+        let asked = Asked::Panel {
+            output: self.output.clone(),
+            part,
+        };
+        if self.actions.send(asked).is_err() {
             tracing::debug!("the shell is stopping; the press is dropped");
         }
     }

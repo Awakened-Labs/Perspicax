@@ -1,4 +1,4 @@
-//! The disk, as the menus read it.
+//! The disk, as the menus and the taskbar read it.
 //!
 //! Through a trait, so that a test of which applications a menu lists, or
 //! which icon it finds, says in the test itself which files it relies on,
@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// What the menus ask of a filesystem.
+/// What the shell asks of a filesystem.
 pub(crate) trait Fs {
     /// A text file's contents, or `None` for one that is missing, cannot be
     /// read, or is not UTF-8.

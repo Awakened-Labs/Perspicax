@@ -1,7 +1,7 @@
 //! Pixels: tiny-skia paints straight into the buffer a surface shows, and
 //! [`argb`] puts the buffer's bytes in the order Wayland reads them.
 
-#[cfg(feature = "menus")]
+#[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) mod icons;
 #[cfg(feature = "menus")]
 pub(crate) mod menu;
@@ -16,6 +16,14 @@ pub(crate) mod wallpaper;
 pub(crate) use shapes::solid;
 #[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) use shapes::{fill, scaled};
+
+/// What the menus and the panels are drawn with: the fonts, and the icon
+/// theme's images, each found once and shared.
+#[cfg(any(feature = "menus", feature = "panel"))]
+pub(crate) struct Kit {
+    pub(crate) fonts: text::Fonts,
+    pub(crate) images: icons::Images,
+}
 
 /// What the menus and the panel are drawn with.
 #[cfg(any(feature = "menus", feature = "panel"))]

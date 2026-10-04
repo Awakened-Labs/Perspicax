@@ -12,12 +12,18 @@ mod canvas;
 mod channel;
 #[cfg(feature = "wallpaper")]
 mod desktop;
+#[cfg(any(feature = "menus", feature = "panel"))]
+mod installed;
 #[cfg(feature = "menus")]
 mod menu;
 #[cfg(feature = "panel")]
+mod pager;
+#[cfg(feature = "panel")]
 mod panel;
-#[cfg(feature = "menus")]
+#[cfg(any(feature = "menus", feature = "panel"))]
 mod seat;
+#[cfg(feature = "panel")]
+mod taskbar;
 
 use std::path::PathBuf;
 
@@ -53,11 +59,11 @@ pub(crate) fn run(
         .insert(event_loop.handle())
         .map_err(|error| wayland(&error.error))?;
     let channel = channel::bind(&globals, &qh);
-    #[cfg(feature = "menus")]
+    #[cfg(any(feature = "menus", feature = "panel"))]
     let actions = {
-        // What an assistive technology asks of a menu or a start button
-        // arrives on AccessKit's thread, and is handled here, in the loop,
-        // like anything else.
+        // What an assistive technology asks of a menu or a panel arrives on
+        // AccessKit's thread, and is handled here, in the loop, like
+        // anything else.
         let (sender, receiver) = calloop::channel::channel();
         event_loop
             .handle()
@@ -69,27 +75,41 @@ pub(crate) fn run(
             .map_err(|error| wayland(&error.error))?;
         sender
     };
-    #[cfg(all(feature = "panel", feature = "menus"))]
-    let panels = panel::Panels::new(&shell, actions.clone());
-    #[cfg(all(feature = "panel", not(feature = "menus")))]
-    let panels = panel::Panels::new(&shell);
+    #[cfg(any(feature = "menus", feature = "panel"))]
+    let installed = installed::Installed::new(crate::model::apps::Places::from_env());
     let mut app = App {
         registry: RegistryState::new(&globals),
         outputs: OutputState::new(&globals, &qh),
         #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
         canvas: canvas::Canvas::bind(&globals, &qh)?,
         #[cfg(any(feature = "menus", feature = "panel"))]
-        fonts: crate::paint::text::Fonts::find(),
+        kit: crate::paint::Kit {
+            fonts: crate::paint::text::Fonts::find(),
+            images: images(shell.icon_theme.as_deref(), installed.places()),
+        },
         #[cfg(feature = "wallpaper")]
         desktops: desktop::Desktops::new(&shell, config.as_deref()),
         #[cfg(feature = "panel")]
-        panels,
+        panels: panel::Panels::new(
+            &shell,
+            actions.clone(),
+            taskbar::bind(&globals, &qh),
+            pager::bind(&globals, &qh),
+        ),
         #[cfg(feature = "panel")]
         ticking: None,
-        #[cfg(feature = "menus")]
+        #[cfg(any(feature = "menus", feature = "panel"))]
         seat: seat::Seat::new(&globals, &qh),
         #[cfg(feature = "menus")]
-        menus: menu::Menus::new(&shell, config.as_deref(), actions, channel.is_some()),
+        menus: menu::Menus::new(
+            &shell,
+            config.as_deref(),
+            installed.places(),
+            actions,
+            channel.is_some(),
+        ),
+        #[cfg(any(feature = "menus", feature = "panel"))]
+        installed,
         #[cfg(feature = "menus")]
         reaping: false,
         channel,
@@ -134,9 +154,13 @@ pub(crate) struct App {
     channel: Option<perspicax_protocols::shell::v1::client::perspicax_shell_v1::PerspicaxShellV1>,
     #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
     canvas: canvas::Canvas,
-    /// The fonts the menus and the panels write with, found once.
+    /// The fonts and icons the menus and the panels are drawn with.
     #[cfg(any(feature = "menus", feature = "panel"))]
-    fonts: crate::paint::text::Fonts,
+    kit: crate::paint::Kit,
+    /// The installed applications, which the menus list and among which
+    /// the taskbar finds each window's icon.
+    #[cfg(any(feature = "menus", feature = "panel"))]
+    installed: installed::Installed,
     #[cfg(feature = "wallpaper")]
     desktops: desktop::Desktops,
     #[cfg(feature = "panel")]
@@ -144,7 +168,7 @@ pub(crate) struct App {
     /// The timer that moves the clock on.
     #[cfg(feature = "panel")]
     ticking: Option<calloop::RegistrationToken>,
-    #[cfg(feature = "menus")]
+    #[cfg(any(feature = "menus", feature = "panel"))]
     seat: seat::Seat,
     #[cfg(feature = "menus")]
     menus: menu::Menus,
@@ -167,16 +191,26 @@ pub(crate) struct App {
 
 /// What an assistive technology asked of the shell, passed from AccessKit's
 /// thread to the loop.
-#[cfg(feature = "menus")]
+#[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) enum Asked {
     /// Something of the open menus: to choose an item, or move to one.
+    #[cfg(feature = "menus")]
     Menu(crate::update::Event),
-    /// To press the start button of the monitor of this connector name.
-    #[cfg_attr(
-        not(feature = "panel"),
-        allow(dead_code, reason = "no panel, so no start button to press")
-    )]
-    StartMenu(String),
+    /// To press `part` of the panel of the monitor of connector name
+    /// `output`, as a left click would.
+    #[cfg(feature = "panel")]
+    Panel {
+        output: String,
+        part: crate::layout::panel::Part,
+    },
+}
+
+/// The icon theme named `theme`, looked for in the data folders of
+/// `places` and the home folder.
+#[cfg(any(feature = "menus", feature = "panel"))]
+fn images(theme: Option<&str>, places: &crate::model::apps::Places) -> crate::paint::icons::Images {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    crate::paint::icons::Images::new(theme, &places.data, home.as_deref())
 }
 
 impl App {
@@ -186,7 +220,7 @@ impl App {
     }
 
     /// The monitor of connector name `name`.
-    #[cfg(feature = "menus")]
+    #[cfg(all(feature = "menus", feature = "panel"))]
     fn output_named(&self, name: &str) -> Option<wl_output::WlOutput> {
         self.outputs
             .outputs()
@@ -208,6 +242,12 @@ impl App {
             }
         };
         tracing::info!("the config changed; applying it");
+        #[cfg(any(feature = "menus", feature = "panel"))]
+        let icons_changed = shell.icon_theme.as_deref() != self.kit.images.theme();
+        #[cfg(any(feature = "menus", feature = "panel"))]
+        if icons_changed {
+            self.kit.images = images(shell.icon_theme.as_deref(), self.installed.places());
+        }
         #[cfg(feature = "wallpaper")]
         self.desktops.reconfigure(
             &mut self.canvas,
@@ -219,8 +259,13 @@ impl App {
         #[cfg(feature = "panel")]
         {
             self.panels
-                .reconfigure(&mut self.canvas, qh, &shell, &self.outputs, &mut self.fonts);
+                .reconfigure(&mut self.canvas, qh, &shell, &self.outputs, &mut self.kit);
             self.keep_time();
+            // The taskbar's icons, from the new theme. The menus are drawn
+            // afresh each time one opens.
+            if icons_changed {
+                self.panels_changed();
+            }
         }
         #[cfg(feature = "menus")]
         self.menus.reconfigure(&shell, self.config.as_deref());
@@ -257,11 +302,11 @@ impl App {
         if let Some(ticking) = self.ticking.take() {
             self.handle.remove(ticking);
         }
-        let next = self.panels.tick(&mut self.canvas, &mut self.fonts);
+        let next = self.panels.tick(&mut self.canvas, &mut self.kit);
         let ticking = self
             .handle
             .insert_source(Timer::from_duration(next), |_, (), app| {
-                TimeoutAction::ToDuration(app.panels.tick(&mut app.canvas, &mut app.fonts))
+                TimeoutAction::ToDuration(app.panels.tick(&mut app.canvas, &mut app.kit))
             });
         match ticking {
             Ok(ticking) => self.ticking = Some(ticking),
@@ -270,20 +315,23 @@ impl App {
     }
 }
 
-#[cfg(feature = "menus")]
+#[cfg(any(feature = "menus", feature = "panel"))]
 impl App {
     /// Do what an assistive technology asked.
     fn asked(&mut self, asked: Asked) {
         match asked {
+            #[cfg(feature = "menus")]
             Asked::Menu(event) => self.menu_event(event),
-            Asked::StartMenu(name) => {
-                if let Some(output) = self.output_named(&name) {
-                    self.start_menu(&output);
-                }
+            #[cfg(feature = "panel")]
+            Asked::Panel { output, part } => {
+                self.panel_pressed(&output, Some(part), crate::model::Button::Left);
             }
         }
     }
+}
 
+#[cfg(feature = "menus")]
+impl App {
     /// Open the start menu on `output`, or close it, from its start button:
     /// the one on that monitor's panel, or where one would be on a monitor
     /// with none.
@@ -318,15 +366,17 @@ impl App {
     fn menu_event(&mut self, event: crate::update::Event) {
         use crate::update::Effect;
         let qh = self.qh.clone();
-        let effects = self
-            .menus
-            .send(&mut self.canvas, &qh, &self.outputs, &mut self.fonts, event);
-        #[cfg(feature = "panel")]
-        self.panels.set_open(
+        let effects = self.menus.send(
             &mut self.canvas,
-            &mut self.fonts,
-            self.menus.start_open_on(),
+            &qh,
+            &self.outputs,
+            &mut self.kit,
+            &mut self.installed,
+            event,
         );
+        #[cfg(feature = "panel")]
+        self.panels
+            .set_open(&mut self.canvas, &mut self.kit, self.menus.start_open_on());
         for effect in effects {
             match effect {
                 Effect::Run(run) => self.start(&run),
@@ -432,12 +482,8 @@ impl OutputHandler for App {
         #[cfg(feature = "panel")]
         {
             if let Some(info) = self.outputs.info(&output) {
-                self.panels.rescale(
-                    &mut self.canvas,
-                    &mut self.fonts,
-                    &output,
-                    info.scale_factor,
-                );
+                self.panels
+                    .rescale(&mut self.canvas, &mut self.kit, &output, info.scale_factor);
             }
             // A monitor moved may be the first now, or no longer.
             self.panels.sync(&self.canvas, qh, &self.outputs, None);
@@ -458,8 +504,12 @@ impl OutputHandler for App {
         #[cfg(feature = "wallpaper")]
         self.desktops.remove(&output);
         #[cfg(feature = "panel")]
-        self.panels
-            .sync(&self.canvas, qh, &self.outputs, Some(&output));
+        {
+            self.panels
+                .sync(&self.canvas, qh, &self.outputs, Some(&output));
+            self.panels.gone(&output);
+            self.panels_changed();
+        }
         self.monitors_changed();
         #[cfg(not(any(feature = "wallpaper", feature = "panel")))]
         let _ = output;
@@ -472,9 +522,9 @@ impl ProvidesRegistryState for App {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry
     }
-    #[cfg(feature = "menus")]
+    #[cfg(any(feature = "menus", feature = "panel"))]
     registry_handlers![OutputState, smithay_client_toolkit::seat::SeatState];
-    #[cfg(not(feature = "menus"))]
+    #[cfg(not(any(feature = "menus", feature = "panel")))]
     registry_handlers![OutputState];
 }
 

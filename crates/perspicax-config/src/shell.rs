@@ -56,7 +56,8 @@ pub struct Shell {
     /// The desktop folder's files, as icons on the wallpaper.
     pub desktop_icons: bool,
     /// The icon theme, by its folder name. `None` is hicolor, the theme every
-    /// application installs into.
+    /// application installs into, and the one any theme missing an icon
+    /// falls back to.
     pub icon_theme: Option<String>,
     /// What an application that asks for a terminal is run in, as a program
     /// and its arguments. `None` takes the first terminal installed.
@@ -178,15 +179,19 @@ impl Shell {
     /// A profile's shell, holding only what `built` has.
     #[must_use]
     pub fn profile(profile: Profile, built: ShellBuilt) -> Self {
-        let (colour, panel, icons) = match profile {
+        let (colour, panel, icons, theme) = match profile {
             // Plasma's: a panel along the bottom and icons on the desktop.
+            // Adwaita, for an icon on most applications and every menu
+            // group: hicolor holds only what applications install, and
+            // Plasma's own Breeze is drawn mostly in SVG.
             Profile::Classic => (
                 Colour::rgb(0x1e, 0x4a, 0x73),
                 Some(Panel::classic(built)),
                 true,
+                Some("Adwaita"),
             ),
             // Fluxbox's: the desktop is a wallpaper and a right-click menu.
-            Profile::Minimal => (Colour::rgb(0x3c, 0x40, 0x48), None, false),
+            Profile::Minimal => (Colour::rgb(0x3c, 0x40, 0x48), None, false, None),
         };
         Self {
             enabled: true,
@@ -198,7 +203,9 @@ impl Shell {
             root_menu: built.menus,
             menu_file: None,
             desktop_icons: icons && built.icons,
-            icon_theme: None,
+            icon_theme: theme
+                .filter(|_| built.menus || built.panel || built.icons)
+                .map(str::to_owned),
             terminal: None,
             lock: vec!["swaylock".to_owned()],
             panel: panel.filter(|_| built.panel),
@@ -579,11 +586,13 @@ mod tests {
         assert_eq!(panel.outputs, PanelOutputs::All);
         assert_eq!(panel.taskbar, TaskbarScope::ThisOutput);
         assert!(classic.wallpaper.is_some() && classic.root_menu && classic.desktop_icons);
+        assert_eq!(classic.icon_theme.as_deref(), Some("Adwaita"));
 
         let minimal = shell("profile = \"minimal\"", ShellBuilt::FULL).unwrap();
         assert!(minimal.wallpaper.is_some() && minimal.root_menu);
         assert_eq!(minimal.panel, None);
         assert!(!minimal.desktop_icons);
+        assert_eq!(minimal.icon_theme, None, "hicolor");
         assert_ne!(
             minimal.wallpaper.unwrap().colour,
             classic.wallpaper.unwrap().colour

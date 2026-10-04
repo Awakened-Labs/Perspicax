@@ -25,7 +25,7 @@ pub(crate) struct Served {
 
 impl Served {
     /// Serve `tree`, once the bus asks for it, with nothing on it to act on.
-    #[cfg(any(feature = "wallpaper", all(feature = "panel", not(feature = "menus"))))]
+    #[cfg(feature = "wallpaper")]
     pub(crate) fn new(tree: TreeUpdate) -> Self {
         Self::acting(tree, Inert)
     }
@@ -69,8 +69,8 @@ impl ActivationHandler for Latest {
     }
 }
 
-/// Nothing on the surface to act on: a wallpaper, or a panel in a shell
-/// without menus to open from it.
+/// Nothing to do: nothing on a wallpaper to act on, and nothing to stop
+/// when the bus turns accessibility off.
 struct Inert;
 
 impl ActionHandler for Inert {

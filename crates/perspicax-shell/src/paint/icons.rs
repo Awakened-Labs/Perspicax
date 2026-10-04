@@ -1,15 +1,23 @@
 //! Icons as images: found in the theme, read from disk once, and kept for
-//! every menu after.
+//! every menu and panel after.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
-use tiny_skia::Pixmap;
+use tiny_skia::{FilterQuality, Pixmap, PixmapMut, PixmapPaint, Transform};
 
-use crate::model::{fs::Disk, icons::Icons, image};
+use crate::{
+    layout::Rect,
+    model::{fs::Disk, icons::Icons, image},
+};
 
 /// The icon theme, and the images already read from it.
 #[derive(Default)]
 pub(crate) struct Images {
+    /// The theme's name, as the config gives it.
+    theme: Option<String>,
     icons: Icons,
     /// By name and size in pixels; `None` for one that could not be found
     /// or read, so it is not looked for again.
@@ -17,11 +25,19 @@ pub(crate) struct Images {
 }
 
 impl Images {
-    pub(crate) fn new(icons: Icons) -> Self {
+    /// The icon theme named `theme`, hicolor if none, looked for in the data
+    /// folders `data` and in `home`.
+    pub(crate) fn new(theme: Option<&str>, data: &[PathBuf], home: Option<&Path>) -> Self {
         Self {
-            icons,
+            theme: theme.map(str::to_owned),
+            icons: Icons::new(&Disk, theme, data, home),
             read: HashMap::new(),
         }
+    }
+
+    /// The theme's name, as the config gives it.
+    pub(crate) fn theme(&self) -> Option<&str> {
+        self.theme.as_deref()
     }
 
     /// The image of icon `name`, for drawing `size` logical pixels square
@@ -40,4 +56,23 @@ impl Images {
             })
             .as_ref()
     }
+}
+
+/// Draw `image` on `canvas`, scaled to fill `place`, in pixels.
+pub(crate) fn draw(canvas: &mut PixmapMut<'_>, image: &Pixmap, place: Rect) {
+    let (sx, sy) = (
+        place.w as f32 / image.width() as f32,
+        place.h as f32 / image.height() as f32,
+    );
+    canvas.draw_pixmap(
+        0,
+        0,
+        image.as_ref(),
+        &PixmapPaint {
+            quality: FilterQuality::Bicubic,
+            ..PixmapPaint::default()
+        },
+        Transform::from_row(sx, 0.0, 0.0, sy, place.x as f32, place.y as f32),
+        None,
+    );
 }
