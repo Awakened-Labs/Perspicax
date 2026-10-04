@@ -187,8 +187,18 @@ fn an_agent_finds_the_start_button_by_name_and_it_opens_the_start_menu() {
         hosted.wait_until("the start button read and joined", |index, facts| {
             on_layer(index, facts, (Role::Button, "Start"), (Layer::Top, PANEL))
         });
-        hosted.wait_until("the clock read and joined", |index, facts| {
+        let clock = hosted.wait_until("the clock read and joined", |index, facts| {
             on_layer(index, facts, (Role::Status, "Clock"), (Layer::Top, PANEL))
+        });
+        hosted.desk.read(&mut |index, _| {
+            let time = index
+                .get(clock)
+                .and_then(|node| node.node.description())
+                .unwrap_or_default();
+            assert!(
+                time.contains(':'),
+                "the time is read with the clock: {time:?}"
+            );
         });
 
         hosted.click("button:Start", PointerButton::Left);

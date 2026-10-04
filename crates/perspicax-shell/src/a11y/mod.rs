@@ -368,7 +368,9 @@ mod panels {
     /// A panel: a window named `namespace` covering it, holding a `Toolbar`
     /// of what it holds, where it is `placed`. The start button is a
     /// `Button` that opens a menu, expanded while the start menu is `open`;
-    /// the clock is a `Status` whose value is the `time` it shows.
+    /// the clock is a `Status` whose value is the `time` it shows, and whose
+    /// description is too, for a reader of names and descriptions alone (as
+    /// perspicax is, for now).
     pub(crate) fn panel(
         namespace: &str,
         size: Option<(u32, u32)>,
@@ -397,6 +399,7 @@ mod panels {
                     let mut clock = Node::new(Role::Status);
                     clock.set_label("Clock");
                     clock.set_value(time);
+                    clock.set_description(time);
                     (CLOCK, clock)
                 }
                 Item::Taskbar | Item::Pager | Item::Tray => continue,
@@ -461,6 +464,7 @@ mod panels {
             let clock = node(&tree, CLOCK);
             assert_eq!((clock.role(), clock.label()), (Role::Status, Some("Clock")));
             assert_eq!(clock.value(), Some("14:05"));
+            assert_eq!(clock.description(), Some("14:05"));
 
             let open = panel("perspicax-panel-DP-1", None, &placed, "14:05", true);
             assert_eq!(
