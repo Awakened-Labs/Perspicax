@@ -102,6 +102,31 @@ fn a_spanning_switch_hides_one_workspace_and_shows_another_on_both_monitors() {
 
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn coming_back_from_an_empty_workspace_gives_the_keyboard_back() {
+    let session = Session::start("refocus", Mode::Spanning);
+    let (mut desk, mut queue, qh) = session.client();
+
+    desk.open_window(&qh, "first");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    let opened = session.wait_for(|facts| focused_at(facts, "first").is_some());
+    let first_focus = focused_at(&opened, "first");
+
+    // Workspace 2 has no window, so nothing has the keyboard there.
+    session.perform(Action::Workspace(Direction::Right));
+    session.wait_for(|facts| seen(facts, "first") == Visibility::OtherWorkspace { workspace: 1 });
+
+    // Back on workspace 1, its window has it again, as it had when the
+    // person left.
+    session.perform(Action::Workspace(Direction::Left));
+    session.wait_for(|facts| {
+        seen(facts, "first") == Visibility::Visible && focused_at(facts, "first") > first_focus
+    });
+
+    session.stop(desk, queue);
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn per_output_each_monitor_flips_alone_and_a_moved_window_joins_the_other() {
     let session = Session::start("per-output", Mode::PerOutput);
     let (mut desk, mut queue, qh) = session.client();
@@ -254,6 +279,15 @@ fn seen(facts: &HostFacts, title: &str) -> Visibility {
         .map_or(Visibility::Unknown, |surface| {
             judge(facts, surface.id, BUTTON).visibility
         })
+}
+
+/// When the window titled `title` was last given the keyboard.
+fn focused_at(facts: &HostFacts, title: &str) -> Option<Instant> {
+    facts
+        .surfaces()
+        .iter()
+        .find(|surface| surface.title.as_deref() == Some(title))
+        .and_then(|surface| surface.focused_at)
 }
 
 fn geometry(facts: &HostFacts, title: &str) -> Rect {
