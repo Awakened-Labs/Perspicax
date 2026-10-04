@@ -48,7 +48,7 @@ impl Images {
             .entry((name.to_owned(), size * scale))
             .or_insert_with(|| {
                 let path = icons.find(&Disk, name, size, scale)?;
-                image::load(&path)
+                image::load_icon(&path, size * scale)
                     .map_err(|error| {
                         tracing::debug!("the icon {} could not be read: {error}", path.display());
                     })
@@ -75,4 +75,51 @@ pub(crate) fn draw(canvas: &mut PixmapMut<'_>, image: &Pixmap, place: Rect) {
         Transform::from_row(sx, 0.0, 0.0, sy, place.x as f32, place.y as f32),
         None,
     );
+}
+
+#[cfg(all(test, feature = "svg"))]
+mod tests {
+    use super::*;
+
+    /// A square of the highlight's blue, sixteen units on a side.
+    const SQUARE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#3daee9"/></svg>"##;
+
+    /// The premultiplied RGBA of the pixel at `x`, `y`.
+    fn pixel(image: &Pixmap, x: u32, y: u32) -> [u8; 4] {
+        let at = ((y * image.width() + x) * 4) as usize;
+        image.data()[at..at + 4].try_into().expect("four bytes")
+    }
+
+    #[test]
+    fn an_svg_icon_renders_at_the_asked_size() {
+        let data = std::env::temp_dir().join(format!("perspicax-shell-svg-{}", std::process::id()));
+        let hicolor = data.join("icons/hicolor");
+        std::fs::create_dir_all(hicolor.join("scalable/apps")).expect("a theme");
+        std::fs::write(
+            hicolor.join("index.theme"),
+            "[Icon Theme]\nName=Hicolor\nDirectories=scalable/apps\n\
+             [scalable/apps]\nSize=48\nType=Scalable\nMinSize=8\nMaxSize=512\n",
+        )
+        .expect("its index");
+        std::fs::write(hicolor.join("scalable/apps/square.svg"), SQUARE).expect("an icon");
+        let mut images = Images::new(None, std::slice::from_ref(&data), None);
+        let drawn = [1, 2].map(|scale| {
+            images.get("square", 48, scale).map(|image| {
+                let middle = image.width() / 2;
+                (image.width(), image.height(), pixel(image, middle, middle))
+            })
+        });
+        std::fs::remove_dir_all(&data).ok();
+        let blue = [0x3d, 0xae, 0xe9, 0xff];
+        assert_eq!(
+            drawn[0],
+            Some((48, 48, blue)),
+            "found in hicolor, and drawn"
+        );
+        assert_eq!(
+            drawn[1],
+            Some((96, 96, blue)),
+            "twice as many pixels at scale 2"
+        );
+    }
 }

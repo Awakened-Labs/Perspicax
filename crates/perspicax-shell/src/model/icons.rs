@@ -9,7 +9,8 @@
 //! theme every application installs its icon into; and last among the loose
 //! images in `pixmaps/`. An icon written as a path is itself.
 //!
-//! Only PNG images are found for now.
+//! PNG images are found, and with the `svg` feature SVG ones too, in the
+//! spec's order: a PNG before an SVG of the same icon in the same folder.
 //!
 //! A theme's folders are listed once, the first time an icon is looked for
 //! in it, and an icon is then found by name rather than by asking the disk
@@ -25,7 +26,10 @@ use std::{
 use super::fs::Fs;
 
 /// The kinds of image found, best first.
-const EXTENSIONS: [&str; 1] = ["png"];
+#[cfg(feature = "svg")]
+const EXTENSIONS: &[&str] = &["png", "svg"];
+#[cfg(not(feature = "svg"))]
+const EXTENSIONS: &[&str] = &["png"];
 
 /// The theme every application installs its icon into, and every theme
 /// falls back to.

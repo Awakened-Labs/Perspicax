@@ -80,7 +80,9 @@ allow = [
 #   - tiny-skia and tiny-skia-path: BSD-3-Clause. A port of a subset of
 #     Skia, and Skia's licence with it: keep the notice, and do not use the
 #     authors' names to endorse a product. The shell draws every shape with
-#     it. Read 2026-10-03.
+#     it. Read 2026-10-03; 0.12, which resvg draws with too, read again
+#     2026-10-04 with the shell's `svg` feature: the same licence. Every
+#     other crate resvg brought is MIT or Apache-2.0, and needs no line here.
 #   - arrayref: BSD-2-Clause, which is BSD-3-Clause without the endorsement
 #     clause. tiny-skia takes it for fixed-size views of its pixel slices.
 #

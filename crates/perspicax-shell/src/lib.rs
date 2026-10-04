@@ -1,14 +1,18 @@
 //! perspicax-shell: the desktop a person logs in to.
 //!
 //! A wallpaper on every monitor, a menu of the installed applications on a
-//! right-click, and a panel with a start menu, a taskbar, a pager and a
-//! clock, to be joined by a tray and desktop icons: each a cargo feature,
-//! and each a key in the `[shell]` table of perspicax's own config file. perspicax starts
-//! it, but it is an ordinary Wayland client: its surfaces are layer-shell
-//! surfaces, its taskbar speaks wlr-foreign-toplevel-management, and the one
-//! thing it needs from perspicax alone, being told that the person asked for
-//! a menu, comes over `perspicax-shell-v1`. A compositor without that
-//! channel still gets a desktop, with no menu on a key.
+//! right-click, a panel with a start menu, a taskbar, a pager and a clock,
+//! and the desktop folder's icons, to be joined by a tray: each a cargo
+//! feature, and each a key in the `[shell]` table of perspicax's own config
+//! file. Icons drawn in SVG, as most icon themes draw them, are a feature of
+//! their own, `svg`.
+//!
+//! perspicax starts it, but it is an ordinary Wayland client: its surfaces
+//! are layer-shell surfaces, its taskbar speaks
+//! wlr-foreign-toplevel-management, and the one thing it needs from
+//! perspicax alone, being told that the person asked for a menu, comes over
+//! `perspicax-shell-v1`. A compositor without that channel still gets a
+//! desktop, with no menu on a key.
 //!
 //! The shell is drawn in software: tiny-skia paints into memory, and the
 //! picture is copied into a `wl_shm` buffer. A desktop changes rarely, and

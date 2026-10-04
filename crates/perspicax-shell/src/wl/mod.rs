@@ -82,13 +82,19 @@ pub(crate) fn run(
         outputs: OutputState::new(&globals, &qh),
         #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
         canvas: canvas::Canvas::bind(&globals, &qh)?,
-        #[cfg(any(feature = "menus", feature = "panel"))]
+        #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
         kit: crate::paint::Kit {
+            #[cfg(any(feature = "menus", feature = "panel"))]
             fonts: crate::paint::text::Fonts::find(),
+            #[cfg(any(feature = "menus", feature = "panel"))]
             images: images(shell.icon_theme.as_deref(), installed.places()),
         },
-        #[cfg(feature = "wallpaper")]
+        #[cfg(all(feature = "wallpaper", not(feature = "icons")))]
         desktops: desktop::Desktops::new(&shell, config.as_deref()),
+        #[cfg(feature = "icons")]
+        desktops: desktop::Desktops::new(&shell, config.as_deref(), actions.clone()),
+        #[cfg(feature = "icons")]
+        watching: false,
         #[cfg(feature = "panel")]
         panels: panel::Panels::new(
             &shell,
@@ -119,6 +125,8 @@ pub(crate) fn run(
     };
     #[cfg(feature = "panel")]
     app.keep_time();
+    #[cfg(feature = "icons")]
+    app.watch_folder();
     #[cfg(not(any(feature = "wallpaper", feature = "menus", feature = "panel")))]
     let _ = shell;
     loop {
@@ -154,8 +162,9 @@ pub(crate) struct App {
     channel: Option<perspicax_protocols::shell::v1::client::perspicax_shell_v1::PerspicaxShellV1>,
     #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
     canvas: canvas::Canvas,
-    /// The fonts and icons the menus and the panels are drawn with.
-    #[cfg(any(feature = "menus", feature = "panel"))]
+    /// The fonts and icons the menus, the panels and the desktop folder's
+    /// icons are drawn with.
+    #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
     kit: crate::paint::Kit,
     /// The installed applications, which the menus list and among which
     /// the taskbar finds each window's icon.
@@ -163,6 +172,9 @@ pub(crate) struct App {
     installed: installed::Installed,
     #[cfg(feature = "wallpaper")]
     desktops: desktop::Desktops,
+    /// Whether a timer is looking at the desktop folder for changes.
+    #[cfg(feature = "icons")]
+    watching: bool,
     #[cfg(feature = "panel")]
     panels: panel::Panels,
     /// The timer that moves the clock on.
@@ -206,6 +218,12 @@ pub(crate) enum Asked {
         output: String,
         part: crate::layout::panel::Part,
     },
+    /// To open the desktop folder's icon that is this node of its tree.
+    #[cfg(feature = "icons")]
+    OpenIcon(accesskit::NodeId),
+    /// To select it.
+    #[cfg(feature = "icons")]
+    SelectIcon(accesskit::NodeId),
 }
 
 /// The icon theme named `theme`, looked for in the data folders of
@@ -246,19 +264,25 @@ impl App {
         };
         tracing::info!("the config changed; applying it");
         #[cfg(any(feature = "menus", feature = "panel"))]
-        let icons_changed = shell.icon_theme.as_deref() != self.kit.images.theme();
+        let theme_changed = shell.icon_theme.as_deref() != self.kit.images.theme();
         #[cfg(any(feature = "menus", feature = "panel"))]
-        if icons_changed {
+        if theme_changed {
             self.kit.images = images(shell.icon_theme.as_deref(), self.installed.places());
         }
         #[cfg(feature = "wallpaper")]
         self.desktops.reconfigure(
             &mut self.canvas,
+            &mut self.kit,
             qh,
             &shell,
             self.config.as_deref(),
             &self.outputs,
         );
+        // The desktop folder's icons, from the new theme.
+        #[cfg(feature = "icons")]
+        if theme_changed {
+            self.desktops.draw_icons(&mut self.canvas, &mut self.kit);
+        }
         #[cfg(feature = "panel")]
         {
             self.panels
@@ -266,19 +290,22 @@ impl App {
             self.keep_time();
             // The taskbar's icons, from the new theme. The menus are drawn
             // afresh each time one opens.
-            if icons_changed {
+            if theme_changed {
                 self.panels_changed();
             }
         }
         #[cfg(feature = "menus")]
         self.menus.reconfigure(&shell, self.config.as_deref());
         self.monitors_changed();
+        #[cfg(feature = "icons")]
+        self.watch_folder();
         #[cfg(not(any(feature = "wallpaper", feature = "panel")))]
         let _ = (qh, shell);
     }
 
     /// The monitors, or the panels on them, changed: tell the menus where
-    /// the panels are now, to keep off them.
+    /// the panels are now, to keep off them, and put the desktop folder's
+    /// icons on the first monitor, clear of its panel.
     fn monitors_changed(&mut self) {
         #[cfg(all(feature = "menus", feature = "panel"))]
         {
@@ -292,6 +319,25 @@ impl App {
                 })
                 .collect();
             self.menus.reserve(reserved);
+        }
+        #[cfg(feature = "icons")]
+        {
+            let monitors: Vec<desktop::Monitor> = self
+                .outputs
+                .outputs()
+                .filter_map(|output| {
+                    let info = self.outputs.info(&output)?;
+                    let name = info.name?;
+                    let at = info.logical_position.unwrap_or((i32::MAX, i32::MAX));
+                    #[cfg(feature = "panel")]
+                    let strip = self.panels.strip(&name, self.monitor(&output));
+                    #[cfg(not(feature = "panel"))]
+                    let strip = None;
+                    Some((name, at, strip))
+                })
+                .collect();
+            self.desktops
+                .arrange(&mut self.canvas, &mut self.kit, &monitors);
         }
     }
 }
@@ -328,6 +374,16 @@ impl App {
             #[cfg(feature = "panel")]
             Asked::Panel { output, part } => {
                 self.panel_pressed(&output, Some(part), crate::model::Button::Left);
+            }
+            #[cfg(feature = "icons")]
+            Asked::OpenIcon(node) => {
+                if let Some(run) = self.desktops.open(node) {
+                    self.start(&run);
+                }
+            }
+            #[cfg(feature = "icons")]
+            Asked::SelectIcon(node) => {
+                self.desktops.select(&mut self.canvas, &mut self.kit, node);
             }
         }
     }
@@ -480,7 +536,7 @@ impl OutputHandler for App {
         #[cfg(feature = "wallpaper")]
         if let Some(info) = self.outputs.info(&output) {
             self.desktops
-                .rescale(&mut self.canvas, &output, info.scale_factor);
+                .rescale(&mut self.canvas, &mut self.kit, &output, info.scale_factor);
         }
         #[cfg(feature = "panel")]
         {

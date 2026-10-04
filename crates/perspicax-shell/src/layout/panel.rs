@@ -74,17 +74,11 @@ pub(crate) enum Part {
 }
 
 /// Which of `monitors`, each a connector name and where its top-left corner
-/// is on the desk, have a panel by `rule`, in the order given. The first
-/// monitor is the leftmost, the topmost of those level with it.
+/// is on the desk, have a panel by `rule`, in the order given.
 pub(crate) fn chosen<'a>(rule: &PanelOutputs, monitors: &[(&'a str, (i32, i32))]) -> Vec<&'a str> {
     match rule {
         PanelOutputs::All => monitors.iter().map(|&(name, _)| name).collect(),
-        PanelOutputs::First => monitors
-            .iter()
-            .min_by_key(|&&(_, at)| at)
-            .map(|&(name, _)| name)
-            .into_iter()
-            .collect(),
+        PanelOutputs::First => super::first(monitors).into_iter().collect(),
         PanelOutputs::Named(names) => monitors
             .iter()
             .map(|&(name, _)| name)

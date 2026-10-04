@@ -4,6 +4,8 @@
 //! Text is measured through [`Measure`], which the shell answers with its
 //! fonts and a test with fixed widths, so no test needs a font installed.
 
+#[cfg(feature = "icons")]
+pub(crate) mod folder;
 #[cfg(feature = "menus")]
 pub(crate) mod menu;
 #[cfg(feature = "panel")]
@@ -62,6 +64,18 @@ pub(crate) fn usable(monitor: Rect, strip: Option<Rect>) -> Rect {
             (strip.y - monitor.y).max(0),
         ),
     }
+}
+
+/// The first of `monitors`, each a connector name and where its top-left
+/// corner is on the desk: the leftmost, the topmost of those level with it.
+/// Where a panel goes with `outputs = "first"`, and where the desktop
+/// folder's icons go.
+#[cfg(any(feature = "panel", feature = "icons"))]
+pub(crate) fn first<'a>(monitors: &[(&'a str, (i32, i32))]) -> Option<&'a str> {
+    monitors
+        .iter()
+        .min_by_key(|&&(_, at)| at)
+        .map(|&(name, _)| name)
 }
 
 /// How wide a line of text is drawn, in logical pixels.

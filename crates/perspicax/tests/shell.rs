@@ -4,7 +4,8 @@
 //! uses it: a right-click on the wallpaper by selector, and the menu that
 //! opens read and clicked through to an application; the panel's start
 //! button found by name, and the start menu it opens; a window found on the
-//! taskbar by its title, and brought forward by a click on its tab.
+//! taskbar by its title, and brought forward by a click on its tab; the
+//! desktop folder's icons read as a list, and one selected by a click.
 //!
 //! Each test runs a compositor that keeps its desk current the way `--mcp`
 //! does, and starts shells against its socket as a person's session would,
@@ -260,6 +261,83 @@ fn an_agent_brings_a_window_forward_by_its_tab() {
             forward(index, facts, "First")
         });
     });
+}
+
+#[test]
+#[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
+fn the_desktop_icons_are_a_list_an_agent_can_read() {
+    host("icons", CLASSIC, |hosted| {
+        // A desktop folder of the test's own, where user-dirs.dirs says it
+        // is, holding an application's entry and a file.
+        let base =
+            std::env::temp_dir().join(format!("perspicax-shell-icons-{}", std::process::id()));
+        let (config, desk) = (base.join("config"), base.join("desk"));
+        std::fs::create_dir_all(&config).expect("a config folder");
+        std::fs::create_dir_all(&desk).expect("a desktop folder");
+        std::fs::write(
+            config.join("user-dirs.dirs"),
+            format!("XDG_DESKTOP_DIR=\"{}\"\n", desk.display()),
+        )
+        .expect("user-dirs.dirs");
+        let entry = desk.join("notes.desktop");
+        std::fs::write(
+            &entry,
+            "[Desktop Entry]\nType=Application\nName=Field notes\nExec=true\n",
+        )
+        .expect("a desktop entry");
+        // One that may be run, as an application's on the desktop must be.
+        std::fs::set_permissions(&entry, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("made runnable");
+        std::fs::write(desk.join("plan.txt"), "").expect("a file");
+
+        let _shell = hosted.shell_with(&[("XDG_CONFIG_HOME", config.as_os_str())]);
+        for name in ["Field notes", "plan.txt"] {
+            hosted.wait_until(&format!("{name}'s icon read and joined"), |index, facts| {
+                icon(index, facts, name)
+            });
+        }
+
+        // An agent's click selects one: there is no double-click to open it.
+        hosted.click("list:Desktop>listitem:plan.txt", PointerButton::Left);
+        hosted.wait_until("the icon selected", |index, facts| {
+            icon(index, facts, "plan.txt").filter(|&item| {
+                index
+                    .get(item)
+                    .is_some_and(|node| node.node.is_selected() == Some(true))
+            })
+        });
+
+        // An entry saved to the folder later is shown once it is seen there:
+        // as the file it is, while it may not be run, and as its
+        // application once it may, though the folder itself is unchanged.
+        let later = desk.join("tool.desktop");
+        std::fs::write(
+            &later,
+            "[Desktop Entry]\nType=Application\nName=Tool\nExec=true\n",
+        )
+        .expect("another entry");
+        hosted.wait_until("the new entry's icon read, as a file", |index, facts| {
+            icon(index, facts, "tool.desktop")
+        });
+        std::fs::set_permissions(&later, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("made runnable");
+        hosted.wait_until(
+            "the entry read again, as its application",
+            |index, facts| icon(index, facts, "Tool"),
+        );
+        std::fs::remove_dir_all(&base).ok();
+    });
+}
+
+/// The desktop folder's icon named `name`, if it is read and joined to the
+/// desktop on the background layer.
+fn icon(index: &Index, facts: &HostFacts, name: &str) -> Option<NodeId> {
+    on_layer(
+        index,
+        facts,
+        (Role::ListItem, name),
+        (Layer::Background, DESKTOP),
+    )
 }
 
 /// The taskbar's tab for the window titled `title`, if it is read, joined

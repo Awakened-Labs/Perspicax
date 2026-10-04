@@ -181,7 +181,8 @@ impl LayerShellHandler for App {
         _: u32,
     ) {
         #[cfg(feature = "wallpaper")]
-        self.desktops.configure(&mut self.canvas, layer, &configure);
+        self.desktops
+            .configure(&mut self.canvas, &mut self.kit, layer, &configure);
         #[cfg(feature = "panel")]
         self.panels
             .configure(&mut self.canvas, &mut self.kit, layer, &configure);

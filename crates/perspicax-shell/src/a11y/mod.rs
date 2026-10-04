@@ -57,6 +57,193 @@ fn window(namespace: &str, size: Option<(u32, u32)>) -> Node {
     root
 }
 
+#[cfg(feature = "icons")]
+pub(crate) use folder::{folder, icon_at, is_icon};
+
+#[cfg(feature = "icons")]
+mod folder {
+    use std::{
+        hash::{DefaultHasher, Hash, Hasher},
+        path::Path,
+    };
+
+    use accesskit::{Action, Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate};
+
+    use super::{ROOT, rect, window};
+    use crate::{
+        layout::{Rect, folder::Spot},
+        model::folder::Folder,
+    };
+
+    /// The list of icons.
+    const LIST: NodeId = NodeId(1);
+    /// An icon's node: its file's path, hashed, with this bit set to keep
+    /// clear of the list and the root. The same while the file is there,
+    /// whatever comes and goes beside it.
+    const ICON: u64 = 1 << 63;
+
+    fn node_of(path: &Path) -> NodeId {
+        let mut hasher = DefaultHasher::new();
+        path.hash(&mut hasher);
+        NodeId(ICON | hasher.finish())
+    }
+
+    /// Whether `node` is an icon's.
+    pub(crate) fn is_icon(node: NodeId) -> bool {
+        node.0 & ICON != 0
+    }
+
+    /// Which of `folder`'s icons the node `node` is, if it is one.
+    pub(crate) fn icon_at(folder: &Folder, node: NodeId) -> Option<usize> {
+        folder
+            .icons()
+            .iter()
+            .position(|icon| node_of(&icon.path) == node)
+    }
+
+    /// The desktop that holds the folder's icons: a window named `namespace`
+    /// covering it, holding a `List` named "Desktop" of a `ListItem` for
+    /// each icon placed at `spots`, named as drawn, the one selected
+    /// selected. Clicking an item opens it; focusing it selects it.
+    pub(crate) fn folder(
+        namespace: &str,
+        size: Option<(u32, u32)>,
+        folder: &Folder,
+        spots: &[Spot],
+    ) -> TreeUpdate {
+        let mut root = window(namespace, size);
+        let mut list = Node::new(Role::List);
+        list.set_label("Desktop");
+        let mut nodes = Vec::new();
+        let mut around: Option<Rect> = None;
+        for (icon, spot) in folder.icons().iter().zip(spots) {
+            let id = node_of(&icon.path);
+            let mut item = Node::new(Role::ListItem);
+            item.set_label(icon.name.as_str());
+            item.set_bounds(rect(spot.place));
+            item.set_selected(folder.is_selected(icon));
+            item.add_action(Action::Click);
+            item.add_action(Action::Focus);
+            list.push_child(id);
+            nodes.push((id, item));
+            around = Some(around.map_or(spot.place, |around| union(around, spot.place)));
+        }
+        if let Some(around) = around {
+            list.set_bounds(rect(around));
+        }
+        root.push_child(LIST);
+        nodes.insert(0, (LIST, list));
+        nodes.insert(0, (ROOT, root));
+        TreeUpdate {
+            nodes,
+            tree: Some(TreeInfo::new(ROOT)),
+            tree_id: TreeId::ROOT,
+            focus: ROOT,
+        }
+    }
+
+    /// The smallest rectangle around `a` and `b`.
+    fn union(a: Rect, b: Rect) -> Rect {
+        let (x, y) = (a.x.min(b.x), a.y.min(b.y));
+        Rect::new(
+            x,
+            y,
+            a.right().max(b.right()) - x,
+            a.bottom().max(b.bottom()) - y,
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::path::PathBuf;
+
+        use super::*;
+        use crate::{
+            layout::{Monospace, folder::lay_out},
+            model::{
+                Button,
+                apps::Run,
+                folder::{Folder, Icon},
+            },
+        };
+
+        fn icon(name: &str) -> Icon {
+            Icon {
+                path: PathBuf::from(format!("/home/ada/Desktop/{name}")),
+                name: name.to_owned(),
+                image: "text-x-generic".to_owned(),
+                fallback: "text-x-generic",
+                opens: Run {
+                    argv: vec!["xdg-open".to_owned(), name.to_owned()],
+                    terminal: false,
+                    dir: None,
+                },
+                is_folder: false,
+            }
+        }
+
+        fn node(tree: &TreeUpdate, id: NodeId) -> &Node {
+            &tree
+                .nodes
+                .iter()
+                .find(|(at, _)| *at == id)
+                .expect("in the tree")
+                .1
+        }
+
+        #[test]
+        fn the_desktop_icons_are_a_list_of_items_named_as_drawn() {
+            let mut folder = Folder::default();
+            folder.show(vec![icon("notes.txt"), icon("plan.pdf")]);
+            folder.press(Some(1), Button::Left, 0);
+            let spots = lay_out(
+                folder.icons().iter().map(|icon| icon.name.as_str()),
+                Rect::new(0, 0, 1280, 760),
+                &mut Monospace(7.0),
+            );
+            let tree = super::folder("perspicax-desktop-DP-1", Some((1280, 800)), &folder, &spots);
+            let root = node(&tree, ROOT);
+            assert_eq!(
+                (root.role(), root.label()),
+                (Role::Window, Some("perspicax-desktop-DP-1"))
+            );
+            let list = node(&tree, LIST);
+            assert_eq!((list.role(), list.label()), (Role::List, Some("Desktop")));
+            let items: Vec<_> = list
+                .children()
+                .iter()
+                .map(|&id| {
+                    let item = node(&tree, id);
+                    assert_eq!(item.role(), Role::ListItem);
+                    assert!(item.supports_action(Action::Click));
+                    (
+                        item.label().unwrap_or_default().to_owned(),
+                        item.is_selected(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                items,
+                [
+                    ("notes.txt".to_owned(), Some(false)),
+                    ("plan.pdf".to_owned(), Some(true)),
+                ]
+            );
+            let second = list.children()[1];
+            assert_eq!(node(&tree, second).bounds(), Some(rect(spots[1].place)));
+            assert!(is_icon(second) && !is_icon(LIST) && !is_icon(ROOT));
+            assert_eq!(icon_at(&folder, second), Some(1), "known by its file");
+
+            folder.show(vec![icon("a.txt"), icon("notes.txt"), icon("plan.pdf")]);
+            assert_eq!(
+                icon_at(&folder, second),
+                Some(2),
+                "and still, with another before it"
+            );
+        }
+    }
+}
+
 #[cfg(feature = "menus")]
 pub(crate) use menus::{menu, route_of};
 

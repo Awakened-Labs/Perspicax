@@ -20,6 +20,8 @@ pub(crate) mod apps;
 pub(crate) mod categories;
 #[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) mod desktop;
+#[cfg(feature = "icons")]
+pub(crate) mod folder;
 #[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) mod fs;
 #[cfg(any(feature = "menus", feature = "panel"))]

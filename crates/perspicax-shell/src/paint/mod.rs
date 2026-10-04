@@ -1,6 +1,8 @@
 //! Pixels: tiny-skia paints straight into the buffer a surface shows, and
 //! [`argb`] puts the buffer's bytes in the order Wayland reads them.
 
+#[cfg(feature = "icons")]
+pub(crate) mod folder;
 #[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) mod icons;
 #[cfg(feature = "menus")]
@@ -17,11 +19,14 @@ pub(crate) use shapes::solid;
 #[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) use shapes::{fill, scaled};
 
-/// What the menus and the panels are drawn with: the fonts, and the icon
-/// theme's images, each found once and shared.
-#[cfg(any(feature = "menus", feature = "panel"))]
+/// What the menus, the panels and the desktop folder's icons are drawn
+/// with: the fonts, and the icon theme's images, each found once and
+/// shared. Empty in a shell of a wallpaper alone, which draws neither, so
+/// that what draws a desktop takes it either way.
 pub(crate) struct Kit {
+    #[cfg(any(feature = "menus", feature = "panel"))]
     pub(crate) fonts: text::Fonts,
+    #[cfg(any(feature = "menus", feature = "panel"))]
     pub(crate) images: icons::Images,
 }
 
@@ -38,7 +43,7 @@ mod shapes {
         Rect::new(rect.x * s, rect.y * s, rect.w * s, rect.h * s)
     }
 
-    /// Paint in `colour`, premultiplied RGBA.
+    /// Paint in `colour`, RGBA with straight alpha.
     pub(crate) fn solid(colour: [u8; 4]) -> Paint<'static> {
         let mut paint = Paint::default();
         paint.set_color_rgba8(colour[0], colour[1], colour[2], colour[3]);

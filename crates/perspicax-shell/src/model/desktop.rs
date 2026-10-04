@@ -46,6 +46,8 @@ pub(crate) struct Entry {
     pub(crate) no_display: bool,
     /// The class its windows carry, for finding the entry from a window.
     pub(crate) wm_class: Option<String>,
+    /// `Type=Link`'s address: what a link on the desktop opens.
+    pub(crate) url: Option<String>,
 }
 
 /// Why an entry was refused.
@@ -177,6 +179,9 @@ pub(crate) fn parse(text: &str, locale: &Locale) -> Result<Entry, Malformed> {
         hidden: boolean("Hidden")?,
         no_display: boolean("NoDisplay")?,
         wm_class: plain("StartupWMClass").map(unescape),
+        url: plain("URL")
+            .map(unescape)
+            .filter(|url| kind == "Link" && !url.is_empty()),
     })
 }
 
@@ -512,8 +517,9 @@ mod tests {
         assert_eq!(entry.not_show_in, ["XFCE"]);
         assert_eq!(entry.try_exec.as_deref(), Some("/usr/bin/x"));
         assert_eq!(entry.path.as_deref(), Some("/srv"));
-        assert!(
-            !read("[Desktop Entry]\nType=Link\nName=Docs\nURL=https://example.org\n").application
-        );
+        let link = read("[Desktop Entry]\nType=Link\nName=Docs\nURL=https://example.org\n");
+        assert!(!link.application);
+        assert_eq!(link.url.as_deref(), Some("https://example.org"));
+        assert_eq!(entry.url, None, "an application has no address");
     }
 }

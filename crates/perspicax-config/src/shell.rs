@@ -183,7 +183,8 @@ impl Shell {
             // Plasma's: a panel along the bottom and icons on the desktop.
             // Adwaita, for an icon on most applications and every menu
             // group: hicolor holds only what applications install, and
-            // Plasma's own Breeze is drawn mostly in SVG.
+            // Plasma's own Breeze is drawn mostly in SVG, which a shell
+            // built without `svg` cannot draw.
             Profile::Classic => (
                 Colour::rgb(0x1e, 0x4a, 0x73),
                 Some(Panel::classic(built)),

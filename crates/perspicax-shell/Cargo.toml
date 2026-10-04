@@ -53,9 +53,11 @@ tracing-subscriber.workspace = true
 
 # Shapes and images, drawn in software into shared-memory buffers.
 # BSD-3-Clause, with arrayref (BSD-2-Clause) beneath it; see deny.toml.
-# `png-format` is off: it would bring a second version of png, and the
-# wallpaper decodes with the one below.
-tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"], optional = true }
+# `png-format` is off: the wallpaper decodes with the png below. resvg
+# turns it on under `svg`, with that same png. 0.12 because resvg draws
+# with it, so the shell has one tiny-skia, and an SVG is drawn straight
+# into an icon's pixels.
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"], optional = true }
 # Wallpapers: PNG, with the version already in the tree for screenshots, and
 # JPEG, which is what most photographs are. Both pure Rust; zune-jpeg is MIT
 # OR Apache-2.0 OR Zlib.
@@ -66,6 +68,11 @@ cosmic-text = { workspace = true, optional = true }
 # The menu file. Parse only, as the config crate reads the config file.
 serde = { workspace = true, optional = true }
 toml = { version = "1", default-features = false, features = ["std", "serde", "parse"], optional = true }
+# Icons drawn from SVG, as most icon themes ship them. Default features off:
+# an icon needs no text, no system fonts and no embedded photographs, and
+# each of those brings a font stack or image decoders of its own. It draws
+# with the same tiny-skia as everything else.
+resvg = { version = "0.48", default-features = false, optional = true }
 # The panel's clock, in the local time zone. Already in the tree for the MCP
 # server's schemas; `clock` adds only iana-time-zone, which is there too.
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"], optional = true }
@@ -108,8 +115,10 @@ menus = [
 ]
 # Status icons from other programs, in the panel.
 tray = ["panel"]
-# The desktop folder's files, as icons on the wallpaper.
-icons = []
+# The desktop folder's files, as icons on the wallpaper: drawn on the
+# wallpaper's own surface, and found, named and started as the menus' items
+# are, so it takes both.
+icons = ["wallpaper", "menus"]
 # Icons drawn from SVG, as most icon themes ship them.
-svg = []
+svg = ["dep:resvg"]
 full = ["wallpaper", "panel", "menus", "tray", "icons", "svg"]

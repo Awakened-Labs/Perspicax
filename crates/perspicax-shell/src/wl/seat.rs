@@ -1,7 +1,9 @@
 //! The pointer and the keyboard, on the shell's surfaces.
 //!
 //! A button on a desktop is a click on the wallpaper: the right one opens
-//! the root menu where it was pressed. A button on a panel is the panel's:
+//! the root menu where it was pressed, and the left one on one of the
+//! desktop folder's icons selects it, or opens it if it follows another
+//! there closely. A button on a panel is the panel's:
 //! the left one on its start button opens the start menu, or closes it; on
 //! a task it brings that window forward, or puts it away if it is forward
 //! already, and the middle one closes it; the left one on a workspace
@@ -220,8 +222,10 @@ impl PointerHandler for App {
                 PointerEventKind::Press { .. } if on_menus => self.menu_event(Event::Press(at)),
                 #[cfg(feature = "menus")]
                 PointerEventKind::Release { .. } if on_menus => self.menu_event(Event::Release(at)),
-                PointerEventKind::Press { button: code, .. } if !on_menus => {
-                    self.press_elsewhere(&event.surface, at, button(code));
+                PointerEventKind::Press {
+                    button: code, time, ..
+                } if !on_menus => {
+                    self.press_elsewhere(&event.surface, at, button(code), time);
                 }
                 _ => {}
             }
@@ -230,20 +234,34 @@ impl PointerHandler for App {
 }
 
 impl App {
-    /// A button went down on a surface of the shell's other than the menus'.
-    fn press_elsewhere(&mut self, surface: &wl_surface::WlSurface, at: (f64, f64), button: Button) {
+    /// A button went down on a surface of the shell's other than the menus',
+    /// at `time` by the pointer's clock.
+    fn press_elsewhere(
+        &mut self,
+        surface: &wl_surface::WlSurface,
+        at: (f64, f64),
+        button: Button,
+        time: u32,
+    ) {
         #[cfg(feature = "panel")]
         if let Some((name, part)) = self.panels.at(surface, at) {
             let name = name.to_owned();
             self.panel_pressed(&name, part, button);
             return;
         }
-        self.desktop_press(surface, at, button);
+        self.desktop_press(surface, at, button, time);
     }
 
-    /// A button went down on a desktop.
+    /// A button went down on a desktop: on one of the desktop folder's
+    /// icons, or not, and then for the root menu.
     #[cfg(all(feature = "wallpaper", feature = "menus"))]
-    fn desktop_press(&mut self, surface: &wl_surface::WlSurface, at: (f64, f64), button: Button) {
+    fn desktop_press(
+        &mut self,
+        surface: &wl_surface::WlSurface,
+        at: (f64, f64),
+        button: Button,
+        time: u32,
+    ) {
         let Some((output, (width, height))) = self.desktops.at(surface) else {
             return;
         };
@@ -253,12 +271,21 @@ impl App {
             at,
             button,
         };
+        #[cfg(feature = "icons")]
+        if let Some(run) =
+            self.desktops
+                .press(&mut self.canvas, &mut self.kit, surface, at, button, time)
+        {
+            self.start(&run);
+        }
+        #[cfg(not(feature = "icons"))]
+        let _ = time;
         self.menu_event(event);
     }
 
     /// A button went down on a desktop, with no menu to open from it.
     #[cfg(not(all(feature = "wallpaper", feature = "menus")))]
-    fn desktop_press(&mut self, _: &wl_surface::WlSurface, _: (f64, f64), _: Button) {}
+    fn desktop_press(&mut self, _: &wl_surface::WlSurface, _: (f64, f64), _: Button, _: u32) {}
 }
 
 #[cfg(feature = "menus")]
