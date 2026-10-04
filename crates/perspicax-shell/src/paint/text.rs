@@ -5,7 +5,7 @@
 //!
 //! Finding the fonts is a scan of the system's font folders, the one slow
 //! thing here, so it is done once, on a thread of its own as the shell
-//! starts, and waited for only when a menu first needs it.
+//! starts, and waited for only when text is first measured or drawn.
 
 use std::{collections::HashMap, thread::JoinHandle};
 
@@ -15,7 +15,7 @@ use cosmic_text::{
 };
 use tiny_skia::PixmapMut;
 
-use crate::layout::{Measure, Rect, menu::TEXT};
+use crate::layout::{Measure, Rect, TEXT};
 
 /// The fonts, found once.
 pub(crate) enum Fonts {

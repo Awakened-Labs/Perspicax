@@ -2,7 +2,8 @@
 //! read off the accessibility bus and joined to its surfaces as any
 //! application is -- and read again when it comes and goes. And as an agent
 //! uses it: a right-click on the wallpaper by selector, and the menu that
-//! opens read and clicked through to an application.
+//! opens read and clicked through to an application; the panel's start
+//! button found by name, and the start menu it opens.
 //!
 //! Each test runs a compositor that keeps its desk current the way `--mcp`
 //! does, and starts shells against its socket as a person's session would,
@@ -29,6 +30,13 @@ use perspicax_node::{NodeId, Origin, Role, SurfaceId};
 
 /// The one monitor's desktop: the surface's namespace and its window's name.
 const DESKTOP: &str = "perspicax-desktop-HEADLESS-1";
+/// Its panel, and the menus' surface, likewise.
+const PANEL: &str = "perspicax-panel-HEADLESS-1";
+const MENUS: &str = "perspicax-menu-HEADLESS-1";
+
+/// The profiles' shells: a wallpaper and a root menu, and a panel too.
+const MINIMAL: &str = "profile = \"minimal\"\n";
+const CLASSIC: &str = "profile = \"classic\"\n";
 
 /// How long a newcomer draws before it is read. Short: the shell's tree is
 /// whole before its first frame.
@@ -40,7 +48,7 @@ const PATIENCE: Duration = Duration::from_secs(30);
 #[test]
 #[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
 fn the_wallpapers_window_joins_its_background_surface_by_namespace() {
-    host("joins", |hosted| {
+    host("joins", MINIMAL, |hosted| {
         let shell = hosted.shell();
         let (window, surface) = hosted.wait_until("the desktop window joined", |index, facts| {
             joined_desktop(index, facts, shell.id())
@@ -64,7 +72,7 @@ fn the_wallpapers_window_joins_its_background_surface_by_namespace() {
 #[test]
 #[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
 fn an_application_started_after_the_first_read_is_read_and_joined() {
-    host("late", |hosted| {
+    host("late", MINIMAL, |hosted| {
         let first = hosted.shell();
         hosted.wait_until("the first shell read and joined", |index, facts| {
             joined_desktop(index, facts, first.id())
@@ -90,7 +98,7 @@ fn an_application_started_after_the_first_read_is_read_and_joined() {
 #[test]
 #[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
 fn a_restarted_shell_is_read_again() {
-    host("restart", |hosted| {
+    host("restart", MINIMAL, |hosted| {
         let mut shell = hosted.shell();
         let (window, _) = hosted.wait_until("the shell read and joined", |index, facts| {
             joined_desktop(index, facts, shell.id())
@@ -122,7 +130,7 @@ fn a_restarted_shell_is_read_again() {
 #[test]
 #[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
 fn choosing_an_application_launches_it() {
-    host("launch", |hosted| {
+    host("launch", MINIMAL, |hosted| {
         // One application installed, and nothing else: data folders of the
         // test's own, the system's left out.
         let base =
@@ -171,12 +179,65 @@ fn choosing_an_application_launches_it() {
     });
 }
 
+#[test]
+#[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
+fn an_agent_finds_the_start_button_by_name_and_it_opens_the_start_menu() {
+    host("start", CLASSIC, |hosted| {
+        let _shell = hosted.shell();
+        hosted.wait_until("the start button read and joined", |index, facts| {
+            on_layer(index, facts, (Role::Button, "Start"), (Layer::Top, PANEL))
+        });
+        hosted.wait_until("the clock read and joined", |index, facts| {
+            on_layer(index, facts, (Role::Status, "Clock"), (Layer::Top, PANEL))
+        });
+
+        hosted.click("button:Start", PointerButton::Left);
+        hosted.wait_until("the start menu read and joined", |index, facts| {
+            on_layer(
+                index,
+                facts,
+                (Role::Menu, "Start menu"),
+                (Layer::Overlay, MENUS),
+            )
+        });
+
+        // The button is in reach with the menu open, and closes it.
+        hosted.click("button:Start", PointerButton::Left);
+        hosted.wait_until("the start menu gone", |index, facts| {
+            on_layer(
+                index,
+                facts,
+                (Role::Menu, "Start menu"),
+                (Layer::Overlay, MENUS),
+            )
+            .is_none()
+            .then_some(())
+        });
+    });
+}
+
 /// The menu item labelled `label`, if it is read and joined to the menus'
 /// surface on the overlay layer.
 fn menu_item(index: &Index, facts: &HostFacts, label: &str) -> Option<NodeId> {
+    on_layer(
+        index,
+        facts,
+        (Role::MenuItem, label),
+        (Layer::Overlay, MENUS),
+    )
+}
+
+/// The node of `role` labelled `label`, if it is read and joined to the
+/// surface on `layer` named `namespace`.
+fn on_layer(
+    index: &Index,
+    facts: &HostFacts,
+    (role, label): (Role, &str),
+    (layer, namespace): (Layer, &str),
+) -> Option<NodeId> {
     index.preorder().into_iter().find(|&id| {
         index.get(id).is_some_and(|node| {
-            node.node.role() == Role::MenuItem
+            node.node.role() == role
                 && node.node.label() == Some(label)
                 && node
                     .surface
@@ -184,8 +245,8 @@ fn menu_item(index: &Index, facts: &HostFacts, label: &str) -> Option<NodeId> {
                     .is_some_and(|surface| {
                         matches!(
                             &surface.kind,
-                            SurfaceKind::Layer { layer: Layer::Overlay, namespace }
-                                if namespace == "perspicax-menu-HEADLESS-1"
+                            SurfaceKind::Layer { layer: on, namespace: named }
+                                if *on == layer && named == namespace
                         )
                     })
         })
@@ -294,17 +355,17 @@ impl Drop for Shell {
     }
 }
 
-/// Run a compositor, and `body` against it on a thread of its own; then
-/// stop it.
+/// Run a compositor, and `body` against it on a thread of its own, with
+/// shells reading `shell_config`; then stop it.
 ///
 /// The compositor has the test's own thread, because Wayland state is not
 /// `Send`. A panic in `body` stops it and is the test's failure.
-fn host(name: &str, body: impl FnOnce(&Hosted) + Send + 'static) {
+fn host(name: &str, shell_config: &str, body: impl FnOnce(&Hosted) + Send + 'static) {
     let _registry = session::Registry::ensure().expect("an accessibility registry");
     let socket = format!("perspicax-shell-{name}-{}", std::process::id());
     let runtime_dir = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR"));
     let config = std::env::temp_dir().join(format!("{socket}.toml"));
-    std::fs::write(&config, "profile = \"minimal\"\n").expect("a shell config");
+    std::fs::write(&config, shell_config).expect("a shell config");
 
     let (facts, stop, requests) = (Facts::new(), Stop::new(), Requests::new());
     let desk = Arc::new(Desk::new(&facts, &Host::new(&facts, &requests)));

@@ -1,8 +1,8 @@
 //! What every surface the shell draws needs: layer-shell surfaces to draw
 //! on, and shared memory to draw into.
 //!
-//! The desktops and the menus each keep their own surfaces, and come here
-//! to make one and to show a picture on it. A picture is painted in place in
+//! The desktops, the panels and the menus each keep their own surfaces, and
+//! come here to make one and to show a picture on it. A picture is painted in place in
 //! the buffer the compositor will read, as premultiplied RGBA, then put in
 //! the byte order Wayland reads.
 
@@ -79,6 +79,27 @@ impl Canvas {
         )
     }
 
+    /// Have `layer`, `size` big, take clicks everywhere but `cut`: where a
+    /// panel of the shell's is, which takes its own. From its next picture.
+    #[cfg(feature = "menus")]
+    pub(super) fn take_clicks(
+        &self,
+        layer: &LayerSurface,
+        (width, height): (u32, u32),
+        cut: Option<Area>,
+    ) {
+        let surface = layer.wl_surface();
+        let Some((x, y, w, h)) = cut else {
+            surface.set_input_region(None);
+            return;
+        };
+        if let Ok(region) = Region::new(&self.compositor) {
+            region.add(0, 0, width as i32, height as i32);
+            region.subtract(x, y, w, h);
+            surface.set_input_region(Some(region.wl_region()));
+        }
+    }
+
     /// Show on `layer` a picture `size` logical pixels at `scale`, painted
     /// by `draw`: opaque in `opaque`, and clear everywhere else.
     pub(super) fn show(
@@ -145,8 +166,10 @@ impl LayerShellHandler for App {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
         #[cfg(feature = "wallpaper")]
         self.desktops.closed(layer);
+        #[cfg(feature = "panel")]
+        self.panels.closed(layer);
         #[cfg(feature = "menus")]
-        self.menus.closed(layer);
+        self.menus.closed(&mut self.fonts, layer);
     }
 
     fn configure(
@@ -159,8 +182,12 @@ impl LayerShellHandler for App {
     ) {
         #[cfg(feature = "wallpaper")]
         self.desktops.configure(&mut self.canvas, layer, &configure);
+        #[cfg(feature = "panel")]
+        self.panels
+            .configure(&mut self.canvas, &mut self.fonts, layer, &configure);
         #[cfg(feature = "menus")]
-        self.menus.configure(&mut self.canvas, layer, &configure);
+        self.menus
+            .configure(&mut self.canvas, &mut self.fonts, layer, &configure);
     }
 }
 

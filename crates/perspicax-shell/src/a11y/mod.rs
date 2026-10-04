@@ -36,6 +36,17 @@ pub(crate) fn desktop(namespace: &str, size: Option<(u32, u32)>) -> TreeUpdate {
     }
 }
 
+/// A rectangle of a surface, as AccessKit bounds it.
+#[cfg(any(feature = "menus", feature = "panel"))]
+fn rect(rect: crate::layout::Rect) -> Rect {
+    Rect::new(
+        f64::from(rect.x),
+        f64::from(rect.y),
+        f64::from(rect.right()),
+        f64::from(rect.bottom()),
+    )
+}
+
 /// A surface's root: a window named `namespace`, covering it.
 fn window(namespace: &str, size: Option<(u32, u32)>) -> Node {
     let mut root = Node::new(Role::Window);
@@ -53,8 +64,11 @@ pub(crate) use menus::{menu, route_of};
 mod menus {
     use accesskit::{Action, HasPopup, Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate};
 
-    use super::{ROOT, window};
-    use crate::{layout, model::menu::Route, update::View};
+    use super::{ROOT, rect, window};
+    use crate::{
+        model::menu::Route,
+        update::{View, Which},
+    };
 
     /// An open menu's node: its place in the cascade, below this.
     const MENU: u64 = 1 << 62;
@@ -94,15 +108,6 @@ mod menus {
         Some(route)
     }
 
-    fn rect(rect: layout::Rect) -> accesskit::Rect {
-        accesskit::Rect::new(
-            f64::from(rect.x),
-            f64::from(rect.y),
-            f64::from(rect.right()),
-            f64::from(rect.bottom()),
-        )
-    }
-
     /// The menus' surface: a window named `namespace` covering it, holding
     /// a `Menu` for each open menu, each holding a `MenuItem` for each line
     /// that can be chosen, named as drawn. The focus is the line the keyboard
@@ -122,10 +127,11 @@ mod menus {
                 focus = id;
             }
             let mut node = Node::new(Role::Menu);
-            node.set_label(
-                menu.opened_by
-                    .map_or("Root menu", |item| item.label.as_str()),
-            );
+            let first = match view.map(|view| view.which) {
+                Some(Which::Start) => "Start menu",
+                _ => "Root menu",
+            };
+            node.set_label(menu.opened_by.map_or(first, |item| item.label.as_str()));
             node.set_bounds(rect(menu.rect));
             if let (Some(header), Some(query)) = (menu.header, view.and_then(|view| view.query)) {
                 let mut typed = Node::new(Role::SearchInput);
@@ -173,10 +179,10 @@ mod menus {
     mod tests {
         use super::*;
         use crate::{
-            layout::Monospace,
+            layout::{self, Monospace},
             model::{
                 apps::{App, Run},
-                menu::{Session, root},
+                menu::{Session, root, start},
             },
             update::{Button, Event, Key, State},
         };
@@ -196,14 +202,12 @@ mod menus {
                 keywords: Vec::new(),
                 wm_class: None,
             };
-            let mut state = State::new(root(
-                &[app("xcalc", "Calculator"), app("gedit", "Text Editor")],
-                None,
-                &Session {
-                    lock: None,
-                    log_out: true,
-                },
-            ));
+            let apps = [app("xcalc", "Calculator"), app("gedit", "Text Editor")];
+            let session = Session {
+                lock: None,
+                log_out: true,
+            };
+            let mut state = State::new(root(&apps, None, &session), start(&apps, &session));
             state.update(
                 Event::DesktopPress {
                     output: "DP-1".to_owned(),
@@ -306,6 +310,29 @@ mod menus {
         }
 
         #[test]
+        fn the_start_menu_is_named_so_and_has_its_search_line_from_the_start() {
+            let mut state = opened();
+            state.update(
+                Event::StartMenu {
+                    output: "DP-1".to_owned(),
+                    area: layout::Rect::new(0, 0, 800, 560),
+                    button: layout::Rect::new(0, 560, 40, 40),
+                    edge: perspicax_config::Edge::Bottom,
+                },
+                &mut Monospace(8.0),
+            );
+            let view = state.view().unwrap();
+            let tree = menu("perspicax-menu-DP-1", None, Some(&view));
+            let first = node(&tree, ROOT).children()[0];
+            assert_eq!(node(&tree, first).label(), Some("Start menu"));
+            assert_eq!(
+                labels(&tree, first)[0],
+                (Role::SearchInput, "Search".to_owned())
+            );
+            assert_eq!(node(&tree, TYPED).value(), Some(""));
+        }
+
+        #[test]
         fn an_items_node_and_its_route_are_one_another() {
             for route in [vec![0], vec![3, 0, 7], vec![4094, 1, 2, 3, 4]] {
                 assert_eq!(item(&route).and_then(route_of), Some(route));
@@ -315,6 +342,132 @@ mod menus {
             assert_eq!(route_of(TYPED), None);
             assert_eq!(route_of(NodeId(MENU)), None);
             assert_eq!(route_of(ROOT), None);
+        }
+    }
+}
+
+#[cfg(all(feature = "panel", feature = "menus"))]
+pub(crate) use panels::START;
+#[cfg(feature = "panel")]
+pub(crate) use panels::panel;
+
+#[cfg(feature = "panel")]
+mod panels {
+    use accesskit::{Action, HasPopup, Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate};
+    use perspicax_config::Item;
+
+    use super::{ROOT, rect, window};
+    use crate::layout::Rect;
+
+    /// What the panel holds, as one bar.
+    const TOOLBAR: NodeId = NodeId(1);
+    /// The start button.
+    pub(crate) const START: NodeId = NodeId(2);
+    const CLOCK: NodeId = NodeId(3);
+
+    /// A panel: a window named `namespace` covering it, holding a `Toolbar`
+    /// of what it holds, where it is `placed`. The start button is a
+    /// `Button` that opens a menu, expanded while the start menu is `open`;
+    /// the clock is a `Status` whose value is the `time` it shows.
+    pub(crate) fn panel(
+        namespace: &str,
+        size: Option<(u32, u32)>,
+        placed: &[(Item, Rect)],
+        time: &str,
+        open: bool,
+    ) -> TreeUpdate {
+        let mut root = window(namespace, size);
+        let mut bar = Node::new(Role::Toolbar);
+        bar.set_label("Panel");
+        if let Some((width, height)) = size {
+            bar.set_bounds(rect(Rect::new(0, 0, width as i32, height as i32)));
+        }
+        let mut nodes = Vec::new();
+        for &(item, place) in placed {
+            let (id, mut node) = match item {
+                Item::Start => {
+                    let mut button = Node::new(Role::Button);
+                    button.set_label("Start");
+                    button.set_has_popup(HasPopup::Menu);
+                    button.set_expanded(open);
+                    button.add_action(Action::Click);
+                    (START, button)
+                }
+                Item::Clock => {
+                    let mut clock = Node::new(Role::Status);
+                    clock.set_label("Clock");
+                    clock.set_value(time);
+                    (CLOCK, clock)
+                }
+                Item::Taskbar | Item::Pager | Item::Tray => continue,
+            };
+            node.set_bounds(rect(place));
+            bar.push_child(id);
+            nodes.push((id, node));
+        }
+        root.push_child(TOOLBAR);
+        nodes.insert(0, (TOOLBAR, bar));
+        nodes.insert(0, (ROOT, root));
+        TreeUpdate {
+            nodes,
+            tree: Some(TreeInfo::new(ROOT)),
+            tree_id: TreeId::ROOT,
+            focus: ROOT,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::layout::{Monospace, panel::lay_out};
+
+        fn node(tree: &TreeUpdate, id: NodeId) -> &Node {
+            &tree
+                .nodes
+                .iter()
+                .find(|(at, _)| *at == id)
+                .expect("in the tree")
+                .1
+        }
+
+        #[test]
+        fn the_panel_is_a_toolbar_with_a_start_button_and_a_clock() {
+            let items = [Item::Start, Item::Taskbar, Item::Clock];
+            let placed = lay_out(&items, "14:05", (1280, 40), &mut Monospace(8.0));
+            let tree = panel(
+                "perspicax-panel-DP-1",
+                Some((1280, 40)),
+                &placed,
+                "14:05",
+                false,
+            );
+            let root = node(&tree, ROOT);
+            assert_eq!(root.role(), Role::Window);
+            assert_eq!(root.label(), Some("perspicax-panel-DP-1"));
+            assert_eq!(root.children(), [TOOLBAR]);
+            let bar = node(&tree, TOOLBAR);
+            assert_eq!(bar.role(), Role::Toolbar);
+            assert_eq!(
+                bar.children(),
+                [START, CLOCK],
+                "the taskbar shows nothing yet"
+            );
+
+            let start = node(&tree, START);
+            assert_eq!((start.role(), start.label()), (Role::Button, Some("Start")));
+            assert_eq!(start.bounds(), Some(rect(placed[0].1)), "where it is drawn");
+            assert_eq!(start.has_popup(), Some(HasPopup::Menu));
+            assert_eq!(start.is_expanded(), Some(false));
+            let clock = node(&tree, CLOCK);
+            assert_eq!((clock.role(), clock.label()), (Role::Status, Some("Clock")));
+            assert_eq!(clock.value(), Some("14:05"));
+
+            let open = panel("perspicax-panel-DP-1", None, &placed, "14:05", true);
+            assert_eq!(
+                node(&open, START).is_expanded(),
+                Some(true),
+                "expanded while the start menu is open"
+            );
         }
     }
 }

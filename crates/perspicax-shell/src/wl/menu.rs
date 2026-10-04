@@ -11,17 +11,19 @@
 //! It covers the whole monitor, panels included, rather than only the room
 //! panels leave: a point perspicax gives, or a click on the wallpaper, is
 //! from the monitor's corner, and a surface placed in what panels leave
-//! cannot know where that corner is. The shell's own panels will be cut out
-//! of where it takes clicks.
+//! cannot know where that corner is. The shell's own panel is cut out of
+//! where it takes clicks, and no menu is drawn over it, so the panel stays
+//! in reach while a menu is open; another program's panel is covered, and a
+//! click on it closes the menus (issue #24 would change that).
 //!
-//! The root menu is built from the installed applications when it first
+//! The menus are built from the installed applications when one first
 //! opens, and again on an open after an application was installed or
-//! removed, or the menu file changed: what it lists is never older than the
-//! last time it was opened.
+//! removed, or the menu file changed: what they list is never older than
+//! the last time one was opened.
 
 use std::{
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::{Instant, SystemTime},
 };
 
 use accesskit::{Action, ActionHandler, ActionRequest};
@@ -36,6 +38,7 @@ use smithay_client_toolkit::{
 };
 use wayland_client::{QueueHandle, protocol::wl_output, protocol::wl_surface};
 
+use super::Asked;
 use super::{
     App,
     canvas::{Area, Canvas, whole},
@@ -43,7 +46,7 @@ use super::{
 use crate::{
     a11y::{self, adapter::Served},
     launch::{self, Launcher},
-    layout::Rect,
+    layout::{Rect, usable},
     model::{
         apps::{self, Places, Run},
         fs::{Disk, which},
@@ -61,8 +64,11 @@ pub(super) struct Menus {
     state: State,
     /// The surface, while a menu is open.
     shown: Option<Shown>,
-    fonts: Fonts,
     images: Images,
+    /// The strip each of the shell's panels takes of its monitor, by the
+    /// monitor's connector name: where no menu is drawn, and where the
+    /// menus' surface takes no clicks.
+    reserved: Vec<(String, Rect)>,
     settings: Settings,
     places: Places,
     /// What the root menu was last built from; `None` to build it afresh.
@@ -71,7 +77,7 @@ pub(super) struct Menus {
     log_out: bool,
     pub(super) launcher: Launcher,
     /// Where an assistive technology's requests are sent, to reach the loop.
-    actions: Sender<Event>,
+    actions: Sender<Asked>,
 }
 
 /// What the config says of the menus.
@@ -99,7 +105,7 @@ impl Menus {
     pub(super) fn new(
         shell: &Shell,
         config: Option<&Path>,
-        actions: Sender<Event>,
+        actions: Sender<Asked>,
         log_out: bool,
     ) -> Self {
         let places = Places::from_env();
@@ -110,10 +116,10 @@ impl Menus {
             .clone()
             .or_else(|| launch::find_terminal(&Disk, &places.path));
         Self {
-            state: State::new(menu::Menu::default()),
+            state: State::new(menu::Menu::default(), menu::Menu::default()),
             shown: None,
-            fonts: Fonts::find(),
             images,
+            reserved: Vec::new(),
             settings,
             built_from: None,
             log_out,
@@ -155,6 +161,23 @@ impl Menus {
             .is_some_and(|shown| shown.layer.wl_surface() == surface)
     }
 
+    /// Where the shell's panels are, from now on.
+    #[cfg(feature = "panel")]
+    pub(super) fn reserve(&mut self, reserved: Vec<(String, Rect)>) {
+        self.reserved = reserved;
+    }
+
+    /// The strip the shell's panel takes of the monitor named `output`.
+    pub(super) fn reserved_on(&self, output: &str) -> Option<Rect> {
+        reserved_on(&self.reserved, output)
+    }
+
+    /// The monitor the start menu is open on, if it is open.
+    #[cfg(feature = "panel")]
+    pub(super) fn start_open_on(&self) -> Option<&str> {
+        self.state.start_open_on()
+    }
+
     /// Handle `event`, and show what it changed. What is left to do, the
     /// effects that reach past the menus, is returned.
     pub(super) fn send(
@@ -162,9 +185,10 @@ impl Menus {
         canvas: &mut Canvas,
         qh: &QueueHandle<App>,
         outputs: &OutputState,
+        fonts: &mut Fonts,
         event: Event,
     ) -> Vec<Effect> {
-        let opens = matches!(
+        let root = matches!(
             event,
             Event::RootMenu { .. }
                 | Event::DesktopPress {
@@ -172,15 +196,15 @@ impl Menus {
                     ..
                 }
         );
-        if opens && !self.state.is_open() {
-            if !self.settings.root {
-                return Vec::new();
-            }
+        if root && !self.settings.root {
+            return Vec::new();
+        }
+        if (root || matches!(event, Event::StartMenu { .. })) && !self.state.is_open() {
             self.refresh();
         }
-        let effects = self.state.update(event, &mut self.fonts);
+        let effects = self.state.update(event, fonts);
         if effects.contains(&Effect::Redraw) {
-            self.sync(canvas, qh, outputs);
+            self.sync(canvas, qh, outputs, fonts);
         }
         effects
             .into_iter()
@@ -188,7 +212,7 @@ impl Menus {
             .collect()
     }
 
-    /// Build the root menu again if what it is built from changed.
+    /// Build the menus again if what they are built from changed.
     fn refresh(&mut self) {
         let menu_file = self.settings.menu_file.as_deref();
         let now = stamp(&self.places, menu_file);
@@ -220,15 +244,23 @@ impl Menus {
             lock,
             log_out: self.log_out,
         };
-        self.state
-            .set_root(menu::root(&apps, file.as_ref(), &session));
-        tracing::debug!(applications = apps.len(), "the root menu was built");
+        self.state.set_menus(
+            menu::root(&apps, file.as_ref(), &session),
+            menu::start(&apps, &session),
+        );
+        tracing::debug!(applications = apps.len(), "the menus were built");
         self.built_from = Some(now);
     }
 
     /// Make the surface match what is open: take it away, put it up on the
     /// monitor a menu opened on, or draw it again.
-    fn sync(&mut self, canvas: &mut Canvas, qh: &QueueHandle<App>, outputs: &OutputState) {
+    fn sync(
+        &mut self,
+        canvas: &mut Canvas,
+        qh: &QueueHandle<App>,
+        outputs: &OutputState,
+        fonts: &mut Fonts,
+    ) {
         let Some(view) = self.state.view() else {
             self.shown = None;
             return;
@@ -263,29 +295,34 @@ impl Menus {
                 Forward(self.actions.clone()),
             ));
         }
-        self.draw(canvas);
+        self.draw(canvas, fonts);
     }
 
     /// Draw the open menus on the surface, once the compositor has given it
     /// a size.
-    fn draw(&mut self, canvas: &mut Canvas) {
+    fn draw(&mut self, canvas: &mut Canvas, fonts: &mut Fonts) {
         let (Some(shown), Some(view)) = (&mut self.shown, self.state.view()) else {
             return;
         };
         let Some(size) = shown.size else {
             return;
         };
+        let panel = reserved_on(&self.reserved, &shown.name)
+            .map(|strip| (strip.x, strip.y, strip.w, strip.h));
+        canvas.take_clicks(&shown.layer, size, panel);
         let opaque: Vec<Area> = view
             .menus
             .iter()
             .map(|menu| (menu.rect.x, menu.rect.y, menu.rect.w, menu.rect.h))
             .collect();
-        let text = self.fonts.get();
+        let text = fonts.get();
         let images = &mut self.images;
         let scale = shown.scale;
+        let started = Instant::now();
         canvas.show(&shown.layer, size, scale, &opaque, |picture| {
             paint::menu::paint(&view, picture, scale, text, images);
         });
+        tracing::debug!(took = ?started.elapsed(), "the menus were drawn");
         shown
             .a11y
             .show(a11y::menu(&shown.namespace, Some(size), Some(&view)));
@@ -296,6 +333,7 @@ impl Menus {
     pub(super) fn configure(
         &mut self,
         canvas: &mut Canvas,
+        fonts: &mut Fonts,
         layer: &LayerSurface,
         configure: &LayerSurfaceConfigure,
     ) {
@@ -307,20 +345,21 @@ impl Menus {
             return;
         }
         shown.size = Some((width, height));
-        let area = Rect::new(0, 0, width as i32, height as i32);
-        self.state.update(Event::Resized(area), &mut self.fonts);
-        self.draw(canvas);
+        let monitor = Rect::new(0, 0, width as i32, height as i32);
+        let area = usable(monitor, reserved_on(&self.reserved, &shown.name));
+        self.state.update(Event::Resized(area), fonts);
+        self.draw(canvas, fonts);
     }
 
     /// The compositor took the surface away: the monitor went.
-    pub(super) fn closed(&mut self, layer: &LayerSurface) {
+    pub(super) fn closed(&mut self, fonts: &mut Fonts, layer: &LayerSurface) {
         if self
             .shown
             .as_ref()
             .is_some_and(|shown| shown.layer == *layer)
         {
             self.shown = None;
-            self.state.update(Event::KeyboardLost, &mut self.fonts);
+            self.state.update(Event::KeyboardLost, fonts);
         }
     }
 
@@ -381,6 +420,14 @@ impl Settings {
     }
 }
 
+/// The strip of `reserved` on the monitor named `output`.
+fn reserved_on(reserved: &[(String, Rect)], output: &str) -> Option<Rect> {
+    reserved
+        .iter()
+        .find(|(name, _)| name == output)
+        .map(|&(_, strip)| strip)
+}
+
 /// The icon theme the config names, read.
 fn icons(settings: &Settings, places: &Places) -> Icons {
     Icons::new(
@@ -413,7 +460,7 @@ fn stamp(places: &Places, menu_file: Option<&Path>) -> Vec<Option<SystemTime>> {
 
 /// An assistive technology's requests of a menu, sent on to the shell's
 /// loop: clicking an item chooses it, focusing it selects it.
-struct Forward(Sender<Event>);
+struct Forward(Sender<Asked>);
 
 impl ActionHandler for Forward {
     fn do_action(&mut self, request: ActionRequest) {
@@ -425,7 +472,7 @@ impl ActionHandler for Forward {
             Action::Focus => Event::Select(route),
             _ => return,
         };
-        if self.0.send(event).is_err() {
+        if self.0.send(Asked::Menu(event)).is_err() {
             tracing::debug!("the shell is stopping; the request is dropped");
         }
     }

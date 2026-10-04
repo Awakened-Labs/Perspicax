@@ -1,22 +1,31 @@
 //! What the shell does when something happens: a right-click on the
-//! desktop, a key in a menu, perspicax asking for the root menu.
+//! desktop, a click on the start button, a key in a menu, perspicax asking
+//! for a menu.
 //!
 //! A reducer: an [`Event`] and the [`State`] in, the state changed and the
 //! [`Effect`]s to carry out back. Nothing here draws or speaks Wayland, so
 //! the shell's behaviour is tested here, as values.
+//!
+//! There are two menus, one open at a time: the root menu, at the pointer,
+//! and the start menu, beside the start button, with a search line on top
+//! from the start. Asking for the one that is open closes it, and asking
+//! for the other puts it in its place.
 //!
 //! A menu works the way menus do on any desktop. The pointer selects the
 //! item under it, and a submenu opens as soon as the pointer is on its item;
 //! a click chooses. The arrows move up and down a menu, into a submenu and
 //! back out; Enter chooses and Escape closes. Typing narrows the menu to
 //! the programs whose names hold what was typed, from anywhere in it, as
-//! many of the best as fit in one column, and Backspace widens it again. A click anywhere off the menus closes them,
-//! and so does losing the keyboard to something else.
+//! many of the best as fit in one column, and Backspace widens it again. A
+//! click anywhere off the menus closes them, on a panel too, and so does
+//! losing the keyboard to something else.
+
+use perspicax_config::Edge;
 
 use crate::{
     layout::{
         Measure, Rect,
-        menu::{self, Line, Placed, Shown},
+        menu::{self, Anchor, Line, Placed, Shown},
     },
     model::{
         apps::Run,
@@ -73,6 +82,20 @@ pub(crate) enum Event {
         area: Rect,
         at: (i32, i32),
     },
+    /// The start menu was asked for on a monitor, from `button` on a panel
+    /// along `edge`: a click on the start button, or a key.
+    StartMenu {
+        output: String,
+        area: Rect,
+        button: Rect,
+        edge: Edge,
+    },
+    /// A button went down on a panel, off its start button.
+    #[cfg_attr(
+        not(feature = "panel"),
+        allow(dead_code, reason = "a shell without panels has none to click")
+    )]
+    PanelPress,
     /// The pointer moved on the menus.
     Motion((f64, f64)),
     /// A button went down on the menus' surface: on a menu, or off them.
@@ -101,22 +124,39 @@ pub(crate) enum Effect {
     LogOut,
 }
 
+/// Which menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Which {
+    /// The desktop's own: a right-click on the wallpaper, or its key.
+    Root,
+    /// The start button's.
+    Start,
+}
+
 /// What the shell's menus are doing.
 #[derive(Debug)]
 pub(crate) struct State {
-    root: Menu,
+    trees: Trees,
     open: Option<Open>,
+}
+
+/// The menus there are to open.
+#[derive(Debug)]
+struct Trees {
+    root: Menu,
+    start: Menu,
 }
 
 /// The menus while they are open.
 #[derive(Debug)]
 struct Open {
+    which: Which,
     /// The monitor they are on, by connector name.
     output: String,
-    /// The monitor, in its own logical pixels.
+    /// What of the monitor they may cover, in its own logical pixels.
     area: Rect,
     /// Where they were asked for.
-    anchor: (i32, i32),
+    anchor: Anchor,
     /// What has been typed.
     query: String,
     /// The root menu, or what typing narrowed it to; then each open submenu.
@@ -150,8 +190,10 @@ enum How {
 /// The open menus, for drawing and for the accessibility tree.
 #[derive(Debug)]
 pub(crate) struct View<'a> {
+    pub(crate) which: Which,
     pub(crate) output: &'a str,
-    /// What has been typed, if anything.
+    /// What has been typed, while there is a line to show it on: always in
+    /// the start menu, and in the root menu once something is.
     pub(crate) query: Option<&'a str>,
     pub(crate) menus: Vec<MenuView<'a>>,
 }
@@ -182,20 +224,36 @@ pub(crate) struct LineView<'a> {
 }
 
 impl State {
-    pub(crate) fn new(root: Menu) -> Self {
-        Self { root, open: None }
+    pub(crate) fn new(root: Menu, start: Menu) -> Self {
+        Self {
+            trees: Trees { root, start },
+            open: None,
+        }
     }
 
-    /// Show `root` from the next time the menu opens. Ignored while it is
-    /// open, so that what a person is looking at does not shift under them.
-    pub(crate) fn set_root(&mut self, root: Menu) {
+    /// Show `root` and `start` from the next time a menu opens. Ignored
+    /// while one is open, so that what a person is looking at does not shift
+    /// under them.
+    pub(crate) fn set_menus(&mut self, root: Menu, start: Menu) {
         if self.open.is_none() {
-            self.root = root;
+            self.trees = Trees { root, start };
         }
     }
 
     pub(crate) fn is_open(&self) -> bool {
         self.open.is_some()
+    }
+
+    /// The monitor the start menu is open on, if it is open.
+    #[cfg_attr(
+        not(feature = "panel"),
+        allow(dead_code, reason = "no start button to show it on")
+    )]
+    pub(crate) fn start_open_on(&self) -> Option<&str> {
+        self.open
+            .as_ref()
+            .filter(|open| open.which == Which::Start)
+            .map(|open| open.output.as_str())
     }
 
     /// Handle `event`, measuring text with `measure`.
@@ -207,18 +265,24 @@ impl State {
                 at,
                 button,
             } => match button {
-                Button::Right => {
-                    self.open(output, area, (at.0.round() as i32, at.1.round() as i32))
-                }
+                Button::Right => self.open(
+                    Which::Root,
+                    output,
+                    area,
+                    Anchor::Point(at.0.round() as i32, at.1.round() as i32),
+                ),
                 _ => self.close(),
             },
             Event::RootMenu { output, area, at } => {
-                if self.open.is_some() {
-                    self.close()
-                } else {
-                    self.open(output, area, at)
-                }
+                self.toggle(Which::Root, output, area, Anchor::Point(at.0, at.1))
             }
+            Event::StartMenu {
+                output,
+                area,
+                button,
+                edge,
+            } => self.toggle(Which::Start, output, area, Anchor::Button(button, edge)),
+            Event::PanelPress => self.close(),
             Event::Motion(at) => self.hover(at),
             Event::Press(at) => self.press(at),
             Event::Release(at) => self.release(at),
@@ -249,6 +313,7 @@ impl State {
     /// The open menus, if they are open.
     pub(crate) fn view(&self) -> Option<View<'_>> {
         let open = self.open.as_ref()?;
+        let tree = self.trees.of(open.which);
         let active = open.active();
         let menus = open
             .levels
@@ -261,7 +326,7 @@ impl State {
                 opened_by: k
                     .checked_sub(1)
                     .and_then(|above| open.levels[above].selected_route())
-                    .and_then(|route| self.root.item(route)),
+                    .and_then(|route| tree.item(route)),
                 lines: level
                     .lines
                     .iter()
@@ -272,7 +337,7 @@ impl State {
                         Some(LineView {
                             rect: *rect,
                             route,
-                            item: self.root.item(route)?,
+                            item: tree.item(route)?,
                             selected,
                             open: selected && open.levels.len() > k + 1,
                             focused: selected && k == active,
@@ -282,23 +347,36 @@ impl State {
             })
             .collect();
         Some(View {
+            which: open.which,
             output: &open.output,
-            query: (!open.query.is_empty()).then_some(open.query.as_str()),
+            query: open.searching().then_some(open.query.as_str()),
             menus,
         })
     }
 
-    fn open(&mut self, output: String, area: Rect, anchor: (i32, i32)) -> Vec<Effect> {
-        if self.root.items.is_empty() {
-            tracing::info!("the root menu has nothing in it to show");
+    /// Open `which`, or close it if it is the one open.
+    fn toggle(&mut self, which: Which, output: String, area: Rect, anchor: Anchor) -> Vec<Effect> {
+        if self.open.as_ref().is_some_and(|open| open.which == which) {
+            self.close()
+        } else {
+            self.open(which, output, area, anchor)
+        }
+    }
+
+    /// Open `which` on `output`, in place of whatever was open.
+    fn open(&mut self, which: Which, output: String, area: Rect, anchor: Anchor) -> Vec<Effect> {
+        let tree = self.trees.of(which);
+        if tree.items.is_empty() {
+            tracing::info!(?which, "the menu has nothing in it to show");
             return self.close();
         }
         self.open = Some(Open {
+            which,
             output,
             area,
             anchor,
             query: String::new(),
-            levels: vec![Level::of(&self.root, &[])],
+            levels: vec![Level::of(tree, &[])],
             placed: Vec::new(),
             pressed: false,
         });
@@ -352,10 +430,11 @@ impl State {
         let Some(open) = &self.open else {
             return Vec::new();
         };
+        let tree = self.trees.of(open.which);
         let active = open.active();
         let level = &open.levels[active];
         let choosable: Vec<usize> = (0..level.lines.len())
-            .filter(|&n| self.root.item(&level.lines[n]).is_some_and(Item::choosable))
+            .filter(|&n| tree.item(&level.lines[n]).is_some_and(Item::choosable))
             .collect();
         let count = choosable.len();
         let at = level
@@ -363,8 +442,7 @@ impl State {
             .and_then(|selected| choosable.iter().position(|&n| n == selected));
         let selected = level.selected;
         let into = selected.filter(|&line| {
-            self.root
-                .item(&level.lines[line])
+            tree.item(&level.lines[line])
                 .and_then(Item::submenu)
                 .is_some()
         });
@@ -422,10 +500,11 @@ impl State {
         let Some(open) = &mut self.open else {
             return Vec::new();
         };
+        let tree = self.trees.of(open.which);
         open.levels = if open.query.is_empty() {
-            vec![Level::of(&self.root, &[])]
+            vec![Level::of(tree, &[])]
         } else {
-            let mut found = self.root.find(&open.query);
+            let mut found = tree.find(&open.query);
             found.truncate(menu::found_fit(open.area));
             vec![Level {
                 selected: (!found.is_empty()).then_some(0),
@@ -441,10 +520,11 @@ impl State {
         let Some(open) = &mut self.open else {
             return Vec::new();
         };
+        let tree = self.trees.of(open.which);
         let Some(route) = open.levels.get(level).and_then(|it| it.lines.get(line)) else {
             return Vec::new();
         };
-        let Some(item) = self.root.item(route).filter(|item| item.choosable()) else {
+        let Some(item) = tree.item(route).filter(|item| item.choosable()) else {
             return Vec::new();
         };
         let before = open.levels.clone();
@@ -460,9 +540,9 @@ impl State {
                     // Already open, perhaps with a line in it selected.
                     open.levels.push(before[level + 1].clone());
                 }
-                How::Pointed => open.levels.push(Level::of(&self.root, &route)),
+                How::Pointed => open.levels.push(Level::of(tree, &route)),
                 How::Entered => {
-                    let mut below = Level::of(&self.root, &route);
+                    let mut below = Level::of(tree, &route);
                     below.selected = submenu.items.iter().position(Item::choosable);
                     open.levels.push(below);
                 }
@@ -485,7 +565,7 @@ impl State {
             .levels
             .get(level)
             .and_then(|it| it.lines.get(line))
-            .and_then(|route| self.root.item(route))
+            .and_then(|route| self.trees.of(open.which).item(route))
         else {
             return Vec::new();
         };
@@ -518,20 +598,20 @@ impl State {
 
     /// Lay the open menus out again.
     fn lay_out(&mut self, measure: &mut impl Measure) {
-        let Self { root, open } = self;
-        let Some(open) = open else {
+        let Some(open) = &mut self.open else {
             return;
         };
+        let tree = self.trees.of(open.which);
         let shown: Vec<Shown<'_>> = open
             .levels
             .iter()
             .enumerate()
             .map(|(k, level)| Shown {
-                header: (k == 0 && !open.query.is_empty()).then_some(open.query.as_str()),
+                header: (k == 0 && open.searching()).then_some(open.query.as_str()),
                 lines: level
                     .lines
                     .iter()
-                    .map(|route| match root.item(route) {
+                    .map(|route| match tree.item(route) {
                         Some(item) if item.choosable() => Line::Item {
                             label: &item.label,
                             submenu: item.submenu().is_some(),
@@ -548,7 +628,22 @@ impl State {
     }
 }
 
+impl Trees {
+    fn of(&self, which: Which) -> &Menu {
+        match which {
+            Which::Root => &self.root,
+            Which::Start => &self.start,
+        }
+    }
+}
+
 impl Open {
+    /// Whether the first menu has a search line: the start menu always
+    /// does, and the root menu once something has been typed.
+    fn searching(&self) -> bool {
+        self.which == Which::Start || !self.query.is_empty()
+    }
+
     /// The menu the keyboard is in: the deepest with a line selected.
     fn active(&self) -> usize {
         self.levels
@@ -586,11 +681,15 @@ mod tests {
         layout::Monospace,
         model::{
             apps::App,
-            menu::{Session, root},
+            menu::{Session, root, start},
         },
     };
 
     const SCREEN: Rect = Rect::new(0, 0, 1280, 800);
+    /// The monitor above a panel along its bottom, and the start button at
+    /// the panel's left end.
+    const ABOVE_PANEL: Rect = Rect::new(0, 0, 1280, 760);
+    const START: Rect = Rect::new(0, 760, 40, 40);
 
     fn app(id: &str, name: &str, categories: &str) -> App {
         App {
@@ -613,21 +712,19 @@ mod tests {
         }
     }
 
-    /// The root menu: Accessories (gedit, xcalc), Internet (firefox), a
-    /// separator, Lock, Log Out.
+    /// The root menu and the start menu, both Accessories (gedit, xcalc),
+    /// Internet (firefox), a separator, Lock, Log Out.
     fn state() -> State {
-        State::new(root(
-            &[
-                app("gedit", "Text Editor", "Utility"),
-                app("xcalc", "Calculator", "Utility"),
-                app("firefox", "Firefox", "Network"),
-            ],
-            None,
-            &Session {
-                lock: Some(run("swaylock")),
-                log_out: true,
-            },
-        ))
+        let apps = [
+            app("gedit", "Text Editor", "Utility"),
+            app("xcalc", "Calculator", "Utility"),
+            app("firefox", "Firefox", "Network"),
+        ];
+        let session = Session {
+            lock: Some(run("swaylock")),
+            log_out: true,
+        };
+        State::new(root(&apps, None, &session), start(&apps, &session))
     }
 
     struct Shell {
@@ -654,6 +751,16 @@ mod tests {
 
         fn key(&mut self, key: Key) -> Vec<Effect> {
             self.send(Event::Key(key))
+        }
+
+        /// A click on the start button of a panel along the bottom.
+        fn start_button(&mut self) -> Vec<Effect> {
+            self.send(Event::StartMenu {
+                output: "DP-1".to_owned(),
+                area: ABOVE_PANEL,
+                button: START,
+                edge: Edge::Bottom,
+            })
         }
 
         /// Each open menu's labels, `*` before the selected one.
@@ -913,7 +1020,7 @@ mod tests {
         let apps: Vec<App> = (0..40)
             .map(|n| app(&format!("tool{n}"), &format!("Tool {n:02}"), "Utility"))
             .collect();
-        let mut state = State::new(root(&apps, None, &Session::default()));
+        let mut state = State::new(root(&apps, None, &Session::default()), Menu::default());
         // Room for the typed line and four more.
         let short = Rect::new(0, 0, 800, 5 * menu::ROW + 2 * (menu::PAD + menu::BORDER));
         state.update(
@@ -946,6 +1053,107 @@ mod tests {
         shell.right_click((100.0, 100.0));
         assert_eq!(shell.send(Event::KeyboardLost), [Effect::Redraw]);
         assert!(!shell.state.is_open());
+    }
+
+    #[test]
+    fn clicking_the_start_button_opens_the_start_menu_above_it() {
+        let mut shell = Shell::new();
+        assert_eq!(shell.start_button(), [Effect::Redraw]);
+        let view = shell.state.view().expect("open");
+        assert_eq!(view.which, Which::Start);
+        let menu = view.menus[0].rect;
+        assert_eq!(
+            (menu.x, menu.bottom()),
+            (START.x, START.y),
+            "its bottom-left corner on the button's top-left"
+        );
+        assert_eq!(view.query, Some(""), "with a search line before any typing");
+        assert!(view.menus[0].header.is_some());
+        assert_eq!(shell.state.start_open_on(), Some("DP-1"));
+
+        assert_eq!(shell.start_button(), [Effect::Redraw]);
+        assert!(!shell.state.is_open(), "and a second click closes it");
+    }
+
+    #[test]
+    fn one_menu_takes_the_others_place() {
+        let mut shell = Shell::new();
+        shell.right_click((300.0, 200.0));
+        shell.start_button();
+        let view = shell.state.view().expect("open");
+        assert_eq!(
+            view.which,
+            Which::Start,
+            "the start menu, for the root menu"
+        );
+        assert_eq!(view.menus.len(), 1);
+
+        let ask_root = Event::RootMenu {
+            output: "DP-1".to_owned(),
+            area: ABOVE_PANEL,
+            at: (300, 200),
+        };
+        assert_eq!(shell.send(ask_root.clone()), [Effect::Redraw]);
+        assert_eq!(shell.state.view().map(|view| view.which), Some(Which::Root));
+        assert_eq!(shell.state.start_open_on(), None);
+        shell.send(ask_root);
+        assert!(!shell.state.is_open(), "and asked for again, it closes");
+    }
+
+    #[test]
+    fn the_start_menu_narrows_as_the_root_menu_does() {
+        let mut shell = Shell::new();
+        shell.start_button();
+        let before = shell.state.view().unwrap().menus[0].rect;
+        shell.key(Key::Text("fire".to_owned()));
+        let view = shell.state.view().unwrap();
+        assert_eq!(view.query, Some("fire"));
+        assert_eq!(shell.shown(), [rows(&["*Firefox"])]);
+        assert_eq!(
+            view.menus[0].rect.bottom(),
+            before.bottom(),
+            "still standing on the panel"
+        );
+        assert_eq!(
+            shell.key(Key::Enter),
+            [Effect::Redraw, Effect::Run(run("firefox"))]
+        );
+    }
+
+    #[test]
+    fn log_out_asks_the_compositor_to_end_the_session() {
+        let mut shell = Shell::new();
+        shell.start_button();
+        assert_eq!(
+            shell.click(shell.middle_of("Log Out")),
+            [Effect::Redraw, Effect::LogOut]
+        );
+        assert!(!shell.state.is_open());
+    }
+
+    #[test]
+    fn a_press_on_a_panel_closes_the_menus() {
+        let mut shell = Shell::new();
+        shell.right_click((300.0, 200.0));
+        assert_eq!(shell.send(Event::PanelPress), [Effect::Redraw]);
+        assert!(!shell.state.is_open());
+        assert_eq!(shell.send(Event::PanelPress), [], "nothing left to close");
+    }
+
+    #[test]
+    fn a_menu_with_nothing_in_it_does_not_open() {
+        let mut state = State::new(Menu::default(), Menu::default());
+        let effects = state.update(
+            Event::StartMenu {
+                output: "DP-1".to_owned(),
+                area: ABOVE_PANEL,
+                button: START,
+                edge: Edge::Bottom,
+            },
+            &mut Monospace(8.0),
+        );
+        assert_eq!(effects, []);
+        assert!(!state.is_open());
     }
 
     #[test]

@@ -5,10 +5,51 @@
 pub(crate) mod icons;
 #[cfg(feature = "menus")]
 pub(crate) mod menu;
-#[cfg(feature = "menus")]
+#[cfg(feature = "panel")]
+pub(crate) mod panel;
+#[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) mod text;
 #[cfg(feature = "wallpaper")]
 pub(crate) mod wallpaper;
+
+#[cfg(feature = "menus")]
+pub(crate) use shapes::solid;
+#[cfg(any(feature = "menus", feature = "panel"))]
+pub(crate) use shapes::{fill, scaled};
+
+/// What the menus and the panel are drawn with.
+#[cfg(any(feature = "menus", feature = "panel"))]
+mod shapes {
+    use tiny_skia::{Paint, PixmapMut, Transform};
+
+    use crate::layout::Rect;
+
+    /// `rect` in pixels at `scale`.
+    pub(crate) fn scaled(rect: Rect, scale: u32) -> Rect {
+        let s = scale as i32;
+        Rect::new(rect.x * s, rect.y * s, rect.w * s, rect.h * s)
+    }
+
+    /// Paint in `colour`, premultiplied RGBA.
+    pub(crate) fn solid(colour: [u8; 4]) -> Paint<'static> {
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(colour[0], colour[1], colour[2], colour[3]);
+        paint.anti_alias = true;
+        paint
+    }
+
+    /// Fill `place`, in pixels, with `colour`.
+    pub(crate) fn fill(canvas: &mut PixmapMut<'_>, place: Rect, colour: [u8; 4]) {
+        if let Some(rect) = tiny_skia::Rect::from_xywh(
+            place.x as f32,
+            place.y as f32,
+            place.w as f32,
+            place.h as f32,
+        ) {
+            canvas.fill_rect(rect, &solid(colour), Transform::identity(), None);
+        }
+    }
+}
 
 /// Turn the `areas` of `canvas`, a picture `width` pixels wide, from what
 /// tiny-skia leaves, premultiplied RGBA, into a `wl_shm` buffer's ARGB8888,

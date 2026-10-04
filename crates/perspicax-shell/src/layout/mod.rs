@@ -4,7 +4,13 @@
 //! Text is measured through [`Measure`], which the shell answers with its
 //! fonts and a test with fixed widths, so no test needs a font installed.
 
+#[cfg(feature = "menus")]
 pub(crate) mod menu;
+#[cfg(feature = "panel")]
+pub(crate) mod panel;
+
+/// The text's size, in menus and on panels.
+pub(crate) const TEXT: f32 = 14.0;
 
 /// A rectangle in a surface's logical pixels, from its top-left corner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -37,6 +43,27 @@ impl Rect {
     }
 }
 
+/// What is left of `monitor` beside `strip`, the shell's panel along its top
+/// or its bottom, if it has one: where menus may go.
+#[cfg(feature = "menus")]
+pub(crate) fn usable(monitor: Rect, strip: Option<Rect>) -> Rect {
+    match strip {
+        None => monitor,
+        Some(strip) if strip.y <= monitor.y => Rect::new(
+            monitor.x,
+            strip.bottom(),
+            monitor.w,
+            (monitor.bottom() - strip.bottom()).max(0),
+        ),
+        Some(strip) => Rect::new(
+            monitor.x,
+            monitor.y,
+            monitor.w,
+            (strip.y - monitor.y).max(0),
+        ),
+    }
+}
+
 /// How wide a line of text is drawn, in logical pixels.
 pub(crate) trait Measure {
     fn width(&mut self, text: &str) -> f32;
@@ -50,5 +77,26 @@ pub(crate) struct Monospace(pub(crate) f32);
 impl Measure for Monospace {
     fn width(&mut self, text: &str) -> f32 {
         self.0 * text.chars().count() as f32
+    }
+}
+
+#[cfg(all(test, feature = "menus"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menus_have_what_a_panel_leaves() {
+        let monitor = Rect::new(0, 0, 1280, 800);
+        assert_eq!(
+            usable(monitor, Some(Rect::new(0, 760, 1280, 40))),
+            Rect::new(0, 0, 1280, 760),
+            "above a panel along the bottom"
+        );
+        assert_eq!(
+            usable(monitor, Some(Rect::new(0, 0, 1280, 32))),
+            Rect::new(0, 32, 1280, 768),
+            "below one along the top"
+        );
+        assert_eq!(usable(monitor, None), monitor, "and all of it with none");
     }
 }

@@ -322,6 +322,9 @@ pub struct Desk {
     /// Each window's colour, ARGB, in the order they opened.
     pub colours: Vec<u32>,
     pub drawn: usize,
+    /// The size the compositor last offered a window, where it named one.
+    /// Windows are drawn at their own size whatever it offers.
+    pub offered: Option<(u32, u32)>,
     pub list: Option<ExtForeignToplevelListV1>,
     pub list_finished: bool,
     pub listed: HashMap<ObjectId, Listed>,
@@ -368,6 +371,7 @@ impl Desk {
             pool,
             windows: Vec::new(),
             colours: Vec::new(),
+            offered: None,
             drawn: 0,
             list: None,
             list_finished: false,
@@ -1188,9 +1192,12 @@ impl WindowHandler for Desk {
         _: &Connection,
         _: &QueueHandle<Self>,
         window: &Window,
-        _: WindowConfigure,
+        configure: WindowConfigure,
         _: u32,
     ) {
+        if let (Some(width), Some(height)) = configure.new_size {
+            self.offered = Some((width.get(), height.get()));
+        }
         let (width, height) = WINDOW;
         let (buffer, canvas) = self
             .pool

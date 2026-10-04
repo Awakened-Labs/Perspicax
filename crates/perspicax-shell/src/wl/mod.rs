@@ -7,13 +7,15 @@
 //! there is to show it on, hands over the pixels, and passes on what the
 //! person did.
 
-#[cfg(any(feature = "wallpaper", feature = "menus"))]
+#[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
 mod canvas;
 mod channel;
 #[cfg(feature = "wallpaper")]
 mod desktop;
 #[cfg(feature = "menus")]
 mod menu;
+#[cfg(feature = "panel")]
+mod panel;
 #[cfg(feature = "menus")]
 mod seat;
 
@@ -53,26 +55,37 @@ pub(crate) fn run(
     let channel = channel::bind(&globals, &qh);
     #[cfg(feature = "menus")]
     let actions = {
-        // What an assistive technology asks of a menu arrives on AccessKit's
-        // thread, and is handled here, in the loop, like anything else.
+        // What an assistive technology asks of a menu or a start button
+        // arrives on AccessKit's thread, and is handled here, in the loop,
+        // like anything else.
         let (sender, receiver) = calloop::channel::channel();
         event_loop
             .handle()
             .insert_source(receiver, |event, (), app: &mut App| {
-                if let calloop::channel::Event::Msg(event) = event {
-                    app.menu_event(event);
+                if let calloop::channel::Event::Msg(asked) = event {
+                    app.asked(asked);
                 }
             })
             .map_err(|error| wayland(&error.error))?;
         sender
     };
+    #[cfg(all(feature = "panel", feature = "menus"))]
+    let panels = panel::Panels::new(&shell, actions.clone());
+    #[cfg(all(feature = "panel", not(feature = "menus")))]
+    let panels = panel::Panels::new(&shell);
     let mut app = App {
         registry: RegistryState::new(&globals),
         outputs: OutputState::new(&globals, &qh),
-        #[cfg(any(feature = "wallpaper", feature = "menus"))]
+        #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
         canvas: canvas::Canvas::bind(&globals, &qh)?,
+        #[cfg(any(feature = "menus", feature = "panel"))]
+        fonts: crate::paint::text::Fonts::find(),
         #[cfg(feature = "wallpaper")]
         desktops: desktop::Desktops::new(&shell, config.as_deref()),
+        #[cfg(feature = "panel")]
+        panels,
+        #[cfg(feature = "panel")]
+        ticking: None,
         #[cfg(feature = "menus")]
         seat: seat::Seat::new(&globals, &qh),
         #[cfg(feature = "menus")]
@@ -84,7 +97,9 @@ pub(crate) fn run(
         handle: event_loop.handle(),
         qh,
     };
-    #[cfg(not(any(feature = "wallpaper", feature = "menus")))]
+    #[cfg(feature = "panel")]
+    app.keep_time();
+    #[cfg(not(any(feature = "wallpaper", feature = "menus", feature = "panel")))]
     let _ = shell;
     loop {
         if let Err(error) = event_loop.dispatch(None, &mut app) {
@@ -117,10 +132,18 @@ pub(crate) struct App {
     outputs: OutputState,
     /// The channel to perspicax, if this compositor offers it to us.
     channel: Option<perspicax_protocols::shell::v1::client::perspicax_shell_v1::PerspicaxShellV1>,
-    #[cfg(any(feature = "wallpaper", feature = "menus"))]
+    #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
     canvas: canvas::Canvas,
+    /// The fonts the menus and the panels write with, found once.
+    #[cfg(any(feature = "menus", feature = "panel"))]
+    fonts: crate::paint::text::Fonts,
     #[cfg(feature = "wallpaper")]
     desktops: desktop::Desktops,
+    #[cfg(feature = "panel")]
+    panels: panel::Panels,
+    /// The timer that moves the clock on.
+    #[cfg(feature = "panel")]
+    ticking: Option<calloop::RegistrationToken>,
     #[cfg(feature = "menus")]
     seat: seat::Seat,
     #[cfg(feature = "menus")]
@@ -131,8 +154,8 @@ pub(crate) struct App {
     /// The config file, read again when perspicax says it changed.
     config: Option<PathBuf>,
     #[cfg_attr(
-        not(feature = "menus"),
-        expect(dead_code, reason = "the menus' timers and keyboard")
+        not(any(feature = "menus", feature = "panel")),
+        expect(dead_code, reason = "the menus' and the clock's timers")
     )]
     handle: LoopHandle<'static, App>,
     #[cfg_attr(
@@ -142,10 +165,32 @@ pub(crate) struct App {
     qh: QueueHandle<App>,
 }
 
+/// What an assistive technology asked of the shell, passed from AccessKit's
+/// thread to the loop.
+#[cfg(feature = "menus")]
+pub(crate) enum Asked {
+    /// Something of the open menus: to choose an item, or move to one.
+    Menu(crate::update::Event),
+    /// To press the start button of the monitor of this connector name.
+    #[cfg_attr(
+        not(feature = "panel"),
+        allow(dead_code, reason = "no panel, so no start button to press")
+    )]
+    StartMenu(String),
+}
+
 impl App {
     /// A monitor's connector name, `DP-1`, as the compositor gave it.
     fn output_name(&self, output: &wl_output::WlOutput) -> Option<String> {
         self.outputs.info(output).and_then(|info| info.name)
+    }
+
+    /// The monitor of connector name `name`.
+    #[cfg(feature = "menus")]
+    fn output_named(&self, name: &str) -> Option<wl_output::WlOutput> {
+        self.outputs
+            .outputs()
+            .find(|output| self.output_name(output).as_deref() == Some(name))
     }
 
     /// The config file changed: read it again, and show what it says now on
@@ -171,20 +216,117 @@ impl App {
             self.config.as_deref(),
             &self.outputs,
         );
+        #[cfg(feature = "panel")]
+        {
+            self.panels
+                .reconfigure(&mut self.canvas, qh, &shell, &self.outputs, &mut self.fonts);
+            self.keep_time();
+        }
         #[cfg(feature = "menus")]
         self.menus.reconfigure(&shell, self.config.as_deref());
-        #[cfg(not(feature = "wallpaper"))]
+        self.monitors_changed();
+        #[cfg(not(any(feature = "wallpaper", feature = "panel")))]
         let _ = (qh, shell);
+    }
+
+    /// The monitors, or the panels on them, changed: tell the menus where
+    /// the panels are now, to keep off them.
+    fn monitors_changed(&mut self) {
+        #[cfg(all(feature = "menus", feature = "panel"))]
+        {
+            let reserved = self
+                .outputs
+                .outputs()
+                .filter_map(|output| {
+                    let name = self.output_name(&output)?;
+                    let strip = self.panels.strip(&name, self.monitor(&output))?;
+                    Some((name, strip))
+                })
+                .collect();
+            self.menus.reserve(reserved);
+        }
+    }
+}
+
+#[cfg(feature = "panel")]
+impl App {
+    /// Read the clock now, and again whenever what it shows next changes.
+    fn keep_time(&mut self) {
+        use calloop::timer::{TimeoutAction, Timer};
+
+        if let Some(ticking) = self.ticking.take() {
+            self.handle.remove(ticking);
+        }
+        let next = self.panels.tick(&mut self.canvas, &mut self.fonts);
+        let ticking = self
+            .handle
+            .insert_source(Timer::from_duration(next), |_, (), app| {
+                TimeoutAction::ToDuration(app.panels.tick(&mut app.canvas, &mut app.fonts))
+            });
+        match ticking {
+            Ok(ticking) => self.ticking = Some(ticking),
+            Err(error) => tracing::warn!("the clock will stand still: {error}"),
+        }
     }
 }
 
 #[cfg(feature = "menus")]
 impl App {
+    /// Do what an assistive technology asked.
+    fn asked(&mut self, asked: Asked) {
+        match asked {
+            Asked::Menu(event) => self.menu_event(event),
+            Asked::StartMenu(name) => {
+                if let Some(output) = self.output_named(&name) {
+                    self.start_menu(&output);
+                }
+            }
+        }
+    }
+
+    /// Open the start menu on `output`, or close it, from its start button:
+    /// the one on that monitor's panel, or where one would be on a monitor
+    /// with none.
+    fn start_menu(&mut self, output: &wl_output::WlOutput) {
+        use perspicax_config::Edge;
+
+        use crate::layout::{Rect, usable};
+
+        let Some(name) = self.output_name(output) else {
+            return;
+        };
+        let monitor = self.monitor(output);
+        let area = usable(monitor, self.menus.reserved_on(&name));
+        #[cfg(feature = "panel")]
+        let (button, edge) = (self.panels.start_button(&name, monitor), self.panels.edge());
+        #[cfg(not(feature = "panel"))]
+        let (button, edge) = (None, None);
+        let edge = edge.unwrap_or(Edge::Bottom);
+        let button = button.unwrap_or(match edge {
+            Edge::Bottom => Rect::new(area.x, area.bottom(), 0, 0),
+            Edge::Top => Rect::new(area.x, area.y, 0, 0),
+        });
+        self.menu_event(crate::update::Event::StartMenu {
+            output: name,
+            area,
+            button,
+            edge,
+        });
+    }
+
     /// Pass `event` to the menus, and carry out what it calls for.
     fn menu_event(&mut self, event: crate::update::Event) {
         use crate::update::Effect;
         let qh = self.qh.clone();
-        let effects = self.menus.send(&mut self.canvas, &qh, &self.outputs, event);
+        let effects = self
+            .menus
+            .send(&mut self.canvas, &qh, &self.outputs, &mut self.fonts, event);
+        #[cfg(feature = "panel")]
+        self.panels.set_open(
+            &mut self.canvas,
+            &mut self.fonts,
+            self.menus.start_open_on(),
+        );
         for effect in effects {
             match effect {
                 Effect::Run(run) => self.start(&run),
@@ -200,9 +342,18 @@ impl App {
         }
     }
 
-    /// The menus' area on `output`: the whole monitor, in its logical
-    /// pixels.
+    /// The menus' area on `output`: the monitor, less the shell's panel on
+    /// it.
     fn area(&self, output: &wl_output::WlOutput) -> crate::layout::Rect {
+        let monitor = self.monitor(output);
+        let strip = self
+            .output_name(output)
+            .and_then(|name| self.menus.reserved_on(&name));
+        crate::layout::usable(monitor, strip)
+    }
+
+    /// The whole of `output`, in its logical pixels.
+    fn monitor(&self, output: &wl_output::WlOutput) -> crate::layout::Rect {
         let info = self.outputs.info(output);
         let (width, height) = info
             .as_ref()
@@ -260,6 +411,9 @@ impl OutputHandler for App {
         tracing::debug!(output = info.name.as_deref(), "a monitor");
         #[cfg(feature = "wallpaper")]
         self.desktops.add(&self.canvas, qh, output, &info);
+        #[cfg(feature = "panel")]
+        self.panels.sync(&self.canvas, qh, &self.outputs, None);
+        self.monitors_changed();
         #[cfg(not(feature = "wallpaper"))]
         let _ = (qh, output);
     }
@@ -267,7 +421,7 @@ impl OutputHandler for App {
     fn update_output(
         &mut self,
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
         #[cfg(feature = "wallpaper")]
@@ -275,20 +429,42 @@ impl OutputHandler for App {
             self.desktops
                 .rescale(&mut self.canvas, &output, info.scale_factor);
         }
-        #[cfg(not(feature = "wallpaper"))]
+        #[cfg(feature = "panel")]
+        {
+            if let Some(info) = self.outputs.info(&output) {
+                self.panels.rescale(
+                    &mut self.canvas,
+                    &mut self.fonts,
+                    &output,
+                    info.scale_factor,
+                );
+            }
+            // A monitor moved may be the first now, or no longer.
+            self.panels.sync(&self.canvas, qh, &self.outputs, None);
+        }
+        self.monitors_changed();
+        #[cfg(not(any(feature = "wallpaper", feature = "panel")))]
         let _ = output;
+        #[cfg(not(feature = "panel"))]
+        let _ = qh;
     }
 
     fn output_destroyed(
         &mut self,
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
         #[cfg(feature = "wallpaper")]
         self.desktops.remove(&output);
-        #[cfg(not(feature = "wallpaper"))]
+        #[cfg(feature = "panel")]
+        self.panels
+            .sync(&self.canvas, qh, &self.outputs, Some(&output));
+        self.monitors_changed();
+        #[cfg(not(any(feature = "wallpaper", feature = "panel")))]
         let _ = output;
+        #[cfg(not(feature = "panel"))]
+        let _ = qh;
     }
 }
 

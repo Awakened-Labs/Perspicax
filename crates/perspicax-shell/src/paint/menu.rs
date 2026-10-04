@@ -5,18 +5,18 @@
 //! an icon, a label cut short if it must be, and an arrow for a submenu.
 //! The line the keyboard is on is drawn in the highlight colour, and each
 //! line whose submenu is open in a paler one. What a person typed sits on a
-//! line of its own above the rest, behind a magnifying glass. The shapes are
-//! drawn rather than taken from a font, so they show with any font, or none.
+//! line of its own above the rest, behind a magnifying glass; the start
+//! menu's line is there before anything is typed, saying what it is for.
+//! The shapes are drawn rather than taken from a font, so they show with any
+//! font, or none.
 
-use tiny_skia::{
-    FilterQuality, LineCap, Paint, PathBuilder, PixmapMut, PixmapPaint, Stroke, Transform,
-};
+use tiny_skia::{FilterQuality, LineCap, PathBuilder, PixmapMut, PixmapPaint, Stroke, Transform};
 
-use super::{icons::Images, text::Text};
+use super::{fill, icons::Images, scaled, solid, text::Text};
 use crate::{
     layout::{
-        Rect,
-        menu::{ARROW, BORDER, GAP, ICON, INSET, TEXT},
+        Rect, TEXT,
+        menu::{ARROW, BORDER, GAP, ICON, INSET},
     },
     model::menu::Does,
     update::View,
@@ -34,6 +34,9 @@ pub(crate) const OPENED: [u8; 4] = [0xc4, 0xe5, 0xf7, 0xff];
 pub(crate) const RULE: [u8; 4] = [0xdc, 0xde, 0xe0, 0xff];
 /// Behind what a person typed.
 pub(crate) const TYPED: [u8; 4] = [0xef, 0xf0, 0xf1, 0xff];
+/// What an empty search line says, and its ink.
+const HINT: &str = "Type to search";
+const HINT_INK: [u8; 4] = [0x7f, 0x8c, 0x8d, 0xff];
 
 /// Draw `view` on `canvas`, a surface's pixels at `scale` times its size.
 pub(crate) fn paint(
@@ -52,7 +55,12 @@ pub(crate) fn paint(
         if let (Some(header), Some(query)) = (menu.header, view.query) {
             fill(canvas, px(header), TYPED);
             magnifier(canvas, px(icon_box(header)), s);
-            text.write(canvas, query, px(label_box(header, false)), TEXT * s, INK);
+            let (words, ink) = if query.is_empty() {
+                (HINT, HINT_INK)
+            } else {
+                (query, INK)
+            };
+            text.write(canvas, words, px(label_box(header, false)), TEXT * s, ink);
         }
         for line in &menu.lines {
             if let Does::Separator = line.item.does {
@@ -113,11 +121,6 @@ pub(crate) fn paint(
 }
 
 /// `rect` in pixels at `scale`.
-fn scaled(rect: Rect, scale: u32) -> Rect {
-    let s = scale as i32;
-    Rect::new(rect.x * s, rect.y * s, rect.w * s, rect.h * s)
-}
-
 fn inset(rect: Rect, by: i32) -> Rect {
     Rect::new(rect.x + by, rect.y + by, rect.w - 2 * by, rect.h - 2 * by)
 }
@@ -137,24 +140,6 @@ fn label_box(line: Rect, arrow: bool) -> Rect {
 /// Where a submenu's arrow goes: at the line's right.
 fn arrow_box(line: Rect) -> Rect {
     Rect::new(line.right() - INSET - ARROW, line.y, ARROW, line.h)
-}
-
-fn solid(colour: [u8; 4]) -> Paint<'static> {
-    let mut paint = Paint::default();
-    paint.set_color_rgba8(colour[0], colour[1], colour[2], colour[3]);
-    paint.anti_alias = true;
-    paint
-}
-
-fn fill(canvas: &mut PixmapMut<'_>, place: Rect, colour: [u8; 4]) {
-    if let Some(rect) = tiny_skia::Rect::from_xywh(
-        place.x as f32,
-        place.y as f32,
-        place.w as f32,
-        place.h as f32,
-    ) {
-        canvas.fill_rect(rect, &solid(colour), Transform::identity(), None);
-    }
 }
 
 /// A `>`, centred in `place`, `s` pixels to a logical one.
@@ -206,7 +191,7 @@ mod tests {
         layout::Monospace,
         model::{
             apps::{App, Run},
-            menu::{Session, root},
+            menu::{Session, root, start},
         },
         update::{Button, Event, Key, State},
     };
@@ -226,7 +211,10 @@ mod tests {
             keywords: Vec::new(),
             wm_class: None,
         };
-        let mut state = State::new(root(&[app], None, &Session::default()));
+        let mut state = State::new(
+            root(std::slice::from_ref(&app), None, &Session::default()),
+            start(&[app], &Session::default()),
+        );
         state.update(
             Event::DesktopPress {
                 output: "DP-1".to_owned(),

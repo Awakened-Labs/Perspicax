@@ -62,6 +62,9 @@ cosmic-text = { workspace = true, optional = true }
 # The menu file. Parse only, as the config crate reads the config file.
 serde = { workspace = true, optional = true }
 toml = { version = "1", default-features = false, features = ["std", "serde", "parse"], optional = true }
+# The panel's clock, in the local time zone. Already in the tree for the MCP
+# server's schemas; `clock` adds only iana-time-zone, which is there too.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"], optional = true }
 
 [dev-dependencies]
 # A wallpaper's colour, written as the config writes it.
@@ -74,7 +77,14 @@ perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
 # A picture or a colour behind the windows, on every monitor.
 wallpaper = ["dep:tiny-skia", "dep:png", "dep:zune-jpeg", "dep:accesskit", "dep:accesskit_unix"]
 # A bar along an edge of each monitor: start button, taskbar, pager, clock.
-panel = []
+# Its start button needs `menus` as well, which the config checks.
+panel = [
+    "dep:tiny-skia",
+    "dep:cosmic-text",
+    "dep:chrono",
+    "dep:accesskit",
+    "dep:accesskit_unix",
+]
 # The start menu and the root menu, of the installed applications. A menu
 # takes the keyboard, so sctk reads the keymap with xkbcommon, the library
 # the compositor already links.

@@ -1,6 +1,8 @@
 //! `perspicax-shell-v1`, the channel from perspicax: the person asked for a
 //! menu, the config changed. A changed config is applied in place; the root
-//! menu opens where perspicax says the pointer is, or closes if it is open.
+//! menu opens where perspicax says the pointer is, and the start menu from
+//! the start button of the monitor the pointer is on, or each closes if it
+//! is the one open.
 
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 use wayland_client::{Connection, Dispatch, QueueHandle, globals::GlobalList, protocol::wl_output};
@@ -49,6 +51,23 @@ impl App {
     }
 }
 
+impl App {
+    /// perspicax asked for the start menu on `output`: the monitor the
+    /// pointer is on, or `None` for one this client has not bound yet, when
+    /// the first monitor stands in.
+    fn start_menu_on(&mut self, output: Option<wl_output::WlOutput>) {
+        #[cfg(feature = "menus")]
+        if let Some(output) = output.or_else(|| self.outputs.outputs().next()) {
+            self.start_menu(&output);
+        }
+        #[cfg(not(feature = "menus"))]
+        tracing::info!(
+            output = output.and_then(|output| self.output_name(&output)),
+            "asked for the start menu, and this shell was built without menus"
+        );
+    }
+}
+
 impl Dispatch<PerspicaxShellV1, ()> for App {
     fn event(
         app: &mut Self,
@@ -60,10 +79,7 @@ impl Dispatch<PerspicaxShellV1, ()> for App {
     ) {
         use perspicax_shell_v1::Event;
         match event {
-            Event::StartMenu { output } => {
-                let output = output.and_then(|output| app.output_name(&output));
-                tracing::info!(output, "asked for the start menu");
-            }
+            Event::StartMenu { output } => app.start_menu_on(output),
             Event::RootMenu { output, x, y } => app.root_menu(output, x, y),
             Event::Reconfigure => app.reconfigure(qh),
             Event::Finished => {

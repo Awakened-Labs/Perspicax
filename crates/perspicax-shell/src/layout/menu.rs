@@ -1,12 +1,19 @@
-//! A cascade of menus: the root menu where it was asked for, and each open
+//! A cascade of menus: the first where it was asked for, and each open
 //! submenu beside the item that opened it.
 //!
-//! A menu opens down and to the right of the point it was asked for, and
-//! flips at the edge of the monitor: leftwards near the right edge, upwards
-//! near the bottom. A submenu opens to the right of its parent, or to the
-//! left where there is no room, and the submenus below it keep going the way
-//! it went. A submenu that would run off the bottom slides up until it fits.
-//! A menu too tall for the monitor breaks into columns.
+//! A menu opened at a point opens down and to the right of it, and flips
+//! at the edge of the monitor: leftwards near the right edge, upwards near
+//! the bottom. A menu opened from a panel's button opens away from the
+//! panel, its corner at the button's, as a start menu does. A submenu
+//! opens to the right of its parent, or to the left where there is no room,
+//! and the submenus below it keep going the way it went. A submenu that
+//! would run off the bottom slides up until it fits. A menu too tall for
+//! the monitor breaks into columns.
+//!
+//! The area menus are laid out in is the monitor less the shell's own
+//! panel, so that no menu is drawn where a click would reach the panel.
+
+use perspicax_config::Edge;
 
 use super::{Measure, Rect};
 
@@ -29,8 +36,16 @@ pub(crate) const ARROW: i32 = 12;
 /// The narrowest and widest a menu is drawn. A longer label is cut short.
 pub(crate) const MIN_WIDTH: i32 = 180;
 pub(crate) const MAX_WIDTH: i32 = 420;
-/// The text's size.
-pub(crate) const TEXT: f32 = 14.0;
+
+/// Where the first menu of a cascade opens from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Anchor {
+    /// A point: a click on the desktop, or where the pointer was.
+    Point(i32, i32),
+    /// A button on a panel along `edge` of the monitor: the menu opens away
+    /// from the panel, beside the button.
+    Button(Rect, Edge),
+}
 
 /// One menu of a cascade, as it is to be laid out.
 #[derive(Debug, Clone, PartialEq)]
@@ -62,11 +77,11 @@ pub(crate) struct Placed {
     pub(crate) leftwards: bool,
 }
 
-/// Lay out `menus`, the first opened at `anchor` and each other beside the
-/// line of the one before that opened it, all inside `area`.
+/// Lay out `menus`, the first opened from `anchor` and each other beside
+/// the line of the one before that opened it, all inside `area`.
 pub(crate) fn cascade(
     menus: &[Shown<'_>],
-    anchor: (i32, i32),
+    anchor: Anchor,
     area: Rect,
     measure: &mut impl Measure,
 ) -> Vec<Placed> {
@@ -78,7 +93,10 @@ pub(crate) fn cascade(
                 let row = parent.rows.get(line).copied().unwrap_or(parent.rect);
                 beside(parent, row, (width, height), area)
             }
-            _ => at_point(anchor, (width, height), area),
+            _ => match anchor {
+                Anchor::Point(x, y) => at_point((x, y), (width, height), area),
+                Anchor::Button(button, edge) => at_button(button, edge, (width, height), area),
+            },
         };
         let rect = Rect::new(x, y, width, height);
         let (header, rows) = lines(menu, rect, &columns);
@@ -108,6 +126,32 @@ fn at_point(point: (i32, i32), (width, height): (i32, i32), area: Rect) -> (i32,
     (
         x.clamp(area.x, (area.right() - width).max(area.x)),
         y.max(area.y),
+        leftwards,
+    )
+}
+
+/// Where a menu of `size` goes when opened from `button`, on a panel along
+/// `edge`: off the panel, its near corner at the button's, flipped to end at
+/// the button's far side where it would run off the monitor.
+fn at_button(
+    button: Rect,
+    edge: Edge,
+    (width, height): (i32, i32),
+    area: Rect,
+) -> (i32, i32, bool) {
+    let leftwards = button.x + width > area.right();
+    let x = if leftwards {
+        button.right() - width
+    } else {
+        button.x
+    };
+    let y = match edge {
+        Edge::Bottom => button.y - height,
+        Edge::Top => button.bottom(),
+    };
+    (
+        x.clamp(area.x, (area.right() - width).max(area.x)),
+        y.clamp(area.y, (area.bottom() - height).max(area.y)),
         leftwards,
     )
 }
@@ -277,8 +321,8 @@ mod tests {
         }
     }
 
-    fn laid(menus: &[Shown<'_>], anchor: (i32, i32)) -> Vec<Placed> {
-        cascade(menus, anchor, SCREEN, &mut Monospace(8.0))
+    fn laid(menus: &[Shown<'_>], (x, y): (i32, i32)) -> Vec<Placed> {
+        cascade(menus, Anchor::Point(x, y), SCREEN, &mut Monospace(8.0))
     }
 
     #[test]
@@ -335,12 +379,65 @@ mod tests {
             from: None,
             ..sub(0, 14)
         };
-        let menus = cascade(&[long], (0, 0), short_screen, &mut Monospace(8.0));
+        let menus = cascade(
+            &[long],
+            Anchor::Point(0, 0),
+            short_screen,
+            &mut Monospace(8.0),
+        );
         let menu = &menus[0];
         assert_eq!(menu.rect.h, short_screen.h);
         assert_eq!(menu.rect.w, 3 * MIN_WIDTH + 2 * BORDER, "three columns");
         assert_eq!(menu.rows[6].x, menu.rows[0].x + MIN_WIDTH);
         assert_eq!(menu.rows[6].y, menu.rows[0].y);
+    }
+
+    #[test]
+    fn a_menu_from_a_bottom_panels_button_opens_above_it() {
+        // The monitor above a 40 pixel panel, and a button at its left end.
+        let above = Rect::new(0, 0, 1280, 760);
+        let button = Rect::new(0, 760, 40, 40);
+        let menus = cascade(
+            &[root(&["Accessories >", "Internet >"]), sub(1, 3)],
+            Anchor::Button(button, Edge::Bottom),
+            above,
+            &mut Monospace(8.0),
+        );
+        assert_eq!(
+            (menus[0].rect.x, menus[0].rect.bottom()),
+            (0, 760),
+            "its bottom-left corner on the button's top-left"
+        );
+        assert!(
+            menus[1].rect.bottom() <= 760,
+            "and a submenu stays off the panel"
+        );
+
+        let right_end = Rect::new(1240, 760, 40, 40);
+        let menus = cascade(
+            &[root(&["Accessories >"])],
+            Anchor::Button(right_end, Edge::Bottom),
+            above,
+            &mut Monospace(8.0),
+        );
+        assert_eq!(
+            menus[0].rect.right(),
+            1280,
+            "a button at the right end: the menu ends where it does"
+        );
+    }
+
+    #[test]
+    fn a_menu_from_a_top_panels_button_opens_below_it() {
+        let below = Rect::new(0, 32, 1280, 768);
+        let button = Rect::new(0, 0, 32, 32);
+        let menus = cascade(
+            &[root(&["a", "b"])],
+            Anchor::Button(button, Edge::Top),
+            below,
+            &mut Monospace(8.0),
+        );
+        assert_eq!((menus[0].rect.x, menus[0].rect.y), (0, 32));
     }
 
     #[test]

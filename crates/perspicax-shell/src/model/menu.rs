@@ -2,7 +2,9 @@
 //!
 //! The root menu is the installed applications, one submenu per group,
 //! with Lock and Log Out at its foot, as on Plasma's desktop. A menu file
-//! may put items of its own above them, or replace the lot.
+//! may put items of its own above them, or replace the lot. The start menu
+//! is the same, without the menu file's say: it is where every application
+//! can always be found.
 
 use super::{
     apps::{App, Run},
@@ -192,6 +194,11 @@ pub(crate) fn root(apps: &[App], file: Option<&MenuFile>, session: &Session) -> 
         }
     };
     Menu { items }.tidy()
+}
+
+/// The start menu: the applications by group, then Lock and Log Out.
+pub(crate) fn start(apps: &[App], session: &Session) -> Menu {
+    root(apps, None, session)
 }
 
 /// One submenu per group that has an application in it, each listing its
@@ -412,6 +419,16 @@ mod tests {
                 "Lock",
                 "Log Out"
             ]
+        );
+    }
+
+    #[test]
+    fn the_start_menu_lists_every_application_whatever_the_menu_file_says() {
+        let replaced = root(&apps(), Some(&file("mode = \"replace\"\n")), &session());
+        assert!(replaced.items.is_empty(), "the root menu as the file says");
+        assert_eq!(
+            labels(&start(&apps(), &session())),
+            ["Accessories", "Internet", "System", "--", "Lock", "Log Out"]
         );
     }
 

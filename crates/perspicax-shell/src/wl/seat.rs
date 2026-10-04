@@ -1,8 +1,11 @@
 //! The pointer and the keyboard, on the shell's surfaces.
 //!
 //! A button on a desktop is a click on the wallpaper: the right one opens
-//! the root menu where it was pressed. The pointer and the buttons on the
-//! menus' surface, and every key while it has the keyboard, are the menus'.
+//! the root menu where it was pressed. The left button on a panel's start
+//! button opens the start menu, or closes it; any other press on a panel
+//! closes the menus, as a click anywhere off them does. The pointer and the
+//! buttons on the menus' surface, and every key while it has the keyboard,
+//! are the menus'.
 //! The pointer is drawn as the cursor theme's arrow on every surface of the
 //! shell's, rather than as whatever the last window left it as.
 
@@ -182,7 +185,7 @@ impl PointerHandler for App {
                 PointerEventKind::Press { .. } if on_menus => self.menu_event(Event::Press(at)),
                 PointerEventKind::Release { .. } if on_menus => self.menu_event(Event::Release(at)),
                 PointerEventKind::Press { button: code, .. } => {
-                    self.desktop_press(&event.surface, at, button(code))
+                    self.press_elsewhere(&event.surface, at, button(code));
                 }
                 _ => {}
             }
@@ -192,6 +195,38 @@ impl PointerHandler for App {
 
 impl App {
     /// A button went down on a surface of the shell's other than the menus'.
+    fn press_elsewhere(&mut self, surface: &wl_surface::WlSurface, at: (f64, f64), button: Button) {
+        #[cfg(feature = "panel")]
+        if self.panel_press(surface, at, button) {
+            return;
+        }
+        self.desktop_press(surface, at, button);
+    }
+
+    /// A button went down on `surface`, if it is a panel's: say whether it
+    /// was.
+    #[cfg(feature = "panel")]
+    fn panel_press(
+        &mut self,
+        surface: &wl_surface::WlSurface,
+        at: (f64, f64),
+        button: Button,
+    ) -> bool {
+        let Some((name, item)) = self.panels.at(surface, at) else {
+            return false;
+        };
+        match (item, button) {
+            (Some(perspicax_config::Item::Start), Button::Left) => {
+                if let Some(output) = self.output_named(name) {
+                    self.start_menu(&output);
+                }
+            }
+            _ => self.menu_event(Event::PanelPress),
+        }
+        true
+    }
+
+    /// A button went down on a desktop.
     #[cfg(feature = "wallpaper")]
     fn desktop_press(&mut self, surface: &wl_surface::WlSurface, at: (f64, f64), button: Button) {
         let Some((output, (width, height))) = self.desktops.at(surface) else {

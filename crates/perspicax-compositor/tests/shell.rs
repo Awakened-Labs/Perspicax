@@ -10,9 +10,11 @@
 //! for its monitor. Told its config changed, it repaints those surfaces
 //! rather than making new ones. A right-click on the wallpaper, or the root
 //! menu's key, opens a menu on the `overlay` layer where the pointer is, and
-//! choosing an item in it runs the item's program. Like the other live
-//! tests it binds a real Wayland socket, so it needs `XDG_RUNTIME_DIR`, and
-//! is `#[ignore]`d for `ci/live-tests.sh` to run.
+//! choosing an item in it runs the item's program. In the classic profile a
+//! panel along the bottom of each monitor keeps windows above it, and its
+//! start button, or the start menu's key, opens the start menu standing on
+//! it. Like the other live tests it binds a real Wayland socket, so it needs
+//! `XDG_RUNTIME_DIR`, and is `#[ignore]`d for `ci/live-tests.sh` to run.
 //!
 //! The menus here are a menu file's, so that what they hold does not hang
 //! on what is installed on the machine running the test.
@@ -142,6 +144,42 @@ fn menu(facts: &HostFacts) -> Option<(SurfaceId, String, Rect, Vec<Rect>)> {
             _ => None,
         })
 }
+
+/// The panels the facts show, by namespace, each with its id and where it
+/// is.
+fn panels(facts: &HostFacts) -> Vec<(String, SurfaceId, Rect)> {
+    let mut panels: Vec<_> = facts
+        .surfaces()
+        .iter()
+        .filter(|surface| surface.mapped)
+        .filter_map(|surface| match &surface.kind {
+            SurfaceKind::Layer {
+                layer: Layer::Top,
+                namespace,
+            } => Some((namespace.clone(), surface.id, surface.geometry)),
+            _ => None,
+        })
+        .collect();
+    panels.sort_by(|a, b| a.0.cmp(&b.0));
+    panels
+}
+
+/// The id of the surface named `namespace`.
+fn layer_named(facts: &HostFacts, namespace: &str) -> SurfaceId {
+    facts
+        .surfaces()
+        .iter()
+        .find(|surface| {
+            matches!(&surface.kind, SurfaceKind::Layer { namespace: named, .. } if named == namespace)
+        })
+        .expect("a layer surface of that namespace")
+        .id
+}
+
+/// The classic profile: a panel along the bottom of every monitor, 40
+/// pixels high, with the start button at its left end.
+const CLASSIC: &str = "profile = \"classic\"\n";
+const PANEL_HEIGHT: f64 = 40.0;
 
 /// The one desktop's id.
 fn desktop(facts: &HostFacts) -> SurfaceId {
@@ -290,7 +328,12 @@ fn a_picture_of_the_desktop_shows_the_wallpaper_not_the_backdrop() {
     use perspicax_index::ShotTarget;
 
     let session = Session::start("shell-picture", Backend::headless((800, 600)));
-    let shell = Shell::start(&session, "picture", "[shell]\nwallpaper = \"#336699\"");
+    // Minimal: no panel along the bottom, so every corner is the wallpaper.
+    let shell = Shell::start(
+        &session,
+        "picture",
+        "profile = \"minimal\"\n[shell]\nwallpaper = \"#336699\"",
+    );
     let facts = session.wait_for(|facts| desktops(facts).len() == 1);
     let desktop = facts
         .surfaces()
@@ -602,4 +645,96 @@ fn a_picture_shows_the_menu_over_a_window() {
     drop((desk, queue));
     shell.stop_with(session);
     std::fs::remove_file(file).ok();
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_panel_reserves_its_height() {
+    let session = Session::start("shell-panel", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "panel", CLASSIC);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (namespace, _, geometry) = &panels(&facts)[0];
+    assert_eq!(namespace, "perspicax-panel-HEADLESS-1");
+    assert_eq!(
+        *geometry,
+        rect(0, 760, 1280, 40),
+        "along the bottom, the monitor's width"
+    );
+
+    // A window maximized is offered what the panel leaves.
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_coloured(&qh, "orange", "orange", 0xffff_8000);
+    common::until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    session.perform(Action::ToggleMaximize);
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.offered.is_some_and(|(width, _)| width == 1280)
+    });
+    assert_eq!(
+        desk.offered,
+        Some((1280, 760)),
+        "the monitor less the panel's strip"
+    );
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_start_menu_opens_on_the_monitor_under_the_pointer() {
+    let session = Session::start("shell-start-key", two_monitors());
+    let shell = Shell::start(&session, "start-key", CLASSIC);
+    let facts = session.wait_for(|facts| desktops(facts).len() == 2 && panels(facts).len() == 2);
+
+    // The pointer on the second monitor, and the start menu's key.
+    click(
+        &session,
+        layer_named(&facts, "perspicax-desktop-HEADLESS-2"),
+        (500.0, 500.0),
+        PointerButton::Left,
+    );
+    session.perform(Action::StartMenu);
+    let facts = session.wait_for(|facts| menu(facts).is_some());
+    let (_, namespace, geometry, opaque) = menu(&facts).expect("waited for");
+    assert_eq!(namespace, "perspicax-menu-HEADLESS-2");
+    assert_eq!(geometry, rect(1280, 0, 1920, 1080), "over that monitor");
+    assert_eq!(opaque.len(), 1, "one menu: {opaque:?}");
+    assert_eq!(
+        (opaque[0].x0, opaque[0].y1),
+        (0.0, 1080.0 - PANEL_HEIGHT),
+        "standing on the panel, at the start button's corner"
+    );
+
+    session.perform(Action::StartMenu);
+    session.wait_for(|facts| menu(facts).is_none());
+
+    shell.stop_with(session);
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_agents_click_on_the_start_button_opens_it() {
+    let session = Session::start("shell-start-click", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "start-click", CLASSIC);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+
+    // The start button is the square at the panel's left end.
+    let start = (PANEL_HEIGHT / 2.0, PANEL_HEIGHT / 2.0);
+    click(&session, panel, start, PointerButton::Left);
+    let facts = session.wait_for(|facts| menu(facts).is_some());
+    let (_, namespace, _, opaque) = menu(&facts).expect("waited for");
+    assert_eq!(namespace, "perspicax-menu-HEADLESS-1");
+    assert_eq!(
+        (opaque[0].x0, opaque[0].y1),
+        (0.0, 800.0 - PANEL_HEIGHT),
+        "above the button"
+    );
+
+    // The panel is still in reach with the menu open, and a second click
+    // on the button closes it.
+    click(&session, panel, start, PointerButton::Left);
+    session.wait_for(|facts| menu(facts).is_none());
+
+    shell.stop_with(session);
 }
