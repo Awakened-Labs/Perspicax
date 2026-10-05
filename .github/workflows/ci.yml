@@ -23,9 +23,14 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Every job runs on `ubuntu-24.04` by name, not `ubuntu-latest`, for the reason
+# the toolchain is pinned. That label moves to Ubuntu 26 from 2026-10-19, and the
+# jobs install system libraries by Ubuntu package name: a release that renames
+# one would turn CI red on a day nobody touched this repository. Move to the next
+# release on purpose, in a commit that says so.
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -78,7 +83,7 @@ jobs:
   # backend a person actually logs in to cannot rot behind a feature nobody
   # compiles. No GPU and no seat on a runner, so clippy and non-live tests only.
   seat:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -108,7 +113,7 @@ jobs:
         run: cargo test --locked --workspace --features perspicax/desktop
 
   deny:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
