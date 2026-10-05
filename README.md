@@ -195,7 +195,11 @@ reason is reported rather than logged.
 perspicax --headless --mcp --spawn gtk4-widget-factory
 ```
 
-That is an MCP server on stdin and stdout with a compositor behind it. Eight
+That is an MCP server on stdin and stdout with a compositor behind it.
+Headless, it runs until the client goes away, and exits non-zero if the agent
+interface failed rather than ended; on `--seat` the session is the person's
+and outlives the client. A request sent before `initialize` is answered with
+an error naming what to send first, and the server waits on. Eight
 tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
 `tab_forward`, `deltas`, `screenshot`. The two window verbs act on a whole
 window by its surface: a close is a request the application may answer with a

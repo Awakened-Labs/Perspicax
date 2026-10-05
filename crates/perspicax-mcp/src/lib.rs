@@ -41,6 +41,7 @@
 //! rest.
 
 pub mod dto;
+mod gate;
 mod server;
 
 #[cfg(test)]
@@ -150,8 +151,9 @@ pub enum Denied {
 /// schedule for no benefit they can act on.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ServeError {
-    /// stdio could not be turned into a transport, or the client never
-    /// completed the handshake.
+    /// stdio could not be turned into a transport, or the handshake itself
+    /// failed. Not a client speaking out of turn before it: that is answered
+    /// and the server waits on (see [`serve`]).
     #[error("the MCP transport could not be established: {0}")]
     Transport(String),
     /// The conversation ended badly. A client that simply closed its pipe is
@@ -161,6 +163,15 @@ pub enum ServeError {
 }
 
 /// Serve the eight tools over stdio until the client goes away.
+///
+/// # A conversation begins with `initialize`
+///
+/// Until it does, a request that cannot open one is answered with an error
+/// naming what to send first, and anything that is not a request is dropped --
+/// and either way the server goes on waiting. rmcp on its own gives up on the
+/// transport instead, and over stdio there is no second one: a single message
+/// sent out of turn would have ended the agent interface, and with it, in
+/// `perspicax`, the desktop it serves. Issue #26.
 ///
 /// # stdout is the wire
 ///
@@ -180,13 +191,37 @@ pub enum ServeError {
 /// ended badly. A client that closes its pipe, or cancels, returns `Ok(())` --
 /// both are ordinary ends to a conversation.
 pub async fn serve(desktop: Arc<dyn Desktop>) -> Result<(), ServeError> {
-    use rmcp::ServiceExt as _;
-    use rmcp::service::QuitReason;
+    serve_over(desktop, rmcp::transport::stdio()).await
+}
 
-    let service = Perspicax::new(desktop)
-        .serve(rmcp::transport::stdio())
+/// [`serve`], over any transport rather than this process's stdio.
+///
+/// `serve` is this with stdin and stdout, and nothing else: a test speaking the
+/// wire down a `tokio::io::duplex` pair goes the same way a client does.
+///
+/// # Errors
+///
+/// As [`serve`].
+pub async fn serve_over<T, E, A>(desktop: Arc<dyn Desktop>, transport: T) -> Result<(), ServeError>
+where
+    T: rmcp::transport::IntoTransport<rmcp::RoleServer, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    use rmcp::ServiceExt as _;
+    use rmcp::service::{QuitReason, ServerInitializeError};
+
+    let service = match Perspicax::new(desktop)
+        .serve(gate::Gated::new(transport.into_transport()))
         .await
-        .map_err(|error| ServeError::Transport(error.to_string()))?;
+    {
+        Ok(service) => service,
+        // Gone before saying anything worth answering: the same ordinary end as
+        // a client that closes its pipe after a conversation.
+        Err(ServerInitializeError::ConnectionClosed(_) | ServerInitializeError::Cancelled) => {
+            return Ok(());
+        }
+        Err(error) => return Err(ServeError::Transport(error.to_string())),
+    };
 
     match service.waiting().await {
         Ok(QuitReason::Closed | QuitReason::Cancelled) => Ok(()),

@@ -21,8 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use perspicax_index::{Delta, HostFacts, Index, Receipt, Refusal, Selector, Verb};
-use perspicax_mcp::{Denied, Desktop, Perspicax};
-use rmcp::ServiceExt as _;
+use perspicax_mcp::{Denied, Desktop, ServeError};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
@@ -113,21 +112,23 @@ impl Client {
     }
 }
 
+/// How the server's side of a conversation ended.
+type Serving = tokio::task::JoinHandle<Result<(), ServeError>>;
+
 /// A server on one end of a duplex pair, and a client on the other.
-fn connected() -> (Client, tokio::task::JoinHandle<()>) {
+///
+/// Served by [`perspicax_mcp::serve_over`], which is what `--mcp` runs over
+/// stdio, so every exchange here goes through the same door a real client's
+/// does -- the gate in front of the handshake included.
+fn connected() -> (Client, Serving) {
     let (client, server) = tokio::io::duplex(64 * 1024);
     let (server_read, server_write) = tokio::io::split(server);
     let (client_read, client_write) = tokio::io::split(client);
 
-    let serving = tokio::spawn(async move {
-        let service = Perspicax::new(Arc::new(Nothing))
-            .serve((server_read, server_write))
-            .await
-            .expect("the transport is a pair of pipes");
-        // The client dropping its end is an ordinary end to the conversation
-        // and not a failure, so the result is deliberately not unwrapped.
-        let _ = service.waiting().await;
-    });
+    let serving = tokio::spawn(perspicax_mcp::serve_over(
+        Arc::new(Nothing),
+        (server_read, server_write),
+    ));
 
     (
         Client {
@@ -155,6 +156,15 @@ async fn handshake(client: &mut Client) -> Value {
         .send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
         .await;
     result
+}
+
+/// The client has gone; the server should have taken that as an ordinary end.
+async fn ended_cleanly(serving: Serving) {
+    tokio::time::timeout(PATIENCE, serving)
+        .await
+        .expect("the server noticed the client go")
+        .expect("the server did not panic")
+        .expect("a client going away is an ordinary end");
 }
 
 #[tokio::test]
@@ -204,7 +214,7 @@ async fn the_server_introduces_itself_and_lists_its_tools_with_no_compositor_run
     }
 
     drop(client);
-    serving.await.expect("the server stopped cleanly");
+    ended_cleanly(serving).await;
 }
 
 #[tokio::test]
@@ -266,5 +276,77 @@ async fn the_tools_answer_over_the_wire_and_refusals_arrive_as_refusals() {
     );
 
     drop(client);
-    serving.await.expect("the server stopped cleanly");
+    ended_cleanly(serving).await;
+}
+
+// Issue #26. A client that speaks before its handshake -- one restarted
+// without it, one retrying, one simply wrong -- used to end the transport, and
+// `perspicax` ended the session with it: on a seat, every window the person
+// had open. One mis-ordered message must cost that message, not the desktop.
+
+#[tokio::test]
+async fn a_request_before_the_handshake_is_refused_and_the_handshake_still_works() {
+    let (mut client, serving) = connected();
+
+    client
+        .send(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }))
+        .await;
+    let refused = client.recv().await;
+    assert_eq!(refused["id"], 1, "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("initialize")),
+        "the refusal should say what to send first: {refused}"
+    );
+
+    // And the conversation is still there to be had.
+    handshake(&mut client).await;
+    let listed = client.call(2, "tools/list", json!({})).await;
+    assert_eq!(listed["tools"].as_array().map(Vec::len), Some(8));
+
+    drop(client);
+    ended_cleanly(serving).await;
+}
+
+#[tokio::test]
+async fn a_notification_before_the_handshake_is_ignored() {
+    let (mut client, serving) = connected();
+
+    // Sent too early, as a client that lost track of its own state might.
+    client
+        .send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+        .await;
+
+    handshake(&mut client).await;
+    let windows = client
+        .call(2, "tools/call", json!({ "name": "window_list" }))
+        .await;
+    assert_eq!(windows["structuredContent"]["count"], 0);
+
+    drop(client);
+    ended_cleanly(serving).await;
+}
+
+#[tokio::test]
+async fn a_ping_before_the_handshake_is_still_answered() {
+    let (mut client, serving) = connected();
+
+    // MCP allows this one, and the gate must not take it away.
+    let pong = client.call(7, "ping", json!({})).await;
+    assert_eq!(pong, json!({}));
+
+    handshake(&mut client).await;
+    let listed = client.call(2, "tools/list", json!({})).await;
+    assert_eq!(listed["tools"].as_array().map(Vec::len), Some(8));
+
+    drop(client);
+    ended_cleanly(serving).await;
+}
+
+#[tokio::test]
+async fn a_client_that_leaves_before_its_handshake_is_an_ordinary_end() {
+    let (client, serving) = connected();
+    drop(client);
+    ended_cleanly(serving).await;
 }
