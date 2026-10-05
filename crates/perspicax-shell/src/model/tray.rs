@@ -29,7 +29,8 @@ pub(crate) const ITEM_PATH: &str = "/StatusNotifierItem";
 /// A program's status icon, as the tray shows it.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Item {
-    /// What it is called: its title, or its tooltip's, or its id.
+    /// What it is called: its tooltip's title, or its title, or its id,
+    /// whichever is first not blank.
     pub(crate) title: String,
     pub(crate) status: Status,
     pub(crate) icon: Icon,

@@ -19,6 +19,9 @@ pub(super) const INTERFACE: &str = "org.kde.StatusNotifierItem";
 /// it, and the root.
 const NO_MENU: [&str; 2] = ["/NO_DBUSMENU", "/"];
 
+/// What an icon is called whose program gives it no name at all.
+const UNNAMED: &str = "Status icon";
+
 /// A status icon as read: what the tray shows of it, and where its menu is
 /// served, if it has one.
 pub(super) struct Read {
@@ -82,11 +85,16 @@ fn of(properties: &HashMap<String, OwnedValue>) -> Read {
         _ => None,
     };
     let menu = said("Menu").filter(|path| !NO_MENU.contains(&path.as_str()));
+    let name = |text: Option<String>| text.filter(|name| !name.trim().is_empty());
     let item = Item {
-        title: said("Title")
-            .or_else(|| tooltip().filter(|title| !title.is_empty()))
-            .or_else(|| said("Id"))
-            .unwrap_or_default(),
+        // The tooltip's title is what a person reads on hovering, and is
+        // often the program's full name where its title is a short id:
+        // VLC's title is "vlc", its tooltip's "VLC media player". A blank
+        // one, or none, falls back to the title, then the id.
+        title: name(tooltip())
+            .or_else(|| name(said("Title")))
+            .or_else(|| name(said("Id")))
+            .unwrap_or_else(|| UNNAMED.to_owned()),
         status: Status::parse(said("Status").as_deref().unwrap_or_default()),
         icon: icon("IconName", "IconPixmap"),
         attention: icon("AttentionIconName", "AttentionIconPixmap"),
@@ -147,20 +155,24 @@ mod tests {
     #[test]
     fn a_status_icon_is_read_from_its_properties() {
         let red: Pictures = vec![(1, 1, vec![0xff, 0xff, 0, 0])];
-        let tooltip = (
-            String::new(),
-            Pictures::new(),
-            "Tooltip title".to_owned(),
-            "Tooltip text".to_owned(),
-        );
+        // What VLC says of itself.
+        let tooltip = |title: &str| {
+            (
+                String::new(),
+                Pictures::new(),
+                title.to_owned(),
+                String::new(),
+            )
+        };
         let read = of(&properties([
-            ("Id", "example".into()),
+            ("Id", "vlc".into()),
+            ("Title", "vlc".into()),
             ("Status", "NeedsAttention".into()),
             ("IconName", "".into()),
             ("IconPixmap", red.into()),
             ("AttentionIconName", "mail-unread".into()),
             ("IconThemePath", "/opt/example/icons".into()),
-            ("ToolTip", tooltip.into()),
+            ("ToolTip", tooltip("VLC media player").into()),
             (
                 "Menu",
                 ObjectPath::from_static_str_unchecked("/MenuBar").into(),
@@ -168,7 +180,7 @@ mod tests {
             ("ItemIsMenu", false.into()),
         ]));
         let item = &read.item;
-        assert_eq!(item.title, "Tooltip title", "no title: the tooltip's");
+        assert_eq!(item.title, "VLC media player", "its tooltip's title");
         assert_eq!(item.status, Status::NeedsAttention);
         assert_eq!(item.icon.name, None, "an empty name is none");
         assert_eq!(item.icon.pixmaps.len(), 1);
@@ -180,6 +192,17 @@ mod tests {
         );
         assert_eq!(read.menu.as_deref(), Some("/MenuBar"));
         assert!(item.menu && !item.only_menu);
+
+        for blank in ["", "  "] {
+            let read = of(&properties([
+                ("Id", "vlc".into()),
+                ("Title", "vlc".into()),
+                ("ToolTip", tooltip(blank).into()),
+            ]));
+            assert_eq!(read.item.title, "vlc", "a blank tooltip title: its title");
+        }
+        let read = of(&properties([("Id", " ".into()), ("Title", "".into())]));
+        assert_eq!(read.item.title, UNNAMED, "nothing to go by: still a name");
 
         let read = of(&properties([
             ("Id", "bare".into()),
