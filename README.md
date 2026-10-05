@@ -81,8 +81,8 @@ step; it is the reason the compositor exists, not a feature bolted to it.
 
 Two layers of tuning. **Cargo features** decide what is built at all, the way
 USE flags do: `seat` (DRM, GBM, EGL/GLES, libinput, libseat), `xwayland`, and
-`desktop`, which is both. Later, one feature per shell component and per
-optional module. **A config file** decides what a build that has a thing does
+`desktop`, which is both; and one per component of the desktop shell (see
+[The desktop](#the-desktop)). **A config file** decides what a build that has a thing does
 with it, and a key for something left out of the build is an error naming the
 feature, never silently ignored.
 
@@ -92,7 +92,7 @@ feature, never silently ignored.
 | **W2** | Config profiles (`classic`, `minimal`) and policy: focus models, a workspace grid with edge flipping, moving between screens, snapping | done |
 | **W3** | Server-side decorations, then tabbed window groups | done |
 | **W4** | Protocols Smithay lacks: foreign-toplevel management, ext-workspace, screencopy, output management — and `screenshot` stops refusing; agent verbs to close a window and bring a tab forward | done |
-| **W5** | `perspicax-shell`, a separate process: wallpaper, panel, tray, start menu, root menu, desktop icons — each a feature and a toggle | |
+| **W5** | `perspicax-shell`, a separate process: wallpaper, panel, tray, start menu, root menu, desktop icons — each a feature and a toggle | done |
 | **W6** | Polish: themes, keymaps, a session entry for display managers | |
 
 The shell is a separate process on purpose. A panel that crashes should not
@@ -316,11 +316,18 @@ cargo test  --workspace
 ```
 
 The daily-driver build, which needs the development packages for libudev,
-libinput, libseat, libgbm, libdrm, libEGL and libGLESv2:
+libinput, libseat, libgbm, libdrm, libEGL and libGLESv2, and builds the
+desktop shell with every component beside it:
 
 ```sh
-cargo build --release --features perspicax/desktop
+cargo build --release --features perspicax/desktop,perspicax-shell/full
 ```
+
+perspicax starts `perspicax-shell` from beside its own binary, and from `PATH`
+if there is none there. A workspace build without `perspicax-shell/full`
+leaves a shell of no components in `target/`, which draws nothing; to install
+the shell on its own, `cargo install --path crates/perspicax-shell --features
+full`.
 
 Run it from a text console (a TTY, not a terminal inside another desktop), with
 seatd or logind managing the seat. Log to a file: the console the session
@@ -437,7 +444,7 @@ scale = 1.25
 name = "eDP-1"
 enable = false
 
-autostart = [["waybar"], ["swaybg", "-i", "/home/me/wall.png"]]
+autostart = [["mako"], ["nm-applet", "--indicator"]]
 
 [protocols]                    # who may reach past their own windows:
 foreign-toplevel-management = "any"   # "any", "off", or a list of programs
@@ -489,6 +496,92 @@ connector with nothing plugged into it on request (`echo on | sudo tee
 /sys/class/drm/card1-HDMI-A-1/status`, and `detect` to undo it), and
 perspicax treats it as a monitor nobody can see: the pointer crosses into it,
 windows can be sent there and back, and unplugging it rescues them.
+
+## The desktop
+
+`perspicax-shell` is the desktop: a wallpaper, a panel, menus of the installed
+applications, other programs' tray icons and the desktop folder's icons. It
+is a program of its own and an ordinary Wayland client: its surfaces are
+layer-shell surfaces, and its taskbar and pager speak the protocols waybar
+speaks. A panel that crashes takes no window with it, and anything speaking
+layer-shell can stand in for any piece of it.
+
+perspicax starts it as the session starts, before `autostart`, and starts it
+again if it crashes; a shell that refuses its config waits for the file to be
+saved again. A save that changes `[shell]` reaches it in place, without a
+restart. The tray needs a D-Bus session bus, and a text-console login has
+none: start the session under one, `dbus-run-session -- perspicax --seat`.
+
+Each component is a cargo feature of `perspicax-shell`, and `full` is all of
+them; none is on by default. The profiles turn on what the build has:
+
+| Component | Feature | `classic` | `minimal` | Surface: layer, namespace | What an agent reads |
+|---|---|---|---|---|---|
+| Wallpaper | `wallpaper` | Plasma's blue | a dark grey | background, `perspicax-desktop-<output>` | a `Window` named for its surface |
+| Desktop icons | `icons` (with `wallpaper`, `menus`) | the first monitor | off | drawn on the wallpaper's | a `List` "Desktop" of a `ListItem` for each icon, the selected one selected |
+| Root menu | `menus` | right-click on the wallpaper, or `root-menu`'s key | the same | overlay, `perspicax-menu-<output>`, while open | a `Menu` "Root menu" of `MenuItem`s |
+| Panel | `panel` | along the bottom of every monitor | none | top, `perspicax-panel-<output>` | a `Toolbar` "Panel" holding what follows |
+| Start button and menu | `menus` | the panel's first item; a tap of Logo | — | the panel's; its menu as the root menu's | a `Button` "Start"; a `Menu` "Start menu" with a search line |
+| Taskbar | `panel` | each monitor's own windows | — | the panel's | a `TabList` "Taskbar", the window in use selected |
+| Pager | `panel` | the workspaces | — | the panel's | a `TabList` "Workspaces", the one showing selected |
+| Tray | `tray` (with `panel`, `menus`) | before the clock | — | the panel's; its menus as the root menu's | a `Group` "Tray" of a `Button` for each icon, named by its tooltip |
+| Clock | `panel` | the time, last | — | the panel's | a `Status` "Clock", the time its value |
+
+An agent reads the shell as it reads any application. On a seat it cannot
+click it: like everything else the person's session starts, the shell gets no
+agent consent. A key for a component the shell was built without is refused
+with the feature that would provide it. Every key is optional:
+
+```toml
+[shell]
+enabled = true                 # false: no shell; bring your own from autostart
+wallpaper = "~/Pictures/wall.jpg"   # an image, "#rrggbb", or "none"; a
+                               # relative path is beside this file
+wallpaper-mode = "fill"        # fill | fit | center | tile
+root-menu = true
+menu-file = "menu.toml"        # extends the root menu, or replaces it
+desktop-icons = true
+untrusted-launchers = "hidden" # an application's entry on the desktop that is
+                               # not executable: "as-files" (the default) shows
+                               # it as the file it is
+icon-theme = "Adwaita"
+terminal = ["foot"]            # for applications that ask for one
+lock = ["swaylock", "-f"]      # the start menu's Lock
+
+[shell.wallpapers]             # a workspace's own, by number from 1, row by row
+2 = "#2d5a4f"
+3 = { wallpaper = "~/Pictures/tile.png", mode = "tile" }
+
+[shell.panel]
+enabled = true                 # false: no panel
+edge = "top"                   # or "bottom"
+height = 32
+outputs = "first"              # "all", or a list of connectors: ["DP-1"]
+taskbar = "all"                # every window on every panel; "this-output"
+                               # lists each monitor's own
+items = ["start", "taskbar", "pager", "tray", "clock"]
+clock = "%a %e %b %H:%M"       # as strftime writes it
+```
+
+The menu file is TOML too: `mode = "extend"` puts its items above the
+applications and `"replace"` puts them instead, and each `[[items]]` is one of
+`exec = [...]` with a `label`, `app = "firefox"` for an installed
+application, `separator = true`, a submenu with `items = [...]`,
+`applications = true` for the applications by group, or `session = true` for
+Lock and Log Out.
+
+A tray icon is any program's that registers one the StatusNotifierItem way,
+as Qt, Electron and libappindicator programs do. The shell serves the
+registry the programs look for, or shows what another program's lists if one
+was there first. A left click activates the icon, a middle click activates it
+the other way, and a right click opens its menu at the icon, as the start menu
+opens at its button.
+
+**Coming from W4.** `classic` now starts the shell, so a config that starts
+waybar and swaybg from `autostart` gets two panels and two wallpapers. Take
+them out of `autostart`, or keep them and set `[shell] enabled = false`.
+
+## Test
 
 Gates, in the order CI runs them:
 
