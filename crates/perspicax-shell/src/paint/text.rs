@@ -15,10 +15,17 @@ use cosmic_text::{
 };
 use tiny_skia::PixmapMut;
 
+use perspicax_config::Font;
+
 use crate::layout::{Measure, Rect, TEXT};
 
-/// The fonts, found once.
-pub(crate) enum Fonts {
+/// The fonts, found once, and the theme's font to write in.
+pub(crate) struct Fonts {
+    search: Search,
+    font: Font,
+}
+
+enum Search {
     /// Still being found.
     Finding(JoinHandle<FontSystem>),
     Found(Box<Text>),
@@ -27,27 +34,45 @@ pub(crate) enum Fonts {
 }
 
 impl Fonts {
-    /// Start finding the fonts.
-    pub(crate) fn find() -> Self {
-        Self::Finding(std::thread::spawn(FontSystem::new))
+    /// Start finding the fonts, to write in `font` once they are found.
+    pub(crate) fn find(font: Font) -> Self {
+        Self {
+            search: Search::Finding(std::thread::spawn(FontSystem::new)),
+            font,
+        }
     }
 
     /// The fonts, waiting for them if they are still being found.
     pub(crate) fn get(&mut self) -> &mut Text {
-        if let Self::Finding(_) | Self::Gone = self {
-            let fonts = match std::mem::replace(self, Self::Gone) {
-                Self::Finding(search) => search.join().unwrap_or_else(|_| {
+        if let Search::Finding(_) | Search::Gone = self.search {
+            let fonts = match std::mem::replace(&mut self.search, Search::Gone) {
+                Search::Finding(search) => search.join().unwrap_or_else(|_| {
                     tracing::warn!("finding the fonts failed; menus are drawn without text");
                     no_fonts()
                 }),
                 _ => FontSystem::new(),
             };
-            *self = Self::Found(Box::new(Text::new(fonts)));
+            let mut text = Text::new(fonts);
+            text.set_font(&self.font);
+            self.search = Search::Found(Box::new(text));
         }
-        match self {
-            Self::Found(text) => text,
-            Self::Finding(_) | Self::Gone => unreachable!("found just above"),
+        match &mut self.search {
+            Search::Found(text) => text,
+            Search::Finding(_) | Search::Gone => unreachable!("found just above"),
         }
+    }
+
+    /// Write in `font` from now on. Whether that is a change, so whatever
+    /// was written in the old one is drawn again.
+    pub(crate) fn set_font(&mut self, font: &Font) -> bool {
+        if *font == self.font {
+            return false;
+        }
+        self.font = font.clone();
+        if let Search::Found(text) = &mut self.search {
+            text.set_font(font);
+        }
+        true
     }
 }
 
@@ -57,6 +82,9 @@ pub(crate) struct Text {
     glyphs: SwashCache,
     /// Each label's width at the menu's size, measured once.
     widths: HashMap<String, f32>,
+    /// What everything is written in.
+    family: perspicax_config::Family,
+    size: f32,
 }
 
 impl Text {
@@ -68,6 +96,44 @@ impl Text {
             fonts,
             glyphs: SwashCache::new(),
             widths: HashMap::new(),
+            family: perspicax_config::Family::SansSerif,
+            size: TEXT,
+        }
+    }
+
+    /// Write in `font` from now on, measuring every label again in it.
+    pub(crate) fn set_font(&mut self, font: &Font) {
+        self.family = font.family.clone();
+        self.size = f32::from(font.size);
+        self.widths.clear();
+        if let perspicax_config::Family::Named(name) = &font.family {
+            let known = self.fonts.db().faces().any(|face| {
+                face.families
+                    .iter()
+                    .any(|(family, _)| family.eq_ignore_ascii_case(name))
+            });
+            if !known && !self.fonts.db().is_empty() {
+                tracing::warn!(
+                    family = name,
+                    "no font of the theme's family is installed; each character is written in \
+                     whichever font has it"
+                );
+            }
+        }
+    }
+
+    /// The text's size, in logical pixels.
+    pub(crate) fn size(&self) -> f32 {
+        self.size
+    }
+
+    /// The family as cosmic-text names it.
+    fn family(&self) -> Family<'_> {
+        match &self.family {
+            perspicax_config::Family::SansSerif => Family::SansSerif,
+            perspicax_config::Family::Serif => Family::Serif,
+            perspicax_config::Family::Monospace => Family::Monospace,
+            perspicax_config::Family::Named(name) => Family::Name(name),
         }
     }
 
@@ -99,9 +165,10 @@ impl Text {
         buffer.set_wrap(Wrap::None);
         buffer.set_ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)));
         buffer.set_size(Some(place.w as f32), Some(line));
+        let family = self.family();
         buffer.set_text(
             text,
-            &Attrs::new().family(Family::SansSerif),
+            &Attrs::new().family(family),
             Shaping::Advanced,
             Some(Align::Left),
         );
@@ -130,6 +197,11 @@ impl Measure for Fonts {
     fn width(&mut self, text: &str) -> f32 {
         self.get().width(text)
     }
+
+    #[cfg(feature = "icons")]
+    fn size(&self) -> f32 {
+        f32::from(self.font.size)
+    }
 }
 
 impl Measure for Text {
@@ -140,14 +212,11 @@ impl Measure for Text {
         if self.fonts.db().is_empty() {
             return 0.0;
         }
-        let mut buffer = Buffer::new(&mut self.fonts, Metrics::new(TEXT, TEXT * 2.0));
+        let size = self.size;
+        let mut buffer = Buffer::new(&mut self.fonts, Metrics::new(size, size * 2.0));
         buffer.set_wrap(Wrap::None);
-        buffer.set_text(
-            text,
-            &Attrs::new().family(Family::SansSerif),
-            Shaping::Advanced,
-            None,
-        );
+        let family = self.family();
+        buffer.set_text(text, &Attrs::new().family(family), Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.fonts, false);
         let width = buffer
             .layout_runs()
@@ -155,6 +224,11 @@ impl Measure for Text {
             .fold(0.0, f32::max);
         self.widths.insert(text.to_owned(), width);
         width
+    }
+
+    #[cfg(feature = "icons")]
+    fn size(&self) -> f32 {
+        self.size
     }
 }
 

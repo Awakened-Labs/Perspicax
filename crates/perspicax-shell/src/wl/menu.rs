@@ -315,12 +315,16 @@ impl Menus {
             .iter()
             .map(|menu| (menu.rect.x, menu.rect.y, menu.rect.w, menu.rect.h))
             .collect();
-        let Kit { fonts, images } = kit;
+        let Kit {
+            fonts,
+            images,
+            palette,
+        } = kit;
         let text = fonts.get();
         let scale = shown.scale;
         let started = Instant::now();
         canvas.show(&shown.layer, size, scale, &opaque, |picture| {
-            paint::menu::paint(&view, picture, scale, text, images);
+            paint::menu::paint(&view, picture, scale, text, images, palette);
         });
         tracing::debug!(took = ?started.elapsed(), "the menus were drawn");
         shown

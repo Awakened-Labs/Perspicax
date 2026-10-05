@@ -397,7 +397,11 @@ impl Desktops {
             .as_ref()
             .filter(|icons| icons.on.as_ref() == Some(&desktop.name))
         {
-            let Kit { fonts, images } = kit;
+            let Kit {
+                fonts,
+                images,
+                palette,
+            } = kit;
             let text = fonts.get();
             let monitor = Rect::new(0, 0, width as i32, height as i32);
             let area = layout::usable(monitor, icons.strip);
@@ -423,6 +427,7 @@ impl Desktops {
                         scale,
                         text,
                         images,
+                        palette,
                     );
                 },
             );

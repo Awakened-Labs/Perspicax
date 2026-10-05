@@ -10,7 +10,7 @@
 
 use std::{collections::BTreeMap, path::PathBuf};
 
-use perspicax_policy::Colour;
+use perspicax_policy::{Colour, Font, Palette};
 use serde::Deserialize;
 
 use crate::{Error, Profile, invalid};
@@ -80,6 +80,11 @@ pub struct Shell {
     pub lock: Vec<String>,
     /// The panel, or `None` for none.
     pub panel: Option<Panel>,
+    /// The colours everything is drawn in: `[theme]`'s, read here so that a
+    /// change to the theme reaches the shell as one to `[shell]` does.
+    pub palette: Palette,
+    /// The font everything is written in, from `[theme]` likewise.
+    pub font: Font,
 }
 
 /// What the desktop shows of an application's entry that may not be run.
@@ -241,6 +246,8 @@ impl Shell {
             terminal: None,
             lock: vec!["swaylock".to_owned()],
             panel: panel.filter(|_| built.panel),
+            palette: Palette::default(),
+            font: Font::default(),
         }
     }
 }

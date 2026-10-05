@@ -505,7 +505,11 @@ impl Panels {
             #[cfg(feature = "tray")]
             tray,
         };
-        let Kit { fonts, images } = kit;
+        let Kit {
+            fonts,
+            images,
+            palette,
+        } = kit;
         let text = fonts.get();
         bar.placed = lay_out(&panel.items, holding, (width, height), &mut *text);
         let open = self.open_on.as_deref() == Some(bar.name.as_str());
@@ -526,7 +530,7 @@ impl Panels {
             bar.scale,
             &[(0, 0, width, height)],
             |picture| {
-                paint::panel::paint(&shown, picture, bar.scale, text, images);
+                paint::panel::paint(&shown, picture, bar.scale, text, images, palette);
             },
         );
         tracing::debug!(output = bar.name, took = ?started.elapsed(), "a panel was drawn");

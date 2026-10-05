@@ -25,9 +25,8 @@ mod shell;
 use std::path::{Path, PathBuf};
 
 use perspicax_policy::{
-    Access, Action, Bindings, Builtin, Chord, Decorations, Direction, Family, Flipping, Focus,
-    FocusModel, Font, Grid, Keysym, Mods, Place, Program, Protocol, Rgba, Role, Rule, Shape, Side,
-    Snapping, Theme, Towards,
+    Access, Action, Bindings, Chord, Decorations, Direction, Flipping, Focus, FocusModel, Grid,
+    Keysym, Mods, Place, Program, Protocol, Rule, Shape, Side, Snapping, Towards,
 };
 use serde::Deserialize;
 
@@ -36,6 +35,8 @@ pub use crate::shell::{
     Edge, Item, Panel, PanelOutputs, Shell, ShellBuilt, TaskbarScope, UntrustedLaunchers,
     Wallpaper, WallpaperMode,
 };
+/// The theme's types, as the shell reads them from [`Shell`].
+pub use perspicax_policy::{Builtin, Family, Font, Palette, Rgba, Role, Theme};
 
 /// Which cargo features this binary was built with, as far as config cares.
 /// The binary fills it in with `cfg!`; this crate cannot see the binary's
@@ -519,9 +520,9 @@ pub fn load_shell(path: &Path, built: ShellBuilt) -> Result<Shell, Error> {
 
 /// Parse a config file's `[shell]` table, with its profile, as a
 /// perspicax-shell built with `built` reads it, and the double-click time
-/// from `[input.pointer]`, which its icons share with the titlebars. The
-/// rest of the file must be this schema, and is otherwise the compositor's
-/// to judge.
+/// from `[input.pointer]`, which its icons share with the titlebars, and the
+/// theme, which everything is drawn in. The rest of the file must be this
+/// schema, and is otherwise the compositor's to judge.
 ///
 /// # Errors
 ///
@@ -530,6 +531,7 @@ pub fn load_shell(path: &Path, built: ShellBuilt) -> Result<Shell, Error> {
 /// [`Error::Invalid`] for a value it cannot use.
 pub fn shell(text: &str, built: ShellBuilt) -> Result<Shell, Error> {
     let raw: Raw = toml::from_str(text).map_err(|error| Error::Parse(error.to_string()))?;
+    let theme = theme(raw.theme, raw.decorations.as_ref())?;
     let profile = Shell::profile(raw.profile, built);
     // The grid's sides are the compositor's to judge; this only counts.
     let workspaces = match raw.workspaces.as_ref().and_then(|written| written.grid) {
@@ -547,6 +549,8 @@ pub fn shell(text: &str, built: ShellBuilt) -> Result<Shell, Error> {
     if let Some(written) = written {
         shell.double_click_ms = double_click_ms(written)?;
     }
+    shell.palette = theme.palette;
+    shell.font = theme.font;
     Ok(shell)
 }
 
@@ -928,6 +932,8 @@ impl Raw {
             )?;
         }
         config.shell.double_click_ms = config.pointer.double_click_ms;
+        config.shell.palette = config.theme.palette;
+        config.shell.font = config.theme.font.clone();
 
         if let Some(empty) = self.autostart.iter().position(Vec::is_empty) {
             return Err(invalid(
@@ -1738,6 +1744,29 @@ mod tests {
             assert!(error.to_string().contains(key), "{error}");
         }
         assert!(parse("[decorations]\nmode = \"both\"", SEAT).is_err());
+    }
+
+    /// The shell draws in the theme, and reads it as the compositor does,
+    /// so a theme change reaches it as a change to `[shell]` would.
+    #[test]
+    fn the_shell_reads_the_theme_and_the_compositor_hands_it_on() {
+        let text = "[theme]\nname = \"breeze-light\"\nfont-size = 16\n\
+                    [theme.palette]\naccent = \"#e93d5a\"";
+        let shell = shell(text, ShellBuilt::FULL).unwrap();
+        assert_eq!(shell.font.size, 16);
+        assert_eq!(
+            shell.palette[Role::Accent],
+            Rgba::new(0xe9, 0x3d, 0x5a, 0xff)
+        );
+        assert_eq!(
+            shell.palette[Role::Panel],
+            Builtin::BreezeLight.palette()[Role::Panel]
+        );
+        assert_eq!(parse(text, SEAT).unwrap().shell, shell);
+        assert_ne!(
+            shell.palette,
+            Shell::profile(Profile::Classic, ShellBuilt::FULL).palette
+        );
     }
 
     #[test]

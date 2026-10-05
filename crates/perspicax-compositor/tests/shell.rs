@@ -890,6 +890,27 @@ fn a_picture_shows_the_menu_over_a_window() {
     std::fs::remove_file(file).ok();
 }
 
+/// The panel is drawn in the theme's colours, and a theme saved while the
+/// shell runs reaches it in place.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_panel_wears_the_theme_and_one_saved_later_in_place() {
+    use perspicax_policy::{Builtin, Role};
+
+    let session = Session::start("shell-theme", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "theme", "[theme.palette]\npanel = \"#102030\"\n");
+    session.wait_for(|facts| panels(facts).len() == 1);
+    until_colour(&session, (640, 790), [0x10, 0x20, 0x30, 0xff]);
+
+    shell.rewrite("[theme]\nname = \"breeze-dark\"\n");
+    session.command(Command::ReconfigureShell);
+    let dark = Builtin::BreezeDark.palette()[Role::Panel];
+    until_colour(&session, (640, 790), [dark.r, dark.g, dark.b, 0xff]);
+
+    shell.stop_with(session);
+}
+
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn the_panel_reserves_its_height() {

@@ -21,13 +21,23 @@ pub(crate) use shapes::{fill, scaled};
 
 /// What the menus, the panels and the desktop folder's icons are drawn
 /// with: the fonts, and the icon theme's images, each found once and
-/// shared. Empty in a shell of a wallpaper alone, which draws neither, so
-/// that what draws a desktop takes it either way.
+/// shared, and the theme's colours. Empty in a shell of a wallpaper alone,
+/// which draws neither, so that what draws a desktop takes it either way.
 pub(crate) struct Kit {
     #[cfg(any(feature = "menus", feature = "panel"))]
     pub(crate) fonts: text::Fonts,
     #[cfg(any(feature = "menus", feature = "panel"))]
     pub(crate) images: icons::Images,
+    #[cfg(any(feature = "menus", feature = "panel"))]
+    pub(crate) palette: perspicax_config::Palette,
+}
+
+/// `role`'s colour in `palette`, as tiny-skia's paint takes it: RGBA with
+/// straight alpha.
+#[cfg(any(feature = "menus", feature = "panel"))]
+pub(crate) fn colour(palette: &perspicax_config::Palette, role: perspicax_config::Role) -> [u8; 4] {
+    let perspicax_config::Rgba { r, g, b, a } = palette[role];
+    [r, g, b, a]
 }
 
 /// What the menus and the panel are drawn with.

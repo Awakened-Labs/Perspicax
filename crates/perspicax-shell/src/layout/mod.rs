@@ -11,7 +11,7 @@ pub(crate) mod menu;
 #[cfg(feature = "panel")]
 pub(crate) mod panel;
 
-/// The text's size, in menus and on panels.
+/// The text's size, in menus and on panels, unless the theme says another.
 pub(crate) const TEXT: f32 = 14.0;
 
 /// A rectangle in a surface's logical pixels, from its top-left corner.
@@ -81,6 +81,13 @@ pub(crate) fn first<'a>(monitors: &[(&'a str, (i32, i32))]) -> Option<&'a str> {
 /// How wide a line of text is drawn, in logical pixels.
 pub(crate) trait Measure {
     fn width(&mut self, text: &str) -> f32;
+
+    /// The text's size, in logical pixels: the theme's font size. Only the
+    /// desktop's icons lay out by it; menu rows are tall enough for any.
+    #[cfg(feature = "icons")]
+    fn size(&self) -> f32 {
+        TEXT
+    }
 }
 
 /// Every character the same width, for tests.
