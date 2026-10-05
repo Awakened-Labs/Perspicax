@@ -25,8 +25,9 @@ mod shell;
 use std::path::{Path, PathBuf};
 
 use perspicax_policy::{
-    Access, Action, Bindings, Chord, Colour, Decorations, Direction, Flipping, Focus, FocusModel,
-    Grid, Keysym, Mods, Place, Program, Protocol, Rule, Shape, Side, Snapping, Towards,
+    Access, Action, Bindings, Builtin, Chord, Decorations, Direction, Family, Flipping, Focus,
+    FocusModel, Font, Grid, Keysym, Mods, Place, Program, Protocol, Rgba, Role, Rule, Shape, Side,
+    Snapping, Theme, Towards,
 };
 use serde::Deserialize;
 
@@ -86,7 +87,10 @@ pub struct Config {
     /// of a monitor.
     pub snapping: Snapping,
     /// Who draws a window's titlebar and border, and what they look like.
+    /// Its colours are the theme's titlebar colours.
     pub decorations: Decorations,
+    /// What everything perspicax draws looks like: the `[theme]` table.
+    pub theme: Theme,
     /// Whether X11 applications get an Xwayland. Only meaningful in a build
     /// with the `xwayland` feature; saying `true` in one without it is an
     /// error.
@@ -397,6 +401,7 @@ impl Config {
                 },
             },
             decorations: Decorations::default(),
+            theme: Theme::default(),
             xwayland: built.xwayland,
             protocols: protocols(built),
             shell: Shell::profile(profile, ShellBuilt::FULL),
@@ -579,8 +584,20 @@ struct Raw {
     workspaces: Option<RawWorkspaces>,
     snap: Option<RawSnap>,
     decorations: Option<RawDecorations>,
+    theme: Option<RawTheme>,
     protocols: Option<RawProtocols>,
     shell: Option<RawShell>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawTheme {
+    name: Option<String>,
+    font: Option<String>,
+    font_size: Option<u16>,
+    /// By role, checked against [`Role`] rather than by serde, so that a
+    /// misspelled role is named with the table it is in.
+    palette: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -888,9 +905,15 @@ impl Raw {
             config.snapping.drag = snap.drag.unwrap_or(config.snapping.drag);
         }
 
+        config.theme = theme(self.theme, self.decorations.as_ref())?;
         if let Some(decorations) = self.decorations {
             config.decorations = decorations.apply(config.decorations)?;
         }
+        let palette = &config.theme.palette;
+        config.decorations.focused = palette[Role::TitleFocused].colour();
+        config.decorations.focused_ink = palette[Role::TitleFocusedInk].colour();
+        config.decorations.unfocused = palette[Role::TitleUnfocused].colour();
+        config.decorations.unfocused_ink = palette[Role::TitleUnfocusedInk].colour();
 
         if let Some(protocols) = self.protocols {
             config.protocols = protocols.apply(config.protocols, built)?;
@@ -942,22 +965,110 @@ impl RawDecorations {
         if let Some(border) = self.border {
             decorations.border = pixels("border", border, 0..=32)?;
         }
-        let colour = |key: &str, text: String| {
-            Colour::parse(&text).ok_or_else(|| {
-                invalid(
-                    format!("decorations.{key}"),
-                    format!("{text:?} is not a colour; write one as \"#rrggbb\""),
-                )
-            })
-        };
-        if let Some(focused) = self.focused {
-            decorations.focused = colour("focused", focused)?;
-        }
-        if let Some(unfocused) = self.unfocused {
-            decorations.unfocused = colour("unfocused", unfocused)?;
-        }
+        // Its colours are the theme's: see `theme`.
         Ok(decorations)
     }
+}
+
+/// The `[theme]` table, decided: a theme by name, the colours a person wrote
+/// over it, and the font.
+///
+/// `[decorations] focused` and `unfocused` were the titlebars' colours before
+/// there were themes, and still are: the same two roles, written in the older
+/// place. Writing one in both places is refused rather than one quietly
+/// winning.
+fn theme(written: Option<RawTheme>, decorations: Option<&RawDecorations>) -> Result<Theme, Error> {
+    let written = written.unwrap_or_default();
+    let builtin = match written.name {
+        Some(name) => Builtin::named(&name).ok_or_else(|| {
+            let known: Vec<&str> = Builtin::ALL.iter().map(|theme| theme.name()).collect();
+            invalid(
+                "theme.name".to_owned(),
+                format!("{name:?} is not a theme; there are {}", known.join(", ")),
+            )
+        })?,
+        None => Builtin::default(),
+    };
+
+    let mut colours = std::collections::BTreeMap::new();
+    for (key, text) in written.palette.unwrap_or_default() {
+        let at = format!("theme.palette.{key}");
+        let role = Role::keyed(&key)
+            .ok_or_else(|| invalid(at.clone(), "is not one of the palette's colours".to_owned()))?;
+        colours.insert(role, palette_colour(&at, role, &text)?);
+    }
+    if let Some(decorations) = decorations {
+        let older = [
+            ("focused", &decorations.focused, Role::TitleFocused),
+            ("unfocused", &decorations.unfocused, Role::TitleUnfocused),
+        ];
+        for (key, text, role) in older {
+            let Some(text) = text else { continue };
+            let at = format!("decorations.{key}");
+            if colours.contains_key(&role) {
+                return Err(invalid(
+                    at,
+                    format!(
+                        "is [theme.palette] {} as well; write it in one place",
+                        role.key()
+                    ),
+                ));
+            }
+            colours.insert(role, palette_colour(&at, role, text)?);
+        }
+    }
+
+    let mut font = Font::default();
+    if let Some(family) = written.font {
+        if family.trim().is_empty() {
+            return Err(invalid(
+                "theme.font".to_owned(),
+                "an empty name; leave it out for the system's sans-serif".to_owned(),
+            ));
+        }
+        font.family = Family::parse(&family);
+    }
+    if let Some(size) = written.font_size {
+        if !(10..=20).contains(&size) {
+            return Err(invalid(
+                "theme.font-size".to_owned(),
+                format!("{size} is outside 10 to 20 pixels"),
+            ));
+        }
+        font.size = size;
+    }
+
+    Ok(Theme {
+        builtin,
+        palette: builtin.palette().written_over(&colours),
+        font,
+    })
+}
+
+/// A colour written for `role` at `at`: opaque, unless the role is one of the
+/// few drawn see-through.
+fn palette_colour(at: &str, role: Role, text: &str) -> Result<Rgba, Error> {
+    let colour = Rgba::parse(text).ok_or_else(|| {
+        let forms = if role.takes_alpha() {
+            "\"#rrggbb\" or \"#rrggbbaa\""
+        } else {
+            "\"#rrggbb\""
+        };
+        invalid(
+            at.to_owned(),
+            format!("{text:?} is not a colour; write one as {forms}"),
+        )
+    })?;
+    if !colour.is_opaque() && !role.takes_alpha() {
+        return Err(invalid(
+            at.to_owned(),
+            format!(
+                "{text:?} is see-through, and this is drawn opaque so the compositor can \
+                 say what it covers; write it as \"#rrggbb\""
+            ),
+        ));
+    }
+    Ok(colour)
 }
 
 impl RawProtocols {
@@ -1238,6 +1349,8 @@ fn invalid(key: String, reason: String) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use perspicax_policy::{Colour, Palette};
+
     use super::*;
 
     const SEAT: Built = Built {
@@ -1625,6 +1738,98 @@ mod tests {
             assert!(error.to_string().contains(key), "{error}");
         }
         assert!(parse("[decorations]\nmode = \"both\"", SEAT).is_err());
+    }
+
+    #[test]
+    fn with_no_theme_the_desk_looks_as_it_did_before_themes() {
+        let config = parse("", SEAT).unwrap();
+        assert_eq!(config.theme, Theme::default());
+        assert_eq!(config.decorations, Decorations::default());
+    }
+
+    #[test]
+    fn a_theme_is_named_and_written_over_one_colour_at_a_time() {
+        let config = parse(
+            "[theme]\nname = \"breeze-dark\"\nfont = \"Noto Sans\"\nfont-size = 12\n\
+             [theme.palette]\npanel = \"#102030\"\nselected = \"#ff000080\"\n",
+            SEAT,
+        )
+        .unwrap();
+        let theme = config.theme;
+        assert_eq!(theme.builtin, Builtin::BreezeDark);
+        assert_eq!(theme.font.family, Family::Named("Noto Sans".to_owned()));
+        assert_eq!(theme.font.size, 12);
+        assert_eq!(
+            theme.palette[Role::Panel],
+            Rgba::new(0x10, 0x20, 0x30, 0xff)
+        );
+        assert_eq!(theme.palette[Role::Selected], Rgba::new(0xff, 0, 0, 0x80));
+        // The rest is the theme's own.
+        let dark = Builtin::BreezeDark.palette();
+        assert_eq!(theme.palette[Role::Menu], dark[Role::Menu]);
+        // And the titlebars wear the theme's colours.
+        assert_eq!(
+            config.decorations.focused,
+            dark[Role::TitleFocused].colour()
+        );
+        assert_eq!(
+            config.decorations.unfocused_ink,
+            dark[Role::TitleUnfocusedInk].colour()
+        );
+    }
+
+    /// `[decorations] focused` predates themes. It still says the focused
+    /// titlebar's colour, its ink follows as it always did, and writing the
+    /// colour in both places is refused rather than one quietly winning.
+    #[test]
+    fn the_older_titlebar_colours_are_the_palettes_and_not_twice() {
+        let config = parse("[decorations]\nfocused = \"#ffffff\"", SEAT).unwrap();
+        assert_eq!(config.decorations.focused, Colour::rgb(0xff, 0xff, 0xff));
+        assert_eq!(config.decorations.focused_ink, Colour::rgb(0, 0, 0));
+        assert_eq!(
+            config.theme.palette[Role::TitleFocused],
+            Rgba::new(0xff, 0xff, 0xff, 0xff)
+        );
+
+        let error = parse(
+            "[decorations]\nfocused = \"#ffffff\"\n[theme.palette]\ntitle-focused = \"#000000\"",
+            SEAT,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, Error::Invalid { key, .. } if key == "decorations.focused"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_theme_that_cannot_be_drawn_is_refused_by_its_key() {
+        for (text, key) in [
+            ("name = \"Breeze\"", "theme.name"),
+            ("font = \" \"", "theme.font"),
+            ("font-size = 40", "theme.font-size"),
+            (
+                "[theme.palette]\nbackground = \"#000000\"",
+                "theme.palette.background",
+            ),
+            ("[theme.palette]\npanel = \"dark\"", "theme.palette.panel"),
+            // Opaque, so the compositor can prove what a panel covers.
+            (
+                "[theme.palette]\npanel = \"#00000080\"",
+                "theme.palette.panel",
+            ),
+        ] {
+            let error = parse(&format!("[theme]\n{text}"), SEAT).unwrap_err();
+            assert!(
+                matches!(&error, Error::Invalid { key: at, .. } if at == key),
+                "{text}: {error}"
+            );
+        }
+        assert!(matches!(
+            parse("[theme]\ncolour = \"#000000\"", SEAT),
+            Err(Error::Parse(_))
+        ));
+        assert_eq!(Palette::default(), Builtin::Perspicax.palette());
     }
 
     #[test]

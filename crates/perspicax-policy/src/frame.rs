@@ -65,8 +65,12 @@ pub struct Decorations {
     pub border: i32,
     /// The frame of the window with the keyboard.
     pub focused: Colour,
+    /// Its title and buttons.
+    pub focused_ink: Colour,
     /// Every other frame.
     pub unfocused: Colour,
+    /// Their titles and buttons.
+    pub unfocused_ink: Colour,
 }
 
 impl Default for Decorations {
@@ -76,7 +80,9 @@ impl Default for Decorations {
             title: 24,
             border: 2,
             focused: Colour::rgb(0x2d, 0x6f, 0xa3),
+            focused_ink: Colour::rgb(0xff, 0xff, 0xff),
             unfocused: Colour::rgb(0x47, 0x50, 0x57),
+            unfocused_ink: Colour::rgb(0xff, 0xff, 0xff),
         }
     }
 }

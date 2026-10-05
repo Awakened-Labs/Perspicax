@@ -40,6 +40,7 @@ mod restart;
 mod snap;
 mod tabs;
 mod tap;
+mod theme;
 mod workspace;
 
 pub use crate::{
@@ -61,6 +62,7 @@ pub use crate::{
     snap::{Snapping, Zone, keyed, zone},
     tabs::Groups,
     tap::{LogoTap, is_logo},
+    theme::{Builtin, Family, Font, Palette, Rgba, Role, Theme, follows},
     workspace::{Cell, Direction, Grid, GroupView, Home, Mode, Shape, WorkspaceView, Workspaces},
 };
 

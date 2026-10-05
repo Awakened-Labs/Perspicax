@@ -235,6 +235,7 @@ pub(crate) fn reload(state: &mut Compositor) {
     let keyboard_changed = fresh.keyboard != session.settings.keyboard;
     let outputs_changed = fresh.outputs != session.settings.outputs;
     let decorations_changed = fresh.decorations != session.settings.decorations;
+    let theme_changed = fresh.theme != session.settings.theme;
     let access = (fresh.protocols != session.settings.protocols).then(|| fresh.protocols.clone());
     let shell_changed = fresh.shell != session.settings.shell;
     let shell = session.settings.shell.clone();
@@ -269,6 +270,11 @@ pub(crate) fn reload(state: &mut Compositor) {
     if decorations_changed {
         state.refit_frames();
     }
+    // The titles' font and the snap preview are drawn from the settings as
+    // they are; a frame drawn since only has to be drawn again.
+    if theme_changed {
+        state.backend.redraw();
+    }
     let access_changed = access.is_some();
     if let Some(access) = access {
         state.set_access(access);
@@ -280,6 +286,7 @@ pub(crate) fn reload(state: &mut Compositor) {
         keyboard_changed,
         outputs_changed,
         decorations_changed,
+        theme_changed,
         access_changed,
         shell_changed,
         "config reloaded"

@@ -188,10 +188,10 @@ impl Compositor {
         let decorations = self.backend.decorations();
         let focused = self.focused_surface();
         for window in self.space.elements() {
-            let colour = if focused.is_some() && crate::shell::id_of(window) == focused {
-                decorations.focused
+            let (colour, ink) = if focused.is_some() && crate::shell::id_of(window) == focused {
+                (decorations.focused, decorations.focused_ink)
             } else {
-                decorations.unfocused
+                (decorations.unfocused, decorations.unfocused_ink)
             };
             let insets = self.insets(window);
             let size = crate::shell::extent_size(window);
@@ -202,7 +202,7 @@ impl Compositor {
             } else {
                 0
             };
-            window.wear(insets, grip, colour, title_at);
+            window.wear(insets, grip, colour, ink, title_at);
         }
     }
 
