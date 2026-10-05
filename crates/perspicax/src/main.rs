@@ -26,7 +26,11 @@
 //! mapping; headless, that log is the only way to watch a compositor that
 //! deliberately draws nothing.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, mpsc},
+    time::Duration,
+};
 
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
@@ -105,8 +109,10 @@ struct Cli {
     /// **This takes over stdout**, which becomes the JSON-RPC wire. Logging
     /// goes to stderr in every mode; see the note in `main`.
     ///
-    /// The session ends when the client does: an agent-driven compositor with
-    /// no agent left has nothing to host.
+    /// Headless, the run ends when the client does: an agent-driven compositor
+    /// with no agent left has nothing to host, and it exits non-zero if the
+    /// agent interface failed rather than ended. On `--seat` the session is the
+    /// person's, and it outlives the client however the client goes.
     #[arg(long)]
     mcp: bool,
 
@@ -198,46 +204,69 @@ fn main() -> Result<()> {
         dump_when_ready(facts.clone(), stop.clone(), after);
     }
 
-    if cli.mcp {
+    // Headless, the agent is who the run is for. On a seat it is the person's
+    // session, and no agent interface ending -- cleanly or not -- may take
+    // their windows with it (issue #26).
+    let agent_ends_session = !cli.seat;
+    let agent = cli.mcp.then(|| {
         let desk = Arc::new(Desk::new(&facts, &Host::new(&facts, &requests)));
-        serve(Arc::clone(&desk), stop.clone());
+        let ended = serve(Arc::clone(&desk), stop.clone(), agent_ends_session);
         keep_current(
             desk,
             facts.clone(),
             stop.clone(),
             Duration::from_secs_f64(cli.settle),
         );
-    }
+        ended
+    });
 
-    perspicax_compositor::run(&config, &facts, &requests, &stop).context("the compositor stopped")
+    perspicax_compositor::run(&config, &facts, &requests, &stop)
+        .context("the compositor stopped")?;
+
+    // A run the agent interface ended by failing is not a clean end, and a
+    // script or a supervisor watching the exit status should be able to tell.
+    if agent_ends_session && let Some(Ok(Err(error))) = agent.map(|ended| ended.try_recv()) {
+        return Err(error.context("the agent interface failed"));
+    }
+    Ok(())
 }
 
-/// Serve the agent interface on its own thread, with its own runtime.
+/// Serve the agent interface on its own thread, with its own runtime, and say
+/// on the channel returned how it ended.
 ///
 /// The same arrangement `dump_when_ready` uses and for the same reason: Wayland
 /// state is not `Send` and the calloop loop must not be blocked, while an MCP
 /// server spends its life waiting on a pipe.
-fn serve(desk: Arc<Desk>, stop: Stop) {
+///
+/// `ends_session` is whether the interface ending ends the session too. Over
+/// stdio it cannot come back: there is no second stdin for another client to
+/// arrive on.
+fn serve(desk: Arc<Desk>, stop: Stop, ends_session: bool) -> mpsc::Receiver<Result<()>> {
+    let (tell, ended) = mpsc::channel();
     std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
+        let outcome = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-        {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                tracing::error!(%error, "no runtime for the agent interface");
-                stop.request();
-                return;
-            }
-        };
-
-        if let Err(error) = runtime.block_on(perspicax_mcp::serve(desk)) {
-            tracing::error!(%error, "the agent interface stopped");
+            .context("no runtime for the agent interface")
+            .and_then(|runtime| Ok(runtime.block_on(perspicax_mcp::serve(desk))?));
+        match &outcome {
+            Ok(()) => tracing::info!("the agent's client went away"),
+            Err(error) => tracing::error!("the agent interface stopped: {error:#}"),
         }
-        // The client going away ends the session. This process exists to be
-        // driven, and there is nobody left to drive it.
-        stop.request();
+
+        // Told before the stop is asked for, so that `main`, which looks once
+        // the compositor has stopped, finds it there. Nobody listening is
+        // `main` already on its way out, which needs telling nothing.
+        let _ = tell.send(outcome);
+        if ends_session {
+            // This process exists to be driven, and there is nobody left to
+            // drive it.
+            stop.request();
+        } else {
+            tracing::warn!("the session runs on without an agent interface");
+        }
     });
+    ended
 }
 
 /// Turn accessibility on for this session, briefly borrowing a runtime to do
