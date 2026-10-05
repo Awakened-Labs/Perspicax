@@ -112,3 +112,40 @@ fn a_stop_request_ends_the_loop_before_its_deadline() {
         "waited for the deadline instead of the request"
     );
 }
+
+/// The socket's name is published as the compositor comes up, before anything
+/// it starts could ask for it: it is what the session bus is told, so that a
+/// program D-Bus starts on request -- a keyring's unlock prompt, a portal --
+/// can find this compositor (issue #27).
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_socket_is_published_to_whoever_watches_the_session() {
+    let socket = format!("perspicax-test-session-{}", std::process::id());
+    let config = Config {
+        backend: Backend::headless((800, 600)),
+        spawn: Vec::new(),
+        env: Vec::new(),
+        run_for: Some(Duration::from_millis(250)),
+        config: None,
+        socket: Some(socket.clone()),
+        xwayland: false,
+    };
+
+    let facts = Facts::new();
+    let watch = facts.watch_session();
+    perspicax_compositor::run(&config, &facts, &Requests::new(), &Stop::new())
+        .expect("a headless compositor needs nothing but a runtime dir");
+
+    let heard: Vec<_> = watch.try_iter().collect();
+    assert_eq!(
+        heard.first().map(|facts| facts.wayland_display.clone()),
+        Some(None),
+        "a watcher hears first that there is no socket yet"
+    );
+    assert_eq!(
+        heard.last().and_then(|facts| facts.wayland_display.clone()),
+        Some(socket),
+        "the socket was never published: {heard:?}"
+    );
+    assert_eq!(facts.session().x11_display, None);
+}
