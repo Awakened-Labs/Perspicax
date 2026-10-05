@@ -4,7 +4,8 @@
 //! with Lock and Log Out at its foot, as on Plasma's desktop. A menu file
 //! may put items of its own above them, or replace the lot. The start menu
 //! is the same, without the menu file's say: it is where every application
-//! can always be found.
+//! can always be found. A tray icon's menu is its program's, and what is
+//! chosen in it is told back to that program.
 
 use super::{
     apps::{App, Run},
@@ -39,8 +40,34 @@ pub(crate) enum Does {
     Open(Menu),
     /// End the session.
     LogOut,
+    /// Tell the program whose menu it is that this, its item, was chosen:
+    /// a tray icon's menu, which its program builds and answers itself.
+    #[cfg(feature = "tray")]
+    Tell(Choice),
     /// Nothing: a line between groups of items.
     Separator,
+}
+
+/// An item of a program's own menu, as its tray icon's menu shows it.
+#[cfg(feature = "tray")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Choice {
+    /// The program's own number for it, which it is told back.
+    pub(crate) id: i32,
+    /// Greyed out: shown, and not to be chosen.
+    pub(crate) enabled: bool,
+    /// A tick or a dot beside it, saying whether it is on.
+    pub(crate) mark: Option<Mark>,
+}
+
+/// What stands beside an item that is on or off.
+#[cfg(feature = "tray")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mark {
+    /// A tick, on or off by itself.
+    Check(bool),
+    /// A dot, one of a group of which one is on.
+    Radio(bool),
 }
 
 /// An item's place in the tree: its index in each menu on the way down
@@ -57,7 +84,7 @@ pub(crate) struct Session {
 }
 
 impl Item {
-    fn separator() -> Self {
+    pub(crate) fn separator() -> Self {
         Self {
             label: String::new(),
             icon: None,
@@ -66,9 +93,20 @@ impl Item {
         }
     }
 
-    /// Whether it can be chosen: everything but a separator.
+    /// Whether it can be chosen: everything but a separator, and an item
+    /// its program greyed out.
     pub(crate) fn choosable(&self) -> bool {
-        !matches!(self.does, Does::Separator)
+        match &self.does {
+            Does::Separator => false,
+            #[cfg(feature = "tray")]
+            Does::Tell(choice) => choice.enabled,
+            _ => true,
+        }
+    }
+
+    /// Whether it is a line between groups of items rather than an item.
+    pub(crate) fn is_separator(&self) -> bool {
+        matches!(self.does, Does::Separator)
     }
 
     /// The submenu it opens, if it opens one.
@@ -149,24 +187,26 @@ impl Menu {
                 Does::Run(_) => visit(route, item),
                 Does::Open(menu) => menu.each_run(route, visit),
                 Does::LogOut | Does::Separator => {}
+                #[cfg(feature = "tray")]
+                Does::Tell(_) => {}
             }
             route.pop();
         }
     }
 
     /// No separator first, last, or beside another, here or in any submenu.
-    fn tidy(mut self) -> Self {
+    pub(crate) fn tidy(mut self) -> Self {
         let mut items: Vec<Item> = Vec::with_capacity(self.items.len());
         for mut item in self.items.drain(..) {
             if let Does::Open(menu) = item.does {
                 item.does = Does::Open(menu.tidy());
             }
-            let after_separator = items.last().is_none_or(|last| !last.choosable());
-            if item.choosable() || !after_separator {
+            let after_separator = items.last().is_none_or(Item::is_separator);
+            if !item.is_separator() || !after_separator {
                 items.push(item);
             }
         }
-        if items.last().is_some_and(|last| !last.choosable()) {
+        if items.last().is_some_and(Item::is_separator) {
             items.pop();
         }
         Self { items }

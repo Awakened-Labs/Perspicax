@@ -5,8 +5,11 @@
 //! window's title: the window with the keyboard in the highlight's shade,
 //! with a line of the highlight along the screen's edge, and a minimized one
 //! with no face and its title faint. The pager is a grid of small screens,
-//! each with its workspace's name, the one showing lit. The clock is the
-//! time, in the panel's ink. Every pixel of it is opaque.
+//! each with its workspace's name, the one showing lit. Each of the tray's
+//! icons sits in the middle of its slot, drawn from the icon its program
+//! names if it is found, otherwise from the picture its program sent
+//! nearest the size. The clock is the time, in the panel's ink. Every pixel
+//! of it is opaque.
 
 use perspicax_config::{Edge, Item};
 use tiny_skia::PixmapMut;
@@ -51,8 +54,12 @@ const LINE: i32 = 2;
 /// A task's icon, square, and the room around it and the title.
 const ICON: i32 = 22;
 const INSET: i32 = 6;
-/// The icon a window is drawn with when its application has none.
+/// The icon a window is drawn with when its application has none, and a
+/// status icon whose program gives none that can be drawn.
 const GENERIC: &str = "application-x-executable";
+/// The least room above and below a status icon.
+#[cfg(feature = "tray")]
+const TRAY_MARGIN: i32 = 2;
 
 /// What a panel shows.
 pub(crate) struct Shown<'a> {
@@ -63,6 +70,9 @@ pub(crate) struct Shown<'a> {
     pub(crate) time: &'a str,
     /// The start menu is open from this panel's button.
     pub(crate) open: bool,
+    /// The status icons, by key, to draw those `placed` holds.
+    #[cfg(feature = "tray")]
+    pub(crate) tray: &'a [(u64, crate::model::tray::Item)],
 }
 
 /// Draw `shown` on `canvas`, a surface's pixels at `scale` times its size.
@@ -110,6 +120,12 @@ pub(crate) fn paint(
     }
     for (cell, place) in &shown.placed.cells {
         pen.cell(cell, *place);
+    }
+    #[cfg(feature = "tray")]
+    for (icon, place) in &shown.placed.tray {
+        if let Some((_, item)) = shown.tray.iter().find(|(key, _)| *key == icon.key) {
+            pen.status(item, *place, images);
+        }
     }
     fill(pen.canvas, px(rule), RULE);
 }
@@ -167,6 +183,31 @@ impl Pen<'_, '_, '_> {
         let size = TEXT * self.scale as f32;
         self.text
             .write(self.canvas, &task.title, self.px(words), size, ink);
+    }
+
+    /// A status icon, in the middle of its slot at `place`.
+    #[cfg(feature = "tray")]
+    fn status(&mut self, item: &crate::model::tray::Item, place: Rect, images: &mut Images) {
+        let side = ICON.min(place.h - 2 * TRAY_MARGIN).max(1);
+        let at = self.px(Rect::new(
+            place.x + (place.w - side) / 2,
+            place.y + (place.h - side) / 2,
+            side,
+            side,
+        ));
+        let (size, scale) = (side as u32, self.scale);
+        let icon = item.drawn();
+        if let Some(image) = icon
+            .name
+            .as_deref()
+            .and_then(|name| images.get_from(icon.folder.as_deref(), name, size, scale))
+        {
+            icons::draw(self.canvas, image, at);
+        } else if let Some(picture) = crate::model::tray::chosen(&icon.pixmaps, size * scale) {
+            icons::draw(self.canvas, picture, at);
+        } else if let Some(image) = images.get(GENERIC, size, scale) {
+            icons::draw(self.canvas, image, at);
+        }
     }
 
     /// A workspace's cell, at `place`: a small screen with its name in the
@@ -244,6 +285,8 @@ mod tests {
                 time: "14:05",
                 tasks: vec![task(0, "Editor", false), task(1, "Mail", true)],
                 cells: vec![cell(10, 0), cell(11, 1)],
+                #[cfg(feature = "tray")]
+                tray: Vec::new(),
             },
             (600, 40),
             &mut Monospace(8.0),
@@ -259,6 +302,8 @@ mod tests {
                 placed,
                 time: "14:05",
                 open,
+                #[cfg(feature = "tray")]
+                tray: &[],
             },
             &mut picture.as_mut(),
             scale,

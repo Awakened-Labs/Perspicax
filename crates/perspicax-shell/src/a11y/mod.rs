@@ -253,8 +253,8 @@ mod menus {
 
     use super::{ROOT, rect, window};
     use crate::{
-        model::menu::Route,
-        update::{View, Which},
+        model::menu::{Item, Route},
+        update::View,
     };
 
     /// An open menu's node: its place in the cascade, below this.
@@ -297,7 +297,9 @@ mod menus {
 
     /// The menus' surface: a window named `namespace` covering it, holding
     /// a `Menu` for each open menu, each holding a `MenuItem` for each line
-    /// that can be chosen, named as drawn. The focus is the line the keyboard
+    /// that is not a separator, named as drawn: one its program greyed out
+    /// disabled, and one with a tick or a dot a `MenuItemCheckBox` or a
+    /// `MenuItemRadio`, toggled as drawn. The focus is the line the keyboard
     /// is on, or the root menu.
     pub(crate) fn menu(
         namespace: &str,
@@ -314,10 +316,7 @@ mod menus {
                 focus = id;
             }
             let mut node = Node::new(Role::Menu);
-            let first = match view.map(|view| view.which) {
-                Some(Which::Start) => "Start menu",
-                _ => "Root menu",
-            };
+            let first = view.map_or("Root menu", |view| view.name);
             node.set_label(menu.opened_by.map_or(first, |item| item.label.as_str()));
             node.set_bounds(rect(menu.rect));
             if let (Some(header), Some(query)) = (menu.header, view.and_then(|view| view.query)) {
@@ -330,14 +329,11 @@ mod menus {
                 nodes.push((TYPED, typed));
             }
             for line in &menu.lines {
-                let Some(id) = item(line.route).filter(|_| line.item.choosable()) else {
+                let Some(id) = item(line.route).filter(|_| !line.item.is_separator()) else {
                     continue;
                 };
-                let mut entry = Node::new(Role::MenuItem);
-                entry.set_label(line.item.label.as_str());
+                let mut entry = entry(line.item);
                 entry.set_bounds(rect(line.rect));
-                entry.add_action(Action::Click);
-                entry.add_action(Action::Focus);
                 if line.item.submenu().is_some() {
                     entry.set_has_popup(HasPopup::Menu);
                     entry.set_expanded(line.open);
@@ -360,6 +356,40 @@ mod menus {
             tree_id: TreeId::ROOT,
             focus,
         }
+    }
+
+    /// A menu item, as `item` is: chosen by a click, or moved to by focus,
+    /// unless it is greyed out.
+    fn entry(item: &Item) -> Node {
+        #[cfg(feature = "tray")]
+        if let crate::model::menu::Does::Tell(choice) = item.does {
+            use accesskit::Toggled;
+
+            use crate::model::menu::Mark;
+
+            let (role, on) = match choice.mark {
+                Some(Mark::Check(on)) => (Role::MenuItemCheckBox, Some(on)),
+                Some(Mark::Radio(on)) => (Role::MenuItemRadio, Some(on)),
+                None => (Role::MenuItem, None),
+            };
+            let mut entry = Node::new(role);
+            entry.set_label(item.label.as_str());
+            if let Some(on) = on {
+                entry.set_toggled(if on { Toggled::True } else { Toggled::False });
+            }
+            if choice.enabled {
+                entry.add_action(Action::Click);
+                entry.add_action(Action::Focus);
+            } else {
+                entry.set_disabled();
+            }
+            return entry;
+        }
+        let mut entry = Node::new(Role::MenuItem);
+        entry.set_label(item.label.as_str());
+        entry.add_action(Action::Click);
+        entry.add_action(Action::Focus);
+        entry
     }
 
     #[cfg(test)]
@@ -554,10 +584,15 @@ mod panels {
     const CLOCK: NodeId = NodeId(3);
     const TASKBAR: NodeId = NodeId(4);
     const PAGER: NodeId = NodeId(5);
-    /// A task's node, and a workspace's: the serial of its window or its
-    /// workspace, which stays its own while it lasts, above one of these.
+    #[cfg(feature = "tray")]
+    const TRAY: NodeId = NodeId(6);
+    /// A task's node, a workspace's and a status icon's: the serial of its
+    /// window or its workspace, or the icon's key, which stays its own
+    /// while it lasts, above one of these.
     const TASK: u64 = 1;
     const WORKSPACE: u64 = 2;
+    #[cfg(feature = "tray")]
+    const STATUS: u64 = 3;
     const SERIAL_BITS: u32 = 40;
 
     /// What on a panel the node `id` is, if it is something to press.
@@ -567,6 +602,8 @@ mod panels {
             (START, _) => Some(Part::Start),
             (_, TASK) => Some(Part::Task(serial)),
             (_, WORKSPACE) => Some(Part::Workspace(serial)),
+            #[cfg(feature = "tray")]
+            (_, STATUS) => Some(Part::Tray(serial)),
             _ => None,
         }
     }
@@ -581,7 +618,9 @@ mod panels {
     /// The taskbar is a `TabList` of a `Tab` for each window, named by its
     /// title, the one with the keyboard selected and a minimized one
     /// described so; the pager is a `TabList` of a `Tab` for each workspace,
-    /// the one showing selected. The clock is a `Status` whose value is the
+    /// the one showing selected. The tray is a `Group` of a `Button` for
+    /// each status icon, named as its program names it, that opens a menu
+    /// if it has one. The clock is a `Status` whose value is the
     /// `time` it shows, and whose description is too, for a reader of names
     /// and descriptions alone (as perspicax is, for now). What takes no room
     /// on the panel is not in the tree.
@@ -635,6 +674,25 @@ mod panels {
                     });
                     (PAGER, tab_list("Workspaces", tabs, &mut nodes))
                 }
+                #[cfg(feature = "tray")]
+                Item::Tray => {
+                    let mut group = Node::new(Role::Group);
+                    group.set_label("Tray");
+                    for (icon, place) in &placed.tray {
+                        let mut button = Node::new(Role::Button);
+                        button.set_label(icon.title.as_str());
+                        button.set_bounds(rect(*place));
+                        button.add_action(Action::Click);
+                        if icon.menu {
+                            button.set_has_popup(HasPopup::Menu);
+                        }
+                        let id = node_of(STATUS, icon.key);
+                        group.push_child(id);
+                        nodes.push((id, button));
+                    }
+                    (TRAY, group)
+                }
+                #[cfg(not(feature = "tray"))]
                 Item::Tray => continue,
             };
             node.set_bounds(rect(place));
@@ -700,8 +758,72 @@ mod panels {
                 time: "14:05",
                 tasks,
                 cells,
+                #[cfg(feature = "tray")]
+                tray: Vec::new(),
             };
             lay_out(&items, holding, (1280, 40), &mut Monospace(8.0))
+        }
+
+        #[cfg(feature = "tray")]
+        #[test]
+        fn the_tray_is_a_group_of_buttons_named_by_their_programs() {
+            use crate::layout::panel::TrayIcon;
+
+            let icon = |key: u64, title: &str, menu: bool| TrayIcon {
+                key,
+                title: title.to_owned(),
+                menu,
+            };
+            let placed = lay_out(
+                &[Item::Start, Item::Tray, Item::Clock],
+                Holding {
+                    time: "14:05",
+                    tasks: Vec::new(),
+                    cells: Vec::new(),
+                    tray: vec![icon(3, "Network", true), icon(8, "Updates", false)],
+                },
+                (1280, 40),
+                &mut Monospace(8.0),
+            );
+            let tree = panel(
+                "perspicax-panel-DP-1",
+                Some((1280, 40)),
+                &placed,
+                "14:05",
+                false,
+            );
+            assert_eq!(node(&tree, TOOLBAR).children(), [START, TRAY, CLOCK]);
+            let tray = node(&tree, TRAY);
+            assert_eq!((tray.role(), tray.label()), (Role::Group, Some("Tray")));
+            assert_eq!(tray.bounds(), Some(rect(placed.items[1].1)));
+            let buttons: Vec<_> = tray
+                .children()
+                .iter()
+                .map(|&id| {
+                    let button = node(&tree, id);
+                    (
+                        part_of(id),
+                        button.role(),
+                        button.label(),
+                        button.has_popup(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                buttons,
+                [
+                    (
+                        Some(Part::Tray(3)),
+                        Role::Button,
+                        Some("Network"),
+                        Some(HasPopup::Menu)
+                    ),
+                    (Some(Part::Tray(8)), Role::Button, Some("Updates"), None),
+                ],
+                "a click on each is a press on its icon"
+            );
+            let second = node(&tree, tray.children()[1]);
+            assert_eq!(second.bounds(), Some(rect(placed.tray[1].1)));
         }
 
         #[test]

@@ -1,11 +1,11 @@
 //! perspicax-shell: the desktop a person logs in to.
 //!
 //! A wallpaper on every monitor, a menu of the installed applications on a
-//! right-click, a panel with a start menu, a taskbar, a pager and a clock,
-//! and the desktop folder's icons, to be joined by a tray: each a cargo
-//! feature, and each a key in the `[shell]` table of perspicax's own config
-//! file. Icons drawn in SVG, as most icon themes draw them, are a feature of
-//! their own, `svg`.
+//! right-click, a panel with a start menu, a taskbar, a pager, other
+//! programs' status icons and a clock, and the desktop folder's icons: each
+//! a cargo feature, and each a key in the `[shell]` table of perspicax's own
+//! config file. Icons drawn in SVG, as most icon themes draw them, are a
+//! feature of their own, `svg`.
 //!
 //! perspicax starts it, but it is an ordinary Wayland client: its surfaces
 //! are layer-shell surfaces, its taskbar speaks
@@ -36,6 +36,8 @@ mod layout;
 mod model;
 #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
 mod paint;
+#[cfg(feature = "tray")]
+mod tray;
 #[cfg(feature = "menus")]
 mod update;
 mod wl;
@@ -64,6 +66,12 @@ pub struct Options {
     /// The config file. `None` is perspicax's own,
     /// `$XDG_CONFIG_HOME/perspicax/config.toml`.
     pub config: Option<PathBuf>,
+    /// The D-Bus bus the tray finds other programs' status icons on, by
+    /// its address. `None` is the session bus, the one
+    /// `DBUS_SESSION_BUS_ADDRESS` names, as for any program. Unused by a
+    /// shell built without `tray`; what agents read is on the session's
+    /// accessibility bus whatever this says.
+    pub session_bus: Option<String>,
 }
 
 /// Why the shell stopped.
@@ -113,7 +121,7 @@ pub fn run(options: Options) -> Result<(), Error> {
         Some(connection) => connection,
         None => Connection::connect_to_env()?,
     };
-    wl::run(connection, shell, path)
+    wl::run(connection, shell, path, options.session_bus)
 }
 
 /// The `[shell]` table of the config file at `path`, as this build reads it,

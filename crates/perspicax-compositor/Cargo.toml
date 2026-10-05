@@ -99,3 +99,8 @@ perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", feat
 # against a compositor on a thread: what it draws is checked in the facts and
 # in pictures, without a binary to find or a process to supervise.
 perspicax-shell = { path = "../perspicax-shell", version = "0.1.0", features = ["full"] }
+# A program's status icon and its menu, served on a bus of the test's own
+# for the shell's tray to find, as any program serves its own: zbus, the
+# tray's own, on tokio, as atspi has it for the whole workspace.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio.workspace = true

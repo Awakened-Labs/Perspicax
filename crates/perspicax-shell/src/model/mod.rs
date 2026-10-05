@@ -9,6 +9,8 @@ pub(crate) mod image;
 pub(crate) mod pager;
 #[cfg(feature = "panel")]
 pub(crate) mod tasks;
+#[cfg(feature = "tray")]
+pub(crate) mod tray;
 #[cfg(feature = "wallpaper")]
 pub(crate) mod wallpaper;
 

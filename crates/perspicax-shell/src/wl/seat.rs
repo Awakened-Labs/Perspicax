@@ -7,8 +7,11 @@
 //! the left one on its start button opens the start menu, or closes it; on
 //! a task it brings that window forward, or puts it away if it is forward
 //! already, and the middle one closes it; the left one on a workspace
-//! switches to it. Any press on a panel other than the start button's
-//! closes the menus, as a click anywhere off them does. The pointer and the
+//! switches to it. A button on a tray icon is asked of its program: the
+//! left one activates it, the middle one activates it the other way, and
+//! the right one opens its menu. Any press on a panel other than the start
+//! button's closes the menus, as a click anywhere off them does, and one on
+//! the tray icon whose menu is open does only that. The pointer and the
 //! buttons on the menus' surface, and every key while it has the keyboard,
 //! are the menus'.
 //!

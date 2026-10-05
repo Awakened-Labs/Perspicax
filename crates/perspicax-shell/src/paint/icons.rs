@@ -22,6 +22,10 @@ pub(crate) struct Images {
     /// By name and size in pixels; `None` for one that could not be found
     /// or read, so it is not looked for again.
     read: HashMap<(String, u32), Option<Pixmap>>,
+    /// The theme, with a program's own folder of icons looked in first, by
+    /// that folder.
+    #[cfg(feature = "tray")]
+    folders: HashMap<PathBuf, Icons>,
 }
 
 impl Images {
@@ -32,6 +36,8 @@ impl Images {
             theme: theme.map(str::to_owned),
             icons: Icons::new(&Disk, theme, data, home),
             read: HashMap::new(),
+            #[cfg(feature = "tray")]
+            folders: HashMap::new(),
         }
     }
 
@@ -55,6 +61,32 @@ impl Images {
                     .ok()
             })
             .as_ref()
+    }
+
+    /// The image of icon `name`, as [`Images::get`] finds it, but looked for
+    /// first in `folder`, a program's own folder of icons, if it has one:
+    /// among its loose images, and in its copy of each theme's folders.
+    #[cfg(feature = "tray")]
+    pub(crate) fn get_from(
+        &mut self,
+        folder: Option<&Path>,
+        name: &str,
+        size: u32,
+        scale: u32,
+    ) -> Option<&Pixmap> {
+        let Some(folder) = folder else {
+            return self.get(name, size, scale);
+        };
+        let icons = &self.icons;
+        let found = self
+            .folders
+            .entry(folder.to_owned())
+            .or_insert_with(|| icons.with_folder(&Disk, folder))
+            .find(&Disk, name, size, scale);
+        match found.as_deref().and_then(Path::to_str) {
+            Some(path) => self.get(path, size, scale),
+            None => self.get(name, size, scale),
+        }
     }
 }
 

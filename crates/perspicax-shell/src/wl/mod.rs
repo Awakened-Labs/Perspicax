@@ -24,6 +24,8 @@ mod panel;
 mod seat;
 #[cfg(feature = "panel")]
 mod taskbar;
+#[cfg(feature = "tray")]
+mod tray;
 
 use std::path::PathBuf;
 
@@ -45,11 +47,13 @@ use wayland_client::{
 
 use crate::Error;
 
-/// Run the shell on `connection` until the compositor goes away.
+/// Run the shell on `connection` until the compositor goes away, with its
+/// tray on the bus at address `bus`, or the session's.
 pub(crate) fn run(
     connection: Connection,
     shell: Shell,
     config: Option<PathBuf>,
+    bus: Option<String>,
 ) -> Result<(), Error> {
     let (globals, queue) =
         registry_queue_init::<App>(&connection).map_err(|error| wayland(&error))?;
@@ -75,6 +79,22 @@ pub(crate) fn run(
             .map_err(|error| wayland(&error.error))?;
         sender
     };
+    #[cfg(feature = "tray")]
+    let news = {
+        // What the tray reads arrives on its thread, and is shown here.
+        let (sender, receiver) = calloop::channel::channel();
+        event_loop
+            .handle()
+            .insert_source(receiver, |event, (), app: &mut App| {
+                if let calloop::channel::Event::Msg((started, news)) = event {
+                    app.tray_news(started, news);
+                }
+            })
+            .map_err(|error| wayland(&error.error))?;
+        sender
+    };
+    #[cfg(not(feature = "tray"))]
+    let _ = bus;
     #[cfg(any(feature = "menus", feature = "panel"))]
     let installed = installed::Installed::new(crate::model::apps::Places::from_env());
     let mut app = App {
@@ -101,6 +121,8 @@ pub(crate) fn run(
         panels: panel::Panels::new(&shell, actions.clone(), taskbar::bind(&globals, &qh)),
         #[cfg(feature = "panel")]
         ticking: None,
+        #[cfg(feature = "tray")]
+        tray: tray::Tray::new(bus, news),
         #[cfg(any(feature = "menus", feature = "panel"))]
         seat: seat::Seat::new(&globals, &qh),
         #[cfg(feature = "menus")]
@@ -124,6 +146,8 @@ pub(crate) fn run(
     app.keep_time();
     #[cfg(feature = "icons")]
     app.watch_folder();
+    #[cfg(feature = "tray")]
+    app.follow_tray(&shell);
     #[cfg(not(any(feature = "wallpaper", feature = "menus", feature = "panel")))]
     let _ = shell;
     loop {
@@ -180,6 +204,9 @@ pub(crate) struct App {
     /// The timer that moves the clock on.
     #[cfg(feature = "panel")]
     ticking: Option<calloop::RegistrationToken>,
+    /// Other programs' status icons, from the session bus.
+    #[cfg(feature = "tray")]
+    tray: tray::Tray,
     #[cfg(any(feature = "menus", feature = "panel"))]
     seat: seat::Seat,
     #[cfg(feature = "menus")]
@@ -304,6 +331,8 @@ impl App {
                 self.panels_changed();
             }
         }
+        #[cfg(feature = "tray")]
+        self.follow_tray(&shell);
         #[cfg(feature = "menus")]
         self.menus.reconfigure(&shell, self.config.as_deref());
         self.monitors_changed();
@@ -456,6 +485,8 @@ impl App {
             &self.workspaces.model,
             self.menus.start_open_on(),
         );
+        #[cfg(feature = "tray")]
+        self.menu_opened(self.menus.open_menu());
         for effect in effects {
             match effect {
                 Effect::Run(run) => self.start(&run),
@@ -466,6 +497,8 @@ impl App {
                     }
                     None => tracing::warn!("Log Out was chosen with no compositor to ask"),
                 },
+                #[cfg(feature = "tray")]
+                Effect::Tell { key, id } => self.tell_status(key, id),
                 Effect::Redraw => {}
             }
         }

@@ -17,9 +17,14 @@
 //! start button, or the start menu's key, opens the start menu standing on
 //! it. Its taskbar lists the windows, and a click on one brings it forward,
 //! puts it away or closes it; its pager shows the workspaces, follows a
-//! switch, and switches on a click. Like the other live tests it binds a
-//! real Wayland socket, so it needs `XDG_RUNTIME_DIR`, and is `#[ignore]`d
-//! for `ci/live-tests.sh` to run.
+//! switch, and switches on a click. Its tray shows a program's status icon
+//! once the program registers it, asks the program for what a click on it
+//! is for, opens its menu and tells the program what was chosen in it.
+//! Like the other live tests it binds a real Wayland socket, so it needs
+//! `XDG_RUNTIME_DIR`, and is `#[ignore]`d for `ci/live-tests.sh` to run.
+//!
+//! Each shell has a session bus of its own, a `dbus-daemon` the test starts,
+//! so that its tray meets no program of the machine running the test.
 //!
 //! The menus here are a menu file's, so that what they hold does not hang
 //! on what is installed on the machine running the test.
@@ -39,6 +44,8 @@ use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_h
 struct Shell {
     thread: thread::JoinHandle<Result<(), perspicax_shell::Error>>,
     config: PathBuf,
+    /// The session bus its tray is on.
+    bus: Bus,
 }
 
 impl Shell {
@@ -50,13 +57,16 @@ impl Shell {
             std::process::id()
         ));
         std::fs::write(&path, config).expect("a config file");
+        let bus = Bus::start();
         let options = perspicax_shell::Options {
             connection: Some(connect(session.socket())),
             config: Some(path.clone()),
+            session_bus: Some(bus.address.clone()),
         };
         Self {
             thread: thread::spawn(move || perspicax_shell::run(options)),
             config: path,
+            bus,
         }
     }
 
@@ -71,7 +81,42 @@ impl Shell {
         session.stop(());
         let stopped = self.thread.join().expect("the shell thread panicked");
         std::fs::remove_file(&self.config).ok();
+        // The bus outlives the shell, which leaves it as it stops.
+        drop(self.bus);
         stopped.expect("the shell stopped cleanly with its compositor");
+    }
+}
+
+/// A session bus of the test's own.
+struct Bus {
+    daemon: std::process::Child,
+    address: String,
+}
+
+impl Bus {
+    fn start() -> Self {
+        use std::io::BufRead;
+
+        let mut daemon = std::process::Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("dbus-daemon, which a session with a bus has");
+        let mut address = String::new();
+        std::io::BufReader::new(daemon.stdout.take().expect("its output"))
+            .read_line(&mut address)
+            .expect("its address");
+        Self {
+            daemon,
+            address: address.trim().to_owned(),
+        }
+    }
+}
+
+impl Drop for Bus {
+    fn drop(&mut self) {
+        self.daemon.kill().ok();
+        self.daemon.wait().ok();
     }
 }
 
@@ -1121,4 +1166,271 @@ fn a_taskbar_and_pager_taken_away_come_back_with_their_rules() {
 
     drop((desk, queue));
     shell.stop_with(session);
+}
+
+/// A panel along the bottom holding the start button, the taskbar and the
+/// tray, the tray last: its first icon in the 30 pixels at the panel's
+/// right end.
+#[cfg(feature = "capture")]
+const TRAY_LAST: &str =
+    "profile = \"classic\"\n[shell.panel]\nitems = [\"start\", \"taskbar\", \"tray\"]\n";
+
+/// The middle of the tray's first icon, on a 1280 by 800 monitor.
+#[cfg(feature = "capture")]
+const STATUS: (f64, f64) = (1280.0 - 15.0, 20.0);
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_item_on_the_bus_appears_in_the_tray() {
+    let session = Session::start("shell-tray", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "tray", TRAY_LAST);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let at = (STATUS.0 as usize, 800 - 20);
+    until_colour(&session, at, BAR);
+
+    // A program registers its icon, a picture of magenta.
+    let notifier = notifier::Notifier::register(&shell.bus.address);
+    until_colour(&session, at, notifier::MAGENTA);
+
+    // A click on it is asked of the program.
+    click(&session, panel, STATUS, PointerButton::Left);
+    notifier.until_asked("Activate");
+
+    // The program leaves the bus, and its icon goes with it.
+    notifier.leave();
+    until_colour(&session, at, BAR);
+
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_tray_menu_choice_is_sent_back() {
+    let session = Session::start("shell-tray-menu", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "tray-menu", TRAY_LAST);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let notifier = notifier::Notifier::register(&shell.bus.address);
+    until_colour(&session, (STATUS.0 as usize, 800 - 20), notifier::MAGENTA);
+
+    // A right click opens the program's menu, above its icon.
+    click(&session, panel, STATUS, PointerButton::Right);
+    let facts = session.wait_for(|facts| menu(facts).is_some());
+    let (surface, namespace, _, opaque) = menu(&facts).expect("waited for");
+    assert_eq!(namespace, "perspicax-menu-HEADLESS-1");
+    assert_eq!(opaque[0].y1, 800.0 - PANEL_HEIGHT, "standing on the panel");
+    assert_eq!(opaque[0].x1, 1280.0, "and kept on the monitor");
+
+    // It holds one item, and choosing it is told to the program.
+    click(&session, surface, middle(opaque[0]), PointerButton::Left);
+    notifier.until_asked("clicked 1");
+    session.wait_for(|facts| menu(facts).is_none());
+
+    notifier.leave();
+    shell.stop_with(session);
+}
+
+/// A program's status icon, served as a program serves one: a title, a
+/// picture of magenta, and a menu of one item, Quit. What it is asked is
+/// kept, to be waited for.
+#[cfg(feature = "capture")]
+mod notifier {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
+
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+
+    /// Its picture's colour, opaque.
+    pub(super) const MAGENTA: [u8; 4] = [0xff, 0x00, 0xff, 0xff];
+
+    /// What it was asked, in order.
+    type Asked = Arc<Mutex<Vec<String>>>;
+
+    pub(super) struct Notifier {
+        runtime: tokio::runtime::Runtime,
+        connection: zbus::Connection,
+        asked: Asked,
+    }
+
+    struct Item {
+        asked: Asked,
+    }
+
+    #[zbus::interface(name = "org.kde.StatusNotifierItem")]
+    impl Item {
+        fn activate(&self, _x: i32, _y: i32) {
+            self.asked.lock().unwrap().push("Activate".to_owned());
+        }
+
+        fn secondary_activate(&self, _x: i32, _y: i32) {
+            self.asked
+                .lock()
+                .unwrap()
+                .push("SecondaryActivate".to_owned());
+        }
+
+        fn context_menu(&self, _x: i32, _y: i32) {
+            self.asked.lock().unwrap().push("ContextMenu".to_owned());
+        }
+
+        #[zbus(property)]
+        fn id(&self) -> &str {
+            "perspicax-test"
+        }
+
+        #[zbus(property)]
+        fn title(&self) -> &str {
+            "Test icon"
+        }
+
+        #[zbus(property)]
+        fn status(&self) -> &str {
+            "Active"
+        }
+
+        #[zbus(property)]
+        fn icon_name(&self) -> &str {
+            ""
+        }
+
+        #[zbus(property)]
+        fn icon_pixmap(&self) -> Vec<(i32, i32, Vec<u8>)> {
+            // Alpha, red, green, blue, each pixel.
+            let argb = [0xff, MAGENTA[0], MAGENTA[1], MAGENTA[2]];
+            vec![(22, 22, argb.repeat(22 * 22))]
+        }
+
+        #[zbus(property)]
+        fn item_is_menu(&self) -> bool {
+            false
+        }
+
+        #[zbus(property)]
+        fn menu(&self) -> OwnedObjectPath {
+            OwnedObjectPath::try_from("/MenuBar").unwrap()
+        }
+    }
+
+    struct Menu {
+        asked: Asked,
+    }
+
+    /// An item of a dbusmenu layout: `(ia{sv}av)`.
+    type Layout = (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>);
+
+    fn said(key: &str, value: &str) -> (String, OwnedValue) {
+        (
+            key.to_owned(),
+            OwnedValue::try_from(Value::from(value)).unwrap(),
+        )
+    }
+
+    #[zbus::interface(name = "com.canonical.dbusmenu")]
+    impl Menu {
+        fn get_layout(&self, _parent: i32, _depth: i32, _properties: Vec<String>) -> (u32, Layout) {
+            let quit: Layout = (1, HashMap::from([said("label", "_Quit")]), Vec::new());
+            let root: Layout = (
+                0,
+                HashMap::from([said("children-display", "submenu")]),
+                vec![OwnedValue::try_from(Value::from(quit)).unwrap()],
+            );
+            (1, root)
+        }
+
+        fn about_to_show(&self, _id: i32) -> bool {
+            false
+        }
+
+        fn event(&self, id: i32, event: &str, _data: OwnedValue, _timestamp: u32) {
+            self.asked.lock().unwrap().push(format!("{event} {id}"));
+        }
+
+        #[zbus(property)]
+        fn version(&self) -> u32 {
+            3
+        }
+    }
+
+    impl Notifier {
+        /// Serve the icon on the bus at `address`, and register it with the
+        /// watcher there once there is one.
+        pub(super) fn register(address: &str) -> Self {
+            let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+            let asked = Asked::default();
+            let name = format!("org.kde.StatusNotifierItem-{}-1", std::process::id());
+            let connection = runtime
+                .block_on(async {
+                    zbus::connection::Builder::address(address)?
+                        .name(name.as_str())?
+                        .serve_at(
+                            "/StatusNotifierItem",
+                            Item {
+                                asked: asked.clone(),
+                            },
+                        )?
+                        .serve_at(
+                            "/MenuBar",
+                            Menu {
+                                asked: asked.clone(),
+                            },
+                        )?
+                        .build()
+                        .await
+                })
+                .expect("the icon served");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let registered = runtime.block_on(connection.call_method(
+                    Some("org.kde.StatusNotifierWatcher"),
+                    "/StatusNotifierWatcher",
+                    Some("org.kde.StatusNotifierWatcher"),
+                    "RegisterStatusNotifierItem",
+                    &name,
+                ));
+                match registered {
+                    Ok(_) => break,
+                    Err(error) => assert!(
+                        Instant::now() < deadline,
+                        "the shell's watcher never took the registration: {error}"
+                    ),
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Self {
+                runtime,
+                connection,
+                asked,
+            }
+        }
+
+        /// Wait until the icon has been asked `what`.
+        pub(super) fn until_asked(&self, what: &str) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !self.asked.lock().unwrap().iter().any(|asked| asked == what) {
+                assert!(
+                    Instant::now() < deadline,
+                    "never asked {what}; asked {:?}",
+                    self.asked.lock().unwrap()
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        /// Leave the bus, as a program that quits does.
+        pub(super) fn leave(self) {
+            let Self {
+                runtime,
+                connection,
+                ..
+            } = self;
+            runtime.block_on(async move { drop(connection) });
+            runtime.shutdown_timeout(Duration::from_secs(1));
+        }
+    }
 }

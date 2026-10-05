@@ -29,6 +29,7 @@ fn main() -> ExitCode {
     match perspicax_shell::run(Options {
         connection: None,
         config: cli.config,
+        session_bus: None,
     }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

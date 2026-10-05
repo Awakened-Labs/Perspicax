@@ -14,8 +14,9 @@
 //!
 //! Every panel lists its windows and pages its workspaces from what the
 //! compositor tells the shell over the taskbar's and the pager's protocols
-//! (see `taskbar` and `pager`). News of either draws the panels again once
-//! the loop has nothing else to do, so a batch of it is drawn once.
+//! (see `taskbar` and `pager`), and shows the status icons the tray reads
+//! off the session bus (see `tray`). News of any draws the panels again
+//! once the loop has nothing else to do, so a batch of it is drawn once.
 
 use std::{
     collections::HashMap,
@@ -80,6 +81,9 @@ pub(super) struct Panels {
     /// applications' read of number `icons_from`.
     icons: HashMap<String, Option<String>>,
     icons_from: u64,
+    /// The status icons, by key, in the order they came.
+    #[cfg(feature = "tray")]
+    tray: Vec<(u64, crate::model::tray::Item)>,
     /// The panels are to be drawn again once the loop is idle.
     stale: bool,
     /// Where an assistive technology's press of something on a panel is
@@ -119,6 +123,8 @@ impl Panels {
             taskbar,
             icons: HashMap::new(),
             icons_from: 0,
+            #[cfg(feature = "tray")]
+            tray: Vec::new(),
             stale: false,
             actions,
         }
@@ -391,6 +397,49 @@ impl Panels {
             .then(|| crate::layout::panel::strip(panel.edge, panel.height as i32, monitor))
     }
 
+    /// The status icon of `key`.
+    #[cfg(feature = "tray")]
+    pub(super) fn status(&self, key: u64) -> Option<&crate::model::tray::Item> {
+        self.tray
+            .iter()
+            .find(|(shown, _)| *shown == key)
+            .map(|(_, item)| item)
+    }
+
+    /// Show the status icon of `key` as `item`, where it was, or after the
+    /// rest if it is new.
+    #[cfg(feature = "tray")]
+    pub(super) fn show_status(&mut self, key: u64, item: crate::model::tray::Item) {
+        match self.tray.iter_mut().find(|(shown, _)| *shown == key) {
+            Some((_, shown)) => *shown = item,
+            None => self.tray.push((key, item)),
+        }
+    }
+
+    /// Take the status icon of `key` away. Whether there was one.
+    #[cfg(feature = "tray")]
+    pub(super) fn forget_status(&mut self, key: u64) -> bool {
+        let before = self.tray.len();
+        self.tray.retain(|(shown, _)| *shown != key);
+        self.tray.len() != before
+    }
+
+    /// Take every status icon away. Whether there were any.
+    #[cfg(feature = "tray")]
+    pub(super) fn clear_tray(&mut self) -> bool {
+        !std::mem::take(&mut self.tray).is_empty()
+    }
+
+    /// Where on `monitor` the status icon of `key` is, on the panel of the
+    /// monitor named `name`.
+    #[cfg(feature = "tray")]
+    pub(super) fn status_at(&self, name: &str, key: u64, monitor: Rect) -> Option<Rect> {
+        let strip = self.strip(name, monitor)?;
+        let bar = self.each.iter().find(|bar| bar.name == name)?;
+        let at = bar.placed.tray_icon(key)?;
+        Some(Rect::new(strip.x + at.x, strip.y + at.y, at.w, at.h))
+    }
+
     /// Where on `monitor` the start button of the panel on the monitor named
     /// `name` is, if it has one.
     #[cfg(feature = "menus")]
@@ -438,10 +487,23 @@ impl Panels {
                 active: workspace.active,
             })
             .collect();
+        #[cfg(feature = "tray")]
+        let tray = self
+            .tray
+            .iter()
+            .filter(|(_, item)| item.shown())
+            .map(|(key, item)| crate::layout::panel::TrayIcon {
+                key: *key,
+                title: item.title.clone(),
+                menu: item.menu,
+            })
+            .collect();
         let holding = Holding {
             time: &self.time,
             tasks,
             cells,
+            #[cfg(feature = "tray")]
+            tray,
         };
         let Kit { fonts, images } = kit;
         let text = fonts.get();
@@ -453,6 +515,8 @@ impl Panels {
             placed: &bar.placed,
             time: &self.time,
             open,
+            #[cfg(feature = "tray")]
+            tray: &self.tray,
         };
         let started = Instant::now();
         // Wholly opaque, which lets the compositor skip what is under it.
@@ -523,15 +587,26 @@ impl App {
                 }
                 return;
             }
+            #[cfg(feature = "tray")]
+            let was_open = self.menus.open_menu();
             // Anything else on a panel closes the menus, as a press anywhere
-            // off them does.
+            // off them does; a press on the tray icon whose menu is open
+            // does only that.
             self.menu_event(crate::update::Event::PanelPress);
+            #[cfg(feature = "tray")]
+            if let Some(Part::Tray(key)) = part
+                && was_open == Some(crate::update::Which::Tray(key))
+            {
+                return;
+            }
         }
         #[cfg(not(feature = "menus"))]
         let _ = name;
         match part {
             Some(Part::Task(serial)) => self.press_task(serial, button),
             Some(Part::Workspace(serial)) => self.press_workspace(serial, button),
+            #[cfg(feature = "tray")]
+            Some(Part::Tray(key)) => self.press_status(name, key, button),
             Some(Part::Start) | None => {}
         }
     }

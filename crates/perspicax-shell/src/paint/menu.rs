@@ -7,8 +7,10 @@
 //! line whose submenu is open in a paler one. What a person typed sits on a
 //! line of its own above the rest, behind a magnifying glass; the start
 //! menu's line is there before anything is typed, saying what it is for.
-//! The shapes are drawn rather than taken from a font, so they show with any
-//! font, or none.
+//! In a tray icon's menu, an item its program greyed out is written faint,
+//! and one that is on or off has a box, ticked when on, or a ring, with a
+//! dot when on, where an icon would be. The shapes are drawn rather than
+//! taken from a font, so they show with any font, or none.
 
 use tiny_skia::{LineCap, PathBuilder, PixmapMut, Stroke, Transform};
 
@@ -39,7 +41,8 @@ pub(crate) const OPENED: [u8; 4] = [0xc4, 0xe5, 0xf7, 0xff];
 pub(crate) const RULE: [u8; 4] = [0xdc, 0xde, 0xe0, 0xff];
 /// Behind what a person typed.
 pub(crate) const TYPED: [u8; 4] = [0xef, 0xf0, 0xf1, 0xff];
-/// What an empty search line says, and its ink.
+/// What an empty search line says, and its ink, which is also a greyed-out
+/// item's.
 const HINT: &str = "Type to search";
 const HINT_INK: [u8; 4] = [0x7f, 0x8c, 0x8d, 0xff];
 
@@ -81,12 +84,21 @@ pub(crate) fn paint(
             let ink = if line.focused {
                 fill(canvas, px(line.rect), HIGHLIGHT);
                 ON_HIGHLIGHT
+            } else if !line.item.choosable() {
+                HINT_INK
             } else {
                 if line.selected {
                     fill(canvas, px(line.rect), OPENED);
                 }
                 INK
             };
+            #[cfg(feature = "tray")]
+            if let Does::Tell(crate::model::menu::Choice {
+                mark: Some(drawn), ..
+            }) = line.item.does
+            {
+                mark(canvas, px(icon_box(line.rect)), s, drawn, ink);
+            }
             if let Some(image) = line
                 .item
                 .icon
@@ -144,6 +156,59 @@ fn chevron(canvas: &mut PixmapMut<'_>, place: Rect, s: f32, ink: [u8; 4]) {
     path.line_to(cx + half / 2.0, cy);
     path.line_to(cx - half / 2.0, cy + half);
     stroke(canvas, path, s, ink);
+}
+
+/// A box, ticked if it is on, or a ring, with a dot in it if it is on,
+/// centred in `place`.
+#[cfg(feature = "tray")]
+fn mark(
+    canvas: &mut PixmapMut<'_>,
+    place: Rect,
+    s: f32,
+    drawn: crate::model::menu::Mark,
+    ink: [u8; 4],
+) {
+    use crate::model::menu::Mark;
+
+    let (cx, cy) = (
+        place.x as f32 + place.w as f32 / 2.0,
+        place.y as f32 + place.h as f32 / 2.0,
+    );
+    let half = 6.0 * s;
+    let mut path = PathBuilder::new();
+    let on = match drawn {
+        Mark::Check(on) => {
+            if let Some(square) =
+                tiny_skia::Rect::from_xywh(cx - half, cy - half, 2.0 * half, 2.0 * half)
+            {
+                path.push_rect(square);
+            }
+            if on {
+                path.move_to(cx - half / 2.0, cy);
+                path.line_to(cx - half / 8.0, cy + half / 2.0);
+                path.line_to(cx + half / 2.0, cy - half / 2.0);
+            }
+            false
+        }
+        Mark::Radio(on) => {
+            path.push_circle(cx, cy, half);
+            on
+        }
+    };
+    stroke(canvas, path, s, ink);
+    if on {
+        let mut dot = PathBuilder::new();
+        dot.push_circle(cx, cy, half / 2.0);
+        if let Some(dot) = dot.finish() {
+            canvas.fill_path(
+                &dot,
+                &solid(ink),
+                tiny_skia::FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
 }
 
 /// A magnifying glass, centred in `place`.

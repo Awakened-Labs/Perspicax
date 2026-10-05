@@ -9,7 +9,10 @@
 //! There are two menus, one open at a time: the root menu, at the pointer,
 //! and the start menu, beside the start button, with a search line on top
 //! from the start. Asking for the one that is open closes it, and asking
-//! for the other puts it in its place.
+//! for the other puts it in its place. With a tray there is a third, any
+//! tray icon's, beside its icon: its program's own menu, read when it was
+//! asked for, in which nothing is searched for, and whose choice is told to
+//! the program rather than carried out here.
 //!
 //! A menu works the way menus do on any desktop. The pointer selects the
 //! item under it, and a submenu opens as soon as the pointer is on its item;
@@ -82,6 +85,18 @@ pub(crate) enum Event {
         button: Rect,
         edge: Edge,
     },
+    /// A tray icon's program gave its menu, to open beside the icon,
+    /// `button` on a panel along `edge`. `name` is what the icon is called.
+    #[cfg(feature = "tray")]
+    TrayMenu {
+        key: u64,
+        name: String,
+        menu: Menu,
+        output: String,
+        area: Rect,
+        button: Rect,
+        edge: Edge,
+    },
     /// A button went down on a panel, off its start button.
     #[cfg_attr(
         not(feature = "panel"),
@@ -114,6 +129,10 @@ pub(crate) enum Effect {
     Run(Run),
     /// Ask perspicax to end the session.
     LogOut,
+    /// Tell the program of tray icon `key` that its menu item `id` was
+    /// chosen.
+    #[cfg(feature = "tray")]
+    Tell { key: u64, id: i32 },
 }
 
 /// Which menu.
@@ -123,6 +142,9 @@ pub(crate) enum Which {
     Root,
     /// The start button's.
     Start,
+    /// The program's of the tray icon of this key.
+    #[cfg(feature = "tray")]
+    Tray(u64),
 }
 
 /// What the shell's menus are doing.
@@ -137,6 +159,9 @@ pub(crate) struct State {
 struct Trees {
     root: Menu,
     start: Menu,
+    /// The last tray icon's menu asked for, and what the icon is called.
+    #[cfg(feature = "tray")]
+    tray: (String, Menu),
 }
 
 /// The menus while they are open.
@@ -182,7 +207,8 @@ enum How {
 /// The open menus, for drawing and for the accessibility tree.
 #[derive(Debug)]
 pub(crate) struct View<'a> {
-    pub(crate) which: Which,
+    /// What the first menu is called.
+    pub(crate) name: &'a str,
     pub(crate) output: &'a str,
     /// What has been typed, while there is a line to show it on: always in
     /// the start menu, and in the root menu once something is.
@@ -218,7 +244,12 @@ pub(crate) struct LineView<'a> {
 impl State {
     pub(crate) fn new(root: Menu, start: Menu) -> Self {
         Self {
-            trees: Trees { root, start },
+            trees: Trees {
+                root,
+                start,
+                #[cfg(feature = "tray")]
+                tray: (String::new(), Menu::default()),
+            },
             open: None,
         }
     }
@@ -228,7 +259,8 @@ impl State {
     /// under them.
     pub(crate) fn set_menus(&mut self, root: Menu, start: Menu) {
         if self.open.is_none() {
-            self.trees = Trees { root, start };
+            self.trees.root = root;
+            self.trees.start = start;
         }
     }
 
@@ -246,6 +278,12 @@ impl State {
             .as_ref()
             .filter(|open| open.which == Which::Start)
             .map(|open| open.output.as_str())
+    }
+
+    /// Which menu is open, if one is.
+    #[cfg(feature = "tray")]
+    pub(crate) fn open_menu(&self) -> Option<Which> {
+        self.open.as_ref().map(|open| open.which)
     }
 
     /// Handle `event`, measuring text with `measure`.
@@ -274,6 +312,22 @@ impl State {
                 button,
                 edge,
             } => self.toggle(Which::Start, output, area, Anchor::Button(button, edge)),
+            #[cfg(feature = "tray")]
+            Event::TrayMenu {
+                key,
+                name,
+                menu,
+                output,
+                area,
+                button,
+                edge,
+            } => {
+                let closed = self.close();
+                self.trees.tray = (name, menu);
+                let opened =
+                    self.open(Which::Tray(key), output, area, Anchor::Button(button, edge));
+                if opened.is_empty() { closed } else { opened }
+            }
             Event::PanelPress => self.close(),
             Event::Motion(at) => self.hover(at),
             Event::Press(at) => self.press(at),
@@ -339,7 +393,7 @@ impl State {
             })
             .collect();
         Some(View {
-            which: open.which,
+            name: self.trees.name(open.which),
             output: &open.output,
             query: open.searching().then_some(open.query.as_str()),
             menus,
@@ -483,7 +537,11 @@ impl State {
     /// Change what has been typed with `edit`, which says whether it did,
     /// and show what it finds now.
     fn typed(&mut self, edit: impl FnOnce(&mut String) -> bool) -> Vec<Effect> {
-        let edited = self.open.as_mut().is_some_and(|open| edit(&mut open.query));
+        let edited = self
+            .open
+            .as_mut()
+            .filter(|open| open.finds())
+            .is_some_and(|open| edit(&mut open.query));
         if edited { self.narrow() } else { Vec::new() }
     }
 
@@ -573,6 +631,18 @@ impl State {
                 effects.push(Effect::LogOut);
                 effects
             }
+            #[cfg(feature = "tray")]
+            &Does::Tell(choice) => {
+                let Which::Tray(key) = open.which else {
+                    return Vec::new();
+                };
+                if !choice.enabled {
+                    return Vec::new();
+                }
+                let mut effects = self.close();
+                effects.push(Effect::Tell { key, id: choice.id });
+                effects
+            }
             Does::Open(_) => self.select(level, line, how),
             Does::Separator => Vec::new(),
         }
@@ -604,7 +674,7 @@ impl State {
                     .lines
                     .iter()
                     .map(|route| match tree.item(route) {
-                        Some(item) if item.choosable() => Line::Item {
+                        Some(item) if !item.is_separator() => Line::Item {
                             label: &item.label,
                             submenu: item.submenu().is_some(),
                         },
@@ -625,15 +695,43 @@ impl Trees {
         match which {
             Which::Root => &self.root,
             Which::Start => &self.start,
+            #[cfg(feature = "tray")]
+            Which::Tray(_) => &self.tray.1,
+        }
+    }
+
+    /// What the first menu of `which` is called.
+    fn name(&self, which: Which) -> &str {
+        match which {
+            Which::Root => "Root menu",
+            Which::Start => "Start menu",
+            #[cfg(feature = "tray")]
+            Which::Tray(_) => &self.tray.0,
         }
     }
 }
 
 impl Open {
     /// Whether the first menu has a search line: the start menu always
-    /// does, and the root menu once something has been typed.
+    /// does, and the root menu once something has been typed. A tray
+    /// icon's never does: it starts no programs to find.
     fn searching(&self) -> bool {
-        self.which == Which::Start || !self.query.is_empty()
+        match self.which {
+            Which::Start => true,
+            Which::Root => !self.query.is_empty(),
+            #[cfg(feature = "tray")]
+            Which::Tray(_) => false,
+        }
+    }
+
+    /// Whether typing looks for programs in it: in any but a tray icon's,
+    /// whose items are its program's and start none.
+    fn finds(&self) -> bool {
+        #[cfg(feature = "tray")]
+        if let Which::Tray(_) = self.which {
+            return false;
+        }
+        true
     }
 
     /// The menu the keyboard is in: the deepest with a line selected.
@@ -1052,7 +1150,7 @@ mod tests {
         let mut shell = Shell::new();
         assert_eq!(shell.start_button(), [Effect::Redraw]);
         let view = shell.state.view().expect("open");
-        assert_eq!(view.which, Which::Start);
+        assert_eq!(view.name, "Start menu");
         let menu = view.menus[0].rect;
         assert_eq!(
             (menu.x, menu.bottom()),
@@ -1073,11 +1171,7 @@ mod tests {
         shell.right_click((300.0, 200.0));
         shell.start_button();
         let view = shell.state.view().expect("open");
-        assert_eq!(
-            view.which,
-            Which::Start,
-            "the start menu, for the root menu"
-        );
+        assert_eq!(view.name, "Start menu", "the start menu, for the root menu");
         assert_eq!(view.menus.len(), 1);
 
         let ask_root = Event::RootMenu {
@@ -1086,7 +1180,7 @@ mod tests {
             at: (300, 200),
         };
         assert_eq!(shell.send(ask_root.clone()), [Effect::Redraw]);
-        assert_eq!(shell.state.view().map(|view| view.which), Some(Which::Root));
+        assert_eq!(shell.state.view().map(|view| view.name), Some("Root menu"));
         assert_eq!(shell.state.start_open_on(), None);
         shell.send(ask_root);
         assert!(!shell.state.is_open(), "and asked for again, it closes");
@@ -1182,5 +1276,100 @@ mod tests {
             view.menus[1].opened_by.map(|item| item.label.as_str()),
             Some("Accessories")
         );
+    }
+
+    #[cfg(feature = "tray")]
+    #[test]
+    fn a_tray_menu_opens_beside_its_icon_and_tells_its_program_the_choice() {
+        use crate::model::menu::{Choice, Mark};
+
+        let item = |label: &str, id: i32, enabled: bool| Item {
+            label: label.to_owned(),
+            icon: None,
+            keywords: Vec::new(),
+            does: Does::Tell(Choice {
+                id,
+                enabled,
+                mark: (id == 2).then_some(Mark::Check(true)),
+            }),
+        };
+        let menu = Menu {
+            items: vec![
+                item("Connected", 1, false),
+                item("Notifications", 2, true),
+                item("Quit", 3, true),
+            ],
+        };
+        let icon = Rect::new(1200, 760, 30, 40);
+        let open = |shell: &mut Shell| {
+            shell.send(Event::TrayMenu {
+                key: 7,
+                name: "Network".to_owned(),
+                menu: menu.clone(),
+                output: "DP-1".to_owned(),
+                area: ABOVE_PANEL,
+                button: icon,
+                edge: Edge::Bottom,
+            })
+        };
+        let mut shell = Shell::new();
+        shell.start_button();
+        assert_eq!(
+            open(&mut shell),
+            [Effect::Redraw],
+            "in the start menu's place"
+        );
+        let view = shell.state.view().expect("open");
+        assert_eq!(view.name, "Network", "named for its icon");
+        assert_eq!(view.query, None, "with no search line");
+        let rect = view.menus[0].rect;
+        assert!(
+            rect.bottom() == icon.y && rect.right() <= 1280,
+            "above the icon, on the monitor: {rect:?}"
+        );
+        assert_eq!(shell.state.open_menu(), Some(Which::Tray(7)));
+        assert_eq!(shell.state.start_open_on(), None);
+
+        assert_eq!(
+            shell.key(Key::Text("q".to_owned())),
+            [],
+            "nothing to search"
+        );
+        shell.key(Key::Down);
+        assert_eq!(
+            shell.shown(),
+            [["Connected", "*Notifications", "Quit"]],
+            "the greyed-out item passed over"
+        );
+        let greyed = shell.middle_of("Connected");
+        shell.send(Event::Press(greyed));
+        assert_eq!(shell.send(Event::Release(greyed)), [], "and not chosen");
+        assert!(shell.state.is_open());
+
+        let quit = shell.middle_of("Quit");
+        shell.send(Event::Press(quit));
+        assert_eq!(
+            shell.send(Event::Release(quit)),
+            [Effect::Redraw, Effect::Tell { key: 7, id: 3 }],
+            "closed, and its program told"
+        );
+        assert!(!shell.state.is_open());
+
+        let empty = Event::TrayMenu {
+            key: 7,
+            name: "Network".to_owned(),
+            menu: Menu::default(),
+            output: "DP-1".to_owned(),
+            area: ABOVE_PANEL,
+            button: icon,
+            edge: Edge::Bottom,
+        };
+        open(&mut shell);
+        assert_eq!(
+            shell.send(empty),
+            [Effect::Redraw],
+            "an empty menu closes the one open, and opens nothing"
+        );
+        assert!(!shell.state.is_open());
     }
 }

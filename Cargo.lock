@@ -1534,12 +1534,14 @@ dependencies = [
  "smithay",
  "smithay-client-toolkit",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
  "x11rb",
  "xcursor",
+ "zbus",
 ]
 
 [[package]]
@@ -1631,12 +1633,14 @@ dependencies = [
  "smithay-client-toolkit",
  "thiserror 2.0.20",
  "tiny-skia",
+ "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
+ "zbus",
  "zune-jpeg",
 ]
 

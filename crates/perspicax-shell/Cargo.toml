@@ -76,6 +76,14 @@ resvg = { version = "0.48", default-features = false, optional = true }
 # The panel's clock, in the local time zone. Already in the tree for the MCP
 # server's schemas; `clock` adds only iana-time-zone, which is there too.
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"], optional = true }
+# The tray: status icons and their menus, from other programs over the
+# session bus. zbus is in the tree for AccessKit and the agent's reader;
+# its tokio executor, because atspi turns that on for the whole workspace,
+# so a shell built alone and one built with the workspace run the same.
+# tokio for the tray's thread to run zbus on: a current-thread runtime of
+# its own, as AccessKit has.
+zbus = { version = "5", default-features = false, features = ["tokio"], optional = true }
+tokio = { version = "1", default-features = false, features = ["rt", "sync"], optional = true }
 
 [dev-dependencies]
 # A wallpaper's colour, written as the config writes it.
@@ -121,8 +129,9 @@ menus = [
     "dep:accesskit_unix",
     "smithay-client-toolkit/xkbcommon",
 ]
-# Status icons from other programs, in the panel.
-tray = ["panel"]
+# Status icons from other programs, in the panel, served the
+# StatusNotifierItem way, with their menus opened as the shell's own are.
+tray = ["panel", "menus", "dep:zbus", "dep:tokio"]
 # The desktop folder's files, as icons on the wallpaper: drawn on the
 # wallpaper's own surface, and found, named and started as the menus' items
 # are, so it takes both.

@@ -3,10 +3,11 @@
 //!
 //! A panel runs the whole width of its monitor, along the top or the
 //! bottom. The start button is a square as tall as the panel, the pager as
-//! wide as its grid of workspaces, and the clock as wide as the time it
-//! shows. The taskbar takes whatever room is left, and shares it among the
-//! windows it lists, each no wider than [`TASK_WIDTH`]; a panel without one
-//! keeps its last item at the right end, and the rest at the left.
+//! wide as its grid of workspaces, the tray a slot [`TRAY_SLOT`] wide for
+//! each icon it shows, and the clock as wide as the time it shows. The
+//! taskbar takes whatever room is left, and shares it among the windows it
+//! lists, each no wider than [`TASK_WIDTH`]; a panel without one keeps its
+//! last item at the right end, and the rest at the left.
 
 use perspicax_config::{Edge, Item, PanelOutputs};
 
@@ -20,6 +21,9 @@ pub(crate) const TASK_WIDTH: i32 = 200;
 /// Room around the pager's grid, and between its cells.
 pub(crate) const PAGER_PAD: i32 = 4;
 pub(crate) const PAGER_GAP: i32 = 2;
+/// How wide each of the tray's icons is, with the room around it.
+#[cfg(feature = "tray")]
+pub(crate) const TRAY_SLOT: i32 = 30;
 
 /// A window the taskbar lists, as it is shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,12 +50,26 @@ pub(crate) struct Cell {
     pub(crate) active: bool,
 }
 
+/// A program's status icon in the tray, as it is shown.
+#[cfg(feature = "tray")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrayIcon {
+    /// The icon's, which stays its own while its program shows it.
+    pub(crate) key: u64,
+    /// What it is called.
+    pub(crate) title: String,
+    /// It has a menu to open.
+    pub(crate) menu: bool,
+}
+
 /// What a panel shows beyond its start button: the time, the windows its
-/// taskbar lists, and its monitor's workspaces.
+/// taskbar lists, its monitor's workspaces, and the status icons.
 pub(crate) struct Holding<'a> {
     pub(crate) time: &'a str,
     pub(crate) tasks: Vec<Task>,
     pub(crate) cells: Vec<Cell>,
+    #[cfg(feature = "tray")]
+    pub(crate) tray: Vec<TrayIcon>,
 }
 
 /// A panel, laid out: each thing it holds, and where, in its own logical
@@ -61,6 +79,8 @@ pub(crate) struct Placed {
     pub(crate) items: Vec<(Item, Rect)>,
     pub(crate) tasks: Vec<(Task, Rect)>,
     pub(crate) cells: Vec<(Cell, Rect)>,
+    #[cfg(feature = "tray")]
+    pub(crate) tray: Vec<(TrayIcon, Rect)>,
 }
 
 /// What on a panel a press can be on.
@@ -71,6 +91,9 @@ pub(crate) enum Part {
     Task(u64),
     /// The cell of the workspace of this serial.
     Workspace(u64),
+    /// The tray's icon of this key.
+    #[cfg(feature = "tray")]
+    Tray(u64),
 }
 
 /// Which of `monitors`, each a connector name and where its top-left corner
@@ -120,7 +143,10 @@ pub(crate) fn lay_out(
             Item::Pager => grid.width(),
             // The taskbar's width is what the others leave.
             Item::Taskbar => 0,
-            // Nothing to draw, so no room taken.
+            #[cfg(feature = "tray")]
+            Item::Tray => holding.tray.len() as i32 * TRAY_SLOT,
+            // Refused by the config without a tray to show.
+            #[cfg(not(feature = "tray"))]
             Item::Tray => 0,
         })
         .collect();
@@ -177,10 +203,24 @@ pub(crate) fn lay_out(
             })
             .collect()
     });
+    #[cfg(feature = "tray")]
+    let tray = within(Item::Tray).map_or_else(Vec::new, |tray| {
+        holding
+            .tray
+            .into_iter()
+            .enumerate()
+            .map(|(at, icon)| {
+                let x = tray.x + at as i32 * TRAY_SLOT;
+                (icon, Rect::new(x, 0, TRAY_SLOT, height))
+            })
+            .collect()
+    });
     Placed {
         items,
         tasks,
         cells,
+        #[cfg(feature = "tray")]
+        tray,
     }
 }
 
@@ -257,7 +297,25 @@ impl Placed {
                 .find(|&&(item, rect)| item == Item::Start && rect.contains(point))
                 .map(|_| Part::Start)
         };
-        task.or_else(cell).or_else(start)
+        #[cfg(feature = "tray")]
+        let tray = || {
+            self.tray
+                .iter()
+                .find(|(_, rect)| rect.contains(point))
+                .map(|(icon, _)| Part::Tray(icon.key))
+        };
+        #[cfg(not(feature = "tray"))]
+        let tray = || None;
+        task.or_else(cell).or_else(start).or_else(tray)
+    }
+
+    /// Where the tray's icon of `key` is, if the panel shows it.
+    #[cfg(feature = "tray")]
+    pub(crate) fn tray_icon(&self, key: u64) -> Option<Rect> {
+        self.tray
+            .iter()
+            .find(|(icon, _)| icon.key == key)
+            .map(|&(_, rect)| rect)
     }
 
     /// Where `item` is, if the panel holds it.
@@ -285,6 +343,8 @@ mod tests {
 
     fn holding(tasks: usize, cells: &[(u32, u32)]) -> Holding<'static> {
         Holding {
+            #[cfg(feature = "tray")]
+            tray: Vec::new(),
             time: "14:05",
             tasks: (0..tasks as u64)
                 .map(|serial| Task {
@@ -433,6 +493,53 @@ mod tests {
         );
         assert_eq!(placed.at((1300.0, 20.0)), None);
         assert_eq!(placed.item(Item::Start), Some(Rect::new(0, 0, 40, 40)));
+    }
+
+    #[cfg(feature = "tray")]
+    #[test]
+    fn the_tray_holds_a_slot_for_each_icon_and_a_press_finds_it() {
+        let icon = |key: u64| TrayIcon {
+            key,
+            title: format!("Icon {key}"),
+            menu: true,
+        };
+        let mut holding = holding(1, &[]);
+        holding.tray = vec![icon(7), icon(9)];
+        let placed = lay_out(
+            &[Item::Start, Item::Taskbar, Item::Tray, Item::Clock],
+            holding,
+            PANEL,
+            &mut Monospace(8.0),
+        );
+        let clock = 5 * 8 + 2 * CLOCK_PAD;
+        let left = 1280 - clock - 2 * TRAY_SLOT;
+        assert_eq!(
+            placed.items[2],
+            (Item::Tray, Rect::new(left, 0, 2 * TRAY_SLOT, 40)),
+            "a slot for each, against the clock"
+        );
+        assert_eq!(
+            placed.tray[1].1,
+            Rect::new(left + TRAY_SLOT, 0, TRAY_SLOT, 40)
+        );
+        assert_eq!(
+            placed.at((f64::from(left) + 1.0, 20.0)),
+            Some(Part::Tray(7))
+        );
+        assert_eq!(
+            placed.at((f64::from(left + 2 * TRAY_SLOT) - 1.0, 20.0)),
+            Some(Part::Tray(9))
+        );
+        assert_eq!(placed.tray_icon(9), Some(placed.tray[1].1));
+        assert_eq!(placed.tray_icon(8), None);
+
+        let empty = lay_out(
+            &[Item::Start, Item::Tray, Item::Clock],
+            self::holding(0, &[]),
+            PANEL,
+            &mut Monospace(8.0),
+        );
+        assert_eq!(empty.items[1].1.w, 0, "no icons, no room taken");
     }
 
     #[test]

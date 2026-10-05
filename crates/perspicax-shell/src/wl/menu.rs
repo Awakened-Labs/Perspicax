@@ -165,6 +165,12 @@ impl Menus {
         reserved_on(&self.reserved, output)
     }
 
+    /// Which menu is open, if one is.
+    #[cfg(feature = "tray")]
+    pub(super) fn open_menu(&self) -> Option<crate::update::Which> {
+        self.state.open_menu()
+    }
+
     /// The monitor the start menu is open on, if it is open.
     #[cfg(feature = "panel")]
     pub(super) fn start_open_on(&self) -> Option<&str> {

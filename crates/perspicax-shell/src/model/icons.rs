@@ -95,6 +95,27 @@ impl Icons {
         icons
     }
 
+    /// These themes, with `folder`, a program's own folder of icons, looked
+    /// in first: its loose images, and its copy of each theme's folders,
+    /// laid out as the theme's own `index.theme` says, wherever that is.
+    #[cfg(feature = "tray")]
+    pub(crate) fn with_folder(&self, fs: &impl Fs, folder: &Path) -> Self {
+        let first = |rest: &[PathBuf]| {
+            std::iter::once(folder.to_owned())
+                .chain(rest.iter().cloned())
+                .collect()
+        };
+        let mut icons = Self {
+            bases: first(&self.bases),
+            pixmaps: first(&self.pixmaps),
+            chain: Vec::new(),
+        };
+        for theme in &self.chain {
+            icons.add(fs, &theme.name);
+        }
+        icons
+    }
+
     /// Read theme `name` into the chain, then what it inherits, unless it
     /// is there already.
     fn add(&mut self, fs: &impl Fs, name: &str) {
