@@ -8,7 +8,9 @@
 //! It puts a wallpaper on every monitor, on a monitor plugged in after it
 //! started too, and each one is a surface on the `background` layer named
 //! for its monitor. Told its config changed, it repaints those surfaces
-//! rather than making new ones. A right-click on the wallpaper, or the root
+//! rather than making new ones. A workspace with a wallpaper of its own
+//! shows it while it is the one showing, on whichever monitor shows it.
+//! A right-click on the wallpaper, or the root
 //! menu's key, opens a menu on the `overlay` layer where the pointer is, and
 //! choosing an item in it runs the item's program. In the classic profile a
 //! panel along the bottom of each monitor keeps windows above it, and its
@@ -248,10 +250,19 @@ fn middle(rect: Rect) -> (f64, f64) {
 /// The colour of the pixel at `x`, `y` in a picture of the first monitor.
 #[cfg(feature = "capture")]
 fn colour_at(session: &Session, x: usize, y: usize) -> [u8; 4] {
+    colour_on(session, None, x, y)
+}
+
+/// The colour of the pixel at `x`, `y` in a picture of the monitor named
+/// `output`, or of the first.
+#[cfg(feature = "capture")]
+fn colour_on(session: &Session, output: Option<&str>, x: usize, y: usize) -> [u8; 4] {
     use perspicax_index::ShotTarget;
 
     let host = Host::new(&session.facts, &session.requests);
-    let shot = host.capture(ShotTarget::Output(None)).expect("a picture");
+    let shot = host
+        .capture(ShotTarget::Output(output.map(str::to_owned)))
+        .expect("a picture");
     let at = (y * shot.width as usize + x) * 4;
     shot.rgba[at..at + 4].try_into().unwrap()
 }
@@ -273,12 +284,24 @@ const TASK: f64 = 200.0;
 /// Wait until the pixel at `x`, `y` of the first monitor is `colour`: what
 /// the panel shows once the shell has heard the news and drawn it.
 #[cfg(feature = "capture")]
-fn until_colour(session: &Session, (x, y): (usize, usize), colour: [u8; 4]) {
+fn until_colour(session: &Session, at: (usize, usize), colour: [u8; 4]) {
+    until_colour_on(session, None, at, colour);
+}
+
+/// Wait until the pixel at `x`, `y` of the monitor named `output`, or of
+/// the first, is `colour`.
+#[cfg(feature = "capture")]
+fn until_colour_on(
+    session: &Session,
+    output: Option<&str>,
+    (x, y): (usize, usize),
+    colour: [u8; 4],
+) {
     use std::time::{Duration, Instant};
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let now = colour_at(session, x, y);
+        let now = colour_on(session, output, x, y);
         if now == colour {
             return;
         }
@@ -312,6 +335,43 @@ fn four_workspaces() -> Backend {
         access: Access::open(),
     }
 }
+
+/// Two monitors side by side, each with four workspaces of its own in a
+/// row.
+#[cfg(feature = "capture")]
+fn two_monitors_each_its_own() -> Backend {
+    let Backend::Headless {
+        outputs, access, ..
+    } = two_monitors()
+    else {
+        unreachable!("two headless monitors")
+    };
+    Backend::Headless {
+        outputs,
+        workspaces: Shape {
+            mode: perspicax_policy::Mode::PerOutput,
+            grid: perspicax_policy::Grid {
+                columns: 4,
+                rows: 1,
+                wrap: false,
+            },
+        },
+        access,
+    }
+}
+
+/// A minimal desktop of the colour `SHELLS`, with `OWN` for workspace 2
+/// and `TILED` for workspace 4: written as a table, with a mode, which a
+/// colour fills the monitor in whatever it is.
+#[cfg(feature = "capture")]
+const OWN_WALLPAPERS: &str = "profile = \"minimal\"\n[shell]\nwallpaper = \"#336699\"\n\
+    [shell.wallpapers]\n2 = \"#996633\"\n4 = { wallpaper = \"#669933\", mode = \"tile\" }\n";
+#[cfg(feature = "capture")]
+const SHELLS: [u8; 4] = [0x33, 0x66, 0x99, 0xff];
+#[cfg(feature = "capture")]
+const OWN: [u8; 4] = [0x99, 0x66, 0x33, 0xff];
+#[cfg(feature = "capture")]
+const TILED: [u8; 4] = [0x66, 0x99, 0x33, 0xff];
 
 /// A panel of the pager and the clock alone, so the pager is at its left
 /// end whatever the clock's font makes its width.
@@ -467,6 +527,70 @@ fn a_reconfigured_shell_changes_its_wallpaper_without_a_new_surface() {
         colour_at(&session, 400, 300),
         [0x99, 0x66, 0x33, 0xff],
         "in the colour the file says now"
+    );
+
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_workspace_switch_shows_its_wallpaper() {
+    let session = Session::start("shell-wallpapers", four_workspaces());
+    let shell = Shell::start(&session, "wallpapers", OWN_WALLPAPERS);
+    let facts = session.wait_for(|facts| painted(facts).len() == 1);
+    let [(desktop, _)] = painted(&facts)[..] else {
+        unreachable!("one desktop, waited for")
+    };
+    let middle = (640, 400);
+    until_colour(&session, middle, SHELLS);
+
+    session.perform(Action::GoToWorkspace(2));
+    until_colour(&session, middle, OWN);
+    session.perform(Action::GoToWorkspace(3));
+    until_colour(&session, middle, SHELLS);
+    session.perform(Action::GoToWorkspace(4));
+    until_colour(&session, middle, TILED);
+    session.perform(Action::GoToWorkspace(1));
+    until_colour(&session, middle, SHELLS);
+
+    let facts = session.wait_for(|_| true);
+    assert_eq!(
+        painted(&facts)
+            .iter()
+            .map(|&(id, _)| id)
+            .collect::<Vec<_>>(),
+        [desktop],
+        "painted again where it was, and nothing new beside it"
+    );
+
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn each_monitor_shows_the_wallpaper_of_the_workspace_it_shows() {
+    let session = Session::start("shell-wallpapers-each", two_monitors_each_its_own());
+    let shell = Shell::start(&session, "wallpapers-each", OWN_WALLPAPERS);
+    let facts = session.wait_for(|facts| desktops(facts).len() == 2);
+    let corner = (100, 100);
+    until_colour_on(&session, Some("HEADLESS-1"), corner, SHELLS);
+    until_colour_on(&session, Some("HEADLESS-2"), corner, SHELLS);
+
+    // The pointer on the second monitor, which a switch then switches.
+    click(
+        &session,
+        layer_named(&facts, "perspicax-desktop-HEADLESS-2"),
+        (500.0, 500.0),
+        PointerButton::Left,
+    );
+    session.perform(Action::GoToWorkspace(2));
+    until_colour_on(&session, Some("HEADLESS-2"), corner, OWN);
+    assert_eq!(
+        colour_on(&session, Some("HEADLESS-1"), corner.0, corner.1),
+        SHELLS,
+        "the first monitor is on its own workspace 1 still"
     );
 
     shell.stop_with(session);

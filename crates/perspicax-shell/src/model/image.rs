@@ -191,6 +191,69 @@ fn svg(_: &[u8], _: u32) -> Result<Pixmap, LoadError> {
 
 /// Straight alpha to premultiplied, in place: what tiny-skia keeps, and what
 /// a compositor blends.
+/// A copy of `image` at the smaller size `to`, in memory; the file it was
+/// read from is never written. Halved first, each pixel the mean of four,
+/// while it stays at least twice `to`, so that every pixel of a large
+/// photograph counts, where one smooth draw to a fraction of its size would
+/// sample some and leave the rest to shimmer; then drawn to `to` smoothly.
+#[cfg(feature = "wallpaper")]
+pub(crate) fn shrink(image: &Pixmap, to: (u32, u32)) -> Option<Pixmap> {
+    use tiny_skia::{FilterQuality, PixmapPaint, Transform};
+
+    let mut halved: Option<Pixmap> = None;
+    loop {
+        let now = halved.as_ref().unwrap_or(image);
+        if now.width() < to.0.saturating_mul(2) || now.height() < to.1.saturating_mul(2) {
+            break;
+        }
+        halved = Some(halve(now)?);
+    }
+    let now = halved.as_ref().unwrap_or(image);
+    if (now.width(), now.height()) == to {
+        return Some(halved.unwrap_or_else(|| image.clone()));
+    }
+    let mut shrunk = Pixmap::new(to.0, to.1)?;
+    let scale = (
+        to.0 as f32 / now.width() as f32,
+        to.1 as f32 / now.height() as f32,
+    );
+    let paint = PixmapPaint {
+        quality: FilterQuality::Bicubic,
+        ..PixmapPaint::default()
+    };
+    shrunk.draw_pixmap(
+        0,
+        0,
+        now.as_ref(),
+        &paint,
+        Transform::from_scale(scale.0, scale.1),
+        None,
+    );
+    Some(shrunk)
+}
+
+/// `image` at half its size, each pixel the mean of the four it covers; an
+/// odd last row or column is left out.
+#[cfg(feature = "wallpaper")]
+fn halve(image: &Pixmap) -> Option<Pixmap> {
+    let (wide, high) = (image.width() / 2, image.height() / 2);
+    let mut half = Pixmap::new(wide, high)?;
+    let from = image.data();
+    let stride = image.width() as usize * 4;
+    let out = half.data_mut();
+    for y in 0..high as usize {
+        for x in 0..wide as usize {
+            let corner = 2 * y * stride + 2 * x * 4;
+            for channel in 0..4 {
+                let at = |offset: usize| u16::from(from[corner + offset + channel]);
+                let sum = at(0) + at(4) + at(stride) + at(stride + 4);
+                out[(y * wide as usize + x) * 4 + channel] = ((sum + 2) / 4) as u8;
+            }
+        }
+    }
+    Some(half)
+}
+
 fn premultiply(rgba: &mut [u8]) {
     for pixel in rgba.chunks_exact_mut(4) {
         let alpha = u16::from(pixel[3]);
@@ -282,6 +345,60 @@ mod tests {
             b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>"
         ));
         assert!(!is_svg(plain, b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[cfg(feature = "wallpaper")]
+    #[test]
+    fn a_shrunk_image_counts_every_pixel_and_leaves_its_file_alone() {
+        let path =
+            std::env::temp_dir().join(format!("perspicax-shell-shrink-{}.png", std::process::id()));
+        {
+            // 8 by 4, in columns of black and white.
+            let file = std::fs::File::create(&path).expect("a file");
+            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 8, 4);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("a header");
+            let rows: Vec<u8> = (0..32)
+                .map(|at| if at % 2 == 0 { 0x00 } else { 0xff })
+                .collect();
+            writer.write_image_data(&rows).expect("written");
+        }
+        let before = (
+            std::fs::read(&path).expect("the file"),
+            std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok(),
+        );
+        let image = load(&path).expect("read");
+        let shrunk = shrink(&image, (2, 1));
+        let quarter = shrink(&image, (3, 2));
+        let after = (
+            std::fs::read(&path).expect("the file"),
+            std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok(),
+        );
+        std::fs::remove_file(&path).ok();
+
+        let shrunk = shrunk.expect("shrunk");
+        assert_eq!((shrunk.width(), shrunk.height()), (2, 1));
+        assert!(
+            shrunk
+                .data()
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0x80, 0x80, 0x80, 0xff]),
+            "every column counted, grey, not one sampled black or white: {:?}",
+            shrunk.data()
+        );
+        let quarter = quarter.expect("shrunk");
+        assert_eq!(
+            (quarter.width(), quarter.height()),
+            (3, 2),
+            "halved once, then drawn to a size halving cannot reach"
+        );
+        assert_eq!((image.width(), image.height()), (8, 4), "the image kept");
+        assert!(before == after, "and its file never written");
     }
 
     #[test]

@@ -371,27 +371,7 @@ impl Config {
                 );
             }
         }
-        let workspaces = match profile {
-            // Plasma's default since 5.x when more than one is asked for, and
-            // Windows' task view: a row, so left and right are all there is.
-            Profile::Classic => Shape {
-                mode: perspicax_policy::Mode::Spanning,
-                grid: Grid {
-                    columns: 4,
-                    rows: 1,
-                    wrap: false,
-                },
-            },
-            // A square to flip around, wrapping, as Fluxbox and E do.
-            Profile::Minimal => Shape {
-                mode: perspicax_policy::Mode::Spanning,
-                grid: Grid {
-                    columns: 2,
-                    rows: 2,
-                    wrap: true,
-                },
-            },
-        };
+        let workspaces = workspaces(profile);
         Self {
             profile,
             focus,
@@ -422,6 +402,37 @@ impl Config {
             shell: Shell::profile(profile, ShellBuilt::FULL),
         }
     }
+}
+
+/// A profile's workspaces.
+fn workspaces(profile: Profile) -> Shape {
+    match profile {
+        // Plasma's default since 5.x when more than one is asked for, and
+        // Windows' task view: a row, so left and right are all there is.
+        Profile::Classic => Shape {
+            mode: perspicax_policy::Mode::Spanning,
+            grid: Grid {
+                columns: 4,
+                rows: 1,
+                wrap: false,
+            },
+        },
+        // A square to flip around, wrapping, as Fluxbox and E do.
+        Profile::Minimal => Shape {
+            mode: perspicax_policy::Mode::Spanning,
+            grid: Grid {
+                columns: 2,
+                rows: 2,
+                wrap: true,
+            },
+        },
+    }
+}
+
+/// How many workspaces `grid` holds: on each monitor, when each has its
+/// own.
+fn count(grid: Grid) -> u32 {
+    u32::from(grid.columns) * u32::from(grid.rows)
 }
 
 /// The `[protocols]` defaults, the same in both profiles: a profile is a
@@ -515,8 +526,13 @@ pub fn load_shell(path: &Path, built: ShellBuilt) -> Result<Shell, Error> {
 pub fn shell(text: &str, built: ShellBuilt) -> Result<Shell, Error> {
     let raw: Raw = toml::from_str(text).map_err(|error| Error::Parse(error.to_string()))?;
     let profile = Shell::profile(raw.profile, built);
+    // The grid's sides are the compositor's to judge; this only counts.
+    let workspaces = match raw.workspaces.as_ref().and_then(|written| written.grid) {
+        Some([columns, rows]) => u32::from(columns) * u32::from(rows),
+        None => count(workspaces(raw.profile).grid),
+    };
     let mut shell = match raw.shell {
-        Some(shell) => shell.apply(profile, built)?,
+        Some(shell) => shell.apply(profile, built, workspaces)?,
         None => profile,
     };
     let written = raw
@@ -882,7 +898,11 @@ impl Raw {
 
         // Whatever the shell was built with: see `shell`.
         if let Some(shell) = self.shell {
-            config.shell = shell.apply(config.shell, ShellBuilt::FULL)?;
+            config.shell = shell.apply(
+                config.shell,
+                ShellBuilt::FULL,
+                count(config.workspaces.grid),
+            )?;
         }
         config.shell.double_click_ms = config.pointer.double_click_ms;
 

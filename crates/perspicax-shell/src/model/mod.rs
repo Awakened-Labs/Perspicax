@@ -5,7 +5,7 @@
 pub(crate) mod clock;
 #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
 pub(crate) mod image;
-#[cfg(feature = "panel")]
+#[cfg(any(feature = "panel", feature = "wallpaper"))]
 pub(crate) mod pager;
 #[cfg(feature = "panel")]
 pub(crate) mod tasks;

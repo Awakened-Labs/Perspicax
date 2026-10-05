@@ -184,8 +184,13 @@ impl LayerShellHandler for App {
         self.desktops
             .configure(&mut self.canvas, &mut self.kit, layer, &configure);
         #[cfg(feature = "panel")]
-        self.panels
-            .configure(&mut self.canvas, &mut self.kit, layer, &configure);
+        self.panels.configure(
+            &mut self.canvas,
+            &mut self.kit,
+            &self.workspaces.model,
+            layer,
+            &configure,
+        );
         #[cfg(feature = "menus")]
         self.menus
             .configure(&mut self.canvas, &mut self.kit, layer, &configure);

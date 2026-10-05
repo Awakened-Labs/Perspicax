@@ -32,12 +32,8 @@ use smithay_client_toolkit::{
     },
 };
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle,
-    protocol::{wl_output, wl_registry, wl_surface},
-};
-use wayland_protocols::ext::workspace::v1::client::{
-    ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
-    ext_workspace_handle_v1::ExtWorkspaceHandleV1, ext_workspace_manager_v1::ExtWorkspaceManagerV1,
+    QueueHandle,
+    protocol::{wl_output, wl_surface},
 };
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
@@ -47,6 +43,7 @@ use wayland_protocols_wlr::foreign_toplevel::v1::client::{
 use super::{
     App, Asked,
     canvas::{Canvas, whole},
+    pager::Model,
 };
 #[cfg(feature = "menus")]
 use crate::layout::Rect;
@@ -57,7 +54,6 @@ use crate::{
         Button,
         apps::{self, App as Application},
         clock::Clock,
-        pager::Pager,
         tasks::{Tasks, Window},
     },
     paint::{self, Kit},
@@ -80,10 +76,6 @@ pub(super) struct Panels {
     /// tells them with: `None` if it does not, or stopped.
     pub(super) tasks: Tasks<ZwlrForeignToplevelHandleV1, wl_output::WlOutput>,
     pub(super) taskbar: Option<ZwlrForeignToplevelManagerV1>,
-    /// The workspaces, as it tells a pager them, likewise.
-    pub(super) workspaces:
-        Pager<ExtWorkspaceGroupHandleV1, ExtWorkspaceHandleV1, wl_output::WlOutput>,
-    pub(super) pager: Option<ExtWorkspaceManagerV1>,
     /// Each window's icon, by the app id it gives, as found in the
     /// applications' read of number `icons_from`.
     icons: HashMap<String, Option<String>>,
@@ -115,7 +107,6 @@ impl Panels {
         shell: &Shell,
         actions: Sender<Asked>,
         taskbar: Option<ZwlrForeignToplevelManagerV1>,
-        pager: Option<ExtWorkspaceManagerV1>,
     ) -> Self {
         let clock = Clock::new(shell.panel.as_ref().map_or("%H:%M", |panel| &panel.clock));
         Self {
@@ -126,8 +117,6 @@ impl Panels {
             open_on: None,
             tasks: Tasks::default(),
             taskbar,
-            workspaces: Pager::default(),
-            pager,
             icons: HashMap::new(),
             icons_from: 0,
             stale: false,
@@ -144,6 +133,7 @@ impl Panels {
         shell: &Shell,
         outputs: &OutputState,
         kit: &mut Kit,
+        workspaces: &Model,
     ) {
         if shell.panel == self.panel {
             return;
@@ -165,7 +155,7 @@ impl Panels {
         }
         self.sync(canvas, qh, outputs, None);
         if !moved {
-            self.redraw(canvas, kit);
+            self.redraw(canvas, kit, workspaces);
         }
     }
 
@@ -240,6 +230,7 @@ impl Panels {
         &mut self,
         canvas: &mut Canvas,
         kit: &mut Kit,
+        workspaces: &Model,
         output: &wl_output::WlOutput,
         scale: i32,
     ) {
@@ -250,14 +241,13 @@ impl Panels {
             .position(|bar| bar.output == *output && bar.scale != scale)
         {
             self.each[at].scale = scale;
-            self.draw(canvas, kit, at);
+            self.draw(canvas, kit, workspaces, at);
         }
     }
 
-    /// A monitor was unplugged: no window or workspace is on it now.
+    /// A monitor was unplugged: no window is on it now.
     pub(super) fn gone(&mut self, output: &wl_output::WlOutput) {
         self.tasks.gone(output);
-        self.workspaces.gone(output);
     }
 
     pub(super) fn closed(&mut self, layer: &LayerSurface) {
@@ -269,6 +259,7 @@ impl Panels {
         &mut self,
         canvas: &mut Canvas,
         kit: &mut Kit,
+        workspaces: &Model,
         layer: &LayerSurface,
         configure: &LayerSurfaceConfigure,
     ) {
@@ -280,17 +271,22 @@ impl Panels {
             return;
         }
         self.each[at].size = Some((width, height));
-        self.draw(canvas, kit, at);
+        self.draw(canvas, kit, workspaces, at);
     }
 
     /// Read the clock, and draw the panels again if what it shows changed.
     /// How long until it next might.
-    pub(super) fn tick(&mut self, canvas: &mut Canvas, kit: &mut Kit) -> Duration {
+    pub(super) fn tick(
+        &mut self,
+        canvas: &mut Canvas,
+        kit: &mut Kit,
+        workspaces: &Model,
+    ) -> Duration {
         let now = chrono::Local::now();
         let time = self.clock.show(&now);
         if time != self.time {
             self.time = time;
-            self.redraw(canvas, kit);
+            self.redraw(canvas, kit, workspaces);
         }
         self.clock.until_next(&now)
     }
@@ -298,7 +294,13 @@ impl Panels {
     /// Show the start button of the monitor `on` as open, and every other as
     /// shut.
     #[cfg(feature = "menus")]
-    pub(super) fn set_open(&mut self, canvas: &mut Canvas, kit: &mut Kit, on: Option<&str>) {
+    pub(super) fn set_open(
+        &mut self,
+        canvas: &mut Canvas,
+        kit: &mut Kit,
+        workspaces: &Model,
+        on: Option<&str>,
+    ) {
         if self.open_on.as_deref() == on {
             return;
         }
@@ -306,7 +308,7 @@ impl Panels {
         for at in 0..self.each.len() {
             let name = Some(self.each[at].name.as_str());
             if name == was.as_deref() || name == on {
-                self.draw(canvas, kit, at);
+                self.draw(canvas, kit, workspaces, at);
             }
         }
     }
@@ -318,9 +320,9 @@ impl Panels {
     }
 
     /// Draw every panel again, if they were marked to be.
-    pub(super) fn draw_if_stale(&mut self, canvas: &mut Canvas, kit: &mut Kit) {
+    pub(super) fn draw_if_stale(&mut self, canvas: &mut Canvas, kit: &mut Kit, workspaces: &Model) {
         if std::mem::take(&mut self.stale) {
-            self.redraw(canvas, kit);
+            self.redraw(canvas, kit, workspaces);
         }
     }
 
@@ -400,12 +402,12 @@ impl Panels {
     }
 
     /// Draw every panel.
-    fn redraw(&mut self, canvas: &mut Canvas, kit: &mut Kit) {
-        (0..self.each.len()).for_each(|at| self.draw(canvas, kit, at));
+    fn redraw(&mut self, canvas: &mut Canvas, kit: &mut Kit, workspaces: &Model) {
+        (0..self.each.len()).for_each(|at| self.draw(canvas, kit, workspaces, at));
     }
 
     /// Draw panel `at`, once the compositor has given it a size.
-    fn draw(&mut self, canvas: &mut Canvas, kit: &mut Kit, at: usize) {
+    fn draw(&mut self, canvas: &mut Canvas, kit: &mut Kit, workspaces: &Model, at: usize) {
         let Some(panel) = &self.panel else {
             return;
         };
@@ -425,8 +427,7 @@ impl Panels {
                 minimized: window.minimized,
             })
             .collect();
-        let cells = self
-            .workspaces
+        let cells = workspaces
             .on(&bar.output)
             .into_iter()
             .map(|(workspace, (column, row))| Cell {
@@ -506,7 +507,8 @@ impl App {
                 let read = app.installed.refresh();
                 app.panels.find_icons(read, app.installed.apps());
             }
-            app.panels.draw_if_stale(&mut app.canvas, &mut app.kit);
+            app.panels
+                .draw_if_stale(&mut app.canvas, &mut app.kit, &app.workspaces.model);
         });
     }
 
@@ -531,52 +533,6 @@ impl App {
             Some(Part::Task(serial)) => self.press_task(serial, button),
             Some(Part::Workspace(serial)) => self.press_workspace(serial, button),
             Some(Part::Start) | None => {}
-        }
-    }
-}
-
-/// A listing of the compositor's globals, asked for afresh.
-pub(super) struct Relisted;
-
-impl App {
-    /// Take back the taskbar's or the pager's protocol, if one was taken away
-    /// and the rules now give it back. The compositor filters each listing of
-    /// its globals by the rules in force when it is asked for, so a listing
-    /// asked for now offers exactly what may be bound now, and binding from
-    /// it never binds what is still refused.
-    pub(super) fn take_back(&mut self, connection: &Connection) {
-        if self.panels.taskbar.is_none() || self.panels.pager.is_none() {
-            connection.display().get_registry(&self.qh, Relisted);
-        }
-    }
-}
-
-impl Dispatch<wl_registry::WlRegistry, Relisted> for App {
-    fn event(
-        app: &mut Self,
-        registry: &wl_registry::WlRegistry,
-        event: wl_registry::Event,
-        _: &Relisted,
-        _: &Connection,
-        qh: &QueueHandle<Self>,
-    ) {
-        let wl_registry::Event::Global {
-            name,
-            interface,
-            version,
-        } = event
-        else {
-            return;
-        };
-        if interface == ZwlrForeignToplevelManagerV1::interface().name
-            && app.panels.taskbar.is_none()
-        {
-            tracing::info!("the taskbar's protocol is offered again; taking it back");
-            app.panels.taskbar = Some(registry.bind(name, version.min(3), qh, ()));
-        } else if interface == ExtWorkspaceManagerV1::interface().name && app.panels.pager.is_none()
-        {
-            tracing::info!("the pager's protocol is offered again; taking it back");
-            app.panels.pager = Some(registry.bind(name, version.min(1), qh, ()));
         }
     }
 }

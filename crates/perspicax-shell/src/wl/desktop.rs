@@ -12,21 +12,29 @@
 //! desktop's id still holds it afterwards. Only turning the wallpaper off
 //! takes them away, and turning it on puts them back.
 //!
+//! A workspace may have a wallpaper of its own, and each monitor shows the
+//! one of the workspace it is on, as the pager's protocol tells it; the
+//! shell's own wallpaper on any other, and on all of them while the
+//! compositor tells of no workspaces. Each image is read once, the first
+//! time it is shown, and kept, no bigger than the monitors need: a switch
+//! paints from memory.
+//!
 //! The icons go on the first monitor alone, the leftmost, as on Windows, in
 //! what the shell's panel leaves of it. The folder is read when they are
 //! first shown, and again whenever it or anything in it has changed, which
 //! is looked at every two seconds while they are. A click on one redraws the icons alone: the
 //! wallpaper under them is painted once and kept.
 
-use std::path::Path;
-#[cfg(feature = "icons")]
-use std::path::PathBuf;
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::{Path, PathBuf},
+};
 
 #[cfg(feature = "icons")]
 use accesskit::{Action, ActionHandler, ActionRequest, NodeId};
 #[cfg(feature = "icons")]
 use perspicax_config::UntrustedLaunchers;
-use perspicax_config::{Shell, Wallpaper};
+use perspicax_config::{Shell, Wallpaper, WallpaperMode};
 #[cfg(feature = "icons")]
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 use smithay_client_toolkit::{
@@ -49,7 +57,7 @@ use super::{
 };
 use crate::{
     a11y::{self, adapter::Served},
-    model::image,
+    model::{image, wallpaper},
     paint::{self, Kit},
 };
 #[cfg(feature = "icons")]
@@ -71,9 +79,12 @@ const NAMESPACE: &str = "perspicax-desktop-";
 pub(super) struct Desktops {
     /// `None` is no wallpaper, and then no desktop either.
     wallpaper: Option<Wallpaper>,
-    /// The wallpaper's image, read once, and again when the config names
-    /// another.
-    image: Option<Pixmap>,
+    /// Workspaces' own wallpapers, by number.
+    wallpapers: BTreeMap<u32, Wallpaper>,
+    /// The wallpapers' images, read once each.
+    images: Images,
+    /// The config file, which a relative image path is beside.
+    config: Option<PathBuf>,
     each: Vec<Desktop>,
     /// The desktop folder's icons, while they are shown.
     #[cfg(feature = "icons")]
@@ -105,10 +116,13 @@ struct Desktop {
     scale: u32,
     /// In the surface's own units, once the compositor has said.
     size: Option<(u32, u32)>,
+    /// The number of the workspace its monitor shows, as far as the
+    /// compositor has told.
+    workspace: Option<u32>,
     /// The wallpaper as last painted under the icons, kept so that showing
     /// a selection does not paint it again.
     #[cfg(feature = "icons")]
-    painted: Option<Pixmap>,
+    painted: Option<(Wallpaper, Pixmap)>,
     /// Where each icon is, while it holds them.
     #[cfg(feature = "icons")]
     spots: Vec<Spot>,
@@ -141,11 +155,11 @@ pub(super) type Monitor = (String, (i32, i32), Option<Rect>);
 impl Desktops {
     #[cfg(not(feature = "icons"))]
     pub(super) fn new(shell: &Shell, config: Option<&Path>) -> Self {
-        let wallpaper = shell.wallpaper.clone();
-        let image = image_of(wallpaper.as_ref(), config);
         Self {
-            wallpaper,
-            image,
+            wallpaper: shell.wallpaper.clone(),
+            wallpapers: shell.wallpapers.clone(),
+            images: Images::default(),
+            config: config.map(Path::to_owned),
             each: Vec::new(),
         }
     }
@@ -154,11 +168,11 @@ impl Desktops {
     /// what is asked of an icon sent on to `actions`.
     #[cfg(feature = "icons")]
     pub(super) fn new(shell: &Shell, config: Option<&Path>, actions: Sender<Asked>) -> Self {
-        let wallpaper = shell.wallpaper.clone();
-        let image = image_of(wallpaper.as_ref(), config);
         let mut desktops = Self {
-            wallpaper,
-            image,
+            wallpaper: shell.wallpaper.clone(),
+            wallpapers: shell.wallpapers.clone(),
+            images: Images::default(),
+            config: config.map(Path::to_owned),
             each: Vec::new(),
             icons: None,
             actions,
@@ -167,7 +181,7 @@ impl Desktops {
         desktops
     }
 
-    /// Show the wallpaper `shell` asks for now. Every desktop is painted
+    /// Show the wallpapers `shell` asks for now. Every desktop is painted
     /// again where it is, unless the wallpaper was turned off, which takes
     /// them all away, or on, which puts one on every monitor.
     pub(super) fn reconfigure(
@@ -183,17 +197,23 @@ impl Desktops {
         let icons_changed = self.show_icons(shell);
         #[cfg(not(feature = "icons"))]
         let icons_changed = false;
-        if shell.wallpaper == self.wallpaper {
+        self.config = config.map(Path::to_owned);
+        if (&shell.wallpaper, &shell.wallpapers) == (&self.wallpaper, &self.wallpapers) {
             if icons_changed {
                 self.redraw(canvas, kit);
             }
             return;
         }
-        if named(shell.wallpaper.as_ref()) != named(self.wallpaper.as_ref()) {
-            self.image = image_of(shell.wallpaper.as_ref(), config);
-        }
         let was_on = self.wallpaper.is_some();
         self.wallpaper = shell.wallpaper.clone();
+        self.wallpapers = shell.wallpapers.clone();
+        let named: Vec<&Path> = self
+            .wallpaper
+            .iter()
+            .chain(self.wallpapers.values())
+            .filter_map(|wallpaper| wallpaper.image.as_deref())
+            .collect();
+        self.images.keep(&named);
         match (was_on, self.wallpaper.is_some()) {
             (true, true) => {
                 #[cfg(feature = "icons")]
@@ -249,6 +269,7 @@ impl Desktops {
             namespace,
             scale: whole(info.scale_factor),
             size: None,
+            workspace: None,
             #[cfg(feature = "icons")]
             painted: None,
             #[cfg(feature = "icons")]
@@ -278,6 +299,41 @@ impl Desktops {
     /// Take a monitor's desktop away with it.
     pub(super) fn remove(&mut self, output: &wl_output::WlOutput) {
         self.each.retain(|desktop| desktop.output != *output);
+    }
+
+    /// Show on each desktop the wallpaper of the workspace that `showing`
+    /// says its monitor shows, painting again each that changes.
+    pub(super) fn follow(
+        &mut self,
+        canvas: &mut Canvas,
+        kit: &mut Kit,
+        showing: impl Fn(&wl_output::WlOutput) -> Option<u32>,
+    ) {
+        for at in 0..self.each.len() {
+            let workspace = showing(&self.each[at].output);
+            let was = std::mem::replace(&mut self.each[at].workspace, workspace);
+            if self.wallpaper_of(was) != self.wallpaper_of(workspace) {
+                self.draw(canvas, kit, at);
+            }
+        }
+    }
+
+    /// What a monitor showing workspace `workspace` shows: its wallpaper, or
+    /// the shell's. `None` with no wallpaper at all.
+    fn wallpaper_of(&self, workspace: Option<u32>) -> Option<&Wallpaper> {
+        let own = workspace.and_then(|number| self.wallpapers.get(&number));
+        own.or(self.wallpaper.as_ref())
+    }
+
+    /// Every desktop's size in pixels, as far as the compositor has said.
+    fn areas(&self) -> Vec<(u32, u32)> {
+        self.each
+            .iter()
+            .filter_map(|desktop| {
+                let (wide, high) = desktop.size?;
+                Some((wide * desktop.scale, high * desktop.scale))
+            })
+            .collect()
     }
 
     /// The monitor and size of the desktop that is `surface`, if one is.
@@ -316,13 +372,23 @@ impl Desktops {
         (0..self.each.len()).for_each(|at| self.draw(canvas, kit, at));
     }
 
-    /// Paint desktop `at` at its monitor's scale: the wallpaper, and the
-    /// icons if it holds them. Its tree on the bus says what it shows.
+    /// Paint desktop `at` at its monitor's scale: the wallpaper of the
+    /// workspace it shows, and the icons if it holds them. Its tree on the
+    /// bus says what it shows.
     fn draw(&mut self, canvas: &mut Canvas, kit: &mut Kit, at: usize) {
-        let desktop = &mut self.each[at];
-        let (Some(wallpaper), Some((width, height))) = (&self.wallpaper, desktop.size) else {
+        let (Some(wallpaper), Some((width, height))) = (
+            self.wallpaper_of(self.each[at].workspace).cloned(),
+            self.each[at].size,
+        ) else {
             return;
         };
+        let areas = self.areas();
+        let image = wallpaper.image.as_deref().and_then(|written| {
+            self.images
+                .get(written, wallpaper.mode, &areas, self.config.as_deref())
+        });
+        let wallpaper = &wallpaper;
+        let desktop = &mut self.each[at];
         // Opaque, which lets the compositor skip whatever is under it.
         let whole = (0, 0, width as i32, height as i32);
         #[cfg(feature = "icons")]
@@ -339,7 +405,7 @@ impl Desktops {
             desktop.spots = layout::folder::lay_out(names, area, &mut *text);
             let pixels = (width * desktop.scale, height * desktop.scale);
             let kept = desktop.painted.take();
-            let Some(painted) = painted(kept, pixels, wallpaper, self.image.as_ref()) else {
+            let Some(painted) = painted(kept, pixels, wallpaper, image) else {
                 return;
             };
             let scale = desktop.scale;
@@ -349,7 +415,7 @@ impl Desktops {
                 scale,
                 &[whole],
                 |picture| {
-                    picture.data_mut().copy_from_slice(painted.data());
+                    picture.data_mut().copy_from_slice(painted.1.data());
                     paint::folder::paint(
                         &icons.folder,
                         &desktop.spots,
@@ -382,7 +448,7 @@ impl Desktops {
             desktop.scale,
             &[whole],
             |picture| {
-                paint::wallpaper::paint(wallpaper, self.image.as_ref(), picture);
+                paint::wallpaper::paint(wallpaper, image, picture);
             },
         );
         desktop
@@ -570,21 +636,23 @@ impl Icons {
     }
 }
 
-/// `wallpaper` painted `pixels` big: `kept`, if it was painted that size,
-/// or else painted afresh.
+/// `wallpaper` painted `pixels` big: `kept`, if it is that wallpaper
+/// painted that size, or else painted afresh.
 #[cfg(feature = "icons")]
 fn painted(
-    kept: Option<Pixmap>,
+    kept: Option<(Wallpaper, Pixmap)>,
     (wide, high): (u32, u32),
     wallpaper: &Wallpaper,
     image: Option<&Pixmap>,
-) -> Option<Pixmap> {
-    if let Some(kept) = kept.filter(|kept| (kept.width(), kept.height()) == (wide, high)) {
+) -> Option<(Wallpaper, Pixmap)> {
+    if let Some(kept) =
+        kept.filter(|(was, kept)| was == wallpaper && (kept.width(), kept.height()) == (wide, high))
+    {
         return Some(kept);
     }
     let mut fresh = Pixmap::new(wide, high)?;
     paint::wallpaper::paint(wallpaper, image, &mut fresh.as_mut());
-    Some(fresh)
+    Some((wallpaper.clone(), fresh))
 }
 
 /// Where the desktop folder is, as `$XDG_CONFIG_HOME/user-dirs.dirs` says.
@@ -674,14 +742,65 @@ impl App {
     }
 }
 
-/// The image `wallpaper` names, as the config writes it.
-fn named(wallpaper: Option<&Wallpaper>) -> Option<&Path> {
-    wallpaper?.image.as_deref()
+/// The wallpapers' images, each read the first time it is shown, by the
+/// path the config writes; `None` for one that could not be read.
+#[derive(Default)]
+struct Images(HashMap<PathBuf, Option<Kept>>);
+
+/// An image as read, kept at the size its wallpapers need.
+struct Kept {
+    pixmap: Pixmap,
+    /// Its size in the file.
+    full: (u32, u32),
 }
 
-/// The image `wallpaper` names, if it names one that can be read.
-fn image_of(wallpaper: Option<&Wallpaper>, config: Option<&Path>) -> Option<Pixmap> {
-    read(named(wallpaper)?, config)
+impl Images {
+    /// The image `written` in the config, for a wallpaper in `mode` on
+    /// monitors of `areas` pixels: as kept, or read again if it was kept
+    /// too small for them, which a bigger monitor plugged in, or the same
+    /// image tiled on another workspace, can ask of it.
+    fn get(
+        &mut self,
+        written: &Path,
+        mode: WallpaperMode,
+        areas: &[(u32, u32)],
+        config: Option<&Path>,
+    ) -> Option<&Pixmap> {
+        let fresh = match self.0.get(written) {
+            None => true,
+            Some(kept) => kept.as_ref().is_some_and(|kept| {
+                let size = (kept.pixmap.width(), kept.pixmap.height());
+                !wallpaper::serves(size, kept.full, mode, areas)
+            }),
+        };
+        if fresh {
+            let kept = read(written, config).map(|whole| {
+                let full = (whole.width(), whole.height());
+                let to = wallpaper::kept_for(full, mode, areas);
+                let pixmap = if to == full {
+                    whole
+                } else {
+                    image::shrink(&whole, to).unwrap_or(whole)
+                };
+                tracing::debug!(
+                    "the wallpaper {} is {full:?}, kept at {:?}",
+                    written.display(),
+                    (pixmap.width(), pixmap.height())
+                );
+                Kept { pixmap, full }
+            });
+            self.0.insert(written.to_owned(), kept);
+        }
+        self.0.get(written)?.as_ref().map(|kept| &kept.pixmap)
+    }
+
+    /// Let go of every image but those `named`, and of every one that could
+    /// not be read, which is tried again the next time it is shown: the
+    /// person may have mended it before saving the config.
+    fn keep(&mut self, named: &[&Path]) {
+        self.0
+            .retain(|path, kept| kept.is_some() && named.contains(&path.as_path()));
+    }
 }
 
 /// Read the image `written` in the config, or say why not and go without.

@@ -1,4 +1,5 @@
-//! The workspaces, as a pager is told them, and which one a press asks for.
+//! The workspaces, as a pager is told them: which one a press asks for, and
+//! which one each monitor shows, for its wallpaper.
 //!
 //! The compositor tells of groups of workspaces, each showing on some of
 //! the monitors, and of each workspace: its name, its place in the grid,
@@ -8,10 +9,12 @@
 //! grid per monitor, each shows its own.
 //!
 //! The compositor ends each batch of news with a `done`, and the pager is
-//! drawn again then, so it never shows a batch half-told.
+//! drawn again then, and the wallpapers changed, so neither shows a batch
+//! half-told.
 //!
 //! Generic over the handles and the monitors, as the tasks are.
 
+#[cfg(feature = "panel")]
 use super::Button;
 
 /// Every group and workspace the compositor has told of.
@@ -37,6 +40,10 @@ struct Group<G, W, O> {
 pub(crate) struct Workspace<W> {
     pub(crate) handle: W,
     /// Its own for as long as it lasts, and never another's.
+    #[cfg_attr(
+        not(feature = "panel"),
+        expect(dead_code, reason = "how a pager's cell names it")
+    )]
     pub(crate) serial: u64,
     pub(crate) name: String,
     /// Its place in the grid as the compositor gives it: for perspicax, its
@@ -44,6 +51,19 @@ pub(crate) struct Workspace<W> {
     pub(crate) coordinates: Vec<u32>,
     /// It is the one showing.
     pub(crate) active: bool,
+}
+
+impl<W> Workspace<W> {
+    /// Its number, from 1, which perspicax names it by, as the config's
+    /// `workspace-N` and `[shell.wallpapers]` know it. `None` for another
+    /// compositor's name.
+    #[cfg_attr(
+        not(any(feature = "wallpaper", test)),
+        expect(dead_code, reason = "a wallpaper's")
+    )]
+    pub(crate) fn number(&self) -> Option<u32> {
+        self.name.parse().ok().filter(|&number| number > 0)
+    }
 }
 
 /// One thing the compositor told of a group.
@@ -192,8 +212,22 @@ impl<G: PartialEq, W: PartialEq, O: PartialEq> Pager<G, W, O> {
         shown
     }
 
+    /// The workspace showing on monitor `output`: the one of the group there
+    /// that is showing.
+    #[cfg_attr(
+        not(any(feature = "wallpaper", test)),
+        expect(dead_code, reason = "a wallpaper's")
+    )]
+    pub(crate) fn showing(&self, output: &O) -> Option<&Workspace<W>> {
+        self.on(output)
+            .into_iter()
+            .map(|(workspace, _)| workspace)
+            .find(|workspace| workspace.active)
+    }
+
     /// The workspace pressing `button` on the cell of workspace `serial`
     /// asks to show: that one, for a left click on one not showing.
+    #[cfg(feature = "panel")]
     pub(crate) fn pressed(&self, serial: u64, button: Button) -> Option<&W> {
         let workspace = self.workspaces.iter().find(|ws| ws.serial == serial)?;
         (button == Button::Left && !workspace.active).then_some(&workspace.handle)
@@ -283,6 +317,27 @@ mod tests {
         assert_eq!(names(&pager, "DP-1"), ["13", "11", "10"]);
     }
 
+    #[test]
+    fn each_monitor_shows_the_workspace_of_its_group_that_is_showing() {
+        let number = |pager: &Paged, output| pager.showing(&output).and_then(Workspace::number);
+        let mut each = Paged::default();
+        grid(&mut each, 1, &["DP-1"], 10, 2);
+        grid(&mut each, 2, &["HDMI-A-1"], 20, 3);
+        each.workspace(&22, Told::Active(true));
+        each.workspace(&20, Told::Active(false));
+        assert_eq!(number(&each, "DP-1"), Some(1));
+        assert_eq!(number(&each, "HDMI-A-1"), Some(3), "each its own");
+        assert_eq!(number(&each, "DP-2"), None, "no group shows there");
+
+        each.workspace(&22, Told::Name("mail".to_owned()));
+        assert_eq!(
+            number(&each, "HDMI-A-1"),
+            None,
+            "showing, but by a name that is not a number"
+        );
+    }
+
+    #[cfg(feature = "panel")]
     #[test]
     fn clicking_a_workspace_switches_to_it() {
         let mut pager = Paged::default();

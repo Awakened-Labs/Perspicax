@@ -16,7 +16,7 @@ mod desktop;
 mod installed;
 #[cfg(feature = "menus")]
 mod menu;
-#[cfg(feature = "panel")]
+#[cfg(any(feature = "panel", feature = "wallpaper"))]
 mod pager;
 #[cfg(feature = "panel")]
 mod panel;
@@ -95,13 +95,10 @@ pub(crate) fn run(
         desktops: desktop::Desktops::new(&shell, config.as_deref(), actions.clone()),
         #[cfg(feature = "icons")]
         watching: false,
+        #[cfg(any(feature = "panel", feature = "wallpaper"))]
+        workspaces: pager::Workspaces::bind(&globals, &qh),
         #[cfg(feature = "panel")]
-        panels: panel::Panels::new(
-            &shell,
-            actions.clone(),
-            taskbar::bind(&globals, &qh),
-            pager::bind(&globals, &qh),
-        ),
+        panels: panel::Panels::new(&shell, actions.clone(), taskbar::bind(&globals, &qh)),
         #[cfg(feature = "panel")]
         ticking: None,
         #[cfg(any(feature = "menus", feature = "panel"))]
@@ -170,6 +167,9 @@ pub(crate) struct App {
     /// the taskbar finds each window's icon.
     #[cfg(any(feature = "menus", feature = "panel"))]
     installed: installed::Installed,
+    /// The workspaces, which the pagers show and the wallpapers follow.
+    #[cfg(any(feature = "panel", feature = "wallpaper"))]
+    workspaces: pager::Workspaces,
     #[cfg(feature = "wallpaper")]
     desktops: desktop::Desktops,
     /// Whether a timer is looking at the desktop folder for changes.
@@ -195,10 +195,10 @@ pub(crate) struct App {
     )]
     handle: LoopHandle<'static, App>,
     #[cfg_attr(
-        not(any(feature = "menus", feature = "panel")),
+        not(any(feature = "menus", feature = "panel", feature = "wallpaper")),
         expect(
             dead_code,
-            reason = "the menus' surface, and the panels' protocols, from the loop"
+            reason = "the menus' surface, and the panels' and wallpapers' protocols, from the loop"
         )
     )]
     qh: QueueHandle<App>,
@@ -270,14 +270,18 @@ impl App {
             self.kit.images = images(shell.icon_theme.as_deref(), self.installed.places());
         }
         #[cfg(feature = "wallpaper")]
-        self.desktops.reconfigure(
-            &mut self.canvas,
-            &mut self.kit,
-            qh,
-            &shell,
-            self.config.as_deref(),
-            &self.outputs,
-        );
+        {
+            self.desktops.reconfigure(
+                &mut self.canvas,
+                &mut self.kit,
+                qh,
+                &shell,
+                self.config.as_deref(),
+                &self.outputs,
+            );
+            // Desktops put back with the wallpaper turned on again.
+            self.follow_workspaces();
+        }
         // The desktop folder's icons, from the new theme.
         #[cfg(feature = "icons")]
         if theme_changed {
@@ -285,8 +289,14 @@ impl App {
         }
         #[cfg(feature = "panel")]
         {
-            self.panels
-                .reconfigure(&mut self.canvas, qh, &shell, &self.outputs, &mut self.kit);
+            self.panels.reconfigure(
+                &mut self.canvas,
+                qh,
+                &shell,
+                &self.outputs,
+                &mut self.kit,
+                &self.workspaces.model,
+            );
             self.keep_time();
             // The taskbar's icons, from the new theme. The menus are drawn
             // afresh each time one opens.
@@ -351,11 +361,17 @@ impl App {
         if let Some(ticking) = self.ticking.take() {
             self.handle.remove(ticking);
         }
-        let next = self.panels.tick(&mut self.canvas, &mut self.kit);
+        let next = self
+            .panels
+            .tick(&mut self.canvas, &mut self.kit, &self.workspaces.model);
         let ticking = self
             .handle
             .insert_source(Timer::from_duration(next), |_, (), app| {
-                TimeoutAction::ToDuration(app.panels.tick(&mut app.canvas, &mut app.kit))
+                TimeoutAction::ToDuration(app.panels.tick(
+                    &mut app.canvas,
+                    &mut app.kit,
+                    &app.workspaces.model,
+                ))
             });
         match ticking {
             Ok(ticking) => self.ticking = Some(ticking),
@@ -434,8 +450,12 @@ impl App {
             event,
         );
         #[cfg(feature = "panel")]
-        self.panels
-            .set_open(&mut self.canvas, &mut self.kit, self.menus.start_open_on());
+        self.panels.set_open(
+            &mut self.canvas,
+            &mut self.kit,
+            &self.workspaces.model,
+            self.menus.start_open_on(),
+        );
         for effect in effects {
             match effect {
                 Effect::Run(run) => self.start(&run),
@@ -519,7 +539,12 @@ impl OutputHandler for App {
         };
         tracing::debug!(output = info.name.as_deref(), "a monitor");
         #[cfg(feature = "wallpaper")]
-        self.desktops.add(&self.canvas, qh, output, &info);
+        {
+            self.desktops.add(&self.canvas, qh, output, &info);
+            // The compositor may have told which workspace it shows before
+            // it told of the monitor.
+            self.follow_workspaces();
+        }
         #[cfg(feature = "panel")]
         self.panels.sync(&self.canvas, qh, &self.outputs, None);
         self.monitors_changed();
@@ -541,8 +566,13 @@ impl OutputHandler for App {
         #[cfg(feature = "panel")]
         {
             if let Some(info) = self.outputs.info(&output) {
-                self.panels
-                    .rescale(&mut self.canvas, &mut self.kit, &output, info.scale_factor);
+                self.panels.rescale(
+                    &mut self.canvas,
+                    &mut self.kit,
+                    &self.workspaces.model,
+                    &output,
+                    info.scale_factor,
+                );
             }
             // A monitor moved may be the first now, or no longer.
             self.panels.sync(&self.canvas, qh, &self.outputs, None);
@@ -562,6 +592,8 @@ impl OutputHandler for App {
     ) {
         #[cfg(feature = "wallpaper")]
         self.desktops.remove(&output);
+        #[cfg(any(feature = "panel", feature = "wallpaper"))]
+        self.workspaces.model.gone(&output);
         #[cfg(feature = "panel")]
         {
             self.panels

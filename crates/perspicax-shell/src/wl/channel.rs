@@ -84,9 +84,9 @@ impl Dispatch<PerspicaxShellV1, ()> for App {
             Event::RootMenu { output, x, y } => app.root_menu(output, x, y),
             Event::Reconfigure => {
                 app.reconfigure(qh);
-                #[cfg(feature = "panel")]
+                #[cfg(any(feature = "panel", feature = "wallpaper"))]
                 app.take_back(connection);
-                #[cfg(not(feature = "panel"))]
+                #[cfg(not(any(feature = "panel", feature = "wallpaper")))]
                 let _ = connection;
             }
             Event::Finished => {

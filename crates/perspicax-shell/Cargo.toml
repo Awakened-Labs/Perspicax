@@ -85,8 +85,16 @@ perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
 # only a wallpaper, and the config refuses a key for a component left out,
 # naming its feature. None is on by default; `full` is all of them.
 [features]
-# A picture or a colour behind the windows, on every monitor.
-wallpaper = ["dep:tiny-skia", "dep:png", "dep:zune-jpeg", "dep:accesskit", "dep:accesskit_unix"]
+# A picture or a colour behind the windows, on every monitor, and one of its
+# own for any workspace, followed through the pager's protocol.
+wallpaper = [
+    "dep:tiny-skia",
+    "dep:png",
+    "dep:zune-jpeg",
+    "dep:accesskit",
+    "dep:accesskit_unix",
+    "dep:wayland-protocols",
+]
 # A bar along an edge of each monitor: start button, taskbar, pager, clock.
 # Its start button needs `menus` as well, which the config checks. The
 # taskbar draws each window's icon, found as the menus find theirs.

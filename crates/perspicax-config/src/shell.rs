@@ -8,7 +8,7 @@
 //! which refuses such a key by name and names the cargo feature that would
 //! provide it, as [`crate::parse`] does for the compositor's own keys.
 
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use perspicax_policy::Colour;
 use serde::Deserialize;
@@ -48,6 +48,11 @@ pub struct Shell {
     /// What every monitor shows behind the windows. `None` is no wallpaper,
     /// for a person who brings their own.
     pub wallpaper: Option<Wallpaper>,
+    /// Workspaces' own wallpapers, by number: the compositor's name for
+    /// each, from 1, row by row along the grid. A monitor shows the one of
+    /// the workspace it is on, and `wallpaper` for a workspace without one.
+    /// Never any with no `wallpaper`.
+    pub wallpapers: BTreeMap<u32, Wallpaper>,
     /// A right-click on the wallpaper opens a menu of the installed
     /// applications.
     pub root_menu: bool,
@@ -224,6 +229,7 @@ impl Shell {
                 image: None,
                 mode: WallpaperMode::Fill,
             }),
+            wallpapers: BTreeMap::new(),
             root_menu: built.menus,
             menu_file: None,
             desktop_icons: icons && built.icons,
@@ -273,6 +279,7 @@ pub(crate) struct RawShell {
     enabled: Option<bool>,
     wallpaper: Option<String>,
     wallpaper_mode: Option<WallpaperMode>,
+    wallpapers: Option<BTreeMap<String, RawWorkspaceWallpaper>>,
     root_menu: Option<bool>,
     menu_file: Option<PathBuf>,
     desktop_icons: Option<bool>,
@@ -295,6 +302,22 @@ struct RawPanel {
     clock: Option<String>,
 }
 
+/// A workspace's wallpaper: written as `wallpaper` is, or as a table that
+/// can fit it its own way.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawWorkspaceWallpaper {
+    Written(String),
+    Table(RawWorkspaceTable),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWorkspaceTable {
+    wallpaper: String,
+    mode: Option<WallpaperMode>,
+}
+
 /// `"all"`, `"first"`, or a list of connector names.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -305,8 +328,14 @@ enum RawOutputs {
 
 impl RawShell {
     /// Layer the written keys on `shell`, refusing any for a component
-    /// `built` lacks.
-    pub(crate) fn apply(self, mut shell: Shell, built: ShellBuilt) -> Result<Shell, Error> {
+    /// `built` lacks, or a wallpaper for one of more workspaces than the
+    /// `workspaces` there are.
+    pub(crate) fn apply(
+        self,
+        mut shell: Shell,
+        built: ShellBuilt,
+        workspaces: u32,
+    ) -> Result<Shell, Error> {
         self.check(built)?;
         if let Some(enabled) = self.enabled {
             shell.enabled = enabled;
@@ -316,6 +345,21 @@ impl RawShell {
         }
         if let (Some(mode), Some(wallpaper)) = (self.wallpaper_mode, &mut shell.wallpaper) {
             wallpaper.mode = mode;
+        }
+        if let Some(written) = self.wallpapers.filter(|written| !written.is_empty()) {
+            let Some(default) = &shell.wallpaper else {
+                return Err(invalid(
+                    "shell.wallpapers".to_owned(),
+                    format!(
+                        "a workspace's wallpaper is shown in place of the shell's, and \
+                         `wallpaper = \"{NONE}\"` leaves the shell's out"
+                    ),
+                ));
+            };
+            shell.wallpapers = written
+                .into_iter()
+                .map(|(number, entry)| workspace_wallpaper(&number, entry, default, workspaces))
+                .collect::<Result<_, _>>()?;
         }
         if let Some(root_menu) = self.root_menu {
             shell.root_menu = root_menu;
@@ -391,6 +435,14 @@ impl RawShell {
             (
                 self.wallpaper_mode.is_some(),
                 "shell.wallpaper-mode",
+                built.wallpaper,
+                "wallpaper",
+            ),
+            (
+                self.wallpapers
+                    .as_ref()
+                    .is_some_and(|written| !written.is_empty()),
+                "shell.wallpapers",
                 built.wallpaper,
                 "wallpaper",
             ),
@@ -560,38 +612,85 @@ impl RawOutputs {
 /// `wallpaper = ...` laid over what the profile had: `"none"`, a colour, or
 /// the path of an image shown over the colour.
 fn wallpaper(written: String, had: Option<Wallpaper>) -> Result<Option<Wallpaper>, Error> {
-    let key = || "shell.wallpaper".to_owned();
-    let had = had.unwrap_or(Wallpaper {
-        colour: Colour::rgb(0, 0, 0),
-        image: None,
-        mode: WallpaperMode::Fill,
-    });
+    const KEY: &str = "shell.wallpaper";
     if written == NONE {
         return Ok(None);
     }
     if written.trim().is_empty() {
         return Err(invalid(
-            key(),
-            "an empty path; write \"none\" for no wallpaper".to_owned(),
+            KEY.to_owned(),
+            format!("an empty path; write \"{NONE}\" for no wallpaper"),
         ));
     }
+    let had = had.unwrap_or(Wallpaper {
+        colour: Colour::rgb(0, 0, 0),
+        image: None,
+        mode: WallpaperMode::Fill,
+    });
+    picture(KEY, written, had).map(Some)
+}
+
+/// Workspace `number`'s wallpaper as `entry` writes it, over `default`:
+/// its colour behind an image, and its mode unless the entry has its own.
+/// Refused for a number that is not one of the `workspaces`.
+fn workspace_wallpaper(
+    number: &str,
+    entry: RawWorkspaceWallpaper,
+    default: &Wallpaper,
+    workspaces: u32,
+) -> Result<(u32, Wallpaper), Error> {
+    let key = format!("shell.wallpapers.{number}");
+    let at = number
+        .parse::<u32>()
+        .ok()
+        .filter(|at| (1..=workspaces).contains(at))
+        .ok_or_else(|| {
+            invalid(
+                key.clone(),
+                format!(
+                    "not a workspace: [workspaces] grid makes {workspaces}, numbered from 1 \
+                     row by row"
+                ),
+            )
+        })?;
+    let (written, mode) = match entry {
+        RawWorkspaceWallpaper::Written(written) => (written, None),
+        RawWorkspaceWallpaper::Table(table) => (table.wallpaper, table.mode),
+    };
+    if written == NONE || written.trim().is_empty() {
+        return Err(invalid(
+            key,
+            format!(
+                "a workspace shows a wallpaper of its own or the shell's; \
+                 `\"{NONE}\"` is the shell's to say"
+            ),
+        ));
+    }
+    let mut wallpaper = picture(&key, written, default.clone())?;
+    wallpaper.mode = mode.unwrap_or(default.mode);
+    Ok((at, wallpaper))
+}
+
+/// A colour, or the path of an image shown over `had`'s colour, as written
+/// at `key`, in `had`'s mode.
+fn picture(key: &str, written: String, had: Wallpaper) -> Result<Wallpaper, Error> {
     if written.starts_with('#') {
         let colour = Colour::parse(&written).ok_or_else(|| {
             invalid(
-                key(),
+                key.to_owned(),
                 format!("{written:?} is not a colour; write one as \"#rrggbb\""),
             )
         })?;
-        return Ok(Some(Wallpaper {
+        return Ok(Wallpaper {
             colour,
             image: None,
             ..had
-        }));
+        });
     }
-    Ok(Some(Wallpaper {
+    Ok(Wallpaper {
         image: Some(PathBuf::from(written)),
         ..had
-    }))
+    })
 }
 
 /// A program and its arguments, of which there must be at least the program.
@@ -812,6 +911,116 @@ mod tests {
         assert_eq!(
             Config::profile(Profile::Minimal, Built::default()).shell,
             Shell::profile(Profile::Minimal, ShellBuilt::FULL)
+        );
+    }
+
+    #[test]
+    fn a_workspace_can_have_a_wallpaper_of_its_own() {
+        let text = r##"
+            [shell]
+            wallpaper = "~/Pictures/hills.png"
+            wallpaper-mode = "fit"
+            [shell.wallpapers]
+            1 = "~/Pictures/sea.jpg"
+            2 = "#203040"
+            4 = { wallpaper = "~/Pictures/linen.png", mode = "tile" }
+        "##;
+        let shell = shell(text, ShellBuilt::FULL).unwrap();
+        let default = shell.wallpaper.clone().unwrap();
+        let colour = Shell::profile(Profile::Classic, ShellBuilt::FULL)
+            .wallpaper
+            .unwrap()
+            .colour;
+        let image = |path: &str, mode| Wallpaper {
+            colour,
+            image: Some(PathBuf::from(path)),
+            mode,
+        };
+        assert_eq!(default, image("~/Pictures/hills.png", WallpaperMode::Fit));
+        assert_eq!(
+            shell.wallpapers,
+            BTreeMap::from([
+                (1, image("~/Pictures/sea.jpg", WallpaperMode::Fit)),
+                (
+                    2,
+                    Wallpaper {
+                        colour: Colour::rgb(0x20, 0x30, 0x40),
+                        image: None,
+                        mode: WallpaperMode::Fit,
+                    }
+                ),
+                (4, image("~/Pictures/linen.png", WallpaperMode::Tile)),
+            ]),
+            "the shell's mode and colour unless an entry says otherwise; 3 has none"
+        );
+        assert_eq!(
+            parse(text, Built::default()).unwrap().shell,
+            shell,
+            "the compositor reads the same, to tell the shell when it changes"
+        );
+    }
+
+    #[test]
+    fn a_workspace_past_the_grid_or_none_is_refused() {
+        let past = "[shell.wallpapers]\n5 = \"#102030\"";
+        for error in [
+            shell(past, ShellBuilt::FULL).unwrap_err(),
+            parse(past, Built::default()).unwrap_err(),
+        ] {
+            assert!(
+                error.to_string().contains("shell.wallpapers.5")
+                    && error.to_string().contains("makes 4"),
+                "classic's grid is four: {error}"
+            );
+        }
+        let wider = "[workspaces]\ngrid = [3, 2]\n[shell.wallpapers]\n6 = \"#102030\"";
+        assert!(
+            shell(wider, ShellBuilt::FULL).is_ok(),
+            "a grid of six has a 6"
+        );
+        assert!(parse(wider, Built::default()).is_ok());
+        let minimal = "profile = \"minimal\"\n[shell.wallpapers]\n4 = \"#102030\"";
+        assert!(shell(minimal, ShellBuilt::FULL).is_ok(), "minimal's 2 by 2");
+
+        for written in [
+            "0 = \"#102030\"",
+            "one = \"#102030\"",
+            "2 = \"none\"",
+            "2 = \"\"",
+        ] {
+            let text = format!("[shell.wallpapers]\n{written}");
+            assert!(
+                shell(&text, ShellBuilt::FULL).is_err(),
+                "{written} is refused"
+            );
+        }
+        let error = shell(
+            "[shell]\nwallpaper = \"none\"\n[shell.wallpapers]\n1 = \"#102030\"",
+            ShellBuilt::FULL,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("shell.wallpapers")
+                && error.to_string().contains("in place of the shell's"),
+            "{error}"
+        );
+        assert!(
+            shell(
+                "[shell.wallpapers]\n1 = { wallpaper = \"a.png\", fit = \"tile\" }",
+                ShellBuilt::FULL
+            )
+            .is_err(),
+            "a table's keys are checked too"
+        );
+        assert!(
+            matches!(
+                shell("[shell.wallpapers]\n1 = \"#102030\"", ShellBuilt::default()),
+                Err(Error::ShellNotBuilt {
+                    key: "shell.wallpapers",
+                    feature: "wallpaper"
+                })
+            ),
+            "a shell with no wallpaper has none to give a workspace"
         );
     }
 
