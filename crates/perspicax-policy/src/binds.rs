@@ -79,6 +79,12 @@ pub enum Action {
     DetachTab,
     /// Read the config file again and apply it.
     Reload,
+    /// Ask the desktop shell for its start menu, on the monitor under the
+    /// pointer. What a tap of the Logo key does in the classic profile.
+    StartMenu,
+    /// Ask the desktop shell for the root menu, at the pointer: the menu a
+    /// right-click on the wallpaper opens.
+    RootMenu,
 }
 
 /// Which output, from the one a window is on.
@@ -112,11 +118,14 @@ pub enum Drag {
     Resize,
 }
 
-/// A table of chords and what each one does, plus the modifier that turns a
-/// press anywhere on a window into a drag.
+/// A table of chords and what each one does, plus what a tap of the Logo
+/// key does, and the modifier that turns a press anywhere on a window into a
+/// drag.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Bindings {
     keys: Vec<(Chord, Action)>,
+    /// What tapping the Logo key alone does. See [`crate::LogoTap`].
+    tap: Option<Action>,
     /// `None`: no modifier-drag at all, and every click is the client's.
     drag: Option<Mods>,
 }
@@ -167,6 +176,27 @@ impl Bindings {
     pub fn unbind(mut self, chord: Chord) -> Self {
         self.keys.retain(|(bound, _)| *bound != chord);
         self
+    }
+
+    /// Make a tap of the Logo key, pressed and released with nothing else,
+    /// do `action`, replacing whatever it did before.
+    #[must_use]
+    pub fn bind_tap(mut self, action: Action) -> Self {
+        self.tap = Some(action);
+        self
+    }
+
+    /// Make a tap of the Logo key do nothing.
+    #[must_use]
+    pub fn unbind_tap(mut self) -> Self {
+        self.tap = None;
+        self
+    }
+
+    /// What a tap of the Logo key does, if anything.
+    #[must_use]
+    pub fn tap(&self) -> Option<&Action> {
+        self.tap.as_ref()
     }
 
     /// No modifier-drag: every click is the client's.

@@ -51,6 +51,8 @@ impl Compositor {
             Action::ToggleSticky => self.toggle_sticky(),
             Action::Snap(direction) => self.snap_focused(*direction),
             Action::Reload => self.reload(),
+            Action::StartMenu => self.ask_shell(crate::shell_protocol::Menu::Start),
+            Action::RootMenu => self.ask_shell(crate::shell_protocol::Menu::Root),
             Action::CycleFocus => {
                 // Minimized windows on this workspace count as below the
                 // bottom of the stack, so cycling reaches them first and

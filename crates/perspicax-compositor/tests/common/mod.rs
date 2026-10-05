@@ -18,15 +18,19 @@ use std::{
 use perspicax_compositor::{Backend, Command, Config, Facts, Requests, Stop};
 use perspicax_index::HostFacts;
 use perspicax_policy::Action;
+use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_output, delegate_registry, delegate_shm, delegate_xdg_shell,
-    delegate_xdg_window,
+    delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
+    delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     shell::{
         WaylandSurface,
+        wlr_layer::{
+            Anchor, Layer, LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
+        },
         xdg::{
             XdgShell, XdgSurface as _,
             window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
@@ -129,6 +133,12 @@ impl Session {
         (Desk::new(&globals, &qh), queue, qh, globals)
     }
 
+    /// The socket's name in `XDG_RUNTIME_DIR`, for a client of the test's
+    /// own to [`connect`] to.
+    pub fn socket(&self) -> &str {
+        &self.socket
+    }
+
     pub fn command(&self, command: Command) {
         self.requests
             .command(command)
@@ -141,6 +151,11 @@ impl Session {
 
     pub fn wait_for(&self, ready: impl Fn(&HostFacts) -> bool) -> HostFacts {
         wait_for(&self.facts, ready)
+    }
+
+    /// Whether the compositor has stopped on its own: a session that ended.
+    pub fn ended(&self) -> bool {
+        self.thread.is_finished()
     }
 
     pub fn stop<D>(self, clients: D) {
@@ -284,6 +299,16 @@ pub struct ShownMode {
     pub finished: bool,
 }
 
+/// What the shell channel told the client, in the order it was told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Told {
+    /// The start menu, on the monitor of this name, if the client knows it.
+    StartMenu(Option<String>),
+    /// The root menu, on the monitor of this name, at this point on it.
+    RootMenu(Option<String>, i32, i32),
+    Reconfigure,
+}
+
 /// The test's client: windows of its own, drawn once in a flat colour, and
 /// whichever of the watching protocols a test binds.
 pub struct Desk {
@@ -297,6 +322,9 @@ pub struct Desk {
     /// Each window's colour, ARGB, in the order they opened.
     pub colours: Vec<u32>,
     pub drawn: usize,
+    /// The size the compositor last offered a window, where it named one.
+    /// Windows are drawn at their own size whatever it offers.
+    pub offered: Option<(u32, u32)>,
     pub list: Option<ExtForeignToplevelListV1>,
     pub list_finished: bool,
     pub listed: HashMap<ObjectId, Listed>,
@@ -321,6 +349,13 @@ pub struct Desk {
     pub shown_modes: Vec<ShownMode>,
     /// `succeeded`, `failed` or `cancelled`, for the last configuration.
     pub configured: Option<&'static str>,
+    pub shell: Option<PerspicaxShellV1>,
+    pub told: Vec<Told>,
+    pub shell_finished: bool,
+    layer_shell: LayerShell,
+    /// Strips across the top of the screen, each with its colour and height.
+    pub layers: Vec<(LayerSurface, u32, u32)>,
+    pub layers_drawn: usize,
 }
 
 impl Desk {
@@ -336,6 +371,7 @@ impl Desk {
             pool,
             windows: Vec::new(),
             colours: Vec::new(),
+            offered: None,
             drawn: 0,
             list: None,
             list_finished: false,
@@ -359,7 +395,34 @@ impl Desk {
             shown: Vec::new(),
             shown_modes: Vec::new(),
             configured: None,
+            shell: None,
+            told: Vec::new(),
+            shell_finished: false,
+            layer_shell: LayerShell::bind(globals, qh).expect("zwlr_layer_shell_v1"),
+            layers: Vec::new(),
+            layers_drawn: 0,
         }
+    }
+
+    /// A strip `height` tall across the top of the screen on `layer`, drawn
+    /// in one colour, ARGB, reserving no room: a panel, or a menu on
+    /// `overlay`.
+    pub fn open_strip(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        layer: Layer,
+        namespace: &str,
+        height: u32,
+        colour: u32,
+    ) {
+        let surface = self.compositor.create_surface(qh);
+        let strip =
+            self.layer_shell
+                .create_layer_surface(qh, surface, layer, Some(namespace), None);
+        strip.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
+        strip.set_size(0, height);
+        strip.commit();
+        self.layers.push((strip, colour, height));
     }
 
     pub fn open_window(&mut self, qh: &QueueHandle<Self>, title: &str, app_id: &str) {
@@ -606,6 +669,21 @@ impl Desk {
         configuration.enable_head(&self.head_named(name).head, qh, ())
     }
 
+    /// Bind the shell channel, as perspicax-shell does. Panics if it is not
+    /// advertised.
+    pub fn bind_shell(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.shell = Some(
+            globals
+                .bind::<PerspicaxShellV1, _, _>(qh, 1..=1, ())
+                .expect("perspicax_shell_v1"),
+        );
+    }
+
+    /// The name of a monitor this client was told of.
+    fn output_name(&self, output: &wl_output::WlOutput) -> Option<String> {
+        self.outputs.info(output).and_then(|info| info.name)
+    }
+
     /// Lock the session, as swaylock does.
     pub fn lock(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
         let manager = globals
@@ -734,6 +812,32 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for Desk {
             Event::Parent { parent } => tasked.parent = parent.map(|parent| parent.id()),
             Event::Done => tasked.done += 1,
             Event::Closed => tasked.closed = true,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<PerspicaxShellV1, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        _: &PerspicaxShellV1,
+        event: perspicax_shell_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use perspicax_shell_v1::Event;
+        match event {
+            Event::StartMenu { output } => {
+                let name = output.and_then(|output| desk.output_name(&output));
+                desk.told.push(Told::StartMenu(name));
+            }
+            Event::RootMenu { output, x, y } => {
+                let name = output.and_then(|output| desk.output_name(&output));
+                desk.told.push(Told::RootMenu(name, x, y));
+            }
+            Event::Reconfigure => desk.told.push(Told::Reconfigure),
+            Event::Finished => desk.shell_finished = true,
             _ => {}
         }
     }
@@ -1042,6 +1146,42 @@ impl Dispatch<ExtSessionLockV1, ()> for Desk {
     }
 }
 
+impl LayerShellHandler for Desk {
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {}
+
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        layer: &LayerSurface,
+        configure: LayerSurfaceConfigure,
+        _: u32,
+    ) {
+        let Some(&(_, colour, height)) = self.layers.iter().find(|(known, _, _)| known == layer)
+        else {
+            return;
+        };
+        let width = configure.new_size.0.max(1);
+        let (buffer, canvas) = self
+            .pool
+            .create_buffer(
+                i32::try_from(width).unwrap(),
+                i32::try_from(height).unwrap(),
+                i32::try_from(width * 4).unwrap(),
+                wl_shm::Format::Argb8888,
+            )
+            .expect("a buffer");
+        for pixel in canvas.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&colour.to_le_bytes());
+        }
+        let surface = layer.wl_surface();
+        buffer.attach_to(surface).expect("attach");
+        surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+        layer.commit();
+        self.layers_drawn += 1;
+    }
+}
+
 impl WindowHandler for Desk {
     fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {
         self.asked_to_close += 1;
@@ -1052,9 +1192,12 @@ impl WindowHandler for Desk {
         _: &Connection,
         _: &QueueHandle<Self>,
         window: &Window,
-        _: WindowConfigure,
+        configure: WindowConfigure,
         _: u32,
     ) {
+        if let (Some(width), Some(height)) = configure.new_size {
+            self.offered = Some((width.get(), height.get()));
+        }
         let (width, height) = WINDOW;
         let (buffer, canvas) = self
             .pool
@@ -1151,4 +1294,5 @@ delegate_output!(Desk);
 delegate_shm!(Desk);
 delegate_xdg_shell!(Desk);
 delegate_xdg_window!(Desk);
+delegate_layer!(Desk);
 delegate_registry!(Desk);

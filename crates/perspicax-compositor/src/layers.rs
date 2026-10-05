@@ -37,6 +37,23 @@ use crate::state::Compositor;
 pub(crate) const BELOW: [Layer; 2] = [Layer::Background, Layer::Bottom];
 /// The layers over the windows, bottom first.
 pub(crate) const ABOVE: [Layer; 2] = [Layer::Top, Layer::Overlay];
+/// The panels' layer: over the windows, and under a fullscreen window that
+/// is in use. See `crate::shell::covers_panels`.
+pub(crate) const TOP: [Layer; 1] = [Layer::Top];
+/// Over everything, a fullscreen window included.
+pub(crate) const OVERLAY: [Layer; 1] = [Layer::Overlay];
+/// Every layer, bottom first.
+pub(crate) const ALL: [Layer; 4] = [Layer::Background, Layer::Bottom, Layer::Top, Layer::Overlay];
+
+/// A layer as the index names it.
+pub(crate) fn level(layer: Layer) -> perspicax_index::Layer {
+    match layer {
+        Layer::Background => perspicax_index::Layer::Background,
+        Layer::Bottom => perspicax_index::Layer::Bottom,
+        Layer::Top => perspicax_index::Layer::Top,
+        Layer::Overlay => perspicax_index::Layer::Overlay,
+    }
+}
 
 impl WlrLayerShellHandler for Compositor {
     fn shell_state(&mut self) -> &mut WlrLayerShellState {
@@ -230,6 +247,16 @@ impl Compositor {
         let mut zone = layer_map_for_output(output).non_exclusive_zone();
         zone.loc += area.loc;
         Some(zone)
+    }
+
+    /// The layer surface an id names, with where it is in global space.
+    pub(crate) fn layer_by_id(
+        &self,
+        id: SurfaceId,
+    ) -> Option<(LayerSurface, Rectangle<i32, Logical>)> {
+        self.layers_in(&ALL)
+            .into_iter()
+            .find(|(layer, _)| layer.user_data().get::<SurfaceId>() == Some(&id))
     }
 
     pub(crate) fn output_under_pointer(&self) -> Option<Output> {

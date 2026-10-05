@@ -73,10 +73,32 @@ allow = [
 #     which draws titles on the seat, takes fontdb to find the system's fonts.
 #     Zlib asks only that the notice stay with the source and that altered
 #     versions say so; it has no reciprocal term.
+#
+# Added 2026-10-03 with W5's perspicax-shell, which draws its wallpaper,
+# panel and menus in software, under the same rule:
+#
+#   - tiny-skia and tiny-skia-path: BSD-3-Clause. A port of a subset of
+#     Skia, and Skia's licence with it: keep the notice, and do not use the
+#     authors' names to endorse a product. The shell draws every shape with
+#     it. Read 2026-10-03; 0.12, which resvg draws with too, read again
+#     2026-10-04 with the shell's `svg` feature: the same licence. Every
+#     other crate resvg brought is MIT or Apache-2.0, and needs no line here.
+#   - arrayref: BSD-2-Clause, which is BSD-3-Clause without the endorsement
+#     clause. tiny-skia takes it for fixed-size views of its pixel slices.
+#
+# And with the shell's accessibility trees, under the same rule:
+#
+#   - foldhash: Zlib, as slotmap is. hashbrown's default hasher, which
+#     accesskit_consumer turns on for the shell's trees; every hashbrown in
+#     the tree then takes it.
 exceptions = [
     { crate = "encoding_rs", allow = ["BSD-3-Clause"] },
     { crate = "libloading", allow = ["ISC"] },
     { crate = "slotmap", allow = ["Zlib"] },
+    { crate = "tiny-skia", allow = ["BSD-3-Clause"] },
+    { crate = "tiny-skia-path", allow = ["BSD-3-Clause"] },
+    { crate = "arrayref", allow = ["BSD-2-Clause"] },
+    { crate = "foldhash", allow = ["Zlib"] },
 ]
 # A crate with no licence expression at all is a licensing unknown, not a
 # permissive default.

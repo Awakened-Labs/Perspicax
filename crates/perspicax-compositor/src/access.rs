@@ -63,6 +63,7 @@ impl crate::state::Compositor {
             match protocol {
                 Protocol::Workspace => self.revoke_pager(),
                 Protocol::OutputManagement => self.revoke_displays(),
+                Protocol::Shell => self.revoke_shell(),
                 #[cfg(feature = "capture")]
                 Protocol::Screencopy => self.revoke_screencopy(),
                 _ => self.revoke_toplevels(protocol),

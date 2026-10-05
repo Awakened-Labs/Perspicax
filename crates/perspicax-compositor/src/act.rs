@@ -25,14 +25,31 @@ use perspicax_index::{Action, PointerButton};
 use perspicax_node::{Rect, SurfaceId};
 use smithay::{
     backend::input::{Axis, AxisSource, ButtonState, KeyState},
+    desktop::LayerSurface,
     input::{
         keyboard::{FilterResult, KeyboardHandle, Keycode, Keysym, xkb},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
-    utils::SERIAL_COUNTER,
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    utils::{Logical, Rectangle, SERIAL_COUNTER},
 };
 
 use crate::{framed::Framed, state::Compositor};
+
+/// What input lands on: an application's window, or a layer-shell surface
+/// (a panel, a wallpaper, a menu) where it sits in global space.
+enum Target {
+    Window(Framed),
+    Layer(LayerSurface, Rectangle<i32, Logical>),
+}
+
+/// Where a pointer event goes: a point in global space, on a surface whose
+/// own origin is at `origin` in global space.
+struct Aim {
+    global: (f64, f64),
+    origin: (f64, f64),
+    surface: WlSurface,
+}
 
 /// Linux button codes, from `linux/input-event-codes.h`. Wayland carries these
 /// verbatim rather than an enum of its own, so the numbers are the protocol.
@@ -75,6 +92,10 @@ pub enum ActError {
     /// their applications until they unlock it.
     #[error("the session is locked")]
     Locked,
+    /// Focus was asked for a layer surface that takes no keyboard: a
+    /// wallpaper, or a panel that is only ever clicked.
+    #[error("surface {0} takes no keyboard focus")]
+    TakesNoKeyboard(u64),
     /// No compositor loop answered. It has not started, it has stopped, or it
     /// is wedged; from outside those look the same and an agent can do nothing
     /// different about any of them.
@@ -243,26 +264,34 @@ impl Compositor {
         }
         // A window verb addresses a window wherever it is: a tab behind
         // another is parked, and closing a window on a hidden workspace is
-        // still closing it. Input goes only to what is on screen.
-        let window = match action {
-            Action::Close | Action::Forward => self.any_window(surface),
-            _ => self.window_for_id(surface),
+        // still closing it. Input goes only to what is on screen, which may
+        // be a panel or a wallpaper as well as a window.
+        let target = match action {
+            Action::Close | Action::Forward => self.any_window(surface).map(Target::Window),
+            _ => self.window_for_id(surface).map(Target::Window).or_else(|| {
+                self.layer_by_id(surface)
+                    .map(|(layer, placed)| Target::Layer(layer, placed))
+            }),
         }
         .ok_or(ActError::NoSuchSurface(surface.0))?;
         let focus_before = self.focused_surface();
 
-        match action {
-            Action::Focus => self.act_focus(&window, surface),
-            Action::Click { at, button } => self.act_click(&window, *at, *button),
-            Action::Scroll { at, dx, dy } => self.act_scroll(&window, *at, *dx, *dy),
-            Action::Type { text } => self.act_type(text),
-            Action::Close => {
-                Self::close(&window);
+        match (action, &target) {
+            (Action::Focus, _) => self.act_focus(&target, surface),
+            (Action::Click { at, button }, _) => self.act_click(&target, *at, *button),
+            (Action::Scroll { at, dx, dy }, _) => self.act_scroll(&target, *at, *dx, *dy),
+            (Action::Type { text }, _) => self.act_type(text),
+            (Action::Close, Target::Window(window)) => {
+                Self::close(window);
                 Ok(())
             }
-            Action::Forward => {
-                self.activate_tab(&window);
+            (Action::Forward, Target::Window(window)) => {
+                self.activate_tab(window);
                 Ok(())
+            }
+            // Found by `any_window`, so never a layer.
+            (Action::Close | Action::Forward, Target::Layer(..)) => {
+                Err(ActError::NoSuchSurface(surface.0))
             }
         }?;
 
@@ -273,32 +302,69 @@ impl Compositor {
         })
     }
 
-    /// Give this surface the keyboard.
-    fn act_focus(&mut self, window: &Framed, id: SurfaceId) -> Result<(), ActError> {
-        let Some(wl_surface) = crate::shell::surface_of(window) else {
-            return Err(ActError::NoSuchSurface(id.0));
+    /// Give this surface the keyboard: a window, or a layer surface that
+    /// takes it.
+    fn act_focus(&mut self, target: &Target, id: SurfaceId) -> Result<(), ActError> {
+        let wl_surface = match target {
+            Target::Window(window) => {
+                crate::shell::surface_of(window).ok_or(ActError::NoSuchSurface(id.0))?
+            }
+            Target::Layer(layer, _) if layer.can_receive_keyboard_focus() => {
+                layer.wl_surface().clone()
+            }
+            Target::Layer(..) => return Err(ActError::TakesNoKeyboard(id.0)),
         };
         self.focus_surface(wl_surface, id);
         Ok(())
     }
 
+    /// Where a rect given in the target's own coordinates is, for a pointer
+    /// event: its centre in global space, on which surface, with that
+    /// surface's origin.
+    fn aim(&self, target: &Target, at: Rect) -> Option<Aim> {
+        match target {
+            Target::Window(window) => {
+                let (global, origin) = self.point_in(window, at);
+                Some(Aim {
+                    global,
+                    origin,
+                    surface: crate::shell::surface_of(window)?,
+                })
+            }
+            // A layer surface has no shadow and no frame: it is its own
+            // rectangle, placed by the layer map.
+            Target::Layer(layer, placed) => {
+                let origin = (f64::from(placed.loc.x), f64::from(placed.loc.y));
+                let local = centre(at);
+                Some(Aim {
+                    global: (origin.0 + local.0, origin.1 + local.1),
+                    origin,
+                    surface: layer.wl_surface().clone(),
+                })
+            }
+        }
+    }
+
     /// Move the pointer onto a rect and press a button on it.
     ///
-    /// `at` is window-relative, because that is the only coordinate space an
-    /// accessibility bridge can be trusted in. The centre is used rather than a
-    /// corner: a corner is shared with whatever is next to it, and a widget's
-    /// centre is the part of it the widget certainly owns.
+    /// `at` is relative to the target, the window or the layer surface,
+    /// because that is the only coordinate space an accessibility bridge can
+    /// be trusted in. Its centre is what is clicked; see [`centre`].
     fn act_click(
         &mut self,
-        window: &Framed,
+        target: &Target,
         at: Rect,
         button: PointerButton,
     ) -> Result<(), ActError> {
-        let (global, origin) = self.point_in(window, at);
         let Some(pointer) = self.pointer.clone() else {
             return Ok(());
         };
-        let Some(surface) = crate::shell::surface_of(window) else {
+        let Some(Aim {
+            global,
+            origin,
+            surface,
+        }) = self.aim(target, at)
+        else {
             return Ok(());
         };
         let focus = Some((surface.into(), origin.into()));
@@ -336,12 +402,16 @@ impl Compositor {
     }
 
     /// Scroll at a point, in surface-local units.
-    fn act_scroll(&mut self, window: &Framed, at: Rect, dx: f64, dy: f64) -> Result<(), ActError> {
-        let (global, origin) = self.point_in(window, at);
+    fn act_scroll(&mut self, target: &Target, at: Rect, dx: f64, dy: f64) -> Result<(), ActError> {
         let Some(pointer) = self.pointer.clone() else {
             return Ok(());
         };
-        let Some(surface) = crate::shell::surface_of(window) else {
+        let Some(Aim {
+            global,
+            origin,
+            surface,
+        }) = self.aim(target, at)
+        else {
             return Ok(());
         };
         let time = self.now_ms();
@@ -474,7 +544,7 @@ impl Compositor {
     ///
     /// [`PointerHandle::motion`]: smithay::input::pointer::PointerHandle::motion
     fn point_in(&self, window: &Framed, at: Rect) -> ((f64, f64), (f64, f64)) {
-        let local = (at.x0 + (at.x1 - at.x0) / 2.0, at.y0 + (at.y1 - at.y0) / 2.0);
+        let local = centre(at);
         let placed = self.space.element_location(window).unwrap_or_default();
         // `at` is relative to the window geometry, which sits at `placed`.
         let global = (local.0 + f64::from(placed.x), local.1 + f64::from(placed.y));
@@ -496,6 +566,13 @@ impl Compositor {
         u32::try_from(self.started_at().elapsed().as_millis() % u128::from(u32::MAX))
             .unwrap_or(u32::MAX)
     }
+}
+
+/// A rect's centre. Aimed at rather than a corner: a corner is shared with
+/// whatever is next to it, and a widget's centre is the part of it the widget
+/// certainly owns.
+fn centre(at: Rect) -> (f64, f64) {
+    (at.x0 + (at.x1 - at.x0) / 2.0, at.y0 + (at.y1 - at.y0) / 2.0)
 }
 
 #[cfg(test)]

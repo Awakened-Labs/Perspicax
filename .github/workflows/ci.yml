@@ -61,6 +61,13 @@ jobs:
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
+      # perspicax-shell with no components. The step above builds it with all
+      # of them, because the compositor's live tests take it `full`, so the
+      # build with none -- and every `cfg` that leaves a component out -- is
+      # only seen here.
+      - name: clippy (perspicax-shell, no components)
+        run: cargo clippy --locked -p perspicax-shell --all-targets -- -D warnings
+
       # Live tests are `#[ignore]`d, so this stays green on a machine with no
       # graphical session. That is the whole reason the split exists.
       - name: test

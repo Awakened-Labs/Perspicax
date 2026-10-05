@@ -81,6 +81,16 @@ if [ ! -x "$probe" ]; then
     exit 1
 fi
 
+# perspicax-shell with every component, for `crates/perspicax/tests/shell.rs`,
+# which starts the real binary and reads it as an agent would. Copied out of
+# `target/`, because the workspace build has already left a shell there with
+# no components, which draws nothing to read, and a later build could leave
+# one again.
+cargo build --locked -p perspicax-shell --features full
+shell_bin="$(mktemp -d)/perspicax-shell"
+cp ./target/debug/perspicax-shell "$shell_bin"
+export PERSPICAX_SHELL="$shell_bin"
+
 # Poll rather than sleep. A fixed wait is either too short on a loaded runner
 # or wasted on an idle one, and when it is too short the failure surfaces as a
 # confusing test error rather than as "the application never arrived".

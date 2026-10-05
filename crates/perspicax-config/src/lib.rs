@@ -20,6 +20,7 @@
 //! and a value (or an error) out.
 
 mod keys;
+mod shell;
 
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,12 @@ use perspicax_policy::{
     Grid, Keysym, Mods, Place, Program, Protocol, Rule, Shape, Side, Snapping, Towards,
 };
 use serde::Deserialize;
+
+use crate::shell::RawShell;
+pub use crate::shell::{
+    Edge, Item, Panel, PanelOutputs, Shell, ShellBuilt, TaskbarScope, UntrustedLaunchers,
+    Wallpaper, WallpaperMode,
+};
 
 /// Which cargo features this binary was built with, as far as config cares.
 /// The binary fills it in with `cfg!`; this crate cannot see the binary's
@@ -87,6 +94,10 @@ pub struct Config {
     /// Which programs may use the protocols that reach past their own
     /// windows: taskbars, pagers, screenshot and display tools.
     pub protocols: Access,
+    /// What perspicax-shell puts on the desktop, read as if the shell had
+    /// every component: which it was built with is for it to check, through
+    /// [`shell`].
+    pub shell: Shell,
 }
 
 /// The keyboard layout and key repeat.
@@ -119,16 +130,59 @@ impl Default for Keyboard {
     }
 }
 
-/// Pointer device settings. `None` leaves libinput's own default alone,
-/// which differs by device (tap-to-click is off on most touchpads, for
-/// example), so "unset" and "false" are different requests.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+/// Pointer settings: the devices' own, and the double-click time.
+///
+/// For a device setting, `None` leaves libinput's own default alone, which
+/// differs by device (tap-to-click is off on most touchpads, for example),
+/// so "unset" and "false" are different requests.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pointer {
     /// Acceleration, from -1 (slowest) to 1 (fastest).
     pub accel: Option<f64>,
     pub natural_scroll: Option<bool>,
     pub tap_to_click: Option<bool>,
     pub left_handed: Option<bool>,
+    /// How soon, in milliseconds, a second click must follow the first to
+    /// make a double-click: on a titlebar, and on the shell's desktop icons,
+    /// which [`Shell::double_click_ms`] carries to the shell. One setting,
+    /// so the desk's double-clicks all ask the same of a hand.
+    pub double_click_ms: u32,
+}
+
+impl Default for Pointer {
+    fn default() -> Self {
+        Self {
+            accel: None,
+            natural_scroll: None,
+            tap_to_click: None,
+            left_handed: None,
+            double_click_ms: DOUBLE_CLICK_MS,
+        }
+    }
+}
+
+/// The double-click time, in milliseconds, of a config that does not say:
+/// GTK's and Qt's.
+pub const DOUBLE_CLICK_MS: u32 = 400;
+
+/// The double-click times a config may ask for. Faster than the shortest, a
+/// hand cannot click twice on purpose; slower than the longest, two clicks
+/// a person meant as two would open what they only meant to select.
+const DOUBLE_CLICK_RANGE: std::ops::RangeInclusive<u32> = 100..=2000;
+
+/// `double-click-ms` as written, if it is in [`DOUBLE_CLICK_RANGE`].
+fn double_click_ms(written: u32) -> Result<u32, Error> {
+    if DOUBLE_CLICK_RANGE.contains(&written) {
+        return Ok(written);
+    }
+    Err(invalid(
+        "input.pointer.double-click-ms".to_owned(),
+        format!(
+            "{written} is outside {} to {} milliseconds",
+            DOUBLE_CLICK_RANGE.start(),
+            DOUBLE_CLICK_RANGE.end()
+        ),
+    ))
 }
 
 /// The most workspaces along one side of the grid. Generous: past this, a
@@ -178,6 +232,15 @@ pub enum Error {
          cargo feature (`--features perspicax/{feature}`)"
     )]
     NotBuilt {
+        key: &'static str,
+        feature: &'static str,
+    },
+    /// A `[shell]` key for a component perspicax-shell was built without.
+    #[error(
+        "`{key}` is not built into this perspicax-shell; rebuild it with the \
+         `{feature}` cargo feature (`--features perspicax-shell/{feature}`)"
+    )]
+    ShellNotBuilt {
         key: &'static str,
         feature: &'static str,
     },
@@ -284,6 +347,9 @@ impl Config {
             }
         }
         if profile == Profile::Classic {
+            // The start menu, opened as on Plasma and Windows: a tap of the
+            // Logo key on its own.
+            bindings = bindings.bind_tap(Action::StartMenu);
             // Windows' snapping keys.
             for (key, direction) in arrows {
                 bindings = bindings.bind(
@@ -305,27 +371,7 @@ impl Config {
                 );
             }
         }
-        let workspaces = match profile {
-            // Plasma's default since 5.x when more than one is asked for, and
-            // Windows' task view: a row, so left and right are all there is.
-            Profile::Classic => Shape {
-                mode: perspicax_policy::Mode::Spanning,
-                grid: Grid {
-                    columns: 4,
-                    rows: 1,
-                    wrap: false,
-                },
-            },
-            // A square to flip around, wrapping, as Fluxbox and E do.
-            Profile::Minimal => Shape {
-                mode: perspicax_policy::Mode::Spanning,
-                grid: Grid {
-                    columns: 2,
-                    rows: 2,
-                    wrap: true,
-                },
-            },
-        };
+        let workspaces = workspaces(profile);
         Self {
             profile,
             focus,
@@ -353,16 +399,48 @@ impl Config {
             decorations: Decorations::default(),
             xwayland: built.xwayland,
             protocols: protocols(built),
+            shell: Shell::profile(profile, ShellBuilt::FULL),
         }
     }
 }
 
+/// A profile's workspaces.
+fn workspaces(profile: Profile) -> Shape {
+    match profile {
+        // Plasma's default since 5.x when more than one is asked for, and
+        // Windows' task view: a row, so left and right are all there is.
+        Profile::Classic => Shape {
+            mode: perspicax_policy::Mode::Spanning,
+            grid: Grid {
+                columns: 4,
+                rows: 1,
+                wrap: false,
+            },
+        },
+        // A square to flip around, wrapping, as Fluxbox and E do.
+        Profile::Minimal => Shape {
+            mode: perspicax_policy::Mode::Spanning,
+            grid: Grid {
+                columns: 2,
+                rows: 2,
+                wrap: true,
+            },
+        },
+    }
+}
+
+/// How many workspaces `grid` holds: on each monitor, when each has its
+/// own.
+fn count(grid: Grid) -> u32 {
+    u32::from(grid.columns) * u32::from(grid.rows)
+}
+
 /// The `[protocols]` defaults, the same in both profiles: a profile is a
 /// window manager's habits, not a security posture. Listing windows and
-/// workspaces is open to any client, as every panel expects. Reading pixels
-/// and moving monitors is for the programs that are known to do it, by name,
-/// which anything can claim; a person who wants it tighter writes full
-/// paths.
+/// workspaces is open to any client, as every panel expects. Reading pixels,
+/// moving monitors and speaking for the desktop shell are for the programs
+/// that are known to do it, by name, which anything can claim; a person who
+/// wants it tighter writes full paths.
 fn protocols(built: Built) -> Access {
     let only = |names: &[&str]| Rule::Only(names.iter().map(|name| Program::parse(name)).collect());
     Access::open()
@@ -378,6 +456,7 @@ fn protocols(built: Built) -> Access {
             Protocol::OutputManagement,
             only(&["wlr-randr", "kanshi", "wdisplays", "nwg-displays"]),
         )
+        .with(Protocol::Shell, only(&["perspicax-shell"]))
 }
 
 /// Where the config file lives: `$XDG_CONFIG_HOME/perspicax/config.toml`,
@@ -410,6 +489,60 @@ pub fn load(path: &Path, built: Built) -> Result<Config, Error> {
             source,
         }),
     }
+}
+
+/// Read a config file's `[shell]` table, as a perspicax-shell built with
+/// `built` does. A file that does not exist is the classic profile's shell,
+/// as it is for the compositor.
+///
+/// # Errors
+///
+/// [`Error::Read`] for a file that exists and cannot be read, and anything
+/// [`shell`] refuses.
+pub fn load_shell(path: &Path, built: ShellBuilt) -> Result<Shell, Error> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => shell(&text, built),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(Shell::profile(Profile::Classic, built))
+        }
+        Err(source) => Err(Error::Read {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+/// Parse a config file's `[shell]` table, with its profile, as a
+/// perspicax-shell built with `built` reads it, and the double-click time
+/// from `[input.pointer]`, which its icons share with the titlebars. The
+/// rest of the file must be this schema, and is otherwise the compositor's
+/// to judge.
+///
+/// # Errors
+///
+/// [`Error::Parse`] for text that is not this schema,
+/// [`Error::ShellNotBuilt`] for a key the shell cannot honour,
+/// [`Error::Invalid`] for a value it cannot use.
+pub fn shell(text: &str, built: ShellBuilt) -> Result<Shell, Error> {
+    let raw: Raw = toml::from_str(text).map_err(|error| Error::Parse(error.to_string()))?;
+    let profile = Shell::profile(raw.profile, built);
+    // The grid's sides are the compositor's to judge; this only counts.
+    let workspaces = match raw.workspaces.as_ref().and_then(|written| written.grid) {
+        Some([columns, rows]) => u32::from(columns) * u32::from(rows),
+        None => count(workspaces(raw.profile).grid),
+    };
+    let mut shell = match raw.shell {
+        Some(shell) => shell.apply(profile, built, workspaces)?,
+        None => profile,
+    };
+    let written = raw
+        .input
+        .and_then(|input| input.pointer)
+        .and_then(|pointer| pointer.double_click_ms);
+    if let Some(written) = written {
+        shell.double_click_ms = double_click_ms(written)?;
+    }
+    Ok(shell)
 }
 
 /// Parse a config file's text.
@@ -447,6 +580,7 @@ struct Raw {
     snap: Option<RawSnap>,
     decorations: Option<RawDecorations>,
     protocols: Option<RawProtocols>,
+    shell: Option<RawShell>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -457,6 +591,7 @@ struct RawProtocols {
     workspace: Option<RawRule>,
     screencopy: Option<RawRule>,
     output_management: Option<RawRule>,
+    shell: Option<RawRule>,
 }
 
 /// `"any"`, `"off"`, or a list of programs.
@@ -576,6 +711,7 @@ struct RawPointer {
     natural_scroll: Option<bool>,
     tap_to_click: Option<bool>,
     left_handed: Option<bool>,
+    double_click_ms: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -636,13 +772,15 @@ impl Raw {
         }
 
         for (written, action) in self.keys {
-            let chord = keys::chord(&written)
+            let trigger = keys::trigger(&written)
                 .map_err(|reason| invalid(format!("keys.{written}"), reason))?;
-            config.bindings = match action_for(action)
-                .map_err(|reason| invalid(format!("keys.{written}"), reason))?
-            {
-                Some(action) => config.bindings.bind(chord, action),
-                None => config.bindings.unbind(chord),
+            let action =
+                action_for(action).map_err(|reason| invalid(format!("keys.{written}"), reason))?;
+            config.bindings = match (trigger, action) {
+                (keys::Trigger::Chord(chord), Some(action)) => config.bindings.bind(chord, action),
+                (keys::Trigger::Chord(chord), None) => config.bindings.unbind(chord),
+                (keys::Trigger::LogoTap, Some(action)) => config.bindings.bind_tap(action),
+                (keys::Trigger::LogoTap, None) => config.bindings.unbind_tap(),
             };
         }
         if let Some(drag) = self.drag {
@@ -672,6 +810,9 @@ impl Raw {
                     natural_scroll: pointer.natural_scroll,
                     tap_to_click: pointer.tap_to_click,
                     left_handed: pointer.left_handed,
+                    double_click_ms: pointer
+                        .double_click_ms
+                        .map_or(Ok(DOUBLE_CLICK_MS), double_click_ms)?,
                 };
             }
         }
@@ -755,6 +896,16 @@ impl Raw {
             config.protocols = protocols.apply(config.protocols, built)?;
         }
 
+        // Whatever the shell was built with: see `shell`.
+        if let Some(shell) = self.shell {
+            config.shell = shell.apply(
+                config.shell,
+                ShellBuilt::FULL,
+                count(config.workspaces.grid),
+            )?;
+        }
+        config.shell.double_click_ms = config.pointer.double_click_ms;
+
         if let Some(empty) = self.autostart.iter().position(Vec::is_empty) {
             return Err(invalid(
                 format!("autostart[{empty}]"),
@@ -820,6 +971,7 @@ impl RawProtocols {
             (Protocol::Workspace, self.workspace),
             (Protocol::Screencopy, self.screencopy),
             (Protocol::OutputManagement, self.output_management),
+            (Protocol::Shell, self.shell),
         ];
         for (protocol, raw) in written {
             let Some(raw) = raw else { continue };
@@ -1020,11 +1172,13 @@ fn action_for(action: RawAction) -> Result<Option<Action>, String> {
             "previous-tab" => Action::CycleTab { forward: false },
             "tab-with-previous" => Action::TabWithPrevious,
             "detach-tab" => Action::DetachTab,
+            "start-menu" => Action::StartMenu,
+            "root-menu" => Action::RootMenu,
             other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
                 format!(
                     "`{other}` is not an action; use close, cycle-focus, reload, \
                          toggle-sticky, toggle-maximize, minimize, next-tab, previous-tab, \
-                         tab-with-previous, detach-tab, \
+                         tab-with-previous, detach-tab, start-menu, root-menu, \
                          move-to-next-output, move-to-previous-output, \
                          move-to-output-<side>, workspace-<side>, workspace-<number>, \
                          send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
@@ -1611,6 +1765,67 @@ mod tests {
     fn workspace_zero_and_a_side_that_is_not_one_are_refused() {
         assert!(parse("[keys]\n\"Logo+0\" = \"workspace-0\"", SEAT).is_err());
         assert!(parse("[keys]\n\"Logo+0\" = \"workspace-sideways\"", SEAT).is_err());
+    }
+
+    #[test]
+    fn logo_on_its_own_binds_a_tap() {
+        let config = parse("[keys]\n\"Super\" = \"root-menu\"", SEAT).unwrap();
+        assert_eq!(config.bindings.tap(), Some(&Action::RootMenu));
+        let config = parse("[keys]\n\"Logo\" = \"none\"", SEAT).unwrap();
+        assert_eq!(
+            config.bindings.tap(),
+            None,
+            "none takes the profile's tap away"
+        );
+    }
+
+    #[test]
+    fn only_logo_can_be_bound_on_its_own() {
+        let error = parse("[keys]\n\"Alt\" = \"start-menu\"", SEAT).unwrap_err();
+        assert!(error.to_string().contains("keys.Alt"), "{error}");
+        assert!(error.to_string().contains("only Logo"), "{error}");
+    }
+
+    #[test]
+    fn classic_taps_logo_for_the_start_menu_and_minimal_does_not() {
+        assert_eq!(
+            Config::profile(Profile::Classic, SEAT).bindings.tap(),
+            Some(&Action::StartMenu)
+        );
+        assert_eq!(Config::profile(Profile::Minimal, SEAT).bindings.tap(), None);
+    }
+
+    #[test]
+    fn the_menus_are_actions_a_chord_can_have() {
+        let config = parse(
+            "[keys]\n\"Alt+F1\" = \"root-menu\"\n\"Logo+Space\" = \"start-menu\"",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(
+            config.bindings.resolve(Mods::alt(), &[Keysym::F1]),
+            Some(&Action::RootMenu)
+        );
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::space]),
+            Some(&Action::StartMenu)
+        );
+    }
+
+    #[test]
+    fn the_shell_protocol_defaults_to_perspicax_shell_in_both_profiles() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let access = Config::profile(profile, SEAT).protocols;
+            assert!(access.admits(Protocol::Shell, Some("/usr/bin/perspicax-shell")));
+            assert!(!access.admits(Protocol::Shell, Some("/usr/bin/waybar")));
+            assert!(!access.admits(Protocol::Shell, None));
+        }
+        let config = parse("[protocols]\nshell = \"off\"", SEAT).unwrap();
+        assert_eq!(config.protocols.rule(Protocol::Shell), &Rule::Off);
     }
 
     #[test]

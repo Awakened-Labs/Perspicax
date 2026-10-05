@@ -29,7 +29,7 @@
 
 use std::sync::{Arc, PoisonError, RwLock};
 
-use perspicax_index::{HostFacts, SurfaceFacts};
+use perspicax_index::{HostFacts, SurfaceFacts, SurfaceKind};
 use perspicax_node::{Origin, Rect, SurfaceId, Vec2};
 use smithay::{
     reexports::wayland_server::{Resource as _, protocol::wl_surface::WlSurface},
@@ -137,6 +137,9 @@ impl Compositor {
     /// would mean an occlusion verdict computed against a window that had
     /// already moved.
     pub(crate) fn publish_facts(&mut self) {
+        // Every change a window's fullscreen state can come from ends here,
+        // so this is where it is settled whether one covers the panels.
+        self.stack_fullscreen(self.focused_surface());
         self.generation += 1;
         let generation = self.generation;
 
@@ -153,14 +156,27 @@ impl Compositor {
         // Layer surfaces around them, where the person sees them: background
         // and bottom under every window, top and overlay over. A panel on
         // `top` covering the foot of a maximized window is an occlusion the
-        // index has to know about. And while the session is locked, the lock
-        // surfaces go over everything, so every node beneath is honestly
-        // judged covered.
+        // index has to know about. A fullscreen window in use goes over the
+        // panels and under `overlay` (`crate::shell::covers_panels`). And
+        // while the session is locked, the lock surfaces go over everything,
+        // so every node beneath is honestly judged covered.
         let below = self.layers_in(&crate::layers::BELOW);
-        let above = self.layers_in(&crate::layers::ABOVE);
+        let top = self.layers_in(&crate::layers::TOP);
+        let overlay = self.layers_in(&crate::layers::OVERLAY);
+        let (raised, windows): (Vec<&crate::framed::Framed>, Vec<_>) = self
+            .space
+            .elements()
+            .partition(|window| crate::shell::covers_panels(window));
+        let window =
+            |window: &crate::framed::Framed| Some(self.grouped(window, self.facts_for(window)?));
         let layer = |(layer, placed): &(smithay::desktop::LayerSurface, _)| {
             let id = *layer.user_data().get::<SurfaceId>()?;
-            Some(self.plain_facts(id, layer.wl_surface(), *placed))
+            let mut facts = self.plain_facts(id, layer.wl_surface(), *placed);
+            facts.kind = SurfaceKind::Layer {
+                layer: crate::layers::level(layer.layer()),
+                namespace: layer.namespace().to_owned(),
+            };
+            Some(facts)
         };
         let covers = self
             .lock
@@ -168,18 +184,18 @@ impl Compositor {
             .flat_map(|locked| &locked.surfaces)
             .filter_map(|cover| {
                 let area = self.space.output_geometry(&cover.output)?;
-                Some(self.plain_facts(cover.id, cover.surface.wl_surface(), area))
+                Some(
+                    self.plain_facts(cover.id, cover.surface.wl_surface(), area)
+                        .lock_cover(),
+                )
             });
         let surfaces: Vec<SurfaceFacts> = below
             .iter()
             .filter_map(layer)
-            .chain(
-                self.parked
-                    .iter()
-                    .chain(self.space.elements())
-                    .filter_map(|window| Some(self.grouped(window, self.facts_for(window)?))),
-            )
-            .chain(above.iter().filter_map(layer))
+            .chain(self.parked.iter().chain(windows).filter_map(window))
+            .chain(top.iter().filter_map(layer))
+            .chain(raised.into_iter().filter_map(window))
+            .chain(overlay.iter().filter_map(layer))
             .chain(covers)
             .collect();
 
@@ -331,6 +347,7 @@ impl Compositor {
             app_id: None,
             tabs: Vec::new(),
             workspace: None,
+            kind: SurfaceKind::Window,
         })
     }
 
@@ -365,8 +382,8 @@ impl Compositor {
             buffer_origin: Vec2::new(f64::from(placed.loc.x), f64::from(placed.loc.y)),
             opaque,
             origin: self.origin_of_surface(surface),
-            // A layer's namespace is not a title, and the join uses titles to
-            // tell windows apart; better none than a wrong one.
+            // A layer's namespace is not a title: it goes in `kind`, set by
+            // the caller, which the join reads in a title's place.
             title: None,
             focused_at: self.focused_at(id),
             damage_generation: self.damage_generation(id),
@@ -377,6 +394,7 @@ impl Compositor {
             app_id: None,
             tabs: Vec::new(),
             workspace: None,
+            kind: SurfaceKind::Window,
         }
     }
 

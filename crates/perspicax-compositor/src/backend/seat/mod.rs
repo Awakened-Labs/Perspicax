@@ -82,6 +82,7 @@ use crate::{Error, state::Compositor};
 
 mod input;
 mod settings;
+mod supervise;
 mod titles;
 
 pub(crate) use settings::{populate, reload};
@@ -155,6 +156,8 @@ pub(crate) struct Session {
     /// Programs this session started for the person (autostart, bindings),
     /// stopped with it and reaped as they exit.
     children: Vec<std::process::Child>,
+    /// perspicax-shell, started again when it stops. See [`supervise`].
+    shell: supervise::Supervisor,
     cursor: Cursor,
     /// The fonts window titles are written in. See [`titles`].
     titles: titles::Titles,
@@ -174,6 +177,9 @@ pub(crate) struct Session {
     pub(super) dwell_armed: Option<u64>,
     /// Scroll over the desktop, gathered into whole notches.
     pub(super) notches: perspicax_policy::Notches,
+    /// The Logo key, down and on its way to being a tap, unless another
+    /// key, a button or the wheel comes first. See [`input`].
+    pub(super) logo_tap: perspicax_policy::LogoTap,
     /// False while another VT has the seat: no device may be touched then.
     active: bool,
     pub(super) exit: bool,
@@ -331,6 +337,7 @@ impl Session {
             reload_pending: false,
             devices: Vec::new(),
             children: Vec::new(),
+            shell: supervise::Supervisor::new(),
             cursor: Cursor::load(),
             titles: titles::Titles::new(),
             title_press: None,
@@ -339,6 +346,7 @@ impl Session {
             dwell,
             dwell_armed: None,
             notches: perspicax_policy::Notches::default(),
+            logo_tap: perspicax_policy::LogoTap::default(),
             active: true,
             exit: false,
             runtime: None,
@@ -909,10 +917,10 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
             .map(Elements::CursorSurface),
         ),
         Some(None) => {}
-        None => match space.render_elements_for_output(renderer, &head.output, 1.0) {
-            Ok(windows) => elements.extend(windows.into_iter().map(Elements::Space)),
-            Err(error) => {
-                tracing::warn!(output = head.output.name(), %error, "output is not mapped");
+        None => match crate::shell::stack(space, &head.output) {
+            Some(stack) => elements.extend(scene(renderer, &stack, scale)),
+            None => {
+                tracing::warn!(output = head.output.name(), "output is not mapped");
                 return;
             }
         },
@@ -947,6 +955,57 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     if let CursorImageStatus::Surface(surface) = status {
         send_frames_surface_tree(surface, &output, now, None, |_, _| Some(output.clone()));
     }
+}
+
+/// What `stack` shows, front to back, at `scale`: each layer surface and
+/// window where the stack puts it.
+fn scene(renderer: &mut GlesRenderer, stack: &crate::shell::Stack, scale: f64) -> Vec<Elements> {
+    use smithay::{
+        backend::renderer::element::{AsRenderElements, Wrap},
+        desktop::LayerSurface,
+        utils::{Logical, Point},
+    };
+
+    use crate::framed::{Framed, FramedElement};
+
+    let at_scale = smithay::utils::Scale::from(scale);
+    let layers = |renderer: &mut GlesRenderer, pieces: &[(LayerSurface, Point<i32, Logical>)]| {
+        pieces
+            .iter()
+            .flat_map(|(surface, at)| {
+                AsRenderElements::<GlesRenderer>::render_elements::<
+                    WaylandSurfaceRenderElement<GlesRenderer>,
+                >(
+                    surface,
+                    renderer,
+                    at.to_physical_precise_round(scale),
+                    at_scale,
+                    1.0,
+                )
+            })
+            .map(|element| Elements::Space(SpaceRenderElements::Surface(element)))
+            .collect::<Vec<_>>()
+    };
+    let windows = |renderer: &mut GlesRenderer, pieces: &[(Framed, Point<i32, Logical>)]| {
+        pieces
+            .iter()
+            .flat_map(|(window, at)| {
+                window.render_elements::<FramedElement<GlesRenderer>>(
+                    renderer,
+                    at.to_physical_precise_round(scale),
+                    at_scale,
+                    1.0,
+                )
+            })
+            .map(|element| Elements::Space(SpaceRenderElements::Element(Wrap::from(element))))
+            .collect::<Vec<_>>()
+    };
+    let mut elements = layers(renderer, &stack.overlay);
+    elements.extend(windows(renderer, &stack.raised));
+    elements.extend(layers(renderer, &stack.top));
+    elements.extend(windows(renderer, &stack.windows));
+    elements.extend(layers(renderer, &stack.lower));
+    elements
 }
 
 /// The pointer, drawn at `at` in the output's own coordinates: the client's
@@ -1038,6 +1097,8 @@ fn resume(state: &mut Compositor) {
     }
     session.active = true;
     session.swallowed.clear();
+    // A Logo key let go on another VT never came back up here.
+    session.logo_tap = perspicax_policy::LogoTap::default();
     for head in &mut session.heads {
         // Whatever was queued when we left will never see its vblank.
         head.queued = false;

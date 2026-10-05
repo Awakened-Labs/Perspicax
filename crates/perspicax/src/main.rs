@@ -30,17 +30,8 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
-use perspicax::{desk::Desk, observe, session};
+use perspicax::{desk::Desk, keep::keep_current, observe, session};
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop, Virtual};
-use perspicax_index::Change;
-
-/// How often the index takes what the accessibility bus has volunteered.
-///
-/// A drain reads a queue that already arrived and asks no application anything,
-/// so this is not the polling this project objects to -- polling a whole *tree*
-/// was. Four times a second is well inside the latency an agent already accepts
-/// from an act, which waits 200 ms for damage.
-const REFRESH: Duration = Duration::from_millis(250);
 
 #[derive(Parser)]
 #[command(
@@ -119,15 +110,16 @@ struct Cli {
     #[arg(long)]
     mcp: bool,
 
-    /// How long `--mcp` waits before reading the accessibility bus.
+    /// How long `--mcp` lets an application draw before reading it.
     ///
     /// The same wait `--dump-tree` takes as its argument, and for the same
     /// reason: a toolkit maps its window and *then* populates its
     /// accessibility tree, so reading too early finds a window with nothing in
-    /// it. The server itself starts immediately and answers honestly in the
-    /// meantime -- an empty desktop is a real answer, and a client that had to
-    /// wait eight seconds for `initialize` would look like one talking to a
-    /// hung process.
+    /// it. Every application gets this long from when it first draws, whether
+    /// it was spawned at the start or by the person an hour later. The server
+    /// itself starts immediately and answers honestly in the meantime -- an
+    /// empty desktop is a real answer, and a client that had to wait eight
+    /// seconds for `initialize` would look like one talking to a hung process.
     #[arg(long, value_name = "SECONDS", default_value = "8")]
     settle: f64,
 }
@@ -246,117 +238,6 @@ fn serve(desk: Arc<Desk>, stop: Stop) {
         // driven, and there is nobody left to drive it.
         stop.request();
     });
-}
-
-/// Read the desktop once its applications have settled, then keep it current
-/// from what the bus volunteers.
-///
-/// # What this does not do
-///
-/// It reads the applications that were hosted when it ran, once. An application
-/// that maps its first window *after* the settle is not read -- the compositor
-/// knows about its surface, so `window_list` reports it with no accessible node
-/// and its provenance, which is the honest answer, but its tree never arrives.
-/// Watching for new clients is the same seam as the push notifications the plan
-/// defers to M4, and belongs with them rather than half-built here.
-fn keep_current(desk: Arc<Desk>, facts: Facts, stop: Stop, settle: Duration) {
-    std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                tracing::error!(%error, "no runtime for the accessibility read");
-                return;
-            }
-        };
-
-        runtime.block_on(async move {
-            tokio::time::sleep(settle).await;
-            let reading = match observe::observe(&facts).await {
-                Ok(reading) => reading,
-                Err(error) => {
-                    tracing::error!("{error:#}");
-                    return;
-                }
-            };
-            tracing::info!(
-                apps = reading.apps.len(),
-                nodes = reading.index.len(),
-                "read the desktop"
-            );
-
-            let mut apps = reading.apps;
-            desk.publish(reading.index);
-
-            while !stop.requested() {
-                tokio::time::sleep(REFRESH).await;
-                refresh(&mut apps, &desk).await;
-            }
-        });
-    });
-}
-
-/// Take what each application has volunteered and fold it into the index.
-async fn refresh(apps: &mut [observe::App], desk: &Desk) {
-    for app in apps {
-        let changes = match app.changes().await {
-            Ok(changes) if changes.is_empty() => continue,
-            Ok(changes) => changes,
-            Err(error) => {
-                tracing::warn!("{error:#}");
-                continue;
-            }
-        };
-
-        // A shape change is the one thing a signal cannot describe: it says the
-        // subtree is no longer what we hold, not what it now is. Noted here and
-        // answered below, after the cheap half has been applied.
-        let invalidated = changes
-            .iter()
-            .any(|change| matches!(change, Change::SubtreeInvalidated { .. }));
-
-        desk.update(|index, facts| {
-            for change in changes {
-                index.apply(change);
-            }
-            // A node the bus has just volunteered arrives unjoined, and an
-            // unjoined node is refused. Re-attributing is a tree walk with no
-            // I/O in it, so it happens on every change rather than being
-            // something the next read gets round to.
-            app.rejoin(index, facts);
-        });
-
-        if !invalidated {
-            continue;
-        }
-        // Snapshot the damage counters BEFORE the read, for the same reason
-        // `observe` does: crediting a read with the generation it finished at
-        // would silently swallow the frames that arrived during it.
-        let before: Vec<_> = {
-            let facts = desk.facts();
-            app.joins
-                .iter()
-                .map(|join| {
-                    let generation = facts
-                        .surface(join.surface)
-                        .map_or(0, |facts| facts.damage_generation);
-                    (join.surface, generation)
-                })
-                .collect()
-        };
-        match app.reread().await {
-            Ok(nodes) => desk.update(|index, facts| {
-                index.ingest_snapshot(nodes);
-                app.rejoin(index, facts);
-                for (surface, generation) in before {
-                    index.reconcile(surface, generation);
-                }
-            }),
-            Err(error) => tracing::warn!("{error:#}"),
-        }
-    }
 }
 
 /// Turn accessibility on for this session, briefly borrowing a runtime to do

@@ -47,7 +47,7 @@ use perspicax_node::{Node, NodeId, ObservedNode, Origin, Rect, SurfaceId, Visibi
 
 pub use crate::{
     cache::{Delta, Index},
-    host::{HostFacts, Judgement, SurfaceFacts, Tally, judge},
+    host::{HostFacts, Judgement, Layer, SurfaceFacts, SurfaceKind, Tally, judge},
     id::Interner,
     join::{Evidence, Finding, Join, SurfaceClaim, WindowClaim, join},
     receipt::{DamageWitness, Receipt, Verb, WindowReceipt, WindowVerb, WindowWitness},
@@ -90,6 +90,10 @@ pub enum Refusal {
     AmbiguousSelector { matches: usize },
     /// The selector matched nothing.
     NotFound,
+    /// A window verb named a surface that is not an application's window: a
+    /// panel, a wallpaper, a menu, a lock screen. They are part of the desk,
+    /// and nothing closes them or brings them forward but their own program.
+    NotAWindow,
 }
 
 impl core::fmt::Display for Refusal {
@@ -119,6 +123,11 @@ impl core::fmt::Display for Refusal {
             Self::NoCapability { origin } => write!(f, "no capability for origin {origin:?}"),
             Self::AmbiguousSelector { matches } => write!(f, "selector matched {matches} nodes"),
             Self::NotFound => write!(f, "selector matched no nodes"),
+            Self::NotAWindow => write!(
+                f,
+                "surface is part of the desk (a panel, wallpaper, menu or lock screen), \
+                 not an application's window"
+            ),
         }
     }
 }
@@ -231,7 +240,8 @@ pub fn check_readable(facts: &HostFacts, surface: SurfaceId) -> Result<&SurfaceF
 ///
 /// A window is addressed by surface, so there is no node to judge visible:
 /// what is checked instead is that the window exists, that it is attributed,
-/// and that the agent holds consent for whoever drew it. Bringing a tab
+/// and that the agent holds consent for whoever drew it, and that it is a
+/// window at all rather than a panel or a wallpaper. Bringing a tab
 /// forward hides the tab in front, so consent for that one is needed too.
 /// And it is only done where the person can already see the group: a group
 /// on a hidden workspace, or minimized, is refused rather than brought into
@@ -246,6 +256,9 @@ pub fn check_window(
     verb: WindowVerb,
 ) -> Result<&SurfaceFacts, Refusal> {
     let window = check_readable(facts, surface)?;
+    if window.kind != SurfaceKind::Window {
+        return Err(Refusal::NotAWindow);
+    }
     if verb == WindowVerb::Forward
         && let Some(front) = window.behind_tab
     {
@@ -622,6 +635,34 @@ mod tests {
             check_window(&unattributed, SurfaceId(1), WindowVerb::Close).unwrap_err(),
             Refusal::Unattributed
         );
+    }
+
+    #[test]
+    fn a_window_verb_refuses_a_panel_a_wallpaper_and_a_lock_screen() {
+        let area = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let facts = HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(SurfaceId(1), area)
+                    .owned_by(owned_by(10))
+                    .layered(Layer::Background, "wallpaper"),
+                SurfaceFacts::new(SurfaceId(2), area)
+                    .owned_by(owned_by(10))
+                    .layered(Layer::Top, "panel"),
+                SurfaceFacts::new(SurfaceId(3), area)
+                    .owned_by(owned_by(11))
+                    .lock_cover(),
+            ],
+            1,
+        )
+        .with_consent(Consent::Everyone);
+        for id in 1..=3 {
+            for verb in [WindowVerb::Close, WindowVerb::Forward] {
+                assert_eq!(
+                    check_window(&facts, SurfaceId(id), verb).unwrap_err(),
+                    Refusal::NotAWindow
+                );
+            }
+        }
     }
 
     #[test]

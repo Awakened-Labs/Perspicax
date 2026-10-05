@@ -11,5 +11,6 @@
 
 pub mod act;
 pub mod desk;
+pub mod keep;
 pub mod observe;
 pub mod session;

@@ -53,6 +53,7 @@ mod pager;
 #[cfg(feature = "capture")]
 mod screencopy;
 mod shell;
+mod shell_protocol;
 pub mod state;
 mod toplevels;
 #[cfg(feature = "xwayland")]
@@ -66,7 +67,7 @@ pub use crate::{
 };
 
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::PathBuf,
     process::Child,
     sync::{
@@ -369,6 +370,7 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
             break Err(error);
         }
         if stop.requested()
+            || state.exit_asked
             || state.backend.exit_requested()
             || deadline.is_some_and(|deadline| Instant::now() >= deadline)
         {
@@ -437,7 +439,12 @@ pub(crate) struct Launch {
 
 impl Launch {
     /// Start one program, as a program and its arguments.
-    pub(crate) fn spawn(&self, command: &[String]) -> Result<Child, Error> {
+    pub(crate) fn spawn(&self, command: &[impl AsRef<OsStr>]) -> Result<Child, Error> {
+        let shown = command
+            .iter()
+            .map(|word| word.as_ref().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
         let (program, arguments) = command.split_first().ok_or_else(|| Error::Spawn {
             command: String::new(),
             source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "an empty command"),
@@ -454,10 +461,10 @@ impl Launch {
             None => command_line.env_remove("DISPLAY"),
         };
         let child = command_line.spawn().map_err(|source| Error::Spawn {
-            command: command.join(" "),
+            command: shown.clone(),
             source,
         })?;
-        tracing::info!(pid = child.id(), command = %command.join(" "), "spawned");
+        tracing::info!(pid = child.id(), command = %shown, "spawned");
         Ok(child)
     }
 }

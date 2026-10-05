@@ -216,6 +216,12 @@ impl Compositor {
 
     pub(crate) fn workspace_changed(&mut self) {
         self.show_what_belongs();
+        // Leaving for a workspace with no window left nothing with the
+        // keyboard. Coming back gives it to the window in front, as it is
+        // on any desktop.
+        if self.keyboard_focus().is_none() {
+            self.focus_top_window();
+        }
         self.backend.redraw();
         self.publish_facts();
     }

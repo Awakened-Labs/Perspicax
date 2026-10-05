@@ -13,8 +13,8 @@
 use std::sync::Mutex;
 
 use perspicax_index::{
-    Consent, Delta, Drawn, HostFacts, Index, Receipt, Selector, Shot, ShotTarget, SurfaceFacts,
-    Verb, WindowReceipt, WindowVerb, WindowWitness,
+    Consent, Delta, Drawn, HostFacts, Index, Layer, Receipt, Selector, Shot, ShotTarget,
+    SurfaceFacts, Verb, WindowReceipt, WindowVerb, WindowWitness,
 };
 use perspicax_node::{Node, NodeId, ObservedNode, Origin, ProcessOrigin, Rect, Role, SurfaceId};
 
@@ -22,7 +22,7 @@ use crate::{Denied, Desktop};
 
 /// The window's surface, the one with a tree on it.
 pub(crate) const WINDOW: SurfaceId = SurfaceId(1);
-/// The surface on top of it, which nothing describes.
+/// The surface on top of it, which nothing describes: a panel.
 pub(crate) const OVERLAY: SurfaceId = SurfaceId(2);
 
 /// The window node.
@@ -42,7 +42,7 @@ pub(crate) fn origin() -> Origin {
     }))
 }
 
-/// The host's published facts: a window, and an undescribed surface over it.
+/// The host's published facts: a window, and an undescribed panel over it.
 ///
 /// Bottom to top, so the overlay is second and therefore above.
 pub(crate) fn facts() -> HostFacts {
@@ -56,14 +56,14 @@ pub(crate) fn facts() -> HostFacts {
                 // into the number `screenshot` refuses with.
                 .damaged(41)
                 .damaging([(41, Rect::new(0.0, 0.0, 100.0, 60.0))]),
-            SurfaceFacts::new(OVERLAY, Rect::new(100.0, 100.0, 300.0, 250.0)).owned_by(
-                Origin::Process(Box::new(ProcessOrigin {
+            SurfaceFacts::new(OVERLAY, Rect::new(100.0, 100.0, 300.0, 250.0))
+                .owned_by(Origin::Process(Box::new(ProcessOrigin {
                     pid: 5150,
                     exe: None,
                     cgroup: None,
                     sandbox: None,
-                })),
-            ),
+                })))
+                .layered(Layer::Top, "waybar"),
         ],
         7,
     )

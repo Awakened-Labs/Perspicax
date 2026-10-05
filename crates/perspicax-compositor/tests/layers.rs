@@ -7,6 +7,10 @@
 //! the index's own judge. And a panel that reserves room for itself moves the
 //! windows already there out from under it.
 //!
+//! The facts say what each surface is: a panel is a layer surface, with its
+//! layer and the namespace it gave, where a window is a window. An agent may
+//! click a panel as it would a window, and may not close it.
+//!
 //! The client is written here with smithay-client-toolkit, not borrowed from
 //! waybar, so the test needs nothing installed beyond what CI already has. Like
 //! the other live tests it binds a real Wayland socket, so it needs
@@ -19,16 +23,22 @@ use std::{
     time::{Duration, Instant},
 };
 
-use perspicax_compositor::{Backend, Config, Facts, Requests, Stop};
-use perspicax_index::{HostFacts, judge};
+use perspicax_compositor::{ActError, Backend, Config, Facts, Host, Requests, Stop};
+use perspicax_index::{
+    Action as Verb, HostFacts, Layer as Level, PointerButton, SurfaceKind, judge,
+};
 use perspicax_node::{Rect, Visibility};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
-    delegate_xdg_shell, delegate_xdg_window,
+    delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
+    delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
+    seat::{
+        Capability, SeatHandler, SeatState,
+        pointer::{PointerEvent, PointerEventKind, PointerHandler},
+    },
     shell::{
         WaylandSurface,
         wlr_layer::{
@@ -44,26 +54,33 @@ use smithay_client_toolkit::{
 use wayland_client::{
     Connection, EventQueue, QueueHandle,
     globals::{GlobalList, registry_queue_init},
-    protocol::{wl_output, wl_shm, wl_surface},
+    protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
 };
 
 const WINDOW: (u32, u32) = (400, 300);
 const PANEL_HEIGHT: u32 = 40;
 
-/// A headless compositor on a thread, and the means to stop it.
+/// A headless compositor on a thread, and the means to drive and stop it.
 fn start(
     name: &str,
 ) -> (
     String,
     Facts,
+    Requests,
     Stop,
     thread::JoinHandle<Result<(), perspicax_compositor::Error>>,
 ) {
     let socket = format!("perspicax-test-{name}-{}", std::process::id());
     let facts = Facts::new();
+    let requests = Requests::new();
     let stop = Stop::new();
     let compositor = {
-        let (facts, stop, socket) = (facts.clone(), stop.clone(), socket.clone());
+        let (facts, requests, stop, socket) = (
+            facts.clone(),
+            requests.clone(),
+            stop.clone(),
+            socket.clone(),
+        );
         thread::spawn(move || {
             let config = Config {
                 backend: Backend::headless((800, 600)),
@@ -74,10 +91,10 @@ fn start(
                 socket: Some(socket),
                 xwayland: false,
             };
-            perspicax_compositor::run(&config, &facts, &Requests::new(), &stop)
+            perspicax_compositor::run(&config, &facts, &requests, &stop)
         })
     };
-    (socket, facts, stop, compositor)
+    (socket, facts, requests, stop, compositor)
 }
 
 fn mapped(facts: &Facts, count: usize) -> HostFacts {
@@ -94,7 +111,7 @@ fn mapped(facts: &Facts, count: usize) -> HostFacts {
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_panel_on_the_top_layer_occludes_the_window_beneath_it() {
-    let (socket, facts, stop, compositor) = start("occludes");
+    let (socket, facts, _requests, stop, compositor) = start("occludes");
     let client = connect(&socket);
     let (globals, mut queue) = registry_queue_init(&client).expect("the registry");
     let qh = queue.handle();
@@ -143,7 +160,7 @@ fn a_panel_on_the_top_layer_occludes_the_window_beneath_it() {
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_panel_that_reserves_room_moves_windows_out_from_under_it() {
-    let (socket, facts, stop, compositor) = start("reserves");
+    let (socket, facts, _requests, stop, compositor) = start("reserves");
     let client = connect(&socket);
     let (globals, mut queue) = registry_queue_init(&client).expect("the registry");
     let qh = queue.handle();
@@ -179,6 +196,88 @@ fn a_panel_that_reserves_room_moves_windows_out_from_under_it() {
         second.geometry.y0 >= f64::from(PANEL_HEIGHT),
         "the second window opened under the panel: {:?}",
         second.geometry
+    );
+
+    stop.request();
+    drop((desk, queue));
+    compositor
+        .join()
+        .expect("the compositor thread panicked")
+        .expect("the compositor failed");
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_facts_say_which_layer_a_panel_is_on_and_its_namespace() {
+    let (socket, facts, _requests, stop, compositor) = start("kind");
+    let client = connect(&socket);
+    let (globals, mut queue) = registry_queue_init(&client).expect("the registry");
+    let qh = queue.handle();
+    let mut desk = Desk::new(&globals, &qh);
+    desk.open_window(&qh);
+    until(&mut queue, &mut desk, |desk| desk.windows_drawn == 1);
+    desk.open_panel(&qh, false);
+    until(&mut queue, &mut desk, |desk| desk.panel_drawn);
+
+    let published = mapped(&facts, 2);
+    let surfaces = published.surfaces();
+    assert_eq!(surfaces[0].kind, SurfaceKind::Window);
+    assert_eq!(
+        surfaces[1].kind,
+        SurfaceKind::Layer {
+            layer: Level::Top,
+            namespace: "panel".to_owned(),
+        }
+    );
+    assert_eq!(surfaces[1].title, None, "a namespace is not a title");
+
+    stop.request();
+    drop((desk, queue));
+    compositor
+        .join()
+        .expect("the compositor thread panicked")
+        .expect("the compositor failed");
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_agents_click_on_a_panel_reaches_the_panel_and_it_cannot_close_one() {
+    let (socket, facts, requests, stop, compositor) = start("click-panel");
+    let client = connect(&socket);
+    let (globals, mut queue) = registry_queue_init(&client).expect("the registry");
+    let qh = queue.handle();
+    let mut desk = Desk::new(&globals, &qh);
+    desk.open_panel(&qh, true);
+    until(&mut queue, &mut desk, |desk| {
+        desk.panel_drawn && desk.pointer.is_some()
+    });
+    let panel = mapped(&facts, 1).surfaces()[0].id;
+    let host = Host::new(&facts, &requests);
+
+    host.act(
+        panel,
+        &Verb::Click {
+            at: Rect::new(100.0, 10.0, 120.0, 30.0),
+            button: PointerButton::Left,
+        },
+    )
+    .expect("dispatched");
+    until(&mut queue, &mut desk, |desk| !desk.panel_presses.is_empty());
+    assert_eq!(
+        desk.panel_presses,
+        [(110.0, 20.0)],
+        "its centre, panel-local"
+    );
+
+    assert_eq!(
+        host.act(panel, &Verb::Close),
+        Err(ActError::NoSuchSurface(panel.0)),
+        "only its own program closes a panel"
+    );
+    assert_eq!(
+        host.act(panel, &Verb::Focus),
+        Err(ActError::TakesNoKeyboard(panel.0)),
+        "it asked for no keyboard"
     );
 
     stop.request();
@@ -247,6 +346,10 @@ struct Desk {
     panel: Option<LayerSurface>,
     windows_drawn: usize,
     panel_drawn: bool,
+    seat: SeatState,
+    pointer: Option<wl_pointer::WlPointer>,
+    /// Where each button press on the panel landed, panel-local.
+    panel_presses: Vec<(f64, f64)>,
 }
 
 impl Desk {
@@ -265,6 +368,9 @@ impl Desk {
             panel: None,
             windows_drawn: 0,
             panel_drawn: false,
+            seat: SeatState::new(globals, qh),
+            pointer: None,
+            panel_presses: Vec::new(),
         }
     }
 
@@ -401,6 +507,52 @@ impl OutputHandler for Desk {
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 }
 
+impl SeatHandler for Desk {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat
+    }
+    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+    fn new_capability(
+        &mut self,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            self.pointer = self.seat.get_pointer(qh, &seat).ok();
+        }
+    }
+    fn remove_capability(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: wl_seat::WlSeat,
+        _: Capability,
+    ) {
+    }
+    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+}
+
+impl PointerHandler for Desk {
+    fn pointer_frame(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        let panel = self.panel.as_ref().map(|panel| panel.wl_surface().clone());
+        for event in events {
+            if let PointerEventKind::Press { .. } = event.kind
+                && panel.as_ref() == Some(&event.surface)
+            {
+                self.panel_presses.push(event.position);
+            }
+        }
+    }
+}
+
 impl ShmHandler for Desk {
     fn shm_state(&mut self) -> &mut Shm {
         &mut self.shm
@@ -411,7 +563,7 @@ impl ProvidesRegistryState for Desk {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry
     }
-    registry_handlers![OutputState];
+    registry_handlers![OutputState, SeatState];
 }
 
 delegate_compositor!(Desk);
@@ -420,4 +572,6 @@ delegate_shm!(Desk);
 delegate_xdg_shell!(Desk);
 delegate_xdg_window!(Desk);
 delegate_layer!(Desk);
+delegate_seat!(Desk);
+delegate_pointer!(Desk);
 delegate_registry!(Desk);

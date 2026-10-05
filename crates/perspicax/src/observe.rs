@@ -34,12 +34,18 @@
 //!
 //! # Read once, then listen
 //!
-//! [`observe`] is the expensive half and runs once: seconds against a cold Qt
-//! tree. After it, each [`App`] is still attached and still subscribed, so
-//! [`App::changes`] takes what the bus has volunteered without asking anything.
-//! Polling a tree is the failure mode this project exists to remove, and the
-//! subscription was opened before the snapshot precisely so that nothing can
-//! change in the gap between the two.
+//! Reading is the expensive half: seconds against a cold Qt tree. After it,
+//! each [`App`] is still attached and still subscribed, so [`App::changes`]
+//! takes what the bus has volunteered without asking anything. Polling a tree
+//! is the failure mode this project exists to remove, and the subscription was
+//! opened before the snapshot precisely so that nothing can change in the gap
+//! between the two.
+//!
+//! [`observe`] reads every application drawing on the host, once. Keeping that
+//! current as applications come and go is [`crate::keep`]'s, which reads each
+//! newcomer with [`read`] and puts it in the index with [`Snapshot::admit`]:
+//! the read awaits the bus and touches no index, and the admitting touches the
+//! index and awaits nothing, so the index is never held across a wait.
 
 use std::{collections::HashSet, time::Duration};
 
@@ -69,6 +75,9 @@ pub struct App {
     pub name: String,
     /// The toolkit it reports. Diagnostic only.
     pub toolkit: String,
+    /// Its process, as the bus reports it: the pid that admitted it to be
+    /// read, because it owns surfaces on this host.
+    pub pid: u32,
     /// Its root node, in the desktop's shared index.
     pub root: NodeId,
     /// Its toplevels, bound to surfaces.
@@ -142,6 +151,70 @@ impl App {
             index.join_subtree(join.node, join.surface, &origin);
         }
     }
+
+    /// Bind this application's windows to the host's surfaces again, then
+    /// attribute them: [`App::rejoin`], after weighing the windows afresh.
+    ///
+    /// For when either side changed since the last weighing: a window the
+    /// tree gained, a surface the host mapped, one monitor's desktop joined
+    /// by a shell when the monitor is plugged in. Cheap, like `rejoin`: the
+    /// weighing is over a handful of windows and surfaces, with no I/O.
+    pub fn relink(&mut self, index: &mut Index, facts: &HostFacts) {
+        let windows = toplevels(index, self.root, Some(self.pid));
+        let surfaces: Vec<SurfaceClaim> =
+            facts.surfaces().iter().map(SurfaceFacts::claim).collect();
+        (self.joins, self.findings) = join(&windows, &surfaces);
+        self.rejoin(index, facts);
+    }
+}
+
+/// One application, read off the bus and not yet in any index.
+pub struct Snapshot {
+    name: String,
+    toolkit: String,
+    pid: u32,
+    root: NodeId,
+    nodes: Vec<ObservedNode>,
+    /// The host as it was when the read began.
+    before: HostFacts,
+    ingest: AtspiIngest,
+}
+
+impl Snapshot {
+    /// The process this application belongs to.
+    #[must_use]
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// Put this application into `index`, its windows bound to the surfaces
+    /// the host had when the read began.
+    pub fn admit(self, index: &mut Index) -> App {
+        index.ingest_snapshot(self.nodes);
+        let mut app = App {
+            name: self.name,
+            toolkit: self.toolkit,
+            pid: self.pid,
+            root: self.root,
+            joins: Vec::new(),
+            findings: Vec::new(),
+            ingest: self.ingest,
+        };
+        app.relink(index, &self.before);
+        for join in &app.joins {
+            // Credited with the generation the surface was at when the read
+            // STARTED. A GTK tree takes tens of milliseconds at best, during
+            // which that application repaints its window perhaps twice;
+            // crediting the read with where the counter finished would
+            // quietly claim those frames had been seen.
+            let generation = self
+                .before
+                .surface(join.surface)
+                .map_or(0, |facts| facts.damage_generation);
+            index.reconcile(join.surface, generation);
+        }
+        app
+    }
 }
 
 /// What one read of the desktop found.
@@ -165,10 +238,6 @@ pub struct Reading {
 /// application that cannot be read is reported and skipped: one misbehaving
 /// toolkit must not be able to hide the desktop.
 pub async fn observe(facts: &Facts) -> Result<Reading> {
-    let bus = perspicax_atspi::on_the_bus()
-        .await
-        .context("the accessibility bus could not be reached")?;
-
     // Only applications this host actually drew. The pid is the join's gate, so
     // an application whose process owns none of our surfaces cannot bind to one
     // however promising its windows look -- and reading it would cost a D-Bus
@@ -176,44 +245,17 @@ pub async fn observe(facts: &Facts) -> Result<Reading> {
     // difference is the whole GNOME session: gnome-shell, seven gsd-* daemons,
     // and two leftover copies of the demo applications, none of which this
     // compositor is hosting.
-    let ours: HashSet<u32> = facts
-        .read()
-        .surfaces()
-        .iter()
-        .filter_map(|surface| surface.claim().pid)
-        .collect();
+    let ours = drawing(&facts.read());
 
     // One id map for the desktop, handed to every ingest below. See the module
     // documentation for what an interner each costs.
     let ids = Ids::default();
     let mut index = Index::new();
-    let mut apps = Vec::new();
-    let mut skipped = 0;
-
-    for app in bus {
-        if !app.bus_pid().is_some_and(|pid| ours.contains(&pid)) {
-            skipped += 1;
-            continue;
-        }
-        let (name, toolkit) = (app.name().to_owned(), app.toolkit().to_owned());
-        // By reference, not by name. A desktop can be running two copies of one
-        // program -- the test bed was, one of them a leftover -- and resolving
-        // by name reads the first twice while never reaching the second.
-        match tokio::time::timeout(PER_APP, read_app(app, &ids, &mut index, facts)).await {
-            Ok(Ok(mut app)) => {
-                app.toolkit = toolkit;
-                apps.push(app);
-            }
-            Ok(Err(error)) => tracing::warn!(app = %name, %error, "could not read application"),
-            Err(_) => tracing::warn!(app = %name, "gave up reading application"),
-        }
-    }
-    if skipped > 0 {
-        tracing::info!(
-            skipped,
-            "applications on the bus that this host did not draw"
-        );
-    }
+    let apps = read(&ours, &ids, facts)
+        .await?
+        .into_iter()
+        .map(|snapshot| snapshot.admit(&mut index))
+        .collect();
 
     // Judged and staled against the host as it is NOW, which is the whole
     // point: the difference between when each tree was read and now is exactly
@@ -230,9 +272,54 @@ pub async fn observe(facts: &Facts) -> Result<Reading> {
     })
 }
 
-/// Read one application into the desktop's index, and join it.
-async fn read_app(app: AppRef, ids: &Ids, index: &mut Index, facts: &Facts) -> Result<App> {
-    let name = app.name().to_owned();
+/// Every process that owns a surface on the host.
+#[must_use]
+pub fn drawing(facts: &HostFacts) -> HashSet<u32> {
+    facts
+        .surfaces()
+        .iter()
+        .filter_map(|surface| surface.claim().pid)
+        .collect()
+}
+
+/// Read every application on the accessibility bus whose process is one of
+/// `pids`, minting ids from `ids`.
+///
+/// # Errors
+///
+/// Fails only if the accessibility bus itself cannot be reached. An
+/// individual application that cannot be read is reported and skipped: one
+/// misbehaving toolkit must not be able to hide the desktop.
+pub async fn read(pids: &HashSet<u32>, ids: &Ids, facts: &Facts) -> Result<Vec<Snapshot>> {
+    let bus = perspicax_atspi::on_the_bus()
+        .await
+        .context("the accessibility bus could not be reached")?;
+    let mut snapshots = Vec::new();
+    let mut skipped = 0;
+    for app in bus {
+        let Some(pid) = app.bus_pid().filter(|pid| pids.contains(pid)) else {
+            skipped += 1;
+            continue;
+        };
+        let name = app.name().to_owned();
+        // By reference, not by name. A desktop can be running two copies of one
+        // program -- the test bed was, one of them a leftover -- and resolving
+        // by name reads the first twice while never reaching the second.
+        match tokio::time::timeout(PER_APP, snapshot(app, pid, ids, facts)).await {
+            Ok(Ok(snapshot)) => snapshots.push(snapshot),
+            Ok(Err(error)) => tracing::warn!(app = %name, %error, "could not read application"),
+            Err(_) => tracing::warn!(app = %name, "gave up reading application"),
+        }
+    }
+    if skipped > 0 {
+        tracing::debug!(skipped, "applications on the bus that were not asked for");
+    }
+    Ok(snapshots)
+}
+
+/// Read one application's tree, with geometry.
+async fn snapshot(app: AppRef, pid: u32, ids: &Ids, facts: &Facts) -> Result<Snapshot> {
+    let (name, toolkit) = (app.name().to_owned(), app.toolkit().to_owned());
     let mut ingest = AtspiIngest::attach(app)
         .await?
         .sharing(ids)
@@ -240,39 +327,18 @@ async fn read_app(app: AppRef, ids: &Ids, index: &mut Index, facts: &Facts) -> R
     let root = ingest.root_id();
 
     // The state of the host *before* the read, kept so the reconciliation
-    // below can be honest about what this tree does and does not contain.
+    // can be honest about what this tree does and does not contain.
     let before = facts.read();
-    let surfaces: Vec<SurfaceClaim> = before.surfaces().iter().map(SurfaceFacts::claim).collect();
-
     let nodes = ingest.snapshot(root).await?;
-    index.ingest_snapshot(nodes);
-
-    let windows = toplevels(index, root, ingest.app().bus_pid());
-    let (joins, findings) = join(&windows, &surfaces);
-
-    let app = App {
+    Ok(Snapshot {
         name,
-        toolkit: String::new(),
+        toolkit,
+        pid,
         root,
-        joins,
-        findings,
+        nodes,
+        before,
         ingest,
-    };
-    app.rejoin(index, &before);
-
-    for join in &app.joins {
-        // Credited with the generation the surface was at when the read
-        // STARTED. A GTK tree takes tens of milliseconds at best, during which
-        // that application repaints its window perhaps twice; crediting the
-        // read with where the counter finished would quietly claim those
-        // frames had been seen.
-        let generation = before
-            .surface(join.surface)
-            .map_or(0, |facts| facts.damage_generation);
-        index.reconcile(join.surface, generation);
-    }
-
-    Ok(app)
+    })
 }
 
 /// An application's toplevels, as claims to be weighed.

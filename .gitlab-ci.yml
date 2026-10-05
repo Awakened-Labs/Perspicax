@@ -94,6 +94,11 @@ clippy:
   script:
     - rustup component add clippy
     - cargo clippy --locked --workspace --all-targets -- -D warnings
+    # perspicax-shell with no components. The line above builds it with all
+    # of them, because the compositor's live tests take it `full`, so the
+    # build a person gets from `cargo install perspicax-shell` -- and every
+    # `cfg` that leaves a component out -- is only seen here.
+    - cargo clippy --locked -p perspicax-shell --all-targets -- -D warnings
 
 # The daily-driver build: `--features perspicax/desktop`, which is the seat
 # backend (libseat, udev, DRM, GBM, EGL, GLES, libinput) and Xwayland. The jobs
