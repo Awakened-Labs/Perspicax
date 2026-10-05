@@ -53,8 +53,17 @@ pub struct Shell {
     pub root_menu: bool,
     /// A TOML menu file that replaces the root menu or extends it.
     pub menu_file: Option<PathBuf>,
-    /// The desktop folder's files, as icons on the wallpaper.
+    /// The desktop folder's files, as icons on the wallpaper. Never with no
+    /// wallpaper: they are drawn on it.
     pub desktop_icons: bool,
+    /// What the desktop shows of an application's entry that may not be
+    /// run.
+    pub untrusted_launchers: UntrustedLaunchers,
+    /// How soon, in milliseconds, a second click on a desktop icon must
+    /// follow the first to open it: `[input.pointer] double-click-ms`, read
+    /// here so that a change to it reaches the shell as one to `[shell]`
+    /// does.
+    pub double_click_ms: u32,
     /// The icon theme, by its folder name. `None` is hicolor, the theme every
     /// application installs into, and the one any theme missing an icon
     /// falls back to.
@@ -66,6 +75,20 @@ pub struct Shell {
     pub lock: Vec<String>,
     /// The panel, or `None` for none.
     pub panel: Option<Panel>,
+}
+
+/// What the desktop shows of an application's entry that may not be run.
+/// Anyone's download can land on the desktop, and an entry there could call
+/// itself a document and run anything at all, so an application's entry is
+/// trusted only when it may be run, as Plasma trusts one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UntrustedLaunchers {
+    /// Shown as the file it is, and opened as one.
+    #[default]
+    AsFiles,
+    /// Not shown, until it is made executable.
+    Hidden,
 }
 
 /// A wallpaper: a colour, and an image over it.
@@ -204,6 +227,8 @@ impl Shell {
             root_menu: built.menus,
             menu_file: None,
             desktop_icons: icons && built.icons,
+            untrusted_launchers: UntrustedLaunchers::AsFiles,
+            double_click_ms: crate::DOUBLE_CLICK_MS,
             icon_theme: theme
                 .filter(|_| built.menus || built.panel || built.icons)
                 .map(str::to_owned),
@@ -251,6 +276,7 @@ pub(crate) struct RawShell {
     root_menu: Option<bool>,
     menu_file: Option<PathBuf>,
     desktop_icons: Option<bool>,
+    untrusted_launchers: Option<UntrustedLaunchers>,
     icon_theme: Option<String>,
     terminal: Option<Vec<String>>,
     lock: Option<Vec<String>>,
@@ -305,6 +331,24 @@ impl RawShell {
         }
         if let Some(icons) = self.desktop_icons {
             shell.desktop_icons = icons;
+        }
+        if shell.wallpaper.is_none() && shell.desktop_icons {
+            // The icons are drawn on the wallpaper. A profile's icons give
+            // way to a person bringing their own; asking for both is a
+            // mistake to point out.
+            if self.desktop_icons == Some(true) {
+                return Err(invalid(
+                    "shell.desktop-icons".to_owned(),
+                    format!(
+                        "the icons are drawn on the shell's wallpaper, and \
+                         `wallpaper = \"{NONE}\"` leaves it out"
+                    ),
+                ));
+            }
+            shell.desktop_icons = false;
+        }
+        if let Some(untrusted) = self.untrusted_launchers {
+            shell.untrusted_launchers = untrusted;
         }
         if let Some(theme) = self.icon_theme {
             if theme.trim().is_empty() {
@@ -366,6 +410,12 @@ impl RawShell {
             (
                 self.desktop_icons == Some(true),
                 "shell.desktop-icons",
+                built.icons,
+                "icons",
+            ),
+            (
+                self.untrusted_launchers.is_some(),
+                "shell.untrusted-launchers",
                 built.icons,
                 "icons",
             ),
@@ -763,5 +813,92 @@ mod tests {
             Config::profile(Profile::Minimal, Built::default()).shell,
             Shell::profile(Profile::Minimal, ShellBuilt::FULL)
         );
+    }
+
+    #[test]
+    fn desktop_icons_need_the_wallpaper_they_are_drawn_on() {
+        let own = shell("[shell]\nwallpaper = \"none\"", ShellBuilt::FULL).unwrap();
+        assert!(
+            !own.desktop_icons,
+            "classic's icons give way to a wallpaper of the person's own"
+        );
+        let both = "[shell]\nwallpaper = \"none\"\ndesktop-icons = true";
+        let error = shell(both, ShellBuilt::FULL).unwrap_err();
+        assert!(
+            error.to_string().contains("shell.desktop-icons")
+                && error.to_string().contains("drawn on the shell's wallpaper"),
+            "{error}"
+        );
+        assert!(
+            parse(both, Built::default()).is_err(),
+            "the compositor refuses it too"
+        );
+        let plain = shell("[shell]\nwallpaper = \"#102030\"", ShellBuilt::FULL).unwrap();
+        assert!(
+            plain.desktop_icons,
+            "any wallpaper of the shell's holds them"
+        );
+    }
+
+    #[test]
+    fn untrusted_launchers_are_shown_as_files_or_hidden() {
+        assert_eq!(
+            shell("", ShellBuilt::FULL).unwrap().untrusted_launchers,
+            UntrustedLaunchers::AsFiles
+        );
+        let hidden = "[shell]\nuntrusted-launchers = \"hidden\"";
+        assert_eq!(
+            shell(hidden, ShellBuilt::FULL).unwrap().untrusted_launchers,
+            UntrustedLaunchers::Hidden
+        );
+        assert!(
+            matches!(
+                shell(hidden, WALLPAPER_ONLY),
+                Err(Error::ShellNotBuilt {
+                    key: "shell.untrusted-launchers",
+                    feature: "icons"
+                })
+            ),
+            "a shell without icons has no launchers to hide"
+        );
+        assert!(shell("[shell]\nuntrusted-launchers = \"run\"", ShellBuilt::FULL).is_err());
+    }
+
+    #[test]
+    fn the_double_click_time_is_the_pointers_for_the_compositor_and_the_shell() {
+        let seat = Built {
+            seat: true,
+            ..Built::default()
+        };
+        let untouched = parse("", seat).unwrap();
+        assert_eq!(untouched.pointer.double_click_ms, crate::DOUBLE_CLICK_MS);
+        assert_eq!(untouched.shell.double_click_ms, crate::DOUBLE_CLICK_MS);
+
+        let slow = "[input.pointer]\ndouble-click-ms = 650";
+        let config = parse(slow, seat).unwrap();
+        assert_eq!(config.pointer.double_click_ms, 650, "the titlebars'");
+        assert_eq!(
+            config.shell.double_click_ms, 650,
+            "what the compositor compares to tell the shell of a change"
+        );
+        assert_eq!(
+            shell(slow, WALLPAPER_ONLY).unwrap().double_click_ms,
+            650,
+            "the icons'"
+        );
+
+        for written in [50, 5000] {
+            let text = format!("[input.pointer]\ndouble-click-ms = {written}");
+            for error in [
+                parse(&text, seat).unwrap_err(),
+                shell(&text, ShellBuilt::FULL).unwrap_err(),
+            ] {
+                assert!(
+                    error.to_string().contains("input.pointer.double-click-ms")
+                        && error.to_string().contains("100 to 2000"),
+                    "{error}"
+                );
+            }
+        }
     }
 }

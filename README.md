@@ -397,6 +397,7 @@ repeat-rate = 30
 [input.pointer]
 natural-scroll = true
 tap-to-click = true
+double-click-ms = 400          # titlebars and the shell's desktop icons alike
 
 [workspaces]
 mode = "spanning"              # one workspace across every monitor, switched

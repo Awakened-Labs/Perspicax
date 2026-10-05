@@ -336,14 +336,13 @@ pub fn part_at(
 pub type Press = (u32, (f64, f64));
 
 /// Whether a press at `second` makes a double-click of the press at
-/// `first`: soon enough after, and near enough, that a hand meant the two as
-/// one gesture.
+/// `first`: soon enough after, within `within_ms`, and near enough, that a
+/// hand meant the two as one gesture.
 #[must_use]
-pub fn is_double(first: Press, second: Press) -> bool {
-    const WITHIN_MS: u32 = 400;
+pub fn is_double(first: Press, second: Press, within_ms: u32) -> bool {
     const WITHIN_PIXELS: f64 = 6.0;
     let ((then, (x0, y0)), (now, (x1, y1))) = (first, second);
-    now.wrapping_sub(then) <= WITHIN_MS && (x1 - x0).hypot(y1 - y0) <= WITHIN_PIXELS
+    now.wrapping_sub(then) <= within_ms && (x1 - x0).hypot(y1 - y0) <= WITHIN_PIXELS
 }
 
 /// Where a window placed with its client at `at` has to go so that the top
@@ -567,17 +566,21 @@ mod tests {
 
     #[test]
     fn two_presses_close_in_time_and_place_are_a_double_click() {
-        assert!(is_double((1000, (10.0, 10.0)), (1300, (12.0, 11.0))));
+        assert!(is_double((1000, (10.0, 10.0)), (1300, (12.0, 11.0)), 400));
         assert!(
-            !is_double((1000, (10.0, 10.0)), (1500, (10.0, 10.0))),
+            !is_double((1000, (10.0, 10.0)), (1500, (10.0, 10.0)), 400),
             "too slow"
         );
         assert!(
-            !is_double((1000, (10.0, 10.0)), (1100, (40.0, 10.0))),
+            is_double((1000, (10.0, 10.0)), (1500, (10.0, 10.0)), 600),
+            "for a hand that asked for longer"
+        );
+        assert!(
+            !is_double((1000, (10.0, 10.0)), (1100, (40.0, 10.0)), 400),
             "too far"
         );
         assert!(
-            is_double((u32::MAX - 100, (0.0, 0.0)), (100, (0.0, 0.0))),
+            is_double((u32::MAX - 100, (0.0, 0.0)), (100, (0.0, 0.0)), 400),
             "across the clock wrapping"
         );
     }

@@ -11,7 +11,8 @@
 //! An application's entry is trusted only when it may be run, as Plasma
 //! trusts one. Anyone's download can be saved to the desktop, and an entry
 //! there could call itself a document and run anything at all; one that may
-//! not be run is shown as the file it is, and opened as one.
+//! not be run is shown as the file it is, and opened as one, or not shown,
+//! as the config says.
 //!
 //! Folders come first, then everything else, each by name, ignoring case.
 //!
@@ -22,15 +23,14 @@
 
 use std::path::{Path, PathBuf};
 
+use perspicax_config::UntrustedLaunchers;
+
 use super::{
     Button,
     apps::Run,
     desktop::{self, Locale},
     fs::Fs,
 };
-
-/// How soon a second press on an icon must follow the first to open it.
-pub(crate) const DOUBLE_CLICK_MS: u32 = 400;
 
 /// One thing in the desktop folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,10 +83,17 @@ pub(crate) fn desktop_dir(
     (Some(dir.as_path()) != home).then_some(dir)
 }
 
-/// The icons of what the folder `dir` holds, in the order shown. An entry's
-/// name is in `locale`'s language where it has one, and a link's `$HOME` is
-/// `home`.
-pub(crate) fn read(fs: &impl Fs, dir: &Path, locale: &Locale, home: Option<&Path>) -> Vec<Icon> {
+/// The icons of what the folder `dir` holds, in the order shown, with an
+/// application's entry that may not be run shown as `untrusted` says. An
+/// entry's name is in `locale`'s language where it has one, and a link's
+/// `$HOME` is `home`.
+pub(crate) fn read(
+    fs: &impl Fs,
+    dir: &Path,
+    untrusted: UntrustedLaunchers,
+    locale: &Locale,
+    home: Option<&Path>,
+) -> Vec<Icon> {
     let mut icons: Vec<Icon> = fs
         .list(dir)
         .into_iter()
@@ -107,21 +114,33 @@ pub(crate) fn read(fs: &impl Fs, dir: &Path, locale: &Locale, home: Option<&Path
                 .ends_with(".desktop")
                 .then(|| entry(fs, &path, locale, home))
                 .flatten();
-            entry.or_else(|| file(path, name))
+            match entry {
+                Some(Entry::Shown(icon)) => Some(icon),
+                Some(Entry::Untrusted) if untrusted == UntrustedLaunchers::Hidden => None,
+                _ => file(path, name),
+            }
         })
         .collect();
     icons.sort_by_cached_key(|icon| (!icon.is_folder, icon.name.to_lowercase(), icon.path.clone()));
     icons
 }
 
-/// The desktop entry at `path` as an icon: an application that may be run,
-/// or a link. `None` for anything else, which is shown as a file.
-fn entry(fs: &impl Fs, path: &Path, locale: &Locale, home: Option<&Path>) -> Option<Icon> {
+/// A desktop entry on the desktop, as far as it is more than a file.
+enum Entry {
+    /// An application's that may be run, or a link's: its own name and icon.
+    Shown(Icon),
+    /// An application's that may not be run.
+    Untrusted,
+}
+
+/// The desktop entry at `path`, as an icon of its own or as untrusted.
+/// `None` for anything else, which is shown as a file.
+fn entry(fs: &impl Fs, path: &Path, locale: &Locale, home: Option<&Path>) -> Option<Entry> {
     let entry = desktop::parse(&fs.read(path)?, locale).ok()?;
     let (opens, fallback) = if entry.application {
         if !fs.is_executable(path) {
-            tracing::debug!("{} may not be run, so is shown as a file", path.display());
-            return None;
+            tracing::debug!("{} may not be run, so is not trusted", path.display());
+            return Some(Entry::Untrusted);
         }
         let run = Run {
             argv: entry.exec?,
@@ -148,14 +167,14 @@ fn entry(fs: &impl Fs, path: &Path, locale: &Locale, home: Option<&Path>) -> Opt
         };
         (open(Path::new(local.unwrap_or(&url)))?, fallback)
     };
-    Some(Icon {
+    Some(Entry::Shown(Icon {
         path: path.to_owned(),
         name: entry.name,
         image: entry.icon.unwrap_or_else(|| fallback.to_owned()),
         fallback,
         opens,
         is_folder: false,
-    })
+    }))
 }
 
 /// A file named `name` at `path` as an icon, its picture by the kind its
@@ -217,12 +236,15 @@ fn open(place: &Path) -> Option<Run> {
 }
 
 /// The icons shown, which is selected, and what was last pressed.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Folder {
     icons: Vec<Icon>,
     selected: Option<PathBuf>,
     /// The icon last pressed with the left button, and when.
     last: Option<(PathBuf, u32)>,
+    /// How soon a second press on an icon must follow the first to open it,
+    /// in milliseconds.
+    pub(crate) double_click_ms: u32,
 }
 
 /// What a press did.
@@ -237,6 +259,16 @@ pub(crate) enum Pressed {
 }
 
 impl Folder {
+    /// No icons yet, opened by a double-click within `double_click_ms`.
+    pub(crate) fn new(double_click_ms: u32) -> Self {
+        Self {
+            icons: Vec::new(),
+            selected: None,
+            last: None,
+            double_click_ms,
+        }
+    }
+
     /// Show `icons` from now on, the one selected still selected if it is
     /// among them.
     pub(crate) fn show(&mut self, icons: Vec<Icon>) {
@@ -269,7 +301,7 @@ impl Folder {
             return self.select(None);
         };
         let again = self.last.as_ref().is_some_and(|(path, then)| {
-            *path == icon.path && time.wrapping_sub(*then) <= DOUBLE_CLICK_MS
+            *path == icon.path && time.wrapping_sub(*then) <= self.double_click_ms
         });
         if again {
             // A third press starts another pair, rather than opening twice.
@@ -300,6 +332,8 @@ impl Folder {
 
 #[cfg(test)]
 mod tests {
+    use perspicax_config::DOUBLE_CLICK_MS;
+
     use super::*;
     use crate::model::fs::fake::Files;
 
@@ -350,9 +384,16 @@ mod tests {
 
     /// The disk `files` describes, read as Ada's desktop folder.
     fn icons(files: &Files) -> Vec<Icon> {
+        icons_trusting(files, UntrustedLaunchers::AsFiles)
+    }
+
+    /// The same, with an untrusted application's entry shown as `untrusted`
+    /// says.
+    fn icons_trusting(files: &Files, untrusted: UntrustedLaunchers) -> Vec<Icon> {
         read(
             files,
             Path::new("/home/ada/Desktop"),
+            untrusted,
             &Locale::default(),
             Some(Path::new(HOME)),
         )
@@ -417,6 +458,42 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_that_may_not_be_run_can_be_hidden() {
+        let files = Files::default()
+            .program("/home/ada/Desktop/notes.desktop")
+            .with(
+                "/home/ada/Desktop/notes.desktop",
+                &entry("Application", "Exec=gedit %U\n"),
+            )
+            .with(
+                "/home/ada/Desktop/invoice.desktop",
+                &entry("Application", "Exec=invoice-viewer\n"),
+            )
+            .with("/home/ada/Desktop/broken.desktop", "not an entry at all")
+            .with("/home/ada/Desktop/plan.txt", "");
+        let names = |untrusted| {
+            icons_trusting(&files, untrusted)
+                .into_iter()
+                .map(|icon| icon.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(UntrustedLaunchers::Hidden),
+            ["broken.desktop", "Field notes", "plan.txt"],
+            "the one that may not be run is gone; the rest, and a file that is no entry, stay"
+        );
+        assert_eq!(
+            names(UntrustedLaunchers::AsFiles),
+            [
+                "broken.desktop",
+                "Field notes",
+                "invoice.desktop",
+                "plan.txt"
+            ]
+        );
+    }
+
+    #[test]
     fn a_link_opens_its_address() {
         let files = Files::default()
             .with(
@@ -457,7 +534,7 @@ mod tests {
         let files = Files::default()
             .with("/home/ada/Desktop/a.txt", "")
             .with("/home/ada/Desktop/b.txt", "");
-        let mut folder = Folder::default();
+        let mut folder = Folder::new(DOUBLE_CLICK_MS);
         folder.show(icons(&files));
         folder
     }
@@ -516,6 +593,25 @@ mod tests {
             "a press off them selects none"
         );
         assert_eq!(folder.press(None, Button::Left, 8100), Pressed::Nothing);
+    }
+
+    #[test]
+    fn the_double_click_time_is_the_configs() {
+        let mut slow = folder();
+        slow.double_click_ms = 800;
+        slow.press(Some(0), Button::Left, 1000);
+        assert!(
+            matches!(slow.press(Some(0), Button::Left, 1700), Pressed::Open(_)),
+            "a slower hand's pair"
+        );
+        let mut quick = folder();
+        quick.double_click_ms = 200;
+        quick.press(Some(0), Button::Left, 1000);
+        assert_eq!(
+            quick.press(Some(0), Button::Left, 1300),
+            Pressed::Nothing,
+            "two clicks to a quicker one"
+        );
     }
 
     #[test]

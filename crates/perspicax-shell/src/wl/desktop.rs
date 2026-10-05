@@ -24,6 +24,8 @@ use std::path::PathBuf;
 
 #[cfg(feature = "icons")]
 use accesskit::{Action, ActionHandler, ActionRequest, NodeId};
+#[cfg(feature = "icons")]
+use perspicax_config::UntrustedLaunchers;
 use perspicax_config::{Shell, Wallpaper};
 #[cfg(feature = "icons")]
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
@@ -124,6 +126,8 @@ struct Icons {
     /// shell's panel takes.
     on: Option<String>,
     strip: Option<Rect>,
+    /// What is shown of an application's entry that may not be run.
+    untrusted: UntrustedLaunchers,
     locale: Locale,
     home: Option<PathBuf>,
 }
@@ -389,22 +393,20 @@ impl Desktops {
 
 #[cfg(feature = "icons")]
 impl Desktops {
-    /// Show the desktop folder's icons if `shell` asks for them, and there
-    /// is a wallpaper to show them on. Whether what is shown changed.
+    /// Show the desktop folder's icons if `shell` asks for them, as it
+    /// asks. Whether what is shown changed.
     fn show_icons(&mut self, shell: &Shell) -> bool {
-        let wanted = shell.desktop_icons && shell.wallpaper.is_some();
-        match (&mut self.icons, wanted) {
+        match (&mut self.icons, shell.desktop_icons) {
             (None, false) => false,
             (Some(_), false) => {
                 self.icons = None;
                 true
             }
             (None, true) => {
-                self.icons = Some(Icons::find());
+                self.icons = Some(Icons::find(shell));
                 true
             }
-            // The desktop folder may be another now.
-            (Some(icons), true) => icons.find_again(),
+            (Some(icons), true) => icons.follow(shell),
         }
     }
 
@@ -511,14 +513,15 @@ impl Desktops {
 #[cfg(feature = "icons")]
 impl Icons {
     /// The desktop folder, wherever the environment says it is, and what it
-    /// holds; shown on no monitor yet.
-    fn find() -> Self {
+    /// holds, shown as `shell` asks; shown on no monitor yet.
+    fn find(shell: &Shell) -> Self {
         let mut icons = Self {
             dir: desktop_dir(),
             stamp: None,
-            folder: Folder::default(),
+            folder: Folder::new(shell.double_click_ms),
             on: None,
             strip: None,
+            untrusted: shell.untrusted_launchers,
             locale: Locale::from_env(),
             home: std::env::var_os("HOME").map(PathBuf::from),
         };
@@ -526,14 +529,17 @@ impl Icons {
         icons
     }
 
-    /// Look for the desktop folder again, and read it if it is another.
-    /// Whether it was.
-    fn find_again(&mut self) -> bool {
+    /// Show the folder as `shell` asks now, looking for it again, since it
+    /// may be another; read it again if it is, or if what is shown of it
+    /// changed. Whether either did.
+    fn follow(&mut self, shell: &Shell) -> bool {
+        self.folder.double_click_ms = shell.double_click_ms;
         let dir = desktop_dir();
-        if dir == self.dir {
+        if (&dir, shell.untrusted_launchers) == (&self.dir, self.untrusted) {
             return false;
         }
         self.dir = dir;
+        self.untrusted = shell.untrusted_launchers;
         self.read();
         true
     }
@@ -551,7 +557,13 @@ impl Icons {
     fn read(&mut self) {
         self.stamp = changed(self.dir.as_deref());
         let icons = self.dir.as_deref().map_or_else(Vec::new, |dir| {
-            folder::read(&Disk, dir, &self.locale, self.home.as_deref())
+            folder::read(
+                &Disk,
+                dir,
+                self.untrusted,
+                &self.locale,
+                self.home.as_deref(),
+            )
         });
         tracing::debug!(icons = icons.len(), dir = ?self.dir, "the desktop folder was read");
         self.folder.show(icons);

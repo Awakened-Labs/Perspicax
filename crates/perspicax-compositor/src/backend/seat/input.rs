@@ -385,10 +385,11 @@ fn pressed_frame(
     };
     let id = id_of(window);
     let press = (time, (at.x, at.y));
+    let within = session.settings.pointer.double_click_ms;
     let double = session
         .title_press
         .take()
-        .is_some_and(|(was, first)| was == id && is_double(first, press));
+        .is_some_and(|(was, first)| was == id && is_double(first, press, within));
     match part {
         Part::Title if double => state.toggle_maximize(window),
         Part::Title => {

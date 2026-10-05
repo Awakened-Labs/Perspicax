@@ -193,7 +193,7 @@ mod folder {
 
         #[test]
         fn the_desktop_icons_are_a_list_of_items_named_as_drawn() {
-            let mut folder = Folder::default();
+            let mut folder = Folder::new(perspicax_config::DOUBLE_CLICK_MS);
             folder.show(vec![icon("notes.txt"), icon("plan.pdf")]);
             folder.press(Some(1), Button::Left, 0);
             let spots = lay_out(

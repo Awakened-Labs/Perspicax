@@ -32,7 +32,8 @@ use serde::Deserialize;
 
 use crate::shell::RawShell;
 pub use crate::shell::{
-    Edge, Item, Panel, PanelOutputs, Shell, ShellBuilt, TaskbarScope, Wallpaper, WallpaperMode,
+    Edge, Item, Panel, PanelOutputs, Shell, ShellBuilt, TaskbarScope, UntrustedLaunchers,
+    Wallpaper, WallpaperMode,
 };
 
 /// Which cargo features this binary was built with, as far as config cares.
@@ -129,16 +130,59 @@ impl Default for Keyboard {
     }
 }
 
-/// Pointer device settings. `None` leaves libinput's own default alone,
-/// which differs by device (tap-to-click is off on most touchpads, for
-/// example), so "unset" and "false" are different requests.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+/// Pointer settings: the devices' own, and the double-click time.
+///
+/// For a device setting, `None` leaves libinput's own default alone, which
+/// differs by device (tap-to-click is off on most touchpads, for example),
+/// so "unset" and "false" are different requests.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pointer {
     /// Acceleration, from -1 (slowest) to 1 (fastest).
     pub accel: Option<f64>,
     pub natural_scroll: Option<bool>,
     pub tap_to_click: Option<bool>,
     pub left_handed: Option<bool>,
+    /// How soon, in milliseconds, a second click must follow the first to
+    /// make a double-click: on a titlebar, and on the shell's desktop icons,
+    /// which [`Shell::double_click_ms`] carries to the shell. One setting,
+    /// so the desk's double-clicks all ask the same of a hand.
+    pub double_click_ms: u32,
+}
+
+impl Default for Pointer {
+    fn default() -> Self {
+        Self {
+            accel: None,
+            natural_scroll: None,
+            tap_to_click: None,
+            left_handed: None,
+            double_click_ms: DOUBLE_CLICK_MS,
+        }
+    }
+}
+
+/// The double-click time, in milliseconds, of a config that does not say:
+/// GTK's and Qt's.
+pub const DOUBLE_CLICK_MS: u32 = 400;
+
+/// The double-click times a config may ask for. Faster than the shortest, a
+/// hand cannot click twice on purpose; slower than the longest, two clicks
+/// a person meant as two would open what they only meant to select.
+const DOUBLE_CLICK_RANGE: std::ops::RangeInclusive<u32> = 100..=2000;
+
+/// `double-click-ms` as written, if it is in [`DOUBLE_CLICK_RANGE`].
+fn double_click_ms(written: u32) -> Result<u32, Error> {
+    if DOUBLE_CLICK_RANGE.contains(&written) {
+        return Ok(written);
+    }
+    Err(invalid(
+        "input.pointer.double-click-ms".to_owned(),
+        format!(
+            "{written} is outside {} to {} milliseconds",
+            DOUBLE_CLICK_RANGE.start(),
+            DOUBLE_CLICK_RANGE.end()
+        ),
+    ))
 }
 
 /// The most workspaces along one side of the grid. Generous: past this, a
@@ -458,8 +502,10 @@ pub fn load_shell(path: &Path, built: ShellBuilt) -> Result<Shell, Error> {
 }
 
 /// Parse a config file's `[shell]` table, with its profile, as a
-/// perspicax-shell built with `built` reads it. The rest of the file must be
-/// this schema, and is otherwise the compositor's to judge.
+/// perspicax-shell built with `built` reads it, and the double-click time
+/// from `[input.pointer]`, which its icons share with the titlebars. The
+/// rest of the file must be this schema, and is otherwise the compositor's
+/// to judge.
 ///
 /// # Errors
 ///
@@ -469,10 +515,18 @@ pub fn load_shell(path: &Path, built: ShellBuilt) -> Result<Shell, Error> {
 pub fn shell(text: &str, built: ShellBuilt) -> Result<Shell, Error> {
     let raw: Raw = toml::from_str(text).map_err(|error| Error::Parse(error.to_string()))?;
     let profile = Shell::profile(raw.profile, built);
-    match raw.shell {
-        Some(shell) => shell.apply(profile, built),
-        None => Ok(profile),
+    let mut shell = match raw.shell {
+        Some(shell) => shell.apply(profile, built)?,
+        None => profile,
+    };
+    let written = raw
+        .input
+        .and_then(|input| input.pointer)
+        .and_then(|pointer| pointer.double_click_ms);
+    if let Some(written) = written {
+        shell.double_click_ms = double_click_ms(written)?;
     }
+    Ok(shell)
 }
 
 /// Parse a config file's text.
@@ -641,6 +695,7 @@ struct RawPointer {
     natural_scroll: Option<bool>,
     tap_to_click: Option<bool>,
     left_handed: Option<bool>,
+    double_click_ms: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -739,6 +794,9 @@ impl Raw {
                     natural_scroll: pointer.natural_scroll,
                     tap_to_click: pointer.tap_to_click,
                     left_handed: pointer.left_handed,
+                    double_click_ms: pointer
+                        .double_click_ms
+                        .map_or(Ok(DOUBLE_CLICK_MS), double_click_ms)?,
                 };
             }
         }
@@ -826,6 +884,7 @@ impl Raw {
         if let Some(shell) = self.shell {
             config.shell = shell.apply(config.shell, ShellBuilt::FULL)?;
         }
+        config.shell.double_click_ms = config.pointer.double_click_ms;
 
         if let Some(empty) = self.autostart.iter().position(Vec::is_empty) {
             return Err(invalid(
