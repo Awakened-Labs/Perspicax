@@ -1,4 +1,5 @@
-//! The session bus is told where the session's displays are (issue #27).
+//! The session bus is told where the session's displays are (issue #27), and
+//! what it started for the session ends with it (H3).
 //!
 //! Each test starts a `dbus-daemon` of its own, with a service directory the
 //! test writes, so what D-Bus starts on request is a script the test can read
@@ -19,9 +20,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use perspicax::bus::{self, Keyring, Options};
+use perspicax::{
+    bus::{self, Keyring, Options},
+    session,
+};
 use perspicax_compositor::SessionFacts;
-use zbus::Connection;
+use zbus::{Connection, fdo::DBusProxy, names::BusName};
 
 /// A bus of the test's own, starting only the services in its directory.
 struct Bus {
@@ -66,9 +70,13 @@ impl Bus {
         )
         .expect("a bus configuration");
 
+        // What it starts keeps its sockets here and finds no X server: the
+        // accessibility bus would otherwise make its own where the person's is.
         let mut daemon = Command::new("dbus-daemon")
             .arg(format!("--config-file={}", config.display()))
             .args(["--nofork", "--print-address=1"])
+            .env("XDG_RUNTIME_DIR", &dir)
+            .env_remove("DISPLAY")
             .stdout(Stdio::piped())
             .spawn()
             .expect("dbus-daemon, which a session with a bus has");
@@ -109,18 +117,20 @@ impl Drop for Bus {
     fn drop(&mut self) {
         self.daemon.kill().ok();
         self.daemon.wait().ok();
-        // File by file, then the two directories: nothing here deletes a
-        // tree it did not just list.
-        empty(&self.dir.join("services"));
+        // File by file and folder by folder, the services' runtime folders
+        // among them: nothing here deletes a tree it did not just list.
         empty(&self.dir);
     }
 }
 
-/// Remove the files directly in `dir`, then `dir` itself if that left it empty.
+/// Remove what `dir` holds, each folder emptied the same way, then `dir`
+/// itself. A link is removed, never followed.
 fn empty(dir: &Path) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
-            if entry.file_type().is_ok_and(|kind| !kind.is_dir()) {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                empty(&entry.path());
+            } else {
                 std::fs::remove_file(entry.path()).ok();
             }
         }
@@ -404,6 +414,92 @@ fn the_secret_service_is_told_apart_in_each_way_it_can_answer() {
         })
         .expect("a stand-in Secret Service");
     assert_eq!(keyring(&serving), Keyring::Running);
+}
+
+/// H3: logging out of a session SDDM started left its accessibility bus
+/// running, one more `dbus-daemon` after every login. The launcher answering
+/// for `org.a11y.Bus` runs a bus daemon of its own and stops it on its way out,
+/// which the display manager's hangup cuts short. So the session asks it to go
+/// first, while the session's bus can still say who it is -- and here that is
+/// the launcher as this machine installs it.
+#[test]
+#[ignore = "starts a dbus-daemon of its own, and the accessibility bus as installed"]
+fn the_accessibility_bus_is_stopped_with_the_daemon_it_runs() {
+    let installed = std::fs::read_to_string("/usr/share/dbus-1/services/org.a11y.Bus.service")
+        .expect("the accessibility bus's service, which at-spi2-core installs");
+    let launcher = installed
+        .lines()
+        .find_map(|line| line.strip_prefix("Exec="))
+        .expect("the program it runs");
+    let bus = Bus::start(&[("org.a11y.Bus", launcher)]);
+    let runtime = runtime();
+    let connection = bus.connect(&runtime);
+
+    // Asking about it does not start it.
+    let none = runtime.block_on(session::stop_accessibility_bus(&connection));
+    assert_eq!(
+        none.expect("an answer"),
+        None,
+        "stopped a bus nobody asked for"
+    );
+
+    // Started as a toolkit starts it, by asking where it is.
+    let daemon = runtime
+        .block_on(async {
+            let reply = connection
+                .call_method(
+                    Some("org.a11y.Bus"),
+                    "/org/a11y/bus",
+                    Some("org.a11y.Bus"),
+                    "GetAddress",
+                    &(),
+                )
+                .await?;
+            let address: String = reply.body().deserialize()?;
+            let own = zbus::connection::Builder::address(address.as_str())?
+                .build()
+                .await?;
+            DBusProxy::new(&own)
+                .await?
+                .get_connection_unix_process_id(BusName::try_from("org.freedesktop.DBus")?)
+                .await
+                .map_err(zbus::Error::from)
+        })
+        .expect("the accessibility bus, and its daemon's word on who it is");
+    assert!(
+        running(daemon),
+        "the accessibility bus's daemon is not running"
+    );
+
+    let stopped = runtime.block_on(session::stop_accessibility_bus(&connection));
+    assert!(
+        stopped.expect("the accessibility bus stopped").is_some(),
+        "nothing was stopped"
+    );
+    let named = runtime.block_on(async {
+        DBusProxy::new(&connection)
+            .await?
+            .name_has_owner(BusName::try_from("org.a11y.Bus")?)
+            .await
+            .map_err(zbus::Error::from)
+    });
+    assert!(!named.expect("an answer"), "org.a11y.Bus is still served");
+    assert!(
+        eventually(|| !running(daemon)),
+        "its daemon, {daemon}, is still running"
+    );
+}
+
+/// Whether `pid` is a process that has not ended: a zombie has, and waits only
+/// for whoever reaps it.
+fn running(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next().map(|state| state != "Z"))
+        })
+        .unwrap_or(false)
 }
 
 /// A session with no bus to reach still comes up: the session is the

@@ -47,6 +47,9 @@ tracing-subscriber.workspace = true
 # The session bus, told where this session's displays are (issue #27). zbus is
 # atspi's already; its tokio executor, as atspi has it for the whole workspace.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+# `kill` without `unsafe`, which this crate forbids: a session stopping the
+# accessibility bus its own bus started (H3). zbus's already.
+rustix = { version = "1", default-features = false, features = ["process", "std"] }
 perspicax-atspi = { path = "../perspicax-atspi", version = "0.1.0" }
 perspicax-compositor = { path = "../perspicax-compositor", version = "0.1.0" }
 perspicax-config = { path = "../perspicax-config", version = "0.1.0" }

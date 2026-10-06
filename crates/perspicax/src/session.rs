@@ -27,8 +27,10 @@
 //!
 //! `--session`, which is what a display manager starts, needs two things more.
 //! A session bus, which a display manager that is not systemd's does not give
-//! it ([`ensure_bus`]). And a log of its own ([`log_path`], [`open_log`]),
-//! since its stderr goes wherever the display manager keeps such things.
+//! it ([`ensure_bus`]), and whose accessibility bus it stops on the way out
+//! ([`stop_accessibility_bus`]). And a log of its own ([`log_path`],
+//! [`open_log`]), since its stderr goes wherever the display manager keeps
+//! such things.
 
 use std::{
     env,
@@ -42,10 +44,12 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result, bail};
+use rustix::process::{Pid, Signal, kill_process};
+use zbus::{Connection, fdo::DBusProxy, names::WellKnownName};
 
 /// Environment every child of this compositor gets, so that a toolkit which
 /// would otherwise decide nobody is listening joins the bus anyway.
@@ -133,7 +137,7 @@ pub fn has_bus(var: impl Fn(&str) -> Option<String>) -> bool {
 /// Called before anything is logged or started, because when it works nothing
 /// after it runs: the process that carries on is the one `dbus-run-session`
 /// starts. The bus ends with that process, and takes every service it
-/// activated with it.
+/// activated with it, but for the one [`stop_accessibility_bus`] stops.
 ///
 /// # Errors
 ///
@@ -155,6 +159,76 @@ pub fn ensure_bus() -> Result<()> {
         .env(BUS_STARTED, "1")
         .exec();
     Err(error).context("no session bus, and dbus-run-session could not be run to start one")
+}
+
+/// The accessibility bus's name on the session bus.
+const ACCESSIBILITY_BUS: &str = "org.a11y.Bus";
+
+/// How long the accessibility bus has to stop before the session goes anyway.
+/// It takes milliseconds, and a logout held up by one that will not stop would
+/// be worse than a daemon left behind.
+const ACCESSIBILITY_BUS_DEADLINE: Duration = Duration::from_secs(1);
+
+/// Stop the accessibility bus that the session's own bus started, and say
+/// which process served it; `None` when nothing did.
+///
+/// Everything a bus from [`ensure_bus`] activates ends with it, all but this.
+/// `at-spi-bus-launcher` runs a `dbus-daemon` of its own and stops it only on
+/// its way out. SDDM, ending the session, hangs up its process group as a
+/// terminal would: the launcher dies of the hangup before it has stopped its
+/// daemon, and `dbus-daemon` takes a hangup as an order to reread its
+/// configuration. So it lived on, one more after every login (H3). Asked with
+/// SIGTERM, the launcher stops its daemon and goes.
+///
+/// Called while `connection`'s bus is still there to say who serves the name,
+/// and only on a bus this session started: on one shared with other sessions,
+/// the accessibility bus is theirs too.
+///
+/// # Errors
+///
+/// When the bus will not say who serves it, the signal cannot be sent, or the
+/// name is still served after [`ACCESSIBILITY_BUS_DEADLINE`].
+pub async fn stop_accessibility_bus(connection: &Connection) -> Result<Option<u32>> {
+    let bus = DBusProxy::new(connection)
+        .await
+        .context("no word from the session bus")?;
+    let name = WellKnownName::from_static_str_unchecked(ACCESSIBILITY_BUS);
+    // Asked about by name, which does not start it: a session nobody read has
+    // no accessibility bus, and is not given one on its way out.
+    let launcher = match bus
+        .get_connection_unix_process_id(name.clone().into())
+        .await
+    {
+        Ok(pid) => pid,
+        Err(zbus::fdo::Error::NameHasNoOwner(_)) => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .context("the session bus would not say who serves the accessibility bus");
+        }
+    };
+    let pid = i32::try_from(launcher)
+        .ok()
+        .and_then(Pid::from_raw)
+        .with_context(|| {
+            format!("the accessibility bus is served by pid {launcher}, which is no process")
+        })?;
+    kill_process(pid, Signal::TERM)
+        .with_context(|| format!("could not ask the accessibility bus (pid {launcher}) to stop"))?;
+
+    // Waited for, because the hangup is coming: a launcher still stopping its
+    // daemon when it arrives is the leak all over again.
+    let deadline = Instant::now() + ACCESSIBILITY_BUS_DEADLINE;
+    while bus
+        .name_has_owner(name.clone().into())
+        .await
+        .unwrap_or(false)
+    {
+        if Instant::now() >= deadline {
+            bail!("the accessibility bus (pid {launcher}) was asked to stop, and is still running");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Ok(Some(launcher))
 }
 
 /// Where a session keeps its log: `$XDG_STATE_HOME/perspicax/perspicax.log`,

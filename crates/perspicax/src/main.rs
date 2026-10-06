@@ -199,9 +199,10 @@ fn main() -> Result<()> {
                 .from_env_lossy(),
         )
         .init();
+    let own_bus = cli.session && bus.is_ok() && std::env::var_os(session::BUS_STARTED).is_some();
     match bus {
         Err(error) => tracing::warn!("{error:#}; the session goes on without a bus"),
-        Ok(()) if cli.session && std::env::var_os(session::BUS_STARTED).is_some() => {
+        Ok(()) if own_bus => {
             tracing::info!("the session bus is this session's own, from dbus-run-session");
         }
         Ok(()) => {}
@@ -216,6 +217,11 @@ fn main() -> Result<()> {
     // looked for in its log, beside whatever led up to it.
     if to_file && let Err(error) = &ended {
         tracing::error!("{error:#}");
+    }
+    // While the bus is still up to say who serves it: `dbus-run-session` takes
+    // the bus down only once this process has gone.
+    if own_bus && let Err(error) = stop_accessibility_bus() {
+        tracing::warn!("{error:#}");
     }
     ended
 }
@@ -394,6 +400,24 @@ fn enable_accessibility() -> Result<()> {
         .context("no runtime to enable accessibility with")?
         .block_on(perspicax_atspi::enable())
         .context("could not turn accessibility on for this session")
+}
+
+/// Stop the accessibility bus this session's own bus started, briefly
+/// borrowing a runtime to do it, as [`enable_accessibility`] does.
+fn stop_accessibility_bus() -> Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("no runtime to stop the accessibility bus with")?
+        .block_on(async {
+            let connection = zbus::Connection::session()
+                .await
+                .context("no session bus to stop the accessibility bus on")?;
+            if let Some(pid) = session::stop_accessibility_bus(&connection).await? {
+                tracing::info!(pid, "stopped the accessibility bus this session started");
+            }
+            Ok(())
+        })
 }
 
 /// Read and report the desktop on its own thread, then ask the compositor to
