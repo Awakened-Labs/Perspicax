@@ -196,6 +196,9 @@ pub struct Compositor {
     /// Which windows are tabs of one another, and which tab of each group is
     /// in front. See `shell::tabs`.
     pub(crate) tabs: perspicax_policy::Groups<SurfaceId>,
+    /// Whose the keyboard layout is, and each window's own when it is
+    /// theirs. See `crate::keyboard`.
+    pub(crate) layout_memory: perspicax_policy::LayoutMemory<SurfaceId>,
     /// The window being moved with the pointer, while it is: an edge flip
     /// takes it along to the next workspace.
     pub(crate) dragging: Option<Framed>,
@@ -249,13 +252,6 @@ pub struct Compositor {
     #[cfg(feature = "capture")]
     pub(crate) screencopy: crate::screencopy::Screencopy,
     /// The event loop, for the handlers that must schedule work on it.
-    #[cfg_attr(
-        not(any(feature = "xwayland", feature = "capture")),
-        expect(
-            dead_code,
-            reason = "Xwayland's selections, and screencopy's waiting frames"
-        )
-    )]
     pub(crate) loop_handle: LoopHandle<'static, Self>,
     /// How to start a program against this compositor. Set by `run` once the
     /// socket exists, so `None` only before any client could connect.
@@ -339,6 +335,7 @@ impl Compositor {
             parked: Vec::new(),
             workspaces: Workspaces::new(workspace_shape),
             tabs: perspicax_policy::Groups::default(),
+            layout_memory: perspicax_policy::LayoutMemory::default(),
             dragging: None,
             snap_preview: None,
             #[cfg(feature = "seat")]
@@ -1002,6 +999,14 @@ impl SeatHandler for Compositor {
             .and_then(|surface| self.window_for(surface))
             .and_then(|window| shell::id_of(&window));
         self.stack_fullscreen(window);
+        // The window in use is typed in its own layout, when each has one.
+        // Not here: smithay calls this from inside `set_focus`, holding the
+        // keyboard, and reading or switching its layout now would wait on
+        // that lock for ever. Once the loop is idle the keyboard is free.
+        if self.layout_memory.switching() == perspicax_policy::Switching::Window {
+            self.loop_handle
+                .insert_idle(move |state| state.follow_layout(window));
+        }
 
         if !self.backend.has_person() {
             return;

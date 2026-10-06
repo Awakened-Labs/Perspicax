@@ -94,6 +94,17 @@ pub enum Action {
     Layout(u8),
 }
 
+impl Action {
+    /// Whether a binding to this still works at the lock screen. Only
+    /// switching layout does: a password is typed in a layout too. Anything
+    /// else a binding does over the lock screen -- a terminal opened, a
+    /// window moved -- would be an unlock, or a look behind it.
+    #[must_use]
+    pub fn while_locked(&self) -> bool {
+        matches!(self, Self::CycleLayout { .. } | Self::Layout(_))
+    }
+}
+
 /// Which output, from the one a window is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Towards {
@@ -459,6 +470,14 @@ mod tests {
             bindings.resolve(logo(Keysym::q).mods, &syms),
             Some(&Action::Minimize)
         );
+    }
+
+    #[test]
+    fn only_switching_layout_works_at_the_lock_screen() {
+        assert!(Action::CycleLayout { forward: true }.while_locked());
+        assert!(Action::Layout(2).while_locked());
+        assert!(!Action::Spawn(vec!["foot".to_owned()]).while_locked());
+        assert!(!Action::Reload.while_locked());
     }
 
     #[test]

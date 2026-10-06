@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use perspicax_policy::{
     Access, Action, Bindings, Chord, Decorations, Direction, Flipping, Focus, FocusModel, Grid,
-    Keysym, Mods, Place, Program, Protocol, Rule, Shape, Side, Snapping, Towards,
+    Keysym, Mods, Place, Program, Protocol, Rule, Shape, Side, Snapping, Switching, Towards,
 };
 use serde::Deserialize;
 
@@ -124,6 +124,8 @@ pub struct Keyboard {
     /// Num Lock on or off when the session starts, and again whenever a save
     /// changes this. `None` leaves it as the person has it.
     pub numlock: Option<bool>,
+    /// Whether the layout in use is the session's or each window's own.
+    pub switching: Switching,
 }
 
 impl Default for Keyboard {
@@ -137,6 +139,7 @@ impl Default for Keyboard {
             repeat_rate: 25,
             repeat_delay: 200,
             numlock: None,
+            switching: Switching::Global,
         }
     }
 }
@@ -361,6 +364,9 @@ impl Config {
             // The start menu, opened as on Plasma and Windows: a tap of the
             // Logo key on its own.
             bindings = bindings.bind_tap(Action::StartMenu);
+            // The next keyboard layout, as Windows switches it. Applications
+            // no longer get Logo+Space.
+            bindings = bindings.bind(logo(Keysym::space), Action::CycleLayout { forward: true });
             // Windows' snapping keys.
             for (key, direction) in arrows {
                 bindings = bindings.bind(
@@ -749,6 +755,14 @@ struct RawKeyboard {
     repeat_rate: Option<i32>,
     repeat_delay: Option<i32>,
     numlock: Option<bool>,
+    switching: Option<RawSwitching>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawSwitching {
+    Global,
+    Window,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1230,6 +1244,12 @@ impl RawKeyboard {
         keyboard.variant = self.variant.unwrap_or(keyboard.variant);
         keyboard.options = self.options.or(keyboard.options);
         keyboard.numlock = self.numlock.or(keyboard.numlock);
+        if let Some(switching) = self.switching {
+            keyboard.switching = match switching {
+                RawSwitching::Global => Switching::Global,
+                RawSwitching::Window => Switching::Window,
+            };
+        }
         Ok(keyboard)
     }
 }
@@ -1360,11 +1380,14 @@ fn action_for(action: RawAction) -> Result<Option<Action>, String> {
             "detach-tab" => Action::DetachTab,
             "start-menu" => Action::StartMenu,
             "root-menu" => Action::RootMenu,
+            "next-layout" => Action::CycleLayout { forward: true },
+            "previous-layout" => Action::CycleLayout { forward: false },
             other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
                 format!(
                     "`{other}` is not an action; use close, cycle-focus, reload, \
                          toggle-sticky, toggle-maximize, minimize, next-tab, previous-tab, \
                          tab-with-previous, detach-tab, start-menu, root-menu, \
+                         next-layout, previous-layout, layout-<1-4>, \
                          move-to-next-output, move-to-previous-output, \
                          move-to-output-<side>, workspace-<side>, workspace-<number>, \
                          send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
@@ -1398,7 +1421,13 @@ fn directed(name: &str) -> Option<Action> {
 
 /// `workspace-3`. Any positive number is accepted here: whether the grid has
 /// that many is a question for the grid, which a later reload may change.
+/// `layout-2`, from 1 to 4: xkb holds four layouts at most, and whether the
+/// keymap has that many is the keymap's question.
 fn numbered(name: &str) -> Option<Action> {
+    if let Some(layout) = name.strip_prefix("layout-") {
+        let number: u8 = layout.parse().ok()?;
+        return (1..=4).contains(&number).then_some(Action::Layout(number));
+    }
     let number: u16 = name.strip_prefix("workspace-")?.parse().ok()?;
     (number > 0).then_some(Action::GoToWorkspace(number))
 }
@@ -1705,6 +1734,65 @@ mod tests {
         let off = parse("[input.keyboard]\nnumlock = false", SEAT).unwrap();
         assert_eq!(off.keyboard.numlock, Some(false));
         assert!(parse("[input.keyboard]\nnumlock = \"on\"", SEAT).is_err());
+    }
+
+    #[test]
+    fn the_layout_is_the_sessions_unless_the_config_gives_each_window_its_own() {
+        assert_eq!(
+            parse("", SEAT).unwrap().keyboard.switching,
+            Switching::Global
+        );
+        let window = parse("[input.keyboard]\nswitching = \"window\"", SEAT).unwrap();
+        assert_eq!(window.keyboard.switching, Switching::Window);
+        let error = parse("[input.keyboard]\nswitching = \"app\"", SEAT).unwrap_err();
+        assert!(error.to_string().contains("switching"), "{error}");
+    }
+
+    #[test]
+    fn layout_actions_are_named_and_numbered_from_one_to_four() {
+        let text = "[keys]\n\"Ctrl+1\" = \"layout-1\"\n\
+                    \"Ctrl+4\" = \"layout-4\"\n\"Ctrl+n\" = \"next-layout\"\n\
+                    \"Ctrl+p\" = \"previous-layout\"";
+        let bindings = parse(text, SEAT).unwrap().bindings;
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            bindings.resolve(ctrl, &[Keysym::_1]),
+            Some(&Action::Layout(1))
+        );
+        assert_eq!(
+            bindings.resolve(ctrl, &[Keysym::_4]),
+            Some(&Action::Layout(4))
+        );
+        assert_eq!(
+            bindings.resolve(ctrl, &[Keysym::n]),
+            Some(&Action::CycleLayout { forward: true })
+        );
+        assert_eq!(
+            bindings.resolve(ctrl, &[Keysym::p]),
+            Some(&Action::CycleLayout { forward: false })
+        );
+        for refused in ["layout-0", "layout-5", "layout-x"] {
+            let text = format!("[keys]\n\"Ctrl+1\" = \"{refused}\"");
+            assert!(parse(&text, SEAT).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn classic_switches_layout_with_logo_space_and_minimal_does_not() {
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        let classic = Config::profile(Profile::Classic, SEAT).bindings;
+        assert_eq!(
+            classic.resolve(logo, &[Keysym::space]),
+            Some(&Action::CycleLayout { forward: true })
+        );
+        let minimal = Config::profile(Profile::Minimal, SEAT).bindings;
+        assert_eq!(minimal.resolve(logo, &[Keysym::space]), None);
     }
 
     #[test]

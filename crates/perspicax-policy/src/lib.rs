@@ -35,6 +35,7 @@ mod focus;
 mod frame;
 mod geometry;
 mod heads;
+mod keyboard;
 mod layout;
 mod restart;
 mod snap;
@@ -57,6 +58,7 @@ pub use crate::{
         unmaximized_at,
     },
     heads::{Head, HeadChange, HeadMode, ModeChoice, Rejection, check_heads},
+    keyboard::{LayoutMemory, Switching},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
     restart::{EX_CONFIG, Ended, Restart, Restarts},
     snap::{Snapping, Zone, keyed, zone},

@@ -37,6 +37,7 @@ impl Compositor {
         self.parked.retain(|parked| parked != window);
         if let Some(id) = id_of(window) {
             self.workspaces.remove(id);
+            self.layout_memory.forget(id);
         }
     }
 

@@ -164,8 +164,13 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
             let logo = raw.iter().copied().any(is_logo);
             let locked = state.lock.is_some();
             if pressed == KeyState::Released {
-                if session.logo_tap.release(logo) && !locked {
-                    tapped = session.settings.bindings.tap().cloned();
+                if session.logo_tap.release(logo) {
+                    tapped = session
+                        .settings
+                        .bindings
+                        .tap()
+                        .filter(|action| !locked || action.while_locked())
+                        .cloned();
                 }
                 return match session.swallowed.iter().position(|&k| k == keycode) {
                     Some(at) => {
@@ -176,14 +181,12 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
                 };
             }
             session.logo_tap.press(logo, mods(modifiers));
-            // While locked, only the escape hatches: a binding that opened a
-            // terminal over the lock screen would be an unlock.
+            // While locked, only the escape hatches and the layout keys: a
+            // binding that opened a terminal over the lock screen would be an
+            // unlock, while a password is typed in a layout too.
             let taken = hatch::classify(modifiers, keysym.modified_sym(), &raw)
                 .map(Taken::Hatch)
                 .or_else(|| {
-                    if locked {
-                        return None;
-                    }
                     let layout = modifiers.serialized.layout_effective;
                     let syms = candidates(
                         keysym.modified_sym(),
@@ -195,6 +198,7 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
                         .settings
                         .bindings
                         .resolve(mods(modifiers), &syms)
+                        .filter(|action| !locked || action.while_locked())
                         .cloned()
                         .map(Taken::Bound)
                 });

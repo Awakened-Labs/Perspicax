@@ -155,6 +155,7 @@ pub(super) fn apply_keyboard(state: &mut Compositor, numlock: Option<bool>) {
         return;
     };
     let settings = session.settings.keyboard.clone();
+    state.layout_memory.set_switching(settings.switching);
     let keymap = Keymap {
         rules: settings.rules,
         model: settings.model,

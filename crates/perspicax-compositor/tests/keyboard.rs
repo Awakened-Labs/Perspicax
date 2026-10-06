@@ -1,6 +1,7 @@
 //! A keyboard with more than one layout, as a client hears it: an agent's
-//! text arrives as typed, in whichever layout has each character, and a new
-//! keymap keeps the layout in use.
+//! text arrives as typed, in whichever layout has each character, a new
+//! keymap keeps the layout in use, and under `switching = "window"` each
+//! window keeps its own.
 //!
 //! The client reads its keys as a toolkit does. It keeps the keymap it is
 //! sent and the modifiers and group in force at each key, and turns them into
@@ -21,7 +22,7 @@ use common::{Desk, Session, until};
 use perspicax_compositor::{Backend, Command, Host, Keymap};
 use perspicax_index::{Action as Verb, HostFacts};
 use perspicax_node::SurfaceId;
-use perspicax_policy::Action;
+use perspicax_policy::{Action, Switching};
 use smithay::input::keyboard::{Keycode, xkb};
 use wayland_client::{
     Connection, Dispatch, EventQueue, QueueHandle, WEnum,
@@ -112,6 +113,20 @@ fn id(facts: &HostFacts) -> SurfaceId {
     facts.surfaces()[0].id
 }
 
+fn titled(facts: &HostFacts, title: &str) -> Option<SurfaceId> {
+    facts
+        .surfaces()
+        .iter()
+        .find(|surface| surface.title.as_deref() == Some(title))
+        .map(|surface| surface.id)
+}
+
+fn focus(session: &Session, window: SurfaceId) {
+    Host::new(&session.facts, &session.requests)
+        .act(window, &Verb::Focus)
+        .expect("focused");
+}
+
 fn listen(globals: &GlobalList, qh: &QueueHandle<Desk>) -> Ear {
     let seat: wl_seat::WlSeat = globals.bind(qh, 1..=7, ()).expect("wl_seat");
     let ear = Ear::default();
@@ -190,6 +205,44 @@ fn a_new_keymap_keeps_the_layout_in_use_and_is_typed_from() {
     session.command(Command::Keymap(keymap("us")));
     until(&mut queue, &mut desk, |_| heard(&ear).layouts == 1);
     assert_eq!(heard(&ear).group(), 0);
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn under_window_switching_each_window_keeps_its_own_layout() {
+    let (session, mut desk, mut queue, ear, first) = typist("keyboard-window", "us,ru");
+    session.command(Command::LayoutSwitching(Switching::Window));
+    desk.open_window(&queue.handle(), "second", "second");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 2);
+    let facts = session.wait_for(|facts| titled(facts, "second").is_some());
+    let second = titled(&facts, "second").expect("waited for");
+
+    // The first window in Russian; the second, new, starts in English.
+    focus(&session, first);
+    session.perform(Action::Layout(2));
+    until(&mut queue, &mut desk, |_| heard(&ear).group() == 1);
+    focus(&session, second);
+    until(&mut queue, &mut desk, |_| heard(&ear).group() == 0);
+    // Each goes back to its own.
+    focus(&session, first);
+    until(&mut queue, &mut desk, |_| heard(&ear).group() == 1);
+    focus(&session, second);
+    until(&mut queue, &mut desk, |_| heard(&ear).group() == 0);
+
+    // The session's again: the layout stays as it is wherever the keyboard
+    // goes.
+    session.command(Command::LayoutSwitching(Switching::Global));
+    session.perform(Action::Layout(2));
+    until(&mut queue, &mut desk, |_| heard(&ear).group() == 1);
+    focus(&session, first);
+    focus(&session, second);
+    queue.roundtrip(&mut desk).expect("flush");
+    queue
+        .roundtrip(&mut desk)
+        .expect("and again, past an idle turn");
+    assert_eq!(heard(&ear).group(), 1);
 
     session.stop((desk, queue));
 }

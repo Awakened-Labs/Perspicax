@@ -8,6 +8,10 @@
 //! only the repeat rate used to put a Russian typist back in English with
 //! Caps Lock off. [`Compositor::set_keymap`] puts all three back.
 //!
+//! Under `switching = "window"` each window keeps its own layout
+//! ([`perspicax_policy::LayoutMemory`]), switched to when it takes the
+//! keyboard.
+//!
 //! Putting the locks back is quiet in smithay: `set_modifier_state` changes
 //! the state without a `modifiers` event, so the focused client would go on
 //! reading keys without Caps Lock, and without a word to the lights. Both are
@@ -15,6 +19,7 @@
 
 use std::sync::PoisonError;
 
+use perspicax_node::SurfaceId;
 use smithay::{
     input::keyboard::{Error, KeyboardTarget as _, Layout, XkbConfig},
     utils::SERIAL_COUNTER,
@@ -126,6 +131,19 @@ impl Compositor {
         };
         if self.layouts().is_some_and(|(_, count)| index < count) {
             self.lock_layout(index);
+        }
+    }
+
+    /// The keyboard went to `window`, or to something that is not a window:
+    /// when each window has its own layout, remember the one the last window
+    /// was typed in, and switch to this one's.
+    pub(crate) fn follow_layout(&mut self, window: Option<SurfaceId>) {
+        let Some((active, count)) = self.layouts() else {
+            return;
+        };
+        if let Some(layout) = self.layout_memory.focus(window, active) {
+            // Kept from a keymap that had more layouts than this one.
+            self.lock_layout(layout.min(count - 1));
         }
     }
 }

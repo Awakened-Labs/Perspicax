@@ -457,6 +457,9 @@ impl Compositor {
                     tracing::warn!(%error, ?keymap, "xkb could not compile that keymap");
                 }
             }
+            crate::Command::LayoutSwitching(switching) => {
+                self.layout_memory.set_switching(*switching);
+            }
         }
     }
 
