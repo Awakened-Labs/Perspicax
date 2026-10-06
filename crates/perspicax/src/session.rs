@@ -1,4 +1,4 @@
-//! Owning the accessibility session, rather than hoping somebody else did.
+//! Owning the session, rather than hoping somebody else did.
 //!
 //! A toolkit only joins the accessibility bus if three separate things are
 //! true, and on a desktop all three are arranged by a session manager nobody
@@ -24,14 +24,28 @@
 //! All three were learned the expensive way while measuring M1 and are written
 //! down here so that they are a property of the program rather than of a
 //! runbook.
+//!
+//! `--session`, which is what a display manager starts, needs two things more.
+//! A session bus, which a display manager that is not systemd's does not give
+//! it ([`ensure_bus`]). And a log of its own ([`log_path`], [`open_log`]),
+//! since its stderr goes wherever the display manager keeps such things.
 
 use std::{
-    fs,
+    env,
+    ffi::OsString,
+    fs::{self, DirBuilder, File, OpenOptions},
+    io,
+    os::unix::{
+        fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _},
+        net::UnixStream,
+        process::CommandExt as _,
+    },
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::Duration,
 };
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 
 /// Environment every child of this compositor gets, so that a toolkit which
 /// would otherwise decide nobody is listening joins the bus anyway.
@@ -88,6 +102,107 @@ pub fn desktop_env(inherited: impl Fn(&str) -> Option<String>) -> Vec<(String, S
     ]
 }
 
+/// Set in the environment of the process `dbus-run-session` starts in this
+/// one's place, so that it cannot start another if it still finds no bus.
+pub const BUS_STARTED: &str = "PERSPICAX_BUS_STARTED";
+
+/// Whether this session has a bus: one named in `DBUS_SESSION_BUS_ADDRESS`,
+/// or one answering at `$XDG_RUNTIME_DIR/bus`, where a systemd user manager
+/// keeps the user's.
+///
+/// The socket is connected to rather than looked at. A bus that has gone
+/// leaves its socket behind, and a session that took it for a bus would have
+/// none.
+///
+/// `var` reads the environment; a function rather than the process's own, so
+/// the rule can be checked without changing the test's environment.
+#[must_use]
+pub fn has_bus(var: impl Fn(&str) -> Option<String>) -> bool {
+    let var = |name: &str| var(name).filter(|value| !value.is_empty());
+    var("DBUS_SESSION_BUS_ADDRESS").is_some()
+        || var("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
+            .is_some_and(|dir| UnixStream::connect(dir.join("bus")).is_ok())
+}
+
+/// Give a session a bus of its own if it was started without one, by
+/// replacing this process with `dbus-run-session` running it again, with
+/// [`BUS_STARTED`] set.
+///
+/// Called before anything is logged or started, because when it works nothing
+/// after it runs: the process that carries on is the one `dbus-run-session`
+/// starts. The bus ends with that process, and takes every service it
+/// activated with it.
+///
+/// # Errors
+///
+/// Why the session goes on without a bus: `dbus-run-session` could not be run,
+/// or it was, and this process, which it started, still has no bus.
+pub fn ensure_bus() -> Result<()> {
+    if has_bus(|name| env::var(name).ok()) {
+        return Ok(());
+    }
+    if env::var_os(BUS_STARTED).is_some() {
+        bail!("dbus-run-session started this session, and it still has no session bus");
+    }
+    let this = env::current_exe()
+        .context("no session bus, and no path to this program to run it under one")?;
+    let error = Command::new("dbus-run-session")
+        .arg("--")
+        .arg(this)
+        .args(env::args_os().skip(1))
+        .env(BUS_STARTED, "1")
+        .exec();
+    Err(error).context("no session bus, and dbus-run-session could not be run to start one")
+}
+
+/// Where a session keeps its log: `$XDG_STATE_HOME/perspicax/perspicax.log`,
+/// with `~/.local/state` for a state folder that is not set. `None` with
+/// neither variable set.
+///
+/// `var` reads the environment, as [`has_bus`]'s does.
+#[must_use]
+pub fn log_path(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    // The XDG spec's rule: a relative folder is no folder at all.
+    let folder = |name: &str| var(name).map(PathBuf::from).filter(|dir| dir.is_absolute());
+    let state = folder("XDG_STATE_HOME")
+        .or_else(|| folder("HOME").map(|home| home.join(".local/state")))?;
+    Some(state.join("perspicax").join("perspicax.log"))
+}
+
+/// Open a fresh log at `path`, keeping the last one beside it as
+/// `perspicax.log.old`, where the session that went wrong is looked for.
+///
+/// Only the person can read either, and a folder made for them is theirs alone:
+/// a log names the applications run and the windows they opened.
+///
+/// # Errors
+///
+/// When the folder cannot be made, or the log not opened, or the last one not
+/// kept: a log it would have overwritten is the one that mattered.
+pub fn open_log(path: &Path) -> io::Result<File> {
+    if let Some(folder) = path.parent() {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(folder)?;
+    }
+    let mut old = OsString::from(path);
+    old.push(".old");
+    if let Err(error) = fs::rename(path, &old)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        return Err(error);
+    }
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+}
+
 /// A registry this process started and is responsible for stopping.
 pub struct Registry(Option<Child>);
 
@@ -109,11 +224,22 @@ impl Registry {
             return Ok(Self(None));
         }
 
-        let child = Command::new("/usr/libexec/at-spi2-registryd")
+        let registry = find_registry(Path::new("/")).with_context(|| {
+            format!(
+                "no accessibility registry is running, and there is no {REGISTRY} to start in {}",
+                REGISTRY_FOLDERS.join(", ")
+            )
+        })?;
+        let child = Command::new(&registry)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .context("no accessibility registry is running and none could be started")?;
+            .with_context(|| {
+                format!(
+                    "no accessibility registry is running, and {} could not be started",
+                    registry.display()
+                )
+            })?;
         tracing::info!(pid = child.id(), "started an accessibility registry");
 
         // Give it a moment to claim its bus name. A client that asks before it
@@ -132,6 +258,46 @@ impl Drop for Registry {
             let _ = child.wait();
         }
     }
+}
+
+/// The registry's program, which is never on `PATH`.
+const REGISTRY: &str = "at-spi2-registryd";
+
+/// Where distributions put [`REGISTRY`], in the order looked: Fedora's and
+/// Gentoo's, Arch's, and older Debian's and Ubuntu's, which some put under a
+/// multiarch triplet as well. A `*` is each folder there.
+const REGISTRY_FOLDERS: [&str; 4] = [
+    "/usr/libexec",
+    "/usr/lib",
+    "/usr/lib/at-spi2-core",
+    "/usr/lib/*/at-spi2-core",
+];
+
+/// The first [`REGISTRY`] that may be run in [`REGISTRY_FOLDERS`] under
+/// `root`, which is `/` but in a test. Triplets are taken in name order, so the
+/// choice does not depend on the order a folder happens to list them in.
+fn find_registry(root: &Path) -> Option<PathBuf> {
+    REGISTRY_FOLDERS
+        .iter()
+        .map(|folder| folder.trim_start_matches('/'))
+        .flat_map(|folder| match folder.split_once("/*/") {
+            Some((parent, child)) => {
+                let mut triplets: Vec<_> = fs::read_dir(root.join(parent))
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path().join(child))
+                    .collect();
+                triplets.sort();
+                triplets
+            }
+            None => vec![root.join(folder)],
+        })
+        .map(|folder| folder.join(REGISTRY))
+        .find(|path| {
+            path.metadata()
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
 }
 
 /// Whether something is already serving the accessibility registry.
@@ -156,14 +322,171 @@ fn registry_is_running() -> bool {
             cmdline
                 .split(|byte| *byte == 0)
                 .next()
-                .is_some_and(|argv0| argv0.ends_with(b"at-spi2-registryd"))
+                .is_some_and(|argv0| argv0.ends_with(REGISTRY.as_bytes()))
         })
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::net::UnixListener;
+
     use super::*;
+
+    /// A fresh directory for one test, emptied when it ends. Its name is short,
+    /// because a socket's path has to fit in 108 bytes.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = env::temp_dir().join(format!("perspicax-{name}-{}", std::process::id()));
+            fs::create_dir_all(&dir).expect("a scratch directory");
+            Self(dir)
+        }
+
+        /// A file at `path` in it, with `mode`.
+        fn file(&self, path: &str, mode: u32) -> PathBuf {
+            let file = self.0.join(path);
+            fs::create_dir_all(file.parent().expect("a folder")).expect("its folder");
+            fs::write(&file, "").expect("a file");
+            fs::set_permissions(&file, fs::Permissions::from_mode(mode)).expect("its mode");
+            file
+        }
+
+        /// The environment, as `has_bus` and `log_path` read it: `vars`, with
+        /// `{}` in a value standing for this directory.
+        fn env(&self, vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+            let vars: Vec<_> = vars
+                .iter()
+                .map(|&(name, value)| {
+                    (
+                        name.to_owned(),
+                        value.replace("{}", &self.0.to_string_lossy()),
+                    )
+                })
+                .collect();
+            move |name| {
+                vars.iter()
+                    .find(|(var, _)| var == name)
+                    .map(|(_, value)| value.clone())
+            }
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).expect("it exists").permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn a_bus_address_is_a_bus_and_an_empty_one_is_not() {
+        let scratch = Scratch::new("address");
+        assert!(has_bus(
+            scratch.env(&[("DBUS_SESSION_BUS_ADDRESS", "unix:path=/x")])
+        ));
+        assert!(!has_bus(scratch.env(&[("DBUS_SESSION_BUS_ADDRESS", "")])));
+        assert!(!has_bus(scratch.env(&[])));
+    }
+
+    #[test]
+    fn a_bus_is_one_answering_in_the_runtime_folder_and_not_the_socket_it_left() {
+        let scratch = Scratch::new("bus");
+        let runtime = [("XDG_RUNTIME_DIR", "{}")];
+        assert!(!has_bus(scratch.env(&runtime)), "no socket at all");
+
+        let listening = UnixListener::bind(scratch.0.join("bus")).expect("a socket");
+        assert!(has_bus(scratch.env(&runtime)));
+        // The same folder named relatively is no folder.
+        assert!(!has_bus(scratch.env(&[("XDG_RUNTIME_DIR", "run")])));
+
+        drop(listening);
+        assert!(scratch.0.join("bus").exists(), "the socket stays behind");
+        assert!(!has_bus(scratch.env(&runtime)));
+    }
+
+    #[test]
+    fn the_log_is_in_the_state_folder_or_else_the_home_one() {
+        let scratch = Scratch::new("log-path");
+        let log = |vars: &[(&str, &str)]| log_path(scratch.env(vars));
+        assert_eq!(
+            log(&[("XDG_STATE_HOME", "/state"), ("HOME", "/home/someone")]),
+            Some(PathBuf::from("/state/perspicax/perspicax.log"))
+        );
+        for state in ["", "state"] {
+            assert_eq!(
+                log(&[("XDG_STATE_HOME", state), ("HOME", "/home/someone")]),
+                Some(PathBuf::from(
+                    "/home/someone/.local/state/perspicax/perspicax.log"
+                )),
+                "XDG_STATE_HOME = {state:?}"
+            );
+        }
+        assert_eq!(log(&[]), None);
+    }
+
+    #[test]
+    fn a_new_log_keeps_the_last_one_and_only_the_last_one() {
+        let scratch = Scratch::new("log");
+        let path = scratch.0.join("state/perspicax/perspicax.log");
+        let old = scratch.0.join("state/perspicax/perspicax.log.old");
+        let run = |said: &str| {
+            let mut log = open_log(&path).expect("a log");
+            io::Write::write_all(&mut log, said.as_bytes()).expect("written");
+        };
+
+        run("first");
+        assert_eq!(mode(&scratch.0.join("state/perspicax")), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        assert!(!old.exists());
+
+        run("second");
+        run("third");
+        assert_eq!(fs::read_to_string(&path).expect("the log"), "third");
+        assert_eq!(fs::read_to_string(&old).expect("the last"), "second");
+        assert_eq!(mode(&old), 0o600);
+    }
+
+    #[test]
+    fn the_registry_is_found_where_a_distribution_put_it() {
+        let scratch = Scratch::new("registry");
+        let root = &scratch.0;
+        assert_eq!(find_registry(root), None);
+
+        scratch.file(
+            "usr/lib/x86_64-linux-gnu/at-spi2-core/at-spi2-registryd",
+            0o755,
+        );
+        let multiarch = scratch.file(
+            "usr/lib/aarch64-linux-gnu/at-spi2-core/at-spi2-registryd",
+            0o755,
+        );
+        assert_eq!(
+            find_registry(root),
+            Some(multiarch),
+            "triplets in name order"
+        );
+
+        let debian = scratch.file("usr/lib/at-spi2-core/at-spi2-registryd", 0o755);
+        assert_eq!(find_registry(root), Some(debian));
+
+        let arch = scratch.file("usr/lib/at-spi2-registryd", 0o755);
+        assert_eq!(find_registry(root), Some(arch.clone()));
+
+        scratch.file("usr/libexec/at-spi2-registryd", 0o644);
+        assert_eq!(
+            find_registry(root),
+            Some(arch),
+            "a file that may not be run is passed over"
+        );
+
+        let fedora = scratch.file("usr/libexec/at-spi2-registryd", 0o755);
+        assert_eq!(find_registry(root), Some(fedora));
+    }
 
     fn value<'a>(env: &'a [(String, String)], key: &str) -> &'a str {
         env.iter()

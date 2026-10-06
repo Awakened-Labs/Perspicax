@@ -17,6 +17,10 @@
 //! perspicax --seat
 //! ```
 //!
+//! A display manager's session entry runs `perspicax --session`: the same
+//! session, under a session bus of its own when it was started without one,
+//! and logging to `~/.local/state/perspicax/perspicax.log`.
+//!
 //! It needs `XDG_RUNTIME_DIR` set, which is where the Wayland socket goes. Over
 //! SSH that is `export XDG_RUNTIME_DIR=/run/user/$(id -u)`, the same variable
 //! `perspicax-probe` needs for the accessibility bus and for the same reason: a login
@@ -27,8 +31,10 @@
 //! deliberately draws nothing.
 
 use std::{
+    fs::File,
+    io,
     path::PathBuf,
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
     time::Duration,
 };
 
@@ -36,21 +42,24 @@ use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use perspicax::{bus, desk::Desk, keep::keep_current, observe, session};
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop, Virtual};
-use tracing_subscriber::{EnvFilter, filter::LevelFilter};
+use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt::writer::BoxMakeWriter};
 
 #[derive(Parser)]
 #[command(
     name = "perspicax",
     about = "An agent-native Wayland compositor: everything on screen, as a typed API.",
     version,
-    group = clap::ArgGroup::new("backend").required(true).args(["headless", "seat"])
+    group = clap::ArgGroup::new("backend")
+        .required(true)
+        .args(["headless", "seat", "session"])
 )]
 struct Cli {
     /// Run with no window system at all: a virtual output, no rendering, no
     /// GPU. What CI runs, and what an agent with no person present wants.
     ///
-    /// One of `--headless` or `--seat` is required rather than defaulted, so
-    /// that no script written against one silently starts meaning the other.
+    /// One of `--headless`, `--seat` or `--session` is required rather than
+    /// defaulted, so that no script written against one silently starts
+    /// meaning another.
     #[arg(long)]
     headless: bool,
 
@@ -59,6 +68,13 @@ struct Cli {
     /// from a TTY. Needs a build with `--features seat` (or `desktop`).
     #[arg(long)]
     seat: bool,
+
+    /// Run as a whole session, as a display manager starts one: `--seat`,
+    /// under a session bus of its own when it was given none, and logging to
+    /// `$XDG_STATE_HOME/perspicax/perspicax.log` (the last run's is kept as
+    /// `perspicax.log.old`). What the session entry runs.
+    #[arg(long)]
+    session: bool,
 
     /// A virtual output's size, as `WIDTHxHEIGHT`. Repeat it for more than one
     /// monitor: they are named `HEADLESS-1`, `HEADLESS-2`, ... and placed left
@@ -69,7 +85,7 @@ struct Cli {
         long,
         default_value = "1920x1080",
         value_parser = parse_size,
-        conflicts_with = "seat"
+        conflicts_with_all = ["seat", "session"]
     )]
     size: Vec<(i32, i32)>,
 
@@ -108,11 +124,11 @@ struct Cli {
     /// cost a serialisation of every node and buy nothing.
     ///
     /// **This takes over stdout**, which becomes the JSON-RPC wire. Logging
-    /// goes to stderr in every mode; see the note in `main`.
+    /// never goes there, in any mode; see the note in `main`.
     ///
     /// Headless, the run ends when the client does: an agent-driven compositor
     /// with no agent left has nothing to host, and it exits non-zero if the
-    /// agent interface failed rather than ended. On `--seat` the session is the
+    /// agent interface failed rather than ended. On a seat the session is the
     /// person's, and it outlives the client however the client goes.
     #[arg(long)]
     mcp: bool,
@@ -131,33 +147,89 @@ struct Cli {
     settle: f64,
 }
 
+impl Cli {
+    /// Whether this is a person's session on this machine's seat, which both
+    /// `--seat` and `--session` are. They differ only in the bus and the log.
+    fn on_seat(&self) -> bool {
+        self.seat || self.session
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // STDERR, AND NOT STDOUT. Under `--mcp` stdout is the JSON-RPC wire, and a
-    // single log line written to it corrupts a frame -- which arrives at the
-    // client as a parse error with nothing in it pointing back here. Stderr
-    // unconditionally rather than only under `--mcp`, because a log destination
-    // that depends on a flag is one somebody adds a `println!` next to.
+    // Before the log is opened and before anything is started, because when it
+    // works nothing after it runs: this process becomes `dbus-run-session`,
+    // which runs it again under a bus of its own.
+    let bus = if cli.session {
+        session::ensure_bus()
+    } else {
+        Ok(())
+    };
+
+    // NEVER STDOUT. Under `--mcp` stdout is the JSON-RPC wire, and a single log
+    // line written to it corrupts a frame -- which arrives at the client as a
+    // parse error with nothing in it pointing back here. So stderr whatever the
+    // flags, rather than only under `--mcp`, because a log destination that
+    // depends on a flag is one somebody adds a `println!` next to -- with one
+    // exception, and that one a file: a display manager keeps a session's
+    // stderr wherever it keeps such things, so `--session` has a log of its own.
     //
     // With no `RUST_LOG`, a person's session says its warnings: one of them
-    // is the only word anywhere on why a keyring lookup hangs (issue #27).
-    // Headless says only errors, as it always has.
-    let quiet = if cli.seat {
+    // is the only word anywhere on why a keyring lookup hangs (issue #27). One
+    // a display manager started says what it did as well, since its log is
+    // read after the fact. Headless says only errors, as it always has.
+    let quiet = if cli.session {
+        LevelFilter::INFO
+    } else if cli.seat {
         LevelFilter::WARN
     } else {
         LevelFilter::ERROR
     };
+    let (writer, unopened) = match cli.session.then(open_log) {
+        Some(Ok(log)) => (BoxMakeWriter::new(Mutex::new(log)), None),
+        Some(Err(error)) => (BoxMakeWriter::new(io::stderr), Some(error)),
+        None => (BoxMakeWriter::new(io::stderr), None),
+    };
     tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
+        .with_writer(writer)
         .with_env_filter(
             EnvFilter::builder()
                 .with_default_directive(quiet.into())
                 .from_env_lossy(),
         )
         .init();
+    match bus {
+        Err(error) => tracing::warn!("{error:#}; the session goes on without a bus"),
+        Ok(()) if cli.session && std::env::var_os(session::BUS_STARTED).is_some() => {
+            tracing::info!("the session bus is this session's own, from dbus-run-session");
+        }
+        Ok(()) => {}
+    }
+    let to_file = cli.session && unopened.is_none();
+    if let Some(error) = unopened {
+        tracing::warn!("{error:#}: logging to stderr instead");
+    }
 
-    let backend = if cli.seat {
+    let ended = run(&cli);
+    // Said on stderr too, as `main`'s error always is, but a session's is
+    // looked for in its log, beside whatever led up to it.
+    if to_file && let Err(error) = &ended {
+        tracing::error!("{error:#}");
+    }
+    ended
+}
+
+/// Open a session's log, or say why there is none.
+fn open_log() -> Result<File> {
+    let path = session::log_path(|name| std::env::var(name).ok())
+        .context("a session logs under XDG_STATE_HOME or HOME, and neither is set")?;
+    session::open_log(&path).with_context(|| format!("could not open {}", path.display()))
+}
+
+/// Everything once there is a log: the run, from its first child to its end.
+fn run(cli: &Cli) -> Result<()> {
+    let backend = if cli.on_seat() {
         Backend::Seat
     } else {
         Backend::Headless {
@@ -179,7 +251,17 @@ fn main() -> Result<()> {
 
     // Before anything is spawned, and in this order. A registry that arrives
     // after its clients is a registry GTK has already given up on.
-    let _registry = session::Registry::ensure()?;
+    //
+    // Without one, an agent run headless has nothing to read, and stops. A
+    // person's session is still a session, and says so.
+    let _registry = match session::Registry::ensure() {
+        Ok(registry) => Some(registry),
+        Err(error) if cli.on_seat() => {
+            tracing::warn!("{error:#}");
+            None
+        }
+        Err(error) => return Err(error),
+    };
     if let Err(error) = enable_accessibility() {
         tracing::warn!("{error:#}");
     }
@@ -188,7 +270,7 @@ fn main() -> Result<()> {
     // bus alike. Headless, the agent's programs live in whatever desktop the
     // run was started from, and telling its bus anything would send that
     // desktop's portals and notifications to a compositor nobody can see.
-    let desktop = if cli.seat {
+    let desktop = if cli.on_seat() {
         session::desktop_env(|key| std::env::var(key).ok())
     } else {
         Vec::new()
@@ -209,7 +291,7 @@ fn main() -> Result<()> {
         env: [session::accessibility_env(), desktop.clone()].concat(),
         run_for: cli.run_for.map(Duration::from_secs_f64),
         config: cli
-            .seat
+            .on_seat()
             .then(|| cli.config.clone().or_else(perspicax_config::default_path))
             .flatten(),
         socket: None,
@@ -225,7 +307,7 @@ fn main() -> Result<()> {
     // channel would be a `Host` nobody is listening to.
     let requests = Requests::new();
 
-    if cli.seat {
+    if cli.on_seat() {
         bus::start(bus::Options::session(desktop), facts.watch_session());
     }
 
@@ -236,7 +318,7 @@ fn main() -> Result<()> {
     // Headless, the agent is who the run is for. On a seat it is the person's
     // session, and no agent interface ending -- cleanly or not -- may take
     // their windows with it (issue #26).
-    let agent_ends_session = !cli.seat;
+    let agent_ends_session = cli.headless;
     let agent = cli.mcp.then(|| {
         let desk = Arc::new(Desk::new(&facts, &Host::new(&facts, &requests)));
         let ended = serve(Arc::clone(&desk), stop.clone(), agent_ends_session);
@@ -363,4 +445,61 @@ fn parse_size(raw: &str) -> Result<(i32, i32)> {
         bail!("an output must have a positive size, got {width}x{height}");
     }
     Ok((width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory as _, error::ErrorKind};
+
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, ErrorKind> {
+        Cli::try_parse_from(["perspicax"].iter().chain(args)).map_err(|error| error.kind())
+    }
+
+    #[test]
+    fn the_arguments_agree_with_each_other() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn exactly_one_backend_is_named() {
+        assert_eq!(parse(&[]).err(), Some(ErrorKind::MissingRequiredArgument));
+        for two in [["--seat", "--session"], ["--headless", "--session"]] {
+            assert_eq!(
+                parse(&two).err(),
+                Some(ErrorKind::ArgumentConflict),
+                "{two:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_is_on_the_seat_and_ended_by_no_agent() {
+        let session = parse(&["--session"]).expect("--session alone");
+        assert!(session.on_seat());
+        assert!(!session.headless);
+        assert!(parse(&["--seat"]).expect("--seat alone").on_seat());
+        assert!(!parse(&["--headless"]).expect("--headless alone").on_seat());
+    }
+
+    #[test]
+    fn only_headless_takes_a_size_and_only_a_seat_a_config() {
+        for seat in ["--seat", "--session"] {
+            assert_eq!(
+                parse(&[seat, "--size", "800x600"]).err(),
+                Some(ErrorKind::ArgumentConflict),
+                "{seat}"
+            );
+            assert!(
+                parse(&[seat, "--config", "perspicax.toml"]).is_ok(),
+                "{seat}"
+            );
+        }
+        assert!(parse(&["--headless", "--size", "800x600"]).is_ok());
+        assert_eq!(
+            parse(&["--headless", "--config", "perspicax.toml"]).err(),
+            Some(ErrorKind::ArgumentConflict)
+        );
+    }
 }
