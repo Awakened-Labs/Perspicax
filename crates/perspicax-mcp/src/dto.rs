@@ -468,9 +468,11 @@ pub struct Window {
     /// the process that chose it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub untrusted_title: Option<String>,
-    /// How many frames of damage this surface has ever taken. Read it as a
-    /// rate, not a total: an idle GTK window repaints about forty times a
-    /// second and an idle Qt one about once every two.
+    /// How many frames of damage this surface has ever taken, what it drew
+    /// into its subsurfaces included: one for each commit that brought a new
+    /// buffer or named damage. Read it as a rate, not a total: an idle GTK
+    /// window repaints about forty times a second and an idle Qt one about
+    /// once every two.
     pub damage_frames: u64,
     /// The app id the client set, under a key that says who set it, as the
     /// title is.

@@ -22,7 +22,7 @@ use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, Perspicax
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
-    delegate_xdg_shell, delegate_xdg_window,
+    delegate_subcompositor, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -37,13 +37,14 @@ use smithay_client_toolkit::{
         },
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
+    subcompositor::SubcompositorState,
 };
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
     backend::ObjectId,
     event_created_child,
     globals::{GlobalList, registry_queue_init},
-    protocol::{wl_output, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_output, wl_seat, wl_shm, wl_subsurface, wl_surface},
 };
 use wayland_protocols::ext::{
     foreign_toplevel_list::v1::client::{
@@ -315,10 +316,15 @@ pub struct Desk {
     registry: RegistryState,
     outputs: OutputState,
     compositor: CompositorState,
+    subcompositor: SubcompositorState,
     xdg: XdgShell,
     shm: Shm,
     pool: SlotPool,
     pub windows: Vec<Window>,
+    /// Windows that never draw, and how many configures they have had: each
+    /// one acknowledged and committed with nothing attached.
+    pub blank: Vec<Window>,
+    pub blank_configured: usize,
     /// Each window's colour, ARGB, in the order they opened.
     pub colours: Vec<u32>,
     pub drawn: usize,
@@ -369,14 +375,21 @@ impl Desk {
     fn new(globals: &GlobalList, qh: &QueueHandle<Self>) -> Self {
         let shm = Shm::bind(globals, qh).expect("wl_shm");
         let pool = SlotPool::new(1 << 22, &shm).expect("a buffer pool");
+        let compositor = CompositorState::bind(globals, qh).expect("wl_compositor");
+        let subcompositor =
+            SubcompositorState::bind(compositor.wl_compositor().clone(), globals, qh)
+                .expect("wl_subcompositor");
         Self {
             registry: RegistryState::new(globals),
             outputs: OutputState::new(globals, qh),
-            compositor: CompositorState::bind(globals, qh).expect("wl_compositor"),
+            compositor,
+            subcompositor,
             xdg: XdgShell::bind(globals, qh).expect("xdg_wm_base"),
             shm,
             pool,
             windows: Vec::new(),
+            blank: Vec::new(),
+            blank_configured: 0,
             colours: Vec::new(),
             offered: None,
             drawn: 0,
@@ -455,6 +468,62 @@ impl Desk {
         window.set_app_id(app_id);
         window.commit();
         self.windows.push(window);
+    }
+
+    /// Open a window that declares its geometry and never draws.
+    pub fn open_blank(&mut self, qh: &QueueHandle<Self>, title: &str) {
+        let surface = self.compositor.create_surface(qh);
+        let window = self.xdg.create_window(surface, WindowDecorations::None, qh);
+        window.set_title(title);
+        let (width, height) = WINDOW;
+        window.xdg_surface().set_window_geometry(
+            0,
+            0,
+            i32::try_from(width).unwrap(),
+            i32::try_from(height).unwrap(),
+        );
+        window.commit();
+        self.blank.push(window);
+    }
+
+    /// A subsurface of `parent`, at `at` in the parent's coordinates, with
+    /// nothing in it yet. Synchronized, as every subsurface starts, unless
+    /// `sync` is false.
+    pub fn open_subsurface(
+        &self,
+        qh: &QueueHandle<Self>,
+        parent: &wl_surface::WlSurface,
+        at: (i32, i32),
+        sync: bool,
+    ) -> (wl_subsurface::WlSubsurface, wl_surface::WlSurface) {
+        let (subsurface, surface) = self.subcompositor.create_subsurface(parent.clone(), qh);
+        subsurface.set_position(at.0, at.1);
+        if !sync {
+            subsurface.set_desync();
+        }
+        (subsurface, surface)
+    }
+
+    /// Attach a buffer of `size` to `surface`, all in one colour, ARGB, and
+    /// damage all of it the way toolkits do, with a rectangle as large as
+    /// the protocol allows. Not committed: the caller says which commit
+    /// shows it.
+    pub fn paint(&mut self, surface: &wl_surface::WlSurface, size: (u32, u32), colour: u32) {
+        let (width, height) = size;
+        let (buffer, canvas) = self
+            .pool
+            .create_buffer(
+                i32::try_from(width).unwrap(),
+                i32::try_from(height).unwrap(),
+                i32::try_from(width * 4).unwrap(),
+                wl_shm::Format::Argb8888,
+            )
+            .expect("a buffer");
+        for pixel in canvas.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&colour.to_le_bytes());
+        }
+        buffer.attach_to(surface).expect("attach");
+        surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
     }
 
     /// Bind the window list. Panics if it is not advertised.
@@ -1228,6 +1297,11 @@ impl WindowHandler for Desk {
         configure: WindowConfigure,
         _: u32,
     ) {
+        if self.blank.contains(window) {
+            window.commit();
+            self.blank_configured += 1;
+            return;
+        }
         if let (Some(width), Some(height)) = configure.new_size {
             self.offered = Some((width.get(), height.get()));
         }
@@ -1325,6 +1399,7 @@ impl ProvidesRegistryState for Desk {
 delegate_compositor!(Desk);
 delegate_output!(Desk);
 delegate_shm!(Desk);
+delegate_subcompositor!(Desk);
 delegate_xdg_shell!(Desk);
 delegate_xdg_window!(Desk);
 delegate_layer!(Desk);

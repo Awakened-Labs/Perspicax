@@ -177,11 +177,17 @@ pub struct SurfaceFacts {
     pub title: Option<String>,
     /// When the host last gave this surface keyboard focus.
     pub focused_at: Option<Instant>,
-    /// How many times this surface has been damaged. Monotonic; the index
-    /// compares it against what it has reconciled to decide staleness.
+    /// How many frames of damage this surface has taken, its subsurfaces'
+    /// included: one for each commit that brought a new buffer or named
+    /// damage, however many of its tree's surfaces that commit changed.
+    /// Monotonic; the index compares it against what it has reconciled to
+    /// decide staleness.
     pub damage_generation: u64,
-    /// Where recent damage landed, oldest first, in surface-local coordinates,
-    /// each tagged with the generation it arrived at.
+    /// Where recent damage landed, oldest first, in this surface's own
+    /// surface-local coordinates, each tagged with the generation it arrived
+    /// at. Damage a subsurface took is moved into them by where the
+    /// subsurface sits, so what a client drew into one -- Firefox draws every
+    /// page that way -- lands where it shows.
     ///
     /// # Why the extent matters and a counter alone will not do
     ///
