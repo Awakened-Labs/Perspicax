@@ -478,8 +478,13 @@ impl Launch {
             .envs(self.env.iter().map(|(key, value)| (key, value)))
             .envs(self.look.iter().map(|(key, value)| (key, value)))
             .env("WAYLAND_DISPLAY", &self.socket)
-            .env("GDK_BACKEND", "wayland")
-            .env("QT_QPA_PLATFORM", "wayland");
+            // Wayland first, and X11 for a toolkit that will not: Chromium and
+            // Electron in X11 mode allow GTK only its X11 backend, and a strict
+            // `wayland` leaves them nothing to open. The fallback can reach no
+            // X server but this compositor's own, since `DISPLAY` is either its
+            // Xwayland or removed.
+            .env("GDK_BACKEND", "wayland,x11")
+            .env("QT_QPA_PLATFORM", "wayland;xcb");
         if let Some(dir) = dir {
             command_line.current_dir(dir);
         }

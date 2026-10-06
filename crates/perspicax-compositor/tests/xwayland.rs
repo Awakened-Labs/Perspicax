@@ -127,6 +127,11 @@ fn an_x11_window_is_attributed_to_its_client_through_xres() {
 /// Issue #21: a `--spawn` program starts once Xwayland is ready, so it finds
 /// `DISPLAY`, and so does whatever it starts in turn: the shell in a spawned
 /// terminal, say. It used to start first, with `DISPLAY` removed.
+///
+/// And its toolkit may use it (H3). GTK and Qt are asked for Wayland first, as
+/// they always were, but no longer for Wayland alone: Chromium and Electron in
+/// X11 mode allow GTK only its X11 backend, and a strict `GDK_BACKEND=wayland`
+/// left them nothing to open -- Teams, autostarted, said "cannot open display".
 #[test]
 #[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
 fn a_spawned_program_finds_xwaylands_display() {
@@ -142,7 +147,8 @@ fn a_spawned_program_finds_xwaylands_display() {
                 spawn: vec![vec![
                     "sh".to_owned(),
                     "-c".to_owned(),
-                    r#"echo "$DISPLAY" > "$PERSPICAX_WRITE_DISPLAY_TO""#.to_owned(),
+                    r#"echo "$DISPLAY $GDK_BACKEND $QT_QPA_PLATFORM" > "$PERSPICAX_WRITE_DISPLAY_TO""#
+                        .to_owned(),
                 ]],
                 env: vec![(
                     "PERSPICAX_WRITE_DISPLAY_TO".to_owned(),
@@ -174,8 +180,8 @@ fn a_spawned_program_finds_xwaylands_display() {
         .expect("the compositor failed");
     assert_eq!(
         seen.as_deref(),
-        Some(format!(":{display}\n").as_str()),
-        "the spawned program saw Xwayland's DISPLAY"
+        Some(format!(":{display} wayland,x11 wayland;xcb\n").as_str()),
+        "the spawned program saw Xwayland's DISPLAY, and toolkits that may fall back to it"
     );
 }
 
