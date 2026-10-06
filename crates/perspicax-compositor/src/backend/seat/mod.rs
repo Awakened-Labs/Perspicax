@@ -329,6 +329,7 @@ impl Session {
 
         let dwell = perspicax_policy::EdgeDwell::new(settings.flipping.delay_ms);
         let preview = SolidColorBuffer::new((1, 1), preview_colour(&settings));
+        let cursor = Cursor::load(settings.theme.cursor.as_deref(), settings.theme.cursor_size);
         settings::watch(handle, config_path.as_deref());
         Ok(Self {
             seat,
@@ -345,7 +346,7 @@ impl Session {
             devices: Vec::new(),
             children: Vec::new(),
             shell: supervise::Supervisor::new(),
-            cursor: Cursor::load(),
+            cursor,
             titles: titles::Titles::new(),
             title_press: None,
             button_press: None,

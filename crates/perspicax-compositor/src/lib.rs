@@ -332,6 +332,7 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         socket: socket_name.clone(),
         env: config.env.clone(),
         x11_display: None,
+        look: Vec::new(),
     });
     // The agent's programs, then on a seat the person's own, which are never
     // granted consent. Where this compositor starts an Xwayland both wait for
@@ -435,6 +436,10 @@ pub(crate) struct Launch {
     /// so an X11 program fails plainly rather than finding some other X
     /// server and drawing where this compositor cannot see.
     pub(crate) x11_display: Option<u32>,
+    /// What the session's look says to every program it starts: the
+    /// pointer's theme and size, from the theme, on a seat. Changed by a
+    /// reload, and seen by what starts after it.
+    pub(crate) look: Vec<(String, String)>,
 }
 
 impl Launch {
@@ -453,6 +458,7 @@ impl Launch {
         command_line
             .args(arguments)
             .envs(self.env.iter().map(|(key, value)| (key, value)))
+            .envs(self.look.iter().map(|(key, value)| (key, value)))
             .env("WAYLAND_DISPLAY", &self.socket)
             .env("GDK_BACKEND", "wayland")
             .env("QT_QPA_PLATFORM", "wayland");

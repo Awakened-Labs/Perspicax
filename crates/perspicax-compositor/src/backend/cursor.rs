@@ -1,8 +1,9 @@
 //! The arrow the compositor draws when no client is drawing its own.
 //!
-//! Read once from the person's Xcursor theme (`XCURSOR_THEME`,
-//! `XCURSOR_SIZE`, the same variables every toolkit reads), and drawn from
-//! then on as one texture. If there is no theme at all, a plain arrow is
+//! Read from the theme's `cursor` and `cursor-size`, or without them from the
+//! person's Xcursor variables (`XCURSOR_THEME`, `XCURSOR_SIZE`, the same ones
+//! every toolkit reads), and drawn from then on as one texture; read again
+//! when the theme changes. If there is no theme at all, a plain arrow is
 //! generated rather than drawing nothing: a session whose pointer is
 //! invisible looks like one whose mouse is dead.
 //!
@@ -10,7 +11,8 @@
 //! for: the resize arrows the compositor shows over a window's frame. A shape
 //! the theme lacks is drawn as the arrow. A client that wants a text beam
 //! still gets it by attaching its own cursor surface, which GTK and Qt both
-//! do. Named shapes asked for by clients arrive with `cursor-shape-v1`.
+//! do, or by naming it with `cursor-shape-v1`, which draws it from here: from
+//! the same theme as every other application's pointer.
 
 use std::collections::HashMap;
 
@@ -44,12 +46,19 @@ pub(crate) struct Cursor {
 }
 
 impl Cursor {
-    /// The theme's default arrow, or a generated one.
-    pub(crate) fn load() -> Self {
-        let name = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".to_owned());
-        let size = std::env::var("XCURSOR_SIZE")
-            .ok()
-            .and_then(|size| size.parse().ok())
+    /// The arrow of the theme `name` at `size`, each from the Xcursor
+    /// variables where it is `None`; or a generated arrow.
+    pub(crate) fn load(name: Option<&str>, size: Option<u32>) -> Self {
+        let name = name.map_or_else(
+            || std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".to_owned()),
+            str::to_owned,
+        );
+        let size = size
+            .or_else(|| {
+                std::env::var("XCURSOR_SIZE")
+                    .ok()
+                    .and_then(|size| size.parse().ok())
+            })
             .unwrap_or(DEFAULT_SIZE);
         let theme = CursorTheme::load(&name);
         let arrow = themed(&theme, &["default", "left_ptr"], size).unwrap_or_else(|| {

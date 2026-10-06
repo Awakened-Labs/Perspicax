@@ -33,7 +33,12 @@ use smithay::{
 };
 
 use super::{Session, relight, supervise};
-use crate::{Error, Launch, act::Keys, backend::Running, state::Compositor};
+use crate::{
+    Error, Launch,
+    act::Keys,
+    backend::{Running, cursor::Cursor},
+    state::Compositor,
+};
 
 /// What this build can honour, for the config's feature check.
 const BUILT: Built = Built {
@@ -236,6 +241,11 @@ pub(crate) fn reload(state: &mut Compositor) {
     let outputs_changed = fresh.outputs != session.settings.outputs;
     let decorations_changed = fresh.decorations != session.settings.decorations;
     let theme_changed = fresh.theme != session.settings.theme;
+    let pointer_changed = (&fresh.theme.cursor, fresh.theme.cursor_size)
+        != (
+            &session.settings.theme.cursor,
+            session.settings.theme.cursor_size,
+        );
     let access = (fresh.protocols != session.settings.protocols).then(|| fresh.protocols.clone());
     let shell_changed = fresh.shell != session.settings.shell;
     let shell = session.settings.shell.clone();
@@ -271,7 +281,16 @@ pub(crate) fn reload(state: &mut Compositor) {
         state.refit_frames();
     }
     // The titles' font and the snap preview are drawn from the settings as
-    // they are; a frame drawn since only has to be drawn again.
+    // they are; a frame drawn since only has to be drawn again. The pointer
+    // is read again from its theme, and programs started from now on are
+    // told; those already running keep the pointer they chose.
+    if pointer_changed {
+        if let Running::Seat(session) = &mut state.backend {
+            let theme = &session.settings.theme;
+            session.cursor = Cursor::load(theme.cursor.as_deref(), theme.cursor_size);
+        }
+        look(state);
+    }
     if theme_changed {
         state.backend.redraw();
     }
@@ -306,6 +325,7 @@ pub(crate) fn populate(
     event_loop: &LoopHandle<'static, Compositor>,
     ready: impl FnOnce(&mut Compositor) + 'static,
 ) -> Result<(), Error> {
+    look(state);
     let ready = move |state: &mut Compositor| {
         ready(state);
         // A `--spawn` that would not start ends the session: nothing of the
@@ -321,6 +341,29 @@ pub(crate) fn populate(
     }
     ready(state);
     Ok(())
+}
+
+/// Tell every program started from now on how the session looks: the
+/// pointer's theme and size, where the theme names them. Toolkits draw their
+/// own pointer from these, and without them would each pick their own.
+fn look(state: &mut Compositor) {
+    let Running::Seat(session) = &state.backend else {
+        return;
+    };
+    let theme = &session.settings.theme;
+    let look: Vec<(String, String)> = theme
+        .cursor
+        .iter()
+        .map(|name| ("XCURSOR_THEME".to_owned(), name.clone()))
+        .chain(
+            theme
+                .cursor_size
+                .map(|size| ("XCURSOR_SIZE".to_owned(), size.to_string())),
+        )
+        .collect();
+    if let Some(launch) = state.launch.as_mut() {
+        launch.look = look;
+    }
 }
 
 fn autostart(state: &mut Compositor) {

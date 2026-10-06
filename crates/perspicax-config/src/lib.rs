@@ -599,6 +599,8 @@ struct RawTheme {
     name: Option<String>,
     font: Option<String>,
     font_size: Option<u16>,
+    cursor: Option<String>,
+    cursor_size: Option<u32>,
     /// By role, checked against [`Role`] rather than by serde, so that a
     /// misspelled role is named with the table it is in.
     palette: Option<std::collections::BTreeMap<String, String>>,
@@ -1044,10 +1046,31 @@ fn theme(written: Option<RawTheme>, decorations: Option<&RawDecorations>) -> Res
         font.size = size;
     }
 
+    if written
+        .cursor
+        .as_deref()
+        .is_some_and(|name| name.trim().is_empty())
+    {
+        return Err(invalid(
+            "theme.cursor".to_owned(),
+            "an empty name; leave it out for XCURSOR_THEME's".to_owned(),
+        ));
+    }
+    if let Some(size) = written.cursor_size
+        && !(8..=128).contains(&size)
+    {
+        return Err(invalid(
+            "theme.cursor-size".to_owned(),
+            format!("{size} is outside 8 to 128 pixels"),
+        ));
+    }
+
     Ok(Theme {
         builtin,
         palette: builtin.palette().written_over(&colours),
         font,
+        cursor: written.cursor,
+        cursor_size: written.cursor_size,
     })
 }
 
@@ -1786,6 +1809,7 @@ mod tests {
         .unwrap();
         let theme = config.theme;
         assert_eq!(theme.builtin, Builtin::BreezeDark);
+        assert_eq!((theme.cursor, theme.cursor_size), (None, None));
         assert_eq!(theme.font.family, Family::Named("Noto Sans".to_owned()));
         assert_eq!(theme.font.size, 12);
         assert_eq!(
@@ -1805,6 +1829,15 @@ mod tests {
             config.decorations.unfocused_ink,
             dark[Role::TitleUnfocusedInk].colour()
         );
+    }
+
+    #[test]
+    fn the_pointer_is_named_and_sized_in_the_theme() {
+        let theme = parse("[theme]\ncursor = \"Adwaita\"\ncursor-size = 32", SEAT)
+            .unwrap()
+            .theme;
+        assert_eq!(theme.cursor.as_deref(), Some("Adwaita"));
+        assert_eq!(theme.cursor_size, Some(32));
     }
 
     /// `[decorations] focused` predates themes. It still says the focused
@@ -1837,6 +1870,8 @@ mod tests {
             ("name = \"Breeze\"", "theme.name"),
             ("font = \" \"", "theme.font"),
             ("font-size = 40", "theme.font-size"),
+            ("cursor = \"\"", "theme.cursor"),
+            ("cursor-size = 4", "theme.cursor-size"),
             (
                 "[theme.palette]\nbackground = \"#000000\"",
                 "theme.palette.background",

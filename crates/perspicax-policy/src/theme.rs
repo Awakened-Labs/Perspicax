@@ -439,6 +439,12 @@ pub struct Theme {
     pub builtin: Builtin,
     pub palette: Palette,
     pub font: Font,
+    /// The Xcursor theme the pointer is drawn from, by its folder name.
+    /// `None` leaves it to `XCURSOR_THEME`, as before there were themes.
+    pub cursor: Option<String>,
+    /// The pointer's size, in logical pixels. `None` leaves it to
+    /// `XCURSOR_SIZE`.
+    pub cursor_size: Option<u32>,
 }
 
 impl Default for Palette {
