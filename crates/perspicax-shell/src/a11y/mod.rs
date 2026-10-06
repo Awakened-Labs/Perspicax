@@ -573,9 +573,12 @@ mod panels {
     use perspicax_config::Item;
 
     use super::{ROOT, rect, window};
-    use crate::layout::{
-        Rect,
-        panel::{Part, Placed},
+    use crate::{
+        layout::{
+            Rect,
+            panel::{Part, Placed},
+        },
+        model::layouts::Layout,
     };
 
     /// What the panel holds, as one bar.
@@ -586,6 +589,7 @@ mod panels {
     const PAGER: NodeId = NodeId(5);
     #[cfg(feature = "tray")]
     const TRAY: NodeId = NodeId(6);
+    const LAYOUT: NodeId = NodeId(7);
     /// A task's node, a workspace's and a status icon's: the serial of its
     /// window or its workspace, or the icon's key, which stays its own
     /// while it lasts, above one of these.
@@ -600,6 +604,7 @@ mod panels {
         let serial = id.0 & ((1 << SERIAL_BITS) - 1);
         match (id, id.0 >> SERIAL_BITS) {
             (START, _) => Some(Part::Start),
+            (LAYOUT, _) => Some(Part::Layout),
             (_, TASK) => Some(Part::Task(serial)),
             (_, WORKSPACE) => Some(Part::Workspace(serial)),
             #[cfg(feature = "tray")]
@@ -622,14 +627,17 @@ mod panels {
     /// each status icon, named as its program names it, that opens a menu
     /// if it has one. The clock is a `Status` whose value is the
     /// `time` it shows, and whose description is too, for a reader of names
-    /// and descriptions alone (as perspicax is, for now). What takes no room
-    /// on the panel is not in the tree.
+    /// and descriptions alone (as perspicax is, for now). The layout
+    /// indicator is a `Button`, "Keyboard layout", whose value and
+    /// description are the `layout` in use's name; a click moves to the
+    /// next. What takes no room on the panel is not in the tree.
     pub(crate) fn panel(
         namespace: &str,
         size: Option<(u32, u32)>,
         placed: &Placed,
         time: &str,
         open: bool,
+        layout: Option<&Layout>,
     ) -> TreeUpdate {
         let mut root = window(namespace, size);
         let mut bar = Node::new(Role::Toolbar);
@@ -654,6 +662,16 @@ mod panels {
                     clock.set_value(time);
                     clock.set_description(time);
                     (CLOCK, clock)
+                }
+                Item::Layout => {
+                    let mut button = Node::new(Role::Button);
+                    button.set_label("Keyboard layout");
+                    if let Some(layout) = layout {
+                        button.set_value(layout.name.as_str());
+                        button.set_description(layout.name.as_str());
+                    }
+                    button.add_action(Action::Click);
+                    (LAYOUT, button)
                 }
                 Item::Taskbar => {
                     let tabs = placed.tasks.iter().map(|(task, place)| {
@@ -756,6 +774,7 @@ mod panels {
             let items = [Item::Start, Item::Taskbar, Item::Pager, Item::Clock];
             let holding = Holding {
                 time: "14:05",
+                layout: None,
                 tasks,
                 cells,
                 #[cfg(feature = "tray")]
@@ -778,6 +797,7 @@ mod panels {
                 &[Item::Start, Item::Tray, Item::Clock],
                 Holding {
                     time: "14:05",
+                    layout: None,
                     tasks: Vec::new(),
                     cells: Vec::new(),
                     tray: vec![icon(3, "Network", true), icon(8, "Updates", false)],
@@ -791,6 +811,7 @@ mod panels {
                 &placed,
                 "14:05",
                 false,
+                None,
             );
             assert_eq!(node(&tree, TOOLBAR).children(), [START, TRAY, CLOCK]);
             let tray = node(&tree, TRAY);
@@ -835,6 +856,7 @@ mod panels {
                 &placed,
                 "14:05",
                 false,
+                None,
             );
             let root = node(&tree, ROOT);
             assert_eq!(root.role(), Role::Window);
@@ -862,11 +884,55 @@ mod panels {
             assert_eq!(clock.value(), Some("14:05"));
             assert_eq!(clock.description(), Some("14:05"));
 
-            let open = panel("perspicax-panel-DP-1", None, &placed, "14:05", true);
+            let open = panel("perspicax-panel-DP-1", None, &placed, "14:05", true, None);
             assert_eq!(
                 node(&open, START).is_expanded(),
                 Some(true),
                 "expanded while the start menu is open"
+            );
+        }
+
+        #[test]
+        fn the_layout_indicator_is_a_button_whose_value_is_the_layouts_name() {
+            let items = [Item::Taskbar, Item::Layout, Item::Clock];
+            let holding = |layout| Holding {
+                time: "14:05",
+                layout,
+                tasks: Vec::new(),
+                cells: Vec::new(),
+                #[cfg(feature = "tray")]
+                tray: Vec::new(),
+            };
+            let russian = Layout {
+                name: "Russian".to_owned(),
+                short: "RU".to_owned(),
+            };
+            let placed = lay_out(&items, holding(Some("RU")), (1280, 40), &mut Monospace(8.0));
+            let tree = panel(
+                "perspicax-panel-DP-1",
+                None,
+                &placed,
+                "14:05",
+                false,
+                Some(&russian),
+            );
+            assert_eq!(node(&tree, TOOLBAR).children(), [TASKBAR, LAYOUT, CLOCK]);
+            let button = node(&tree, LAYOUT);
+            assert_eq!(
+                (button.role(), button.label()),
+                (Role::Button, Some("Keyboard layout"))
+            );
+            assert_eq!(button.value(), Some("Russian"));
+            assert_eq!(button.description(), Some("Russian"));
+            assert_eq!(button.bounds(), Some(rect(placed.items[1].1)));
+            assert_eq!(part_of(LAYOUT), Some(Part::Layout));
+
+            let one = lay_out(&items, holding(None), (1280, 40), &mut Monospace(8.0));
+            let tree = panel("perspicax-panel-DP-1", None, &one, "14:05", false, None);
+            assert_eq!(
+                node(&tree, TOOLBAR).children(),
+                [TASKBAR, CLOCK],
+                "one layout: no indicator"
             );
         }
 
@@ -894,7 +960,7 @@ mod panels {
                 ],
                 vec![cell(0, "1", 0, false), cell(1, "2", 1, true)],
             );
-            let tree = panel("perspicax-panel-DP-1", None, &placed, "14:05", false);
+            let tree = panel("perspicax-panel-DP-1", None, &placed, "14:05", false, None);
             assert_eq!(
                 node(&tree, TOOLBAR).children(),
                 [START, TASKBAR, PAGER, CLOCK]

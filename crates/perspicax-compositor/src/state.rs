@@ -199,6 +199,8 @@ pub struct Compositor {
     /// Whose the keyboard layout is, and each window's own when it is
     /// theirs. See `crate::keyboard`.
     pub(crate) layout_memory: perspicax_policy::LayoutMemory<SurfaceId>,
+    /// The names the keyboard's keymap was compiled from.
+    pub(crate) keymap: crate::Keymap,
     /// The window being moved with the pointer, while it is: an edge flip
     /// takes it along to the next workspace.
     pub(crate) dragging: Option<Framed>,
@@ -336,6 +338,7 @@ impl Compositor {
             workspaces: Workspaces::new(workspace_shape),
             tabs: perspicax_policy::Groups::default(),
             layout_memory: perspicax_policy::LayoutMemory::default(),
+            keymap: crate::Keymap::default(),
             dragging: None,
             snap_preview: None,
             #[cfg(feature = "seat")]

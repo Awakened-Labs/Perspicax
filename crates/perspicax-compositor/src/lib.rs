@@ -362,6 +362,7 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
             break Err(Error::Io(error));
         }
         state.popups.cleanup();
+        state.announce_layout();
         // Collect children that have exited, so they do not sit as zombies
         // until the session ends. A spawned program that finished is gone
         // from this list, and nothing is left to kill for it at the end.

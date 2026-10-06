@@ -1,9 +1,10 @@
 //! `perspicax-shell-v1`, the channel from perspicax: the person asked for a
-//! menu, the config changed. A changed config is applied in place, and a
-//! protocol its rules give back is taken back; the root
-//! menu opens where perspicax says the pointer is, and the start menu from
-//! the start button of the monitor the pointer is on, or each closes if it
-//! is the one open.
+//! menu, the config changed, the keyboard's layouts. A changed config is
+//! applied in place, and a protocol its rules give back is taken back; the
+//! root menu opens where perspicax says the pointer is, and the start menu
+//! from the start button of the monitor the pointer is on, or each closes if
+//! it is the one open. The layouts, from version 2, are what the panel's
+//! indicator shows.
 
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 use wayland_client::{Connection, Dispatch, QueueHandle, globals::GlobalList, protocol::wl_output};
@@ -15,7 +16,7 @@ use super::App;
 /// this program out; the shell still draws, and its menus open only by
 /// pointer.
 pub(super) fn bind(globals: &GlobalList, qh: &QueueHandle<App>) -> Option<PerspicaxShellV1> {
-    let bound = globals.bind::<PerspicaxShellV1, _, _>(qh, 1..=1, ()).ok();
+    let bound = globals.bind::<PerspicaxShellV1, _, _>(qh, 1..=2, ()).ok();
     if bound.is_none() {
         tracing::info!("the compositor offers no perspicax_shell_v1; no menu will open on a key");
     }
@@ -95,6 +96,18 @@ impl Dispatch<PerspicaxShellV1, ()> for App {
                 app.channel = None;
                 #[cfg(feature = "menus")]
                 app.menus.set_log_out(false);
+            }
+            #[cfg(feature = "panel")]
+            Event::Layout { name, short, .. } => app.panels.layouts.layout(name, short),
+            #[cfg(feature = "panel")]
+            Event::LayoutsDone => {
+                app.panels.layouts.done();
+                app.panels_changed();
+            }
+            #[cfg(feature = "panel")]
+            Event::ActiveLayout { index } => {
+                app.panels.layouts.activate(index);
+                app.panels_changed();
             }
             _ => {}
         }

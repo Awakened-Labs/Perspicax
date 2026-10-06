@@ -184,6 +184,9 @@ pub enum Item {
     /// Status icons from other programs.
     Tray,
     Clock,
+    /// The keyboard layout in use, which a click moves to the next. Takes
+    /// no room while the keyboard has only one.
+    Layout,
 }
 
 impl Item {
@@ -196,6 +199,7 @@ impl Item {
             Self::Pager => "pager",
             Self::Tray => "tray",
             Self::Clock => "clock",
+            Self::Layout => "layout",
         }
     }
 }
@@ -259,6 +263,7 @@ impl Panel {
             Item::Start,
             Item::Taskbar,
             Item::Pager,
+            Item::Layout,
             Item::Tray,
             Item::Clock,
         ];
@@ -736,6 +741,7 @@ mod tests {
                 Item::Start,
                 Item::Taskbar,
                 Item::Pager,
+                Item::Layout,
                 Item::Tray,
                 Item::Clock
             ]
@@ -778,6 +784,24 @@ mod tests {
     }
 
     #[test]
+    fn the_layout_item_needs_only_a_panel() {
+        let text = "[shell.panel]\nitems = [\"taskbar\", \"layout\", \"clock\"]";
+        let panel_only = ShellBuilt {
+            panel: true,
+            ..WALLPAPER_ONLY
+        };
+        let items = shell(text, panel_only).unwrap().panel.unwrap().items;
+        assert_eq!(items, [Item::Taskbar, Item::Layout, Item::Clock]);
+        assert!(matches!(
+            shell(text, WALLPAPER_ONLY),
+            Err(Error::ShellNotBuilt {
+                feature: "panel",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn a_shell_key_left_out_of_the_build_names_its_feature() {
         let error = shell("[shell.panel]\nheight = 30", WALLPAPER_ONLY).unwrap_err();
         assert!(
@@ -814,7 +838,13 @@ mod tests {
         );
         assert_eq!(
             Shell::profile(Profile::Classic, tray).panel.unwrap().items,
-            [Item::Start, Item::Taskbar, Item::Pager, Item::Clock],
+            [
+                Item::Start,
+                Item::Taskbar,
+                Item::Pager,
+                Item::Layout,
+                Item::Clock
+            ],
             "the profile's panel leaves the tray out instead"
         );
     }

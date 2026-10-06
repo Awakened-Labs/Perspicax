@@ -3,7 +3,8 @@
 //! One so far: `perspicax-shell-v1`, the channel between the compositor and
 //! `perspicax-shell` (see `protocols/perspicax-shell-v1.xml`). It carries
 //! only what no standard protocol does: that the person asked for a menu,
-//! that the config changed, that the session should end. The shell's
+//! that the config changed, that the session should end, and from version 2
+//! the keyboard's layouts and which is in use. The shell's
 //! surfaces, taskbar and pager all speak standard protocols, so any piece of
 //! it can be replaced by a program that knows nothing of this one.
 //!
@@ -14,14 +15,20 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-/// `perspicax-shell-v1`: menus asked for, a config changed, a session ended.
+/// `perspicax-shell-v1`: menus asked for, a config changed, a session ended,
+/// the keyboard's layouts.
 pub mod shell {
-    /// Version 1.
+    /// `perspicax_shell_v1`, whose interface is at version 2.
     pub mod v1 {
         #[cfg(feature = "client")]
         pub use self::generated::client;
         #[cfg(feature = "server")]
         pub use self::generated::server;
+
+        // The scanner's macros read the XML without telling cargo, so an
+        // edit to it alone would not rebuild this crate. Reading it here
+        // does: rustc records what `include_str!` reads.
+        const _: &str = include_str!("../protocols/perspicax-shell-v1.xml");
 
         // The scanner's output, as `wayland-protocols` includes its own.
         // The interface tables it emits for libwayland are statics holding

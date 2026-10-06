@@ -92,7 +92,30 @@ impl Compositor {
         }
         self.backend.light(keyboard.led_state());
         self.keys = Keys::new(keymap);
+        self.keymap = keymap.clone();
         Ok(())
+    }
+
+    /// The keymap's layouts as a shell shows them: xkb's name for each, as
+    /// "English (US)", and a short label for a panel.
+    pub(crate) fn layout_labels(&mut self) -> Vec<(String, String)> {
+        let Some(keyboard) = self.keyboard.clone() else {
+            return Vec::new();
+        };
+        let names: Vec<String> = keyboard.with_xkb_state(self, |context| {
+            let xkb = context.xkb().lock().unwrap_or_else(PoisonError::into_inner);
+            xkb.layouts()
+                .map(|layout| xkb.layout_name(layout).to_owned())
+                .collect()
+        });
+        let mut written = self.keymap.layout.split(',');
+        names
+            .into_iter()
+            .map(|name| {
+                let short = short(written.next(), &name);
+                (name, short)
+            })
+            .collect()
     }
 
     /// The layout in use, counted from 0, and how many the keymap has.
@@ -145,5 +168,28 @@ impl Compositor {
             // Kept from a keymap that had more layouts than this one.
             self.lock_layout(layout.min(count - 1));
         }
+    }
+}
+
+/// A layout's label for a panel: its name as the config wrote it, in
+/// capitals, so "us,ru" gives "US" and "RU", or with none written, the first
+/// two letters of xkb's own name for it.
+fn short(written: Option<&str>, name: &str) -> String {
+    match written.map(str::trim).filter(|written| !written.is_empty()) {
+        Some(written) => written.to_uppercase(),
+        None => name.chars().take(2).collect::<String>().to_uppercase(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_layout_is_labelled_as_the_config_wrote_it_or_by_xkbs_name() {
+        assert_eq!(short(Some("us"), "English (US)"), "US");
+        assert_eq!(short(Some(" ru"), "Russian"), "RU");
+        assert_eq!(short(None, "English (US)"), "EN", "xkb's default");
+        assert_eq!(short(Some(""), "Russian"), "RU");
     }
 }

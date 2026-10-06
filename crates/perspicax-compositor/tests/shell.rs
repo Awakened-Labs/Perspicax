@@ -34,7 +34,7 @@ mod common;
 use std::{path::PathBuf, thread};
 
 use common::{Desk, Session, connect};
-use perspicax_compositor::{Backend, Command, Host, Virtual};
+use perspicax_compositor::{Backend, Command, Host, Keymap, Virtual};
 use perspicax_index::{Action as Verb, HostFacts, Layer, PointerButton, SurfaceKind};
 use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::{Access, Action, Place, Protocol, Rule, Shape, Side};
@@ -1184,6 +1184,40 @@ fn a_taskbar_and_pager_taken_away_come_back_with_their_rules() {
     session.command(Command::Protocols(Access::open()));
     until_colour(&session, task, LIT);
     until_colour(&session, first_cell, LIT);
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
+/// A panel of the layout indicator and the clock alone, so the indicator is
+/// at its left end whatever the font makes its width.
+const LAYOUT_FIRST: &str =
+    "profile = \"classic\"\n[shell.panel]\nitems = [\"layout\", \"clock\"]\n";
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_agents_click_on_the_layout_indicator_moves_to_the_next_layout() {
+    let session = Session::start("shell-layout", Backend::headless((1280, 800)));
+    session.command(Command::Keymap(Keymap {
+        layout: "us,ru".to_owned(),
+        ..Keymap::default()
+    }));
+    let shell = Shell::start(&session, "layout", LAYOUT_FIRST);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    // A second listener on the channel, to hear which layout is in use.
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_shell(&globals, &qh);
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.layouts.len() == 2 && desk.active_layout == Some(0)
+    });
+
+    // Inside the padding before "US", at the panel's left end.
+    let indicator = (6.0, PANEL_HEIGHT / 2.0);
+    click(&session, panel, indicator, PointerButton::Left);
+    common::until(&mut queue, &mut desk, |desk| desk.active_layout == Some(1));
+    click(&session, panel, indicator, PointerButton::Left);
+    common::until(&mut queue, &mut desk, |desk| desk.active_layout == Some(0));
 
     drop((desk, queue));
     shell.stop_with(session);

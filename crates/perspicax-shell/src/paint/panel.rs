@@ -86,6 +86,8 @@ pub(crate) struct Shown<'a> {
     pub(crate) edge: Edge,
     pub(crate) placed: &'a Placed,
     pub(crate) time: &'a str,
+    /// The layout in use's label, if there is a choice of layouts.
+    pub(crate) layout: Option<&'a str>,
     /// The start menu is open from this panel's button.
     pub(crate) open: bool,
     /// The status icons, by key, to draw those `placed` holds.
@@ -118,15 +120,20 @@ pub(crate) fn paint(
                 }
                 grid(canvas, px(place), scale as i32, colours.ink);
             }
-            Item::Clock => {
-                let words = Rect::new(
+            // The layout's label is set as the clock's time is.
+            Item::Clock | Item::Layout => {
+                let words = match item {
+                    Item::Clock => shown.time,
+                    _ => shown.layout.unwrap_or_default(),
+                };
+                let room = Rect::new(
                     place.x + CLOCK_PAD,
                     place.y,
                     place.w - 2 * CLOCK_PAD,
                     place.h,
                 );
                 let size = text.size() * scale as f32;
-                text.write(canvas, shown.time, px(words), size, colours.ink);
+                text.write(canvas, words, px(room), size, colours.ink);
             }
             Item::Taskbar | Item::Pager | Item::Tray => {}
         }
@@ -336,6 +343,7 @@ mod tests {
                 edge: Edge::Bottom,
                 placed: &laid(false),
                 time: "14:05",
+                layout: None,
                 open: false,
                 #[cfg(feature = "tray")]
                 tray: &[],
@@ -370,6 +378,7 @@ mod tests {
             &[Item::Start, Item::Taskbar, Item::Pager, Item::Clock],
             Holding {
                 time: "14:05",
+                layout: None,
                 tasks: vec![task(0, "Editor", false), task(1, "Mail", true)],
                 cells: vec![cell(10, 0), cell(11, 1)],
                 #[cfg(feature = "tray")]
@@ -388,6 +397,7 @@ mod tests {
                 edge: Edge::Bottom,
                 placed,
                 time: "14:05",
+                layout: None,
                 open,
                 #[cfg(feature = "tray")]
                 tray: &[],

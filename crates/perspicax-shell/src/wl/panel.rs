@@ -15,8 +15,10 @@
 //! Every panel lists its windows and pages its workspaces from what the
 //! compositor tells the shell over the taskbar's and the pager's protocols
 //! (see `taskbar` and `pager`), and shows the status icons the tray reads
-//! off the session bus (see `tray`). News of any draws the panels again
-//! once the loop has nothing else to do, so a batch of it is drawn once.
+//! off the session bus (see `tray`), and the keyboard layout in use from
+//! what perspicax tells the shell channel (see `channel`). News of any draws
+//! the panels again once the loop has nothing else to do, so a batch of it
+//! is drawn once.
 
 use std::{
     collections::HashMap,
@@ -24,6 +26,7 @@ use std::{
 };
 
 use perspicax_config::{Edge, Item, Panel, Shell};
+use perspicax_protocols::shell::v1::client::perspicax_shell_v1;
 use smithay_client_toolkit::{
     output::OutputState,
     reexports::calloop::channel::Sender,
@@ -33,7 +36,7 @@ use smithay_client_toolkit::{
     },
 };
 use wayland_client::{
-    QueueHandle,
+    Proxy as _, QueueHandle,
     protocol::{wl_output, wl_surface},
 };
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
@@ -55,6 +58,7 @@ use crate::{
         Button,
         apps::{self, App as Application},
         clock::Clock,
+        layouts::Layouts,
         tasks::{Tasks, Window},
     },
     paint::{self, Kit},
@@ -84,6 +88,8 @@ pub(super) struct Panels {
     /// The status icons, by key, in the order they came.
     #[cfg(feature = "tray")]
     tray: Vec<(u64, crate::model::tray::Item)>,
+    /// The keyboard's layouts, as perspicax lists them.
+    pub(super) layouts: Layouts,
     /// The panels are to be drawn again once the loop is idle.
     stale: bool,
     /// Where an assistive technology's press of something on a panel is
@@ -125,6 +131,7 @@ impl Panels {
             icons_from: 0,
             #[cfg(feature = "tray")]
             tray: Vec::new(),
+            layouts: Layouts::default(),
             stale: false,
             actions,
         }
@@ -223,7 +230,7 @@ impl Panels {
     /// panel of the monitor named `name`.
     fn served(&self, namespace: &str, name: &str) -> Served {
         Served::acting(
-            a11y::panel(namespace, None, &Placed::default(), &self.time, false),
+            a11y::panel(namespace, None, &Placed::default(), &self.time, false, None),
             Press {
                 output: name.to_owned(),
                 actions: self.actions.clone(),
@@ -498,8 +505,10 @@ impl Panels {
                 menu: item.menu,
             })
             .collect();
+        let layout = self.layouts.shown();
         let holding = Holding {
             time: &self.time,
+            layout: layout.map(|layout| layout.short.as_str()),
             tasks,
             cells,
             #[cfg(feature = "tray")]
@@ -518,6 +527,7 @@ impl Panels {
             edge: panel.edge,
             placed: &bar.placed,
             time: &self.time,
+            layout: layout.map(|layout| layout.short.as_str()),
             open,
             #[cfg(feature = "tray")]
             tray: &self.tray,
@@ -540,6 +550,7 @@ impl Panels {
             &bar.placed,
             &self.time,
             open,
+            layout,
         ));
     }
 }
@@ -611,7 +622,19 @@ impl App {
             Some(Part::Workspace(serial)) => self.press_workspace(serial, button),
             #[cfg(feature = "tray")]
             Some(Part::Tray(key)) => self.press_status(name, key, button),
-            Some(Part::Start) | None => {}
+            Some(Part::Layout) if button == Button::Left => self.next_layout(),
+            Some(Part::Start | Part::Layout) | None => {}
+        }
+    }
+
+    /// Ask perspicax for the keyboard's next layout. What it switched to
+    /// comes back on the channel, and is drawn then.
+    fn next_layout(&self) {
+        let (Some(channel), Some(next)) = (&self.channel, self.panels.layouts.next()) else {
+            return;
+        };
+        if channel.version() >= perspicax_shell_v1::REQ_SET_LAYOUT_SINCE {
+            channel.set_layout(next);
         }
     }
 }
