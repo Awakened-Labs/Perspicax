@@ -21,8 +21,8 @@
 //! ```
 //!
 //! `applications = true` stands for the applications by group, and
-//! `session = true` for Lock and Log Out, so a menu that replaces the root
-//! menu can still hold them wherever it likes. Each item is exactly one of
+//! `session = true` for the ways to leave, as `[shell] leave` lists them, so
+//! a menu that replaces the root menu can still hold them wherever it likes. Each item is exactly one of
 //! these. `~` at the start of an argument is the home folder, as a shell
 //! would have it.
 

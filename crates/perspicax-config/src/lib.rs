@@ -38,7 +38,7 @@ use serde::Deserialize;
 
 use crate::shell::RawShell;
 pub use crate::shell::{
-    Edge, Item, Panel, PanelOutputs, Shell, ShellBuilt, TaskbarScope, UntrustedLaunchers,
+    Edge, Item, Leave, Panel, PanelOutputs, Shell, ShellBuilt, TaskbarScope, UntrustedLaunchers,
     Wallpaper, WallpaperMode,
 };
 /// The theme's types, as the shell reads them from [`Shell`].

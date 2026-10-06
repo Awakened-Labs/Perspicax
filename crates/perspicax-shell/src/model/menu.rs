@@ -1,15 +1,24 @@
 //! A menu as a tree: what it lists, in order, and what each item does.
 //!
 //! The root menu is the installed applications, one submenu per group,
-//! with Lock and Log Out at its foot, as on Plasma's desktop. A menu file
+//! with the ways to leave at its foot, as on Plasma's desktop: Lock, Log
+//! Out, Suspend, Restart and Shut Down, as `[shell] leave` lists them and
+//! as far as each can work here. Choosing one is the whole of it: there is
+//! no dialog to confirm, and Suspend does not lock first (that is for
+//! swayidle's `before-sleep`, so that every way to sleep locks). A menu file
 //! may put items of its own above them, or replace the lot. The start menu
 //! is the same, without the menu file's say: it is where every application
 //! can always be found. A tray icon's menu is its program's, and what is
 //! chosen in it is told back to that program.
 
+use std::path::PathBuf;
+
+use perspicax_config::{Leave, Shell};
+
 use super::{
     apps::{App, Run},
     categories::Category,
+    fs::{Fs, which},
     menu_file::{FileItem, MenuFile, Mode},
 };
 
@@ -74,13 +83,39 @@ pub(crate) enum Mark {
 /// from the root.
 pub(crate) type Route = Vec<usize>;
 
-/// What the session items at the root menu's foot do.
+/// The session items at the root menu's foot: each way to leave, in order,
+/// and what choosing it does.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct Session {
-    /// The command Lock runs, if there is to be a Lock.
-    pub(crate) lock: Option<Run>,
-    /// Whether there is a Log Out: only with a compositor to ask.
-    pub(crate) log_out: bool,
+    pub(crate) leave: Vec<(Leave, Does)>,
+}
+
+impl Session {
+    /// The ways to leave `shell` lists that can work here: Log Out with a
+    /// compositor to ask (`log_out`), and each of the others with its
+    /// program installed, found on `path` in `fs`. An item that would do
+    /// nothing is worse than none.
+    pub(crate) fn of(shell: &Shell, log_out: bool, fs: &impl Fs, path: &[PathBuf]) -> Self {
+        let leave = shell
+            .leave
+            .iter()
+            .filter_map(|&leave| {
+                let does = match shell.runs(leave) {
+                    None => log_out.then_some(Does::LogOut)?,
+                    Some(argv) => {
+                        which(fs, argv.first()?, path)?;
+                        Does::Run(Run {
+                            argv: argv.to_vec(),
+                            terminal: false,
+                            dir: None,
+                        })
+                    }
+                };
+                Some((leave, does))
+            })
+            .collect();
+        Self { leave }
+    }
 }
 
 impl Item {
@@ -213,7 +248,7 @@ impl Menu {
     }
 }
 
-/// The root menu: the applications by group, then Lock and Log Out; with
+/// The root menu: the applications by group, then the ways to leave; with
 /// a menu file's items above them, or in their place.
 pub(crate) fn root(apps: &[App], file: Option<&MenuFile>, session: &Session) -> Menu {
     let standard = || {
@@ -236,7 +271,7 @@ pub(crate) fn root(apps: &[App], file: Option<&MenuFile>, session: &Session) -> 
     Menu { items }.tidy()
 }
 
-/// The start menu: the applications by group, then Lock and Log Out.
+/// The start menu: the applications by group, then the ways to leave.
 pub(crate) fn start(apps: &[App], session: &Session) -> Menu {
     root(apps, None, session)
 }
@@ -263,21 +298,28 @@ fn applications(apps: &[App]) -> Vec<Item> {
         .collect()
 }
 
-/// Lock and Log Out, as far as this session has them.
+/// The ways to leave, named and drawn as Plasma's are. Typing finds the
+/// ones that run a program by another desktop's word for them too.
 fn session_items(session: &Session) -> Vec<Item> {
-    let lock = session.lock.clone().map(|run| Item {
-        label: "Lock".to_owned(),
-        icon: Some("system-lock-screen".to_owned()),
-        keywords: Vec::new(),
-        does: Does::Run(run),
-    });
-    let log_out = session.log_out.then(|| Item {
-        label: "Log Out".to_owned(),
-        icon: Some("system-log-out".to_owned()),
-        keywords: Vec::new(),
-        does: Does::LogOut,
-    });
-    lock.into_iter().chain(log_out).collect()
+    session
+        .leave
+        .iter()
+        .map(|(leave, does)| {
+            let (label, icon, keywords): (_, _, &[&str]) = match leave {
+                Leave::Lock => ("Lock", "system-lock-screen", &[]),
+                Leave::LogOut => ("Log Out", "system-log-out", &[]),
+                Leave::Suspend => ("Suspend", "system-suspend", &["sleep"]),
+                Leave::Reboot => ("Restart", "system-reboot", &["reboot"]),
+                Leave::PowerOff => ("Shut Down", "system-shutdown", &["power off"]),
+            };
+            Item {
+                label: label.to_owned(),
+                icon: Some(icon.to_owned()),
+                keywords: keywords.iter().map(|&word| word.to_owned()).collect(),
+                does: does.clone(),
+            }
+        })
+        .collect()
 }
 
 /// An item that starts `app`, labelled and drawn as given or as the app is.
@@ -331,8 +373,10 @@ fn resolve(written: &[FileItem], apps: &[App], session: &Session) -> Vec<Item> {
 
 #[cfg(test)]
 mod tests {
+    use perspicax_config::{Profile, ShellBuilt};
+
     use super::*;
-    use crate::model::menu_file;
+    use crate::model::{fs::fake::Files, menu_file};
 
     fn app(id: &str, name: &str, categories: &str) -> App {
         App {
@@ -366,8 +410,10 @@ mod tests {
 
     fn session() -> Session {
         Session {
-            lock: Some(run(&["swaylock"])),
-            log_out: true,
+            leave: vec![
+                (Leave::Lock, Does::Run(run(&["swaylock"]))),
+                (Leave::LogOut, Does::LogOut),
+            ],
         }
     }
 
@@ -498,5 +544,86 @@ mod tests {
         assert_eq!(found("brow"), ["Firefox"], "by a keyword");
         assert_eq!(found("lock"), ["Lock"], "the session's programs too");
         assert!(found("  ").is_empty());
+    }
+
+    #[test]
+    fn a_menu_files_session_item_is_the_ways_to_leave() {
+        let session = Session {
+            leave: vec![
+                (Leave::PowerOff, Does::Run(run(&["loginctl", "poweroff"]))),
+                (Leave::Lock, Does::Run(run(&["swaylock"]))),
+            ],
+        };
+        let file = file("mode = \"replace\"\n[[items]]\nsession = true\n");
+        assert_eq!(
+            labels(&root(&apps(), Some(&file), &session)),
+            ["Shut Down", "Lock"]
+        );
+    }
+
+    #[test]
+    fn each_way_to_leave_shows_in_its_order_where_it_can_work() {
+        let files = Files::default().program("/usr/bin/loginctl");
+        let path = [PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin")];
+        let shell = Shell::profile(Profile::Classic, ShellBuilt::FULL);
+        let menu = start(&[], &Session::of(&shell, true, &files, &path));
+        assert_eq!(
+            labels(&menu),
+            ["Log Out", "Suspend", "Restart", "Shut Down"],
+            "no swaylock installed, so no Lock"
+        );
+        let icons: Vec<_> = menu.items.iter().map(|item| item.icon.as_deref()).collect();
+        assert_eq!(
+            icons,
+            [
+                Some("system-log-out"),
+                Some("system-suspend"),
+                Some("system-reboot"),
+                Some("system-shutdown"),
+            ]
+        );
+        assert_eq!(
+            menu.items[3].does,
+            Does::Run(run(&["loginctl", "poweroff"])),
+            "the program, not the path it was found at"
+        );
+
+        let shell = Shell {
+            leave: vec![Leave::PowerOff, Leave::Lock, Leave::LogOut],
+            lock: vec!["/opt/lock/bin/lock".to_owned(), "-f".to_owned()],
+            ..shell
+        };
+        let files = files.program("/opt/lock/bin/lock");
+        assert_eq!(
+            labels(&start(&[], &Session::of(&shell, false, &files, &path))),
+            ["Shut Down", "Lock"],
+            "in the order written, a path as written, and no compositor to log out of"
+        );
+        assert_eq!(
+            labels(&start(
+                &[],
+                &Session::of(&shell, true, &Files::default(), &path)
+            )),
+            ["Log Out"],
+            "nothing installed"
+        );
+    }
+
+    #[test]
+    fn a_way_to_leave_is_found_by_another_desktops_word_for_it() {
+        let files = Files::default().program("/usr/bin/loginctl");
+        let shell = Shell::profile(Profile::Classic, ShellBuilt::FULL);
+        let session = Session::of(&shell, true, &files, &[PathBuf::from("/usr/bin")]);
+        let menu = start(&[], &session);
+        let found = |query: &str| -> Vec<&str> {
+            menu.find(query)
+                .iter()
+                .map(|route| menu.item(route).unwrap().label.as_str())
+                .collect()
+        };
+        assert_eq!(found("sleep"), ["Suspend"]);
+        assert_eq!(found("reboot"), ["Restart"]);
+        assert_eq!(found("power"), ["Shut Down"]);
+        assert_eq!(found("shut"), ["Shut Down"]);
     }
 }

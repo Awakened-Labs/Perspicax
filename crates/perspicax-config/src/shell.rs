@@ -76,8 +76,18 @@ pub struct Shell {
     /// What an application that asks for a terminal is run in, as a program
     /// and its arguments. `None` takes the first terminal installed.
     pub terminal: Option<Vec<String>>,
-    /// What the start menu's Lock runs.
+    /// What the menus' Lock runs.
     pub lock: Vec<String>,
+    /// What the menus' Suspend runs.
+    pub suspend: Vec<String>,
+    /// What the menus' Restart runs.
+    pub reboot: Vec<String>,
+    /// What the menus' Shut Down runs.
+    pub power_off: Vec<String>,
+    /// The ways to leave at the menus' foot, in order. Each shows only
+    /// where it can work: Log Out with a compositor to ask, and the others
+    /// with their program installed.
+    pub leave: Vec<Leave>,
     /// The panel, or `None` for none.
     pub panel: Option<Panel>,
     /// The colours everything is drawn in: `[theme]`'s, read here so that a
@@ -204,6 +214,43 @@ impl Item {
     }
 }
 
+/// A way to leave the desk, at the menus' foot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Leave {
+    Lock,
+    /// End the session: the compositor is asked, and no program is run.
+    LogOut,
+    Suspend,
+    /// Restart the computer.
+    Reboot,
+    /// Shut the computer down.
+    PowerOff,
+}
+
+impl Leave {
+    /// Every way, in the order both profiles list them: Plasma's.
+    pub const ALL: [Self; 5] = [
+        Self::Lock,
+        Self::LogOut,
+        Self::Suspend,
+        Self::Reboot,
+        Self::PowerOff,
+    ];
+
+    /// Its name as `leave` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Lock => "lock",
+            Self::LogOut => "log-out",
+            Self::Suspend => "suspend",
+            Self::Reboot => "reboot",
+            Self::PowerOff => "power-off",
+        }
+    }
+}
+
 /// What `wallpaper` is set to for no wallpaper.
 const NONE: &str = "none";
 
@@ -249,11 +296,37 @@ impl Shell {
                 .map(str::to_owned),
             terminal: None,
             lock: vec!["swaylock".to_owned()],
+            // logind's, which elogind has too: a session's own user may
+            // suspend and restart the computer it sits at.
+            suspend: loginctl("suspend"),
+            reboot: loginctl("reboot"),
+            power_off: loginctl("poweroff"),
+            leave: Leave::ALL.to_vec(),
             panel: panel.filter(|_| built.panel),
             palette: Palette::default(),
             font: Font::default(),
         }
     }
+}
+
+impl Shell {
+    /// The program `leave` runs, as its key says: `None` for Log Out, which
+    /// asks the compositor instead.
+    #[must_use]
+    pub fn runs(&self, leave: Leave) -> Option<&[String]> {
+        match leave {
+            Leave::Lock => Some(&self.lock),
+            Leave::LogOut => None,
+            Leave::Suspend => Some(&self.suspend),
+            Leave::Reboot => Some(&self.reboot),
+            Leave::PowerOff => Some(&self.power_off),
+        }
+    }
+}
+
+/// `loginctl verb`.
+fn loginctl(verb: &str) -> Vec<String> {
+    vec!["loginctl".to_owned(), verb.to_owned()]
 }
 
 impl Panel {
@@ -299,6 +372,10 @@ pub(crate) struct RawShell {
     icon_theme: Option<String>,
     terminal: Option<Vec<String>>,
     lock: Option<Vec<String>>,
+    suspend: Option<Vec<String>>,
+    reboot: Option<Vec<String>>,
+    power_off: Option<Vec<String>>,
+    leave: Option<Vec<Leave>>,
     panel: Option<RawPanel>,
 }
 
@@ -421,6 +498,24 @@ impl RawShell {
         if let Some(lock) = self.lock {
             shell.lock = command("shell.lock", lock)?;
         }
+        if let Some(suspend) = self.suspend {
+            shell.suspend = command("shell.suspend", suspend)?;
+        }
+        if let Some(reboot) = self.reboot {
+            shell.reboot = command("shell.reboot", reboot)?;
+        }
+        if let Some(power_off) = self.power_off {
+            shell.power_off = command("shell.power-off", power_off)?;
+        }
+        if let Some(leave) = self.leave {
+            if let Some(twice) = twice(&leave) {
+                return Err(invalid(
+                    "shell.leave".to_owned(),
+                    format!("\"{}\" is listed twice", twice.key()),
+                ));
+            }
+            shell.leave = leave;
+        }
         if let Some(panel) = self.panel {
             shell.panel = panel.apply(shell.panel, built)?;
         }
@@ -471,6 +566,20 @@ impl RawShell {
                 "menus",
             ),
             (self.lock.is_some(), "shell.lock", built.menus, "menus"),
+            (
+                self.suspend.is_some(),
+                "shell.suspend",
+                built.menus,
+                "menus",
+            ),
+            (self.reboot.is_some(), "shell.reboot", built.menus, "menus"),
+            (
+                self.power_off.is_some(),
+                "shell.power-off",
+                built.menus,
+                "menus",
+            ),
+            (self.leave.is_some(), "shell.leave", built.menus, "menus"),
             (
                 self.desktop_icons == Some(true),
                 "shell.desktop-icons",
@@ -556,11 +665,7 @@ impl RawPanel {
             panel.taskbar = taskbar;
         }
         if let Some(items) = self.items {
-            if let Some(twice) = items
-                .iter()
-                .enumerate()
-                .find_map(|(at, item)| items[..at].contains(item).then_some(item))
-            {
+            if let Some(twice) = twice(&items) {
                 return Err(invalid(
                     "shell.panel.items".to_owned(),
                     format!("\"{}\" is listed twice", twice.key()),
@@ -703,6 +808,13 @@ fn picture(key: &str, written: String, had: Wallpaper) -> Result<Wallpaper, Erro
         image: Some(PathBuf::from(written)),
         ..had
     })
+}
+
+/// The first of `list` that is in it twice.
+fn twice<T: PartialEq>(list: &[T]) -> Option<&T> {
+    list.iter()
+        .enumerate()
+        .find_map(|(at, item)| list[..at].contains(item).then_some(item))
 }
 
 /// A program and its arguments, of which there must be at least the program.
@@ -922,6 +1034,100 @@ mod tests {
             .unwrap();
         assert_eq!(panel.edge, Edge::Top);
         assert_eq!(panel.height, 40, "the rest is classic's");
+    }
+
+    #[test]
+    fn the_menus_offer_every_way_to_leave_and_suspend_restart_and_shut_down_through_logind() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let shell = Shell::profile(profile, ShellBuilt::FULL);
+            assert_eq!(shell.leave, Leave::ALL, "{profile:?}");
+            assert_eq!(shell.runs(Leave::Lock), Some(&["swaylock".to_owned()][..]));
+            assert_eq!(
+                shell.runs(Leave::Suspend),
+                Some(&["loginctl".to_owned(), "suspend".to_owned()][..])
+            );
+            assert_eq!(
+                shell.runs(Leave::Reboot),
+                Some(&["loginctl".to_owned(), "reboot".to_owned()][..])
+            );
+            assert_eq!(
+                shell.runs(Leave::PowerOff),
+                Some(&["loginctl".to_owned(), "poweroff".to_owned()][..])
+            );
+            assert_eq!(shell.runs(Leave::LogOut), None, "the compositor is asked");
+        }
+    }
+
+    #[test]
+    fn leave_chooses_the_ways_and_their_order_and_each_command_can_be_changed() {
+        let written = shell(
+            r#"
+            [shell]
+            leave = ["power-off", "reboot", "log-out"]
+            power-off = ["systemctl", "poweroff"]
+            suspend = ["zzz"]
+            "#,
+            ShellBuilt::FULL,
+        )
+        .unwrap();
+        assert_eq!(
+            written.leave,
+            [Leave::PowerOff, Leave::Reboot, Leave::LogOut]
+        );
+        assert_eq!(written.power_off, ["systemctl", "poweroff"]);
+        assert_eq!(written.suspend, ["zzz"], "kept, though not listed");
+        assert_eq!(written.reboot, ["loginctl", "reboot"], "the profile's");
+        assert!(
+            shell("[shell]\nleave = []", ShellBuilt::FULL)
+                .unwrap()
+                .leave
+                .is_empty(),
+            "no way to leave from the menus"
+        );
+    }
+
+    #[test]
+    fn a_way_to_leave_listed_twice_or_unknown_or_an_empty_command_is_refused() {
+        let error = shell(
+            "[shell]\nleave = [\"lock\", \"suspend\", \"lock\"]",
+            ShellBuilt::FULL,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("\"lock\" is listed twice"),
+            "{error}"
+        );
+        let error = shell("[shell]\nleave = [\"hibernate\"]", ShellBuilt::FULL).unwrap_err();
+        assert!(error.to_string().contains("hibernate"), "{error}");
+        for key in ["suspend", "reboot", "power-off"] {
+            let error = shell(&format!("[shell]\n{key} = []"), ShellBuilt::FULL).unwrap_err();
+            assert!(
+                error.to_string().contains(&format!("shell.{key}")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ways_to_leave_need_the_menus() {
+        for text in [
+            "leave = [\"lock\"]",
+            "suspend = [\"zzz\"]",
+            "reboot = [\"zzz\"]",
+            "power-off = [\"zzz\"]",
+        ] {
+            let error = shell(&format!("[shell]\n{text}"), WALLPAPER_ONLY).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    Error::ShellNotBuilt {
+                        feature: "menus",
+                        ..
+                    }
+                ),
+                "{text}: {error}"
+            );
+        }
     }
 
     #[test]

@@ -394,13 +394,15 @@ mod menus {
 
     #[cfg(test)]
     mod tests {
+        use perspicax_config::Leave;
+
         use super::*;
         use crate::{
             layout::{self, Monospace},
             model::{
                 Button,
                 apps::{App, Run},
-                menu::{Session, root, start},
+                menu::{Does, Session, root, start},
             },
             update::{Event, Key, State},
         };
@@ -421,9 +423,20 @@ mod menus {
                 wm_class: None,
             };
             let apps = [app("xcalc", "Calculator"), app("gedit", "Text Editor")];
+            let loginctl = |verb: &str| {
+                Does::Run(Run {
+                    argv: vec!["loginctl".to_owned(), verb.to_owned()],
+                    terminal: false,
+                    dir: None,
+                })
+            };
             let session = Session {
-                lock: None,
-                log_out: true,
+                leave: vec![
+                    (Leave::LogOut, Does::LogOut),
+                    (Leave::Suspend, loginctl("suspend")),
+                    (Leave::Reboot, loginctl("reboot")),
+                    (Leave::PowerOff, loginctl("poweroff")),
+                ],
             };
             let mut state = State::new(root(&apps, None, &session), start(&apps, &session));
             state.update(
@@ -473,6 +486,9 @@ mod menus {
                 [
                     (Role::MenuItem, "Accessories".to_owned()),
                     (Role::MenuItem, "Log Out".to_owned()),
+                    (Role::MenuItem, "Suspend".to_owned()),
+                    (Role::MenuItem, "Restart".to_owned()),
+                    (Role::MenuItem, "Shut Down".to_owned()),
                 ],
                 "the separator between them is not an item"
             );
