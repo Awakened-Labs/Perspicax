@@ -335,7 +335,8 @@ full`.
 
 Run it from a text console (a TTY, not a terminal inside another desktop), with
 seatd or logind managing the seat. Log to a file: the console the session
-takes over shows nothing until it ends.
+takes over shows nothing until it ends. With no `RUST_LOG`, a seat logs its
+warnings; `RUST_LOG=info` says what it is doing as well.
 
 ```sh
 perspicax --seat --spawn foot 2>~/perspicax.log
@@ -515,6 +516,21 @@ again if it crashes; a shell that refuses its config waits for the file to be
 saved again. A save that changes `[shell]` reaches it in place, without a
 restart. The tray needs a D-Bus session bus, and a text-console login has
 none: start the session under one, `dbus-run-session -- perspicax --seat`.
+
+The session tells its bus what it is and where its displays are, so that a
+program D-Bus starts on request -- a keyring's unlock prompt, a notification
+daemon, a portal -- has somewhere to draw: `XDG_CURRENT_DESKTOP=perspicax`,
+`XDG_SESSION_TYPE=wayland`, `WAYLAND_DISPLAY` and, once Xwayland is up,
+`DISPLAY`, which a systemd user manager is told too when there is one. It also
+asks the bus for the Secret Service as it starts, and says in the log when
+that does not come up. For a keyring your login unlocks, the PAM file for how
+you log in (`/etc/pam.d/login` from a text console) needs `-auth optional
+pam_gnome_keyring.so` and `-session optional pam_gnome_keyring.so
+auto_start`; without them, the first program that wants a secret asks for the
+keyring's password. gnome-keyring serves one session's bus at a time, so a
+second session of yours, beside another desktop that is still logged in, has
+none: every lookup there waits 25 seconds and fails, and the log names the
+keyring that is in the way.
 
 Each component is a cargo feature of `perspicax-shell`, and `full` is all of
 them; none is on by default. The profiles turn on what the build has:

@@ -51,6 +51,43 @@ pub fn accessibility_env() -> Vec<(String, String)> {
     .collect()
 }
 
+/// What this desktop calls itself in `XDG_CURRENT_DESKTOP`: the name an
+/// application's `OnlyShowIn`, a portal's `UseIn` and xdg-desktop-portal's
+/// choice of `perspicax-portals.conf` are all matched against.
+pub const DESKTOP: &str = "perspicax";
+
+/// What a person's session says about itself, to its own programs and to the
+/// session bus alike (issue #27).
+///
+/// `XDG_SESSION_TYPE` is always `wayland`: a session started from a text
+/// console inherits `tty` from logind, which stops being true the moment this
+/// compositor is running. The two desktop names keep the value the session
+/// was started with -- a display manager sets them from the session entry's
+/// `DesktopNames`, and a person may have added a second name to borrow another
+/// desktop's `OnlyShowIn` entries -- and say [`DESKTOP`] when there is none.
+///
+/// `inherited` reads the environment; a function rather than the process's
+/// own, so the rule can be checked without changing the test's environment.
+#[must_use]
+pub fn desktop_env(inherited: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    let named = |key: &str| {
+        inherited(key)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DESKTOP.to_owned())
+    };
+    vec![
+        (
+            "XDG_CURRENT_DESKTOP".to_owned(),
+            named("XDG_CURRENT_DESKTOP"),
+        ),
+        (
+            "XDG_SESSION_DESKTOP".to_owned(),
+            named("XDG_SESSION_DESKTOP"),
+        ),
+        ("XDG_SESSION_TYPE".to_owned(), "wayland".to_owned()),
+    ]
+}
+
 /// A registry this process started and is responsible for stopping.
 pub struct Registry(Option<Child>);
 
@@ -122,4 +159,34 @@ fn registry_is_running() -> bool {
                 .is_some_and(|argv0| argv0.ends_with(b"at-spi2-registryd"))
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn value<'a>(env: &'a [(String, String)], key: &str) -> &'a str {
+        env.iter()
+            .find(|(name, _)| name == key)
+            .map_or("", |(_, value)| value)
+    }
+
+    #[test]
+    fn a_session_from_a_text_console_calls_itself_perspicax_and_wayland() {
+        let env = desktop_env(|key| (key == "XDG_SESSION_TYPE").then(|| "tty".to_owned()));
+        assert_eq!(value(&env, "XDG_CURRENT_DESKTOP"), "perspicax");
+        assert_eq!(value(&env, "XDG_SESSION_DESKTOP"), "perspicax");
+        assert_eq!(value(&env, "XDG_SESSION_TYPE"), "wayland");
+    }
+
+    #[test]
+    fn a_desktop_name_the_session_was_given_is_kept_and_an_empty_one_is_not() {
+        let env = desktop_env(|key| match key {
+            "XDG_CURRENT_DESKTOP" => Some("perspicax:GNOME".to_owned()),
+            "XDG_SESSION_DESKTOP" => Some(String::new()),
+            _ => None,
+        });
+        assert_eq!(value(&env, "XDG_CURRENT_DESKTOP"), "perspicax:GNOME");
+        assert_eq!(value(&env, "XDG_SESSION_DESKTOP"), "perspicax");
+    }
 }

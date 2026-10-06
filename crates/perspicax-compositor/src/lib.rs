@@ -62,7 +62,7 @@ mod xwayland;
 pub use crate::{
     act::{ActError, Dispatched},
     backend::{Backend, Virtual},
-    facts::Facts,
+    facts::{Facts, SessionFacts},
     host::{Command, Host, Request, Requests},
 };
 
@@ -328,6 +328,11 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
     }
 
     tracing::info!(socket = ?socket_name, backend = ?config.backend, "compositor up");
+    // Before anything is started, so whoever passes it on -- to the session
+    // bus, for programs D-Bus starts -- has it before any program could ask.
+    facts.publish_session(|session| {
+        session.wayland_display = Some(socket_name.to_string_lossy().into_owned());
+    });
     state.launch = Some(Launch {
         socket: socket_name.clone(),
         env: config.env.clone(),
