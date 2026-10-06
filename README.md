@@ -502,6 +502,51 @@ connector with nothing plugged into it on request (`echo on | sudo tee
 perspicax treats it as a monitor nobody can see: the pointer crosses into it,
 windows can be sent there and back, and unplugging it rescues them.
 
+## Log in to it
+
+A display manager (SDDM, GDM, LightDM, greetd) can offer Perspicax at its
+greeter beside every other session. Build as yourself, as above, and install
+as root:
+
+```sh
+cargo build --release --features perspicax/desktop,perspicax-shell/full
+sudo scripts/install.sh
+```
+
+That puts `perspicax` and `perspicax-shell` side by side in `/usr/local/bin`,
+the session entry in `/usr/local/share/wayland-sessions`, and the settings
+portal's two files under `/usr/local/share/xdg-desktop-portal`. Some programs
+read only from `/usr`: LightDM, greetd's greeters and older SDDM look for
+sessions only in `/usr/share/wayland-sessions`, and xdg-desktop-portal for
+portal files only in `/usr/share/xdg-desktop-portal/portals`. The script says
+when either applies; `sudo PREFIX=/usr scripts/install.sh` installs under
+`/usr`, and `PORTALDIR` moves the portal file alone. It builds nothing, and
+`DESTDIR` and the other variables at its top are for a package.
+
+Choose Perspicax at the greeter. The entry runs `perspicax --session`, which is
+`--seat` with two differences, for a session nobody watches start:
+
+- **A bus of its own.** A display manager that is not systemd's starts a
+  session with no D-Bus session bus, and the tray, the keyring and the portals
+  each need one. With no `DBUS_SESSION_BUS_ADDRESS`, and nothing answering at
+  `$XDG_RUNTIME_DIR/bus`, it runs itself again under `dbus-run-session`. That
+  bus ends with the session, and every service it started ends with it.
+- **A log of its own**, at `~/.local/state/perspicax/perspicax.log` (under
+  `$XDG_STATE_HOME` when that is set), readable by you alone. The last
+  session's is kept as `perspicax.log.old`: that is the one to read after a
+  login that went straight back to the greeter. It says what the session did
+  as well as its warnings; `RUST_LOG` changes that, as ever.
+
+For a keyring the login unlocks, the two `pam_gnome_keyring` lines under "The
+desktop" go in the display manager's PAM file: `/etc/pam.d/sddm` for SDDM.
+Applications follow the theme's dark or light through the settings portal:
+xdg-desktop-portal finds perspicax's backend from the portal file and
+`XDG_CURRENT_DESKTOP=perspicax`, which the entry sets. `perspicax-portals.conf`
+sends the rest to GTK's backend (the file chooser, printing) and screen sharing
+to wlroots', so install xdg-desktop-portal-gtk and -wlr for those. To see
+which backends it chose, run it again from a terminal inside the session,
+`/usr/libexec/xdg-desktop-portal -rv` (`/usr/lib/` on some distributions).
+
 ## The desktop
 
 `perspicax-shell` is the desktop: a wallpaper, a panel, menus of the installed
@@ -515,7 +560,8 @@ perspicax starts it as the session starts, before `autostart`, and starts it
 again if it crashes; a shell that refuses its config waits for the file to be
 saved again. A save that changes `[shell]` reaches it in place, without a
 restart. The tray needs a D-Bus session bus, and a text-console login has
-none: start the session under one, `dbus-run-session -- perspicax --seat`.
+none: start the session under one, `dbus-run-session -- perspicax --seat`, or
+as `perspicax --session`, which starts one itself.
 
 The session tells its bus what it is and where its displays are, so that a
 program D-Bus starts on request -- a keyring's unlock prompt, a notification
@@ -524,13 +570,13 @@ daemon, a portal -- has somewhere to draw: `XDG_CURRENT_DESKTOP=perspicax`,
 `DISPLAY`, which a systemd user manager is told too when there is one. It also
 asks the bus for the Secret Service as it starts, and says in the log when
 that does not come up. For a keyring your login unlocks, the PAM file for how
-you log in (`/etc/pam.d/login` from a text console) needs `-auth optional
-pam_gnome_keyring.so` and `-session optional pam_gnome_keyring.so
-auto_start`; without them, the first program that wants a secret asks for the
-keyring's password. gnome-keyring serves one session's bus at a time, so a
-second session of yours, beside another desktop that is still logged in, has
-none: every lookup there waits 25 seconds and fails, and the log names the
-keyring that is in the way.
+you log in (`/etc/pam.d/login` from a text console, `/etc/pam.d/sddm` through
+SDDM) needs `-auth optional pam_gnome_keyring.so` and `-session optional
+pam_gnome_keyring.so auto_start`; without them, the first program that wants
+a secret asks for the keyring's password. gnome-keyring serves one session's
+bus at a time, so a second session of yours, beside another desktop that is
+still logged in, has none: every lookup there waits 25 seconds and fails, and
+the log names the keyring that is in the way.
 
 Each component is a cargo feature of `perspicax-shell`, and `full` is all of
 them; none is on by default. The profiles turn on what the build has:
