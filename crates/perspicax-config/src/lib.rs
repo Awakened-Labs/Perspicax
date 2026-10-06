@@ -18,7 +18,13 @@
 //! compositor reads the file, hands the text to [`parse`], and applies the
 //! [`Config`] it gets back. That keeps every rule here testable as a string in
 //! and a value (or an error) out.
+//!
+//! Beside the file, the one other thing both processes read: [`desktop`]
+//! entries, which the shell lists in its menus and the session starts in
+//! [`autostart`](mod@autostart), by the same rules.
 
+pub mod autostart;
+pub mod desktop;
 mod keys;
 mod shell;
 
@@ -80,6 +86,10 @@ pub struct Config {
     /// Programs to start once the session is up, each a program and its
     /// arguments. The person's programs: none is granted agent consent.
     pub autostart: Vec<Vec<String>>,
+    /// Whether the session also starts the XDG autostart entries, as every
+    /// desktop does: see [`autostart`](mod@autostart). On wherever there is a
+    /// seat; saying `true` in a build without one is an error.
+    pub xdg_autostart: bool,
     /// How many workspaces, in what grid, and whether one spans every
     /// monitor or each monitor has its own.
     pub workspaces: Shape,
@@ -397,6 +407,7 @@ impl Config {
             pointer: Pointer::default(),
             outputs: Vec::new(),
             autostart: Vec::new(),
+            xdg_autostart: built.seat,
             workspaces,
             snapping: Snapping {
                 drag: profile == Profile::Classic,
@@ -596,6 +607,7 @@ struct Raw {
     outputs: Vec<RawOutput>,
     #[serde(default)]
     autostart: Vec<Vec<String>>,
+    xdg_autostart: Option<bool>,
     xwayland: Option<bool>,
     workspaces: Option<RawWorkspaces>,
     snap: Option<RawSnap>,
@@ -808,6 +820,15 @@ impl Raw {
                     feature: "seat",
                 });
             }
+        }
+        if let Some(xdg_autostart) = self.xdg_autostart {
+            if xdg_autostart && !built.seat {
+                return Err(Error::NotBuilt {
+                    key: "xdg-autostart",
+                    feature: "seat",
+                });
+            }
+            config.xdg_autostart = xdg_autostart;
         }
         if let Some(xwayland) = self.xwayland {
             if xwayland && !built.xwayland {
@@ -1808,6 +1829,32 @@ mod tests {
     #[test]
     fn an_empty_autostart_command_is_refused() {
         assert!(parse("autostart = [[]]", SEAT).is_err());
+    }
+
+    #[test]
+    fn xdg_autostart_is_on_in_both_profiles_and_can_be_turned_off() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            assert!(Config::profile(profile, SEAT).xdg_autostart, "{profile:?}");
+        }
+        assert!(!parse("xdg-autostart = false", SEAT).unwrap().xdg_autostart);
+    }
+
+    #[test]
+    fn xdg_autostart_in_a_build_without_a_seat_is_refused() {
+        let error = parse("xdg-autostart = true", Built::default()).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::NotBuilt {
+                key: "xdg-autostart",
+                feature: "seat"
+            }
+        ));
+        assert!(
+            !parse("xdg-autostart = false", Built::default())
+                .unwrap()
+                .xdg_autostart,
+            "turning off what is not built is not an error"
+        );
     }
 
     #[test]

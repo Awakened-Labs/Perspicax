@@ -32,9 +32,9 @@ use std::{
 
 #[cfg(feature = "icons")]
 use accesskit::{Action, ActionHandler, ActionRequest, NodeId};
-#[cfg(feature = "icons")]
-use perspicax_config::UntrustedLaunchers;
 use perspicax_config::{Shell, Wallpaper, WallpaperMode};
+#[cfg(feature = "icons")]
+use perspicax_config::{UntrustedLaunchers, desktop::Locale};
 #[cfg(feature = "icons")]
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 use smithay_client_toolkit::{
@@ -66,7 +66,6 @@ use crate::{
     model::{
         Button,
         apps::Run,
-        desktop::Locale,
         folder::{self, Folder, Pressed},
         fs::Disk,
     },

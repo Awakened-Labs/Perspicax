@@ -6,9 +6,10 @@
 //! only if `[input.keyboard]` changed, and keeps the layout in use and its
 //! locks (see [`crate::keyboard`]). Pointer settings go to every device.
 //! Outputs are relit only if their rules changed, because relighting is a
-//! modeset and the screens blink. Autostart is not re-run: those programs are
-//! already running. The shell is told when its own table changed, and is
-//! started or stopped when `enabled` was turned on or off (see [`supervise`]).
+//! modeset and the screens blink. Autostart, the config's and XDG's, is not
+//! re-run: those programs are already running. The shell is told when its
+//! own table changed, and is started or stopped when `enabled` was turned on
+//! or off (see [`supervise`]).
 //!
 //! Saving is watched with inotify on the file's *directory*, not the file:
 //! most editors save by writing a new file and renaming it over the old one,
@@ -16,9 +17,17 @@
 //! save. A save is often several writes in a row, so a reload waits a moment
 //! after the last of them.
 
-use std::{mem::MaybeUninit, path::Path, process::Child, time::Duration};
+use std::{
+    mem::MaybeUninit,
+    path::{Path, PathBuf},
+    process::Child,
+    time::Duration,
+};
 
-use perspicax_config::{Built, Config, Pointer};
+use perspicax_config::{
+    Built, Config, Pointer,
+    autostart::{self, Skip},
+};
 use smithay::{
     reexports::calloop::{
         Interest, LoopHandle, Mode, PostAction,
@@ -313,8 +322,9 @@ pub(crate) fn reload(state: &mut Compositor) {
 
 /// Bring up the person's session around the windows: Xwayland if this build
 /// has it and the config wants it, then `ready` -- the agent's programs --
-/// then the shell and the autostart list, the agent's first. All wait for
-/// Xwayland, so an X11 program in any of them finds `DISPLAY` set.
+/// then the shell, the autostart list and the XDG autostart entries, the
+/// agent's first. All wait for Xwayland, so an X11 program in any of them
+/// finds `DISPLAY` set.
 pub(crate) fn populate(
     state: &mut Compositor,
     #[cfg_attr(
@@ -382,26 +392,93 @@ fn autostart(state: &mut Compositor) {
 }
 
 impl Session {
-    /// Start the config's autostart programs. A program that will not start
-    /// is reported and skipped: one missing panel must not keep the person
-    /// out of their session.
+    /// Start the config's autostart programs, then the XDG autostart
+    /// entries unless the config turns them off. A program that will not
+    /// start is reported and skipped: one missing panel must not keep the
+    /// person out of their session.
     pub(crate) fn autostart(&mut self, launch: Option<&Launch>) {
+        let Some(launch) = launch else {
+            return;
+        };
         let commands = self.settings.autostart.clone();
         for command in &commands {
-            self.spawn(launch, command);
+            self.spawn_in(launch, command, None);
+        }
+        if self.settings.xdg_autostart {
+            self.xdg_autostart(launch);
+        }
+    }
+
+    /// Start what the system and the person installed to start with every
+    /// desktop (see [`autostart`](mod@autostart)). The folders, the
+    /// desktop's names and `PATH` are read as the programs started are given
+    /// them.
+    fn xdg_autostart(&mut self, launch: &Launch) {
+        let var = |name: &str| launch.var(name);
+        let found = autostart_files(&autostart::folders(var));
+        let path = launch.var("PATH");
+        let decided = autostart::select(found, &autostart::desktops(var), |program| {
+            installed(program, path.as_deref())
+        });
+        for (entry, start) in decided {
+            match start {
+                Ok(start) => self.spawn_in(launch, &start.argv, start.dir.as_deref()),
+                // Said where the person would look for why it did not start.
+                Err(why @ (Skip::Terminal | Skip::Malformed(_))) => {
+                    tracing::info!(entry = %entry, %why, "XDG autostart skips an entry");
+                }
+                Err(why) => tracing::debug!(entry = %entry, %why, "XDG autostart skips an entry"),
+            }
         }
     }
 
     /// Start a program for the person, and keep it to stop with the session.
     pub(crate) fn spawn(&mut self, launch: Option<&Launch>, command: &[String]) {
-        let Some(launch) = launch else {
-            return;
-        };
-        match launch.spawn(command) {
+        if let Some(launch) = launch {
+            self.spawn_in(launch, command, None);
+        }
+    }
+
+    /// [`spawn`](Self::spawn), in `dir` where it names one.
+    fn spawn_in(&mut self, launch: &Launch, command: &[String], dir: Option<&Path>) {
+        match launch.spawn_in(command, dir) {
             Ok(child) => self.children.push(child),
             Err(error) => tracing::warn!(%error, "could not start"),
         }
     }
+}
+
+/// Every `.desktop` file in the autostart `folders`, the most important
+/// folder's first and each folder's by name, with its text, or `None` for
+/// one that cannot be read. A folder that is not there holds nothing.
+fn autostart_files(folders: &[PathBuf]) -> Vec<(String, Option<String>)> {
+    let mut found = Vec::new();
+    for folder in folders {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|file| file.file_name().into_string().ok())
+            .filter(|name| name.ends_with(".desktop"))
+            .collect();
+        names.sort();
+        found.extend(names.into_iter().map(|name| {
+            let text = std::fs::read_to_string(folder.join(&name)).ok();
+            (name, text)
+        }));
+    }
+    found
+}
+
+/// Whether `program` is installed, as `TryExec` asks: a file that may be
+/// run, at the path it names, or else in a folder of `path`.
+fn installed(program: &str, path: Option<&str>) -> bool {
+    if program.contains('/') {
+        return supervise::runnable(Path::new(program));
+    }
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .any(|folder| supervise::runnable(&folder.join(program)))
 }
 
 impl Session {
@@ -428,4 +505,77 @@ impl Drop for Session {
 pub(super) fn stop(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{env, fs, os::unix::fs::PermissionsExt};
+
+    use super::*;
+
+    /// A fresh directory for one test, emptied when it ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir =
+                env::temp_dir().join(format!("perspicax-settings-{name}-{}", std::process::id()));
+            fs::create_dir_all(&dir).expect("a scratch directory");
+            Self(dir)
+        }
+
+        /// A file at `path` in it, holding `text`, with `mode`.
+        fn file(&self, path: &str, text: &str, mode: u32) -> PathBuf {
+            let file = self.0.join(path);
+            fs::create_dir_all(file.parent().expect("a folder")).expect("its folder");
+            fs::write(&file, text).expect("a file");
+            fs::set_permissions(&file, fs::Permissions::from_mode(mode)).expect("its mode");
+            file
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn autostart_reads_each_folders_entries_the_most_important_first() {
+        let scratch = Scratch::new("autostart");
+        scratch.file("home/autostart/teams.desktop", "the person's", 0o644);
+        scratch.file("home/autostart/notes.txt", "not an entry", 0o644);
+        scratch.file("etc/autostart/teams.desktop", "the system's", 0o644);
+        scratch.file("etc/autostart/pipewire.desktop", "pipewire", 0o644);
+        fs::create_dir_all(scratch.0.join("etc/autostart/odd.desktop")).expect("a folder");
+        let folders = ["home/autostart", "missing/autostart", "etc/autostart"]
+            .map(|folder| scratch.0.join(folder));
+        let text = |text: &str| Some(text.to_owned());
+        assert_eq!(
+            autostart_files(&folders),
+            [
+                ("teams.desktop".to_owned(), text("the person's")),
+                ("odd.desktop".to_owned(), None),
+                ("pipewire.desktop".to_owned(), text("pipewire")),
+                ("teams.desktop".to_owned(), text("the system's")),
+            ],
+            "a missing folder holds nothing, and what cannot be read is said"
+        );
+    }
+
+    #[test]
+    fn try_exec_finds_a_program_at_its_path_or_on_path() {
+        let scratch = Scratch::new("installed");
+        let program = scratch.file("bin/pipewire", "", 0o755);
+        scratch.file("bin/notes", "", 0o644);
+        let path = format!("/nonexistent:{}", scratch.0.join("bin").display());
+        assert!(installed("pipewire", Some(&path)));
+        assert!(
+            installed(&program.to_string_lossy(), None),
+            "a path needs no PATH"
+        );
+        assert!(!installed("notes", Some(&path)), "one that may not be run");
+        assert!(!installed("pipewire", Some("/nonexistent")));
+        assert!(!installed("pipewire", None));
+    }
 }

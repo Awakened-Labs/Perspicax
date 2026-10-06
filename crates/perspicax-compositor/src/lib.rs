@@ -70,7 +70,7 @@ pub use crate::{
 
 use std::{
     ffi::{OsStr, OsString},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Child,
     sync::{
         Arc,
@@ -453,6 +453,16 @@ pub(crate) struct Launch {
 impl Launch {
     /// Start one program, as a program and its arguments.
     pub(crate) fn spawn(&self, command: &[impl AsRef<OsStr>]) -> Result<Child, Error> {
+        self.spawn_in(command, None)
+    }
+
+    /// Start one program in `dir`, or where this process is if `None`: a
+    /// desktop entry's `Path`.
+    pub(crate) fn spawn_in(
+        &self,
+        command: &[impl AsRef<OsStr>],
+        dir: Option<&Path>,
+    ) -> Result<Child, Error> {
         let shown = command
             .iter()
             .map(|word| word.as_ref().to_string_lossy())
@@ -470,6 +480,9 @@ impl Launch {
             .env("WAYLAND_DISPLAY", &self.socket)
             .env("GDK_BACKEND", "wayland")
             .env("QT_QPA_PLATFORM", "wayland");
+        if let Some(dir) = dir {
+            command_line.current_dir(dir);
+        }
         match self.x11_display {
             Some(display) => command_line.env("DISPLAY", format!(":{display}")),
             None => command_line.env_remove("DISPLAY"),
@@ -480,5 +493,17 @@ impl Launch {
         })?;
         tracing::info!(pid = child.id(), command = %shown, "spawned");
         Ok(child)
+    }
+
+    /// An environment variable as the programs this starts are given it: the
+    /// session's own value where it sets one, else this process's.
+    #[cfg(feature = "seat")]
+    pub(crate) fn var(&self, name: &str) -> Option<String> {
+        self.env
+            .iter()
+            .rev()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+            .or_else(|| std::env::var(name).ok())
     }
 }

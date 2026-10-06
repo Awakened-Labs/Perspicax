@@ -22,8 +22,6 @@ pub(crate) mod wallpaper;
 pub(crate) mod apps;
 #[cfg(feature = "menus")]
 pub(crate) mod categories;
-#[cfg(any(feature = "menus", feature = "panel"))]
-pub(crate) mod desktop;
 #[cfg(feature = "icons")]
 pub(crate) mod folder;
 #[cfg(any(feature = "menus", feature = "panel"))]

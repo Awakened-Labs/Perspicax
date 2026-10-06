@@ -1,6 +1,6 @@
 [package]
 name = "perspicax-config"
-description = "config.toml: the schema, the classic and minimal profiles, and the check that a key names something this build has. Pure; the compositor applies what it returns."
+description = "config.toml: the schema, the classic and minimal profiles, and the check that a key names something this build has; and desktop entries, as the shell's menus and the session's XDG autostart read them. Pure; the compositor applies what it returns."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
