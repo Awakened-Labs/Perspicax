@@ -30,7 +30,7 @@ use smithay::{
     desktop::{PopupKind, PopupManager, Space, Window},
     input::{
         Seat, SeatHandler, SeatState,
-        keyboard::{KeyboardHandle, XkbConfig},
+        keyboard::{KeyboardHandle, LedState, XkbConfig},
         pointer::{CursorImageStatus, GrabStartData, PointerHandle},
     },
     reexports::{
@@ -325,7 +325,7 @@ impl Compositor {
             dmabuf: smithay::wayland::dmabuf::DmabufState::new(),
             keyboard,
             pointer,
-            keys: Keys::from_default_layout(),
+            keys: Keys::new(&crate::Keymap::default()),
             damage: HashMap::new(),
             presented: HashSet::new(),
             focused_at: HashMap::new(),
@@ -1022,6 +1022,13 @@ impl SeatHandler for Compositor {
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
         self.cursor = image;
         self.backend.redraw();
+    }
+
+    /// Lock keys light their LEDs, on every keyboard at once: one xkb state
+    /// serves them all, so Caps Lock pressed on a laptop's keyboard lights
+    /// a plugged-in one's too.
+    fn led_state_changed(&mut self, _seat: &Seat<Self>, leds: LedState) {
+        self.backend.light(leds);
     }
 }
 

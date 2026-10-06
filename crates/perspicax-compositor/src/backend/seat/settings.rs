@@ -3,7 +3,8 @@
 //!
 //! A reload applies what it can without disturbing what did not change. Focus
 //! and bindings are just values, and are swapped. The keyboard is recompiled
-//! only if its layout or repeat changed. Pointer settings go to every device.
+//! only if `[input.keyboard]` changed, and keeps the layout in use and its
+//! locks (see [`crate::keyboard`]). Pointer settings go to every device.
 //! Outputs are relit only if their rules changed, because relighting is a
 //! modeset and the screens blink. Autostart is not re-run: those programs are
 //! already running. The shell is told when its own table changed, and is
@@ -19,7 +20,6 @@ use std::{mem::MaybeUninit, path::Path, process::Child, time::Duration};
 
 use perspicax_config::{Built, Config, Pointer};
 use smithay::{
-    input::keyboard::XkbConfig,
     reexports::calloop::{
         Interest, LoopHandle, Mode, PostAction,
         generic::Generic,
@@ -34,8 +34,7 @@ use smithay::{
 
 use super::{Session, relight, supervise};
 use crate::{
-    Error, Launch,
-    act::Keys,
+    Error, Keymap, Launch,
     backend::{Running, cursor::Cursor},
     state::Compositor,
 };
@@ -149,42 +148,31 @@ pub(super) fn load(path: Option<&Path>) -> Result<Config, Error> {
         .map_err(|error| Error::Config(format!("{}: {error}", path.display())))
 }
 
-/// Give the seat's keyboard the configured layout and repeat, and rebuild the
-/// table agents type from, so the two describe the same keyboard.
-pub(super) fn apply_keyboard(state: &mut Compositor) {
+/// Give the seat's keyboard the configured keymap and repeat. `numlock` sets
+/// Num Lock; `None` leaves it as the person has it.
+pub(super) fn apply_keyboard(state: &mut Compositor, numlock: Option<bool>) {
     let Running::Seat(session) = &state.backend else {
         return;
     };
-    let keyboard_settings = session.settings.keyboard.clone();
-    let Some(keyboard) = state.keyboard.clone() else {
-        return;
+    let settings = session.settings.keyboard.clone();
+    let keymap = Keymap {
+        rules: settings.rules,
+        model: settings.model,
+        layout: settings.layout,
+        variant: settings.variant,
+        options: settings.options,
     };
-    let xkb = XkbConfig {
-        rules: &keyboard_settings.rules,
-        model: &keyboard_settings.model,
-        layout: &keyboard_settings.layout,
-        variant: &keyboard_settings.variant,
-        options: keyboard_settings.options.clone(),
-    };
-    if let Err(error) = keyboard.set_xkb_config(state, xkb) {
+    if let Err(error) = state.set_keymap(&keymap, numlock) {
         tracing::error!(
             ?error,
-            layout = keyboard_settings.layout,
+            layout = keymap.layout,
             "xkb could not compile that layout; the keyboard keeps its old one"
         );
         return;
     }
-    keyboard.change_repeat_info(
-        keyboard_settings.repeat_rate,
-        keyboard_settings.repeat_delay,
-    );
-    state.keys = Keys::from_names(
-        &keyboard_settings.rules,
-        &keyboard_settings.model,
-        &keyboard_settings.layout,
-        &keyboard_settings.variant,
-        keyboard_settings.options,
-    );
+    if let Some(keyboard) = &state.keyboard {
+        keyboard.change_repeat_info(settings.repeat_rate, settings.repeat_delay);
+    }
 }
 
 /// Apply pointer settings to one device, if it is a pointer. Settings left
@@ -238,6 +226,12 @@ pub(crate) fn reload(state: &mut Compositor) {
         }
     };
     let keyboard_changed = fresh.keyboard != session.settings.keyboard;
+    // Num Lock is the file's when the session starts and when a save changes
+    // what it says; in between it is the person's.
+    let numlock = fresh
+        .keyboard
+        .numlock
+        .filter(|_| fresh.keyboard.numlock != session.settings.keyboard.numlock);
     let outputs_changed = fresh.outputs != session.settings.outputs;
     let decorations_changed = fresh.decorations != session.settings.decorations;
     let theme_changed = fresh.theme != session.settings.theme;
@@ -260,7 +254,7 @@ pub(crate) fn reload(state: &mut Compositor) {
         configure(device, &pointer);
     }
     if keyboard_changed {
-        apply_keyboard(state);
+        apply_keyboard(state, numlock);
     }
     if outputs_changed {
         // The file says where the monitors go now, over anything a display

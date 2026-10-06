@@ -45,7 +45,7 @@ mod workspace;
 
 pub use crate::{
     access::{Access, Program, Protocol, Rule},
-    binds::{Action, Bindings, Button, Chord, Drag, Mods, Towards},
+    binds::{Action, Bindings, Button, Chord, Drag, Mods, Towards, candidates},
     flip::{EdgeDwell, Flipping, NOTCH_PIXELS, Notches, arrival, edge_at},
     focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},
     frame::{

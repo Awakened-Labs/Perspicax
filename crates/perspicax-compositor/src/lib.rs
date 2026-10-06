@@ -44,6 +44,7 @@ mod focus;
 mod framed;
 mod heads;
 pub mod host;
+mod keyboard;
 mod layers;
 mod lock;
 mod origin;
@@ -64,6 +65,7 @@ pub use crate::{
     backend::{Backend, Virtual},
     facts::{Facts, SessionFacts},
     host::{Command, Host, Request, Requests},
+    keyboard::Keymap,
 };
 
 use std::{

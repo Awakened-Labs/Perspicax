@@ -53,6 +53,8 @@ impl Compositor {
             Action::Reload => self.reload(),
             Action::StartMenu => self.ask_shell(crate::shell_protocol::Menu::Start),
             Action::RootMenu => self.ask_shell(crate::shell_protocol::Menu::Root),
+            Action::CycleLayout { forward } => self.cycle_layout(*forward),
+            Action::Layout(number) => self.go_to_layout(*number),
             Action::CycleFocus => {
                 // Minimized windows on this workspace count as below the
                 // bottom of the stack, so cycling reaches them first and

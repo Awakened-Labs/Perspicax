@@ -85,6 +85,13 @@ pub enum Action {
     /// Ask the desktop shell for the root menu, at the pointer: the menu a
     /// right-click on the wallpaper opens.
     RootMenu,
+    /// Switch the keyboard to its next layout, or its previous one, wrapping
+    /// round. With one layout there is nothing to switch to.
+    CycleLayout { forward: bool },
+    /// Switch the keyboard to the layout a person calls this number,
+    /// counting from 1 in the order the config lists them. A number past
+    /// the last layout does nothing.
+    Layout(u8),
 }
 
 /// Which output, from the one a window is on.
@@ -235,18 +242,62 @@ impl Bindings {
 
     /// What this key press means, if anything.
     ///
-    /// `syms` should hold every keysym the key produces: the one after the
-    /// layout applied the modifiers, and the unmodified one. With Shift held,
-    /// the layout turns `a` into `A`, and a binding written `Shift+a` has to
-    /// match either. Modifiers must match exactly, so Alt+Tab and
-    /// Alt+Shift+Tab can mean different things.
+    /// `syms` are the key's [`candidates`], the most particular first, and
+    /// the first of them bound with these modifiers wins. Modifiers must
+    /// match exactly, so Alt+Tab and Alt+Shift+Tab can mean different
+    /// things.
     #[must_use]
     pub fn resolve(&self, mods: Mods, syms: &[Keysym]) -> Option<&Action> {
-        self.keys
-            .iter()
-            .find(|(chord, _)| chord.mods == mods && syms.contains(&chord.key))
-            .map(|(_, action)| action)
+        syms.iter().find_map(|&sym| {
+            self.keys
+                .iter()
+                .find(|(chord, _)| chord.mods == mods && chord.key == sym)
+                .map(|(_, action)| action)
+        })
     }
+}
+
+/// Every keysym a key press can be bound by, the most particular first.
+///
+/// First what the key made with the modifiers held, then what it makes
+/// alone: with Shift held the layout turns `a` into `A`, and a binding
+/// written `Shift+a` has to match either. Then two that matter only away
+/// from a US keyboard:
+///
+/// - **`latin`**, the key's keysym in the first layout where it makes a
+///   Latin character (smithay's `raw_latin_sym_or_raw_current_sym`). Under a
+///   Cyrillic or Greek layout, `Logo+q` is pressed on the key that makes
+///   `й`, and without this every letter chord dies the moment the person
+///   switches layout. It needs a Latin layout in the keymap: "us,ru" binds
+///   as "us" does, while "ru" alone does not.
+/// - **`shifted`**, what the key makes with Shift in the active layout,
+///   counted only when that is a digit. AZERTY puts `&é"'(` on the number
+///   row and the digits above them, so `Logo+1`, pressed as the person
+///   presses it on any other keyboard, would otherwise be `Logo+&` and match
+///   nothing.
+///
+/// Repeats are dropped. Order matters to [`Bindings::resolve`]: a chord
+/// written for what the layout itself makes beats one borrowed from another
+/// layout.
+#[must_use]
+pub fn candidates(
+    made: Keysym,
+    raw: &[Keysym],
+    latin: Option<Keysym>,
+    shifted: Option<Keysym>,
+) -> Vec<Keysym> {
+    let digit = shifted.filter(|sym| (Keysym::_0.raw()..=Keysym::_9.raw()).contains(&sym.raw()));
+    let mut candidates = Vec::with_capacity(raw.len() + 3);
+    for sym in std::iter::once(made)
+        .chain(raw.iter().copied())
+        .chain(latin)
+        .chain(digit)
+    {
+        if sym != Keysym::NoSymbol && !candidates.contains(&sym) {
+            candidates.push(sym);
+        }
+    }
+    candidates
 }
 
 #[cfg(test)]
@@ -336,6 +387,83 @@ mod tests {
     #[test]
     fn with_no_drag_modifier_nothing_drags() {
         assert_eq!(Bindings::default().drag(Mods::alt(), Button::Left), None);
+    }
+
+    fn logo(key: Keysym) -> Chord {
+        Chord {
+            mods: Mods {
+                logo: true,
+                ..Mods::default()
+            },
+            key,
+        }
+    }
+
+    #[test]
+    fn under_a_cyrillic_layout_a_letter_chord_is_found_on_the_latin_layout() {
+        let syms = candidates(
+            Keysym::Cyrillic_shorti,
+            &[Keysym::Cyrillic_shorti],
+            Some(Keysym::q),
+            Some(Keysym::Cyrillic_SHORTI),
+        );
+        assert_eq!(syms, [Keysym::Cyrillic_shorti, Keysym::q]);
+        let bindings = Bindings::default().bind(logo(Keysym::q), Action::Close);
+        assert_eq!(
+            bindings.resolve(logo(Keysym::q).mods, &syms),
+            Some(&Action::Close)
+        );
+    }
+
+    #[test]
+    fn on_azerty_the_number_row_counts_as_its_digits() {
+        let syms = candidates(
+            Keysym::ampersand,
+            &[Keysym::ampersand],
+            Some(Keysym::ampersand),
+            Some(Keysym::_1),
+        );
+        assert_eq!(syms, [Keysym::ampersand, Keysym::_1]);
+        let bindings = Bindings::default().bind(logo(Keysym::_1), Action::GoToWorkspace(1));
+        assert_eq!(
+            bindings.resolve(logo(Keysym::_1).mods, &syms),
+            Some(&Action::GoToWorkspace(1))
+        );
+    }
+
+    #[test]
+    fn a_shifted_symbol_that_is_not_a_digit_is_no_candidate() {
+        let syms = candidates(
+            Keysym::_1,
+            &[Keysym::_1],
+            Some(Keysym::_1),
+            Some(Keysym::exclam),
+        );
+        assert_eq!(syms, [Keysym::_1], "a US number row stays its digits");
+    }
+
+    #[test]
+    fn the_layouts_own_meaning_beats_one_borrowed_from_another_layout() {
+        // Bound in the other order, so it is the candidates' order that
+        // decides, not the bindings'.
+        let bindings = Bindings::default()
+            .bind(logo(Keysym::q), Action::Close)
+            .bind(logo(Keysym::Cyrillic_shorti), Action::Minimize);
+        let syms = candidates(
+            Keysym::Cyrillic_shorti,
+            &[Keysym::Cyrillic_shorti],
+            Some(Keysym::q),
+            None,
+        );
+        assert_eq!(
+            bindings.resolve(logo(Keysym::q).mods, &syms),
+            Some(&Action::Minimize)
+        );
+    }
+
+    #[test]
+    fn a_key_that_makes_nothing_is_no_candidate() {
+        assert!(candidates(Keysym::NoSymbol, &[], None, None).is_empty());
     }
 
     #[test]

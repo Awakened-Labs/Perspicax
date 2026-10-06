@@ -13,6 +13,14 @@
 //! ([`perspicax_policy::LogoTap`]). Its press and release still reach the
 //! client, as any modifier's do.
 //!
+//! A binding is found under any layout: a key is matched by what it makes
+//! there, and by what it makes in the keymap's Latin layout and, for
+//! AZERTY's number row, with Shift ([`perspicax_policy::candidates`]).
+//!
+//! Every keyboard's lock keys are lit to match xkb's state, including one
+//! plugged in later, or brought back from another VT, where something else
+//! may have lit them differently.
+//!
 //! The pointer is confined to the outputs ([`super::super::pointer`]),
 //! hit-tested against the stack, and every motion and press is put to the
 //! focus policy ([`perspicax_policy::Focus`]), whose decision is then carried
@@ -21,7 +29,8 @@
 use std::time::Duration;
 
 use perspicax_policy::{
-    Action, Button, Drag, FrameButton, Mods, Part, arrival, edge_at, edges_near, is_double, is_logo,
+    Action, Button, Drag, FrameButton, Mods, Part, arrival, candidates, edge_at, edges_near,
+    is_double, is_logo,
 };
 use smithay::{
     backend::{
@@ -35,7 +44,7 @@ use smithay::{
     },
     desktop::WindowSurfaceType,
     input::{
-        keyboard::{FilterResult, Keycode, ModifiersState},
+        keyboard::{FilterResult, KeyboardHandle, Keycode, LedState, ModifiersState},
         pointer::{
             AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, GrabStartData, MotionEvent,
             PointerHandle,
@@ -44,6 +53,7 @@ use smithay::{
     output::Output,
     reexports::{
         calloop::timer::{TimeoutAction, Timer},
+        input::{Device, DeviceCapability, Led},
         wayland_server::protocol::wl_surface::WlSurface,
     },
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
@@ -55,7 +65,7 @@ use super::{
         hatch::{self, Hatch},
         pointer,
     },
-    settings,
+    Session, settings,
 };
 use crate::layers;
 use crate::{framed::Framed, shell::id_of, state::Compositor};
@@ -110,8 +120,15 @@ pub(super) fn handle(state: &mut Compositor, event: InputEvent<LibinputInputBack
             axis(state, &event);
         }
         InputEvent::DeviceAdded { mut device } => {
+            // Coming back from another VT, libinput adds every device again,
+            // so this also relights the keyboards after whatever lit them
+            // there.
+            let leds = state.keyboard.as_ref().map(KeyboardHandle::led_state);
             if let Running::Seat(session) = &mut state.backend {
                 settings::configure(&mut device, &session.settings.pointer);
+                if let Some(leds) = leds {
+                    light(&mut device, leds);
+                }
                 session.devices.push(device);
             }
         }
@@ -167,8 +184,13 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
                     if locked {
                         return None;
                     }
-                    let mut syms = raw.clone();
-                    syms.push(keysym.modified_sym());
+                    let layout = modifiers.serialized.layout_effective;
+                    let syms = candidates(
+                        keysym.modified_sym(),
+                        &raw,
+                        keysym.raw_latin_sym_or_raw_current_sym(),
+                        state.keys.shifted(layout, keycode),
+                    );
                     session
                         .settings
                         .bindings
@@ -711,11 +733,56 @@ fn extent(state: &Compositor) -> Option<Rectangle<i32, Logical>> {
         .reduce(|a, b| a.merge(b))
 }
 
+impl Session {
+    /// Light every keyboard's lock keys as xkb has them.
+    pub(crate) fn light(&mut self, leds: LedState) {
+        for device in &mut self.devices {
+            light(device, leds);
+        }
+    }
+}
+
+/// Light one device's lock keys, if it is a keyboard.
+fn light(device: &mut Device, leds: LedState) {
+    if device.has_capability(DeviceCapability::Keyboard) {
+        device.led_update(lit(leds));
+    }
+}
+
+/// libinput's LEDs for xkb's: a light the keymap has no indicator for is
+/// off.
+fn lit(leds: LedState) -> Led {
+    [
+        (leds.num, Led::NUMLOCK),
+        (leds.caps, Led::CAPSLOCK),
+        (leds.scroll, Led::SCROLLLOCK),
+    ]
+    .into_iter()
+    .filter(|&(on, _)| on == Some(true))
+    .fold(Led::empty(), |lit, (_, led)| lit | led)
+}
+
 fn mods(modifiers: &ModifiersState) -> Mods {
     Mods {
         ctrl: modifiers.ctrl,
         alt: modifiers.alt,
         shift: modifiers.shift,
         logo: modifiers.logo,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lock_is_lit_only_when_xkb_says_it_is_on() {
+        let leds = LedState {
+            num: Some(false),
+            caps: Some(true),
+            scroll: None,
+        };
+        assert_eq!(lit(leds), Led::CAPSLOCK);
+        assert_eq!(lit(LedState::default()), Led::empty());
     }
 }

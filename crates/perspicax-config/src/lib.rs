@@ -121,6 +121,9 @@ pub struct Keyboard {
     pub repeat_rate: i32,
     /// Milliseconds before a held key starts repeating.
     pub repeat_delay: i32,
+    /// Num Lock on or off when the session starts, and again whenever a save
+    /// changes this. `None` leaves it as the person has it.
+    pub numlock: Option<bool>,
 }
 
 impl Default for Keyboard {
@@ -133,6 +136,7 @@ impl Default for Keyboard {
             options: None,
             repeat_rate: 25,
             repeat_delay: 200,
+            numlock: None,
         }
     }
 }
@@ -744,6 +748,7 @@ struct RawKeyboard {
     options: Option<String>,
     repeat_rate: Option<i32>,
     repeat_delay: Option<i32>,
+    numlock: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1224,6 +1229,7 @@ impl RawKeyboard {
         keyboard.layout = self.layout.unwrap_or(keyboard.layout);
         keyboard.variant = self.variant.unwrap_or(keyboard.variant);
         keyboard.options = self.options.or(keyboard.options);
+        keyboard.numlock = self.numlock.or(keyboard.numlock);
         Ok(keyboard)
     }
 }
@@ -1689,6 +1695,16 @@ mod tests {
         assert_eq!(config.keyboard.layout, "de");
         assert_eq!(config.keyboard.repeat_rate, 40);
         assert_eq!(config.keyboard.repeat_delay, 200, "the default, untouched");
+    }
+
+    #[test]
+    fn num_lock_is_left_alone_unless_the_config_says() {
+        assert_eq!(parse("", SEAT).unwrap().keyboard.numlock, None);
+        let on = parse("[input.keyboard]\nnumlock = true", SEAT).unwrap();
+        assert_eq!(on.keyboard.numlock, Some(true));
+        let off = parse("[input.keyboard]\nnumlock = false", SEAT).unwrap();
+        assert_eq!(off.keyboard.numlock, Some(false));
+        assert!(parse("[input.keyboard]\nnumlock = \"on\"", SEAT).is_err());
     }
 
     #[test]

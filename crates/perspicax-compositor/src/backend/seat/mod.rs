@@ -420,7 +420,8 @@ pub(crate) fn attach(state: &mut Compositor) -> Result<(), Error> {
         .create_global_with_default_feedback::<Compositor>(&state.display, &feedback);
 
     arm_panic_hook();
-    settings::apply_keyboard(state);
+    let numlock = session.settings.keyboard.numlock;
+    settings::apply_keyboard(state, numlock);
     settings::tell_appearance(state);
     rescan(state);
     let Running::Seat(session) = &state.backend else {
