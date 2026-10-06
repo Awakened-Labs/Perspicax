@@ -54,7 +54,8 @@ use crate::{Action, PointerButton};
 pub enum Verb {
     /// Press a mouse button on the target.
     Click(PointerButton),
-    /// Type text at whatever holds keyboard focus.
+    /// Type text into the target's window, which must hold keyboard focus:
+    /// see [`Action::Type`].
     Type(String),
     /// Scroll over the target.
     Scroll {

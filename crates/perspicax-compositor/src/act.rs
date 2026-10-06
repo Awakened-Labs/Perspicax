@@ -13,6 +13,9 @@
 //!   where it came from, so nothing downstream can refuse it. That is what makes
 //!   this work on stock GTK and Qt with no cooperation, and it is why the gate
 //!   in `perspicax-index` has to hold: it is the only place the question can be asked.
+//!   Except one: where a key goes is decided by keyboard focus, which only
+//!   this loop can compare with the target in the same turn it presses the
+//!   key. So typing checks it here, in [`Compositor::act`], and nowhere else.
 //! - **Coordinates arrive window-relative and leave global.** An accessibility
 //!   bridge cannot know where its window is -- measured, not assumed, and
 //!   recorded as risk #1 -- so every rect an agent names is relative to its own
@@ -61,7 +64,8 @@ const BTN_MIDDLE: u32 = 0x112;
 ///
 /// These sit below `perspicax_index::Refusal`, which answers the different
 /// question of whether an act should be *allowed*. Everything here is a
-/// statement about this compositor's ability to carry it out.
+/// statement about this compositor's ability to carry it out, but for
+/// [`ActError::FocusElsewhere`]: a refusal that only this loop can make.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ActError {
     /// No surface with this id is mapped. It was destroyed, or never existed.
@@ -104,6 +108,15 @@ pub enum ActError {
     /// The renderer could not draw or read back the picture.
     #[error("the picture could not be taken: {0}")]
     Capture(String),
+    /// Typing was asked of a surface whose window does not hold the keyboard,
+    /// and nothing was typed. `focused` is what does hold it, `None` if no
+    /// window or layer surface does.
+    ///
+    /// A refusal rather than a failure, decided here because it cannot be
+    /// decided anywhere else: see `Compositor::act_type`. `perspicax` hands
+    /// it to the agent as `Refusal::FocusElsewhere`.
+    #[error("keyboard focus is elsewhere ({focused:?}): nothing was typed")]
+    FocusElsewhere { focused: Option<SurfaceId> },
 }
 
 /// What the compositor did, as it alone can report it.
@@ -116,9 +129,10 @@ pub enum ActError {
 pub struct Dispatched {
     /// When the last event of this action left the compositor.
     pub at: Instant,
-    /// Which surface held keyboard focus before the action.
+    /// Which window or layer surface held keyboard focus before the action.
+    /// A menu open on a window counts as the window.
     pub focus_before: Option<SurfaceId>,
-    /// Which surface holds it after.
+    /// Which holds it after, counted the same way.
     pub focus_after: Option<SurfaceId>,
 }
 
@@ -310,13 +324,13 @@ impl Compositor {
             }),
         }
         .ok_or(ActError::NoSuchSurface(surface.0))?;
-        let focus_before = self.focused_surface();
+        let focus_before = self.keyboard_owner();
 
         match (action, &target) {
             (Action::Focus, _) => self.act_focus(&target, surface),
             (Action::Click { at, button }, _) => self.act_click(&target, *at, *button),
             (Action::Scroll { at, dx, dy }, _) => self.act_scroll(&target, *at, *dx, *dy),
-            (Action::Type { text }, _) => self.act_type(text),
+            (Action::Type { text }, _) => self.act_type(surface, text),
             (Action::Close, Target::Window(window)) => {
                 Self::close(window);
                 Ok(())
@@ -334,7 +348,7 @@ impl Compositor {
         Ok(Dispatched {
             at: Instant::now(),
             focus_before,
-            focus_after: self.focused_surface(),
+            focus_after: self.keyboard_owner(),
         })
     }
 
@@ -478,14 +492,25 @@ impl Compositor {
         Ok(())
     }
 
-    /// Type a string on the seat's keyboard.
+    /// Type a string on the seat's keyboard, into `surface`'s window.
     ///
-    /// Whatever holds keyboard focus receives this. The action carries no
-    /// surface for the same reason a keyboard has no target: focus is the
-    /// addressing mechanism, and an agent that wants a different one asks for
-    /// `Focus` first.
-    fn act_type(&mut self, text: &str) -> Result<(), ActError> {
+    /// A keyboard has no target: whatever holds focus receives the keys. So
+    /// they are sent only if that is `surface`'s window, and refused as
+    /// [`ActError::FocusElsewhere`] otherwise. The agent asks for `Focus`
+    /// first. Typing regardless is how an agent with consent for one window
+    /// typed into another it had none for, the person's terminal included
+    /// (#35).
+    ///
+    /// The check is made here, on the loop thread, in the same call that
+    /// presses the keys, so nothing can move focus between the two. A gate
+    /// reading published facts would leave that moment open: a window mapping
+    /// takes focus, and the keys would follow it.
+    fn act_type(&mut self, surface: SurfaceId, text: &str) -> Result<(), ActError> {
         let keyboard = self.keyboard.clone().ok_or(ActError::NoKeyboard)?;
+        let focused = self.keyboard_owner();
+        if focused != Some(surface) {
+            return Err(ActError::FocusElsewhere { focused });
+        }
         let (active, _) = self.layouts().ok_or(ActError::NoKeyboard)?;
         let caps = keyboard.modifier_state().caps_lock;
 

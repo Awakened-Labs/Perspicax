@@ -251,6 +251,12 @@ workspace, a window that is a tab behind another as `inactive_tab`, naming the
 tab in front, and a node hanging off the edge of every monitor as `off_screen`.
 None is cleared by the agent switching the person's screen on its own.
 
+`type` has one refusal of its own. Keys go wherever keyboard focus is, so
+typing is done only while the node's window holds it, and otherwise refused as
+`focus_elsewhere`, naming the surface that does. The agent `focus`es the node
+first. The compositor makes that check in the same turn it presses the keys, so
+focus cannot move between the two.
+
 **A titlebar is pixels no client drew.** The frame perspicax draws around a
 window goes into the facts beside the window, so a node of another window
 under a titlebar is refused as `occluded`, naming the window the titlebar
@@ -273,7 +279,11 @@ command instead, and every client is on a socket the agent set up. On `--seat`
 the question has two answers, because the person launched most of what is on
 screen. There an agent may act only on what perspicax itself spawned
 (`Refusal::NoCapability` otherwise), and not at all while the person is using the
-keyboard or pointer: an act in the middle of their typing would race it.
+keyboard or pointer: an act in the middle of their typing would race it. Typing
+only into a window that holds the keyboard is what keeps an agent's keys out of
+the person's terminal while it acts on a window it spawned. A window with no
+accessibility tree has no node to name, so it cannot be typed into yet
+([#38](https://github.com/Awakened-Labs/Perspicax/issues/38)).
 
 **`screenshot` is the fallback, and says so.** Occlusion needs geometry,
 z-order, regions and damage, none of which need pixels, so nothing is drawn

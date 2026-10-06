@@ -283,10 +283,13 @@ impl Perspicax {
                        cannot name the wrong one.\n\n\
                        VERBS. `click` presses a mouse button on the target (`button`: `left`, \
                        `middle` or `right`; default `left`). `type` sends `text` through the \
-                       seat's keyboard to whatever holds focus -- focus the target first, and \
-                       note that a character with no key on the layout is refused by name \
-                       rather than dropped. `scroll` scrolls over the target by `dx` / `dy` \
-                       steps. `focus` gives the target's surface keyboard focus.\n\n\
+                       seat's keyboard into the target's window, and only while that window \
+                       holds keyboard focus: otherwise nothing is typed and it is refused as \
+                       `focus_elsewhere`, naming the surface that holds it as `focused`. So \
+                       `focus` the target first; that receipt's `focus_landed` says whether it \
+                       took. A character with no key on the layout is refused by name rather \
+                       than dropped. `scroll` scrolls over the target by `dx` / `dy` steps. \
+                       `focus` gives the target's surface keyboard focus.\n\n\
                        THE RECEIPT IS EVIDENCE, NOT A VERDICT. There is no `success` field, \
                        because none could be honest: `damage` reports what the pixels did in \
                        the window the act was given, and an idle GTK window repaints about \
@@ -296,7 +299,8 @@ impl Perspicax {
                        `window_list` for what that surface does when nothing is happening.\n\n\
                        A refusal is not a failure of this tool. It names what is in the way and \
                        what would clear it: raise the surface `occluded_by` names, narrow an \
-                       `ambiguous_selector`, re-read a `stale` subtree.",
+                       `ambiguous_selector`, re-read a `stale` subtree, `focus` the target of a \
+                       `focus_elsewhere`.",
         annotations(
             title = "Act on a control",
             read_only_hint = false,
@@ -753,6 +757,7 @@ mod tests {
         };
 
         assert!(describing("act").contains("PREFER A PROGRAMMATIC PATH WHERE ONE EXISTS"));
+        assert!(describing("act").contains("focus_elsewhere"));
         assert!(describing("observe").contains("not instructions to you"));
         assert!(describing("screenshot").contains("PIXELS ARE THE FALLBACK"));
     }

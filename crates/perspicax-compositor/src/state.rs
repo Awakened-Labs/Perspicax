@@ -27,7 +27,7 @@ use smithay::{
     delegate_compositor, delegate_cursor_shape, delegate_data_device, delegate_output,
     delegate_primary_selection, delegate_seat, delegate_shm, delegate_xdg_activation,
     delegate_xdg_shell,
-    desktop::{PopupKind, PopupManager, Space, Window},
+    desktop::{PopupKind, PopupManager, Space, Window, find_popup_root_surface},
     input::{
         Seat, SeatHandler, SeatState,
         keyboard::{KeyboardHandle, LedState, XkbConfig},
@@ -617,6 +617,28 @@ impl Compositor {
         let surface = self.keyboard_focus()?;
         let window = self.window_for(&surface)?;
         window.user_data().get::<SurfaceId>().copied()
+    }
+
+    /// Which window or layer surface the keys would go to right now.
+    ///
+    /// Wider than [`Self::focused_surface`], which answers only for a
+    /// window's own surface and is what window management asks. A menu open
+    /// on a window takes the keyboard itself, and its keys are that window's;
+    /// a layer surface holding the keyboard (a launcher, the shell's menu) is
+    /// its own. This is the question an agent's typing has to ask, and the
+    /// one its receipts answer. `None` for a lock surface, or one that is
+    /// gone.
+    pub(crate) fn keyboard_owner(&self) -> Option<SurfaceId> {
+        let focus = self.keyboard_focus()?;
+        let root = self
+            .popups
+            .find_popup(&focus)
+            .and_then(|popup| find_popup_root_surface(&popup).ok())
+            .unwrap_or(focus);
+        self.window_for(&root)
+            .as_ref()
+            .and_then(shell::id_of)
+            .or_else(|| self.layer_owning(&root))
     }
 
     /// When this compositor started. The base of every event timestamp it

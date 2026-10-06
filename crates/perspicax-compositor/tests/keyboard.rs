@@ -1,7 +1,8 @@
 //! A keyboard with more than one layout, as a client hears it: an agent's
 //! text arrives as typed, in whichever layout has each character, a new
 //! keymap keeps the layout in use, and under `switching = "window"` each
-//! window keeps its own.
+//! window keeps its own. And an agent's text goes only into the window it
+//! named, never to whichever holds the keyboard instead.
 //!
 //! The client reads its keys as a toolkit does. It keeps the keymap it is
 //! sent and the modifiers and group in force at each key, and turns them into
@@ -19,13 +20,15 @@ use std::{
 };
 
 use common::{Desk, Session, until};
-use perspicax_compositor::{Backend, Command, Host, Keymap};
+use perspicax_compositor::{ActError, Backend, Command, Host, Keymap};
 use perspicax_index::{Action as Verb, HostFacts};
 use perspicax_node::SurfaceId;
 use perspicax_policy::{Action, Switching};
 use smithay::input::keyboard::{Keycode, xkb};
+use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::{
-    Connection, Dispatch, EventQueue, QueueHandle, WEnum,
+    Connection, Dispatch, EventQueue, Proxy as _, QueueHandle, WEnum,
+    backend::ObjectId,
     globals::GlobalList,
     protocol::{wl_keyboard, wl_seat},
 };
@@ -43,6 +46,8 @@ struct Heard {
     modifiers: [u32; 4],
     /// Each key pressed since the last keymap, with the modifiers in force.
     keys: Vec<(u32, [u32; 4])>,
+    /// The surface the keyboard last entered, until it left.
+    entered: Option<ObjectId>,
 }
 
 type Ear = Arc<Mutex<Heard>>;
@@ -175,7 +180,7 @@ fn latin_and_cyrillic_arrive_as_typed_and_the_layout_is_put_back() {
                 text: "q中".to_owned()
             }
         ),
-        Err(perspicax_compositor::ActError::Untypeable('中'))
+        Err(ActError::Untypeable('中'))
     );
     queue.roundtrip(&mut desk).expect("flush");
     assert_eq!(heard(&ear).typed(), "й q", "not even the q");
@@ -247,6 +252,47 @@ fn under_window_switching_each_window_keeps_its_own_layout() {
     session.stop((desk, queue));
 }
 
+/// #35: an agent with consent for one window typed into whichever held the
+/// keyboard -- the person's terminal, say. Now the keys go only into the
+/// window the act names, while it holds the keyboard, and otherwise nothing is
+/// typed and the refusal names the window that does hold it.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_without_the_keyboard_is_not_typed_into_and_the_refusal_names_the_one_with_it() {
+    let (session, mut desk, mut queue, ear, first) = typist("keyboard-elsewhere", "us");
+    desk.open_window(&queue.handle(), "second", "second");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 2);
+    let facts = session.wait_for(|facts| titled(facts, "second").is_some());
+    let second = titled(&facts, "second").expect("waited for");
+    focus(&session, second);
+
+    assert_eq!(
+        Host::new(&session.facts, &session.requests).act(
+            first,
+            &Verb::Type {
+                text: "nope".to_owned()
+            }
+        ),
+        Err(ActError::FocusElsewhere {
+            focused: Some(second)
+        })
+    );
+    queue.roundtrip(&mut desk).expect("flush");
+    assert!(heard(&ear).keys.is_empty(), "nothing typed, into either");
+
+    // Given the keyboard, it is typed into, and it is the one that hears it.
+    focus(&session, first);
+    type_text(&session, first, "yes");
+    until(&mut queue, &mut desk, |_| heard(&ear).typed() == "yes");
+    assert_eq!(
+        heard(&ear).entered,
+        Some(desk.windows[0].wl_surface().id()),
+        "into the first window"
+    );
+
+    session.stop((desk, queue));
+}
+
 impl Dispatch<wl_keyboard::WlKeyboard, Ear> for Desk {
     fn event(
         _: &mut Self,
@@ -294,6 +340,8 @@ impl Dispatch<wl_keyboard::WlKeyboard, Ear> for Desk {
                 let modifiers = heard.modifiers;
                 heard.keys.push((key, modifiers));
             }
+            wl_keyboard::Event::Enter { surface, .. } => heard.entered = Some(surface.id()),
+            wl_keyboard::Event::Leave { .. } => heard.entered = None,
             _ => {}
         }
     }

@@ -279,6 +279,16 @@ fn an_agents_click_on_a_panel_reaches_the_panel_and_it_cannot_close_one() {
         Err(ActError::TakesNoKeyboard(panel.0)),
         "it asked for no keyboard"
     );
+    assert_eq!(
+        host.act(
+            panel,
+            &Verb::Type {
+                text: "x".to_owned()
+            }
+        ),
+        Err(ActError::FocusElsewhere { focused: None }),
+        "nor holds it, and nothing else does"
+    );
 
     stop.request();
     drop((desk, queue));
