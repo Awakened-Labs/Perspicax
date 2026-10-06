@@ -59,7 +59,8 @@ pub const DAMAGE_WINDOW: Duration = Duration::from_millis(200);
 /// it is covered, it is stale, the selector matched three things -- and every
 /// variant carries what would be needed to recover. An [`ActError`] is a
 /// statement about this compositor, and there is nothing an agent can do but
-/// report it.
+/// report it -- except a keyboard held elsewhere, which the compositor alone
+/// can see in time and which arrives here as the refusal it is.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum Failure {
     /// The gate said no, and said why.
@@ -67,7 +68,21 @@ pub enum Failure {
     Refused(#[from] Refusal),
     /// The compositor could not carry it out.
     #[error("not dispatched: {0}")]
-    Dispatch(#[from] ActError),
+    Dispatch(#[source] ActError),
+}
+
+impl From<ActError> for Failure {
+    fn from(error: ActError) -> Self {
+        match error {
+            // Decided at dispatch because only the loop can check it in the
+            // same turn as the keys, but a statement about the target all the
+            // same, with a remedy: `focus` it.
+            ActError::FocusElsewhere { focused } => {
+                Self::Refused(Refusal::FocusElsewhere { focused })
+            }
+            error => Self::Dispatch(error),
+        }
+    }
 }
 
 /// Resolve a selector, act on what it names, and report what happened.
@@ -75,8 +90,9 @@ pub enum Failure {
 /// # Errors
 ///
 /// [`Failure::Refused`] if the selector matches nothing, matches several
-/// things, or names a node the gate will not act on; [`Failure::Dispatch`] if
-/// the compositor did not carry the action out.
+/// things, or names a node the gate will not act on, or if typing finds the
+/// keyboard in another window; [`Failure::Dispatch`] if the compositor did not
+/// carry the action out.
 pub fn act(
     index: &Index,
     host: &Host,
@@ -223,6 +239,20 @@ mod tests {
 
     fn host() -> Host {
         Host::new(&Facts::new(), &Requests::new()).waiting(Duration::from_millis(20))
+    }
+
+    #[test]
+    fn a_keyboard_elsewhere_is_a_refusal_not_a_dispatch_failure() {
+        for focused in [Some(SurfaceId(3)), None] {
+            assert_eq!(
+                Failure::from(ActError::FocusElsewhere { focused }),
+                Failure::Refused(Refusal::FocusElsewhere { focused })
+            );
+        }
+        assert_eq!(
+            Failure::from(ActError::Unreachable),
+            Failure::Dispatch(ActError::Unreachable)
+        );
     }
 
     #[test]

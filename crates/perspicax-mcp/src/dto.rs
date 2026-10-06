@@ -216,7 +216,8 @@ impl From<Rect> for Bounds {
 pub struct Refused {
     /// One of `occluded`, `clipped`, `unmapped`, `off_screen`,
     /// `other_workspace`, `inactive_tab`, `unjudged`, `unattributed`, `stale`,
-    /// `no_capability`, `ambiguous_selector`, `not_found`.
+    /// `no_capability`, `ambiguous_selector`, `not_found`, `not_a_window`,
+    /// `focus_elsewhere`.
     pub kind: &'static str,
     /// The refusal in words.
     pub message: String,
@@ -237,6 +238,11 @@ pub struct Refused {
     /// `inactive_tab`: the tab in front, which has the group's place.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shown_tab: Option<u64>,
+    /// `focus_elsewhere`: the window or layer surface holding the keyboard,
+    /// where the keys would have gone. Absent when none holds it. `focus` the
+    /// node, then type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focused: Option<u64>,
 }
 
 impl From<&Refusal> for Refused {
@@ -256,6 +262,7 @@ impl From<&Refusal> for Refused {
                 Refusal::AmbiguousSelector { .. } => "ambiguous_selector",
                 Refusal::NotFound => "not_found",
                 Refusal::NotAWindow => "not_a_window",
+                Refusal::FocusElsewhere { .. } => "focus_elsewhere",
             },
             message: refusal.to_string(),
             occluded_by: None,
@@ -263,6 +270,7 @@ impl From<&Refusal> for Refused {
             matches: None,
             workspace: None,
             shown_tab: None,
+            focused: None,
         };
         match refusal {
             Refusal::Occluded { by } => refused.occluded_by = Some(by.0),
@@ -270,6 +278,9 @@ impl From<&Refusal> for Refused {
             Refusal::AmbiguousSelector { matches } => refused.matches = Some(*matches),
             Refusal::OtherWorkspace { workspace } => refused.workspace = Some(*workspace),
             Refusal::InactiveTab { shown } => refused.shown_tab = Some(shown.0),
+            Refusal::FocusElsewhere { focused } => {
+                refused.focused = focused.map(|surface| surface.0);
+            }
             _ => {}
         }
         refused
@@ -912,6 +923,29 @@ mod tests {
             json,
             serde_json::json!({"kind": "not_found",
             "message": "selector matched no nodes"})
+        );
+    }
+
+    /// A keyboard held elsewhere names where the keys would have gone, so the
+    /// agent can see it in `window_list`; with nothing holding it there is
+    /// nothing to name, and no `null` stands in for it.
+    #[test]
+    fn focus_elsewhere_names_the_focused_surface_and_omits_it_when_none_holds_it() {
+        let elsewhere = Refusal::FocusElsewhere {
+            focused: Some(SurfaceId(3)),
+        };
+        assert_eq!(
+            serde_json::to_value(Refused::from(&elsewhere)).unwrap(),
+            serde_json::json!({"kind": "focus_elsewhere",
+            "message": "keyboard focus is on surface 3, not in node's window",
+            "focused": 3})
+        );
+
+        let nowhere = Refusal::FocusElsewhere { focused: None };
+        assert_eq!(
+            serde_json::to_value(Refused::from(&nowhere)).unwrap(),
+            serde_json::json!({"kind": "focus_elsewhere",
+            "message": "no window holds keyboard focus"})
         );
     }
 

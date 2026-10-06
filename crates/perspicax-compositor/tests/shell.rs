@@ -34,7 +34,7 @@ mod common;
 use std::{path::PathBuf, thread};
 
 use common::{Desk, Session, connect};
-use perspicax_compositor::{Backend, Command, Host, Keymap, Virtual};
+use perspicax_compositor::{ActError, Backend, Command, Host, Keymap, Virtual};
 use perspicax_index::{Action as Verb, HostFacts, Layer, PointerButton, SurfaceKind};
 use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::{Access, Action, Place, Protocol, Rule, Shape, Side};
@@ -845,6 +845,21 @@ fn a_window_under_an_open_menu_is_covered_only_where_the_menu_is() {
         .visibility,
         Visibility::Visible,
         "and one beside it is not: the clear rest of the surface covers nothing"
+    );
+    drop(facts);
+
+    // The menu holds the keyboard, so typing at the window under it would
+    // type into the menu: refused, naming the menu.
+    assert_eq!(
+        Host::new(&session.facts, &session.requests).act(
+            window,
+            &Verb::Type {
+                text: "x".to_owned()
+            }
+        ),
+        Err(ActError::FocusElsewhere {
+            focused: Some(menu_surface)
+        })
     );
 
     drop((desk, queue));

@@ -94,6 +94,15 @@ pub enum Refusal {
     /// panel, a wallpaper, a menu, a lock screen. They are part of the desk,
     /// and nothing closes them or brings them forward but their own program.
     NotAWindow,
+    /// Typing was asked of a node whose window does not hold the keyboard.
+    /// Keys go where focus is, so typing anyway would land them in `focused`
+    /// -- possibly a window the agent holds no consent for. `focus` the node
+    /// and try again. `None` when no window or layer holds the keyboard.
+    ///
+    /// The host decides this, not the gate: only the host can compare focus
+    /// with the target in the same step that presses the keys, and anything
+    /// earlier leaves a moment in which focus can move.
+    FocusElsewhere { focused: Option<SurfaceId> },
 }
 
 impl core::fmt::Display for Refusal {
@@ -128,6 +137,14 @@ impl core::fmt::Display for Refusal {
                 "surface is part of the desk (a panel, wallpaper, menu or lock screen), \
                  not an application's window"
             ),
+            Self::FocusElsewhere {
+                focused: Some(focused),
+            } => write!(
+                f,
+                "keyboard focus is on surface {}, not in node's window",
+                focused.0
+            ),
+            Self::FocusElsewhere { focused: None } => write!(f, "no window holds keyboard focus"),
         }
     }
 }
@@ -404,7 +421,15 @@ pub trait HostView {
 pub enum Action {
     /// Move the pointer to a point and click it.
     Click { at: Rect, button: PointerButton },
-    /// Type text through the seat's keyboard, xkb-mapped.
+    /// Type text through the seat's keyboard, xkb-mapped, into this surface's
+    /// window.
+    ///
+    /// Only while that window holds the keyboard (a menu open on it counts as
+    /// the window; a layer surface is its own). A host checks that in the same
+    /// step that presses the keys, and otherwise refuses with
+    /// [`Refusal::FocusElsewhere`], naming what does hold it: a keyboard has
+    /// no target of its own, so typing regardless would deliver to whatever
+    /// holds focus.
     Type { text: String },
     /// Scroll at a point.
     Scroll { at: Rect, dx: f64, dy: f64 },
@@ -464,6 +489,19 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, Refusal::Occluded { by: SurfaceId(7) });
         assert_eq!(err.to_string(), "node occluded by surface 7");
+    }
+
+    #[test]
+    fn a_type_refused_for_focus_elsewhere_names_what_holds_it_or_that_nothing_does() {
+        let elsewhere = Refusal::FocusElsewhere {
+            focused: Some(SurfaceId(3)),
+        };
+        assert_eq!(
+            elsewhere.to_string(),
+            "keyboard focus is on surface 3, not in node's window"
+        );
+        let nowhere = Refusal::FocusElsewhere { focused: None };
+        assert_eq!(nowhere.to_string(), "no window holds keyboard focus");
     }
 
     /// The two fail-closed cases, which are the ones that matter. A node

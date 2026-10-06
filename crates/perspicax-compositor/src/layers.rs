@@ -249,6 +249,16 @@ impl Compositor {
         Some(zone)
     }
 
+    /// The id of the layer surface this surface belongs to: the layer's own,
+    /// or a popup or subsurface of it, which a click on the layer can focus.
+    pub(crate) fn layer_owning(&self, surface: &WlSurface) -> Option<SurfaceId> {
+        self.space.outputs().find_map(|output| {
+            layer_map_for_output(output)
+                .layer_for_surface(surface, WindowSurfaceType::ALL)
+                .and_then(|layer| layer.user_data().get::<SurfaceId>().copied())
+        })
+    }
+
     /// The layer surface an id names, with where it is in global space.
     pub(crate) fn layer_by_id(
         &self,
