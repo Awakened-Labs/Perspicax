@@ -20,7 +20,8 @@ use perspicax_policy::Workspaces;
 use smithay::wayland::seat::WaylandFocus;
 
 use crate::{
-    act::Keys, backend::Running, facts::Facts, focus::FocusTarget, framed::Framed, origin, shell,
+    act::Keys, backend::Running, damage, facts::Facts, focus::FocusTarget, framed::Framed, origin,
+    shell,
 };
 
 use smithay::{
@@ -48,8 +49,8 @@ use smithay::{
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            BufferAssignment, CompositorClientState, CompositorHandler, CompositorState, Damage,
-            SurfaceAttributes, TraversalAction, with_states, with_surface_tree_downward,
+            CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
+            TraversalAction, is_sync_subsurface, with_states, with_surface_tree_downward,
         },
         cursor_shape::CursorShapeManagerState,
         idle_inhibit::IdleInhibitManagerState,
@@ -595,7 +596,6 @@ impl Compositor {
         self.presented.contains(&id)
     }
 
-    /// The window whose toplevel owns this surface, if any.
     /// The window carrying this id, if it is still mapped.
     ///
     /// The id lives in the window's user data, put there by `new_toplevel`, so
@@ -678,9 +678,17 @@ impl CompositorHandler for Compositor {
             .compositor
     }
 
-    /// A client has finished describing a new state for a surface.
+    /// A client has finished describing a new state for a surface, and for
+    /// the subsurfaces under it that were waiting on it.
     ///
-    /// Headless, the buffer is released immediately, which a rendering
+    /// What it drew is recorded against the window or layer at the top of
+    /// its tree, wherever in the tree it drew it, and a commit that brought
+    /// no new buffer and named no damage drew nothing: see [`damage`]. A
+    /// synchronized subsurface's state is applied just before its parent's,
+    /// as part of the parent's commit, and is read there, so its own call
+    /// is passed over.
+    ///
+    /// Headless, buffers are released immediately, which a rendering
     /// compositor would not do. It holds a buffer until it has drawn from it,
     /// and Smithay therefore releases the *previous* buffer when a newer one
     /// arrives -- a scheme that quietly requires the client to own at least
@@ -695,71 +703,46 @@ impl CompositorHandler for Compositor {
     /// same on both paths, so the facts a seat publishes are the facts CI
     /// tested.
     fn commit(&mut self, surface: &WlSurface) {
+        if is_sync_subsurface(surface) {
+            return;
+        }
         let renders = self.backend.keeps_buffers();
-        let whole = declared_geometry(surface);
-        let (presented, damaged) = with_states(surface, |states| {
-            let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-            let current = attributes.current();
-
-            // Read, not drained, when a renderer is going to want the same
-            // damage next; it drains what it uses, and the rest is cleared
-            // below so no commit's damage is ever counted twice.
-            let scale = f64::from(current.buffer_scale.max(1));
-            let mut damaged: Vec<Rect> = current
-                .damage
-                .iter()
-                .map(|damage| match *damage {
-                    Damage::Surface(rect) => to_rect(rect, 1.0),
-                    // Buffer coordinates are the surface's multiplied by the
-                    // scale the client declared, so dividing is what puts them
-                    // back into the space every other rectangle here uses.
-                    Damage::Buffer(rect) => to_rect(rect, scale),
-                })
-                .collect();
-
-            let presented = !matches!(current.buffer, Some(BufferAssignment::Removed));
-            if !renders {
-                current.damage.clear();
-                if let Some(BufferAssignment::NewBuffer(buffer)) = current.buffer.take() {
-                    buffer.release();
-                }
-            }
-
-            // A commit that presents a buffer without saying which part of it
-            // changed has changed all of it as far as anyone here can tell.
-            if damaged.is_empty() && presented {
-                damaged.extend(whole);
-            }
-            (presented, damaged)
-        });
+        let (root, at) = damage::root_of(surface);
+        let is_root = root == *surface;
+        // Read before the renderer drains what it uses, and released here
+        // only when there is no renderer to want it.
+        let taken = damage::take(surface, at, declared_geometry(&root), !renders);
         #[cfg(any(feature = "seat", feature = "capture"))]
         if renders {
             smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
             // What the renderer did not take -- damage committed without a new
-            // buffer -- is cleared here, as the headless path clears it.
-            with_states(surface, |states| {
-                states
-                    .cached_state
-                    .get::<SurfaceAttributes>()
-                    .current()
-                    .damage
-                    .clear();
-            });
+            // buffer -- is cleared here, as the headless path clears it, over
+            // the whole tree the commit applied: a synchronized subsurface's
+            // damage is the renderer's to read first, in this call and not
+            // in its own.
+            damage::clear(surface);
         }
 
         self.popups.commit(surface);
         // A window or a layer surface: both are described to the index, so
-        // both keep the same presentation and damage records.
-        let id = match self.window_for(surface) {
+        // both keep the same presentation and damage records. A subsurface's
+        // are its root's.
+        let id = match self.window_for(&root) {
             Some(window) => {
+                // The window's bounding box takes in its subsurfaces, so it
+                // follows theirs too. A resize is settled only by the
+                // toplevel's own commit, the one that answers it.
                 window.on_commit();
-                self.settle_resize(&window);
+                if is_root {
+                    self.settle_resize(&window);
+                }
                 shell::id_of(&window)
             }
-            None => self.layer_committed(surface),
+            None if is_root => self.layer_committed(surface),
+            None => self.layer_id(&root),
         };
         #[cfg(feature = "xwayland")]
-        if id.is_none() && presented {
+        if id.is_none() && is_root && matches!(taken.own, damage::Buffer::New(_)) {
             with_states(surface, |states| {
                 states
                     .data_map
@@ -767,15 +750,25 @@ impl CompositorHandler for Compositor {
             });
         }
         if let Some(id) = id {
-            if presented {
-                self.presented.insert(id);
-            } else {
-                self.presented.remove(&id);
+            // Whether there is anything to look at is the root's own picture,
+            // and a commit that brought none leaves it as it was.
+            if is_root {
+                match taken.own {
+                    damage::Buffer::New(_) => {
+                        self.presented.insert(id);
+                    }
+                    damage::Buffer::Removed => {
+                        self.presented.remove(&id);
+                    }
+                    damage::Buffer::Unchanged => {}
+                }
             }
-            if !damaged.is_empty() {
+            // One frame for the whole commit, however many surfaces of the
+            // tree it changed.
+            if !taken.rects.is_empty() {
                 let history = self.damage.entry(id).or_default();
                 let generation = history.last().map_or(0, |(g, _)| *g) + 1;
-                history.extend(damaged.into_iter().map(|rect| (generation, rect)));
+                history.extend(taken.rects.into_iter().map(|rect| (generation, rect)));
                 if history.len() > DAMAGE_HISTORY {
                     history.drain(..history.len() - DAMAGE_HISTORY);
                 }
@@ -1147,6 +1140,9 @@ impl XdgActivationHandler for Compositor {
             tracing::debug!("activation refused: no recent input behind the token");
             return;
         }
+        // A client may name any surface it owns, and the window a subsurface
+        // belongs to is its tree's root: that is what is raised and focused.
+        let (surface, _) = damage::root_of(&surface);
         let Some(window) = self.window_for(&surface) else {
             return;
         };
@@ -1205,20 +1201,11 @@ delegate_cursor_shape!(Compositor);
 /// any compositor offering `cursor-shape-v1`, which names a tool's too.
 impl TabletSeatHandler for Compositor {}
 
-/// A smithay rectangle in the surface's own coordinates, divided by `scale`.
-fn to_rect<Kind>(rect: smithay::utils::Rectangle<i32, Kind>, scale: f64) -> Rect {
-    Rect::new(
-        f64::from(rect.loc.x) / scale,
-        f64::from(rect.loc.y) / scale,
-        f64::from(rect.loc.x + rect.size.w) / scale,
-        f64::from(rect.loc.y + rect.size.h) / scale,
-    )
-}
-
 /// The window geometry a client declared, in surface-local coordinates.
 ///
-/// Used as the extent of a commit that presented a buffer and described no
-/// damage. A client that has not declared one yet has nothing on screen for
+/// Used as the whole of a window, for a commit that changed it without saying
+/// where: a buffer whose size cannot be read, or a subsurface's picture taken
+/// away. A client that has not declared one yet has nothing on screen for
 /// damage to be about.
 pub(crate) fn declared_geometry(surface: &WlSurface) -> Option<Rect> {
     with_states(surface, |states| {
@@ -1227,6 +1214,6 @@ pub(crate) fn declared_geometry(surface: &WlSurface) -> Option<Rect> {
             .get::<SurfaceCachedState>()
             .current()
             .geometry
-            .map(|geometry| to_rect(geometry, 1.0))
+            .map(|geometry| damage::to_rect(geometry, 1.0))
     })
 }

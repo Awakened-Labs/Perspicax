@@ -38,6 +38,7 @@ mod access;
 pub mod act;
 mod backend;
 mod capture;
+mod damage;
 mod decorations;
 pub mod facts;
 mod focus;

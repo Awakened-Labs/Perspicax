@@ -183,6 +183,20 @@ impl Compositor {
         layer.user_data().get::<SurfaceId>().copied()
     }
 
+    /// The id of the layer surface that `surface` is, rearranging nothing:
+    /// for a commit on one of its subsurfaces, which changes what it shows
+    /// and not where it goes.
+    ///
+    /// Its own surface only, not its popups'. A popup has a tree of its own,
+    /// and damage in it is in the popup's coordinates, not the layer's.
+    pub(crate) fn layer_id(&self, surface: &WlSurface) -> Option<SurfaceId> {
+        self.space.outputs().find_map(|output| {
+            layer_map_for_output(output)
+                .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
+                .and_then(|layer| layer.user_data().get::<SurfaceId>().copied())
+        })
+    }
+
     #[cfg_attr(
         not(feature = "seat"),
         expect(dead_code, reason = "the seat's input path")

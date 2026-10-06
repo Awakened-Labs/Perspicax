@@ -322,6 +322,14 @@ signal for a different reason: it renders and no bridge can say what it drew.
 Telling those two apart is what a compositor is for, and it is the only honest
 trigger for a vision fallback.
 
+Damage is counted across a window's whole surface tree, where in the window it
+lands. Firefox draws every page into a subsurface and leaves its toplevel
+alone, so a canvas page's frames are its window's, and so are a video player's
+or a GTK 4 offloaded picture's. A frame is a commit that brought a new buffer or
+named what changed. One that asks for a frame callback and nothing else is not:
+loading a page, Firefox committed its subsurface 252 times and drew in 79 of
+them.
+
 ## Build
 
 ```sh
