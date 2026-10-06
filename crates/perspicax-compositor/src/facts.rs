@@ -27,7 +27,7 @@
 //! damage bookkeeping are for -- being *behind* is a state the index can detect
 //! and refuse on, whereas being *inconsistent* is not.
 
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 
 use perspicax_index::{HostFacts, SurfaceFacts, SurfaceKind};
 use perspicax_node::{Origin, Rect, SurfaceId, Vec2};
@@ -54,9 +54,33 @@ use crate::{
 #[derive(Debug, Clone, Default)]
 pub struct Facts {
     host: Arc<RwLock<HostFacts>>,
+    session: Arc<Mutex<Session>>,
+}
+
+/// Where this session's displays are: what a program has to be told to reach
+/// this compositor when it was not started by it.
+///
+/// Programs this compositor starts are told in their environment. Programs
+/// D-Bus starts on request -- a keyring's unlock prompt, a notification
+/// daemon, a portal -- are given the bus's environment instead, and that is
+/// the reader these facts are published for (issue #27).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionFacts {
+    /// The Wayland socket's name, as `WAYLAND_DISPLAY` says it, once the
+    /// socket is listening.
+    pub wayland_display: Option<String>,
     /// Xwayland's display number, once it is up: what `DISPLAY` must say
     /// for an X11 program to reach this compositor.
-    x11_display: Arc<RwLock<Option<u32>>>,
+    pub x11_display: Option<u32>,
+}
+
+/// The session's facts and everyone watching them, behind one lock, so that a
+/// watcher is told every change after the value it started from and none
+/// twice.
+#[derive(Debug, Default)]
+struct Session {
+    now: SessionFacts,
+    watchers: Vec<mpsc::Sender<SessionFacts>>,
 }
 
 impl Facts {
@@ -80,7 +104,7 @@ impl Facts {
     pub fn of(facts: HostFacts) -> Self {
         Self {
             host: Arc::new(RwLock::new(facts)),
-            x11_display: Arc::default(),
+            session: Arc::default(),
         }
     }
 
@@ -113,18 +137,52 @@ impl Facts {
     /// feature.
     #[must_use]
     pub fn x11_display(&self) -> Option<u32> {
-        *self
-            .x11_display
-            .read()
+        self.session().x11_display
+    }
+
+    /// Where this session's displays are, as they stand.
+    #[must_use]
+    pub fn session(&self) -> SessionFacts {
+        self.session
+            .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .now
+            .clone()
+    }
+
+    /// Every change to [`session`](Self::session) from now on, beginning
+    /// with the facts as they stand.
+    ///
+    /// A channel rather than a callback, because the compositor's thread is
+    /// the one that publishes, and it must never wait on whoever is watching:
+    /// a slow watcher only lets changes queue, and one that has gone is
+    /// forgotten at the next change.
+    #[must_use]
+    pub fn watch_session(&self) -> mpsc::Receiver<SessionFacts> {
+        let (tell, watch) = mpsc::channel();
+        let mut session = self.session.lock().unwrap_or_else(PoisonError::into_inner);
+        // Under the lock, so no change can fall between the facts as they
+        // stand and the first one this watcher is told.
+        let _ = tell.send(session.now.clone());
+        session.watchers.push(tell);
+        watch
+    }
+
+    /// Change the session's facts, and tell every watcher if that changed
+    /// anything.
+    pub(crate) fn publish_session(&self, change: impl FnOnce(&mut SessionFacts)) {
+        let mut session = self.session.lock().unwrap_or_else(PoisonError::into_inner);
+        let Session { now, watchers } = &mut *session;
+        let before = now.clone();
+        change(now);
+        if *now != before {
+            watchers.retain(|watcher| watcher.send(now.clone()).is_ok());
+        }
     }
 
     #[cfg(feature = "xwayland")]
     pub(crate) fn publish_x11_display(&self, display: Option<u32>) {
-        *self
-            .x11_display
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = display;
+        self.publish_session(|session| session.x11_display = display);
     }
 }
 
@@ -531,5 +589,48 @@ mod tests {
 
         assert_eq!(reader.read().generation(), 7);
         assert_eq!(reader.read().surfaces().len(), 1);
+    }
+
+    /// A watcher of the session hears where things stood when it began, then
+    /// each change once, and nothing for a publication that changed nothing:
+    /// it is what tells the session bus, and a repeated or a missed
+    /// `WAYLAND_DISPLAY` would be a program D-Bus starts finding no display.
+    #[test]
+    fn a_session_watcher_hears_the_start_then_each_change_once() {
+        let facts = Facts::new();
+        facts.publish_session(|session| session.wayland_display = Some("wayland-1".into()));
+        let watch = facts.watch_session();
+
+        facts.publish_session(|session| session.wayland_display = Some("wayland-1".into()));
+        facts.publish_session(|session| session.x11_display = Some(2));
+
+        let heard: Vec<_> = watch.try_iter().collect();
+        assert_eq!(
+            heard,
+            [
+                SessionFacts {
+                    wayland_display: Some("wayland-1".into()),
+                    x11_display: None,
+                },
+                SessionFacts {
+                    wayland_display: Some("wayland-1".into()),
+                    x11_display: Some(2),
+                },
+            ]
+        );
+        assert_eq!(facts.x11_display(), Some(2));
+    }
+
+    /// A watcher that has gone is forgotten rather than told forever.
+    #[test]
+    fn a_watcher_that_has_gone_is_forgotten() {
+        let facts = Facts::new();
+        drop(facts.watch_session());
+        let kept = facts.watch_session();
+
+        facts.publish_session(|session| session.x11_display = Some(0));
+
+        assert_eq!(facts.session.lock().unwrap().watchers.len(), 1);
+        assert_eq!(kept.try_iter().count(), 2);
     }
 }

@@ -34,8 +34,9 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
-use perspicax::{desk::Desk, keep::keep_current, observe, session};
+use perspicax::{bus, desk::Desk, keep::keep_current, observe, session};
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop, Virtual};
+use tracing_subscriber::{EnvFilter, filter::LevelFilter};
 
 #[derive(Parser)]
 #[command(
@@ -131,17 +132,31 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+
     // STDERR, AND NOT STDOUT. Under `--mcp` stdout is the JSON-RPC wire, and a
     // single log line written to it corrupts a frame -- which arrives at the
     // client as a parse error with nothing in it pointing back here. Stderr
     // unconditionally rather than only under `--mcp`, because a log destination
     // that depends on a flag is one somebody adds a `println!` next to.
+    //
+    // With no `RUST_LOG`, a person's session says its warnings: one of them
+    // is the only word anywhere on why a keyring lookup hangs (issue #27).
+    // Headless says only errors, as it always has.
+    let quiet = if cli.seat {
+        LevelFilter::WARN
+    } else {
+        LevelFilter::ERROR
+    };
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(quiet.into())
+                .from_env_lossy(),
+        )
         .init();
 
-    let cli = Cli::parse();
     let backend = if cli.seat {
         Backend::Seat
     } else {
@@ -169,6 +184,16 @@ fn main() -> Result<()> {
         tracing::warn!("{error:#}");
     }
 
+    // A person's session says what it is, to its programs and to the session
+    // bus alike. Headless, the agent's programs live in whatever desktop the
+    // run was started from, and telling its bus anything would send that
+    // desktop's portals and notifications to a compositor nobody can see.
+    let desktop = if cli.seat {
+        session::desktop_env(|key| std::env::var(key).ok())
+    } else {
+        Vec::new()
+    };
+
     let config = Config {
         backend,
         spawn: cli
@@ -181,7 +206,7 @@ fn main() -> Result<()> {
                     .collect::<Vec<_>>()
             })
             .collect(),
-        env: session::accessibility_env(),
+        env: [session::accessibility_env(), desktop.clone()].concat(),
         run_for: cli.run_for.map(Duration::from_secs_f64),
         config: cli
             .seat
@@ -199,6 +224,10 @@ fn main() -> Result<()> {
     // one: `Requests` hands its receiving end to exactly one loop, and a second
     // channel would be a `Host` nobody is listening to.
     let requests = Requests::new();
+
+    if cli.seat {
+        bus::start(bus::Options::session(desktop), facts.watch_session());
+    }
 
     if let Some(after) = cli.dump_tree.map(Duration::from_secs_f64) {
         dump_when_ready(facts.clone(), stop.clone(), after);
