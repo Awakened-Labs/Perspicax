@@ -228,11 +228,13 @@ fn find(beside: Option<&Path>, path: Option<&OsStr>) -> Option<PathBuf> {
         .into_iter()
         .chain(on_path)
         .map(|directory| directory.join(PROGRAM))
-        .find(|candidate| {
-            candidate
-                .metadata()
-                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        })
+        .find(|candidate| runnable(candidate))
+}
+
+/// Whether `path` is a file that may be run.
+pub(super) fn runnable(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(test)]

@@ -1,10 +1,11 @@
 //! The open menus, drawn over a clear surface the size of the monitor.
 //!
-//! Each menu is a light panel with a thin border, square-cornered so that
-//! all of it is opaque and the compositor can say so to an agent. A line is
+//! Each menu is a panel in the theme's colours with a thin border,
+//! square-cornered so that all of it is opaque and the compositor can say so
+//! to an agent. A line is
 //! an icon, a label cut short if it must be, and an arrow for a submenu.
-//! The line the keyboard is on is drawn in the highlight colour, and each
-//! line whose submenu is open in a paler one. What a person typed sits on a
+//! The line the keyboard is on is drawn in the accent, and each line whose
+//! submenu is open in a paler one. What a person typed sits on a
 //! line of its own above the rest, behind a magnifying glass; the start
 //! menu's line is there before anything is typed, saying what it is for.
 //! In a tray icon's menu, an item its program greyed out is written faint,
@@ -14,37 +15,59 @@
 
 use tiny_skia::{LineCap, PathBuilder, PixmapMut, Stroke, Transform};
 
+use perspicax_config::{Palette, Role};
+
 use super::{
-    fill,
+    colour, fill,
     icons::{self, Images},
     scaled, solid,
     text::Text,
 };
 use crate::{
     layout::{
-        Rect, TEXT,
+        Rect,
         menu::{ARROW, BORDER, GAP, ICON, INSET},
     },
     model::menu::Does,
     update::View,
 };
 
-/// A menu's colours, as premultiplied RGBA. Light, after Breeze.
-pub(crate) const BACKGROUND: [u8; 4] = [0xfc, 0xfc, 0xfc, 0xff];
-pub(crate) const EDGE: [u8; 4] = [0xa0, 0xa4, 0xa8, 0xff];
-pub(crate) const INK: [u8; 4] = [0x23, 0x26, 0x29, 0xff];
-/// The line the keyboard is on, and the ink on it.
-pub(crate) const HIGHLIGHT: [u8; 4] = [0x3d, 0xae, 0xe9, 0xff];
-pub(crate) const ON_HIGHLIGHT: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
-/// A line whose submenu is open, while the keyboard is in the submenu.
-pub(crate) const OPENED: [u8; 4] = [0xc4, 0xe5, 0xf7, 0xff];
-pub(crate) const RULE: [u8; 4] = [0xdc, 0xde, 0xe0, 0xff];
-/// Behind what a person typed.
-pub(crate) const TYPED: [u8; 4] = [0xef, 0xf0, 0xf1, 0xff];
-/// What an empty search line says, and its ink, which is also a greyed-out
-/// item's.
+/// What an empty search line says.
 const HINT: &str = "Type to search";
-const HINT_INK: [u8; 4] = [0x7f, 0x8c, 0x8d, 0xff];
+
+/// A menu's colours, from the theme, as fills take them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Colours {
+    pub(crate) background: [u8; 4],
+    pub(crate) edge: [u8; 4],
+    pub(crate) ink: [u8; 4],
+    /// The line the keyboard is on, and the ink on it.
+    pub(crate) highlight: [u8; 4],
+    pub(crate) on_highlight: [u8; 4],
+    /// A line whose submenu is open, while the keyboard is in the submenu.
+    pub(crate) opened: [u8; 4],
+    pub(crate) rule: [u8; 4],
+    /// Behind what a person typed.
+    pub(crate) typed: [u8; 4],
+    /// The search line's hint, and a greyed-out item.
+    pub(crate) hint: [u8; 4],
+}
+
+impl Colours {
+    pub(crate) fn of(palette: &Palette) -> Self {
+        Self {
+            background: colour(palette, Role::Menu),
+            edge: colour(palette, Role::MenuEdge),
+            ink: colour(palette, Role::MenuInk),
+            highlight: colour(palette, Role::Accent),
+            on_highlight: colour(palette, Role::OnAccent),
+            opened: colour(palette, Role::MenuOpened),
+            rule: colour(palette, Role::MenuRule),
+            typed: colour(palette, Role::MenuTyped),
+            hint: colour(palette, Role::MenuHint),
+        }
+    }
+}
 
 /// Draw `view` on `canvas`, a surface's pixels at `scale` times its size.
 pub(crate) fn paint(
@@ -53,22 +76,25 @@ pub(crate) fn paint(
     scale: u32,
     text: &mut Text,
     images: &mut Images,
+    palette: &Palette,
 ) {
     canvas.fill(tiny_skia::Color::TRANSPARENT);
+    let colours = Colours::of(palette);
     let px = |rect: Rect| scaled(rect, scale);
     let s = scale as f32;
+    let size = text.size() * s;
     for menu in &view.menus {
-        fill(canvas, px(menu.rect), EDGE);
-        fill(canvas, px(inset(menu.rect, BORDER)), BACKGROUND);
+        fill(canvas, px(menu.rect), colours.edge);
+        fill(canvas, px(inset(menu.rect, BORDER)), colours.background);
         if let (Some(header), Some(query)) = (menu.header, view.query) {
-            fill(canvas, px(header), TYPED);
-            magnifier(canvas, px(icon_box(header)), s);
+            fill(canvas, px(header), colours.typed);
+            magnifier(canvas, px(icon_box(header)), s, colours.ink);
             let (words, ink) = if query.is_empty() {
-                (HINT, HINT_INK)
+                (HINT, colours.hint)
             } else {
-                (query, INK)
+                (query, colours.ink)
             };
-            text.write(canvas, words, px(label_box(header, false)), TEXT * s, ink);
+            text.write(canvas, words, px(label_box(header, false)), size, ink);
         }
         for line in &menu.lines {
             if let Does::Separator = line.item.does {
@@ -78,19 +104,19 @@ pub(crate) fn paint(
                     line.rect.w - 2 * INSET,
                     1,
                 );
-                fill(canvas, px(rule), RULE);
+                fill(canvas, px(rule), colours.rule);
                 continue;
             }
             let ink = if line.focused {
-                fill(canvas, px(line.rect), HIGHLIGHT);
-                ON_HIGHLIGHT
+                fill(canvas, px(line.rect), colours.highlight);
+                colours.on_highlight
             } else if !line.item.choosable() {
-                HINT_INK
+                colours.hint
             } else {
                 if line.selected {
-                    fill(canvas, px(line.rect), OPENED);
+                    fill(canvas, px(line.rect), colours.opened);
                 }
-                INK
+                colours.ink
             };
             #[cfg(feature = "tray")]
             if let Does::Tell(crate::model::menu::Choice {
@@ -112,7 +138,7 @@ pub(crate) fn paint(
                 canvas,
                 &line.item.label,
                 px(label_box(line.rect, submenu)),
-                TEXT * s,
+                size,
                 ink,
             );
             if submenu {
@@ -212,7 +238,7 @@ fn mark(
 }
 
 /// A magnifying glass, centred in `place`.
-fn magnifier(canvas: &mut PixmapMut<'_>, place: Rect, s: f32) {
+fn magnifier(canvas: &mut PixmapMut<'_>, place: Rect, s: f32, ink: [u8; 4]) {
     let (cx, cy) = (
         place.x as f32 + place.w as f32 / 2.0 - 1.5 * s,
         place.y as f32 + place.h as f32 / 2.0 - 1.5 * s,
@@ -223,7 +249,7 @@ fn magnifier(canvas: &mut PixmapMut<'_>, place: Rect, s: f32) {
     let reach = radius * std::f32::consts::FRAC_1_SQRT_2;
     path.move_to(cx + reach, cy + reach);
     path.line_to(cx + reach + 4.0 * s, cy + reach + 4.0 * s);
-    stroke(canvas, path, s, INK);
+    stroke(canvas, path, s, ink);
 }
 
 fn stroke(canvas: &mut PixmapMut<'_>, path: PathBuilder, s: f32, ink: [u8; 4]) {
@@ -283,7 +309,18 @@ mod tests {
         state
     }
 
+    /// The default theme's menu colours: what menus were before there were
+    /// themes.
+    const BACKGROUND: [u8; 4] = [0xfc, 0xfc, 0xfc, 0xff];
+    const EDGE: [u8; 4] = [0xa0, 0xa4, 0xa8, 0xff];
+    const HIGHLIGHT: [u8; 4] = [0x3d, 0xae, 0xe9, 0xff];
+    const OPENED: [u8; 4] = [0xc4, 0xe5, 0xf7, 0xff];
+
     fn painted(state: &State, scale: u32) -> Pixmap {
+        painted_in(state, scale, &Palette::default())
+    }
+
+    fn painted_in(state: &State, scale: u32, palette: &Palette) -> Pixmap {
         let mut picture = Pixmap::new(400 * scale, 300 * scale).expect("a picture");
         let view = state.view().expect("open");
         paint(
@@ -292,8 +329,46 @@ mod tests {
             scale,
             &mut Text::without_fonts(),
             &mut Images::default(),
+            palette,
         );
         picture
+    }
+
+    #[test]
+    fn the_default_theme_paints_menus_as_they_were_and_another_its_own() {
+        let colours = Colours::of(&Palette::default());
+        assert_eq!(
+            [
+                colours.background,
+                colours.edge,
+                colours.ink,
+                colours.highlight,
+                colours.on_highlight,
+                colours.opened,
+                colours.rule,
+                colours.typed,
+                colours.hint,
+            ],
+            [
+                BACKGROUND,
+                EDGE,
+                [0x23, 0x26, 0x29, 0xff],
+                HIGHLIGHT,
+                [0xff, 0xff, 0xff, 0xff],
+                OPENED,
+                [0xdc, 0xde, 0xe0, 0xff],
+                [0xef, 0xf0, 0xf1, 0xff],
+                [0x7f, 0x8c, 0x8d, 0xff],
+            ]
+        );
+
+        let state = state();
+        let menu = state.view().unwrap().menus[0].rect;
+        let dark = perspicax_config::Builtin::BreezeDark.palette();
+        assert_eq!(
+            pixel(&painted_in(&state, 1, &dark), menu.x + 2, menu.y + 2),
+            colour(&dark, Role::Menu)
+        );
     }
 
     fn pixel(picture: &Pixmap, x: i32, y: i32) -> [u8; 4] {

@@ -24,12 +24,13 @@ use crate::{
 };
 
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_output, delegate_primary_selection,
-    delegate_seat, delegate_shm, delegate_xdg_activation, delegate_xdg_shell,
+    delegate_compositor, delegate_cursor_shape, delegate_data_device, delegate_output,
+    delegate_primary_selection, delegate_seat, delegate_shm, delegate_xdg_activation,
+    delegate_xdg_shell,
     desktop::{PopupKind, PopupManager, Space, Window},
     input::{
         Seat, SeatHandler, SeatState,
-        keyboard::{KeyboardHandle, XkbConfig},
+        keyboard::{KeyboardHandle, LedState, XkbConfig},
         pointer::{CursorImageStatus, GrabStartData, PointerHandle},
     },
     reexports::{
@@ -50,6 +51,7 @@ use smithay::{
             BufferAssignment, CompositorClientState, CompositorHandler, CompositorState, Damage,
             SurfaceAttributes, TraversalAction, with_states, with_surface_tree_downward,
         },
+        cursor_shape::CursorShapeManagerState,
         idle_inhibit::IdleInhibitManagerState,
         idle_notify::IdleNotifierState,
         output::{OutputHandler, OutputManagerState},
@@ -70,6 +72,7 @@ use smithay::{
             XdgShellState,
         },
         shm::{ShmHandler, ShmState},
+        tablet_manager::TabletSeatHandler,
         xdg_activation::{
             XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
         },
@@ -105,6 +108,11 @@ pub struct Compositor {
     /// should start complaining the moment that makes it live.
     #[expect(dead_code, reason = "RAII handle for the xdg_output global")]
     pub(crate) output_manager: OutputManagerState,
+    /// `wp_cursor_shape_v1`: a client names the pointer it wants and this
+    /// compositor draws it from the theme's cursor, so every application's
+    /// pointer is the same one. Held for its global, as the one above is.
+    #[expect(dead_code, reason = "RAII handle for the cursor-shape global")]
+    pub(crate) cursor_shape: CursorShapeManagerState,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) data_device: DataDeviceState,
     pub(crate) seat: Seat<Self>,
@@ -188,6 +196,11 @@ pub struct Compositor {
     /// Which windows are tabs of one another, and which tab of each group is
     /// in front. See `shell::tabs`.
     pub(crate) tabs: perspicax_policy::Groups<SurfaceId>,
+    /// Whose the keyboard layout is, and each window's own when it is
+    /// theirs. See `crate::keyboard`.
+    pub(crate) layout_memory: perspicax_policy::LayoutMemory<SurfaceId>,
+    /// The names the keyboard's keymap was compiled from.
+    pub(crate) keymap: crate::Keymap,
     /// The window being moved with the pointer, while it is: an edge flip
     /// takes it along to the next workspace.
     pub(crate) dragging: Option<Framed>,
@@ -241,13 +254,6 @@ pub struct Compositor {
     #[cfg(feature = "capture")]
     pub(crate) screencopy: crate::screencopy::Screencopy,
     /// The event loop, for the handlers that must schedule work on it.
-    #[cfg_attr(
-        not(any(feature = "xwayland", feature = "capture")),
-        expect(
-            dead_code,
-            reason = "Xwayland's selections, and screencopy's waiting frames"
-        )
-    )]
     pub(crate) loop_handle: LoopHandle<'static, Self>,
     /// How to start a program against this compositor. Set by `run` once the
     /// socket exists, so `None` only before any client could connect.
@@ -306,6 +312,7 @@ impl Compositor {
             xdg_shell: XdgShellState::new::<Self>(display),
             shm: ShmState::new::<Self>(display, Vec::new()),
             output_manager: OutputManagerState::new_with_xdg_output::<Self>(display),
+            cursor_shape: CursorShapeManagerState::new::<Self>(display),
             data_device: DataDeviceState::new::<Self>(display),
             seat_state,
             seat,
@@ -316,7 +323,7 @@ impl Compositor {
             dmabuf: smithay::wayland::dmabuf::DmabufState::new(),
             keyboard,
             pointer,
-            keys: Keys::from_default_layout(),
+            keys: Keys::new(&crate::Keymap::default()),
             damage: HashMap::new(),
             presented: HashSet::new(),
             focused_at: HashMap::new(),
@@ -330,6 +337,8 @@ impl Compositor {
             parked: Vec::new(),
             workspaces: Workspaces::new(workspace_shape),
             tabs: perspicax_policy::Groups::default(),
+            layout_memory: perspicax_policy::LayoutMemory::default(),
+            keymap: crate::Keymap::default(),
             dragging: None,
             snap_preview: None,
             #[cfg(feature = "seat")]
@@ -993,6 +1002,14 @@ impl SeatHandler for Compositor {
             .and_then(|surface| self.window_for(surface))
             .and_then(|window| shell::id_of(&window));
         self.stack_fullscreen(window);
+        // The window in use is typed in its own layout, when each has one.
+        // Not here: smithay calls this from inside `set_focus`, holding the
+        // keyboard, and reading or switching its layout now would wait on
+        // that lock for ever. Once the loop is idle the keyboard is free.
+        if self.layout_memory.switching() == perspicax_policy::Switching::Window {
+            self.loop_handle
+                .insert_idle(move |state| state.follow_layout(window));
+        }
 
         if !self.backend.has_person() {
             return;
@@ -1013,6 +1030,13 @@ impl SeatHandler for Compositor {
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
         self.cursor = image;
         self.backend.redraw();
+    }
+
+    /// Lock keys light their LEDs, on every keyboard at once: one xkb state
+    /// serves them all, so Caps Lock pressed on a laptop's keyboard lights
+    /// a plugged-in one's too.
+    fn led_state_changed(&mut self, _seat: &Seat<Self>, leds: LedState) {
+        self.backend.light(leds);
     }
 }
 
@@ -1153,6 +1177,11 @@ delegate_shm!(Compositor);
 delegate_xdg_shell!(Compositor);
 delegate_primary_selection!(Compositor);
 delegate_xdg_activation!(Compositor);
+delegate_cursor_shape!(Compositor);
+
+/// No tablets, so nothing to say about a tablet tool's pointer: required of
+/// any compositor offering `cursor-shape-v1`, which names a tool's too.
+impl TabletSeatHandler for Compositor {}
 
 /// A smithay rectangle in the surface's own coordinates, divided by `scale`.
 fn to_rect<Kind>(rect: smithay::utils::Rectangle<i32, Kind>, scale: f64) -> Rect {

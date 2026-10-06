@@ -8,6 +8,10 @@
 //! rule takes it back, and while the session is locked the shell is told
 //! nothing and may end nothing.
 //!
+//! From version 2 the shell is told the keyboard's layouts and the one in
+//! use, whatever switched it, and may switch it; a shell bound at version 1
+//! hears none of it.
+//!
 //! The client is this test binary, so a rule naming `current_exe()` admits
 //! it. Like the other live tests it binds a real Wayland socket, so it needs
 //! `XDG_RUNTIME_DIR`, and is `#[ignore]`d for `ci/live-tests.sh` to run.
@@ -20,7 +24,7 @@ use std::{
 };
 
 use common::{Session, Told, advertised, until};
-use perspicax_compositor::{Backend, Command, Host, Virtual};
+use perspicax_compositor::{Backend, Command, Host, Keymap, Virtual};
 use perspicax_index::{Action as Verb, PointerButton};
 use perspicax_node::Rect;
 use perspicax_policy::{Access, Action, Place, Program, Protocol, Rule, Shape, Side};
@@ -200,4 +204,71 @@ fn exit_session_ends_a_headless_session() {
     }
 
     session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_shell_is_told_the_layouts_and_the_one_in_use_and_may_switch_it() {
+    let session = Session::start("shell-layouts", backend(Access::open()));
+    session.command(Command::Keymap(Keymap {
+        layout: "us,ru".to_owned(),
+        ..Keymap::default()
+    }));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_shell(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| {
+        desk.layouts.len() == 2 && desk.active_layout == Some(0)
+    });
+    let named = |name: &str, short: &str| (name.to_owned(), short.to_owned());
+    assert_eq!(
+        desk.layouts,
+        [named("English (US)", "US"), named("Russian", "RU")]
+    );
+
+    // A switch from anywhere reaches it: a binding's, then its own.
+    session.perform(Action::Layout(2));
+    until(&mut queue, &mut desk, |desk| desk.active_layout == Some(1));
+    let shell = desk.shell.clone().expect("bound");
+    shell.set_layout(0);
+    until(&mut queue, &mut desk, |desk| desk.active_layout == Some(0));
+    // One past the last is no layout: nothing happens.
+    let before = desk.layout_events;
+    shell.set_layout(2);
+    settle(&mut queue, &mut desk);
+    assert_eq!(desk.layout_events, before, "no layout 2 to switch to");
+    session.perform(Action::Layout(2));
+    until(&mut queue, &mut desk, |desk| desk.active_layout == Some(1));
+
+    // While locked it is told nothing; once unlocked, what changed.
+    desk.lock(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.locked);
+    let before = desk.layout_events;
+    session.perform(Action::Layout(1));
+    settle(&mut queue, &mut desk);
+    assert_eq!(desk.layout_events, before, "nothing while locked");
+    desk.unlock();
+    until(&mut queue, &mut desk, |desk| desk.active_layout == Some(0));
+    assert_eq!(
+        desk.layout_events,
+        before + 1,
+        "only the one in use changed"
+    );
+
+    // A shell bound at version 1 hears none of it.
+    let (mut old, mut old_queue, old_qh, old_globals) = session.client();
+    old.bind_shell_v1(&old_globals, &old_qh);
+    session.perform(Action::Layout(2));
+    until(&mut queue, &mut desk, |desk| desk.active_layout == Some(1));
+    settle(&mut old_queue, &mut old);
+    assert_eq!(old.layout_events, 0);
+
+    session.stop(((desk, queue), (old, old_queue)));
+}
+
+/// A few turns of the compositor's loop, for what would be sent to arrive.
+fn settle<D>(queue: &mut wayland_client::EventQueue<D>, state: &mut D) {
+    for _ in 0..3 {
+        queue.roundtrip(state).expect("dispatch");
+        thread::sleep(Duration::from_millis(30));
+    }
 }

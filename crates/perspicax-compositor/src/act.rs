@@ -19,7 +19,7 @@
 //!   surface, and the compositor supplies the origin. That translation happens
 //!   here, once, in [`Compositor::act`].
 
-use std::time::Instant;
+use std::{collections::HashMap, time::Instant};
 
 use perspicax_index::{Action, PointerButton};
 use perspicax_node::{Rect, SurfaceId};
@@ -34,7 +34,7 @@ use smithay::{
     utils::{Logical, Rectangle, SERIAL_COUNTER},
 };
 
-use crate::{framed::Framed, state::Compositor};
+use crate::{Keymap, framed::Framed, state::Compositor};
 
 /// What input lands on: an application's window, or a layer-shell surface
 /// (a panel, a wallpaper, a menu) where it sits in global space.
@@ -57,12 +57,6 @@ const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
 
-/// The shifted layout level. Levels 0 and 1 are unmodified and shifted on every
-/// layout, and this crate goes no further: reaching level 2 means guessing which
-/// of `AltGr`, `ISO_Level3_Shift` or a compose sequence this particular keymap
-/// wants. A character we cannot type without guessing is refused by name.
-const LEVEL_SHIFTED: u32 = 1;
-
 /// Why an action could not be dispatched.
 ///
 /// These sit below `perspicax_index::Refusal`, which answers the different
@@ -76,10 +70,10 @@ pub enum ActError {
     /// The seat has no keyboard, which means xkb could not compile a keymap.
     #[error("the seat has no keyboard: xkb compiled no keymap")]
     NoKeyboard,
-    /// The character has no key on this layout, at a level we will press
-    /// without guessing. Named rather than skipped: typing most of a string and
+    /// No layout of this keyboard has a key for the character, alone or with
+    /// Shift. Named rather than skipped: typing most of a string and
     /// reporting success is the failure an agent cannot detect.
-    #[error("no key on this layout produces {0:?}")]
+    #[error("no layout of this keyboard produces {0:?}")]
     Untypeable(char),
     /// The person at this seat used the keyboard or pointer moments ago.
     /// Synthetic input now would race theirs: a `Focus` would pull the
@@ -131,14 +125,23 @@ pub struct Dispatched {
 /// A character's key, and whether it needs shift held.
 type Stroke = (Keycode, bool);
 
-/// Which key produces which character, on this seat's keymap.
+/// Which key produces which character, in every layout of this seat's
+/// keymap.
 ///
-/// Built once, because it is a pure function of the layout, and built by
+/// Built once per keymap, because it is a pure function of it, and built by
 /// *reversal*: `KeyboardHandle::input` takes a keycode, while an agent asks to
 /// type a string. Everything between those two facts is this table.
+///
+/// Only Shift is ever held. Reaching further means guessing which of `AltGr`,
+/// `ISO_Level3_Shift` or a compose sequence this particular keymap wants, and
+/// a character we cannot type without guessing is refused by name.
 pub(crate) struct Keys {
-    /// Every character the layout can produce without guessing at a modifier.
-    strokes: std::collections::HashMap<char, Stroke>,
+    /// For each layout, in the keymap's order, with Caps Lock off and then
+    /// on: every character a key makes alone or with Shift, and that key.
+    layouts: Vec<[HashMap<char, Stroke>; 2]>,
+    /// What each key makes with Shift held, by layout: where a binding finds
+    /// AZERTY's digits. See `perspicax_policy::candidates`.
+    shifted: HashMap<(u32, Keycode), Keysym>,
     /// The physical shift key, so a shifted character can hold it down. Pressed
     /// as a real key rather than by asserting a modifier state, because that is
     /// what a keyboard does and what smithay's modifier tracking follows.
@@ -146,40 +149,25 @@ pub(crate) struct Keys {
 }
 
 impl Keys {
-    /// Walk a keymap and record what each key produces.
-    ///
-    /// The keymap is compiled from the same empty RMLVO names as
-    /// `XkbConfig::default()`, which is what the seat was built with, so the
-    /// two cannot disagree about what is on the keyboard.
-    pub(crate) fn from_default_layout() -> Self {
-        Self::from_names("", "", "", "", None)
-    }
-
-    /// The same walk over a keymap compiled from these RMLVO names: the ones
-    /// the seat's keyboard was just given. Rebuilt whenever the layout
-    /// changes, because a table describing the previous layout would type
-    /// the wrong characters -- `y` for `z` on a German keyboard -- and report
-    /// success.
-    pub(crate) fn from_names(
-        rules: &str,
-        model: &str,
-        layout: &str,
-        variant: &str,
-        options: Option<String>,
-    ) -> Self {
+    /// The table for a keymap compiled from these names: the ones the seat's
+    /// keyboard was just given. Rebuilt whenever they change, because a
+    /// table describing the previous keymap would type the wrong characters
+    /// -- `y` for `z` on a German keyboard -- and report success.
+    pub(crate) fn new(names: &Keymap) -> Self {
         let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
         let Some(keymap) = xkb::Keymap::new_from_names(
             &context,
-            rules,
-            model,
-            layout,
-            variant,
-            options,
+            &names.rules,
+            &names.model,
+            &names.layout,
+            &names.variant,
+            names.options.clone(),
             xkb::COMPILE_NO_FLAGS,
         ) else {
             tracing::warn!("no keymap: typing will refuse every character");
             return Self {
-                strokes: std::collections::HashMap::new(),
+                layouts: Vec::new(),
+                shifted: HashMap::new(),
                 shift: None,
             };
         };
@@ -188,60 +176,108 @@ impl Keys {
 
     /// The reversal itself, separated so a test can drive it with a keymap it
     /// chose rather than whichever one this machine happens to default to.
+    ///
+    /// Each key is asked what it makes rather than read off its levels, with
+    /// an xkb state in each layout, Shift up and down, Caps Lock off and on.
+    /// That is how the client will read it, so the key types, the groups a
+    /// key without its own falls back to, and what Caps Lock does to each
+    /// key are xkb's answer and not a guess made here.
     fn from_keymap(keymap: &xkb::Keymap) -> Self {
-        let mut strokes = std::collections::HashMap::new();
-        let mut shift = None;
+        let mask = |name| match keymap.mod_get_index(name) {
+            xkb::MOD_INVALID => 0,
+            index => 1 << index,
+        };
+        let (shift_mask, caps_mask) = (mask(xkb::MOD_NAME_SHIFT), mask(xkb::MOD_NAME_CAPS));
+        let keys: Vec<Keycode> = (keymap.min_keycode().raw()..=keymap.max_keycode().raw())
+            .map(Keycode::new)
+            .collect();
+        let mut state = xkb::State::new(keymap);
+        let mut made = |layout, caps, shifted| -> Vec<Keysym> {
+            let depressed = if shifted { shift_mask } else { 0 };
+            let locked = if caps { caps_mask } else { 0 };
+            state.update_mask(depressed, 0, locked, 0, 0, layout);
+            keys.iter().map(|&key| state.key_get_one_sym(key)).collect()
+        };
 
-        for raw in keymap.min_keycode().raw()..=keymap.max_keycode().raw() {
-            let key = Keycode::new(raw);
-            let levels = keymap.num_levels_for_key(key, 0);
-
-            for level in 0..levels {
-                let Some(&sym) = keymap.key_get_syms_by_level(key, 0, level).first() else {
-                    continue;
-                };
-
-                if sym == Keysym::Shift_L {
-                    shift.get_or_insert(key);
+        let mut layouts = Vec::new();
+        let mut shifted = HashMap::new();
+        for layout in 0..keymap.num_layouts() {
+            let mut tables = [HashMap::new(), HashMap::new()];
+            for (table, caps) in tables.iter_mut().zip([false, true]) {
+                let alone = made(layout, caps, false);
+                let with_shift = made(layout, caps, true);
+                for ((&key, &plain), &upper) in keys.iter().zip(&alone).zip(&with_shift) {
+                    if !caps {
+                        shifted.insert((layout, key), upper);
+                    }
+                    // First key wins. A layout can produce one character
+                    // from several keys -- the numeric keypad being the
+                    // obvious case -- and the lower keycode is the
+                    // main-block one.
+                    for (sym, shift) in [(plain, false), (upper, true)] {
+                        if let Some(ch) = text(sym) {
+                            table.entry(ch).or_insert((key, shift));
+                        }
+                    }
                 }
-
-                // Above shifted, the modifier needed stops being knowable
-                // without guessing. See `LEVEL_SHIFTED`.
-                if level > LEVEL_SHIFTED {
-                    continue;
-                }
-
-                let Some(ch) = char::from_u32(xkb::keysym_to_utf32(sym)) else {
-                    continue;
-                };
-                // Control characters have keysyms and are not text. `\n` is the
-                // exception worth keeping: an agent asking to type a newline
-                // means Return, and Return is a key.
-                if ch.is_control() && ch != '\n' {
-                    continue;
-                }
-
-                // First key wins. A layout can produce one character from
-                // several keys -- the numeric keypad being the obvious case --
-                // and the lower keycode is the main-block one.
-                strokes.entry(ch).or_insert((key, level == LEVEL_SHIFTED));
             }
+            layouts.push(tables);
         }
-
-        Self { strokes, shift }
+        let shift = keys.iter().copied().find(|&key| {
+            keymap
+                .key_get_syms_by_level(key, 0, 0)
+                .contains(&Keysym::Shift_L)
+        });
+        Self {
+            layouts,
+            shifted,
+            shift,
+        }
     }
 
-    /// The key that produces this character, if any.
-    fn stroke(&self, ch: char) -> Option<Stroke> {
-        self.strokes.get(&ch).copied()
+    /// The layout and key that type this character: the layout in use if it
+    /// has one, else the first that does, with Caps Lock as it is.
+    fn stroke(&self, ch: char, active: u32, caps: bool) -> Option<(u32, Stroke)> {
+        let find = |(layout, tables): (u32, &[HashMap<char, Stroke>; 2])| {
+            tables[usize::from(caps)]
+                .get(&ch)
+                .map(|&stroke| (layout, stroke))
+        };
+        let numbered = || (0..).zip(&self.layouts);
+        numbered()
+            .filter(|&(layout, _)| layout == active)
+            .chain(numbered())
+            .find_map(find)
     }
 
-    /// How many distinct characters this layout can produce. Diagnostics, and
-    /// the assertion a test about the table's completeness needs.
+    /// What this key makes with Shift held in this layout.
+    #[cfg_attr(
+        not(any(feature = "seat", test)),
+        expect(dead_code, reason = "the seat's bindings")
+    )]
+    pub(crate) fn shifted(&self, layout: u32, key: Keycode) -> Option<Keysym> {
+        self.shifted.get(&(layout, key)).copied()
+    }
+
+    /// How many distinct characters this layout can produce, with Caps Lock
+    /// off. Diagnostics, and the assertion a test about the table's
+    /// completeness needs.
     #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.strokes.len()
+    pub(crate) fn len(&self, layout: usize) -> usize {
+        self.layouts.get(layout).map_or(0, |tables| tables[0].len())
     }
+}
+
+/// The character a keysym types, if it types one. Control characters have
+/// keysyms and are not text, with one exception: an agent asking to type a
+/// newline means Return. xkb reads Return as `\r` and gives `\n` to the
+/// Linefeed key, which no toolkit takes for Enter, so Return is named here.
+fn text(sym: Keysym) -> Option<char> {
+    if sym == Keysym::Return {
+        return Some('\n');
+    }
+    let ch = char::from_u32(xkb::keysym_to_utf32(sym))?;
+    (!ch.is_control()).then_some(ch)
 }
 
 impl Compositor {
@@ -450,6 +486,8 @@ impl Compositor {
     /// `Focus` first.
     fn act_type(&mut self, text: &str) -> Result<(), ActError> {
         let keyboard = self.keyboard.clone().ok_or(ActError::NoKeyboard)?;
+        let (active, _) = self.layouts().ok_or(ActError::NoKeyboard)?;
+        let caps = keyboard.modifier_state().caps_lock;
 
         // Resolve every character before pressing anything. A string that is
         // half typeable is not half typed: an application left holding the
@@ -459,16 +497,23 @@ impl Compositor {
             .chars()
             .map(|ch| {
                 self.keys
-                    .stroke(ch)
-                    .map(|stroke| (ch, stroke))
+                    .stroke(ch, active, caps)
                     .ok_or(ActError::Untypeable(ch))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
         let shift = self.keys.shift;
         let mut held = false;
+        let mut layout = active;
 
-        for (_, (key, wants_shift)) in strokes {
+        for (wanted, (key, wants_shift)) in strokes {
+            // A character only another layout has is typed in that layout,
+            // as a person would switch to type it. The client hears the
+            // switch before the key, in the modifiers smithay sends.
+            if wanted != layout {
+                self.lock_layout(wanted);
+                layout = wanted;
+            }
             if wants_shift != held
                 && let Some(shift_key) = shift
             {
@@ -488,6 +533,10 @@ impl Compositor {
         // a different one, and the client has no way to notice.
         if held && let Some(shift_key) = shift {
             self.press(&keyboard, shift_key, KeyState::Released);
+        }
+        // Nor the person in a layout they did not choose.
+        if layout != active {
+            self.lock_layout(active);
         }
         Ok(())
     }
@@ -579,57 +628,132 @@ fn centre(at: Rect) -> (f64, f64) {
 mod tests {
     use super::*;
 
-    fn keymap() -> xkb::Keymap {
+    fn keymap(layout: &str) -> xkb::Keymap {
         let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-        xkb::Keymap::new_from_names(&context, "", "", "us", "", None, xkb::COMPILE_NO_FLAGS)
-            .expect("a us layout compiles")
+        xkb::Keymap::new_from_names(&context, "", "", layout, "", None, xkb::COMPILE_NO_FLAGS)
+            .expect("the layout compiles")
+    }
+
+    fn us() -> Keys {
+        Keys::from_keymap(&keymap("us"))
+    }
+
+    /// The key and shift for a character in the first layout, Caps Lock off.
+    fn plain(keys: &Keys, ch: char) -> Option<Stroke> {
+        keys.stroke(ch, 0, false).map(|(_, stroke)| stroke)
     }
 
     #[test]
     fn every_ascii_printable_has_a_key() {
-        let keys = Keys::from_keymap(&keymap());
+        let keys = us();
         for ch in ' '..='~' {
-            assert!(keys.stroke(ch).is_some(), "no key produces {ch:?}");
+            assert!(plain(&keys, ch).is_some(), "no key produces {ch:?}");
         }
     }
 
     #[test]
     fn case_is_the_shift_level_of_one_key() {
-        let keys = Keys::from_keymap(&keymap());
-        let (lower, lower_shift) = keys.stroke('a').expect("a is typeable");
-        let (upper, upper_shift) = keys.stroke('A').expect("A is typeable");
+        let keys = us();
+        let (lower, lower_shift) = plain(&keys, 'a').expect("a is typeable");
+        let (upper, upper_shift) = plain(&keys, 'A').expect("A is typeable");
         assert_eq!(lower, upper, "one key, two levels");
         assert!(!lower_shift);
         assert!(upper_shift);
     }
 
     #[test]
+    fn with_caps_lock_on_a_letter_takes_shift_to_be_small_and_a_digit_does_not() {
+        let keys = us();
+        let (key, _) = plain(&keys, 'a').expect("a is typeable");
+        assert_eq!(keys.stroke('a', 0, true), Some((0, (key, true))));
+        assert_eq!(keys.stroke('A', 0, true), Some((0, (key, false))));
+        let (one, _) = plain(&keys, '1').expect("1 is typeable");
+        assert_eq!(keys.stroke('1', 0, true), Some((0, (one, false))));
+    }
+
+    #[test]
     fn a_character_the_layout_cannot_make_is_refused_by_name() {
-        let keys = Keys::from_keymap(&keymap());
         // Not on a US layout at a level we will press without guessing.
-        assert_eq!(keys.stroke('\u{4e2d}'), None);
+        assert_eq!(us().stroke('\u{4e2d}', 0, false), None);
     }
 
     #[test]
     fn the_layout_has_a_shift_key() {
-        let keys = Keys::from_keymap(&keymap());
         assert!(
-            keys.shift.is_some(),
+            us().shift.is_some(),
             "shift is how the second level is reached"
         );
     }
 
     #[test]
-    fn a_newline_is_a_key_and_other_control_characters_are_not() {
-        let keys = Keys::from_keymap(&keymap());
-        assert!(keys.stroke('\n').is_some(), "Return produces a newline");
-        assert_eq!(keys.stroke('\u{7}'), None, "bell is not text");
+    fn a_newline_is_return_and_other_control_characters_are_not_keys() {
+        let map = keymap("us");
+        let keys = Keys::from_keymap(&map);
+        let (key, shift) = plain(&keys, '\n').expect("a newline is typeable");
+        assert_eq!(
+            map.key_get_syms_by_level(key, 0, 0),
+            [Keysym::Return],
+            "Return, not Linefeed"
+        );
+        assert!(!shift);
+        assert_eq!(plain(&keys, '\r'), None, "a carriage return is not text");
+        assert_eq!(plain(&keys, '\u{7}'), None, "bell is not text");
     }
 
     #[test]
     fn the_table_covers_a_whole_layout_rather_than_a_corner_of_one() {
-        let keys = Keys::from_keymap(&keymap());
+        let keys = us();
         // 95 printable ASCII, and a US layout adds little else at levels 0-1.
-        assert!(keys.len() >= 95, "only {} characters mapped", keys.len());
+        assert!(keys.len(0) >= 95, "only {} characters mapped", keys.len(0));
+    }
+
+    #[test]
+    fn each_layout_of_a_keymap_has_a_table_of_its_own() {
+        let keys = Keys::from_keymap(&keymap("us,ru"));
+        let (q, _) = plain(&keys, 'q').expect("q is on the first layout");
+        assert_eq!(
+            keys.stroke('й', 0, false),
+            Some((1, (q, false))),
+            "й is on the same key, in the second layout"
+        );
+        assert_eq!(keys.stroke('Й', 0, false), Some((1, (q, true))));
+        assert!(keys.len(1) >= 66, "33 letters, both cases");
+    }
+
+    #[test]
+    fn the_layout_in_use_is_preferred_and_another_used_only_when_it_must() {
+        let keys = Keys::from_keymap(&keymap("us,ru"));
+        let (space, _) = plain(&keys, ' ').expect("a space");
+        assert_eq!(
+            keys.stroke(' ', 1, false),
+            Some((1, (space, false))),
+            "both layouts have a space; the one in use types it"
+        );
+        assert_eq!(
+            keys.stroke('q', 1, false).map(|(layout, _)| layout),
+            Some(0),
+            "only the first layout has q"
+        );
+        assert_eq!(
+            keys.stroke('\u{4e2d}', 1, false),
+            None,
+            "and neither has 中"
+        );
+    }
+
+    #[test]
+    fn azerty_types_digits_with_shift_and_a_binding_finds_them_there() {
+        let keys = Keys::from_keymap(&keymap("fr"));
+        let (one, shifted) = plain(&keys, '1').expect("1 is typeable");
+        assert!(shifted, "AZERTY's digits are above its symbols");
+        assert_eq!(plain(&keys, '&'), Some((one, false)));
+        assert_eq!(keys.shifted(0, one), Some(Keysym::_1));
+        let (a, _) = plain(&keys, 'a').expect("a is typeable");
+        let us_keys = us();
+        assert_eq!(
+            plain(&us_keys, 'q').map(|(key, _)| key),
+            Some(a),
+            "A where Q is"
+        );
     }
 }

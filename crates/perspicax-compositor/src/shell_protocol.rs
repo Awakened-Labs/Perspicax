@@ -10,6 +10,14 @@
 //! When a save changes the config's `[shell]` table, every shell is told to
 //! read it again, and applies it in place.
 //!
+//! From version 2 a shell is also told the keyboard's layouts and which is
+//! in use, for a panel's indicator, and may switch it. What it was last told
+//! is kept, and each turn of the loop it is told only what changed since: a
+//! switch from any source, a key, a binding, a window taking the keyboard
+//! or a new keymap, reaches it without each having to say so. An agent
+//! typing in another layout switches and switches back within one turn, so
+//! the indicator never shows it.
+//!
 //! Gated like the taskbar protocols: offered only to the programs the
 //! `[protocols] shell` rule admits, withdrawn with `finished` from a client
 //! a reload no longer admits, and silent while the session is locked. A
@@ -26,6 +34,7 @@ use smithay::{
 };
 
 use crate::{
+    Keymap,
     access::{Filtered, Gate},
     state::Compositor,
 };
@@ -41,13 +50,16 @@ pub(crate) enum Menu {
 #[derive(Default)]
 pub(crate) struct Shells {
     bound: Vec<PerspicaxShellV1>,
+    /// The keymap and the layout in use, as the shells were last told them.
+    /// `None`: tell them everything.
+    told: Option<(Keymap, u32)>,
 }
 
 impl Shells {
     /// Advertise the global, filtered by `gate`.
     pub(crate) fn new(display: &DisplayHandle, gate: &Gate) -> Self {
         display.create_global::<Compositor, PerspicaxShellV1, _>(
-            1,
+            2,
             Filtered {
                 gate: gate.clone(),
                 protocol: Protocol::Shell,
@@ -102,6 +114,45 @@ impl Compositor {
         }
     }
 
+    /// Tell every shell of version 2 what changed of the keyboard's layouts
+    /// since it was last told: all of them when the keymap changed, then the
+    /// one in use. Called each turn of the loop; nothing while the session
+    /// is locked, and what changed meanwhile is told once it is unlocked.
+    pub(crate) fn announce_layout(&mut self) {
+        let listening = |shell: &&PerspicaxShellV1| {
+            shell.version() >= perspicax_shell_v1::EVT_ACTIVE_LAYOUT_SINCE
+        };
+        if self.lock.is_some() || !self.shells.bound.iter().any(|shell| listening(&shell)) {
+            return;
+        }
+        let Some((active, _)) = self.layouts() else {
+            return;
+        };
+        let keymap_told = self
+            .shells
+            .told
+            .as_ref()
+            .is_some_and(|(keymap, _)| *keymap == self.keymap);
+        if keymap_told && self.shells.told.as_ref().map(|&(_, told)| told) == Some(active) {
+            return;
+        }
+        let layouts = if keymap_told {
+            Vec::new()
+        } else {
+            self.layout_labels()
+        };
+        for shell in self.shells.bound.iter().filter(listening) {
+            if !keymap_told {
+                for (index, (name, short)) in (0..).zip(&layouts) {
+                    shell.layout(index, name.clone(), short.clone());
+                }
+                shell.layouts_done();
+            }
+            shell.active_layout(active);
+        }
+        self.shells.told = Some((self.keymap.clone(), active));
+    }
+
     /// Whether process `pid` holds the channel, and so hears a
     /// `reconfigure`.
     #[cfg_attr(not(feature = "seat"), expect(dead_code, reason = "the seat's"))]
@@ -144,6 +195,9 @@ impl GlobalDispatch<PerspicaxShellV1, Filtered> for Compositor {
     ) {
         let shell = data_init.init(resource, ());
         state.shells.bound.push(shell);
+        // Every shell is told the layouts again, the new one among them: a
+        // list replaces the one before, and a shell binds seldom.
+        state.shells.told = None;
     }
 
     fn can_view(client: Client, global: &Filtered) -> bool {
@@ -161,15 +215,22 @@ impl Dispatch<PerspicaxShellV1, ()> for Compositor {
         _display: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        // Destroy is the only other request, and what it ends is
-        // `destroyed`'s to forget.
-        if let perspicax_shell_v1::Request::ExitSession = request {
-            if state.lock.is_some() || !state.gate.admits(Protocol::Shell, client) {
-                tracing::warn!("the shell asked to end the session, and may not now");
-                return;
+        // What destroy ends is `destroyed`'s to forget.
+        let may = state.lock.is_none() && state.gate.admits(Protocol::Shell, client);
+        match request {
+            perspicax_shell_v1::Request::ExitSession if may => {
+                tracing::info!("the shell asked to end the session");
+                state.exit_asked = true;
             }
-            tracing::info!("the shell asked to end the session");
-            state.exit_asked = true;
+            perspicax_shell_v1::Request::ExitSession => {
+                tracing::warn!("the shell asked to end the session, and may not now");
+            }
+            perspicax_shell_v1::Request::SetLayout { index } if may => {
+                if state.layouts().is_some_and(|(_, count)| index < count) {
+                    state.lock_layout(index);
+                }
+            }
+            _ => {}
         }
     }
 

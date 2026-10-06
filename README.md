@@ -93,7 +93,7 @@ feature, never silently ignored.
 | **W3** | Server-side decorations, then tabbed window groups | done |
 | **W4** | Protocols Smithay lacks: foreign-toplevel management, ext-workspace, screencopy, output management — and `screenshot` stops refusing; agent verbs to close a window and bring a tab forward | done |
 | **W5** | `perspicax-shell`, a separate process: wallpaper, panel, tray, start menu, root menu, desktop icons — each a feature and a toggle | done |
-| **W6** | Polish: themes, keymaps, a session entry for display managers | |
+| **W6** | Polish: themes that applications follow, keyboard layouts, XDG autostart, the start menu's ways to leave, a session entry for display managers | done |
 
 The shell is a separate process on purpose. A panel that crashes should not
 take every window with it, and anything speaking layer-shell can stand in for
@@ -347,7 +347,11 @@ Two chords always work, whatever the configuration says:
 
 X11 applications run under an Xwayland the session starts (`xwayland = false`
 in the config turns it off), with `DISPLAY` set for everything it launches:
-`--spawn` programs and the autostart list start once Xwayland is ready. An
+`--spawn` programs and the autostart list start once Xwayland is ready.
+Toolkits are asked for Wayland first, and allowed X11 after it (GTK is told
+`wayland,x11`, Qt `wayland;xcb`), so a program that will not use Wayland --
+Chromium or Electron in X11 mode, say -- opens on this Xwayland rather than
+failing to open a display. An
 X11 window's origin says so: the X client's pid comes from the X server's
 X-Resource answer rather than the kernel, and every X client shares one consent
 decision, because X11 lets them read and drive each other.
@@ -386,6 +390,10 @@ feature this build left out, is refused with its name rather than ignored.
 
 ```toml
 profile = "minimal"            # or "classic"; minimal focuses under the pointer
+drag = "Logo"                  # the drag modifier; "none" turns drags off
+autostart = [["mako"], ["nm-applet", "--indicator"]]
+xdg-autostart = true           # and the autostart folders' entries; see below
+                               # (every key outside a table goes up here)
 
 [focus]
 model = "sloppy"               # click | sloppy | strict
@@ -398,8 +406,6 @@ autoraise = false
 "Alt+F1" = "root-menu"         # or "start-menu": the desktop shell's menus
 "Logo" = "none"                # Logo alone is a tap: pressed, let go, nothing
                                # in between; no other modifier can be tapped
-
-drag = "Logo"                  # the drag modifier; "none" turns drags off
 
 [input.keyboard]
 layout = "gb"
@@ -448,8 +454,6 @@ scale = 1.25
 [[output]]
 name = "eDP-1"
 enable = false
-
-autostart = [["mako"], ["nm-applet", "--indicator"]]
 
 [protocols]                    # who may reach past their own windows:
 foreign-toplevel-management = "any"   # "any", "off", or a list of programs
@@ -502,6 +506,72 @@ connector with nothing plugged into it on request (`echo on | sudo tee
 perspicax treats it as a monitor nobody can see: the pointer crosses into it,
 windows can be sent there and back, and unplugging it rescues them.
 
+## Log in to it
+
+A display manager (SDDM, GDM, LightDM, greetd) can offer Perspicax at its
+greeter beside every other session. Build as yourself, as above, and install
+as root:
+
+```sh
+cargo build --release --features perspicax/desktop,perspicax-shell/full
+sudo scripts/install.sh
+```
+
+That puts `perspicax` and `perspicax-shell` side by side in `/usr/local/bin`,
+the session entry in `/usr/local/share/wayland-sessions`, and the settings
+portal's two files under `/usr/local/share/xdg-desktop-portal`. Some programs
+read only from `/usr`: LightDM, greetd's greeters and older SDDM look for
+sessions only in `/usr/share/wayland-sessions`, and xdg-desktop-portal for
+portal files only in `/usr/share/xdg-desktop-portal/portals`. The script says
+when either applies; `sudo PREFIX=/usr scripts/install.sh` installs under
+`/usr`, and `PORTALDIR` moves the portal file alone. It builds nothing, and
+`DESTDIR` and the other variables at its top are for a package.
+
+Choose Perspicax at the greeter. The entry runs `perspicax --session`, which is
+`--seat` with two differences, for a session nobody watches start:
+
+- **A bus of its own.** A display manager that is not systemd's starts a
+  session with no D-Bus session bus, and the tray, the keyring and the portals
+  each need one. With no `DBUS_SESSION_BUS_ADDRESS`, and nothing answering at
+  `$XDG_RUNTIME_DIR/bus`, it runs itself again under `dbus-run-session`. That
+  bus ends with the session, and every service it started ends with it. The
+  session stops the accessibility bus itself on the way out, since that one,
+  left to the display manager's hangup, would outlive it.
+- **A log of its own**, at `~/.local/state/perspicax/perspicax.log` (under
+  `$XDG_STATE_HOME` when that is set), readable by you alone. The last
+  session's is kept as `perspicax.log.old`: that is the one to read after a
+  login that went straight back to the greeter. It says what the session did
+  as well as its warnings; `RUST_LOG` changes that, as ever.
+
+For a keyring the login unlocks, the two `pam_gnome_keyring` lines under "The
+desktop" go in the display manager's PAM file: `/etc/pam.d/sddm` for SDDM.
+Applications follow the theme's dark or light through the settings portal:
+xdg-desktop-portal finds perspicax's backend from the portal file and
+`XDG_CURRENT_DESKTOP=perspicax`, which the entry sets. `perspicax-portals.conf`
+sends the rest to GTK's backend (the file chooser, printing) and screen sharing
+to wlroots', so install xdg-desktop-portal-gtk and -wlr for those. To see
+which backends it chose, run it again from a terminal inside the session,
+`/usr/libexec/xdg-desktop-portal -rv` (`/usr/lib/` on some distributions).
+
+**What starts with a session**, from a greeter or a text console alike: the
+desktop shell, then the config's `autostart` list, then the entries in the
+XDG autostart folders, `~/.config/autostart` and `/etc/xdg/autostart`, each
+once. An entry of yours replaces the system's of the same file name, and one
+of yours saying `Hidden=true` turns the system's off. An entry is skipped when
+it is hidden or disabled (`X-GNOME-Autostart-enabled=false`), when its
+`OnlyShowIn` or `NotShowIn` rules out `perspicax`, or when its `TryExec`
+program is not installed; one that needs a terminal is skipped with a line in
+the log, and `RUST_LOG=info,perspicax_compositor=debug` names every entry
+skipped and why. `xdg-autostart = false`, at the top of the config, turns the
+folders off and keeps the list. A program both of them name starts twice:
+take it out of one.
+
+Another desktop on the same machine may never have started what those
+folders hold -- Enlightenment starts only what its own startup list names --
+so a first login here can start something that has never run there before:
+PipeWire beside a PulseAudio that was the sound server until then, for one.
+Turn off what you do not want with a `Hidden=true` entry of your own.
+
 ## The desktop
 
 `perspicax-shell` is the desktop: a wallpaper, a panel, menus of the installed
@@ -515,7 +585,8 @@ perspicax starts it as the session starts, before `autostart`, and starts it
 again if it crashes; a shell that refuses its config waits for the file to be
 saved again. A save that changes `[shell]` reaches it in place, without a
 restart. The tray needs a D-Bus session bus, and a text-console login has
-none: start the session under one, `dbus-run-session -- perspicax --seat`.
+none: start the session under one, `dbus-run-session -- perspicax --seat`, or
+as `perspicax --session`, which starts one itself.
 
 The session tells its bus what it is and where its displays are, so that a
 program D-Bus starts on request -- a keyring's unlock prompt, a notification
@@ -524,13 +595,13 @@ daemon, a portal -- has somewhere to draw: `XDG_CURRENT_DESKTOP=perspicax`,
 `DISPLAY`, which a systemd user manager is told too when there is one. It also
 asks the bus for the Secret Service as it starts, and says in the log when
 that does not come up. For a keyring your login unlocks, the PAM file for how
-you log in (`/etc/pam.d/login` from a text console) needs `-auth optional
-pam_gnome_keyring.so` and `-session optional pam_gnome_keyring.so
-auto_start`; without them, the first program that wants a secret asks for the
-keyring's password. gnome-keyring serves one session's bus at a time, so a
-second session of yours, beside another desktop that is still logged in, has
-none: every lookup there waits 25 seconds and fails, and the log names the
-keyring that is in the way.
+you log in (`/etc/pam.d/login` from a text console, `/etc/pam.d/sddm` through
+SDDM) needs `-auth optional pam_gnome_keyring.so` and `-session optional
+pam_gnome_keyring.so auto_start`; without them, the first program that wants
+a secret asks for the keyring's password. gnome-keyring serves one session's
+bus at a time, so a second session of yours, beside another desktop that is
+still logged in, has none: every lookup there waits 25 seconds and fails, and
+the log names the keyring that is in the way.
 
 Each component is a cargo feature of `perspicax-shell`, and `full` is all of
 them; none is on by default. The profiles turn on what the build has:
@@ -544,6 +615,7 @@ them; none is on by default. The profiles turn on what the build has:
 | Start button and menu | `menus` | the panel's first item; a tap of Logo | — | the panel's; its menu as the root menu's | a `Button` "Start"; a `Menu` "Start menu" with a search line |
 | Taskbar | `panel` | each monitor's own windows | — | the panel's | a `TabList` "Taskbar", the window in use selected |
 | Pager | `panel` | the workspaces | — | the panel's | a `TabList` "Workspaces", the one showing selected |
+| Keyboard layout | `panel` | before the tray, with two layouts or more | — | the panel's | a `Button` "Keyboard layout", the layout's name its value |
 | Tray | `tray` (with `panel`, `menus`) | before the clock | — | the panel's; its menus as the root menu's | a `Group` "Tray" of a `Button` for each icon, named by its tooltip |
 | Clock | `panel` | the time, last | — | the panel's | a `Status` "Clock", the time its value |
 
@@ -566,7 +638,12 @@ untrusted-launchers = "hidden" # an application's entry on the desktop that is
                                # it as the file it is
 icon-theme = "Adwaita"
 terminal = ["foot"]            # for applications that ask for one
-lock = ["swaylock", "-f"]      # the start menu's Lock
+lock = ["swaylock", "-f"]      # the start menu's Lock,
+suspend = ["loginctl", "suspend"]   # Suspend, Restart and Shut Down:
+reboot = ["loginctl", "reboot"]     # logind's, which elogind has too
+power-off = ["loginctl", "poweroff"]
+leave = ["lock", "log-out", "suspend", "reboot", "power-off"]   # and which
+                               # of them the start menu shows, in this order
 
 [shell.wallpapers]             # a workspace's own, by number from 1, row by row
 2 = "#2d5a4f"
@@ -579,7 +656,7 @@ height = 32
 outputs = "first"              # "all", or a list of connectors: ["DP-1"]
 taskbar = "all"                # every window on every panel; "this-output"
                                # lists each monitor's own
-items = ["start", "taskbar", "pager", "tray", "clock"]
+items = ["start", "taskbar", "pager", "layout", "tray", "clock"]
 clock = "%a %e %b %H:%M"       # as strftime writes it
 ```
 
@@ -588,7 +665,14 @@ applications and `"replace"` puts them instead, and each `[[items]]` is one of
 `exec = [...]` with a `label`, `app = "firefox"` for an installed
 application, `separator = true`, a submenu with `items = [...]`,
 `applications = true` for the applications by group, or `session = true` for
-Lock and Log Out.
+the ways to leave.
+
+The start menu ends with those ways to leave: Lock, Log Out, Suspend, Restart
+and Shut Down, as `leave` chooses and orders them (`leave = []` shows none).
+Each runs its program, and shows only when that program is on `PATH`; Log Out
+asks the compositor instead. Typing "sleep", "reboot" or "power off" in the
+search line finds the last three. Suspend does not lock the screen first;
+`["swayidle", "-w", "before-sleep", "swaylock -f"]` in `autostart` does.
 
 A tray icon is any program's that registers one the StatusNotifierItem way,
 as Qt, Electron and libappindicator programs do. The shell serves the
@@ -600,6 +684,147 @@ opens at its button.
 **Coming from W4.** `classic` now starts the shell, so a config that starts
 waybar and swaybg from `autostart` gets two panels and two wallpapers. Take
 them out of `autostart`, or keep them and set `[shell] enabled = false`.
+
+## Themes
+
+One `[theme]` table colours everything perspicax draws -- the titlebars, the
+panel, the menus, the desktop's labels -- and tells applications whether to be
+dark or light. Every key is optional, and a save reaches all of it in place.
+
+```toml
+[theme]
+name = "breeze-dark"           # perspicax (the default), breeze-light, breeze-dark
+font = "Noto Sans"             # the shell's and the titles'; sans-serif (the
+                               # default), serif, monospace, or a family's name
+font-size = 15                 # the shell's text: 10 to 20 pixels, 14 unset
+cursor = "breeze_cursors"      # an Xcursor theme; unset, XCURSOR_THEME's
+cursor-size = 32               # 8 to 128; unset, XCURSOR_SIZE's
+color-scheme = "dark"          # what applications are told: dark, light or
+contrast = "high"              # no-preference; normal or high
+
+[theme.palette]                # any role below, written over the theme's own
+accent = "#e93d5a"
+panel = "#102030"
+```
+
+`perspicax` is what was drawn before there were themes: blue titlebars, a dark
+panel, light menus. The two Breezes take their window, view, header and
+selection colours from Plasma's Breeze schemes.
+
+The palette is a set of roles, not of widgets, so one colour written recolours
+everything that has that job. A colour is `"#rrggbb"`. Only `selected` and
+`label-shadow` may be see-through, as `"#rrggbbaa"`: an opaque panel or menu
+is what lets the compositor prove to an agent what it covers. Writing one
+colour does not mean writing six. A role you leave out follows from the ones
+you wrote, as the third column says, and otherwise keeps the theme's own. An
+ink is black or white, whichever reads on its colour; a mix is that far from
+the first colour toward the second. The last column is the `perspicax` theme.
+
+| Role | Colours | Unwritten, follows | `perspicax` |
+|---|---|---|---|
+| `accent` | whatever is chosen or in use: the menu line under the keyboard, the task in use, the workspace showing | — | `#3daee9` |
+| `on-accent` | text written on the accent | the accent's ink | `#ffffff` |
+| `title-focused` | the titlebar and border of the window with the keyboard | — | `#2d6fa3` |
+| `title-focused-ink` | its title and buttons | its ink | `#ffffff` |
+| `title-unfocused` | every other window's titlebar and border | — | `#475057` |
+| `title-unfocused-ink` | their titles and buttons | its ink | `#ffffff` |
+| `snap-preview` | where a window dragged to an edge would snap, a quarter opaque | — | `#8cb3f2` |
+| `panel` | the panel's background | — | `#232629` |
+| `panel-ink` | text and symbols on the panel | its ink | `#fcfcfc` |
+| `panel-rule` | the rule along the panel's edge, and the edge of a workspace not showing | `panel` 12% toward `panel-ink` | `#3b4045` |
+| `panel-face` | a task's button, and a workspace not showing | `panel` 7.5% toward `panel-ink` | `#31363b` |
+| `panel-open` | the start button with its menu open, the task in use, the workspace showing | `panel` 30% toward `accent` | `#2b4f63` |
+| `panel-faint` | a minimized task's title | `panel` 57% toward `panel-ink` | `#9aa0a6` |
+| `menu` | a menu's background | — | `#fcfcfc` |
+| `menu-ink` | a menu's text | its ink | `#232629` |
+| `menu-edge` | a menu's border | `menu` 42% toward `menu-ink` | `#a0a4a8` |
+| `menu-rule` | the line between groups of items | `menu` 15% toward `menu-ink` | `#dcdee0` |
+| `menu-opened` | the line whose submenu is open | `menu` 30% toward `accent` | `#c4e5f7` |
+| `menu-typed` | the start menu's search line | `menu` 6% toward `menu-ink` | `#eff0f1` |
+| `menu-hint` | the search line's hint, and an item that cannot be chosen | `menu` 55% toward `menu-ink` | `#7f8c8d` |
+| `selected` | the desktop icon chosen, over the wallpaper | `accent`, 40% opaque | `#3daee966` |
+| `label-ink` | a desktop icon's name | — | `#ffffff` |
+| `label-shadow` | the shadow that name casts, so it reads on any wallpaper | — | `#000000c0` |
+
+`[decorations] focused` and `unfocused` are `title-focused` and
+`title-unfocused` written in their older place, and still win over any theme;
+writing one in both places is refused.
+
+`font` is the family of the shell's text and of the titles. `font-size` sizes
+the shell's text, and the desktop labels' lines with it; menu rows keep their
+height, and a title's size follows its bar's. A family with no face installed
+falls back to the system's, with one warning in the log. The pointer is drawn
+from `cursor` at `cursor-size`; programs started afterwards are told both
+(`XCURSOR_THEME`, `XCURSOR_SIZE`), and those that ask for a cursor by its
+shape get the compositor's.
+
+Applications are told through the settings portal (see [Log in to
+it](#log-in-to-it)): `color-scheme`, `contrast`, and the accent, which is the
+palette's `accent` when written and Breeze's blue under either Breeze. The
+`perspicax` theme tells them nothing, so they look as they would with no
+portal at all. GTK 4 follows at once, a change while it runs included, and
+libadwaita takes the accent from GNOME 47 on, rounded to the nearest of its
+nine. Firefox follows on "System theme — auto". GTK 3 and Qt 5 ignore the
+portal's colour scheme, and Qt 6 follows only with a platform theme that
+reads it.
+
+## Keyboards
+
+`[input.keyboard]` takes xkb's names for a keymap, as every other desktop does,
+with up to four layouts between which a key switches -- for the whole session,
+or for each window on its own.
+
+```toml
+[input.keyboard]
+layout = "us,ru"               # with variant, options, model and rules
+variant = ",phonetic"
+options = "ctrl:nocaps"
+numlock = true                 # on from the start; unset leaves Num Lock alone
+switching = "window"           # each window keeps its own layout; "global",
+                               # the default, switches the session's
+
+[keys]
+"Logo+Space" = "next-layout"   # classic's own; also previous-layout, and
+                               # layout-1 to layout-4 for one in particular
+```
+
+xkb's own switching options, `grp:alt_shift_toggle` and the like, work as
+well. classic binds Logo+Space, so applications no longer get it. A reload
+keeps the layout in use, and Caps Lock and Num Lock with it. The lock keys
+light their LEDs on every keyboard, one plugged in later included.
+
+Under `switching = "window"`, a window is typed in the layout it was last typed
+in, and a new one starts in the first. The panel, a menu or the lock screen
+taking the keyboard changes nothing.
+
+With two layouts or more, the panel's `layout` item shows the one in use, its
+name in capitals (`US`, `RU`), and a click moves to the next. An agent reads it
+as a `Button` "Keyboard layout" whose value is the layout's full name. An
+agent's `type` writes in the layout in use when that has the character, and
+otherwise switches to the first layout that has it, types, and switches back,
+with Caps Lock respected; only a character no layout in the keymap can make is
+refused.
+
+Switching is the one binding that works at the lock screen, so a password can
+be typed in the layout it was set in. Hold Logo while Space goes down: swaylock
+lights its ring on a bare Logo, which invites a pause, and a Space pressed after
+Logo is let go types a space into the password.
+
+A chord names a key by its character, and matches first what the key makes in
+the layout in use. Two fallbacks keep the usual chords where hands expect them
+away from a US keyboard:
+
+- Under a layout with no Latin letters, a letter chord matches the key's letter
+  in the first layout that has one: under `"us,ru"`, Logo+q is the same key in
+  either. It needs a Latin layout in the list; `"ru"` alone has none to borrow.
+- A key whose shifted character is a digit counts as that digit, so AZERTY's
+  Logo+1 is the key marked 1, not Logo+&.
+
+Two cases are not solved. A chord on punctuation matches the key that makes
+that character in the layout in use, which on many layouts needs Shift or
+AltGr; a chord's modifiers must match exactly, so such a chord cannot be
+pressed as written. And a dead key, an accent waiting for its letter, makes no
+character to write a chord with.
 
 ## Test
 

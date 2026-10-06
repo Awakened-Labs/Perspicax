@@ -1,58 +1,64 @@
 //! A desktop entry: the `.desktop` file an application installs to say what
 //! it is called, what it looks like, and how to start it.
 //!
-//! Read to the Desktop Entry Specification, 1.5, as far as a menu needs it:
-//! the `[Desktop Entry]` group's keys, localised for the person's language,
-//! with the spec's escapes undone; and `Exec` split into a program and its
+//! Read to the Desktop Entry Specification, 1.5, as far as the shell's menus
+//! and the session's [autostart](crate::autostart) need it: the
+//! `[Desktop Entry]` group's keys, localised for the person's language, with
+//! the spec's escapes undone; and `Exec` split into a program and its
 //! arguments the way the spec quotes them, so it can be run without a shell.
 //!
 //! `Exec`'s field codes stand for what an application is opened *with*: the
-//! files or links dropped on it. A menu opens it with nothing, so each code
-//! is dropped, an argument that was only a code with it, and `%%` is a `%`.
+//! files or links dropped on it. A menu or a session start opens it with
+//! nothing, so each code is dropped, an argument that was only a code with
+//! it, and `%%` is a `%`.
 //!
 //! An entry that breaks the spec's grammar is refused whole, as GLib refuses
 //! it: a line that is not a group, a key or a comment, a quote left open, or
 //! no `Name` or `Type`. A menu without it is better than a menu item that
 //! runs something half-read.
 
-/// What a menu needs of a desktop entry.
+/// What a menu, the desktop folder and autostart need of a desktop entry.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct Entry {
+pub struct Entry {
     /// `Type=Application`. The other types, links and directories, are not
     /// programs to run.
-    pub(crate) application: bool,
-    pub(crate) name: String,
-    pub(crate) comment: Option<String>,
+    pub application: bool,
+    pub name: String,
+    pub comment: Option<String>,
     /// An icon's name in the theme, or a path to an image.
-    pub(crate) icon: Option<String>,
+    pub icon: Option<String>,
     /// The program and its arguments, field codes dropped. `None` for an
     /// application started only over D-Bus.
-    pub(crate) exec: Option<Vec<String>>,
+    pub exec: Option<Vec<String>>,
     /// A program that must be installed for the entry to be shown.
-    pub(crate) try_exec: Option<String>,
+    pub try_exec: Option<String>,
     /// The folder to run it in.
-    pub(crate) path: Option<String>,
+    pub path: Option<String>,
     /// Run in a terminal.
-    pub(crate) terminal: bool,
-    pub(crate) categories: Vec<String>,
-    pub(crate) keywords: Vec<String>,
+    pub terminal: bool,
+    pub categories: Vec<String>,
+    pub keywords: Vec<String>,
     /// Shown only on these desktops, if any are named.
-    pub(crate) only_show_in: Vec<String>,
+    pub only_show_in: Vec<String>,
     /// Never shown on these desktops.
-    pub(crate) not_show_in: Vec<String>,
+    pub not_show_in: Vec<String>,
     /// Deleted: as if it were not installed.
-    pub(crate) hidden: bool,
+    pub hidden: bool,
     /// Installed, and not for a menu: a helper, or a handler for a file type.
-    pub(crate) no_display: bool,
+    pub no_display: bool,
+    /// An autostart entry turned off without being deleted, as GNOME's
+    /// settings turn one off: `X-GNOME-Autostart-enabled` written as
+    /// anything but true.
+    pub autostart_off: bool,
     /// The class its windows carry, for finding the entry from a window.
-    pub(crate) wm_class: Option<String>,
+    pub wm_class: Option<String>,
     /// `Type=Link`'s address: what a link on the desktop opens.
-    pub(crate) url: Option<String>,
+    pub url: Option<String>,
 }
 
 /// Why an entry was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum Malformed {
+pub enum Malformed {
     #[error("it does not start with a [Desktop Entry] group")]
     NoGroup,
     #[error("line {0} is not a group, a key or a comment")]
@@ -71,14 +77,15 @@ pub(crate) enum Malformed {
 /// best first: `sr_YU@Latn` tries `sr_YU@Latn`, `sr_YU`, `sr@Latn` and `sr`,
 /// then the key with no suffix.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct Locale {
+pub struct Locale {
     tried: Vec<String>,
 }
 
 impl Locale {
     /// The locale messages are shown in: `LC_ALL`, else `LC_MESSAGES`, else
     /// `LANG`, the first one set.
-    pub(crate) fn from_env() -> Self {
+    #[must_use]
+    pub fn from_env() -> Self {
         ["LC_ALL", "LC_MESSAGES", "LANG"]
             .into_iter()
             .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
@@ -87,7 +94,8 @@ impl Locale {
 
     /// A locale written `lang_COUNTRY.ENCODING@MODIFIER`, any part but the
     /// language left out. The encoding never matters.
-    pub(crate) fn parse(written: &str) -> Self {
+    #[must_use]
+    pub fn parse(written: &str) -> Self {
         let (rest, modifier) = match written.split_once('@') {
             Some((rest, modifier)) => (rest, Some(modifier)),
             None => (written, None),
@@ -150,7 +158,11 @@ fn without_encoding(locale: &str) -> String {
 }
 
 /// Read a desktop entry, in `locale`'s language where it has one.
-pub(crate) fn parse(text: &str, locale: &Locale) -> Result<Entry, Malformed> {
+///
+/// # Errors
+///
+/// [`Malformed`], saying why, for an entry that breaks the spec's grammar.
+pub fn parse(text: &str, locale: &Locale) -> Result<Entry, Malformed> {
     let keys = group(text)?;
     let get = |key: &str| keys.get(key);
     let plain = |key: &str| get(key).and_then(|values| values.plain);
@@ -178,6 +190,10 @@ pub(crate) fn parse(text: &str, locale: &Locale) -> Result<Entry, Malformed> {
         not_show_in: plain("NotShowIn").map(list).unwrap_or_default(),
         hidden: boolean("Hidden")?,
         no_display: boolean("NoDisplay")?,
+        // Not the spec's, so not refused for a bad value: read as
+        // gnome-session reads it, where only true leaves the entry on.
+        autostart_off: plain("X-GNOME-Autostart-enabled")
+            .is_some_and(|enabled| !matches!(enabled, "true" | "1")),
         wm_class: plain("StartupWMClass").map(unescape),
         url: plain("URL")
             .map(unescape)
@@ -521,5 +537,23 @@ mod tests {
         assert!(!link.application);
         assert_eq!(link.url.as_deref(), Some("https://example.org"));
         assert_eq!(entry.url, None, "an application has no address");
+    }
+
+    #[test]
+    fn gnomes_autostart_switch_is_off_unless_it_says_true() {
+        let off = |line: &str| {
+            read(&format!(
+                "[Desktop Entry]\nType=Application\nName=X\nExec=x\n{line}\n"
+            ))
+            .autostart_off
+        };
+        assert!(!off(""), "on when it is not written");
+        assert!(!off("X-GNOME-Autostart-enabled=true"));
+        assert!(!off("X-GNOME-Autostart-enabled=1"));
+        assert!(off("X-GNOME-Autostart-enabled=false"));
+        assert!(
+            off("X-GNOME-Autostart-enabled=no"),
+            "not refused, and off, as gnome-session reads it"
+        );
     }
 }

@@ -53,14 +53,15 @@ impl Titles {
     }
 
     /// Make sure `window` has its titlebar drawn at the whole scale `scale`
-    /// in the ink it reads best in: `labels`, one per tab, with `front` the
-    /// one in front. Does nothing if it already has.
+    /// in its ink and the theme's `family`: `labels`, one per tab, with
+    /// `front` the one in front. Does nothing if it already has.
     pub(super) fn prepare(
         &mut self,
         window: &Framed,
         labels: Vec<String>,
         front: usize,
         scale: i32,
+        family: &perspicax_policy::Family,
     ) {
         let (Some(area), Some(ink)) = (window.title_at(), window.ink()) else {
             return;
@@ -70,6 +71,7 @@ impl Titles {
             front,
             size: (area.w, area.h),
             ink,
+            family: family.clone(),
             scale,
         };
         if window.has_title(&key) {
@@ -129,7 +131,7 @@ impl Titles {
             let front = n == key.front;
             let shade = if grouped && !front { BEHIND } else { 255 };
             let inked = Color::rgba(ink.r(), ink.g(), ink.b(), shade);
-            self.write(&mut pixels, width, label, place, inked, key.scale);
+            self.write(&mut pixels, width, label, place, inked, key);
             if grouped && front {
                 let rule = Rect::new(
                     place.x,
@@ -153,7 +155,8 @@ impl Titles {
     }
 
     /// Write `label` into `place`, a rect of a buffer `width` pixels wide,
-    /// inside its padding, cut short with an ellipsis if it does not fit.
+    /// inside its padding, cut short with an ellipsis if it does not fit, at
+    /// `key`'s scale and in its family.
     fn write(
         &mut self,
         pixels: &mut [u8],
@@ -161,9 +164,9 @@ impl Titles {
         label: &str,
         place: Rect,
         ink: Color,
-        scale: i32,
+        key: &TitleKey,
     ) {
-        let padding = PADDING * scale;
+        let padding = PADDING * key.scale;
         let room = place.w - 2 * padding;
         if room <= 0 {
             return;
@@ -175,7 +178,7 @@ impl Titles {
         text.set_size(Some(room as f32), Some(line));
         text.set_text(
             label,
-            &Attrs::new().family(Family::SansSerif),
+            &Attrs::new().family(family(&key.family)),
             Shaping::Advanced,
             Some(Align::Left),
         );
@@ -194,6 +197,17 @@ impl Titles {
                 }
             },
         );
+    }
+}
+
+/// The theme's family as cosmic-text names it. A named family missing from
+/// the system falls back, glyph by glyph, to whatever has the character.
+fn family(family: &perspicax_policy::Family) -> Family<'_> {
+    match family {
+        perspicax_policy::Family::SansSerif => Family::SansSerif,
+        perspicax_policy::Family::Serif => Family::Serif,
+        perspicax_policy::Family::Monospace => Family::Monospace,
+        perspicax_policy::Family::Named(name) => Family::Name(name),
     }
 }
 
@@ -283,6 +297,7 @@ mod tests {
             front: 0,
             size: (200, 24),
             ink: perspicax_policy::Colour::rgb(0xff, 0xff, 0xff),
+            family: perspicax_policy::Family::SansSerif,
             scale: 2,
         };
         let (pixels, (width, height)) = titles.pixels(&key("Terminal — foot"));
@@ -324,6 +339,7 @@ mod tests {
             front: 1,
             size: (200, 24),
             ink: perspicax_policy::Colour::rgb(0xff, 0xff, 0xff),
+            family: perspicax_policy::Family::SansSerif,
             scale: 1,
         };
         let (pixels, (width, height)) = titles.pixels(&key);

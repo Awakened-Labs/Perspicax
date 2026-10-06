@@ -15,10 +15,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{
-    desktop::{self, Entry, Locale},
-    fs::{Fs, which},
-};
+use perspicax_config::desktop::{self, Entry, Locale};
+
+use super::fs::{Fs, which};
 
 /// An application, as a menu lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]

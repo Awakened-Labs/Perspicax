@@ -1,0 +1,13 @@
+# The session a display manager offers at its greeter. scripts/install.sh
+# writes Exec and TryExec as full paths when it installs this.
+#
+# DesktopNames is the display managers' key rather than the spec's, so
+# desktop-file-validate questions it, as it does every session's: SDDM, GDM
+# and LightDM set XDG_CURRENT_DESKTOP from it.
+[Desktop Entry]
+Type=Application
+Name=Perspicax
+Comment=An agent-native Wayland compositor and its desktop
+Exec=perspicax --session
+TryExec=perspicax
+DesktopNames=perspicax

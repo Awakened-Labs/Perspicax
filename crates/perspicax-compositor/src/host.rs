@@ -88,6 +88,14 @@ pub enum Command {
     /// again, as a seat does when a save changes the `[shell]` table. For a
     /// test, which has no seat to save to.
     ReconfigureShell,
+    /// Give the keyboard a new keymap, as a seat does when a save changes
+    /// `[input.keyboard]`: the layout in use and the lock keys are kept,
+    /// and agents type from the new one. A keymap xkb cannot compile is
+    /// refused in the log, and the old one kept.
+    Keymap(crate::Keymap),
+    /// Make the layout in use the session's, or each window's own, as a seat
+    /// does when a save changes `[input.keyboard] switching`.
+    LayoutSwitching(perspicax_policy::Switching),
 }
 
 /// A picture asked for, with somewhere to put it.

@@ -23,14 +23,12 @@
 
 use std::path::{Path, PathBuf};
 
-use perspicax_config::UntrustedLaunchers;
-
-use super::{
-    Button,
-    apps::Run,
+use perspicax_config::{
+    UntrustedLaunchers,
     desktop::{self, Locale},
-    fs::Fs,
 };
+
+use super::{Button, apps::Run, fs::Fs};
 
 /// One thing in the desktop folder.
 #[derive(Debug, Clone, PartialEq, Eq)]

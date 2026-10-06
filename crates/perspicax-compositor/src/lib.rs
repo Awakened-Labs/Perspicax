@@ -44,6 +44,7 @@ mod focus;
 mod framed;
 mod heads;
 pub mod host;
+mod keyboard;
 mod layers;
 mod lock;
 mod origin;
@@ -64,11 +65,12 @@ pub use crate::{
     backend::{Backend, Virtual},
     facts::{Facts, SessionFacts},
     host::{Command, Host, Request, Requests},
+    keyboard::Keymap,
 };
 
 use std::{
     ffi::{OsStr, OsString},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Child,
     sync::{
         Arc,
@@ -337,6 +339,7 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         socket: socket_name.clone(),
         env: config.env.clone(),
         x11_display: None,
+        look: Vec::new(),
     });
     // The agent's programs, then on a seat the person's own, which are never
     // granted consent. Where this compositor starts an Xwayland both wait for
@@ -359,6 +362,7 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
             break Err(Error::Io(error));
         }
         state.popups.cleanup();
+        state.announce_layout();
         // Collect children that have exited, so they do not sit as zombies
         // until the session ends. A spawned program that finished is gone
         // from this list, and nothing is left to kill for it at the end.
@@ -440,11 +444,25 @@ pub(crate) struct Launch {
     /// so an X11 program fails plainly rather than finding some other X
     /// server and drawing where this compositor cannot see.
     pub(crate) x11_display: Option<u32>,
+    /// What the session's look says to every program it starts: the
+    /// pointer's theme and size, from the theme, on a seat. Changed by a
+    /// reload, and seen by what starts after it.
+    pub(crate) look: Vec<(String, String)>,
 }
 
 impl Launch {
     /// Start one program, as a program and its arguments.
     pub(crate) fn spawn(&self, command: &[impl AsRef<OsStr>]) -> Result<Child, Error> {
+        self.spawn_in(command, None)
+    }
+
+    /// Start one program in `dir`, or where this process is if `None`: a
+    /// desktop entry's `Path`.
+    pub(crate) fn spawn_in(
+        &self,
+        command: &[impl AsRef<OsStr>],
+        dir: Option<&Path>,
+    ) -> Result<Child, Error> {
         let shown = command
             .iter()
             .map(|word| word.as_ref().to_string_lossy())
@@ -458,9 +476,18 @@ impl Launch {
         command_line
             .args(arguments)
             .envs(self.env.iter().map(|(key, value)| (key, value)))
+            .envs(self.look.iter().map(|(key, value)| (key, value)))
             .env("WAYLAND_DISPLAY", &self.socket)
-            .env("GDK_BACKEND", "wayland")
-            .env("QT_QPA_PLATFORM", "wayland");
+            // Wayland first, and X11 for a toolkit that will not: Chromium and
+            // Electron in X11 mode allow GTK only its X11 backend, and a strict
+            // `wayland` leaves them nothing to open. The fallback can reach no
+            // X server but this compositor's own, since `DISPLAY` is either its
+            // Xwayland or removed.
+            .env("GDK_BACKEND", "wayland,x11")
+            .env("QT_QPA_PLATFORM", "wayland;xcb");
+        if let Some(dir) = dir {
+            command_line.current_dir(dir);
+        }
         match self.x11_display {
             Some(display) => command_line.env("DISPLAY", format!(":{display}")),
             None => command_line.env_remove("DISPLAY"),
@@ -471,5 +498,17 @@ impl Launch {
         })?;
         tracing::info!(pid = child.id(), command = %shown, "spawned");
         Ok(child)
+    }
+
+    /// An environment variable as the programs this starts are given it: the
+    /// session's own value where it sets one, else this process's.
+    #[cfg(feature = "seat")]
+    pub(crate) fn var(&self, name: &str) -> Option<String> {
+        self.env
+            .iter()
+            .rev()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+            .or_else(|| std::env::var(name).ok())
     }
 }

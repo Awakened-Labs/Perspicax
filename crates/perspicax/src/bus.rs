@@ -19,6 +19,9 @@
 //! and says nothing about why. One line here saying so is the difference
 //! between that and a program that looks as if it will not open.
 //!
+//! The settings portal's backend is served from here too, on the same
+//! connection: see [`crate::portal`].
+//!
 //! All of it on a thread of its own with its own runtime, as the agent
 //! interface has, and for the reason the facts boundary exists: the
 //! compositor's thread must never wait on D-Bus, and this one spends its life
@@ -238,6 +241,9 @@ async fn tell(options: Options, changes: mpsc::Receiver<SessionFacts>, ready: mp
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
     publish(&connection, &desktop).await;
+    // Before the compositor exists, so the backend is there to be found by
+    // the first application that asks how to look.
+    let mut portal = crate::portal::Portal::serve(&connection).await;
     let _ = ready.send(());
 
     // The facts arrive on a plain channel, from a thread that must never
@@ -253,16 +259,21 @@ async fn tell(options: Options, changes: mpsc::Receiver<SessionFacts>, ready: mp
     });
 
     let mut checked = false;
+    let mut published = Vec::new();
     while let Some(facts) = news.recv().await {
+        if let Some(portal) = portal.as_mut() {
+            portal.show(facts.appearance).await;
+        }
         let displays = activation(&facts);
-        if displays.is_empty() {
+        if displays.is_empty() || displays == published {
             continue;
         }
-        let displays: Vec<(&str, &str)> = displays
+        let pairs: Vec<(&str, &str)> = displays
             .iter()
             .map(|(key, value)| (*key, value.as_str()))
             .collect();
-        publish(&connection, &displays).await;
+        publish(&connection, &pairs).await;
+        published = displays;
         // Once there is a display to publish, so a keyring that has to ask
         // for its password has somewhere to ask.
         if !checked {
@@ -348,7 +359,7 @@ mod tests {
     fn display_is_said_empty_without_an_xwayland_and_numbered_with_one() {
         let mut facts = SessionFacts {
             wayland_display: Some("wayland-1".to_owned()),
-            x11_display: None,
+            ..SessionFacts::default()
         };
         assert_eq!(
             activation(&facts),

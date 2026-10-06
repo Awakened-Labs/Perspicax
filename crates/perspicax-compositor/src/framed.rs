@@ -64,6 +64,8 @@ pub(crate) struct TitleKey {
     /// The titlebar's size, in logical pixels.
     pub(crate) size: (i32, i32),
     pub(crate) ink: perspicax_policy::Colour,
+    /// The family it is written in.
+    pub(crate) family: perspicax_policy::Family,
     /// The whole scale it is rasterised at. A buffer's scale is whole, so a
     /// fractional output gets the next one up, scaled down.
     pub(crate) scale: i32,
@@ -97,8 +99,8 @@ struct Dress {
     /// The titlebar, where the title and its buttons are drawn, relative to
     /// the client's geometry.
     title_at: Option<Rect>,
-    /// What the title is written in: whichever of black and white reads on
-    /// the bar. `None` until the frame is first dressed.
+    /// What the title and buttons are written in: the theme's ink for the
+    /// bar. `None` until the frame is first dressed.
     #[cfg(feature = "seat")]
     ink: Option<perspicax_policy::Colour>,
     titles: Vec<Title>,
@@ -126,7 +128,7 @@ impl Framed {
         f(&mut cell.borrow_mut())
     }
 
-    /// Set how the frame looks: how far it reaches, in what colour, and
+    /// Set how the frame looks: how far it reaches, in what colours, and
     /// where its title goes, relative to the client's geometry.
     #[cfg(feature = "seat")]
     pub(crate) fn wear(
@@ -134,6 +136,7 @@ impl Framed {
         insets: Insets,
         grip: i32,
         colour: perspicax_policy::Colour,
+        ink: perspicax_policy::Colour,
         title_at: Option<Rect>,
     ) {
         self.dress(|dress| {
@@ -141,7 +144,7 @@ impl Framed {
             dress.grip = grip;
             dress.colour = rgba(colour);
             dress.title_at = title_at;
-            dress.ink = Some(colour.ink());
+            dress.ink = Some(ink);
             if title_at.is_none() {
                 dress.titles.clear();
             }

@@ -19,7 +19,7 @@
   <description summary="the compositor's channel to its desktop shell">
     What passes between perspicax and perspicax-shell that no standard
     protocol carries: the person asked for a menu, the config changed, the
-    session should end.
+    session should end, the keyboard's layouts and which is in use.
 
     Everything else the shell does, it does as any other client would.
     Its wallpaper, panel and menus are layer-shell surfaces, its taskbar
@@ -33,7 +33,7 @@
     is locked the compositor sends nothing and ignores every request.
   </description>
 
-  <interface name="perspicax_shell_v1" version="1">
+  <interface name="perspicax_shell_v1" version="2">
     <description summary="a shell's binding to the compositor">
       Bound once by a shell. Several shells may bind it; each is told the
       same things.
@@ -95,6 +95,43 @@
         compositor sends nothing more and ignores every request; the shell
         should destroy the object.
       </description>
+    </event>
+
+    <!-- Version 2: the keyboard's layouts. -->
+
+    <request name="set_layout" since="2">
+      <description summary="switch the keyboard's layout">
+        The person chose a layout on the shell: clicked its indicator, say.
+        The compositor switches the keyboard to layout index, counted from
+        0 in the order the layout events named them. An index past the last
+        is ignored.
+      </description>
+      <arg name="index" type="uint" summary="the layout to switch to"/>
+    </request>
+
+    <event name="layout" since="2">
+      <description summary="one of the keyboard's layouts">
+        Sent for each of the keyboard's layouts in order, from index 0, when
+        the object is bound and again whenever the keymap changes, then
+        layouts_done.
+      </description>
+      <arg name="index" type="uint" summary="its place, counted from 0"/>
+      <arg name="name" type="string" summary="xkb's name for it, as English (US)"/>
+      <arg name="short" type="string" summary="a label for a panel, as US"/>
+    </event>
+
+    <event name="layouts_done" since="2">
+      <description summary="every layout has been named">
+        The layout events since the last layouts_done are the keyboard's
+        layouts now, and replace any named before.
+      </description>
+    </event>
+
+    <event name="active_layout" since="2">
+      <description summary="the layout in use">
+        Sent after layouts_done, and whenever the layout in use changes.
+      </description>
+      <arg name="index" type="uint" summary="the layout in use, counted from 0"/>
     </event>
   </interface>
 </protocol>

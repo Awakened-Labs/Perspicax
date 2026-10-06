@@ -25,6 +25,7 @@ mod pointer;
 pub(crate) mod seat;
 
 use smithay::{
+    input::keyboard::LedState,
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::{
@@ -273,6 +274,20 @@ impl Running {
         }
     }
 
+    /// Light the keyboards' lock keys as xkb has them. Headless has no
+    /// keyboard with lights.
+    pub(crate) fn light(
+        &mut self,
+        #[cfg_attr(not(feature = "seat"), expect(unused_variables, reason = "the seat's"))]
+        leds: LedState,
+    ) {
+        match self {
+            Self::Headless { .. } => {}
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.light(leds),
+        }
+    }
+
     /// Finish bringing the backend up, now the compositor exists, and start
     /// telling clients when to draw.
     ///
@@ -437,6 +452,14 @@ impl Compositor {
                 self.reconfigure_shells();
             }
             crate::Command::ReconfigureShell => self.reconfigure_shells(),
+            crate::Command::Keymap(keymap) => {
+                if let Err(error) = self.set_keymap(keymap, None) {
+                    tracing::warn!(%error, ?keymap, "xkb could not compile that keymap");
+                }
+            }
+            crate::Command::LayoutSwitching(switching) => {
+                self.layout_memory.set_switching(*switching);
+            }
         }
     }
 

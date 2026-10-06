@@ -352,6 +352,13 @@ pub struct Desk {
     pub shell: Option<PerspicaxShellV1>,
     pub told: Vec<Told>,
     pub shell_finished: bool,
+    /// The keyboard's layouts as the shell channel last listed them, each
+    /// its name and short label, and the one in use.
+    pub layouts: Vec<(String, String)>,
+    listing: Vec<(String, String)>,
+    pub active_layout: Option<u32>,
+    /// How many of the channel's layout events arrived, of any kind.
+    pub layout_events: usize,
     layer_shell: LayerShell,
     /// Strips across the top of the screen, each with its colour and height.
     pub layers: Vec<(LayerSurface, u32, u32)>,
@@ -398,6 +405,10 @@ impl Desk {
             shell: None,
             told: Vec::new(),
             shell_finished: false,
+            layouts: Vec::new(),
+            listing: Vec::new(),
+            active_layout: None,
+            layout_events: 0,
             layer_shell: LayerShell::bind(globals, qh).expect("zwlr_layer_shell_v1"),
             layers: Vec::new(),
             layers_drawn: 0,
@@ -672,9 +683,19 @@ impl Desk {
     /// Bind the shell channel, as perspicax-shell does. Panics if it is not
     /// advertised.
     pub fn bind_shell(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.bind_shell_up_to(globals, qh, 2);
+    }
+
+    /// Bind the channel as a shell from before the keyboard's layouts were
+    /// in it would.
+    pub fn bind_shell_v1(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.bind_shell_up_to(globals, qh, 1);
+    }
+
+    fn bind_shell_up_to(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>, version: u32) {
         self.shell = Some(
             globals
-                .bind::<PerspicaxShellV1, _, _>(qh, 1..=1, ())
+                .bind::<PerspicaxShellV1, _, _>(qh, 1..=version, ())
                 .expect("perspicax_shell_v1"),
         );
     }
@@ -838,6 +859,18 @@ impl Dispatch<PerspicaxShellV1, ()> for Desk {
             }
             Event::Reconfigure => desk.told.push(Told::Reconfigure),
             Event::Finished => desk.shell_finished = true,
+            Event::Layout { name, short, .. } => {
+                desk.layout_events += 1;
+                desk.listing.push((name, short));
+            }
+            Event::LayoutsDone => {
+                desk.layout_events += 1;
+                desk.layouts = std::mem::take(&mut desk.listing);
+            }
+            Event::ActiveLayout { index } => {
+                desk.layout_events += 1;
+                desk.active_layout = Some(index);
+            }
             _ => {}
         }
     }

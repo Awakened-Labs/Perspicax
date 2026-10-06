@@ -35,16 +35,18 @@ mod focus;
 mod frame;
 mod geometry;
 mod heads;
+mod keyboard;
 mod layout;
 mod restart;
 mod snap;
 mod tabs;
 mod tap;
+mod theme;
 mod workspace;
 
 pub use crate::{
     access::{Access, Program, Protocol, Rule},
-    binds::{Action, Bindings, Button, Chord, Drag, Mods, Towards},
+    binds::{Action, Bindings, Button, Chord, Drag, Mods, Towards, candidates},
     flip::{EdgeDwell, Flipping, NOTCH_PIXELS, Notches, arrival, edge_at},
     focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},
     frame::{
@@ -56,11 +58,16 @@ pub use crate::{
         unmaximized_at,
     },
     heads::{Head, HeadChange, HeadMode, ModeChoice, Rejection, check_heads},
+    keyboard::{LayoutMemory, Switching},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
     restart::{EX_CONFIG, Ended, Restart, Restarts},
     snap::{Snapping, Zone, keyed, zone},
     tabs::Groups,
     tap::{LogoTap, is_logo},
+    theme::{
+        Appearance, Builtin, ColorScheme, Contrast, Family, Font, Palette, Rgba, Role, Theme,
+        follows,
+    },
     workspace::{Cell, Direction, Grid, GroupView, Home, Mode, Shape, WorkspaceView, Workspaces},
 };
 

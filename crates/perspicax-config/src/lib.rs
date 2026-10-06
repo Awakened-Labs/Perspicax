@@ -18,22 +18,32 @@
 //! compositor reads the file, hands the text to [`parse`], and applies the
 //! [`Config`] it gets back. That keeps every rule here testable as a string in
 //! and a value (or an error) out.
+//!
+//! Beside the file, the one other thing both processes read: [`desktop`]
+//! entries, which the shell lists in its menus and the session starts in
+//! [`autostart`](mod@autostart), by the same rules.
 
+pub mod autostart;
+pub mod desktop;
 mod keys;
 mod shell;
 
 use std::path::{Path, PathBuf};
 
 use perspicax_policy::{
-    Access, Action, Bindings, Chord, Colour, Decorations, Direction, Flipping, Focus, FocusModel,
-    Grid, Keysym, Mods, Place, Program, Protocol, Rule, Shape, Side, Snapping, Towards,
+    Access, Action, Bindings, Chord, Decorations, Direction, Flipping, Focus, FocusModel, Grid,
+    Keysym, Mods, Place, Program, Protocol, Rule, Shape, Side, Snapping, Switching, Towards,
 };
 use serde::Deserialize;
 
 use crate::shell::RawShell;
 pub use crate::shell::{
-    Edge, Item, Panel, PanelOutputs, Shell, ShellBuilt, TaskbarScope, UntrustedLaunchers,
+    Edge, Item, Leave, Panel, PanelOutputs, Shell, ShellBuilt, TaskbarScope, UntrustedLaunchers,
     Wallpaper, WallpaperMode,
+};
+/// The theme's types, as the shell reads them from [`Shell`].
+pub use perspicax_policy::{
+    Appearance, Builtin, ColorScheme, Contrast, Family, Font, Palette, Rgba, Role, Theme,
 };
 
 /// Which cargo features this binary was built with, as far as config cares.
@@ -76,6 +86,10 @@ pub struct Config {
     /// Programs to start once the session is up, each a program and its
     /// arguments. The person's programs: none is granted agent consent.
     pub autostart: Vec<Vec<String>>,
+    /// Whether the session also starts the XDG autostart entries, as every
+    /// desktop does: see [`autostart`](mod@autostart). On wherever there is a
+    /// seat; saying `true` in a build without one is an error.
+    pub xdg_autostart: bool,
     /// How many workspaces, in what grid, and whether one spans every
     /// monitor or each monitor has its own.
     pub workspaces: Shape,
@@ -86,7 +100,10 @@ pub struct Config {
     /// of a monitor.
     pub snapping: Snapping,
     /// Who draws a window's titlebar and border, and what they look like.
+    /// Its colours are the theme's titlebar colours.
     pub decorations: Decorations,
+    /// What everything perspicax draws looks like: the `[theme]` table.
+    pub theme: Theme,
     /// Whether X11 applications get an Xwayland. Only meaningful in a build
     /// with the `xwayland` feature; saying `true` in one without it is an
     /// error.
@@ -114,6 +131,11 @@ pub struct Keyboard {
     pub repeat_rate: i32,
     /// Milliseconds before a held key starts repeating.
     pub repeat_delay: i32,
+    /// Num Lock on or off when the session starts, and again whenever a save
+    /// changes this. `None` leaves it as the person has it.
+    pub numlock: Option<bool>,
+    /// Whether the layout in use is the session's or each window's own.
+    pub switching: Switching,
 }
 
 impl Default for Keyboard {
@@ -126,6 +148,8 @@ impl Default for Keyboard {
             options: None,
             repeat_rate: 25,
             repeat_delay: 200,
+            numlock: None,
+            switching: Switching::Global,
         }
     }
 }
@@ -350,6 +374,9 @@ impl Config {
             // The start menu, opened as on Plasma and Windows: a tap of the
             // Logo key on its own.
             bindings = bindings.bind_tap(Action::StartMenu);
+            // The next keyboard layout, as Windows switches it. Applications
+            // no longer get Logo+Space.
+            bindings = bindings.bind(logo(Keysym::space), Action::CycleLayout { forward: true });
             // Windows' snapping keys.
             for (key, direction) in arrows {
                 bindings = bindings.bind(
@@ -380,6 +407,7 @@ impl Config {
             pointer: Pointer::default(),
             outputs: Vec::new(),
             autostart: Vec::new(),
+            xdg_autostart: built.seat,
             workspaces,
             snapping: Snapping {
                 drag: profile == Profile::Classic,
@@ -397,6 +425,7 @@ impl Config {
                 },
             },
             decorations: Decorations::default(),
+            theme: Theme::default(),
             xwayland: built.xwayland,
             protocols: protocols(built),
             shell: Shell::profile(profile, ShellBuilt::FULL),
@@ -514,9 +543,9 @@ pub fn load_shell(path: &Path, built: ShellBuilt) -> Result<Shell, Error> {
 
 /// Parse a config file's `[shell]` table, with its profile, as a
 /// perspicax-shell built with `built` reads it, and the double-click time
-/// from `[input.pointer]`, which its icons share with the titlebars. The
-/// rest of the file must be this schema, and is otherwise the compositor's
-/// to judge.
+/// from `[input.pointer]`, which its icons share with the titlebars, and the
+/// theme, which everything is drawn in. The rest of the file must be this
+/// schema, and is otherwise the compositor's to judge.
 ///
 /// # Errors
 ///
@@ -525,6 +554,7 @@ pub fn load_shell(path: &Path, built: ShellBuilt) -> Result<Shell, Error> {
 /// [`Error::Invalid`] for a value it cannot use.
 pub fn shell(text: &str, built: ShellBuilt) -> Result<Shell, Error> {
     let raw: Raw = toml::from_str(text).map_err(|error| Error::Parse(error.to_string()))?;
+    let theme = theme(raw.theme, raw.decorations.as_ref())?;
     let profile = Shell::profile(raw.profile, built);
     // The grid's sides are the compositor's to judge; this only counts.
     let workspaces = match raw.workspaces.as_ref().and_then(|written| written.grid) {
@@ -542,6 +572,8 @@ pub fn shell(text: &str, built: ShellBuilt) -> Result<Shell, Error> {
     if let Some(written) = written {
         shell.double_click_ms = double_click_ms(written)?;
     }
+    shell.palette = theme.palette;
+    shell.font = theme.font;
     Ok(shell)
 }
 
@@ -575,12 +607,44 @@ struct Raw {
     outputs: Vec<RawOutput>,
     #[serde(default)]
     autostart: Vec<Vec<String>>,
+    xdg_autostart: Option<bool>,
     xwayland: Option<bool>,
     workspaces: Option<RawWorkspaces>,
     snap: Option<RawSnap>,
     decorations: Option<RawDecorations>,
+    theme: Option<RawTheme>,
     protocols: Option<RawProtocols>,
     shell: Option<RawShell>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawColorScheme {
+    Dark,
+    Light,
+    NoPreference,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawContrast {
+    Normal,
+    High,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawTheme {
+    name: Option<String>,
+    font: Option<String>,
+    font_size: Option<u16>,
+    cursor: Option<String>,
+    cursor_size: Option<u32>,
+    color_scheme: Option<RawColorScheme>,
+    contrast: Option<RawContrast>,
+    /// By role, checked against [`Role`] rather than by serde, so that a
+    /// misspelled role is named with the table it is in.
+    palette: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -702,6 +766,15 @@ struct RawKeyboard {
     options: Option<String>,
     repeat_rate: Option<i32>,
     repeat_delay: Option<i32>,
+    numlock: Option<bool>,
+    switching: Option<RawSwitching>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawSwitching {
+    Global,
+    Window,
 }
 
 #[derive(Debug, Deserialize)]
@@ -747,6 +820,15 @@ impl Raw {
                     feature: "seat",
                 });
             }
+        }
+        if let Some(xdg_autostart) = self.xdg_autostart {
+            if xdg_autostart && !built.seat {
+                return Err(Error::NotBuilt {
+                    key: "xdg-autostart",
+                    feature: "seat",
+                });
+            }
+            config.xdg_autostart = xdg_autostart;
         }
         if let Some(xwayland) = self.xwayland {
             if xwayland && !built.xwayland {
@@ -888,9 +970,15 @@ impl Raw {
             config.snapping.drag = snap.drag.unwrap_or(config.snapping.drag);
         }
 
+        config.theme = theme(self.theme, self.decorations.as_ref())?;
         if let Some(decorations) = self.decorations {
             config.decorations = decorations.apply(config.decorations)?;
         }
+        let palette = &config.theme.palette;
+        config.decorations.focused = palette[Role::TitleFocused].colour();
+        config.decorations.focused_ink = palette[Role::TitleFocusedInk].colour();
+        config.decorations.unfocused = palette[Role::TitleUnfocused].colour();
+        config.decorations.unfocused_ink = palette[Role::TitleUnfocusedInk].colour();
 
         if let Some(protocols) = self.protocols {
             config.protocols = protocols.apply(config.protocols, built)?;
@@ -905,6 +993,8 @@ impl Raw {
             )?;
         }
         config.shell.double_click_ms = config.pointer.double_click_ms;
+        config.shell.palette = config.theme.palette;
+        config.shell.font = config.theme.font.clone();
 
         if let Some(empty) = self.autostart.iter().position(Vec::is_empty) {
             return Err(invalid(
@@ -942,22 +1032,152 @@ impl RawDecorations {
         if let Some(border) = self.border {
             decorations.border = pixels("border", border, 0..=32)?;
         }
-        let colour = |key: &str, text: String| {
-            Colour::parse(&text).ok_or_else(|| {
-                invalid(
-                    format!("decorations.{key}"),
-                    format!("{text:?} is not a colour; write one as \"#rrggbb\""),
-                )
-            })
-        };
-        if let Some(focused) = self.focused {
-            decorations.focused = colour("focused", focused)?;
-        }
-        if let Some(unfocused) = self.unfocused {
-            decorations.unfocused = colour("unfocused", unfocused)?;
-        }
+        // Its colours are the theme's: see `theme`.
         Ok(decorations)
     }
+}
+
+/// The `[theme]` table, decided: a theme by name, the colours a person wrote
+/// over it, and the font.
+///
+/// `[decorations] focused` and `unfocused` were the titlebars' colours before
+/// there were themes, and still are: the same two roles, written in the older
+/// place. Writing one in both places is refused rather than one quietly
+/// winning.
+fn theme(written: Option<RawTheme>, decorations: Option<&RawDecorations>) -> Result<Theme, Error> {
+    let written = written.unwrap_or_default();
+    let builtin = match written.name {
+        Some(name) => Builtin::named(&name).ok_or_else(|| {
+            let known: Vec<&str> = Builtin::ALL.iter().map(|theme| theme.name()).collect();
+            invalid(
+                "theme.name".to_owned(),
+                format!("{name:?} is not a theme; there are {}", known.join(", ")),
+            )
+        })?,
+        None => Builtin::default(),
+    };
+
+    let mut colours = std::collections::BTreeMap::new();
+    for (key, text) in written.palette.unwrap_or_default() {
+        let at = format!("theme.palette.{key}");
+        let role = Role::keyed(&key)
+            .ok_or_else(|| invalid(at.clone(), "is not one of the palette's colours".to_owned()))?;
+        colours.insert(role, palette_colour(&at, role, &text)?);
+    }
+    if let Some(decorations) = decorations {
+        let older = [
+            ("focused", &decorations.focused, Role::TitleFocused),
+            ("unfocused", &decorations.unfocused, Role::TitleUnfocused),
+        ];
+        for (key, text, role) in older {
+            let Some(text) = text else { continue };
+            let at = format!("decorations.{key}");
+            if colours.contains_key(&role) {
+                return Err(invalid(
+                    at,
+                    format!(
+                        "is [theme.palette] {} as well; write it in one place",
+                        role.key()
+                    ),
+                ));
+            }
+            colours.insert(role, palette_colour(&at, role, text)?);
+        }
+    }
+
+    let mut font = Font::default();
+    if let Some(family) = written.font {
+        if family.trim().is_empty() {
+            return Err(invalid(
+                "theme.font".to_owned(),
+                "an empty name; leave it out for the system's sans-serif".to_owned(),
+            ));
+        }
+        font.family = Family::parse(&family);
+    }
+    if let Some(size) = written.font_size {
+        if !(10..=20).contains(&size) {
+            return Err(invalid(
+                "theme.font-size".to_owned(),
+                format!("{size} is outside 10 to 20 pixels"),
+            ));
+        }
+        font.size = size;
+    }
+
+    if written
+        .cursor
+        .as_deref()
+        .is_some_and(|name| name.trim().is_empty())
+    {
+        return Err(invalid(
+            "theme.cursor".to_owned(),
+            "an empty name; leave it out for XCURSOR_THEME's".to_owned(),
+        ));
+    }
+    if let Some(size) = written.cursor_size
+        && !(8..=128).contains(&size)
+    {
+        return Err(invalid(
+            "theme.cursor-size".to_owned(),
+            format!("{size} is outside 8 to 128 pixels"),
+        ));
+    }
+
+    // What applications are told: the theme's own, then what was written.
+    // An accent written for perspicax's drawing is the applications' too.
+    let mut apps = builtin.appearance();
+    if let Some(scheme) = written.color_scheme {
+        apps.color_scheme = Some(match scheme {
+            RawColorScheme::Dark => ColorScheme::Dark,
+            RawColorScheme::Light => ColorScheme::Light,
+            RawColorScheme::NoPreference => ColorScheme::NoPreference,
+        });
+    }
+    if let Some(contrast) = written.contrast {
+        apps.contrast = Some(match contrast {
+            RawContrast::Normal => Contrast::Normal,
+            RawContrast::High => Contrast::High,
+        });
+    }
+    if let Some(accent) = colours.get(&Role::Accent) {
+        apps.accent = Some(accent.colour());
+    }
+
+    Ok(Theme {
+        builtin,
+        palette: builtin.palette().written_over(&colours),
+        font,
+        cursor: written.cursor,
+        cursor_size: written.cursor_size,
+        apps,
+    })
+}
+
+/// A colour written for `role` at `at`: opaque, unless the role is one of the
+/// few drawn see-through.
+fn palette_colour(at: &str, role: Role, text: &str) -> Result<Rgba, Error> {
+    let colour = Rgba::parse(text).ok_or_else(|| {
+        let forms = if role.takes_alpha() {
+            "\"#rrggbb\" or \"#rrggbbaa\""
+        } else {
+            "\"#rrggbb\""
+        };
+        invalid(
+            at.to_owned(),
+            format!("{text:?} is not a colour; write one as {forms}"),
+        )
+    })?;
+    if !colour.is_opaque() && !role.takes_alpha() {
+        return Err(invalid(
+            at.to_owned(),
+            format!(
+                "{text:?} is see-through, and this is drawn opaque so the compositor can \
+                 say what it covers; write it as \"#rrggbb\""
+            ),
+        ));
+    }
+    Ok(colour)
 }
 
 impl RawProtocols {
@@ -1044,6 +1264,13 @@ impl RawKeyboard {
         keyboard.layout = self.layout.unwrap_or(keyboard.layout);
         keyboard.variant = self.variant.unwrap_or(keyboard.variant);
         keyboard.options = self.options.or(keyboard.options);
+        keyboard.numlock = self.numlock.or(keyboard.numlock);
+        if let Some(switching) = self.switching {
+            keyboard.switching = match switching {
+                RawSwitching::Global => Switching::Global,
+                RawSwitching::Window => Switching::Window,
+            };
+        }
         Ok(keyboard)
     }
 }
@@ -1174,11 +1401,14 @@ fn action_for(action: RawAction) -> Result<Option<Action>, String> {
             "detach-tab" => Action::DetachTab,
             "start-menu" => Action::StartMenu,
             "root-menu" => Action::RootMenu,
+            "next-layout" => Action::CycleLayout { forward: true },
+            "previous-layout" => Action::CycleLayout { forward: false },
             other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
                 format!(
                     "`{other}` is not an action; use close, cycle-focus, reload, \
                          toggle-sticky, toggle-maximize, minimize, next-tab, previous-tab, \
                          tab-with-previous, detach-tab, start-menu, root-menu, \
+                         next-layout, previous-layout, layout-<1-4>, \
                          move-to-next-output, move-to-previous-output, \
                          move-to-output-<side>, workspace-<side>, workspace-<number>, \
                          send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
@@ -1212,7 +1442,13 @@ fn directed(name: &str) -> Option<Action> {
 
 /// `workspace-3`. Any positive number is accepted here: whether the grid has
 /// that many is a question for the grid, which a later reload may change.
+/// `layout-2`, from 1 to 4: xkb holds four layouts at most, and whether the
+/// keymap has that many is the keymap's question.
 fn numbered(name: &str) -> Option<Action> {
+    if let Some(layout) = name.strip_prefix("layout-") {
+        let number: u8 = layout.parse().ok()?;
+        return (1..=4).contains(&number).then_some(Action::Layout(number));
+    }
     let number: u16 = name.strip_prefix("workspace-")?.parse().ok()?;
     (number > 0).then_some(Action::GoToWorkspace(number))
 }
@@ -1238,6 +1474,8 @@ fn invalid(key: String, reason: String) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use perspicax_policy::{Colour, Palette};
+
     use super::*;
 
     const SEAT: Built = Built {
@@ -1510,6 +1748,75 @@ mod tests {
     }
 
     #[test]
+    fn num_lock_is_left_alone_unless_the_config_says() {
+        assert_eq!(parse("", SEAT).unwrap().keyboard.numlock, None);
+        let on = parse("[input.keyboard]\nnumlock = true", SEAT).unwrap();
+        assert_eq!(on.keyboard.numlock, Some(true));
+        let off = parse("[input.keyboard]\nnumlock = false", SEAT).unwrap();
+        assert_eq!(off.keyboard.numlock, Some(false));
+        assert!(parse("[input.keyboard]\nnumlock = \"on\"", SEAT).is_err());
+    }
+
+    #[test]
+    fn the_layout_is_the_sessions_unless_the_config_gives_each_window_its_own() {
+        assert_eq!(
+            parse("", SEAT).unwrap().keyboard.switching,
+            Switching::Global
+        );
+        let window = parse("[input.keyboard]\nswitching = \"window\"", SEAT).unwrap();
+        assert_eq!(window.keyboard.switching, Switching::Window);
+        let error = parse("[input.keyboard]\nswitching = \"app\"", SEAT).unwrap_err();
+        assert!(error.to_string().contains("switching"), "{error}");
+    }
+
+    #[test]
+    fn layout_actions_are_named_and_numbered_from_one_to_four() {
+        let text = "[keys]\n\"Ctrl+1\" = \"layout-1\"\n\
+                    \"Ctrl+4\" = \"layout-4\"\n\"Ctrl+n\" = \"next-layout\"\n\
+                    \"Ctrl+p\" = \"previous-layout\"";
+        let bindings = parse(text, SEAT).unwrap().bindings;
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            bindings.resolve(ctrl, &[Keysym::_1]),
+            Some(&Action::Layout(1))
+        );
+        assert_eq!(
+            bindings.resolve(ctrl, &[Keysym::_4]),
+            Some(&Action::Layout(4))
+        );
+        assert_eq!(
+            bindings.resolve(ctrl, &[Keysym::n]),
+            Some(&Action::CycleLayout { forward: true })
+        );
+        assert_eq!(
+            bindings.resolve(ctrl, &[Keysym::p]),
+            Some(&Action::CycleLayout { forward: false })
+        );
+        for refused in ["layout-0", "layout-5", "layout-x"] {
+            let text = format!("[keys]\n\"Ctrl+1\" = \"{refused}\"");
+            assert!(parse(&text, SEAT).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn classic_switches_layout_with_logo_space_and_minimal_does_not() {
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        let classic = Config::profile(Profile::Classic, SEAT).bindings;
+        assert_eq!(
+            classic.resolve(logo, &[Keysym::space]),
+            Some(&Action::CycleLayout { forward: true })
+        );
+        let minimal = Config::profile(Profile::Minimal, SEAT).bindings;
+        assert_eq!(minimal.resolve(logo, &[Keysym::space]), None);
+    }
+
+    #[test]
     fn a_zero_repeat_rate_is_refused() {
         assert!(parse("[input.keyboard]\nrepeat-rate = 0", SEAT).is_err());
     }
@@ -1522,6 +1829,32 @@ mod tests {
     #[test]
     fn an_empty_autostart_command_is_refused() {
         assert!(parse("autostart = [[]]", SEAT).is_err());
+    }
+
+    #[test]
+    fn xdg_autostart_is_on_in_both_profiles_and_can_be_turned_off() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            assert!(Config::profile(profile, SEAT).xdg_autostart, "{profile:?}");
+        }
+        assert!(!parse("xdg-autostart = false", SEAT).unwrap().xdg_autostart);
+    }
+
+    #[test]
+    fn xdg_autostart_in_a_build_without_a_seat_is_refused() {
+        let error = parse("xdg-autostart = true", Built::default()).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::NotBuilt {
+                key: "xdg-autostart",
+                feature: "seat"
+            }
+        ));
+        assert!(
+            !parse("xdg-autostart = false", Built::default())
+                .unwrap()
+                .xdg_autostart,
+            "turning off what is not built is not an error"
+        );
     }
 
     #[test]
@@ -1625,6 +1958,168 @@ mod tests {
             assert!(error.to_string().contains(key), "{error}");
         }
         assert!(parse("[decorations]\nmode = \"both\"", SEAT).is_err());
+    }
+
+    /// The shell draws in the theme, and reads it as the compositor does,
+    /// so a theme change reaches it as a change to `[shell]` would.
+    #[test]
+    fn the_shell_reads_the_theme_and_the_compositor_hands_it_on() {
+        let text = "[theme]\nname = \"breeze-light\"\nfont-size = 16\n\
+                    [theme.palette]\naccent = \"#e93d5a\"";
+        let shell = shell(text, ShellBuilt::FULL).unwrap();
+        assert_eq!(shell.font.size, 16);
+        assert_eq!(
+            shell.palette[Role::Accent],
+            Rgba::new(0xe9, 0x3d, 0x5a, 0xff)
+        );
+        assert_eq!(
+            shell.palette[Role::Panel],
+            Builtin::BreezeLight.palette()[Role::Panel]
+        );
+        assert_eq!(parse(text, SEAT).unwrap().shell, shell);
+        assert_ne!(
+            shell.palette,
+            Shell::profile(Profile::Classic, ShellBuilt::FULL).palette
+        );
+    }
+
+    #[test]
+    fn with_no_theme_the_desk_looks_as_it_did_before_themes() {
+        let config = parse("", SEAT).unwrap();
+        assert_eq!(config.theme, Theme::default());
+        assert_eq!(config.decorations, Decorations::default());
+    }
+
+    #[test]
+    fn a_theme_is_named_and_written_over_one_colour_at_a_time() {
+        let config = parse(
+            "[theme]\nname = \"breeze-dark\"\nfont = \"Noto Sans\"\nfont-size = 12\n\
+             [theme.palette]\npanel = \"#102030\"\nselected = \"#ff000080\"\n",
+            SEAT,
+        )
+        .unwrap();
+        let theme = config.theme;
+        assert_eq!(theme.builtin, Builtin::BreezeDark);
+        assert_eq!((theme.cursor, theme.cursor_size), (None, None));
+        assert_eq!(theme.font.family, Family::Named("Noto Sans".to_owned()));
+        assert_eq!(theme.font.size, 12);
+        assert_eq!(
+            theme.palette[Role::Panel],
+            Rgba::new(0x10, 0x20, 0x30, 0xff)
+        );
+        assert_eq!(theme.palette[Role::Selected], Rgba::new(0xff, 0, 0, 0x80));
+        // The rest is the theme's own.
+        let dark = Builtin::BreezeDark.palette();
+        assert_eq!(theme.palette[Role::Menu], dark[Role::Menu]);
+        // And the titlebars wear the theme's colours.
+        assert_eq!(
+            config.decorations.focused,
+            dark[Role::TitleFocused].colour()
+        );
+        assert_eq!(
+            config.decorations.unfocused_ink,
+            dark[Role::TitleUnfocusedInk].colour()
+        );
+    }
+
+    /// Applications are told nothing by the default theme, a Breeze's scheme
+    /// and accent by a Breeze, and whatever is written over either.
+    #[test]
+    fn applications_are_told_what_the_theme_and_the_file_say() {
+        assert_eq!(parse("", SEAT).unwrap().theme.apps, Appearance::default());
+
+        let dark = parse("[theme]\nname = \"breeze-dark\"", SEAT)
+            .unwrap()
+            .theme
+            .apps;
+        assert_eq!(dark.color_scheme, Some(ColorScheme::Dark));
+        assert_eq!(dark.accent, Some(Colour::rgb(0x3d, 0xae, 0xe9)));
+
+        let written = parse(
+            "[theme]\ncolor-scheme = \"light\"\ncontrast = \"high\"\n\
+             [theme.palette]\naccent = \"#e93d5a\"",
+            SEAT,
+        )
+        .unwrap()
+        .theme
+        .apps;
+        assert_eq!(
+            written,
+            Appearance {
+                color_scheme: Some(ColorScheme::Light),
+                accent: Some(Colour::rgb(0xe9, 0x3d, 0x5a)),
+                contrast: Some(Contrast::High),
+            }
+        );
+        assert!(matches!(
+            parse("[theme]\ncolor-scheme = \"grey\"", SEAT),
+            Err(Error::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn the_pointer_is_named_and_sized_in_the_theme() {
+        let theme = parse("[theme]\ncursor = \"Adwaita\"\ncursor-size = 32", SEAT)
+            .unwrap()
+            .theme;
+        assert_eq!(theme.cursor.as_deref(), Some("Adwaita"));
+        assert_eq!(theme.cursor_size, Some(32));
+    }
+
+    /// `[decorations] focused` predates themes. It still says the focused
+    /// titlebar's colour, its ink follows as it always did, and writing the
+    /// colour in both places is refused rather than one quietly winning.
+    #[test]
+    fn the_older_titlebar_colours_are_the_palettes_and_not_twice() {
+        let config = parse("[decorations]\nfocused = \"#ffffff\"", SEAT).unwrap();
+        assert_eq!(config.decorations.focused, Colour::rgb(0xff, 0xff, 0xff));
+        assert_eq!(config.decorations.focused_ink, Colour::rgb(0, 0, 0));
+        assert_eq!(
+            config.theme.palette[Role::TitleFocused],
+            Rgba::new(0xff, 0xff, 0xff, 0xff)
+        );
+
+        let error = parse(
+            "[decorations]\nfocused = \"#ffffff\"\n[theme.palette]\ntitle-focused = \"#000000\"",
+            SEAT,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, Error::Invalid { key, .. } if key == "decorations.focused"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_theme_that_cannot_be_drawn_is_refused_by_its_key() {
+        for (text, key) in [
+            ("name = \"Breeze\"", "theme.name"),
+            ("font = \" \"", "theme.font"),
+            ("font-size = 40", "theme.font-size"),
+            ("cursor = \"\"", "theme.cursor"),
+            ("cursor-size = 4", "theme.cursor-size"),
+            (
+                "[theme.palette]\nbackground = \"#000000\"",
+                "theme.palette.background",
+            ),
+            ("[theme.palette]\npanel = \"dark\"", "theme.palette.panel"),
+            // Opaque, so the compositor can prove what a panel covers.
+            (
+                "[theme.palette]\npanel = \"#00000080\"",
+                "theme.palette.panel",
+            ),
+        ] {
+            let error = parse(&format!("[theme]\n{text}"), SEAT).unwrap_err();
+            assert!(
+                matches!(&error, Error::Invalid { key: at, .. } if at == key),
+                "{text}: {error}"
+            );
+        }
+        assert!(matches!(
+            parse("[theme]\ncolour = \"#000000\"", SEAT),
+            Err(Error::Parse(_))
+        ));
+        assert_eq!(Palette::default(), Builtin::Perspicax.palette());
     }
 
     #[test]

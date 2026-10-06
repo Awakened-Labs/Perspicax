@@ -49,8 +49,8 @@ use crate::{
     layout::{Rect, usable},
     model::{
         Button,
-        apps::{Places, Run},
-        fs::{Disk, which},
+        apps::Places,
+        fs::Disk,
         image,
         menu::{self, Session},
         menu_file,
@@ -69,7 +69,8 @@ pub(super) struct Menus {
     /// menus' surface takes no clicks.
     reserved: Vec<(String, Rect)>,
     settings: Settings,
-    /// The folders programs are found in: Lock's, and a terminal.
+    /// The folders programs are found in: the ways to leave's, and a
+    /// terminal.
     path: Vec<PathBuf>,
     /// What the menus were last built from: the read of the applications,
     /// and when the menu file last changed. `None` to build them afresh.
@@ -84,9 +85,11 @@ pub(super) struct Menus {
 /// What the config says of the menus.
 #[derive(Debug, Clone, PartialEq)]
 struct Settings {
-    root: bool,
+    /// Found from what the file says.
     menu_file: Option<PathBuf>,
-    lock: Vec<String>,
+    /// The rest as the file says it: whether there is a root menu, and the
+    /// ways to leave and what each runs.
+    shell: Shell,
 }
 
 /// The menus' surface.
@@ -196,7 +199,7 @@ impl Menus {
                     ..
                 }
         );
-        if root && !self.settings.root {
+        if root && !self.settings.shell.root_menu {
             return Vec::new();
         }
         if (root || matches!(event, Event::StartMenu { .. })) && !self.state.is_open() {
@@ -230,20 +233,7 @@ impl Menus {
                 None
             }
         });
-        let lock = self
-            .settings
-            .lock
-            .first()
-            .filter(|program| which(&Disk, program, &self.path).is_some())
-            .map(|_| Run {
-                argv: self.settings.lock.clone(),
-                terminal: false,
-                dir: None,
-            });
-        let session = Session {
-            lock,
-            log_out: self.log_out,
-        };
+        let session = Session::of(&self.settings.shell, self.log_out, &Disk, &self.path);
         self.state.set_menus(
             menu::root(apps, file.as_ref(), &session),
             menu::start(apps, &session),
@@ -315,12 +305,16 @@ impl Menus {
             .iter()
             .map(|menu| (menu.rect.x, menu.rect.y, menu.rect.w, menu.rect.h))
             .collect();
-        let Kit { fonts, images } = kit;
+        let Kit {
+            fonts,
+            images,
+            palette,
+        } = kit;
         let text = fonts.get();
         let scale = shown.scale;
         let started = Instant::now();
         canvas.show(&shown.layer, size, scale, &opaque, |picture| {
-            paint::menu::paint(&view, picture, scale, text, images);
+            paint::menu::paint(&view, picture, scale, text, images, palette);
         });
         tracing::debug!(took = ?started.elapsed(), "the menus were drawn");
         shown
@@ -409,12 +403,11 @@ impl Settings {
     fn of(shell: &Shell, config: Option<&Path>) -> Self {
         let home = home();
         Self {
-            root: shell.root_menu,
             menu_file: shell
                 .menu_file
                 .as_deref()
                 .map(|written| image::locate(written, config, home.as_deref())),
-            lock: shell.lock.clone(),
+            shell: shell.clone(),
         }
     }
 }

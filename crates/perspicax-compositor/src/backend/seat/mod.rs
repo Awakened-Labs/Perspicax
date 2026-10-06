@@ -100,10 +100,16 @@ render_elements! {
     Preview=SolidColorRenderElement,
 }
 
-/// Where a dragged window would snap: a pale wash over the zone, light enough
-/// to see the windows through, distinct enough from the backdrop to read.
-const PREVIEW: [f32; 4] = [0.55, 0.7, 0.95, 1.0];
+/// Where a dragged window would snap: a wash of the theme's `snap-preview`
+/// over the zone, light enough to see the windows through.
 const PREVIEW_ALPHA: f32 = 0.25;
+
+/// The snap preview's colour, from the theme.
+fn preview_colour(settings: &perspicax_config::Config) -> [f32; 4] {
+    let colour = settings.theme.palette[perspicax_policy::Role::SnapPreview];
+    let channel = |value: u8| f32::from(value) / 255.0;
+    [channel(colour.r), channel(colour.g), channel(colour.b), 1.0]
+}
 
 /// Which hardware planes a frame may use: the primary plane only, with the
 /// cursor and every window composited into it.
@@ -322,6 +328,8 @@ impl Session {
             .map_err(|error| Error::EventLoop(error.to_string()))?;
 
         let dwell = perspicax_policy::EdgeDwell::new(settings.flipping.delay_ms);
+        let preview = SolidColorBuffer::new((1, 1), preview_colour(&settings));
+        let cursor = Cursor::load(settings.theme.cursor.as_deref(), settings.theme.cursor_size);
         settings::watch(handle, config_path.as_deref());
         Ok(Self {
             seat,
@@ -338,11 +346,11 @@ impl Session {
             devices: Vec::new(),
             children: Vec::new(),
             shell: supervise::Supervisor::new(),
-            cursor: Cursor::load(),
+            cursor,
             titles: titles::Titles::new(),
             title_press: None,
             button_press: None,
-            preview: SolidColorBuffer::new((1, 1), PREVIEW),
+            preview,
             dwell,
             dwell_armed: None,
             notches: perspicax_policy::Notches::default(),
@@ -412,7 +420,9 @@ pub(crate) fn attach(state: &mut Compositor) -> Result<(), Error> {
         .create_global_with_default_feedback::<Compositor>(&state.display, &feedback);
 
     arm_panic_hook();
-    settings::apply_keyboard(state);
+    let numlock = session.settings.keyboard.numlock;
+    settings::apply_keyboard(state, numlock);
+    settings::tell_appearance(state);
     rescan(state);
     let Running::Seat(session) = &state.backend else {
         return Ok(());
@@ -837,6 +847,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         cursor,
         preview,
         titles,
+        settings,
         ..
     } = &mut **session;
     let Some(head) = heads.iter_mut().find(|head| head.crtc == crtc) else {
@@ -855,7 +866,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     let whole = crate::framed::whole_scale(head.output.current_scale().fractional_scale());
     for (window, labels, front) in labels {
         if space.outputs_for_element(&window).contains(&head.output) {
-            titles.prepare(&window, labels, front, whole);
+            titles.prepare(&window, labels, front, whole, &settings.theme.font.family);
         }
     }
 
@@ -888,7 +899,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         && area.overlaps(geometry)
     {
         let scale = head.output.current_scale().fractional_scale();
-        preview.update(area.size, PREVIEW);
+        preview.update(area.size, preview_colour(settings));
         let at = (area.loc - geometry.loc).to_physical_precise_round(scale);
         elements.push(Elements::Preview(SolidColorRenderElement::from_buffer(
             preview,

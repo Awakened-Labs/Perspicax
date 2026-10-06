@@ -3,7 +3,7 @@
 //! from the top before starting the next, as a file manager's desktop does.
 //! Icons past the right edge are not shown.
 
-use super::{Measure, Rect};
+use super::{Measure, Rect, TEXT};
 
 /// Each icon's cell, its picture, and its one line of name below it.
 pub(crate) const CELL: (i32, i32) = (96, 88);
@@ -36,6 +36,10 @@ pub(crate) fn lay_out<'a>(
     measure: &mut impl Measure,
 ) -> Vec<Spot> {
     let (width, height) = CELL;
+    // A name's line grows with the theme's text, as far as the cell has room
+    // under the picture.
+    let line = ((LINE as f32 * measure.size() / TEXT).round() as i32)
+        .clamp(LINE, height - ABOVE - ICON - 4);
     let rows = ((area.h - 2 * MARGIN) / height).max(1);
     let columns = (area.w - 2 * MARGIN) / width;
     names
@@ -57,7 +61,7 @@ pub(crate) fn lay_out<'a>(
                 cell.x + (width - wide) / 2,
                 picture.bottom() + 4,
                 wide,
-                LINE,
+                line,
             );
             Spot {
                 place: Rect::new(
@@ -116,6 +120,31 @@ mod tests {
             32 + 8 + 2,
             "below a panel along the top"
         );
+    }
+
+    /// A larger font gets a taller line for each name, as far as the cell
+    /// has room for it under the picture; the default keeps the line it had.
+    #[test]
+    fn a_names_line_grows_with_the_themes_text() {
+        struct Sized(f32);
+        impl Measure for Sized {
+            fn width(&mut self, text: &str) -> f32 {
+                7.0 * text.chars().count() as f32
+            }
+            fn size(&self) -> f32 {
+                self.0
+            }
+        }
+        let area = Rect::new(0, 0, 1280, 800);
+        let line = |size: f32| lay_out(["Notes"], area, &mut Sized(size))[0].label.h;
+        assert_eq!(line(TEXT), LINE);
+        assert_eq!(line(16.0), 25);
+        assert_eq!(
+            line(20.0),
+            CELL.1 - ABOVE - ICON - 4,
+            "no further than the cell"
+        );
+        assert_eq!(line(10.0), LINE, "and never smaller than it was");
     }
 
     #[test]

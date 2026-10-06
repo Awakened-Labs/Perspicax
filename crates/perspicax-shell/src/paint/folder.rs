@@ -1,30 +1,25 @@
 //! The desktop folder's icons, over the wallpaper: each one's picture, and
-//! its name under it in white over a dark shadow, which reads on any
-//! wallpaper, light or dark. A selected icon sits in a see-through wash of
-//! the highlight.
+//! its name under it in the theme's label ink over a shadow -- white over
+//! dark, unless the theme says otherwise, which reads on any wallpaper,
+//! light or dark. A selected icon sits in a see-through wash of the accent.
 
 use tiny_skia::PixmapMut;
 
+use perspicax_config::{Palette, Role};
+
 use super::{
-    fill,
+    colour, fill,
     icons::{self, Images},
     scaled,
     text::Text,
 };
 use crate::{
     layout::{
-        Rect, TEXT,
+        Rect,
         folder::{ICON, Spot},
     },
     model::folder::Folder,
 };
-
-/// Behind a selected icon: the highlight, as the menus have it, a little
-/// over a third opaque. Straight alpha, as a fill takes it.
-const SELECTED: [u8; 4] = [0x3d, 0xae, 0xe9, 0x66];
-/// A name, and the shadow a pixel below and to the right of it.
-const INK: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
-const SHADOW: [u8; 4] = [0x00, 0x00, 0x00, 0xc0];
 
 /// Draw the icons of `folder` at `spots`, one for each icon as far as they
 /// go, on `canvas`, a surface's pixels at `scale` times its size.
@@ -35,12 +30,20 @@ pub(crate) fn paint(
     scale: u32,
     text: &mut Text,
     images: &mut Images,
+    palette: &Palette,
 ) {
+    // Behind a selected icon, a see-through wash; a name, and the shadow a
+    // pixel below and to the right of it.
+    let (selected, ink, shadow) = (
+        colour(palette, Role::Selected),
+        colour(palette, Role::LabelInk),
+        colour(palette, Role::LabelShadow),
+    );
     let px = |rect: Rect| scaled(rect, scale);
-    let size = TEXT * scale as f32;
+    let size = text.size() * scale as f32;
     for (icon, spot) in folder.icons().iter().zip(spots) {
         if folder.is_selected(icon) {
-            fill(canvas, px(spot.place), SELECTED);
+            fill(canvas, px(spot.place), selected);
         }
         let name = [icon.image.as_str(), icon.fallback]
             .into_iter()
@@ -50,7 +53,7 @@ pub(crate) fn paint(
         }
         let label = spot.label;
         let below = Rect::new(label.x + 1, label.y + 1, label.w, label.h);
-        text.write(canvas, &icon.name, px(below), size, SHADOW);
-        text.write(canvas, &icon.name, px(label), size, INK);
+        text.write(canvas, &icon.name, px(below), size, shadow);
+        text.write(canvas, &icon.name, px(label), size, ink);
     }
 }

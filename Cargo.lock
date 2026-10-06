@@ -1491,6 +1491,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "futures-util",
  "perspicax-atspi",
  "perspicax-compositor",
  "perspicax-config",
@@ -1498,6 +1499,7 @@ dependencies = [
  "perspicax-mcp",
  "perspicax-node",
  "rmcp",
+ "rustix 1.1.4",
  "serde_json",
  "smithay-client-toolkit",
  "thiserror 2.0.20",

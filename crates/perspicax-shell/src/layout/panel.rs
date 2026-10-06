@@ -4,7 +4,9 @@
 //! A panel runs the whole width of its monitor, along the top or the
 //! bottom. The start button is a square as tall as the panel, the pager as
 //! wide as its grid of workspaces, the tray a slot [`TRAY_SLOT`] wide for
-//! each icon it shows, and the clock as wide as the time it shows. The
+//! each icon it shows, and the clock as wide as the time it shows, as is
+//! the layout indicator as wide as its label, while there is a choice of
+//! layouts to show. The
 //! taskbar takes whatever room is left, and shares it among the windows it
 //! lists, each no wider than [`TASK_WIDTH`]; a panel without one keeps its
 //! last item at the right end, and the rest at the left.
@@ -63,9 +65,12 @@ pub(crate) struct TrayIcon {
 }
 
 /// What a panel shows beyond its start button: the time, the windows its
-/// taskbar lists, its monitor's workspaces, and the status icons.
+/// taskbar lists, its monitor's workspaces, the status icons, and the
+/// keyboard layout in use.
 pub(crate) struct Holding<'a> {
     pub(crate) time: &'a str,
+    /// The layout in use's label, if there is a choice of layouts.
+    pub(crate) layout: Option<&'a str>,
     pub(crate) tasks: Vec<Task>,
     pub(crate) cells: Vec<Cell>,
     #[cfg(feature = "tray")]
@@ -87,6 +92,8 @@ pub(crate) struct Placed {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Part {
     Start,
+    /// The keyboard layout indicator.
+    Layout,
     /// The task of the window of this serial.
     Task(u64),
     /// The cell of the workspace of this serial.
@@ -140,6 +147,9 @@ pub(crate) fn lay_out(
         .map(|item| match item {
             Item::Start => height,
             Item::Clock => measure.width(holding.time).ceil() as i32 + 2 * CLOCK_PAD,
+            Item::Layout => holding.layout.map_or(0, |label| {
+                measure.width(label).ceil() as i32 + 2 * CLOCK_PAD
+            }),
             Item::Pager => grid.width(),
             // The taskbar's width is what the others leave.
             Item::Taskbar => 0,
@@ -291,11 +301,15 @@ impl Placed {
                 .find(|(_, rect)| rect.contains(point))
                 .map(|(cell, _)| Part::Workspace(cell.serial))
         };
-        let start = || {
-            self.items
-                .iter()
-                .find(|&&(item, rect)| item == Item::Start && rect.contains(point))
-                .map(|_| Part::Start)
+        let item = || {
+            self.items.iter().find_map(|&(item, rect)| {
+                match item {
+                    Item::Start => Some(Part::Start),
+                    Item::Layout => Some(Part::Layout),
+                    _ => None,
+                }
+                .filter(|_| rect.contains(point))
+            })
         };
         #[cfg(feature = "tray")]
         let tray = || {
@@ -306,7 +320,7 @@ impl Placed {
         };
         #[cfg(not(feature = "tray"))]
         let tray = || None;
-        task.or_else(cell).or_else(start).or_else(tray)
+        task.or_else(cell).or_else(item).or_else(tray)
     }
 
     /// Where the tray's icon of `key` is, if the panel shows it.
@@ -346,6 +360,7 @@ mod tests {
             #[cfg(feature = "tray")]
             tray: Vec::new(),
             time: "14:05",
+            layout: None,
             tasks: (0..tasks as u64)
                 .map(|serial| Task {
                     serial,
@@ -387,6 +402,43 @@ mod tests {
             placed[3],
             (Item::Clock, Rect::new(1280 - clock, 0, clock, 40)),
             "against the right end"
+        );
+    }
+
+    #[test]
+    fn the_layout_indicator_takes_room_only_with_a_choice_of_layouts() {
+        let items = [Item::Start, Item::Taskbar, Item::Layout, Item::Clock];
+        let one = laid(&items);
+        assert_eq!(one[2].1.w, 0, "one layout: nothing to show");
+        let others: Vec<_> = one
+            .into_iter()
+            .filter(|&(item, _)| item != Item::Layout)
+            .collect();
+        assert_eq!(
+            others,
+            laid(&[Item::Start, Item::Taskbar, Item::Clock]),
+            "and everything else where it was"
+        );
+
+        let two = lay_out(
+            &items,
+            Holding {
+                layout: Some("RU"),
+                ..holding(0, &[])
+            },
+            PANEL,
+            &mut Monospace(8.0),
+        );
+        let clock = 5 * 8 + 2 * CLOCK_PAD;
+        let label = 2 * 8 + 2 * CLOCK_PAD;
+        assert_eq!(
+            two.items[2],
+            (Item::Layout, Rect::new(1280 - clock - label, 0, label, 40)),
+            "as wide as its label, beside the clock"
+        );
+        assert_eq!(
+            two.at((1280.0 - clock as f64 - 10.0, 20.0)),
+            Some(Part::Layout)
         );
     }
 

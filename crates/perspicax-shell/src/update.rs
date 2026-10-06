@@ -766,6 +766,8 @@ impl Level {
 
 #[cfg(test)]
 mod tests {
+    use perspicax_config::Leave;
+
     use super::*;
     use crate::{
         layout::Monospace,
@@ -811,8 +813,10 @@ mod tests {
             app("firefox", "Firefox", "Network"),
         ];
         let session = Session {
-            lock: Some(run("swaylock")),
-            log_out: true,
+            leave: vec![
+                (Leave::Lock, Does::Run(run("swaylock"))),
+                (Leave::LogOut, Does::LogOut),
+            ],
         };
         State::new(root(&apps, None, &session), start(&apps, &session))
     }

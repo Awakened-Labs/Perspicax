@@ -5,6 +5,8 @@
 pub(crate) mod clock;
 #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
 pub(crate) mod image;
+#[cfg(feature = "panel")]
+pub(crate) mod layouts;
 #[cfg(any(feature = "panel", feature = "wallpaper"))]
 pub(crate) mod pager;
 #[cfg(feature = "panel")]
@@ -20,8 +22,6 @@ pub(crate) mod wallpaper;
 pub(crate) mod apps;
 #[cfg(feature = "menus")]
 pub(crate) mod categories;
-#[cfg(any(feature = "menus", feature = "panel"))]
-pub(crate) mod desktop;
 #[cfg(feature = "icons")]
 pub(crate) mod folder;
 #[cfg(any(feature = "menus", feature = "panel"))]

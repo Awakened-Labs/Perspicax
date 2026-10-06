@@ -3,11 +3,13 @@
 //!
 //! A reload applies what it can without disturbing what did not change. Focus
 //! and bindings are just values, and are swapped. The keyboard is recompiled
-//! only if its layout or repeat changed. Pointer settings go to every device.
+//! only if `[input.keyboard]` changed, and keeps the layout in use and its
+//! locks (see [`crate::keyboard`]). Pointer settings go to every device.
 //! Outputs are relit only if their rules changed, because relighting is a
-//! modeset and the screens blink. Autostart is not re-run: those programs are
-//! already running. The shell is told when its own table changed, and is
-//! started or stopped when `enabled` was turned on or off (see [`supervise`]).
+//! modeset and the screens blink. Autostart, the config's and XDG's, is not
+//! re-run: those programs are already running. The shell is told when its
+//! own table changed, and is started or stopped when `enabled` was turned on
+//! or off (see [`supervise`]).
 //!
 //! Saving is watched with inotify on the file's *directory*, not the file:
 //! most editors save by writing a new file and renaming it over the old one,
@@ -15,11 +17,18 @@
 //! save. A save is often several writes in a row, so a reload waits a moment
 //! after the last of them.
 
-use std::{mem::MaybeUninit, path::Path, process::Child, time::Duration};
+use std::{
+    mem::MaybeUninit,
+    path::{Path, PathBuf},
+    process::Child,
+    time::Duration,
+};
 
-use perspicax_config::{Built, Config, Pointer};
+use perspicax_config::{
+    Built, Config, Pointer,
+    autostart::{self, Skip},
+};
 use smithay::{
-    input::keyboard::XkbConfig,
     reexports::calloop::{
         Interest, LoopHandle, Mode, PostAction,
         generic::Generic,
@@ -33,7 +42,11 @@ use smithay::{
 };
 
 use super::{Session, relight, supervise};
-use crate::{Error, Launch, act::Keys, backend::Running, state::Compositor};
+use crate::{
+    Error, Keymap, Launch,
+    backend::{Running, cursor::Cursor},
+    state::Compositor,
+};
 
 /// What this build can honour, for the config's feature check.
 const BUILT: Built = Built {
@@ -144,42 +157,32 @@ pub(super) fn load(path: Option<&Path>) -> Result<Config, Error> {
         .map_err(|error| Error::Config(format!("{}: {error}", path.display())))
 }
 
-/// Give the seat's keyboard the configured layout and repeat, and rebuild the
-/// table agents type from, so the two describe the same keyboard.
-pub(super) fn apply_keyboard(state: &mut Compositor) {
+/// Give the seat's keyboard the configured keymap and repeat. `numlock` sets
+/// Num Lock; `None` leaves it as the person has it.
+pub(super) fn apply_keyboard(state: &mut Compositor, numlock: Option<bool>) {
     let Running::Seat(session) = &state.backend else {
         return;
     };
-    let keyboard_settings = session.settings.keyboard.clone();
-    let Some(keyboard) = state.keyboard.clone() else {
-        return;
+    let settings = session.settings.keyboard.clone();
+    state.layout_memory.set_switching(settings.switching);
+    let keymap = Keymap {
+        rules: settings.rules,
+        model: settings.model,
+        layout: settings.layout,
+        variant: settings.variant,
+        options: settings.options,
     };
-    let xkb = XkbConfig {
-        rules: &keyboard_settings.rules,
-        model: &keyboard_settings.model,
-        layout: &keyboard_settings.layout,
-        variant: &keyboard_settings.variant,
-        options: keyboard_settings.options.clone(),
-    };
-    if let Err(error) = keyboard.set_xkb_config(state, xkb) {
+    if let Err(error) = state.set_keymap(&keymap, numlock) {
         tracing::error!(
             ?error,
-            layout = keyboard_settings.layout,
+            layout = keymap.layout,
             "xkb could not compile that layout; the keyboard keeps its old one"
         );
         return;
     }
-    keyboard.change_repeat_info(
-        keyboard_settings.repeat_rate,
-        keyboard_settings.repeat_delay,
-    );
-    state.keys = Keys::from_names(
-        &keyboard_settings.rules,
-        &keyboard_settings.model,
-        &keyboard_settings.layout,
-        &keyboard_settings.variant,
-        keyboard_settings.options,
-    );
+    if let Some(keyboard) = &state.keyboard {
+        keyboard.change_repeat_info(settings.repeat_rate, settings.repeat_delay);
+    }
 }
 
 /// Apply pointer settings to one device, if it is a pointer. Settings left
@@ -233,8 +236,21 @@ pub(crate) fn reload(state: &mut Compositor) {
         }
     };
     let keyboard_changed = fresh.keyboard != session.settings.keyboard;
+    // Num Lock is the file's when the session starts and when a save changes
+    // what it says; in between it is the person's.
+    let numlock = fresh
+        .keyboard
+        .numlock
+        .filter(|_| fresh.keyboard.numlock != session.settings.keyboard.numlock);
     let outputs_changed = fresh.outputs != session.settings.outputs;
     let decorations_changed = fresh.decorations != session.settings.decorations;
+    let theme_changed = fresh.theme != session.settings.theme;
+    let appearance_changed = fresh.theme.apps != session.settings.theme.apps;
+    let pointer_changed = (&fresh.theme.cursor, fresh.theme.cursor_size)
+        != (
+            &session.settings.theme.cursor,
+            session.settings.theme.cursor_size,
+        );
     let access = (fresh.protocols != session.settings.protocols).then(|| fresh.protocols.clone());
     let shell_changed = fresh.shell != session.settings.shell;
     let shell = session.settings.shell.clone();
@@ -248,7 +264,7 @@ pub(crate) fn reload(state: &mut Compositor) {
         configure(device, &pointer);
     }
     if keyboard_changed {
-        apply_keyboard(state);
+        apply_keyboard(state, numlock);
     }
     if outputs_changed {
         // The file says where the monitors go now, over anything a display
@@ -269,6 +285,23 @@ pub(crate) fn reload(state: &mut Compositor) {
     if decorations_changed {
         state.refit_frames();
     }
+    // The titles' font and the snap preview are drawn from the settings as
+    // they are; a frame drawn since only has to be drawn again. The pointer
+    // is read again from its theme, and programs started from now on are
+    // told; those already running keep the pointer they chose.
+    if appearance_changed {
+        tell_appearance(state);
+    }
+    if pointer_changed {
+        if let Running::Seat(session) = &mut state.backend {
+            let theme = &session.settings.theme;
+            session.cursor = Cursor::load(theme.cursor.as_deref(), theme.cursor_size);
+        }
+        look(state);
+    }
+    if theme_changed {
+        state.backend.redraw();
+    }
     let access_changed = access.is_some();
     if let Some(access) = access {
         state.set_access(access);
@@ -280,6 +313,7 @@ pub(crate) fn reload(state: &mut Compositor) {
         keyboard_changed,
         outputs_changed,
         decorations_changed,
+        theme_changed,
         access_changed,
         shell_changed,
         "config reloaded"
@@ -288,8 +322,9 @@ pub(crate) fn reload(state: &mut Compositor) {
 
 /// Bring up the person's session around the windows: Xwayland if this build
 /// has it and the config wants it, then `ready` -- the agent's programs --
-/// then the shell and the autostart list, the agent's first. All wait for
-/// Xwayland, so an X11 program in any of them finds `DISPLAY` set.
+/// then the shell, the autostart list and the XDG autostart entries, the
+/// agent's first. All wait for Xwayland, so an X11 program in any of them
+/// finds `DISPLAY` set.
 pub(crate) fn populate(
     state: &mut Compositor,
     #[cfg_attr(
@@ -299,6 +334,7 @@ pub(crate) fn populate(
     event_loop: &LoopHandle<'static, Compositor>,
     ready: impl FnOnce(&mut Compositor) + 'static,
 ) -> Result<(), Error> {
+    look(state);
     let ready = move |state: &mut Compositor| {
         ready(state);
         // A `--spawn` that would not start ends the session: nothing of the
@@ -316,6 +352,38 @@ pub(crate) fn populate(
     Ok(())
 }
 
+/// Publish what applications are told about the theme, for whoever serves
+/// it to them: the settings portal, in the composition root.
+pub(crate) fn tell_appearance(state: &mut Compositor) {
+    if let Running::Seat(session) = &state.backend {
+        let apps = session.settings.theme.apps;
+        state.facts.publish_session(|facts| facts.appearance = apps);
+    }
+}
+
+/// Tell every program started from now on how the session looks: the
+/// pointer's theme and size, where the theme names them. Toolkits draw their
+/// own pointer from these, and without them would each pick their own.
+fn look(state: &mut Compositor) {
+    let Running::Seat(session) = &state.backend else {
+        return;
+    };
+    let theme = &session.settings.theme;
+    let look: Vec<(String, String)> = theme
+        .cursor
+        .iter()
+        .map(|name| ("XCURSOR_THEME".to_owned(), name.clone()))
+        .chain(
+            theme
+                .cursor_size
+                .map(|size| ("XCURSOR_SIZE".to_owned(), size.to_string())),
+        )
+        .collect();
+    if let Some(launch) = state.launch.as_mut() {
+        launch.look = look;
+    }
+}
+
 fn autostart(state: &mut Compositor) {
     let launch = state.launch.clone();
     if let Running::Seat(session) = &mut state.backend {
@@ -324,26 +392,93 @@ fn autostart(state: &mut Compositor) {
 }
 
 impl Session {
-    /// Start the config's autostart programs. A program that will not start
-    /// is reported and skipped: one missing panel must not keep the person
-    /// out of their session.
+    /// Start the config's autostart programs, then the XDG autostart
+    /// entries unless the config turns them off. A program that will not
+    /// start is reported and skipped: one missing panel must not keep the
+    /// person out of their session.
     pub(crate) fn autostart(&mut self, launch: Option<&Launch>) {
+        let Some(launch) = launch else {
+            return;
+        };
         let commands = self.settings.autostart.clone();
         for command in &commands {
-            self.spawn(launch, command);
+            self.spawn_in(launch, command, None);
+        }
+        if self.settings.xdg_autostart {
+            self.xdg_autostart(launch);
+        }
+    }
+
+    /// Start what the system and the person installed to start with every
+    /// desktop (see [`autostart`](mod@autostart)). The folders, the
+    /// desktop's names and `PATH` are read as the programs started are given
+    /// them.
+    fn xdg_autostart(&mut self, launch: &Launch) {
+        let var = |name: &str| launch.var(name);
+        let found = autostart_files(&autostart::folders(var));
+        let path = launch.var("PATH");
+        let decided = autostart::select(found, &autostart::desktops(var), |program| {
+            installed(program, path.as_deref())
+        });
+        for (entry, start) in decided {
+            match start {
+                Ok(start) => self.spawn_in(launch, &start.argv, start.dir.as_deref()),
+                // Said where the person would look for why it did not start.
+                Err(why @ (Skip::Terminal | Skip::Malformed(_))) => {
+                    tracing::info!(entry = %entry, %why, "XDG autostart skips an entry");
+                }
+                Err(why) => tracing::debug!(entry = %entry, %why, "XDG autostart skips an entry"),
+            }
         }
     }
 
     /// Start a program for the person, and keep it to stop with the session.
     pub(crate) fn spawn(&mut self, launch: Option<&Launch>, command: &[String]) {
-        let Some(launch) = launch else {
-            return;
-        };
-        match launch.spawn(command) {
+        if let Some(launch) = launch {
+            self.spawn_in(launch, command, None);
+        }
+    }
+
+    /// [`spawn`](Self::spawn), in `dir` where it names one.
+    fn spawn_in(&mut self, launch: &Launch, command: &[String], dir: Option<&Path>) {
+        match launch.spawn_in(command, dir) {
             Ok(child) => self.children.push(child),
             Err(error) => tracing::warn!(%error, "could not start"),
         }
     }
+}
+
+/// Every `.desktop` file in the autostart `folders`, the most important
+/// folder's first and each folder's by name, with its text, or `None` for
+/// one that cannot be read. A folder that is not there holds nothing.
+fn autostart_files(folders: &[PathBuf]) -> Vec<(String, Option<String>)> {
+    let mut found = Vec::new();
+    for folder in folders {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|file| file.file_name().into_string().ok())
+            .filter(|name| name.ends_with(".desktop"))
+            .collect();
+        names.sort();
+        found.extend(names.into_iter().map(|name| {
+            let text = std::fs::read_to_string(folder.join(&name)).ok();
+            (name, text)
+        }));
+    }
+    found
+}
+
+/// Whether `program` is installed, as `TryExec` asks: a file that may be
+/// run, at the path it names, or else in a folder of `path`.
+fn installed(program: &str, path: Option<&str>) -> bool {
+    if program.contains('/') {
+        return supervise::runnable(Path::new(program));
+    }
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .any(|folder| supervise::runnable(&folder.join(program)))
 }
 
 impl Session {
@@ -370,4 +505,77 @@ impl Drop for Session {
 pub(super) fn stop(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{env, fs, os::unix::fs::PermissionsExt};
+
+    use super::*;
+
+    /// A fresh directory for one test, emptied when it ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir =
+                env::temp_dir().join(format!("perspicax-settings-{name}-{}", std::process::id()));
+            fs::create_dir_all(&dir).expect("a scratch directory");
+            Self(dir)
+        }
+
+        /// A file at `path` in it, holding `text`, with `mode`.
+        fn file(&self, path: &str, text: &str, mode: u32) -> PathBuf {
+            let file = self.0.join(path);
+            fs::create_dir_all(file.parent().expect("a folder")).expect("its folder");
+            fs::write(&file, text).expect("a file");
+            fs::set_permissions(&file, fs::Permissions::from_mode(mode)).expect("its mode");
+            file
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn autostart_reads_each_folders_entries_the_most_important_first() {
+        let scratch = Scratch::new("autostart");
+        scratch.file("home/autostart/teams.desktop", "the person's", 0o644);
+        scratch.file("home/autostart/notes.txt", "not an entry", 0o644);
+        scratch.file("etc/autostart/teams.desktop", "the system's", 0o644);
+        scratch.file("etc/autostart/pipewire.desktop", "pipewire", 0o644);
+        fs::create_dir_all(scratch.0.join("etc/autostart/odd.desktop")).expect("a folder");
+        let folders = ["home/autostart", "missing/autostart", "etc/autostart"]
+            .map(|folder| scratch.0.join(folder));
+        let text = |text: &str| Some(text.to_owned());
+        assert_eq!(
+            autostart_files(&folders),
+            [
+                ("teams.desktop".to_owned(), text("the person's")),
+                ("odd.desktop".to_owned(), None),
+                ("pipewire.desktop".to_owned(), text("pipewire")),
+                ("teams.desktop".to_owned(), text("the system's")),
+            ],
+            "a missing folder holds nothing, and what cannot be read is said"
+        );
+    }
+
+    #[test]
+    fn try_exec_finds_a_program_at_its_path_or_on_path() {
+        let scratch = Scratch::new("installed");
+        let program = scratch.file("bin/pipewire", "", 0o755);
+        scratch.file("bin/notes", "", 0o644);
+        let path = format!("/nonexistent:{}", scratch.0.join("bin").display());
+        assert!(installed("pipewire", Some(&path)));
+        assert!(
+            installed(&program.to_string_lossy(), None),
+            "a path needs no PATH"
+        );
+        assert!(!installed("notes", Some(&path)), "one that may not be run");
+        assert!(!installed("pipewire", Some("/nonexistent")));
+        assert!(!installed("pipewire", None));
+    }
 }

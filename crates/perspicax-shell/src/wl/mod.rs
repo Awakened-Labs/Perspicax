@@ -105,9 +105,11 @@ pub(crate) fn run(
         #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
         kit: crate::paint::Kit {
             #[cfg(any(feature = "menus", feature = "panel"))]
-            fonts: crate::paint::text::Fonts::find(),
+            fonts: crate::paint::text::Fonts::find(shell.font.clone()),
             #[cfg(any(feature = "menus", feature = "panel"))]
             images: images(shell.icon_theme.as_deref(), installed.places()),
+            #[cfg(any(feature = "menus", feature = "panel"))]
+            palette: shell.palette,
         },
         #[cfg(all(feature = "wallpaper", not(feature = "icons")))]
         desktops: desktop::Desktops::new(&shell, config.as_deref()),
@@ -296,6 +298,17 @@ impl App {
         if theme_changed {
             self.kit.images = images(shell.icon_theme.as_deref(), self.installed.places());
         }
+        // What everything is drawn in. The menus are drawn afresh each time
+        // one opens; the panels and the desktop's icons are drawn again below.
+        #[cfg(any(feature = "menus", feature = "panel"))]
+        let looks_changed = {
+            let palette_changed = shell.palette != self.kit.palette;
+            self.kit.palette = shell.palette;
+            let font_changed = self.kit.fonts.set_font(&shell.font);
+            palette_changed || font_changed
+        };
+        #[cfg(all(feature = "menus", not(any(feature = "panel", feature = "icons"))))]
+        let _ = looks_changed;
         #[cfg(feature = "wallpaper")]
         {
             self.desktops.reconfigure(
@@ -309,9 +322,10 @@ impl App {
             // Desktops put back with the wallpaper turned on again.
             self.follow_workspaces();
         }
-        // The desktop folder's icons, from the new theme.
+        // The desktop folder's icons, from the new icon theme or in the new
+        // colours.
         #[cfg(feature = "icons")]
-        if theme_changed {
+        if theme_changed || looks_changed {
             self.desktops.draw_icons(&mut self.canvas, &mut self.kit);
         }
         #[cfg(feature = "panel")]
@@ -325,9 +339,9 @@ impl App {
                 &self.workspaces.model,
             );
             self.keep_time();
-            // The taskbar's icons, from the new theme. The menus are drawn
-            // afresh each time one opens.
-            if theme_changed {
+            // The taskbar's icons, from the new icon theme, or everything in
+            // the new colours. The menus are drawn afresh each time one opens.
+            if theme_changed || looks_changed {
                 self.panels_changed();
             }
         }

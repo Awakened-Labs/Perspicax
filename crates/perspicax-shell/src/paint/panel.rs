@@ -1,9 +1,9 @@
-//! A panel: a dark bar along the edge of a monitor, with a rule where it
-//! meets the desktop. The start button is a grid of four squares, drawn in
-//! the highlight's shade while its menu is open. Each task is a face a
+//! A panel: a bar in the theme's colours (dark, in the default one) along
+//! the edge of a monitor, with a rule where it meets the desktop. The start button is a grid of four squares, drawn in
+//! the accent's shade while its menu is open. Each task is a face a
 //! little lighter than the bar, holding its application's icon and its
-//! window's title: the window with the keyboard in the highlight's shade,
-//! with a line of the highlight along the screen's edge, and a minimized one
+//! window's title: the window with the keyboard in the accent's shade,
+//! with a line of the accent along the screen's edge, and a minimized one
 //! with no face and its title faint. The pager is a grid of small screens,
 //! each with its workspace's name, the one showing lit. Each of the tray's
 //! icons sits in the middle of its slot, drawn from the icon its program
@@ -14,33 +14,51 @@
 use perspicax_config::{Edge, Item};
 use tiny_skia::PixmapMut;
 
+use perspicax_config::{Palette, Role};
+
 use super::{
-    fill,
+    colour, fill,
     icons::{self, Images},
     scaled,
     text::Text,
 };
 use crate::layout::{
-    Measure, Rect, TEXT,
+    Measure, Rect,
     panel::{CLOCK_PAD, Cell, Placed, Task},
 };
 
-/// The panel's colours, as premultiplied RGBA. Dark, after Breeze's.
-pub(crate) const BAR: [u8; 4] = [0x23, 0x26, 0x29, 0xff];
-pub(crate) const INK: [u8; 4] = [0xfc, 0xfc, 0xfc, 0xff];
-/// The rule along the edge it shares with the desktop, and around each of
-/// the pager's cells.
-pub(crate) const RULE: [u8; 4] = [0x3b, 0x40, 0x45, 0xff];
-/// Behind the start button while the start menu is open, the task of the
-/// window with the keyboard, and the workspace showing: the highlight,
-/// faint over the bar.
-pub(crate) const OPEN: [u8; 4] = [0x2b, 0x4f, 0x63, 0xff];
-/// The highlight itself, as the menus have it.
-pub(crate) const HIGHLIGHT: [u8; 4] = [0x3d, 0xae, 0xe9, 0xff];
-/// A task's face, and a workspace not showing.
-pub(crate) const FACE: [u8; 4] = [0x31, 0x36, 0x3b, 0xff];
-/// A minimized window's title.
-pub(crate) const FAINT: [u8; 4] = [0x9a, 0xa0, 0xa6, 0xff];
+/// The panel's colours, from the theme, as fills take them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Colours {
+    pub(crate) bar: [u8; 4],
+    pub(crate) ink: [u8; 4],
+    /// The rule along the edge it shares with the desktop, and around each
+    /// of the pager's cells.
+    pub(crate) rule: [u8; 4],
+    /// Behind the start button while the start menu is open, the task of
+    /// the window with the keyboard, and the workspace showing.
+    pub(crate) open: [u8; 4],
+    /// The accent, along the task in use and around the workspace showing.
+    pub(crate) highlight: [u8; 4],
+    /// A task's face, and a workspace not showing.
+    pub(crate) face: [u8; 4],
+    /// A minimized window's title.
+    pub(crate) faint: [u8; 4],
+}
+
+impl Colours {
+    pub(crate) fn of(palette: &Palette) -> Self {
+        Self {
+            bar: colour(palette, Role::Panel),
+            ink: colour(palette, Role::PanelInk),
+            rule: colour(palette, Role::PanelRule),
+            open: colour(palette, Role::PanelOpen),
+            highlight: colour(palette, Role::Accent),
+            face: colour(palette, Role::PanelFace),
+            faint: colour(palette, Role::PanelFaint),
+        }
+    }
+}
 
 /// One square of the start button's grid, and the room between them.
 const SQUARE: i32 = 7;
@@ -68,6 +86,8 @@ pub(crate) struct Shown<'a> {
     pub(crate) edge: Edge,
     pub(crate) placed: &'a Placed,
     pub(crate) time: &'a str,
+    /// The layout in use's label, if there is a choice of layouts.
+    pub(crate) layout: Option<&'a str>,
     /// The start menu is open from this panel's button.
     pub(crate) open: bool,
     /// The status icons, by key, to draw those `placed` holds.
@@ -82,10 +102,12 @@ pub(crate) fn paint(
     scale: u32,
     text: &mut Text,
     images: &mut Images,
+    palette: &Palette,
 ) {
+    let colours = Colours::of(palette);
     let px = |rect: Rect| scaled(rect, scale);
     let (width, height) = shown.size;
-    fill(canvas, px(Rect::new(0, 0, width, height)), BAR);
+    fill(canvas, px(Rect::new(0, 0, width, height)), colours.bar);
     let rule = match shown.edge {
         Edge::Bottom => Rect::new(0, 0, width, 1),
         Edge::Top => Rect::new(0, height - 1, width, 1),
@@ -94,18 +116,24 @@ pub(crate) fn paint(
         match item {
             Item::Start => {
                 if shown.open {
-                    fill(canvas, px(place), OPEN);
+                    fill(canvas, px(place), colours.open);
                 }
-                grid(canvas, px(place), scale as i32);
+                grid(canvas, px(place), scale as i32, colours.ink);
             }
-            Item::Clock => {
-                let words = Rect::new(
+            // The layout's label is set as the clock's time is.
+            Item::Clock | Item::Layout => {
+                let words = match item {
+                    Item::Clock => shown.time,
+                    _ => shown.layout.unwrap_or_default(),
+                };
+                let room = Rect::new(
                     place.x + CLOCK_PAD,
                     place.y,
                     place.w - 2 * CLOCK_PAD,
                     place.h,
                 );
-                text.write(canvas, shown.time, px(words), TEXT * scale as f32, INK);
+                let size = text.size() * scale as f32;
+                text.write(canvas, words, px(room), size, colours.ink);
             }
             Item::Taskbar | Item::Pager | Item::Tray => {}
         }
@@ -114,6 +142,7 @@ pub(crate) fn paint(
         canvas,
         scale,
         text,
+        colours,
     };
     for (task, place) in &shown.placed.tasks {
         pen.task(task, *place, shown.edge, images);
@@ -127,7 +156,7 @@ pub(crate) fn paint(
             pen.status(item, *place, images);
         }
     }
-    fill(pen.canvas, px(rule), RULE);
+    fill(pen.canvas, px(rule), colours.rule);
 }
 
 /// What tasks and cells are drawn on, and written with.
@@ -135,6 +164,7 @@ struct Pen<'c, 'p, 't> {
     canvas: &'c mut PixmapMut<'p>,
     scale: u32,
     text: &'t mut Text,
+    colours: Colours,
 }
 
 impl Pen<'_, '_, '_> {
@@ -154,15 +184,16 @@ impl Pen<'_, '_, '_> {
         if face.w <= 0 || face.h <= 0 {
             return;
         }
+        let colours = self.colours;
         if task.active {
-            fill(self.canvas, self.px(face), OPEN);
+            fill(self.canvas, self.px(face), colours.open);
             let line = match edge {
                 Edge::Bottom => Rect::new(face.x, face.bottom() - LINE, face.w, LINE),
                 Edge::Top => Rect::new(face.x, face.y, face.w, LINE),
             };
-            fill(self.canvas, self.px(line), HIGHLIGHT);
+            fill(self.canvas, self.px(line), colours.highlight);
         } else if !task.minimized {
-            fill(self.canvas, self.px(face), FACE);
+            fill(self.canvas, self.px(face), colours.face);
         }
         let mut left = face.x + INSET;
         if face.w >= ICON + 2 * INSET {
@@ -179,8 +210,12 @@ impl Pen<'_, '_, '_> {
             left += ICON + INSET;
         }
         let words = Rect::new(left, face.y, face.right() - INSET - left, face.h);
-        let ink = if task.minimized { FAINT } else { INK };
-        let size = TEXT * self.scale as f32;
+        let ink = if task.minimized {
+            colours.faint
+        } else {
+            colours.ink
+        };
+        let size = self.text.size() * self.scale as f32;
         self.text
             .write(self.canvas, &task.title, self.px(words), size, ink);
     }
@@ -213,28 +248,29 @@ impl Pen<'_, '_, '_> {
     /// A workspace's cell, at `place`: a small screen with its name in the
     /// middle, where there is room for it.
     fn cell(&mut self, cell: &Cell, place: Rect) {
+        let colours = self.colours;
         let (edge, face) = if cell.active {
-            (HIGHLIGHT, OPEN)
+            (colours.highlight, colours.open)
         } else {
-            (RULE, FACE)
+            (colours.rule, colours.face)
         };
         fill(self.canvas, self.px(place), edge);
         let inside = Rect::new(place.x + 1, place.y + 1, place.w - 2, place.h - 2);
         fill(self.canvas, self.px(inside), face);
-        if place.h < TEXT as i32 + 4 {
+        if place.h < self.text.size() as i32 + 4 {
             return;
         }
         let wide = (self.text.width(&cell.name).ceil() as i32 + 2).min(inside.w);
         let words = Rect::new(inside.x + (inside.w - wide) / 2, inside.y, wide, inside.h);
-        let size = TEXT * self.scale as f32;
+        let size = self.text.size() * self.scale as f32;
         self.text
-            .write(self.canvas, &cell.name, self.px(words), size, INK);
+            .write(self.canvas, &cell.name, self.px(words), size, colours.ink);
     }
 }
 
 /// Four squares, two by two, centred in `place`, `s` pixels to a logical
 /// one.
-fn grid(canvas: &mut PixmapMut<'_>, place: Rect, s: i32) {
+fn grid(canvas: &mut PixmapMut<'_>, place: Rect, s: i32, ink: [u8; 4]) {
     let (square, between) = (SQUARE * s, BETWEEN * s);
     let side = 2 * square + between;
     let (left, top) = (
@@ -248,7 +284,7 @@ fn grid(canvas: &mut PixmapMut<'_>, place: Rect, s: i32) {
             square,
             square,
         );
-        fill(canvas, at, INK);
+        fill(canvas, at, ink);
     }
 }
 
@@ -261,6 +297,65 @@ mod tests {
         Monospace,
         panel::{Holding, lay_out},
     };
+
+    /// The default theme's panel colours, which these pictures are drawn in:
+    /// what the panel was before there were themes.
+    const BAR: [u8; 4] = [0x23, 0x26, 0x29, 0xff];
+    const INK: [u8; 4] = [0xfc, 0xfc, 0xfc, 0xff];
+    const RULE: [u8; 4] = [0x3b, 0x40, 0x45, 0xff];
+    const OPEN: [u8; 4] = [0x2b, 0x4f, 0x63, 0xff];
+    const HIGHLIGHT: [u8; 4] = [0x3d, 0xae, 0xe9, 0xff];
+    const FACE: [u8; 4] = [0x31, 0x36, 0x3b, 0xff];
+
+    #[test]
+    fn the_default_theme_paints_the_panel_as_it_was() {
+        let colours = Colours::of(&Palette::default());
+        assert_eq!(
+            [
+                colours.bar,
+                colours.ink,
+                colours.rule,
+                colours.open,
+                colours.highlight,
+                colours.face,
+                colours.faint,
+            ],
+            [
+                BAR,
+                INK,
+                RULE,
+                OPEN,
+                HIGHLIGHT,
+                FACE,
+                [0x9a, 0xa0, 0xa6, 0xff]
+            ]
+        );
+    }
+
+    /// Another theme's panel is drawn in its colours.
+    #[test]
+    fn a_theme_colours_the_bar() {
+        let palette = perspicax_config::Builtin::BreezeLight.palette();
+        let mut picture = Pixmap::new(600, 40).expect("a picture");
+        paint(
+            &Shown {
+                size: (600, 40),
+                edge: Edge::Bottom,
+                placed: &laid(false),
+                time: "14:05",
+                layout: None,
+                open: false,
+                #[cfg(feature = "tray")]
+                tray: &[],
+            },
+            &mut picture.as_mut(),
+            1,
+            &mut Text::without_fonts(),
+            &mut Images::default(),
+            &palette,
+        );
+        assert_eq!(pixel(&picture, 430, 20), colour(&palette, Role::Panel));
+    }
 
     /// Two windows, the second with the keyboard unless it is `minimized`,
     /// and two workspaces, the first showing.
@@ -283,6 +378,7 @@ mod tests {
             &[Item::Start, Item::Taskbar, Item::Pager, Item::Clock],
             Holding {
                 time: "14:05",
+                layout: None,
                 tasks: vec![task(0, "Editor", false), task(1, "Mail", true)],
                 cells: vec![cell(10, 0), cell(11, 1)],
                 #[cfg(feature = "tray")]
@@ -301,6 +397,7 @@ mod tests {
                 edge: Edge::Bottom,
                 placed,
                 time: "14:05",
+                layout: None,
                 open,
                 #[cfg(feature = "tray")]
                 tray: &[],
@@ -309,6 +406,7 @@ mod tests {
             scale,
             &mut Text::without_fonts(),
             &mut Images::default(),
+            &Palette::default(),
         );
         picture
     }
