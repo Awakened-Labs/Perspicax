@@ -421,6 +421,7 @@ pub(crate) fn attach(state: &mut Compositor) -> Result<(), Error> {
 
     arm_panic_hook();
     settings::apply_keyboard(state);
+    settings::tell_appearance(state);
     rescan(state);
     let Running::Seat(session) = &state.backend else {
         return Ok(());

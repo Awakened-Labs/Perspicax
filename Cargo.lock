@@ -1491,6 +1491,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "futures-util",
  "perspicax-atspi",
  "perspicax-compositor",
  "perspicax-config",

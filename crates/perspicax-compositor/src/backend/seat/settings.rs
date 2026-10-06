@@ -241,6 +241,7 @@ pub(crate) fn reload(state: &mut Compositor) {
     let outputs_changed = fresh.outputs != session.settings.outputs;
     let decorations_changed = fresh.decorations != session.settings.decorations;
     let theme_changed = fresh.theme != session.settings.theme;
+    let appearance_changed = fresh.theme.apps != session.settings.theme.apps;
     let pointer_changed = (&fresh.theme.cursor, fresh.theme.cursor_size)
         != (
             &session.settings.theme.cursor,
@@ -284,6 +285,9 @@ pub(crate) fn reload(state: &mut Compositor) {
     // they are; a frame drawn since only has to be drawn again. The pointer
     // is read again from its theme, and programs started from now on are
     // told; those already running keep the pointer they chose.
+    if appearance_changed {
+        tell_appearance(state);
+    }
     if pointer_changed {
         if let Running::Seat(session) = &mut state.backend {
             let theme = &session.settings.theme;
@@ -341,6 +345,15 @@ pub(crate) fn populate(
     }
     ready(state);
     Ok(())
+}
+
+/// Publish what applications are told about the theme, for whoever serves
+/// it to them: the settings portal, in the composition root.
+pub(crate) fn tell_appearance(state: &mut Compositor) {
+    if let Running::Seat(session) = &state.backend {
+        let apps = session.settings.theme.apps;
+        state.facts.publish_session(|facts| facts.appearance = apps);
+    }
 }
 
 /// Tell every program started from now on how the session looks: the

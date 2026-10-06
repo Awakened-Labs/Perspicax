@@ -14,4 +14,5 @@ pub mod bus;
 pub mod desk;
 pub mod keep;
 pub mod observe;
+pub mod portal;
 pub mod session;

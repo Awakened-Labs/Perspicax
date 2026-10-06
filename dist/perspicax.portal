@@ -1,0 +1,8 @@
+# The settings portal's backend, served by perspicax itself while a session
+# runs: what applications are told about the theme (dark or light, the
+# accent, the contrast). xdg-desktop-portal reads this file only from
+# /usr/share/xdg-desktop-portal/portals, its compiled-in directory.
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.perspicax
+Interfaces=org.freedesktop.impl.portal.Settings;
+UseIn=perspicax

@@ -432,6 +432,56 @@ impl Default for Font {
     }
 }
 
+/// Whether applications are asked to be dark or light: the settings
+/// portal's `color-scheme`, in its numbering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorScheme {
+    NoPreference = 0,
+    Dark = 1,
+    Light = 2,
+}
+
+/// Whether applications are asked for more contrast: the portal's
+/// `contrast`, in its numbering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Contrast {
+    Normal = 0,
+    High = 1,
+}
+
+/// What applications are told about the theme, through the settings portal.
+/// Each `None` says nothing, so an application decides as it would with no
+/// portal at all -- which is what the default theme says, so that it changes
+/// no application's look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Appearance {
+    pub color_scheme: Option<ColorScheme>,
+    pub accent: Option<Colour>,
+    pub contrast: Option<Contrast>,
+}
+
+impl Builtin {
+    /// What this theme tells applications: the two Breezes their scheme and
+    /// Breeze's blue, and the default theme nothing.
+    #[must_use]
+    pub fn appearance(self) -> Appearance {
+        let accent = Some(Colour::rgb(0x3d, 0xae, 0xe9));
+        match self {
+            Self::Perspicax => Appearance::default(),
+            Self::BreezeLight => Appearance {
+                color_scheme: Some(ColorScheme::Light),
+                accent,
+                contrast: None,
+            },
+            Self::BreezeDark => Appearance {
+                color_scheme: Some(ColorScheme::Dark),
+                accent,
+                contrast: None,
+            },
+        }
+    }
+}
+
 /// How perspicax draws: the `[theme]` table, decided.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Theme {
@@ -445,6 +495,8 @@ pub struct Theme {
     /// The pointer's size, in logical pixels. `None` leaves it to
     /// `XCURSOR_SIZE`.
     pub cursor_size: Option<u32>,
+    /// What applications are told.
+    pub apps: Appearance,
 }
 
 impl Default for Palette {

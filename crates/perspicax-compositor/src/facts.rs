@@ -57,8 +57,9 @@ pub struct Facts {
     session: Arc<Mutex<Session>>,
 }
 
-/// Where this session's displays are: what a program has to be told to reach
-/// this compositor when it was not started by it.
+/// Where this session's displays are, and how it looks: what a program has
+/// to be told to reach this compositor, and to look like the rest of the
+/// desktop, when it was not started by it.
 ///
 /// Programs this compositor starts are told in their environment. Programs
 /// D-Bus starts on request -- a keyring's unlock prompt, a notification
@@ -72,6 +73,9 @@ pub struct SessionFacts {
     /// Xwayland's display number, once it is up: what `DISPLAY` must say
     /// for an X11 program to reach this compositor.
     pub x11_display: Option<u32>,
+    /// What applications are told about the theme: dark or light, the
+    /// accent, the contrast. The settings portal serves it.
+    pub appearance: perspicax_policy::Appearance,
 }
 
 /// The session's facts and everyone watching them, behind one lock, so that a
@@ -610,11 +614,12 @@ mod tests {
             [
                 SessionFacts {
                     wayland_display: Some("wayland-1".into()),
-                    x11_display: None,
+                    ..SessionFacts::default()
                 },
                 SessionFacts {
                     wayland_display: Some("wayland-1".into()),
                     x11_display: Some(2),
+                    ..SessionFacts::default()
                 },
             ]
         );

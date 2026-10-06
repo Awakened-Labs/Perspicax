@@ -36,7 +36,9 @@ pub use crate::shell::{
     Wallpaper, WallpaperMode,
 };
 /// The theme's types, as the shell reads them from [`Shell`].
-pub use perspicax_policy::{Builtin, Family, Font, Palette, Rgba, Role, Theme};
+pub use perspicax_policy::{
+    Appearance, Builtin, ColorScheme, Contrast, Family, Font, Palette, Rgba, Role, Theme,
+};
 
 /// Which cargo features this binary was built with, as far as config cares.
 /// The binary fills it in with `cfg!`; this crate cannot see the binary's
@@ -593,6 +595,21 @@ struct Raw {
     shell: Option<RawShell>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawColorScheme {
+    Dark,
+    Light,
+    NoPreference,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawContrast {
+    Normal,
+    High,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct RawTheme {
@@ -601,6 +618,8 @@ struct RawTheme {
     font_size: Option<u16>,
     cursor: Option<String>,
     cursor_size: Option<u32>,
+    color_scheme: Option<RawColorScheme>,
+    contrast: Option<RawContrast>,
     /// By role, checked against [`Role`] rather than by serde, so that a
     /// misspelled role is named with the table it is in.
     palette: Option<std::collections::BTreeMap<String, String>>,
@@ -1065,12 +1084,33 @@ fn theme(written: Option<RawTheme>, decorations: Option<&RawDecorations>) -> Res
         ));
     }
 
+    // What applications are told: the theme's own, then what was written.
+    // An accent written for perspicax's drawing is the applications' too.
+    let mut apps = builtin.appearance();
+    if let Some(scheme) = written.color_scheme {
+        apps.color_scheme = Some(match scheme {
+            RawColorScheme::Dark => ColorScheme::Dark,
+            RawColorScheme::Light => ColorScheme::Light,
+            RawColorScheme::NoPreference => ColorScheme::NoPreference,
+        });
+    }
+    if let Some(contrast) = written.contrast {
+        apps.contrast = Some(match contrast {
+            RawContrast::Normal => Contrast::Normal,
+            RawContrast::High => Contrast::High,
+        });
+    }
+    if let Some(accent) = colours.get(&Role::Accent) {
+        apps.accent = Some(accent.colour());
+    }
+
     Ok(Theme {
         builtin,
         palette: builtin.palette().written_over(&colours),
         font,
         cursor: written.cursor,
         cursor_size: written.cursor_size,
+        apps,
     })
 }
 
@@ -1829,6 +1869,41 @@ mod tests {
             config.decorations.unfocused_ink,
             dark[Role::TitleUnfocusedInk].colour()
         );
+    }
+
+    /// Applications are told nothing by the default theme, a Breeze's scheme
+    /// and accent by a Breeze, and whatever is written over either.
+    #[test]
+    fn applications_are_told_what_the_theme_and_the_file_say() {
+        assert_eq!(parse("", SEAT).unwrap().theme.apps, Appearance::default());
+
+        let dark = parse("[theme]\nname = \"breeze-dark\"", SEAT)
+            .unwrap()
+            .theme
+            .apps;
+        assert_eq!(dark.color_scheme, Some(ColorScheme::Dark));
+        assert_eq!(dark.accent, Some(Colour::rgb(0x3d, 0xae, 0xe9)));
+
+        let written = parse(
+            "[theme]\ncolor-scheme = \"light\"\ncontrast = \"high\"\n\
+             [theme.palette]\naccent = \"#e93d5a\"",
+            SEAT,
+        )
+        .unwrap()
+        .theme
+        .apps;
+        assert_eq!(
+            written,
+            Appearance {
+                color_scheme: Some(ColorScheme::Light),
+                accent: Some(Colour::rgb(0xe9, 0x3d, 0x5a)),
+                contrast: Some(Contrast::High),
+            }
+        );
+        assert!(matches!(
+            parse("[theme]\ncolor-scheme = \"grey\"", SEAT),
+            Err(Error::Parse(_))
+        ));
     }
 
     #[test]

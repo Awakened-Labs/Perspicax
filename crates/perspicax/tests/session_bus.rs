@@ -201,6 +201,7 @@ fn a_program_the_bus_starts_and_systemd_are_told_the_displays_and_the_desktop() 
     tell.send(SessionFacts {
         wayland_display: Some("wayland-test".to_owned()),
         x11_display: Some(7),
+        ..SessionFacts::default()
     })
     .expect("the bus thread is listening");
 
@@ -258,6 +259,105 @@ fn a_program_the_bus_starts_and_systemd_are_told_the_displays_and_the_desktop() 
             "the program the bus started had no {expected}:\n{environment}"
         );
     }
+}
+
+/// The settings portal says what the theme tells applications -- a Breeze's
+/// scheme and accent -- answers "not found" for what it does not say, so
+/// that xdg-desktop-portal asks the next backend, and says so when it
+/// changes.
+#[test]
+#[ignore = "starts a dbus-daemon of its own"]
+fn the_settings_portal_says_the_themes_look_and_when_it_changes() {
+    use std::collections::HashMap;
+
+    use futures_util::StreamExt as _;
+    use perspicax::portal::{APPEARANCE, NAME, PATH};
+    use perspicax_config::Builtin;
+    use zbus::zvariant::OwnedValue;
+
+    let bus = Bus::start(&[]);
+    let (tell, watch) = mpsc::channel();
+    bus::start(bus.options(), watch);
+    let runtime = runtime();
+    // In the runtime's context for the whole test: a deadline is made, and
+    // the signal stream let go, outside `block_on`.
+    let _inside = runtime.enter();
+    let connection = bus.connect(&runtime);
+    let settings = runtime
+        .block_on(zbus::Proxy::new(
+            &connection,
+            NAME,
+            PATH,
+            "org.freedesktop.impl.portal.Settings",
+        ))
+        .expect("a proxy for the portal");
+    let mut changes = runtime
+        .block_on(settings.receive_signal("SettingChanged"))
+        .expect("its changes");
+    let read =
+        |key: &str| runtime.block_on(settings.call::<_, _, OwnedValue>("Read", &(APPEARANCE, key)));
+    let scheme = || {
+        read("color-scheme")
+            .ok()
+            .and_then(|value| u32::try_from(value).ok())
+    };
+
+    // Each change, in the order said: a key and its value.
+    let mut next_change = || {
+        let changed = runtime
+            .block_on(tokio::time::timeout(
+                Duration::from_secs(10),
+                changes.next(),
+            ))
+            .expect("a change said within ten seconds")
+            .expect("the signal stream open");
+        let (namespace, key, value): (String, String, OwnedValue) =
+            changed.body().deserialize().expect("a change's arguments");
+        assert_eq!(namespace, APPEARANCE);
+        (key, value)
+    };
+
+    tell.send(SessionFacts {
+        appearance: Builtin::BreezeDark.appearance(),
+        ..SessionFacts::default()
+    })
+    .expect("the bus thread is listening");
+    let (key, value) = next_change();
+    assert_eq!(
+        (key.as_str(), u32::try_from(value)),
+        ("color-scheme", Ok(1)),
+        "dark"
+    );
+    assert_eq!(next_change().0, "accent-color");
+    assert_eq!(scheme(), Some(1));
+
+    let unsaid = read("contrast").expect_err("contrast is not said");
+    assert!(
+        unsaid
+            .to_string()
+            .contains("org.freedesktop.portal.Error.NotFound"),
+        "{unsaid}"
+    );
+    let all: HashMap<String, HashMap<String, OwnedValue>> = runtime
+        .block_on(settings.call("ReadAll", &(vec!["org.freedesktop.*"],)))
+        .expect("everything it says");
+    let mut keys: Vec<&String> = all[APPEARANCE].keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["accent-color", "color-scheme"]);
+
+    // Light, with the same accent: one change, the scheme.
+    tell.send(SessionFacts {
+        appearance: Builtin::BreezeLight.appearance(),
+        ..SessionFacts::default()
+    })
+    .expect("the bus thread is listening");
+    let (key, value) = next_change();
+    assert_eq!(
+        (key.as_str(), u32::try_from(value)),
+        ("color-scheme", Ok(2)),
+        "light"
+    );
+    assert_eq!(scheme(), Some(2));
 }
 
 fn keyring(bus: &Bus) -> Keyring {
