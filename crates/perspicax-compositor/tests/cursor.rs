@@ -2,9 +2,11 @@
 //! compositor draws it from the theme's cursor, so every application's
 //! pointer is the same one.
 //!
-//! Headless draws no pointer, so what this proves is the protocol: the global
-//! is offered, and a shape named on it is taken rather than refused. Which
-//! picture a shape becomes is the seat's, checked by hand on hardware.
+//! Headless has no monitor to draw a pointer on, so what this proves is the
+//! protocol: the global is offered, and a shape named on it is taken rather
+//! than refused. Which picture a shape becomes is checked by hand on
+//! hardware; the pointer in a screen recording, which headless does draw, is
+//! `tests/screencopy.rs`'s.
 
 mod common;
 

@@ -1045,6 +1045,8 @@ impl SeatHandler for Compositor {
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
         self.cursor = image;
         self.backend.redraw();
+        #[cfg(feature = "capture")]
+        self.flush_screencopy_for_pointer();
     }
 
     /// Lock keys light their LEDs, on every keyboard at once: one xkb state

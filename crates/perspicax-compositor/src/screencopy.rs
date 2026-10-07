@@ -9,9 +9,18 @@
 //! different question, governed by consent, and is not asked here.
 //!
 //! Shared memory only: no dmabuf, so a client that can take nothing else
-//! gets nothing. The pointer is not drawn into the picture, whatever the
-//! client asks. `copy_with_damage` waits for the next commit and reports the
+//! gets nothing. `copy_with_damage` waits for the next commit and reports the
 //! whole frame as damaged: the truth, if not the whole of it.
+//!
+//! The pointer is drawn in on top when the client asks (`overlay_cursor`, as
+//! `grim -c` and a recorder with its cursor shown do), as the monitor shows
+//! it: the client's cursor surface or the compositor's image
+//! (`crate::backend::cursor`). Headless too, which has no monitor to show it
+//! on. For such a frame the pointer moving, or changing its picture, is a
+//! change as much as a commit is: a recording of a still window with the
+//! person's pointer going over it would otherwise show the pointer frozen
+//! until something drew. A frame that did not ask never shows it, and an
+//! agent's `screenshot` never does either.
 //!
 //! Who may use it is `[protocols] screencopy`. While the session is locked,
 //! every copy fails.
@@ -59,6 +68,8 @@ pub(crate) struct Frame {
     output: String,
     /// The part of the monitor, in its pixels.
     region: Rectangle<i32, Physical>,
+    /// Whether the client asked for the pointer to be drawn in.
+    pointer: bool,
     copied: Mutex<bool>,
 }
 
@@ -92,6 +103,36 @@ impl Compositor {
         }
     }
 
+    /// The pointer moved, or changed its picture. Copy every waiting frame
+    /// that shows it, once whatever moved it has been taken in; the others
+    /// have nothing new to show, and wait on.
+    ///
+    /// Idle, as a commit's flush is: a mouse reports hundreds of moves a
+    /// second, and the moves one dispatch brings are one copy.
+    pub(crate) fn flush_screencopy_for_pointer(&mut self) {
+        let shows_pointer =
+            |frame: &ZwlrScreencopyFrameV1| frame.data::<Frame>().is_some_and(|data| data.pointer);
+        if !self
+            .screencopy
+            .waiting
+            .iter()
+            .any(|(frame, _)| shows_pointer(frame))
+        {
+            return;
+        }
+        self.loop_handle.insert_idle(move |state: &mut Self| {
+            let (moved, waiting) = std::mem::take(&mut state.screencopy.waiting)
+                .into_iter()
+                .partition(|(frame, _)| shows_pointer(frame));
+            state.screencopy.waiting = waiting;
+            for (frame, buffer) in moved {
+                if frame.is_alive() {
+                    state.copy_frame(&frame, &buffer, true);
+                }
+            }
+        });
+    }
+
     /// Fail every waiting frame of a client the rules no longer admit.
     pub(crate) fn revoke_screencopy(&mut self) {
         let gate = self.gate.clone();
@@ -120,7 +161,7 @@ impl Compositor {
             frame.failed();
             return;
         }
-        let pixels = match crate::capture::draw_output(self, &data.output) {
+        let pixels = match crate::capture::draw_output(self, &data.output, data.pointer) {
             Ok(pixels) => pixels,
             Err(error) => {
                 tracing::warn!(%error, "screencopy failed");
@@ -237,8 +278,12 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
         data_init: &mut DataInit<'_, Self>,
     ) {
         use zwlr_screencopy_manager_v1::Request;
-        let (frame, output, logical) = match request {
-            Request::CaptureOutput { frame, output, .. } => (frame, output, None),
+        let (frame, output, logical, overlay_cursor) = match request {
+            Request::CaptureOutput {
+                frame,
+                output,
+                overlay_cursor,
+            } => (frame, output, None, overlay_cursor),
             Request::CaptureOutputRegion {
                 frame,
                 output,
@@ -246,7 +291,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
                 y,
                 width,
                 height,
-                ..
+                overlay_cursor,
             } => (
                 frame,
                 output,
@@ -254,9 +299,11 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
                     (x, y).into(),
                     (width, height).into(),
                 )),
+                overlay_cursor,
             ),
             _ => return,
         };
+        let pointer = overlay_cursor != 0;
         let output = Output::from_resource(&output);
         let size = output
             .as_ref()
@@ -268,6 +315,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
                 Frame {
                     output: String::new(),
                     region: Rectangle::default(),
+                    pointer,
                     copied: Mutex::new(true),
                 },
             );
@@ -286,6 +334,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
             Frame {
                 output: output.name(),
                 region: region.unwrap_or_default(),
+                pointer,
                 copied: Mutex::new(region.is_none()),
             },
         );

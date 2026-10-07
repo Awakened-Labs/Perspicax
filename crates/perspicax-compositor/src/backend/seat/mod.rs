@@ -58,10 +58,7 @@ use smithay::{
     },
     delegate_dmabuf,
     desktop::{space::SpaceRenderElements, utils::send_frames_surface_tree},
-    input::{
-        keyboard::Keycode,
-        pointer::{CursorImageAttributes, CursorImageStatus},
-    },
+    input::{keyboard::Keycode, pointer::CursorImageStatus},
     output::{Mode as WlMode, Output, PhysicalProperties, Scale},
     reexports::{
         calloop::LoopHandle,
@@ -70,10 +67,9 @@ use smithay::{
         rustix::fs::OFlags,
         wayland_server::backend::GlobalId,
     },
-    utils::{DeviceFd, IsAlive as _, Logical, Point, Transform},
-    wayland::{
-        compositor::with_states,
-        dmabuf::{DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
+    utils::{DeviceFd, Transform},
+    wayland::dmabuf::{
+        DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier,
     },
 };
 
@@ -524,10 +520,11 @@ impl Session {
             .collect()
     }
 
-    /// The renderer, for drawing something other than a frame: a picture.
+    /// The renderer and the pointer's images, for drawing something other
+    /// than a frame: a picture, which may ask for the pointer.
     #[cfg(feature = "capture")]
-    pub(crate) fn renderer(&mut self) -> &mut GlesRenderer {
-        &mut self.renderer
+    pub(crate) fn renderer_and_cursor(&mut self) -> (&mut GlesRenderer, &mut Cursor) {
+        (&mut self.renderer, &mut self.cursor)
     }
 }
 
@@ -870,19 +867,11 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         }
     }
 
-    // A client's cursor surface that has since been destroyed falls back to
-    // the compositor's arrow rather than to nothing.
-    if let CursorImageStatus::Surface(surface) = status
-        && !surface.alive()
-    {
-        *status = CursorImageStatus::default_named();
-    }
-
     // Front to back: the pointer over everything, then the windows.
     let mut elements: Vec<Elements> = match (pointer_at, space.output_geometry(&head.output)) {
         (Some(at), Some(geometry)) if geometry.to_f64().contains(at) => {
             let scale = head.output.current_scale().fractional_scale();
-            pointer_elements(renderer, cursor, status, at - geometry.loc.to_f64(), scale)
+            super::cursor::elements(renderer, cursor, status, at - geometry.loc.to_f64(), scale)
         }
         _ => Vec::new(),
     };
@@ -1017,51 +1006,6 @@ fn scene(renderer: &mut GlesRenderer, stack: &crate::shell::Stack, scale: f64) -
     elements.extend(windows(renderer, &stack.windows));
     elements.extend(layers(renderer, &stack.lower));
     elements
-}
-
-/// The pointer, drawn at `at` in the output's own coordinates: the client's
-/// cursor surface if it set one, the compositor's arrow if it did not,
-/// nothing if it asked for none.
-fn pointer_elements(
-    renderer: &mut GlesRenderer,
-    cursor: &mut Cursor,
-    status: &CursorImageStatus,
-    at: Point<f64, Logical>,
-    scale: f64,
-) -> Vec<Elements> {
-    match status {
-        CursorImageStatus::Hidden => Vec::new(),
-        CursorImageStatus::Named(icon) => {
-            let image = cursor.image(*icon);
-            let origin = (at - image.hotspot.to_f64()).to_physical(scale);
-            MemoryRenderBufferRenderElement::from_buffer(
-                renderer,
-                origin,
-                &image.image,
-                None,
-                None,
-                None,
-                Kind::Cursor,
-            )
-            .map(Elements::Cursor)
-            .into_iter()
-            .collect()
-        }
-        CursorImageStatus::Surface(surface) => {
-            let hotspot = with_states(surface, |states| {
-                states
-                    .data_map
-                    .get::<std::sync::Mutex<CursorImageAttributes>>()
-                    .and_then(|attributes| attributes.lock().ok().map(|a| a.hotspot))
-                    .unwrap_or_default()
-            });
-            let origin = (at - hotspot.to_f64()).to_physical_precise_round(scale);
-            render_elements_from_surface_tree(renderer, surface, origin, scale, 1.0, Kind::Cursor)
-                .into_iter()
-                .map(Elements::CursorSurface)
-                .collect()
-        }
-    }
 }
 
 /// A frame reached the screen. Draw again if anything was committed since.

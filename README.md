@@ -504,7 +504,9 @@ are inert while the screen is locked.
 
 A rule a reload changes applies to the next client that looks, with no
 global torn down, and what a client already holds is withdrawn as above.
-`screencopy` needs the `capture` feature (part of `desktop`). A display tool's
+`screencopy` needs the `capture` feature (part of `desktop`). A tool that asks
+for the pointer (`grim -c`, OBS's *Show cursor*) gets it drawn in, and a
+recording waiting for a change is sent one when the pointer moves. A display tool's
 change to the monitors lasts for the session: it is put in force as the output
 rules, exactly as if `[[output]]` had said it, and a reload that changes
 `[[output]]` puts the file back in charge. Moving a monitor just moves it; a
