@@ -1,10 +1,11 @@
 //! `perspicax --mcp-socket`, the binary itself: what it refuses before it
-//! starts anything, and a headless session serving one conversation after
-//! another while it runs on (issue #30).
+//! starts anything, `perspicax attach` carrying a conversation, and a headless
+//! session serving one conversation after another while it runs on (issue #30).
 //!
 //! The refusals need nothing but a filesystem, because the socket is bound
-//! before the accessibility registry is touched, and they run wherever the
-//! tests do. The session needs a live accessibility bus, so it is `#[ignore]`d,
+//! before the accessibility registry is touched, and `attach` is tested against
+//! a socket this test serves over a desk with no compositor behind it; all of
+//! them run wherever the tests do. The session needs a live accessibility bus, so it is `#[ignore]`d,
 //! and `ci/live-tests.sh` runs it with `--include-ignored`.
 
 use std::{
@@ -13,10 +14,13 @@ use std::{
     os::unix::{fs::PermissionsExt as _, net::UnixStream},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
+    sync::Arc,
     sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 
+use perspicax::desk::Desk;
+use perspicax_compositor::{Facts, Host, Requests};
 use serde_json::{Value, json};
 
 /// How long anything here gets before the test gives up on it.
@@ -131,6 +135,73 @@ fn a_file_that_is_not_a_socket_is_left_alone() {
         fs::read_to_string(&path).expect("still there"),
         "somebody's"
     );
+}
+
+/// Serve a socket at `path` over a desk with nothing on it and no compositor
+/// behind it, on a thread of its own, for as long as the test runs.
+fn serve_an_empty_desk(path: &Path) -> perspicax_mcp::Socket {
+    let (socket, listener) = perspicax_mcp::Socket::bind(path).expect("a socket");
+    std::thread::spawn(move || {
+        let facts = Facts::new();
+        let desk = Arc::new(Desk::new(&facts, &Host::new(&facts, &Requests::new())));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let Err(error) = runtime.block_on(perspicax_mcp::serve_socket(desk, listener));
+        panic!("the socket stopped being served: {error}");
+    });
+    socket
+}
+
+#[test]
+fn attach_carries_a_conversation_to_the_sessions_socket_and_ends_with_it() {
+    let scratch = Scratch::new();
+    let path = scratch.join("mcp");
+    let _socket = serve_an_empty_desk(&path);
+
+    let mut attached = perspicax()
+        .arg("attach")
+        .env("PERSPICAX_MCP_SOCKET", &path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("perspicax attach starts");
+    let mut asking = attached.stdin.take().expect("its stdin");
+    let mut answers = BufReader::new(attached.stdout.take().expect("its stdout"));
+    let mut answer = || {
+        let mut line = String::new();
+        answers.read_line(&mut line).expect("an answer");
+        serde_json::from_str::<Value>(&line).expect("JSON")
+    };
+
+    for message in [
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "perspicax attach test", "version": "0" },
+        }}),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "window_list" } }),
+    ] {
+        writeln!(asking, "{message}").expect("attach is listening");
+    }
+    assert_eq!(answer()["result"]["serverInfo"]["name"], "perspicax");
+    assert_eq!(answer()["result"]["structuredContent"]["count"], 0);
+
+    // The client is done: its conversation ends, and so does the wire.
+    drop(asking);
+    let status = exited(&mut attached, PATIENCE);
+    assert!(status.success(), "{status}");
+}
+
+#[test]
+fn attach_in_a_session_serving_no_socket_says_so() {
+    let output = finished(perspicax().arg("attach").env("PERSPICAX_MCP_SOCKET", ""));
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{said}");
+    assert!(said.contains("serves no agent interface"), "{said}");
 }
 
 /// One connection to the socket, spoken to a line at a time.

@@ -313,14 +313,18 @@ perspicax --seat --mcp-socket "$XDG_RUNTIME_DIR/perspicax-mcp" --spawn foot
 
 Every program the session starts is told where the socket is, in
 `PERSPICAX_MCP_SOCKET` (empty in a session that serves none), so an agent
-started inside it needs only a bridge from its stdio to the socket. With
-OpenBSD netcat, for Claude Code in that terminal:
+started inside it needs only a bridge from its stdio to the socket, and
+`perspicax attach` is one. For Claude Code in that terminal:
 
 ```sh
-claude mcp add perspicax -- sh -c 'exec nc -N -U "$PERSPICAX_MCP_SOCKET"'
+claude mcp add perspicax -- perspicax attach
 ```
 
-`socat STDIO "UNIX-CONNECT:$PERSPICAX_MCP_SOCKET"` does the same.
+It passes the client closing its stdin on as the end of the conversation, and
+ends when the session closes the connection. `perspicax attach PATH` names a
+socket instead. Anything else that joins stdio to a Unix socket will do, with
+OpenBSD netcat's `-N` for the first of those: `nc -N -U "$PERSPICAX_MCP_SOCKET"`,
+or `socat STDIO "UNIX-CONNECT:$PERSPICAX_MCP_SOCKET"`.
 
 **One conversation per connection, one at a time.** Another agent's
 `initialize` is refused, naming the process that holds the conversation, and

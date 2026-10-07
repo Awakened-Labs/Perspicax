@@ -29,6 +29,8 @@
 //! perspicax --seat --mcp-socket "$XDG_RUNTIME_DIR/perspicax-mcp" --spawn foot
 //! ```
 //!
+//! and the agent, in that terminal, runs `perspicax attach` as its MCP server.
+//!
 //! It needs `XDG_RUNTIME_DIR` set, which is where the Wayland socket goes. Over
 //! SSH that is `export XDG_RUNTIME_DIR=/run/user/$(id -u)`, the same variable
 //! `perspicax-probe` needs for the accessibility bus and for the same reason: a login
@@ -48,8 +50,8 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use clap::Parser;
-use perspicax::{bus, desk::Desk, keep::keep_current, observe, session};
+use clap::{Parser, Subcommand};
+use perspicax::{attach, bus, desk::Desk, keep::keep_current, observe, session};
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop, Virtual};
 use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt::writer::BoxMakeWriter};
 
@@ -60,9 +62,15 @@ use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt::writer::BoxMakeWri
     version,
     group = clap::ArgGroup::new("backend")
         .required(true)
-        .args(["headless", "seat", "session"])
+        .args(["headless", "seat", "session"]),
+    subcommand_negates_reqs = true,
+    args_conflicts_with_subcommands = true
 )]
 struct Cli {
+    /// Something other than a session.
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Run with no window system at all: a virtual output, no rendering, no
     /// GPU. What CI runs, and what an agent with no person present wants.
     ///
@@ -159,8 +167,8 @@ struct Cli {
     /// The socket is the owner's alone, and removed on the way out. One a
     /// killed session left behind is replaced; one another session is serving
     /// is refused, naming who serves it. Every program the session starts is
-    /// told where it is in `PERSPICAX_MCP_SOCKET`. `$XDG_RUNTIME_DIR` is the
-    /// place for it.
+    /// told where it is in `PERSPICAX_MCP_SOCKET`, and `perspicax attach`
+    /// connects to it. `$XDG_RUNTIME_DIR` is the place for it.
     #[arg(long, value_name = "PATH", conflicts_with = "mcp")]
     mcp_socket: Option<PathBuf>,
 
@@ -179,6 +187,22 @@ struct Cli {
     settle: f64,
 }
 
+#[derive(Subcommand)]
+enum Command {
+    /// Join this process's stdin and stdout to a session's agent socket, for
+    /// an MCP client inside the session to run as its server:
+    /// `claude mcp add perspicax -- perspicax attach`.
+    ///
+    /// Ends when the session closes the connection. The client closing stdin
+    /// is passed on as the end of what it will say, so its conversation ends
+    /// and the next agent may connect.
+    Attach {
+        /// The socket, instead of the session's own in `$PERSPICAX_MCP_SOCKET`.
+        #[arg(value_name = "PATH")]
+        socket: Option<PathBuf>,
+    },
+}
+
 impl Cli {
     /// Whether this is a person's session on this machine's seat, which both
     /// `--seat` and `--session` are. They differ only in the bus and the log.
@@ -189,6 +213,13 @@ impl Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Before anything else, because it is nothing else: no session, no log,
+    // nothing started, only a length of wire to one that is running.
+    if let Some(Command::Attach { socket }) = &cli.command {
+        let path = attach::socket_path(socket.clone(), |name| std::env::var(name).ok())?;
+        return attach::attach(&path);
+    }
 
     // Before the log is opened and before anything is started, because when it
     // works nothing after it runs: this process becomes `dbus-run-session`,
@@ -631,6 +662,24 @@ mod tests {
         assert!(
             parse(&["--headless", "--mcp-socket"]).is_err(),
             "a socket is somewhere"
+        );
+    }
+
+    #[test]
+    fn attaching_needs_no_session_and_takes_none() {
+        let attaching = parse(&["attach"]).expect("attach alone");
+        assert!(matches!(
+            attaching.command,
+            Some(Command::Attach { socket: None })
+        ));
+        let named = parse(&["attach", "/run/user/1000/perspicax-mcp"]).expect("attach PATH");
+        assert!(matches!(
+            named.command,
+            Some(Command::Attach { socket: Some(_) })
+        ));
+        assert_eq!(
+            parse(&["--headless", "attach"]).err(),
+            Some(ErrorKind::ArgumentConflict)
         );
     }
 }
