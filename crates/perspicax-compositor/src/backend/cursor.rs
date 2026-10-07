@@ -13,13 +13,29 @@
 //! still gets it by attaching its own cursor surface, which GTK and Qt both
 //! do, or by naming it with `cursor-shape-v1`, which draws it from here: from
 //! the same theme as every other application's pointer.
+//!
+//! What is drawn, from whichever of these the pointer is, is [`elements`]:
+//! for a seat's monitors, and for a screen recording that asks for the
+//! pointer (`crate::screencopy`), headless included. One function, so the
+//! recording shows the pointer the person sees.
 
 use std::collections::HashMap;
 
 use smithay::{
-    backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
-    input::pointer::CursorIcon,
-    utils::{Logical, Point, Transform},
+    backend::{
+        allocator::Fourcc,
+        renderer::{
+            ImportAll, ImportMem, Renderer,
+            element::{
+                Kind,
+                memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+            },
+        },
+    },
+    input::pointer::{CursorIcon, CursorImageAttributes, CursorImageStatus},
+    utils::{IsAlive as _, Logical, Point, Transform},
+    wayland::compositor::with_states,
 };
 use xcursor::{CursorTheme, parser::parse_xcursor};
 
@@ -87,6 +103,60 @@ impl Cursor {
         });
         shape.as_ref().unwrap_or(&self.arrow)
     }
+}
+
+/// The pointer, drawn at `at` in an output's own coordinates: the client's
+/// cursor surface if it set one, the compositor's image if it did not, or if
+/// the surface it set has since been destroyed; nothing if it asked for none.
+pub(crate) fn elements<R, E>(
+    renderer: &mut R,
+    cursor: &mut Cursor,
+    status: &CursorImageStatus,
+    at: Point<f64, Logical>,
+    scale: f64,
+) -> Vec<E>
+where
+    R: Renderer + ImportAll + ImportMem,
+    R::TextureId: Send + Clone + 'static,
+    E: From<MemoryRenderBufferRenderElement<R>> + From<WaylandSurfaceRenderElement<R>>,
+{
+    let icon = match status {
+        CursorImageStatus::Hidden => return Vec::new(),
+        CursorImageStatus::Named(icon) => *icon,
+        CursorImageStatus::Surface(surface) if surface.alive() => {
+            let hotspot = with_states(surface, |states| {
+                states
+                    .data_map
+                    .get::<std::sync::Mutex<CursorImageAttributes>>()
+                    .and_then(|attributes| attributes.lock().ok().map(|a| a.hotspot))
+                    .unwrap_or_default()
+            });
+            let origin = (at - hotspot.to_f64()).to_physical_precise_round(scale);
+            return render_elements_from_surface_tree(
+                renderer,
+                surface,
+                origin,
+                scale,
+                1.0,
+                Kind::Cursor,
+            );
+        }
+        CursorImageStatus::Surface(_) => CursorIcon::Default,
+    };
+    let image = cursor.image(icon);
+    let origin = (at - image.hotspot.to_f64()).to_physical(scale);
+    MemoryRenderBufferRenderElement::from_buffer(
+        renderer,
+        origin,
+        &image.image,
+        None,
+        None,
+        None,
+        Kind::Cursor,
+    )
+    .map(E::from)
+    .into_iter()
+    .collect()
 }
 
 /// The first of `names` the theme has, at the nominal size nearest `size`.

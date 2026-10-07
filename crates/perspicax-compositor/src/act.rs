@@ -430,6 +430,8 @@ impl Compositor {
             },
         );
         pointer.frame(self);
+        #[cfg(feature = "capture")]
+        self.flush_screencopy_for_pointer();
 
         let code = match button {
             PointerButton::Left => BTN_LEFT,
@@ -476,6 +478,8 @@ impl Compositor {
             },
         );
         pointer.frame(self);
+        #[cfg(feature = "capture")]
+        self.flush_screencopy_for_pointer();
 
         // `AxisSource::Wheel` rather than `Finger`: a client may treat finger
         // scrolling as kinetic and keep moving after the events stop, which

@@ -52,12 +52,14 @@ mod taking {
                 damage::OutputDamageTracker,
                 element::{
                     AsRenderElements, Kind,
+                    memory::MemoryRenderBufferRenderElement,
                     solid::{SolidColorBuffer, SolidColorRenderElement},
                     surface::WaylandSurfaceRenderElement,
                 },
             },
         },
         desktop::{LayerSurface, layer_map_for_output, space::SpaceElement},
+        input::pointer::CursorImageStatus,
         utils::{
             Buffer as BufferCoord, Logical, Physical, Point, Rectangle, Scale, Size, Transform,
         },
@@ -66,7 +68,10 @@ mod taking {
     use crate::{
         BACKDROP,
         act::ActError,
-        backend::Running,
+        backend::{
+            Pictures, Running,
+            cursor::{self, Cursor},
+        },
         framed::Framed,
         framed::FramedElement,
         shell::{Stack, id_of},
@@ -75,11 +80,14 @@ mod taking {
 
     smithay::backend::renderer::element::render_elements! {
         /// What a picture is made of: windows with their frames, layer
-        /// surfaces, and the blocks painted over what may not be shown.
+        /// surfaces, the blocks painted over what may not be shown, and the
+        /// pointer where it was asked for. A client's cursor surface is a
+        /// `Surface`; the compositor's own image is a `Cursor`.
         pub(crate) Scene<R> where R: ImportAll + ImportMem;
         Window=FramedElement<R>,
         Surface=WaylandSurfaceRenderElement<R>,
         Solid=SolidColorRenderElement,
+        Cursor=MemoryRenderBufferRenderElement<R>,
     }
 
     /// What is painted over a window the agent may not see: opaque, and
@@ -106,6 +114,10 @@ mod taking {
         lower: Vec<(LayerSurface, Point<i32, Logical>)>,
         drawn: Vec<Drawn>,
         redacted: Vec<Drawn>,
+        /// The pointer, over everything, in the picture's own coordinates:
+        /// only in a recording that asked for it, and only on its monitor.
+        /// Never in an agent's picture, which is of what applications drew.
+        pointer: Option<Point<f64, Logical>>,
     }
 
     /// A window, where it is drawn from, and whether it is painted over.
@@ -140,13 +152,30 @@ mod taking {
 
     /// Draw a monitor as it looks, with nothing painted over: what the
     /// person's own screenshot tool is given. Consent is the agent's, and
-    /// this is not the agent asking.
-    pub(crate) fn draw_output(state: &mut Compositor, output: &str) -> Result<Pixels, ActError> {
+    /// this is not the agent asking. With the pointer on top if `pointer`,
+    /// as the tool may ask.
+    pub(crate) fn draw_output(
+        state: &mut Compositor,
+        output: &str,
+        pointer: bool,
+    ) -> Result<Pixels, ActError> {
         let mut plan = plan_output(state, Some(output))?;
         for placed in &mut plan.windows {
             placed.redacted = false;
         }
+        if pointer {
+            plan.pointer = pointer_on(state, output);
+        }
         render(state, &plan)
+    }
+
+    /// Where the pointer is on the monitor named `name`, in the monitor's
+    /// own coordinates; `None` while it is on another.
+    fn pointer_on(state: &Compositor, name: &str) -> Option<Point<f64, Logical>> {
+        let at = state.pointer.as_ref()?.current_location();
+        let output = state.space.outputs().find(|output| output.name() == name)?;
+        let area = state.space.output_geometry(output)?.to_f64();
+        area.contains(at).then(|| at - area.loc)
     }
 
     /// Who drew a surface, from what was last published, and whether the
@@ -261,6 +290,7 @@ mod taking {
             lower,
             drawn,
             redacted,
+            pointer: None,
         })
     }
 
@@ -302,34 +332,57 @@ mod taking {
                 origin,
             }],
             redacted: Vec::new(),
+            pointer: None,
         })
     }
 
-    /// Draw a plan with whichever renderer this backend has.
+    /// Draw a plan with whichever renderer this backend has, and the
+    /// pointer's images if the plan has the pointer in it.
     fn render(state: &mut Compositor, plan: &Plan) -> Result<Pixels, ActError> {
         let failed = |error: String| ActError::Capture(error);
-        match &mut state.backend {
-            Running::Headless { pixman, .. } => {
-                let renderer = match pixman {
-                    Some(renderer) => renderer,
-                    None => pixman.insert(Box::new(
-                        smithay::backend::renderer::pixman::PixmanRenderer::new()
+        let Compositor {
+            backend,
+            cursor: status,
+            ..
+        } = state;
+        let wanted = plan.pointer.is_some();
+        match backend {
+            Running::Headless { pictures, .. } => {
+                let pictures = match pictures {
+                    Some(pictures) => pictures,
+                    None => pictures.insert(Box::new(Pictures {
+                        renderer: smithay::backend::renderer::pixman::PixmanRenderer::new()
                             .map_err(|error| failed(error.to_string()))?,
-                    )),
+                        cursor: None,
+                    })),
                 };
+                let Pictures { renderer, cursor } = &mut **pictures;
+                // Headless has no theme of its own, so it reads the Xcursor
+                // variables, as a seat with no `cursor` in its theme does.
+                let pointer = wanted.then(|| {
+                    let cursor = cursor.get_or_insert_with(|| Cursor::load(None, None));
+                    (cursor, &*status)
+                });
                 draw::<_, smithay::reexports::pixman::Image<'static, 'static>>(
-                    &mut **renderer,
-                    plan,
+                    renderer, plan, pointer,
                 )
             }
             #[cfg(feature = "seat")]
             Running::Seat(session) => {
-                draw::<_, smithay::backend::renderer::gles::GlesTexture>(session.renderer(), plan)
+                let (renderer, cursor) = session.renderer_and_cursor();
+                let pointer = wanted.then_some((cursor, &*status));
+                draw::<_, smithay::backend::renderer::gles::GlesTexture>(renderer, plan, pointer)
             }
         }
     }
 
-    fn draw<R, T>(renderer: &mut R, plan: &Plan) -> Result<Pixels, ActError>
+    /// Draw `plan`, with the pointer on top when the plan has it: drawn by
+    /// `cursor` as `status` says.
+    fn draw<R, T>(
+        renderer: &mut R,
+        plan: &Plan,
+        pointer: Option<(&mut Cursor, &CursorImageStatus)>,
+    ) -> Result<Pixels, ActError>
     where
         R: Renderer + ImportAll + ImportMem + Offscreen<T> + Bind<T> + ExportMem,
         R::TextureId: Texture + Send + Clone + 'static,
@@ -381,8 +434,14 @@ mod taking {
             }
             elements
         };
-        // Front to back.
-        let mut elements: Vec<Scene<R>> = layers(renderer, &plan.overlay);
+        // Front to back: the pointer over everything, as on a monitor.
+        let mut elements: Vec<Scene<R>> = match (plan.pointer, pointer) {
+            (Some(at), Some((cursor, status))) => {
+                cursor::elements(renderer, cursor, status, at, plan.scale)
+            }
+            _ => Vec::new(),
+        };
+        elements.extend(layers(renderer, &plan.overlay));
         elements.extend(windows(renderer, true));
         elements.extend(layers(renderer, &plan.top));
         elements.extend(windows(renderer, false));

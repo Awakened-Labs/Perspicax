@@ -40,8 +40,9 @@ perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", feat
 x11rb = { version = "0.13", default-features = false, features = ["res"], optional = true }
 # Seat-only: the person's config.toml. Headless reads none.
 perspicax-config = { path = "../perspicax-config", version = "0.1.0", optional = true }
-# Seat-only: reads the person's Xcursor theme, and headless draws no cursor.
-# MIT, pure Rust, no dependencies.
+# The pointer's images, from the person's Xcursor theme: drawn on a seat's
+# monitors, and into a screen recording that asks for the pointer (`capture`),
+# headless too. MIT, pure Rust, no dependencies.
 xcursor = { version = "0.3", optional = true }
 # Seat-only: window titles, shaped and rasterised. See the workspace manifest
 # for what it brings.
@@ -78,8 +79,9 @@ xwayland = ["smithay/xwayland", "dep:x11rb"]
 # GPU it already has. Headless draws them in software, with pixman (MIT, the
 # system libpixman-1 found by pkg-config), so that CI tests the same path;
 # it is a feature so the headless build still needs nothing but
-# libxkbcommon unless a picture is wanted.
-capture = ["smithay/renderer_pixman"]
+# libxkbcommon unless a picture is wanted. xcursor draws the pointer into a
+# recording that asks for it.
+capture = ["smithay/renderer_pixman", "dep:xcursor"]
 
 # A real Wayland client for the live tests, so a layer-shell test needs no
 # panel program installed. MIT; default features off, since the tests need

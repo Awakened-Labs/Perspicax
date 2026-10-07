@@ -15,8 +15,8 @@
 
 #[cfg(any(feature = "seat", test))]
 mod connectors;
-#[cfg(feature = "seat")]
-mod cursor;
+#[cfg(any(feature = "seat", feature = "capture"))]
+pub(crate) mod cursor;
 #[cfg(any(feature = "seat", test))]
 mod hatch;
 #[cfg(any(feature = "seat", test))]
@@ -148,11 +148,11 @@ pub(crate) enum Running {
         /// Virtual monitors a display tool turned off, kept so it can turn
         /// them on again.
         dark: Vec<Virtual>,
-        /// The software renderer pictures are drawn with, made the first
-        /// time one is asked for. See [`crate::capture`]. Boxed, as the
-        /// seat's session is: it is large, and the rest of this is not.
+        /// What pictures are drawn with, made the first time one is asked
+        /// for. See [`crate::capture`]. Boxed, as the seat's session is: it
+        /// is large, and the rest of this is not.
         #[cfg(feature = "capture")]
-        pixman: Option<Box<smithay::backend::renderer::pixman::PixmanRenderer>>,
+        pictures: Option<Box<Pictures>>,
     },
     /// The session, the GPU and the outputs on it. Boxed because it is large
     /// and the headless variant is not.
@@ -185,7 +185,7 @@ impl Running {
                 access: access.clone(),
                 dark: Vec::new(),
                 #[cfg(feature = "capture")]
-                pixman: None,
+                pictures: None,
             }),
             #[cfg(feature = "seat")]
             Backend::Seat => Ok(Self::Seat(Box::new(seat::Session::open(
@@ -400,6 +400,16 @@ impl Running {
             Self::Seat(session) => session.exit_requested(),
         }
     }
+}
+
+/// What a headless compositor draws pictures with: pixman, in software, and
+/// the pointer's images, read the first time a picture asks for the pointer,
+/// so a screen recording of a headless session shows the pointer a seat
+/// would.
+#[cfg(feature = "capture")]
+pub(crate) struct Pictures {
+    pub(crate) renderer: smithay::backend::renderer::pixman::PixmanRenderer,
+    pub(crate) cursor: Option<cursor::Cursor>,
 }
 
 /// A virtual output a headless compositor is running.

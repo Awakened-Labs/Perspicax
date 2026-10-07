@@ -44,7 +44,7 @@ use wayland_client::{
     backend::ObjectId,
     event_created_child,
     globals::{GlobalList, registry_queue_init},
-    protocol::{wl_output, wl_seat, wl_shm, wl_subsurface, wl_surface},
+    protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_subsurface, wl_surface},
 };
 use wayland_protocols::ext::{
     foreign_toplevel_list::v1::client::{
@@ -340,6 +340,10 @@ pub struct Desk {
     pub taskbar_finished: bool,
     pub tasked: Vec<Tasked>,
     pub seat: Option<wl_seat::WlSeat>,
+    pub pointer: Option<wl_pointer::WlPointer>,
+    /// The serial of the pointer's last arrival on one of our surfaces: what
+    /// `set_cursor` has to name to be heard.
+    pub entered: Option<u32>,
     /// How many times the compositor asked one of our windows to close.
     pub asked_to_close: usize,
     pub pager: Option<ExtWorkspaceManagerV1>,
@@ -402,6 +406,8 @@ impl Desk {
             taskbar_finished: false,
             tasked: Vec::new(),
             seat: None,
+            pointer: None,
+            entered: None,
             asked_to_close: 0,
             pager: None,
             pager_done: 0,
@@ -636,6 +642,31 @@ impl Desk {
         self.outputs.outputs().next().is_none()
     }
 
+    /// A pointer of our own, on the seat `bind_taskbar` bound or a new one.
+    pub fn bind_pointer(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        let seat = self.seat.get_or_insert_with(|| {
+            globals
+                .bind::<wl_seat::WlSeat, _, _>(qh, 1..=7, ())
+                .expect("wl_seat")
+        });
+        self.pointer = Some(seat.get_pointer(qh, ()));
+    }
+
+    /// Draw the pointer ourselves while it is over us, as a toolkit does: a
+    /// square of `side` in one colour, ARGB, its top-left corner the pointer.
+    pub fn set_cursor(&mut self, qh: &QueueHandle<Self>, side: u32, colour: u32) {
+        let serial = self
+            .entered
+            .expect("the pointer is over one of our surfaces");
+        let surface = self.compositor.create_surface(qh);
+        self.paint(&surface, (side, side), colour);
+        surface.commit();
+        self.pointer
+            .as_ref()
+            .expect("bind_pointer first")
+            .set_cursor(serial, Some(&surface), 0, 0);
+    }
+
     /// Bind screencopy. Panics if it is not advertised.
     pub fn bind_screencopy(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
         self.screencopy = Some(
@@ -645,14 +676,23 @@ impl Desk {
         );
     }
 
-    /// Ask for a frame of the first monitor, or a region of it; returns
-    /// which grab it is.
-    pub fn grab(&mut self, qh: &QueueHandle<Self>, region: Option<(i32, i32, i32, i32)>) -> usize {
+    /// Ask for a frame of the first monitor, or a region of it, with the
+    /// pointer drawn in or not, as `grim -c` asks or plain `grim` does;
+    /// returns which grab it is.
+    pub fn grab(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        region: Option<(i32, i32, i32, i32)>,
+        pointer: bool,
+    ) -> usize {
         let manager = self.screencopy.as_ref().expect("bind_screencopy first");
         let output = self.outputs.outputs().next().expect("a monitor");
+        let overlay = i32::from(pointer);
         let frame = match region {
-            None => manager.capture_output(0, &output, qh, ()),
-            Some((x, y, w, h)) => manager.capture_output_region(0, &output, x, y, w, h, qh, ()),
+            None => manager.capture_output(overlay, &output, qh, ()),
+            Some((x, y, w, h)) => {
+                manager.capture_output_region(overlay, &output, x, y, w, h, qh, ())
+            }
         };
         self.grabs.push(Grab {
             frame,
@@ -1206,6 +1246,23 @@ impl Dispatch<ZwlrOutputConfigurationHeadV1, ()> for Desk {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        _: &wl_pointer::WlPointer,
+        event: wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_pointer::Event::Enter { serial, .. } => desk.entered = Some(serial),
+            wl_pointer::Event::Leave { .. } => desk.entered = None,
+            _ => {}
+        }
     }
 }
 

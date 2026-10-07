@@ -298,6 +298,8 @@ fn moved(state: &mut Compositor, to: Point<f64, Logical>, time: u32) {
     }
     // The cursor itself moved, whatever the policy decided.
     state.backend.redraw();
+    #[cfg(feature = "capture")]
+    state.flush_screencopy_for_pointer();
 }
 
 /// A button went down or up at the pointer's current location.
