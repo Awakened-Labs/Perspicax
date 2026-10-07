@@ -75,6 +75,18 @@ pub enum Refusal {
     OtherWorkspace { workspace: u16 },
     /// A tab behind another in its window's tab group: `shown` is in front.
     InactiveTab { shown: SurfaceId },
+    /// The node's own application says it is not being shown: a menu bar
+    /// hidden until Alt is pressed, the page of a tab that is not in front.
+    /// Show it through the application -- switch to its tab, open its menu
+    /// -- and try again.
+    ///
+    /// A compositor judges a rectangle of a surface, and an application can
+    /// draw many nodes over the same rectangle of one surface, only one of
+    /// which is on screen. Which one is the application's to say. This is the
+    /// one claim an application makes that the gate takes, because it can
+    /// only refuse: an application that says this falsely makes its own node
+    /// un-actable and nothing else.
+    NotShowing,
     /// No compositor has judged this node's visibility. Fails closed.
     Unjudged,
     /// No compositor has attributed this node to a process, so no capability
@@ -123,6 +135,7 @@ impl core::fmt::Display for Refusal {
                     "node's window is on workspace {workspace}, which is not showing"
                 )
             }
+            Self::NotShowing => write!(f, "node's application reports it as not being shown"),
             Self::Unjudged => write!(f, "node visibility has not been judged by a compositor"),
             Self::Unattributed => write!(f, "node has no attributed origin"),
             Self::Stale { frames: 0 } => {
@@ -207,9 +220,20 @@ impl Consent {
 
 /// The gate. Every act path goes through here.
 ///
-/// Both conditions fail closed, and both defaults are un-actable, so an ingest
+/// A node must be attributed, judged [`Visible`](Visibility::Visible) by a
+/// compositor, and not reported hidden by its own application, in that order:
+/// an occluded node is reported as occluded whatever its application says,
+/// because raising the window in the way is the nearer remedy.
+///
+/// The first two fail closed, and both defaults are un-actable, so an ingest
 /// or host implementation that simply forgets to fill a field cannot produce a
-/// clickable node by omission.
+/// clickable node by omission. The third is the application's own word,
+/// taken because it can only refuse -- see [`Refusal::NotShowing`].
+///
+/// A *disabled* node is not refused, deliberately. Pressing it lands on the
+/// control the agent named, which then does nothing, and the agent can read
+/// that it is disabled before spending the call. A node its application says
+/// is not shown is different: the press lands on whatever is drawn there.
 ///
 /// # Errors
 ///
@@ -220,17 +244,25 @@ pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
         Origin::Process(_) | Origin::X11(_) => {}
     }
     match &node.visibility {
-        Visibility::Visible => Ok(()),
-        Visibility::Occluded { by } => Err(Refusal::Occluded { by: *by }),
-        Visibility::Clipped => Err(Refusal::Clipped),
-        Visibility::Unmapped => Err(Refusal::Unmapped),
-        Visibility::OffScreen => Err(Refusal::OffScreen),
-        Visibility::OtherWorkspace { workspace } => Err(Refusal::OtherWorkspace {
-            workspace: *workspace,
-        }),
-        Visibility::InactiveTab { shown } => Err(Refusal::InactiveTab { shown: *shown }),
-        Visibility::Unknown => Err(Refusal::Unjudged),
+        Visibility::Visible => {}
+        Visibility::Occluded { by } => return Err(Refusal::Occluded { by: *by }),
+        Visibility::Clipped => return Err(Refusal::Clipped),
+        Visibility::Unmapped => return Err(Refusal::Unmapped),
+        Visibility::OffScreen => return Err(Refusal::OffScreen),
+        Visibility::OtherWorkspace { workspace } => {
+            return Err(Refusal::OtherWorkspace {
+                workspace: *workspace,
+            });
+        }
+        Visibility::InactiveTab { shown } => {
+            return Err(Refusal::InactiveTab { shown: *shown });
+        }
+        Visibility::Unknown => return Err(Refusal::Unjudged),
     }
+    if node.node.is_hidden() {
+        return Err(Refusal::NotShowing);
+    }
+    Ok(())
 }
 
 /// The gate for reading a whole window: a picture of it. It must exist, be
@@ -489,6 +521,54 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, Refusal::Occluded { by: SurfaceId(7) });
         assert_eq!(err.to_string(), "node occluded by surface 7");
+    }
+
+    fn hidden(mut node: ObservedNode) -> ObservedNode {
+        node.node.set_hidden();
+        node
+    }
+
+    /// The compositor proved the rectangle is on screen and uncovered; the
+    /// application says this node is not what is drawn there. Issue #32:
+    /// Firefox's hidden menu bar sits over its tab strip, and a click on
+    /// `menu:File` would have pressed the tab strip.
+    #[test]
+    fn a_node_its_application_says_is_not_showing_is_refused() {
+        let shown = node_with(attributed(), Visibility::Visible);
+        assert!(check_actable(&shown).is_ok());
+
+        let err = check_actable(&hidden(shown)).unwrap_err();
+        assert_eq!(err, Refusal::NotShowing);
+        assert_eq!(
+            err.to_string(),
+            "node's application reports it as not being shown"
+        );
+    }
+
+    /// The compositor's verdict comes first: an agent told "occluded" can
+    /// raise the window in the way, and one told "not showing" would go
+    /// looking for a tab to switch to.
+    #[test]
+    fn what_the_compositor_refuses_is_reported_before_what_the_application_says() {
+        let covered = Visibility::Occluded { by: SurfaceId(7) };
+        assert_eq!(
+            check_actable(&hidden(node_with(attributed(), covered))).unwrap_err(),
+            Refusal::Occluded { by: SurfaceId(7) }
+        );
+        let anonymous = hidden(node_with(Origin::Unattributed, Visibility::Visible));
+        assert_eq!(
+            check_actable(&anonymous).unwrap_err(),
+            Refusal::Unattributed
+        );
+    }
+
+    /// Deliberate: a press on a disabled control lands on that control, and
+    /// the agent can read `disabled` before spending the call.
+    #[test]
+    fn a_disabled_node_is_still_actable() {
+        let mut node = node_with(attributed(), Visibility::Visible);
+        node.node.set_disabled();
+        assert!(check_actable(&node).is_ok());
     }
 
     #[test]

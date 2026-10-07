@@ -470,7 +470,9 @@ impl Index {
     ///
     /// [`Refusal::NotFound`] for an id this index does not hold,
     /// [`Refusal::Stale`] for one behind the screen, then whatever
-    /// [`check_actable`] says about the node itself, and last
+    /// [`check_actable`] says about the node itself -- its origin, the
+    /// compositor's visibility verdict, and [`Refusal::NotShowing`] when its
+    /// application says it is not shown -- and last
     /// [`Refusal::NoCapability`] for an application the host's [`Consent`]
     /// does not cover. Consent comes last so a refusal names the nearer
     /// obstacle: a covered button is reported as covered, whoever drew it.
@@ -994,6 +996,59 @@ mod tests {
             index.actable(NodeId(2)),
             Err(Refusal::Occluded { .. })
         ));
+    }
+
+    /// Issue #32, in miniature. Firefox draws its menu bar, hidden until Alt
+    /// is pressed, over the same rectangle as its tab strip, on the same
+    /// surface. The compositor judges both nodes visible, because it judges
+    /// the rectangle and the rectangle is uncovered; only the application
+    /// knows which of the two is drawn there, and it says.
+    #[test]
+    fn of_two_nodes_drawn_over_one_rectangle_only_the_one_showing_is_actable() {
+        let strip = Rect::new(0.0, 0.0, 400.0, 26.0);
+        let mut window = Node::new(Role::Window);
+        window.set_children(vec![NodeId(2), NodeId(3)]);
+        window.set_bounds(Rect::new(0.0, 0.0, 400.0, 300.0));
+        let mut menu_bar = placed(2, "File", strip);
+        menu_bar.node.set_hidden();
+        let tab_strip = placed(3, "Tabs", strip);
+
+        let mut index = Index::new();
+        index.ingest_snapshot([
+            ObservedNode::unjoined(NodeId(1), window),
+            menu_bar,
+            tab_strip,
+        ]);
+        index.join_subtree(NodeId(1), SurfaceId(1), &origin());
+        index.judge(&desktop(None));
+
+        for id in [2, 3] {
+            assert_eq!(
+                index.get(NodeId(id)).unwrap().visibility,
+                Visibility::Visible,
+                "the compositor's verdict is about the rectangle, and it is right"
+            );
+        }
+        assert_eq!(
+            index.actable(NodeId(2)).unwrap_err(),
+            Refusal::NotShowing,
+            "a press on File would have landed on the tab strip"
+        );
+        assert!(index.actable(NodeId(3)).is_ok());
+    }
+
+    /// The application's word about its own node is nearer than the person's
+    /// consent to the application: a hidden menu is reported as hidden
+    /// whoever may drive it.
+    #[test]
+    fn a_node_not_showing_is_reported_as_such_before_consent_is_asked() {
+        let mut index = Index::new();
+        let mut hidden = placed(1, "File", Rect::new(0.0, 0.0, 40.0, 26.0));
+        hidden.node.set_hidden();
+        index.ingest_snapshot([hidden]);
+        index.join(NodeId(1), SurfaceId(1), &origin());
+        index.judge(&desktop(None).with_consent(Consent::Nobody));
+        assert_eq!(index.actable(NodeId(1)).unwrap_err(), Refusal::NotShowing);
     }
 
     /// A node can outlive the surface it was read from -- a window closes

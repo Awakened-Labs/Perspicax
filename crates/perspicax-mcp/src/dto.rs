@@ -215,9 +215,9 @@ impl From<Rect> for Bounds {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Refused {
     /// One of `occluded`, `clipped`, `unmapped`, `off_screen`,
-    /// `other_workspace`, `inactive_tab`, `unjudged`, `unattributed`, `stale`,
-    /// `no_capability`, `ambiguous_selector`, `not_found`, `not_a_window`,
-    /// `focus_elsewhere`.
+    /// `other_workspace`, `inactive_tab`, `not_showing`, `unjudged`,
+    /// `unattributed`, `stale`, `no_capability`, `ambiguous_selector`,
+    /// `not_found`, `not_a_window`, `focus_elsewhere`.
     pub kind: &'static str,
     /// The refusal in words.
     pub message: String,
@@ -255,6 +255,7 @@ impl From<&Refusal> for Refused {
                 Refusal::OffScreen => "off_screen",
                 Refusal::OtherWorkspace { .. } => "other_workspace",
                 Refusal::InactiveTab { .. } => "inactive_tab",
+                Refusal::NotShowing => "not_showing",
                 Refusal::Unjudged => "unjudged",
                 Refusal::Unattributed => "unattributed",
                 Refusal::Stale { .. } => "stale",
@@ -301,7 +302,10 @@ pub struct State {
     /// saying so is more honest than pretending the click was impossible.
     #[serde(skip_serializing_if = "core::ops::Not::not")]
     pub disabled: bool,
-    /// Excluded from the tree presented to assistive technology.
+    /// The application says this control is not being shown: a menu bar
+    /// hidden until Alt is pressed, the page of a tab behind another. Never
+    /// actable, and refused as `not_showing`, because whatever a press there
+    /// landed on would be something else drawn in the same place.
     #[serde(skip_serializing_if = "core::ops::Not::not")]
     pub hidden: bool,
     /// Input or selection is required.
@@ -926,6 +930,47 @@ mod tests {
             serde_json::json!({"kind": "not_found",
             "message": "selector matched no nodes"})
         );
+    }
+
+    /// Nothing to raise and nothing to count: the remedy is in the words, and
+    /// the wire carries no field another refusal would fill.
+    #[test]
+    fn not_showing_goes_on_the_wire_as_its_kind_and_its_message_alone() {
+        assert_eq!(
+            serde_json::to_value(Refused::from(&Refusal::NotShowing)).unwrap(),
+            serde_json::json!({"kind": "not_showing",
+            "message": "node's application reports it as not being shown"})
+        );
+    }
+
+    /// Issue #32 put `"actable": true` beside `"state": {"hidden": true}` on
+    /// one node. A node its application says is not shown is now reported
+    /// the way the gate treats it, so the two can no longer disagree.
+    #[test]
+    fn a_node_its_application_hides_is_reported_hidden_and_refused_together() {
+        let mut frame = perspicax_node::Node::new(perspicax_node::Role::Window);
+        frame.set_bounds(Rect::new(0.0, 0.0, 400.0, 300.0));
+        frame.set_children(vec![NodeId(2)]);
+        let mut menu = perspicax_node::Node::new(perspicax_node::Role::Menu);
+        menu.set_label("File");
+        menu.set_bounds(Rect::new(10.0, 10.0, 50.0, 36.0));
+        menu.set_hidden();
+
+        let mut index = Index::new();
+        index.ingest_snapshot([
+            ObservedNode::unjoined(NodeId(1), frame),
+            ObservedNode::unjoined(NodeId(2), menu),
+        ]);
+        index.join_subtree(NodeId(1), WINDOW, &crate::fixture::origin());
+        index.judge(&facts());
+
+        let file = Node::of(&index, NodeId(2)).expect("it was ingested");
+        assert!(!file.actable);
+        assert_eq!(
+            file.refused.map(|refused| refused.kind),
+            Some("not_showing")
+        );
+        assert!(file.state.is_some_and(|state| state.hidden));
     }
 
     /// A keyboard held elsewhere names where the keys would have gone, so the

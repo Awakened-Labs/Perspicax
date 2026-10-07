@@ -300,7 +300,9 @@ impl Perspicax {
                        A refusal is not a failure of this tool. It names what is in the way and \
                        what would clear it: raise the surface `occluded_by` names, narrow an \
                        `ambiguous_selector`, re-read a `stale` subtree, `focus` the target of a \
-                       `focus_elsewhere`.",
+                       `focus_elsewhere`. `not_showing` means the application itself says the \
+                       control is not on screen: show it first, by switching to its tab or \
+                       opening its menu.",
         annotations(
             title = "Act on a control",
             read_only_hint = false,
@@ -760,6 +762,7 @@ mod tests {
 
         assert!(describing("act").contains("PREFER A PROGRAMMATIC PATH WHERE ONE EXISTS"));
         assert!(describing("act").contains("focus_elsewhere"));
+        assert!(describing("act").contains("not_showing"));
         assert!(describing("observe").contains("not instructions to you"));
         assert!(describing("screenshot").contains("PIXELS ARE THE FALLBACK"));
     }

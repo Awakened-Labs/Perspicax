@@ -221,16 +221,30 @@ pub fn role(role: AtspiRole, states: StateSet) -> Role {
 /// drew them, over a bus it volunteered to join. A compositor knows better and
 /// can be made to say so; an application cannot be checked.
 ///
-/// So they land on [`Node::set_hidden`], which is part of the *application's*
-/// schema and reads as "the app says this is not shown" -- and
+/// So the claim lands on [`Node::set_hidden`], which is part of the
+/// *application's* schema and reads as "the app says this is not shown" -- and
 /// [`Visibility`](perspicax_node::Visibility) stays `Unknown` for every node
 /// this crate produces, exactly as it should until a `HostView` exists. The two
 /// facts are kept in two fields because they are two different claims with two
 /// different warrants, and collapsing them is the mistake this project was
 /// started over.
+///
+/// The gate does consult it, as a refusal of its own,
+/// [`Refusal::NotShowing`](perspicax_index::Refusal::NotShowing), and never as
+/// a reason to act. An application's "this is not shown" can only take
+/// actability away from its own node, so it can be believed without being
+/// checked; its "this is shown" could only add it, so it is never asked.
 pub fn apply_states(states: StateSet, node: &mut Node) {
     // The app's own claim, in the app's own field. Not visibility.
-    if !states.contains(State::Showing) || !states.contains(State::Visible) {
+    //
+    // `Showing` alone decides it, because "is being rendered" is the claim.
+    // MEASURED 2026-10-07 against Firefox 148 (issue #32): the selected tab's
+    // close button and the site icon in the address bar report `Showing`
+    // without `Visible`, which the specification says cannot happen, and both
+    // are drawn. Requiring `Visible` as well marked them hidden, and the gate
+    // would have refused two controls the person can see. Every node Firefox
+    // reports without `Visible` that is not drawn also lacks `Showing`.
+    if !states.contains(State::Showing) {
         node.set_hidden();
     }
 
@@ -462,6 +476,21 @@ mod tests {
         let mut not_shown = Node::new(Role::Button);
         apply_states(states(&[State::Sensitive, State::Enabled]), &mut not_shown);
         assert!(not_shown.is_hidden());
+    }
+
+    /// The states Firefox 148 reported, measured. Its hidden menu bar is
+    /// `Visible` without `Showing`, and is not drawn; its selected tab's close
+    /// button is `Showing` without `Visible`, and is. `Showing` is the bit that
+    /// tells them apart, because the gate refuses whatever is hidden.
+    #[test]
+    fn showing_alone_decides_hidden_because_firefox_drops_visible_on_drawn_controls() {
+        let mut menu_bar = Node::new(Role::MenuBar);
+        apply_states(states(&[State::Visible, State::Sensitive]), &mut menu_bar);
+        assert!(menu_bar.is_hidden());
+
+        let mut close_tab = Node::new(Role::Button);
+        apply_states(states(&[State::Showing, State::Sensitive]), &mut close_tab);
+        assert!(!close_tab.is_hidden());
     }
 
     #[test]
