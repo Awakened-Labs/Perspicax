@@ -682,7 +682,11 @@ pam_gnome_keyring.so auto_start`; without them, the first program that wants
 a secret asks for the keyring's password. gnome-keyring serves one session's
 bus at a time, so a second session of yours, beside another desktop that is
 still logged in, has none: every lookup there waits 25 seconds and fails, and
-the log names the keyring that is in the way.
+the log names the keyring that is in the way. The desktop portal waits the same
+25 seconds as it starts, and every GTK 4 application uses the portal as it
+opens, so the session starts the portal itself a few seconds in rather than
+leave that wait to the first application; one opened sooner waits for what is
+left of it.
 
 Each component is a cargo feature of `perspicax-shell`, and `full` is all of
 them; none is on by default. The profiles turn on what the build has:
