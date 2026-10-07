@@ -1,5 +1,6 @@
-//! The session bus is told where the session's displays are (issue #27), and
-//! what it started for the session ends with it (H3).
+//! The session bus is told where the session's displays are (issue #27), what
+//! it started for the session ends with it (H3), and a portal the keyring would
+//! hold up is started before anything asks for it (issue #36).
 //!
 //! Each test starts a `dbus-daemon` of its own, with a service directory the
 //! test writes, so what D-Bus starts on request is a script the test can read
@@ -414,6 +415,67 @@ fn the_secret_service_is_told_apart_in_each_way_it_can_answer() {
         })
         .expect("a stand-in Secret Service");
     assert_eq!(keyring(&serving), Keyring::Running);
+}
+
+/// Issue #36: beside another session's keyring the Secret Service never takes
+/// its name, so D-Bus is still starting it when the session stops waiting, and
+/// xdg-desktop-portal waits 25 s on it as it starts -- inside whichever
+/// application asks for the portal first. So the session starts the portal
+/// then, once the bus can tell it where the displays are and whose portals to
+/// use; and only then, since a session whose keyring answered may never want
+/// one.
+#[test]
+#[ignore = "starts a dbus-daemon of its own"]
+fn the_portal_is_started_early_only_while_the_secret_service_is_still_starting() {
+    // A session on a bus whose portal is a stand-in writing down the
+    // environment it was started with, and whose Secret Service is `secrets`.
+    // The sender keeps the session's bus thread going for as long as it is
+    // held.
+    let session = |secrets: Option<&str>| {
+        let written = scratch("portal");
+        let portal = format!("/bin/sh -c \"env > {}\"", written.display());
+        let mut services = vec![("org.freedesktop.portal.Desktop", portal.as_str())];
+        services.extend(secrets.map(|exec| ("org.freedesktop.secrets", exec)));
+        let bus = Bus::start(&services);
+        let (tell, watch) = mpsc::channel();
+        bus::start(bus.options(), watch);
+        tell.send(SessionFacts {
+            wayland_display: Some("wayland-test".to_owned()),
+            ..SessionFacts::default()
+        })
+        .expect("the bus thread is listening");
+        (bus, tell, written)
+    };
+
+    {
+        let (_bus, _tell, written) = session(Some("/bin/sleep 5"));
+        let environment = || std::fs::read_to_string(&written).unwrap_or_default();
+        let started = eventually(|| environment().contains("WAYLAND_DISPLAY="));
+        let environment = environment();
+        std::fs::remove_file(&written).ok();
+        assert!(
+            started,
+            "the portal was not started while the Secret Service was still starting"
+        );
+        for expected in [
+            "WAYLAND_DISPLAY=wayland-test",
+            "XDG_CURRENT_DESKTOP=perspicax",
+        ] {
+            assert!(
+                environment.lines().any(|line| line == expected),
+                "the portal was started without {expected}:\n{environment}"
+            );
+        }
+    }
+
+    // No Secret Service at all is answered at once, so the deadline and a
+    // second more is time enough for a portal started anyway to have said so.
+    let (bus, _tell, written) = session(None);
+    std::thread::sleep(bus.options().keyring_deadline + Duration::from_secs(1));
+    assert!(
+        !written.exists(),
+        "the portal was started though the Secret Service was not installed"
+    );
 }
 
 /// H3: logging out of a session SDDM started left its accessibility bus

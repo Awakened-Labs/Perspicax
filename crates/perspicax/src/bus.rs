@@ -19,6 +19,12 @@
 //! and says nothing about why. One line here saying so is the difference
 //! between that and a program that looks as if it will not open.
 //!
+//! One program waits on it before any other: xdg-desktop-portal, as it
+//! starts, and whichever application asks for the portal first waits with it
+//! (issue #36). So when the Secret Service is still starting at the deadline,
+//! the portal is started then too, and its wait passes before an application
+//! asks for it rather than inside the first one that does.
+//!
 //! The settings portal's backend is served from here too, on the same
 //! connection: see [`crate::portal`].
 //!
@@ -31,16 +37,24 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::mpsc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use perspicax_compositor::SessionFacts;
 use tracing::Level;
-use zbus::{Connection, fdo::DBusProxy, names::WellKnownName};
+use zbus::{
+    Connection,
+    fdo::{DBusProxy, StartServiceReply},
+    names::WellKnownName,
+};
 
 /// The Secret Service's name on the bus: gnome-keyring's, KWallet's, or
 /// whichever program a person keeps their secrets in.
 const SECRETS: &str = "org.freedesktop.secrets";
+
+/// xdg-desktop-portal's name on the bus, which D-Bus starts for the first
+/// application to ask for it.
+const PORTAL: &str = "org.freedesktop.portal.Desktop";
 
 /// How long the Secret Service has to start before a warning says it did not.
 ///
@@ -221,9 +235,19 @@ pub fn keyring_advice(outcome: &Keyring, holder: Option<&Path>) -> Option<(Level
         ),
         None => "programs here that keep secrets in a keyring will find none".to_owned(),
     };
+    // Still starting, so whatever asks for it waits until it gives up, and
+    // xdg-desktop-portal asks as it starts, before it serves anyone: for
+    // GDBus's 25 s. A start that has failed holds nobody up, since asking
+    // again fails as quickly.
+    let portal = if *outcome == Keyring::TimedOut {
+        ". The desktop portal waits for it too as it starts, for 25 s, and so does any \
+         program that uses the portal meanwhile, as every GTK 4 application does as it opens"
+    } else {
+        ""
+    };
     Some((
         Level::WARN,
-        format!("the Secret Service did not start on this session's bus: {what}; {why}"),
+        format!("the Secret Service did not start on this session's bus: {what}; {why}{portal}"),
     ))
 }
 
@@ -346,6 +370,43 @@ async fn report_keyring(connection: Connection, deadline: Duration) {
         Some((_, advice)) => tracing::info!("{advice}"),
         None => tracing::debug!("the Secret Service is already serving this session's bus"),
     }
+    // Only then: a session whose keyring answered may never want a portal,
+    // and one that failed outright holds the portal up no longer than it
+    // takes to fail again.
+    if outcome == Keyring::TimedOut {
+        start_portal(&connection).await;
+    }
+}
+
+/// Start the desktop portal before any application asks for it, and say when
+/// it is serving.
+///
+/// Nothing waits on this: it runs on the keyring check's own task, and waiting
+/// for the reply yields this thread to the settings backend, which the portal
+/// may ask before it answers.
+async fn start_portal(connection: &Connection) {
+    let asked = Instant::now();
+    let started = async {
+        let reply = DBusProxy::new(connection)
+            .await?
+            .start_service_by_name(WellKnownName::from_static_str_unchecked(PORTAL), 0)
+            .await?;
+        StartServiceReply::try_from(reply)
+    }
+    .await;
+    match started {
+        Ok(StartServiceReply::Success) => tracing::info!(
+            after = ?asked.elapsed(),
+            "started the desktop portal ahead of the first application to want it"
+        ),
+        Ok(StartServiceReply::AlreadyRunning) => {
+            tracing::debug!("the desktop portal was already serving this session's bus");
+        }
+        Err(error) => tracing::info!(
+            %error,
+            "could not start the desktop portal ahead of the first application to want it"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -412,5 +473,29 @@ mod tests {
         assert_eq!(level, Level::WARN);
         assert!(advice.contains("ChildExited"), "{advice}");
         assert!(!advice.contains("another session"), "{advice}");
+    }
+
+    /// Issue #36: a Secret Service still starting holds up xdg-desktop-portal
+    /// as it starts, and with it the first application to use the portal --
+    /// which looks hung unless the log says why. One that has failed holds
+    /// nothing up, so the warning says so only of the first.
+    #[test]
+    fn a_keyring_still_starting_warns_that_the_portal_waits_on_it_too() {
+        let holder = Path::new("/run/user/1000/keyring/control");
+        for holder in [Some(holder), None] {
+            let Some((_, advice)) = keyring_advice(&Keyring::TimedOut, holder) else {
+                panic!("a keyring that did not start is worth a line");
+            };
+            assert!(advice.contains("desktop portal waits"), "{advice}");
+            assert!(advice.contains("25 s"), "{advice}");
+            assert!(advice.contains("GTK 4"), "{advice}");
+        }
+
+        let Some((_, advice)) =
+            keyring_advice(&Keyring::Failed("ExecFailed".to_owned()), Some(holder))
+        else {
+            panic!("a keyring that went away is worth a line");
+        };
+        assert!(!advice.contains("portal"), "{advice}");
     }
 }
