@@ -14,6 +14,13 @@
 //! rmcp judges it, so the gate decides nothing rmcp would have decided
 //! differently -- it only declines to end everything over it. Once something
 //! opens the conversation the gate stands aside for good.
+//!
+//! The gate is also where a conversation takes the desktop's [`Slot`], because
+//! it is the one place that knows the moment a conversation begins. A
+//! connection that never gets that far holds nothing. One that does while
+//! another conversation is open has its opening request answered with who
+//! holds the slot, and the connection ends there: the other conversation is
+//! not this one's to wait on.
 
 use rmcp::{
     RoleServer,
@@ -24,16 +31,29 @@ use rmcp::{
     transport::Transport,
 };
 
+use crate::slot::{Claim, Slot};
+
 /// A transport that will not let one early message end the conversation.
 pub(crate) struct Gated<T> {
     inner: T,
-    /// Whether a message that opens a conversation has gone through. One-way.
-    open: bool,
+    /// The desktop's one conversation, taken when this one opens.
+    slot: Slot,
+    /// The process on the other end, for whoever finds the slot taken.
+    peer: Option<u32>,
+    /// The slot, once a message that opens a conversation has gone through.
+    /// One-way, and held for as long as rmcp holds this transport, which is
+    /// exactly as long as the conversation lasts.
+    claim: Option<Claim>,
 }
 
 impl<T> Gated<T> {
-    pub(crate) fn new(inner: T) -> Self {
-        Self { inner, open: false }
+    pub(crate) fn new(inner: T, slot: Slot, peer: Option<u32>) -> Self {
+        Self {
+            inner,
+            slot,
+            peer,
+            claim: None,
+        }
     }
 }
 
@@ -89,13 +109,36 @@ where
     async fn receive(&mut self) -> Option<ClientJsonRpcMessage> {
         loop {
             let message = self.inner.receive().await?;
-            if self.open {
+            if self.claim.is_some() {
                 return Some(message);
             }
             match early(&message) {
                 Early::Opens => {
-                    self.open = true;
-                    return Some(message);
+                    let busy = match self.slot.claim(self.peer) {
+                        Ok(claim) => {
+                            self.claim = Some(claim);
+                            return Some(message);
+                        }
+                        Err(busy) => busy,
+                    };
+                    let ClientJsonRpcMessage::Request(request) = message else {
+                        unreachable!("only a request opens a conversation");
+                    };
+                    tracing::warn!(
+                        peer = ?self.peer,
+                        holder = ?busy.pid,
+                        "refused a conversation while another is open"
+                    );
+                    let refusal = ServerJsonRpcMessage::error(
+                        ErrorData::invalid_request(busy.to_string(), None),
+                        Some(request.id),
+                    );
+                    if let Err(error) = self.inner.send(refusal).await {
+                        tracing::warn!(%error, "the client went away before its refusal");
+                    }
+                    // The end of the input, which rmcp takes as the client
+                    // going: an ordinary end to a conversation that never began.
+                    return None;
                 }
                 Early::Passes => return Some(message),
                 Early::Dropped => {

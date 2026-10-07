@@ -46,7 +46,7 @@ compositor:
 
 ```
 perspicax              the composition root — one binary, `perspicax --headless`
-perspicax-mcp          MCP server (rmcp, stdio) — eight tools, DTOs, receipts  [portable]
+perspicax-mcp          MCP server (rmcp, stdio or a Unix socket) — eight tools, DTOs, receipts  [portable]
 perspicax-index        node cache, stable ids, selectors, deltas, refusals  [portable]
 perspicax-node         node schema — AccessKit types plus Origin and Visibility
 perspicax-policy       WM decisions as data — focus, bindings, placement, monitors, workspaces, snapping  [portable]
@@ -199,8 +199,10 @@ That is an MCP server on stdin and stdout with a compositor behind it.
 Headless, it runs until the client goes away, and exits non-zero if the agent
 interface failed rather than ended; on `--seat` the session is the person's
 and outlives the client. A request sent before `initialize` is answered with
-an error naming what to send first, and the server waits on. Eight
-tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
+an error naming what to send first, and the server waits on.
+`--mcp-socket PATH` serves the same on a Unix socket instead, for an agent
+running inside the session it drives: see [An agent inside the
+session](#an-agent-inside-the-session). Eight tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
 `tab_forward`, `deltas`, `screenshot`. The two window verbs act on a whole
 window by its surface: a close is a request the application may answer with a
 dialog, and a tab is brought forward only where the person can already see its
@@ -296,6 +298,53 @@ it and the process that drew it, so no pixel is anonymous, and a window drawn
 by a process the agent holds no consent for is painted over in grey and listed
 as redacted rather than shown: a picture is a way of reading, and the gate on
 reading applies to it.
+
+## An agent inside the session
+
+`--mcp` has one client, whatever started perspicax, and on a seat that is the
+login. So the agent a person most wants beside them, one they can see and talk
+to in a terminal inside the session, cannot reach it: it would have to start
+the very session it is running in. `--mcp-socket` serves the same eight tools
+on a Unix socket instead:
+
+```sh
+perspicax --seat --mcp-socket "$XDG_RUNTIME_DIR/perspicax-mcp" --spawn foot
+```
+
+Every program the session starts is told where the socket is, in
+`PERSPICAX_MCP_SOCKET` (empty in a session that serves none), so an agent
+started inside it needs only a bridge from its stdio to the socket, and
+`perspicax attach` is one. For Claude Code in that terminal:
+
+```sh
+claude mcp add perspicax -- perspicax attach
+```
+
+It passes the client closing its stdin on as the end of the conversation, and
+ends when the session closes the connection. `perspicax attach PATH` names a
+socket instead. Anything else that joins stdio to a Unix socket will do, with
+OpenBSD netcat's `-N` for the first of those: `nc -N -U "$PERSPICAX_MCP_SOCKET"`,
+or `socat STDIO "UNIX-CONNECT:$PERSPICAX_MCP_SOCKET"`.
+
+**One conversation per connection, one at a time.** Another agent's
+`initialize` is refused, naming the process that holds the conversation, and
+its connection is closed while the first goes on. A conversation ending,
+however it ends, ends nothing else: the agent can quit, restart or reconnect,
+and the session runs on throughout. Headless too, which runs until it is
+killed or `--run-for` ends it. A conversation's `deltas` begin with it, and
+what changes while nobody is connected is let go of rather than kept for
+nobody. One wrinkle: a client that leaves in the middle of an `act` holds the
+conversation for up to five seconds more while the act finishes, and an agent
+reconnecting in that time is told the one before still has it.
+
+**Who may connect.** The socket is the owner's alone: mode 0600, and a
+connection from a process running as anybody else is closed unanswered. That
+is the same user as the programs the agent could drive, but any process
+running as you can then drive whatever the agent may -- on a seat, what
+`--spawn` started. `$XDG_RUNTIME_DIR`, which only you can enter, is the place
+for it. The socket is removed when the session ends. One a killed session left
+behind is replaced; one another session is still serving is refused, naming
+the process that serves it.
 
 ## What a toolkit renders without explaining
 

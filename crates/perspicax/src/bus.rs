@@ -54,22 +54,24 @@ pub const KEYRING_DEADLINE: Duration = Duration::from_secs(3);
 pub struct Options {
     /// The bus, by address. `None` is the session's own.
     pub address: Option<String>,
-    /// What the session calls itself, told before the compositor exists, so
-    /// that nothing it starts can ask for a portal before the bus knows which
-    /// desktop's portals to give it.
-    pub desktop: Vec<(String, String)>,
+    /// What is told once, before the compositor exists: what the session
+    /// calls itself, so that nothing it starts can ask for a portal before the
+    /// bus knows which desktop's portals to give it, and where its agent
+    /// interface is, so that a program D-Bus starts can find it as one the
+    /// session starts does.
+    pub env: Vec<(String, String)>,
     /// How long the Secret Service has to start; [`KEYRING_DEADLINE`] but in
     /// a test.
     pub keyring_deadline: Duration,
 }
 
 impl Options {
-    /// The session's own bus, told `desktop`.
+    /// The session's own bus, told `env`.
     #[must_use]
-    pub fn session(desktop: Vec<(String, String)>) -> Self {
+    pub fn session(env: Vec<(String, String)>) -> Self {
         Self {
             address: None,
-            desktop,
+            env,
             keyring_deadline: KEYRING_DEADLINE,
         }
     }
@@ -235,12 +237,12 @@ async fn tell(options: Options, changes: mpsc::Receiver<SessionFacts>, ready: mp
             return;
         }
     };
-    let desktop: Vec<(&str, &str)> = options
-        .desktop
+    let env: Vec<(&str, &str)> = options
+        .env
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    publish(&connection, &desktop).await;
+    publish(&connection, &env).await;
     // Before the compositor exists, so the backend is there to be found by
     // the first application that asks how to look.
     let mut portal = crate::portal::Portal::serve(&connection).await;

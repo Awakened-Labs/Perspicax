@@ -121,9 +121,12 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 
 # The MCP server. `server` is the half of the SDK we need (there is a `client`
 # half we do not), `macros` is `#[tool_router]` / `#[tool]` / `#[tool_handler]`,
-# and `transport-io` is stdio -- the only transport an MCP client launched by a
-# harness ever uses. No HTTP, no SSE: a server that listens on a socket is a
-# different security question, and this one is spawned as a child process.
+# and `transport-io` is stdio -- what an MCP client launched by a harness uses --
+# and, through the byte-stream adapter it brings, the Unix socket `--mcp-socket`
+# serves to an agent inside the session (issue #30). That one answers who may
+# connect with the filesystem: owner-only, and the peer's uid checked. No HTTP,
+# no SSE: a loopback port is open to every user on the machine, and would need a
+# bearer token to answer the same question.
 #
 # The plan named 3.1.4 and resolution takes 3.2.0, which is what the lockfile
 # holds and what was read: the four macros, `ServiceExt` and `transport-io` are

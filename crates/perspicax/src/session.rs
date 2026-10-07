@@ -106,6 +106,33 @@ pub fn desktop_env(inherited: impl Fn(&str) -> Option<String>) -> Vec<(String, S
     ]
 }
 
+/// Where a program inside the session finds the agent interface: the socket
+/// `--mcp-socket` serves, which `perspicax attach` connects to (issue #30).
+pub const AGENT_SOCKET: &str = "PERSPICAX_MCP_SOCKET";
+
+/// What every program the session starts is told about the agent interface:
+/// where its socket is, or, by an empty value, that this session serves none.
+///
+/// Empty rather than left out, because what is left out is inherited. A
+/// session started from inside another -- a headless run from a terminal on a
+/// seat -- would pass the outer session's socket on to its own programs, and an
+/// agent among them would drive a desktop other than the one it was started
+/// in. The bus is told the same way, as it is told an empty `DISPLAY`.
+///
+/// # Errors
+///
+/// A path that is not UTF-8, which the launch environment cannot carry.
+pub fn agent_env(socket: Option<&Path>) -> Result<Vec<(String, String)>> {
+    let value = match socket {
+        Some(path) => path
+            .to_str()
+            .with_context(|| format!("the agent socket's path is not UTF-8: {}", path.display()))?
+            .to_owned(),
+        None => String::new(),
+    };
+    Ok(vec![(AGENT_SOCKET.to_owned(), value)])
+}
+
 /// Set in the environment of the process `dbus-run-session` starts in this
 /// one's place, so that it cannot start another if it still finds no bus.
 pub const BUS_STARTED: &str = "PERSPICAX_BUS_STARTED";
@@ -585,5 +612,28 @@ mod tests {
         });
         assert_eq!(value(&env, "XDG_CURRENT_DESKTOP"), "perspicax:GNOME");
         assert_eq!(value(&env, "XDG_SESSION_DESKTOP"), "perspicax");
+    }
+
+    #[test]
+    fn programs_are_told_where_the_agent_socket_is_or_that_there_is_none() {
+        let served = agent_env(Some(Path::new("/run/user/1000/perspicax-mcp"))).expect("UTF-8");
+        assert_eq!(
+            served,
+            [(
+                AGENT_SOCKET.to_owned(),
+                "/run/user/1000/perspicax-mcp".to_owned()
+            )]
+        );
+        assert_eq!(
+            agent_env(None).expect("nothing to encode"),
+            [(AGENT_SOCKET.to_owned(), String::new())],
+            "said, and empty, so an outer session's is not inherited"
+        );
+
+        let unreadable = {
+            use std::os::unix::ffi::OsStrExt as _;
+            PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/\xff"))
+        };
+        assert!(agent_env(Some(&unreadable)).is_err());
     }
 }

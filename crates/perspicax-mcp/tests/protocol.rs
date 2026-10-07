@@ -17,100 +17,17 @@
 //! outside the crate, which is the whole claim of it: a GNOME extension or a
 //! KWin plugin re-implements these five methods and gets the eight tools.
 
+mod common;
+
 use std::sync::Arc;
-use std::time::Duration;
 
-use perspicax_index::{Delta, HostFacts, Index, Receipt, Refusal, Selector, Verb};
-use perspicax_mcp::{Denied, Desktop, ServeError};
-use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use common::{Client, Nothing, PATIENCE};
+use perspicax_mcp::ServeError;
+use serde_json::json;
+use tokio::io::{DuplexStream, ReadHalf, WriteHalf};
 
-/// How long any one exchange gets before the test gives up on it.
-///
-/// A bound rather than patience: a server that never answers should fail this
-/// test in a few seconds, not hold a CI runner until something kills it with no
-/// output to show for the wait.
-const PATIENCE: Duration = Duration::from_secs(5);
-
-/// A desktop with nothing on it, which is exactly what this slice claims to be
-/// able to serve. No compositor has run, no accessibility bus has been read,
-/// and every tool still has to answer.
-struct Nothing;
-
-impl Desktop for Nothing {
-    fn read(&self, visit: &mut dyn FnMut(&Index, &HostFacts)) {
-        visit(&Index::new(), &HostFacts::default());
-    }
-
-    fn deltas(&self) -> Vec<Delta> {
-        Vec::new()
-    }
-
-    fn act(&self, _selector: &Selector, _verb: &Verb) -> Result<Receipt, Denied> {
-        Err(Denied::Refused(Refusal::NotFound))
-    }
-
-    fn act_window(
-        &self,
-        _surface: perspicax_node::SurfaceId,
-        _verb: perspicax_index::WindowVerb,
-    ) -> Result<perspicax_index::WindowReceipt, Denied> {
-        Err(Denied::Refused(Refusal::NotFound))
-    }
-
-    fn capture(
-        &self,
-        _target: perspicax_index::ShotTarget,
-    ) -> Result<perspicax_index::Shot, Denied> {
-        Err(Denied::NotBuilt("capture".to_owned()))
-    }
-}
-
-/// One side of the wire, with the framing JSON-RPC over a byte stream uses.
-struct Client {
-    lines: BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
-    out: tokio::io::WriteHalf<tokio::io::DuplexStream>,
-}
-
-impl Client {
-    async fn send(&mut self, message: &Value) {
-        let mut frame = message.to_string();
-        frame.push('\n');
-        self.out
-            .write_all(frame.as_bytes())
-            .await
-            .expect("the server is listening");
-        self.out.flush().await.expect("the server is listening");
-    }
-
-    async fn recv(&mut self) -> Value {
-        let mut line = String::new();
-        let read = tokio::time::timeout(PATIENCE, self.lines.read_line(&mut line))
-            .await
-            .expect("the server answered in time")
-            .expect("the server wrote a frame");
-        assert!(read > 0, "the server closed the connection");
-        serde_json::from_str(&line).expect("the server writes JSON")
-    }
-
-    /// A request, and its answer. Notifications go through [`Client::send`].
-    async fn call(&mut self, id: u64, method: &str, params: Value) -> Value {
-        self.send(&json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        }))
-        .await;
-        let response = self.recv().await;
-        assert_eq!(response["id"], id, "answered the wrong request");
-        assert!(
-            response.get("error").is_none(),
-            "the server refused the request: {response}"
-        );
-        response["result"].clone()
-    }
-}
+/// The client's end of a duplex pair.
+type Duplex = Client<ReadHalf<DuplexStream>, WriteHalf<DuplexStream>>;
 
 /// How the server's side of a conversation ended.
 type Serving = tokio::task::JoinHandle<Result<(), ServeError>>;
@@ -120,42 +37,22 @@ type Serving = tokio::task::JoinHandle<Result<(), ServeError>>;
 /// Served by [`perspicax_mcp::serve_over`], which is what `--mcp` runs over
 /// stdio, so every exchange here goes through the same door a real client's
 /// does -- the gate in front of the handshake included.
-fn connected() -> (Client, Serving) {
+fn connected() -> (Duplex, Serving) {
+    connected_to(Arc::new(Nothing::default()))
+}
+
+/// [`connected`], to a desktop the test keeps a hand on.
+fn connected_to(desktop: Arc<Nothing>) -> (Duplex, Serving) {
     let (client, server) = tokio::io::duplex(64 * 1024);
     let (server_read, server_write) = tokio::io::split(server);
     let (client_read, client_write) = tokio::io::split(client);
 
     let serving = tokio::spawn(perspicax_mcp::serve_over(
-        Arc::new(Nothing),
+        desktop,
         (server_read, server_write),
     ));
 
-    (
-        Client {
-            lines: BufReader::new(client_read),
-            out: client_write,
-        },
-        serving,
-    )
-}
-
-/// A handshake, and what the server said about itself in it.
-async fn handshake(client: &mut Client) -> Value {
-    let result = client
-        .call(
-            1,
-            "initialize",
-            json!({
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": { "name": "perspicax-mcp protocol test", "version": "0" },
-            }),
-        )
-        .await;
-    client
-        .send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
-        .await;
-    result
+    (Client::new(client_read, client_write), serving)
 }
 
 /// The client has gone; the server should have taken that as an ordinary end.
@@ -171,7 +68,7 @@ async fn ended_cleanly(serving: Serving) {
 async fn the_server_introduces_itself_and_lists_its_tools_with_no_compositor_running() {
     let (mut client, serving) = connected();
 
-    let hello = handshake(&mut client).await;
+    let hello = client.handshake().await;
     assert_eq!(hello["serverInfo"]["name"], "perspicax");
     assert!(hello["capabilities"]["tools"].is_object());
     let instructions = hello["instructions"]
@@ -220,7 +117,7 @@ async fn the_server_introduces_itself_and_lists_its_tools_with_no_compositor_run
 #[tokio::test]
 async fn the_tools_answer_over_the_wire_and_refusals_arrive_as_refusals() {
     let (mut client, serving) = connected();
-    handshake(&mut client).await;
+    client.handshake().await;
 
     // An empty desktop is an answer, not an error: no windows, no nodes.
     let windows = client
@@ -301,7 +198,7 @@ async fn a_request_before_the_handshake_is_refused_and_the_handshake_still_works
     );
 
     // And the conversation is still there to be had.
-    handshake(&mut client).await;
+    client.handshake().await;
     let listed = client.call(2, "tools/list", json!({})).await;
     assert_eq!(listed["tools"].as_array().map(Vec::len), Some(8));
 
@@ -318,7 +215,7 @@ async fn a_notification_before_the_handshake_is_ignored() {
         .send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
         .await;
 
-    handshake(&mut client).await;
+    client.handshake().await;
     let windows = client
         .call(2, "tools/call", json!({ "name": "window_list" }))
         .await;
@@ -336,7 +233,7 @@ async fn a_ping_before_the_handshake_is_still_answered() {
     let pong = client.call(7, "ping", json!({})).await;
     assert_eq!(pong, json!({}));
 
-    handshake(&mut client).await;
+    client.handshake().await;
     let listed = client.call(2, "tools/list", json!({})).await;
     assert_eq!(listed["tools"].as_array().map(Vec::len), Some(8));
 
@@ -347,6 +244,25 @@ async fn a_ping_before_the_handshake_is_still_answered() {
 #[tokio::test]
 async fn a_client_that_leaves_before_its_handshake_is_an_ordinary_end() {
     let (client, serving) = connected();
+    drop(client);
+    ended_cleanly(serving).await;
+}
+
+#[tokio::test]
+async fn a_conversations_deltas_begin_when_it_does() {
+    let desktop = Arc::new(Nothing::default());
+    desktop.change(1);
+    let (mut client, serving) = connected_to(Arc::clone(&desktop));
+
+    // Nothing was said to this conversation before it opened, so nothing from
+    // then is owed to it.
+    client.handshake().await;
+    assert_eq!(client.deltas(2).await, 0);
+
+    desktop.change(2);
+    assert_eq!(client.deltas(3).await, 1);
+    assert_eq!(client.deltas(4).await, 0, "a change is reported once");
+
     drop(client);
     ended_cleanly(serving).await;
 }

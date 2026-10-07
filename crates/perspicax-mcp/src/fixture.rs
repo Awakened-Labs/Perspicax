@@ -127,6 +127,14 @@ impl Fake {
     pub(crate) fn asked(&self) -> Vec<(String, Verb)> {
         self.asked.lock().expect("no test poisons this").clone()
     }
+
+    /// Something changes: a node nobody has seen before arrives, and is one
+    /// delta pending.
+    pub(crate) fn change(&self) {
+        let mut index = self.index.lock().expect("no test poisons this");
+        let id = NodeId(1_000 + index.len() as u64);
+        index.upsert(ObservedNode::unjoined(id, Node::new(Role::Button)));
+    }
 }
 
 impl Desktop for Fake {
