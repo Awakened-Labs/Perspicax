@@ -1573,6 +1573,7 @@ dependencies = [
  "perspicax-node",
  "png",
  "rmcp",
+ "rustix 1.1.4",
  "schemars",
  "serde",
  "serde_json",

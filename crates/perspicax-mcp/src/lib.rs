@@ -1,4 +1,4 @@
-//! The agent interface -- an MCP server over stdio.
+//! The agent interface -- an MCP server over stdio, or on a Unix socket.
 //!
 //! Eight tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
 //! `tab_forward`, `deltas` and `screenshot`. Everything above them is `rmcp`
@@ -39,10 +39,21 @@
 //! what is on screen, consent covers only what perspicax spawned, and
 //! [`perspicax_index::Refusal::NoCapability`] is what an agent hears about the
 //! rest.
+//!
+//! # Two transports, one door
+//!
+//! [`serve`] is stdio: one client, whatever started the process, and one
+//! conversation. [`serve_socket`] is for every other client -- above all an
+//! agent running inside the session it drives -- and takes a conversation per
+//! connection, one at a time, for as long as the process runs. Both go through
+//! the same gate in front of the handshake, and a conversation's `deltas` begin
+//! when it does.
 
 pub mod dto;
 mod gate;
 mod server;
+mod slot;
+mod socket;
 
 #[cfg(test)]
 mod fixture;
@@ -56,6 +67,7 @@ use perspicax_index::{
 use perspicax_node::SurfaceId;
 
 pub use crate::server::{Perspicax, ScreenshotParams};
+pub use crate::socket::{Socket, SocketError, serve_socket};
 
 /// What an MCP server needs from the process hosting it.
 ///
@@ -151,7 +163,7 @@ pub enum Denied {
 /// schedule for no benefit they can act on.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ServeError {
-    /// stdio could not be turned into a transport, or the handshake itself
+    /// The transport could not be established, or the handshake itself
     /// failed. Not a client speaking out of turn before it: that is answered
     /// and the server waits on (see [`serve`]).
     #[error("the MCP transport could not be established: {0}")]
@@ -172,6 +184,9 @@ pub enum ServeError {
 /// transport instead, and over stdio there is no second one: a single message
 /// sent out of turn would have ended the agent interface, and with it, in
 /// `perspicax`, the desktop it serves. Issue #26.
+///
+/// Whatever `deltas` had pending when it opens goes unsaid: the conversation's
+/// first call answers what has changed since it began.
 ///
 /// # stdout is the wire
 ///
@@ -207,11 +222,30 @@ where
     T: rmcp::transport::IntoTransport<rmcp::RoleServer, E, A>,
     E: std::error::Error + Send + Sync + 'static,
 {
+    // A slot of its own: nothing else can reach this conversation's desktop.
+    let slot = slot::Slot::new(Arc::clone(&desktop));
+    serve_conversation(desktop, transport, slot, None).await
+}
+
+/// One conversation over `transport`, opening only if `slot` is free.
+///
+/// `peer` is the process on the other end, named to whoever finds the slot
+/// taken while this conversation holds it.
+pub(crate) async fn serve_conversation<T, E, A>(
+    desktop: Arc<dyn Desktop>,
+    transport: T,
+    slot: slot::Slot,
+    peer: Option<u32>,
+) -> Result<(), ServeError>
+where
+    T: rmcp::transport::IntoTransport<rmcp::RoleServer, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
     use rmcp::ServiceExt as _;
     use rmcp::service::{QuitReason, ServerInitializeError};
 
     let service = match Perspicax::new(desktop)
-        .serve(gate::Gated::new(transport.into_transport()))
+        .serve(gate::Gated::new(transport.into_transport(), slot, peer))
         .await
     {
         Ok(service) => service,

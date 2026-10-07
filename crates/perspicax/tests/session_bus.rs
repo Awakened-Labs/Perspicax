@@ -104,7 +104,7 @@ impl Bus {
     fn options(&self) -> Options {
         Options {
             address: Some(self.address.clone()),
-            desktop: vec![
+            env: vec![
                 ("XDG_CURRENT_DESKTOP".to_owned(), "perspicax".to_owned()),
                 ("XDG_SESSION_TYPE".to_owned(), "wayland".to_owned()),
             ],
@@ -511,7 +511,7 @@ fn no_bus_to_tell_is_no_obstacle() {
     bus::start(
         Options {
             address: Some("unix:path=/nonexistent/perspicax-bus".to_owned()),
-            desktop: Vec::new(),
+            env: Vec::new(),
             keyring_deadline: Duration::from_millis(300),
         },
         watch,

@@ -21,6 +21,14 @@
 //! session, under a session bus of its own when it was started without one,
 //! and logging to `~/.local/state/perspicax/perspicax.log`.
 //!
+//! An agent running inside the session -- a Claude Code in a terminal on the
+//! seat -- reaches the agent interface on a socket, which it may leave and
+//! come back to while the session runs on:
+//!
+//! ```sh
+//! perspicax --seat --mcp-socket "$XDG_RUNTIME_DIR/perspicax-mcp" --spawn foot
+//! ```
+//!
 //! It needs `XDG_RUNTIME_DIR` set, which is where the Wayland socket goes. Over
 //! SSH that is `export XDG_RUNTIME_DIR=/run/user/$(id -u)`, the same variable
 //! `perspicax-probe` needs for the accessibility bus and for the same reason: a login
@@ -33,6 +41,7 @@
 use std::{
     fs::File,
     io,
+    os::unix::net::UnixListener,
     path::PathBuf,
     sync::{Arc, Mutex, mpsc},
     time::Duration,
@@ -130,10 +139,33 @@ struct Cli {
     /// with no agent left has nothing to host, and it exits non-zero if the
     /// agent interface failed rather than ended. On a seat the session is the
     /// person's, and it outlives the client however the client goes.
+    ///
+    /// Its one client is whatever started this process. An agent running
+    /// inside the session wants `--mcp-socket`.
     #[arg(long)]
     mcp: bool,
 
-    /// How long `--mcp` lets an application draw before reading it.
+    /// Serve the agent interface on a Unix socket at PATH instead of on stdin
+    /// and stdout, for an agent that did not start this process: above all one
+    /// running inside the session it drives, which cannot be what started it.
+    ///
+    /// Each connection is one MCP conversation, and the desktop holds one at a
+    /// time: another agent's `initialize` is refused, naming the process that
+    /// holds it. A connection ending, however it ends, ends that conversation
+    /// and nothing else, so an agent may quit, restart and connect again with
+    /// the session up throughout. Headless too, which runs until it is killed
+    /// or `--run-for` ends it.
+    ///
+    /// The socket is the owner's alone, and removed on the way out. One a
+    /// killed session left behind is replaced; one another session is serving
+    /// is refused, naming who serves it. Every program the session starts is
+    /// told where it is in `PERSPICAX_MCP_SOCKET`. `$XDG_RUNTIME_DIR` is the
+    /// place for it.
+    #[arg(long, value_name = "PATH", conflicts_with = "mcp")]
+    mcp_socket: Option<PathBuf>,
+
+    /// How long the agent interface (`--mcp` or `--mcp-socket`) lets an
+    /// application draw before reading it.
     ///
     /// The same wait `--dump-tree` takes as its argument, and for the same
     /// reason: a toolkit maps its window and *then* populates its
@@ -255,6 +287,17 @@ fn run(cli: &Cli) -> Result<()> {
     // after a registry has been started for nothing.
     backend.ensure_built()?;
 
+    // Second, for the same reason: a socket another session is serving is a
+    // reason not to start at all. The file is held to the end of this
+    // function, which is what removes it on the way out, however `run` ends.
+    let (socket, listener) = cli
+        .mcp_socket
+        .as_deref()
+        .map(perspicax_mcp::Socket::bind)
+        .transpose()?
+        .unzip();
+    let agent_env = session::agent_env(socket.as_ref().map(perspicax_mcp::Socket::path))?;
+
     // Before anything is spawned, and in this order. A registry that arrives
     // after its clients is a registry GTK has already given up on.
     //
@@ -294,7 +337,12 @@ fn run(cli: &Cli) -> Result<()> {
                     .collect::<Vec<_>>()
             })
             .collect(),
-        env: [session::accessibility_env(), desktop.clone()].concat(),
+        env: [
+            session::accessibility_env(),
+            desktop.clone(),
+            agent_env.clone(),
+        ]
+        .concat(),
         run_for: cli.run_for.map(Duration::from_secs_f64),
         config: cli
             .on_seat()
@@ -314,7 +362,10 @@ fn run(cli: &Cli) -> Result<()> {
     let requests = Requests::new();
 
     if cli.on_seat() {
-        bus::start(bus::Options::session(desktop), facts.watch_session());
+        bus::start(
+            bus::Options::session([desktop, agent_env].concat()),
+            facts.watch_session(),
+        );
     }
 
     if let Some(after) = cli.dump_tree.map(Duration::from_secs_f64) {
@@ -323,11 +374,23 @@ fn run(cli: &Cli) -> Result<()> {
 
     // Headless, the agent is who the run is for. On a seat it is the person's
     // session, and no agent interface ending -- cleanly or not -- may take
-    // their windows with it (issue #26).
+    // their windows with it (issue #26). Over a socket, conversations come
+    // and go and none of them ends anything: the interface itself ends only
+    // when the socket can no longer be served.
     let agent_ends_session = cli.headless;
-    let agent = cli.mcp.then(|| {
+    let interface = if cli.mcp {
+        Some(Interface::Stdio)
+    } else {
+        listener.map(Interface::Socket)
+    };
+    let agent = interface.map(|interface| {
         let desk = Arc::new(Desk::new(&facts, &Host::new(&facts, &requests)));
-        let ended = serve(Arc::clone(&desk), stop.clone(), agent_ends_session);
+        let ended = serve(
+            Arc::clone(&desk),
+            interface,
+            stop.clone(),
+            agent_ends_session,
+        );
         keep_current(
             desk,
             facts.clone(),
@@ -348,6 +411,14 @@ fn run(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+/// Which way the agent interface is served.
+enum Interface {
+    /// On this process's stdin and stdout, to whatever started it: `--mcp`.
+    Stdio,
+    /// On a Unix socket, to whoever connects: `--mcp-socket`.
+    Socket(UnixListener),
+}
+
 /// Serve the agent interface on its own thread, with its own runtime, and say
 /// on the channel returned how it ended.
 ///
@@ -357,15 +428,30 @@ fn run(cli: &Cli) -> Result<()> {
 ///
 /// `ends_session` is whether the interface ending ends the session too. Over
 /// stdio it cannot come back: there is no second stdin for another client to
-/// arrive on.
-fn serve(desk: Arc<Desk>, stop: Stop, ends_session: bool) -> mpsc::Receiver<Result<()>> {
+/// arrive on. Over a socket it ends only if the socket cannot be served, since
+/// a client going away is not the interface ending.
+fn serve(
+    desk: Arc<Desk>,
+    interface: Interface,
+    stop: Stop,
+    ends_session: bool,
+) -> mpsc::Receiver<Result<()>> {
     let (tell, ended) = mpsc::channel();
     std::thread::spawn(move || {
         let outcome = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("no runtime for the agent interface")
-            .and_then(|runtime| Ok(runtime.block_on(perspicax_mcp::serve(desk))?));
+            .and_then(|runtime| {
+                Ok(runtime.block_on(async {
+                    match interface {
+                        Interface::Stdio => perspicax_mcp::serve(desk).await,
+                        Interface::Socket(listener) => perspicax_mcp::serve_socket(desk, listener)
+                            .await
+                            .map(|never| match never {}),
+                    }
+                })?)
+            });
         match &outcome {
             Ok(()) => tracing::info!("the agent's client went away"),
             Err(error) => tracing::error!("the agent interface stopped: {error:#}"),
@@ -524,6 +610,27 @@ mod tests {
         assert_eq!(
             parse(&["--headless", "--config", "perspicax.toml"]).err(),
             Some(ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn the_agent_interface_is_served_on_stdio_or_on_a_socket_and_not_both() {
+        for backend in ["--headless", "--seat", "--session"] {
+            let cli =
+                parse(&[backend, "--mcp-socket", "/run/user/1000/perspicax-mcp"]).expect(backend);
+            assert_eq!(
+                cli.mcp_socket.as_deref(),
+                Some(std::path::Path::new("/run/user/1000/perspicax-mcp"))
+            );
+            assert!(!cli.mcp, "{backend}");
+        }
+        assert_eq!(
+            parse(&["--headless", "--mcp", "--mcp-socket", "perspicax-mcp"]).err(),
+            Some(ErrorKind::ArgumentConflict)
+        );
+        assert!(
+            parse(&["--headless", "--mcp-socket"]).is_err(),
+            "a socket is somewhere"
         );
     }
 }
