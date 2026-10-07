@@ -16,11 +16,12 @@
 //!   Except one: where a key goes is decided by keyboard focus, which only
 //!   this loop can compare with the target in the same turn it presses the
 //!   key. So typing checks it here, in [`Compositor::act`], and nowhere else.
-//! - **Coordinates arrive window-relative and leave global.** An accessibility
+//! - **Coordinates arrive in window space and leave global.** An accessibility
 //!   bridge cannot know where its window is -- measured, not assumed, and
-//!   recorded as risk #1 -- so every rect an agent names is relative to its own
-//!   surface, and the compositor supplies the origin. That translation happens
-//!   here, once, in [`Compositor::act`].
+//!   recorded as risk #1 -- so every rect that reaches this module is relative
+//!   to its window's geometry, which `perspicax-index` has already brought
+//!   each toolkit's coordinates into, and the compositor supplies the origin.
+//!   That translation happens here, once, in [`Compositor::act`].
 
 use std::{collections::HashMap, time::Instant};
 
@@ -397,9 +398,10 @@ impl Compositor {
 
     /// Move the pointer onto a rect and press a button on it.
     ///
-    /// `at` is relative to the target, the window or the layer surface,
-    /// because that is the only coordinate space an accessibility bridge can
-    /// be trusted in. Its centre is what is clicked; see [`centre`].
+    /// `at` is relative to the target, the window's geometry or the layer
+    /// surface, because the index has brought it there from the only
+    /// coordinates an accessibility bridge can be trusted in. Its centre is
+    /// what is clicked; see [`centre`].
     fn act_click(
         &mut self,
         target: &Target,
@@ -620,7 +622,17 @@ impl Compositor {
     /// it was caught by the dialog not closing. Damage on target is evidence
     /// that something under the click changed, not that the click landed.
     ///
+    /// And a third time, the other way round (issue #45). Firefox measures
+    /// its accessible bounds from its buffer rather than its window geometry,
+    /// so every Firefox click on a seat landed a shadow's width from its
+    /// target. `at` is now window space for every toolkit -- the index
+    /// subtracts each window's own origin before a rect gets here -- and the
+    /// shadow is the declared one ([`geometry_offset`]), so a plain headless
+    /// build, which never computes smithay's window geometry, aims exactly as
+    /// a seat does.
+    ///
     /// [`PointerHandle::motion`]: smithay::input::pointer::PointerHandle::motion
+    /// [`geometry_offset`]: crate::shell::geometry_offset
     fn point_in(&self, window: &Framed, at: Rect) -> ((f64, f64), (f64, f64)) {
         let local = centre(at);
         let placed = self.space.element_location(window).unwrap_or_default();
@@ -632,9 +644,8 @@ impl Compositor {
         // surface and hit-tests it from. Using the geometry origin instead puts
         // every click short by the shadow's width: on the first real seat that
         // was enough to land a click just above a zenity button and repaint it
-        // without pressing it. Headless the offset is zero,
-        // because without a renderer Smithay's window geometry is empty.
-        let surface = placed - window.geometry().loc;
+        // without pressing it.
+        let surface = placed - crate::shell::geometry_offset(window);
         (global, (f64::from(surface.x), f64::from(surface.y)))
     }
 

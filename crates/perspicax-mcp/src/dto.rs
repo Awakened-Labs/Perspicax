@@ -394,9 +394,12 @@ pub struct Node {
     /// it. Absent means no compositor has attributed it, and it is not actable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub surface: Option<u64>,
-    /// **Window-relative**, and absent when the bridge reported no extents.
-    /// Compare it against the window's own bounds in `window_list`, never
-    /// against another window's.
+    /// **Window-relative**: from the top left of the window's own `bounds` in
+    /// `window_list`, inside any shadow, whichever origin the toolkit measures
+    /// from. Compare it against that window's bounds, never another's. Absent
+    /// when the bridge reported no extents, when no compositor has
+    /// attributed the node, and when its window reported no extents of its
+    /// own to measure from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bounds: Option<Bounds>,
     /// This node's children, in the order the node itself lists them.
@@ -430,7 +433,7 @@ impl Node {
             role: format!("{:?}", node.node.role()),
             untrusted_text: Text::of(node),
             surface: node.surface.map(|surface| surface.0),
-            bounds: node.bounds().map(Into::into),
+            bounds: index.window_bounds(id).map(Into::into),
             children: node.node.children().iter().map(|child| child.0).collect(),
             actable: refused.is_none(),
             refused: refused.as_ref().map(Into::into),
@@ -462,7 +465,7 @@ pub struct Window {
     /// that says who chose it, as the title is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub untrusted_namespace: Option<String>,
-    /// The shallowest accessible node drawn on it -- the window's own node.
+    /// The window's own accessible node, the root of what is drawn on it.
     /// Pass it to `observe` as `root` to read this window and nothing else.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node: Option<u64>,
@@ -521,10 +524,6 @@ impl Window {
     /// the host's to answer; this is a list, not a stack.
     #[must_use]
     pub fn all(index: &Index, facts: &HostFacts) -> Vec<Self> {
-        // The first node in tree order carrying a surface is that surface's
-        // window node: `join_subtree` attributes a window and everything
-        // beneath it in one pass, so the shallowest, leftmost member of the
-        // subtree is the window itself.
         let order = index.preorder();
         let mut windows: Vec<Self> = facts
             .surfaces()
@@ -553,7 +552,10 @@ impl Window {
             kind,
             layer,
             untrusted_namespace: namespace,
-            node: order.iter().find(on_this_surface).map(|id| id.0),
+            // The index's own record of the window node: the one its nodes'
+            // window bounds are measured from, so that what `observe` shows
+            // of this window and where it says its nodes are agree.
+            node: index.window_node(facts.id).map(|id| id.0),
             nodes: order.iter().filter(on_this_surface).count(),
             mapped: facts.mapped,
             bounds: facts.geometry.into(),

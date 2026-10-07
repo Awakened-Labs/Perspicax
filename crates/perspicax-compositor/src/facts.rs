@@ -324,14 +324,18 @@ impl Compositor {
         // rather than from `Window::geometry()`.
         //
         // Smithay derives a window's bounding box from buffer dimensions
-        // recorded by `on_commit_buffer_handler`, which only the seat backend
-        // calls -- so headless, `Window::geometry()` is always `0x0`, and
-        // every node on it would judge `Unmapped`. Reading the declared
-        // geometry on both backends keeps a seat's facts the ones CI tested,
+        // recorded by `on_commit_buffer_handler`, which only a backend that
+        // keeps buffers calls -- the seat, and headless built with `capture`
+        // -- so in a plain headless build `Window::geometry()` is always
+        // `0x0`, and every node on it would judge `Unmapped`. Reading the
+        // declared geometry on every backend keeps a seat's facts the ones CI
+        // tested,
         // and it is better information anyway: it is the
-        // visible frame excluding shadow, which is the rectangle an
-        // accessibility bridge's window-relative coordinates are measured
-        // against, and both GTK and Qt set it under client-side decoration.
+        // visible frame excluding shadow, which is what window space is
+        // measured from. GTK, Qt and Firefox all set it under client-side
+        // decoration. Which origin each toolkit's own coordinates are
+        // measured from is a different question, and the index answers it
+        // from the toolkit's window node (`Index::window_origin`).
         //
         // A client that declares none is not described, and its nodes are
         // refused. That is the fail-closed direction: the alternative is
@@ -375,11 +379,6 @@ impl Compositor {
                 f64::from(location.x + declared.size.w),
                 f64::from(location.y + declared.size.h),
             ),
-            // Zero, and measured rather than assumed: both GTK and Qt report
-            // window-relative extents from the window geometry's origin, not
-            // the buffer's. See `perspicax_index::host`'s module documentation
-            // for the numbers.
-            node_space_offset: Vec2::ZERO,
             // Surface-local (0,0) sits at the declared geometry's own offset
             // *back* from where we placed that geometry -- under CSD that is
             // the shadow margin, and it is where opaque regions are measured
@@ -440,7 +439,6 @@ impl Compositor {
                 f64::from(placed.loc.x + placed.size.w),
                 f64::from(placed.loc.y + placed.size.h),
             ),
-            node_space_offset: Vec2::ZERO,
             buffer_origin: Vec2::new(f64::from(placed.loc.x), f64::from(placed.loc.y)),
             opaque,
             origin: self.origin_of_surface(surface),

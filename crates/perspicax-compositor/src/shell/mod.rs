@@ -526,6 +526,32 @@ pub(crate) fn extent_size(window: &Framed) -> Size<i32, Logical> {
     }
 }
 
+/// Where a window's geometry begins inside its surface: the width and height
+/// of its client-side shadow, or nothing for a window that draws none.
+///
+/// From the geometry the client declared, as [`extent_size`] and the published
+/// facts' `buffer_origin` measure it, and not from `Window::geometry()`.
+/// Smithay clamps that to a bounding box only a backend that keeps buffers
+/// computes, so a plain headless build answers `(0, 0)` where a seat answers
+/// the shadow, and an agent's click would land a shadow's width from where the
+/// facts placed its target. A window with no declared geometry, X11's or one
+/// that never set it, falls back to smithay's.
+pub(crate) fn geometry_offset(window: &Framed) -> Point<i32, Logical> {
+    let declared = window.toplevel().and_then(|toplevel| {
+        smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
+            states
+                .cached_state
+                .get::<smithay::wayland::shell::xdg::SurfaceCachedState>()
+                .current()
+                .geometry
+        })
+    });
+    match declared.filter(|declared| !declared.size.is_empty()) {
+        Some(declared) => declared.loc,
+        None => window.geometry().loc,
+    }
+}
+
 pub(crate) fn id_of(window: &Framed) -> Option<SurfaceId> {
     window.user_data().get::<SurfaceId>().copied()
 }

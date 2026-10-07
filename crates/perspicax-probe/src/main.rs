@@ -137,7 +137,7 @@ fn line(index: &Index, id: NodeId, node: &ObservedNode) -> String {
         .map(|label| format!(" {label:?}"))
         .unwrap_or_default();
     let bounds = node
-        .bounds()
+        .node_space_bounds()
         .map(|r| {
             format!(
                 "  [{:.0},{:.0} {:.0}x{:.0}]",
@@ -207,9 +207,11 @@ fn as_json(index: &Index) -> serde_json::Value {
                 "label": node.node.label(),
                 "description": node.node.description(),
                 "children": node.node.children().iter().map(|c| c.0).collect::<Vec<_>>(),
-                "bounds": node.bounds().map(|r| serde_json::json!({
+                "bounds": node.node_space_bounds().map(|r| serde_json::json!({
                     "x": r.x0, "y": r.y0, "width": r.x1 - r.x0, "height": r.y1 - r.y0,
-                    "space": "window-relative",
+                    // The bridge's own coordinates, as read off the bus: no
+                    // compositor here to measure where its window begins.
+                    "space": "node",
                 })),
                 "origin": format!("{:?}", node.origin),
                 "visibility": format!("{:?}", node.visibility),

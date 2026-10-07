@@ -140,8 +140,9 @@ impl Perspicax {
                        accessibility bridge describes -- a canvas, a video, a toolkit with no \
                        bridge at all. That is a real answer about the screen and not a gap in \
                        the data.\n\n\
-                       `bounds` here is global, in the output's coordinate space. Every other \
-                       rectangle this server reports is relative to its own window. \
+                       `bounds` here is global, in the output's coordinate space: the window's \
+                       visible frame, inside any shadow it draws. Every other rectangle this \
+                       server reports is relative to the top left of its own window's `bounds`. \
                        `untrusted_title` is a string the application chose; `rendered_by` names \
                        the process that chose it.\n\n\
                        The desk is listed too: a panel, a wallpaper or a menu is `kind: layer`, \

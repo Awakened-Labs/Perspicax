@@ -199,18 +199,24 @@ impl ObservedNode {
         }
     }
 
-    /// The node's bounds, **window-relative**, if the ingest path supplied any.
+    /// The node's bounds in **node space**, if the ingest path supplied any:
+    /// the bridge's own claim, measured from whatever origin its toolkit
+    /// chose.
     ///
-    /// The coordinate space is the entire point of this accessor existing
-    /// rather than callers reaching through to [`Node::bounds`] themselves. An
+    /// The coordinate space is the entire point of this accessor's name. An
     /// accessibility bridge reports what the toolkit believes, and a Wayland
     /// client cannot know where it sits on screen -- so these numbers are
-    /// window-relative at best and meaningless at worst. Treating them as
-    /// global is the single easiest way to build a system that appears to work
-    /// and silently clicks the wrong place. Only a `HostView` may turn them
-    /// into anything global, because only a compositor knows a window's origin.
+    /// window-relative at best and meaningless at worst. And "window-relative"
+    /// is not one origin: GTK and Qt measure from the window geometry, Firefox
+    /// from its buffer, shadow and all. Treating these as global, or as any one
+    /// window's coordinates, is the single easiest way to build a system that
+    /// appears to work and silently clicks the wrong place.
+    ///
+    /// Where a node is in its window is the index's answer, which measures
+    /// each window's origin from that window's own node: see
+    /// `perspicax_index::Index::window_bounds`.
     #[must_use]
-    pub fn bounds(&self) -> Option<Rect> {
+    pub fn node_space_bounds(&self) -> Option<Rect> {
         self.node.bounds()
     }
 }

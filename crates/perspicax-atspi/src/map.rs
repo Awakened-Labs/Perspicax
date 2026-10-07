@@ -377,7 +377,7 @@ pub fn apply_actions(states: StateSet, interfaces: InterfaceSet, node: &mut Node
 /// and this crate only ever asks for `Window`. A Wayland client cannot know
 /// where it is on screen, so `Screen` extents are a fiction the bus will
 /// nonetheless answer with. See
-/// [`ObservedNode::bounds`](perspicax_node::ObservedNode::bounds).
+/// [`ObservedNode::node_space_bounds`](perspicax_node::ObservedNode::node_space_bounds).
 #[must_use]
 pub fn extents_to_rect((x, y, width, height): (i32, i32, i32, i32)) -> Option<Rect> {
     if width < 0 || height < 0 {

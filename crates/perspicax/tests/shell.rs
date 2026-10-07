@@ -61,7 +61,7 @@ fn the_wallpapers_window_joins_its_background_surface_by_namespace() {
             assert_eq!(node.node.role(), Role::Window);
             let facts = facts.surface(surface).expect("the surface");
             assert_eq!(
-                node.bounds().map(|b| (b.x1 - b.x0, b.y1 - b.y0)),
+                node.node_space_bounds().map(|b| (b.x1 - b.x0, b.y1 - b.y0)),
                 Some((
                     facts.geometry.x1 - facts.geometry.x0,
                     facts.geometry.y1 - facts.geometry.y0
