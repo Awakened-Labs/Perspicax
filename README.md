@@ -253,6 +253,18 @@ workspace, a window that is a tab behind another as `inactive_tab`, naming the
 tab in front, and a node hanging off the edge of every monitor as `off_screen`.
 None is cleared by the agent switching the person's screen on its own.
 
+A control its own application says is not being shown is refused as
+`not_showing`: Firefox's menu bar, hidden until Alt is pressed, and the page of
+a tab behind another. A browser draws those into the same surface as the page
+in front, over the same pixels, so the compositor's proof that a rectangle is
+uncovered is true of the rectangle and not of the node; a click on the hidden
+`File` menu would press the tab strip under it. Only the application knows which
+of the nodes claiming a rectangle is the one drawn there. Its word is taken
+because it can only refuse: an application that says this falsely loses its
+own control and nothing else. A disabled control stays actable, since a press
+on it lands where the agent aimed and `state.disabled` already says it will do
+nothing.
+
 `type` has one refusal of its own. Keys go wherever keyboard focus is, so
 typing is done only while the node's window holds it, and otherwise refused as
 `focus_elsewhere`, naming the surface that does. The agent `focus`es the node
