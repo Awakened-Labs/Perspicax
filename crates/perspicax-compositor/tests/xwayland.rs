@@ -226,6 +226,18 @@ fn eventually<T>(within: Duration, mut probe: impl FnMut() -> Option<T>) -> Opti
     }
 }
 
+/// The title of the window that took the keyboard last, as the facts say.
+fn focused_last(facts: &Facts) -> Option<String> {
+    let facts = facts.read();
+    facts
+        .surfaces()
+        .iter()
+        .filter(|surface| surface.focused_at.is_some())
+        .max_by_key(|surface| surface.focused_at)?
+        .title
+        .clone()
+}
+
 /// Issue #8: an X11 window has no xdg maximized state, so maximizing one
 /// snaps it to the whole monitor. It must be framed as maximized all the
 /// same: the titlebar and no border, with the client sized for exactly that.
@@ -255,7 +267,7 @@ fn a_maximized_x11_window_keeps_its_titlebar_and_loses_its_border() {
         .expect("Xwayland never became ready");
     let (x, screen) = x11rb::connect(Some(&format!(":{display}"))).expect("an X connection");
     let root = x.setup().roots[screen].root;
-    // Two of them, so that Alt+Tab's cycle has one to go to.
+    // Two of them, so the one maximized is the one with the keyboard.
     for title in ["first", "second"] {
         let window = x.generate_id().expect("an X id");
         x.create_window(
@@ -303,20 +315,12 @@ fn a_maximized_x11_window_keeps_its_titlebar_and_loses_its_border() {
     })
     .expect("X11 windows with no Motif hints are framed: titlebar and border");
 
-    // Focused first, as a person's click would: a window maps before
-    // Xwayland has given it a surface, so mapping it cannot focus it.
-    requests
-        .command(Command::Perform(Action::CycleFocus))
-        .expect("the compositor is listening");
+    // The second took the keyboard when it mapped, so it is the one
+    // maximized.
     eventually(Duration::from_secs(5), || {
-        facts
-            .read()
-            .surfaces()
-            .iter()
-            .any(|surface| surface.focused_at.is_some())
-            .then_some(())
+        (focused_last(&facts).as_deref() == Some("second")).then_some(())
     })
-    .expect("the X11 window never took focus");
+    .expect("the second X11 window never took the keyboard");
 
     requests
         .command(Command::Perform(Action::ToggleMaximize))
@@ -338,6 +342,85 @@ fn a_maximized_x11_window_keeps_its_titlebar_and_loses_its_border() {
         .command(Command::Perform(Action::ToggleMaximize))
         .expect("the compositor is listening");
     framed(4).expect("restored, the border is back");
+
+    stop.request();
+    compositor
+        .join()
+        .expect("the compositor thread panicked")
+        .expect("the compositor failed");
+}
+
+/// A new X11 window takes the keyboard when it opens, as a Wayland one does,
+/// and the next takes it from it. It maps before Xwayland has given it a
+/// surface, so the keyboard waits for the surface: it used to be dropped, and
+/// what was typed next went into the window the person had moved on from.
+///
+/// The X server's own answer is the one asked, since it decides which X
+/// client hears a key.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_new_x11_window_takes_the_keyboard_when_it_maps() {
+    let facts = Facts::new();
+    let stop = Stop::new();
+    let compositor = {
+        let (facts, stop) = (facts.clone(), stop.clone());
+        thread::spawn(move || {
+            let config = Config {
+                backend: Backend::headless((800, 600)),
+                spawn: Vec::new(),
+                env: Vec::new(),
+                run_for: Some(Duration::from_secs(30)),
+                config: None,
+                socket: None,
+                xwayland: true,
+            };
+            perspicax_compositor::run(&config, &facts, &Requests::new(), &stop)
+        })
+    };
+
+    let display = eventually(Duration::from_secs(15), || facts.x11_display())
+        .expect("Xwayland never became ready");
+    let (x, screen) = x11rb::connect(Some(&format!(":{display}"))).expect("an X connection");
+    let root = x.setup().roots[screen].root;
+    for title in ["first", "second"] {
+        let window = x.generate_id().expect("an X id");
+        x.create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            window,
+            root,
+            0,
+            0,
+            320,
+            200,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new().background_pixel(x.setup().roots[screen].white_pixel),
+        )
+        .expect("create_window");
+        x.change_property8(
+            PropMode::REPLACE,
+            window,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            title.as_bytes(),
+        )
+        .expect("WM_NAME");
+        x.map_window(window).expect("map_window");
+        x.flush().expect("flush");
+
+        eventually(Duration::from_secs(10), || {
+            let focus = x.get_input_focus().ok()?.reply().ok()?.focus;
+            (focus == window).then_some(())
+        })
+        .unwrap_or_else(|| panic!("{title} never took the keyboard: {:?}", facts.read()));
+    }
+
+    // And the facts agree: the second is the window focused last.
+    eventually(Duration::from_secs(5), || {
+        (focused_last(&facts).as_deref() == Some("second")).then_some(())
+    })
+    .unwrap_or_else(|| panic!("the facts never named the second: {:?}", facts.read()));
 
     stop.request();
     compositor

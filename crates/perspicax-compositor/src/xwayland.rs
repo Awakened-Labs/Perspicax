@@ -33,7 +33,7 @@
 
 use std::{cell::RefCell, os::fd::OwnedFd, process::Stdio, sync::mpsc};
 
-use perspicax_node::{Origin, X11Basis, X11Origin};
+use perspicax_node::{Origin, SurfaceId, X11Basis, X11Origin};
 use smithay::{
     desktop::Window,
     reexports::{
@@ -72,6 +72,9 @@ pub(crate) struct Xwayland {
     client: Option<Client>,
     /// Window ids to ask the XRes thread about.
     ask: Option<mpsc::Sender<u32>>,
+    /// The window that mapped last, while it waits for the surface it takes
+    /// the keyboard with. See `map_window_request`.
+    awaiting_focus: Option<SurfaceId>,
 }
 
 /// Start Xwayland, and become its window manager once it is ready. `ready`
@@ -317,7 +320,9 @@ impl XWaylandShellHandler for Compositor {
 
     /// An X window now has its surface. If that surface already presented
     /// something, the window has: without this, a window whose only commit
-    /// arrived before the association would be judged empty forever.
+    /// arrived before the association would be judged empty forever. And if
+    /// it is the window that mapped last, it takes the keyboard it was
+    /// waiting for, unless it has gone off screen meanwhile.
     fn surface_associated(
         &mut self,
         _xwm: XwmId,
@@ -330,6 +335,13 @@ impl XWaylandShellHandler for Compositor {
         if let Some(id) = self.x11_window(&x11).as_ref().and_then(shell::id_of) {
             if presented {
                 self.mark_presented(id);
+            }
+            let awaited = self
+                .xwayland
+                .awaiting_focus
+                .take_if(|awaited| *awaited == id);
+            if awaited.is_some() && self.window_for_id(id).is_some() {
+                self.focus_surface(surface, id);
             }
             self.backend.redraw();
             self.publish_facts();
@@ -360,7 +372,8 @@ impl XwmHandler for Compositor {
     fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
     /// A managed X11 window wants to be seen: place it as any new window is
-    /// placed, tell it where it is, and focus it.
+    /// placed, tell it where it is, and give it the keyboard, as a new
+    /// Wayland window takes it.
     fn map_window_request(&mut self, _xwm: XwmId, x11: X11Surface) {
         if let Err(error) = x11.set_mapped(true) {
             tracing::warn!(%error, "could not map X11 window");
@@ -381,9 +394,17 @@ impl XwmHandler for Compositor {
         if let Some(wm) = self.xwayland.wm.as_mut() {
             let _ = wm.raise_window(&x11);
         }
-        if let Some(surface) = shell::surface_of(&window) {
-            self.focus_surface(surface, id);
-        }
+        // The keyboard goes to a surface, and a window maps before Xwayland
+        // has given it one, as a rule: then it waits for `surface_associated`.
+        // Dropping it instead left the keyboard with the window before, which
+        // got whatever was typed next.
+        self.xwayland.awaiting_focus = match shell::surface_of(&window) {
+            Some(surface) => {
+                self.focus_surface(surface, id);
+                None
+            }
+            None => Some(id),
+        };
         tracing::info!(surface = id.0, title = x11.title(), "X11 window mapped");
         self.backend.redraw();
         self.publish_facts();
