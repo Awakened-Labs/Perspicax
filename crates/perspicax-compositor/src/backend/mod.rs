@@ -239,6 +239,16 @@ impl Running {
         }
     }
 
+    /// How hard the edges of screens and panels hold a window being moved:
+    /// the person's config on a seat. Headless nobody drags anything.
+    pub(crate) fn resistance(&self) -> Option<perspicax_policy::Resistance> {
+        match self {
+            Self::Headless { .. } => None,
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => Some(session.settings.resistance),
+        }
+    }
+
     /// Who draws window frames, and how they look: the person's config on a
     /// seat. Headless takes the defaults, so the frames a seat would draw are
     /// in the facts CI tests, though nothing is drawn.

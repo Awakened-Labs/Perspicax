@@ -36,7 +36,7 @@ use std::{
 use perspicax_policy::{
     Access, Action, Bindings, Chord, Context, Decorations, Direction, Drag, Flipping, Focus,
     FocusModel, Gesture, Grid, Keysym, Mods, MouseBindings, MouseChord, Place, Program, Protocol,
-    Rule, Shape, Side, Snapping, Switching, Towards,
+    Resistance, Rule, Shape, Side, Snapping, Switching, Towards,
 };
 use serde::Deserialize;
 
@@ -110,6 +110,9 @@ pub struct Config {
     /// Dragging a window to an edge of the desk to give it half or a quarter
     /// of a monitor.
     pub snapping: Snapping,
+    /// How hard the edges of screens and panels hold a window being moved
+    /// against them.
+    pub resistance: Resistance,
     /// Who draws a window's titlebar and border, and what they look like.
     /// Its colours are the theme's titlebar colours.
     pub decorations: Decorations,
@@ -421,6 +424,16 @@ impl Config {
                 drag: profile == Profile::Classic,
                 ..Snapping::default()
             },
+            resistance: match profile {
+                // Plasma and Windows let a window go wherever it is dragged.
+                Profile::Classic => Resistance::default(),
+                // Fluxbox and Openbox hold it at the edge of a screen or a
+                // panel. Between two monitors it crosses, as the pointer does.
+                Profile::Minimal => Resistance {
+                    edges: 20,
+                    seams: 0,
+                },
+            },
             flipping: match profile {
                 Profile::Classic => Flipping::default(),
                 // The Fluxbox and Enlightenment habit: the desk is a loop the
@@ -620,6 +633,7 @@ struct Raw {
     xwayland: Option<bool>,
     workspaces: Option<RawWorkspaces>,
     snap: Option<RawSnap>,
+    resistance: Option<RawResistance>,
     decorations: Option<RawDecorations>,
     theme: Option<RawTheme>,
     protocols: Option<RawProtocols>,
@@ -700,6 +714,16 @@ struct RawSnap {
     drag: Option<bool>,
     threshold: Option<i32>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawResistance {
+    edges: Option<i32>,
+    seams: Option<i32>,
+}
+
+/// More than this and an edge is a wall a person has to fight.
+const RESISTANCE_MAX: i32 = 128;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -1062,6 +1086,24 @@ impl Raw {
                 config.snapping.threshold = threshold;
             }
             config.snapping.drag = snap.drag.unwrap_or(config.snapping.drag);
+        }
+
+        if let Some(resistance) = self.resistance {
+            for (key, value, into) in [
+                ("edges", resistance.edges, &mut config.resistance.edges),
+                ("seams", resistance.seams, &mut config.resistance.seams),
+            ] {
+                let Some(value) = value else {
+                    continue;
+                };
+                if !(0..=RESISTANCE_MAX).contains(&value) {
+                    return Err(invalid(
+                        format!("resistance.{key}"),
+                        format!("{value} is outside 0 to {RESISTANCE_MAX} pixels"),
+                    ));
+                }
+                *into = value;
+            }
         }
 
         config.theme = theme(self.theme, self.decorations.as_ref())?;
@@ -2234,6 +2276,61 @@ mod tests {
         assert!(!config.snapping.drag);
         assert_eq!(config.snapping.threshold, 12);
         assert!(parse("[snap]\nthreshold = 0", SEAT).is_err());
+    }
+
+    #[test]
+    fn minimal_holds_a_moving_window_at_screen_edges_and_classic_does_not() {
+        assert_eq!(
+            Config::profile(Profile::Classic, SEAT).resistance,
+            Resistance::default()
+        );
+        assert_eq!(
+            Config::profile(Profile::Minimal, SEAT).resistance,
+            Resistance {
+                edges: 20,
+                seams: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn resistance_is_configured_in_its_own_table() {
+        let config = parse("[resistance]\nedges = 8\nseams = 16", SEAT).unwrap();
+        assert_eq!(
+            config.resistance,
+            Resistance {
+                edges: 8,
+                seams: 16,
+            }
+        );
+        let seams = parse("profile = \"minimal\"\n[resistance]\nseams = 4", SEAT).unwrap();
+        assert_eq!(seams.resistance.edges, 20, "the profile's, kept");
+        assert_eq!(seams.resistance.seams, 4);
+        let bounds = parse("[resistance]\nedges = 0\nseams = 128", SEAT).unwrap();
+        assert_eq!(
+            bounds.resistance,
+            Resistance {
+                edges: 0,
+                seams: 128,
+            }
+        );
+    }
+
+    #[test]
+    fn a_resistance_out_of_range_is_refused_by_name() {
+        for (text, key) in [
+            ("[resistance]\nedges = -1", "resistance.edges"),
+            ("[resistance]\nedges = 129", "resistance.edges"),
+            ("[resistance]\nseams = -1", "resistance.seams"),
+            ("[resistance]\nseams = 129", "resistance.seams"),
+        ] {
+            let error = parse(text, SEAT).unwrap_err();
+            assert!(error.to_string().contains(key), "{text}: {error}");
+        }
+        assert!(
+            parse("[resistance]\nwindows = 4", SEAT).is_err(),
+            "resisting other windows is not a key yet"
+        );
     }
 
     #[test]

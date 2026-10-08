@@ -205,6 +205,11 @@ pub struct Compositor {
     /// The window being moved with the pointer, while it is: an edge flip
     /// takes it along to the next workspace.
     pub(crate) dragging: Option<Framed>,
+    /// How many times the pointer has jumped rather than moved: carried round
+    /// the desk by an edge flip, or left where it was while the monitors
+    /// moved under it. A move that sees this change knows its next motion is
+    /// a jump, which no edge holds (see `shell::resist`).
+    pub(crate) desk_jumps: u64,
     /// The `[mouse]` bindings in force: the config's on a seat, as of the
     /// last reload; headless, what [`crate::Command::MouseBindings`] said.
     pub(crate) mouse: perspicax_policy::MouseBindings,
@@ -351,6 +356,7 @@ impl Compositor {
             layout_memory: perspicax_policy::LayoutMemory::default(),
             keymap: crate::Keymap::default(),
             dragging: None,
+            desk_jumps: 0,
             mouse,
             clicks: perspicax_policy::Clicks::default(),
             wheel: Default::default(),

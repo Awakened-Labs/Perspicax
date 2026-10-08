@@ -18,6 +18,7 @@
 
 mod actions;
 mod grabs;
+mod resist;
 mod snap;
 mod stacking;
 mod tabs;
@@ -379,7 +380,7 @@ impl Compositor {
         // pointer has really moved (see `MoveGrab`), so a click on its
         // titlebar leaves it as it is.
         let filled = window.toplevel().is_some_and(Self::is_filling) || Self::is_snapped(window);
-        let grab = MoveGrab::new(start, window.clone(), origin, filled);
+        let grab = MoveGrab::new(start, window.clone(), origin, filled, self.desk_jumps);
         pointer.set_grab(self, grab, serial, Focus::Clear);
         // After, not before: replacing a grab unsets the one before it.
         self.dragging = Some(window.clone());

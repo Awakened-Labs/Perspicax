@@ -590,6 +590,9 @@ fn rest_at_edge(state: &mut Compositor, at: Point<f64, Logical>) -> Option<Point
     if !state.flip(&output.name(), direction, carrying.as_ref()) {
         return None;
     }
+    // The pointer is about to come round to the far side of the desk: a
+    // jump, to a window being moved, and no edge it lands beside holds it.
+    state.desk_jumps = state.desk_jumps.wrapping_add(1);
     // Spanning, the desk is one big screen and the pointer comes round to
     // its far side. Per output, only this monitor flipped, and the pointer
     // comes round to the far side of this monitor.

@@ -21,7 +21,8 @@
 //! where a window goes and how big (`geometry`); where each monitor sits
 //! (`layout`); which workspace shows which windows (`workspace`); changing
 //! workspace with the pointer (`flip`); snapping to halves and quarters
-//! (`snap`); the frame drawn around a window (`frame`); and tab groups
+//! (`snap`); holding a window being moved at the edges of screens and panels
+//! (`resist`); the frame drawn around a window (`frame`); and tab groups
 //! (`tabs`); and which programs may use the protocols that reach past their
 //! own windows (`access`); and whether a display tool's request for the
 //! monitors can be carried out (`heads`); and whether a press of the Logo key
@@ -40,6 +41,7 @@ mod heads;
 mod keyboard;
 mod layout;
 mod mouse;
+mod resist;
 mod restart;
 mod snap;
 mod tabs;
@@ -65,6 +67,7 @@ pub use crate::{
     keyboard::{LayoutMemory, Switching},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
     mouse::{Button, Clicks, Context, Gesture, MouseBindings, MouseChord, Wheel},
+    resist::{Resistance, resist},
     restart::{EX_CONFIG, Ended, Restart, Restarts},
     snap::{Snapping, Zone, keyed, zone},
     tabs::Groups,
