@@ -972,6 +972,194 @@ fn the_panel_reserves_its_height() {
     shell.stop_with(session);
 }
 
+/// Classic's panel, `width` wide along the bottom, at `align`.
+fn narrow(width: &str, align: &str) -> String {
+    format!("{CLASSIC}[shell.panel]\nwidth = {width}\nalign = \"{align}\"\n")
+}
+
+/// The one panel's id, where it is, and its bar: where it says it is
+/// opaque, once it has drawn.
+fn bar(facts: &HostFacts) -> Option<(SurfaceId, Rect, Rect)> {
+    facts
+        .surfaces()
+        .iter()
+        .find_map(|surface| match &surface.kind {
+            SurfaceKind::Layer {
+                layer: Layer::Top, ..
+            } if surface.mapped => match surface.opaque.as_deref() {
+                Some([bar]) => Some((surface.id, surface.geometry, *bar)),
+                _ => None,
+            },
+            _ => None,
+        })
+}
+
+/// Wait until the one panel's bar is `wanted`, and say what the facts were.
+fn until_bar(session: &Session, wanted: Rect) -> (SurfaceId, Rect) {
+    let facts = session.wait_for(|facts| bar(facts).is_some_and(|(_, _, at)| at == wanted));
+    let (id, geometry, _) = bar(&facts).expect("waited for");
+    (id, geometry)
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_narrow_panel_keeps_windows_out_of_its_whole_strip() {
+    let session = Session::start("shell-narrow", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "narrow", &narrow("600", "left"));
+    let (_, geometry) = until_bar(&session, rect(0, 0, 600, 40));
+    assert_eq!(
+        geometry,
+        rect(0, 760, 1280, 40),
+        "the panel is the whole strip, its bar only the left of it"
+    );
+
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_coloured(&qh, "orange", "orange", 0xffff_8000);
+    common::until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    session.perform(Action::ToggleMaximize);
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.offered.is_some_and(|(width, _)| width == 1280)
+    });
+    assert_eq!(
+        desk.offered,
+        Some((1280, 760)),
+        "the monitor less the whole strip, beside the bar too"
+    );
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_narrow_panels_start_button_opens_the_start_menu_above_it() {
+    let session = Session::start("shell-narrow-start", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "narrow-start", &narrow("600", "center"));
+    let (panel, _) = until_bar(&session, rect(340, 0, 600, 40));
+
+    let start = (340.0 + PANEL_HEIGHT / 2.0, PANEL_HEIGHT / 2.0);
+    click(&session, panel, start, PointerButton::Left);
+    let facts = session.wait_for(|facts| menu(facts).is_some());
+    let (_, _, _, opaque) = menu(&facts).expect("waited for");
+    assert_eq!(
+        (opaque[0].x0, opaque[0].y1),
+        (340.0, 800.0 - PANEL_HEIGHT),
+        "above the button, where the bar put it"
+    );
+    click(&session, panel, start, PointerButton::Left);
+    session.wait_for(|facts| menu(facts).is_none());
+
+    shell.stop_with(session);
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_saved_width_and_align_move_the_bar_in_place() {
+    let session = Session::start("shell-narrow-saved", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "narrow-saved", &narrow("600", "center"));
+    let (before, _) = until_bar(&session, rect(340, 0, 600, 40));
+
+    shell.rewrite(&narrow("600", "right"));
+    session.command(Command::ReconfigureShell);
+    let (after, _) = until_bar(&session, rect(680, 0, 600, 40));
+    assert_eq!(after, before, "the same panel, redrawn");
+
+    shell.rewrite(&narrow("\"50%\"", "left"));
+    session.command(Command::ReconfigureShell);
+    let (after, _) = until_bar(&session, rect(0, 0, 640, 40));
+    assert_eq!(after, before);
+
+    shell.rewrite(CLASSIC);
+    session.command(Command::ReconfigureShell);
+    until_bar(&session, rect(0, 0, 1280, 40));
+
+    shell.stop_with(session);
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_narrow_panel_shrinks_its_tasks_to_their_icons_then_grows() {
+    /// A task's icon alone, as the shell lays out a task it cannot shrink
+    /// further.
+    const ICON: i32 = 36;
+
+    let session = Session::start("shell-narrow-grows", Backend::headless((1280, 800)));
+    let config = format!(
+        "{CLASSIC}[shell.panel]\nwidth = 120\nitems = [\"start\", \"taskbar\", \"clock\"]\n"
+    );
+    let shell = Shell::start(&session, "narrow-grows", &config);
+    until_bar(&session, rect(580, 0, 120, 40));
+
+    // Start, a task and the clock are already more than 120 pixels: each
+    // window's icon widens the bar, in the middle still.
+    let (mut desk, mut queue, qh, _) = session.client();
+    let mut widths = vec![120.0];
+    for (open, title) in ["first", "second"].into_iter().enumerate() {
+        desk.open_coloured(&qh, title, title, 0xffff_8000);
+        common::until(&mut queue, &mut desk, |desk| desk.drawn == open + 1);
+        let narrower = widths[open];
+        let facts =
+            session.wait_for(|facts| bar(facts).is_some_and(|(_, _, at)| at.x1 - at.x0 > narrower));
+        let (_, _, at) = bar(&facts).expect("waited for");
+        let wide = at.x1 - at.x0;
+        assert_eq!(at.x0, ((1280.0 - wide) / 2.0).floor(), "in the middle");
+        widths.push(wide);
+    }
+    assert_eq!(
+        widths[2] - widths[1],
+        f64::from(ICON),
+        "another window, another icon's width: {widths:?}"
+    );
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
+/// A person's click beside a narrow panel's bar reaches the wallpaper under
+/// it, and one on the bar reaches the bar, a menu open or not.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_click_beside_a_narrow_panels_bar_reaches_the_desktop() {
+    use perspicax_policy::{Button, Mods};
+
+    let session = Session::start("shell-narrow-beside", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "narrow-beside", &narrow("600", "center"));
+    until_bar(&session, rect(340, 0, 600, 40));
+    until_colour(&session, (640, 790), BAR);
+    assert_eq!(
+        colour_at(&session, 100, 790),
+        [0x1e, 0x4a, 0x73, 0xff],
+        "classic's wallpaper beside the bar"
+    );
+
+    let press = |at: (i32, i32), button: Button| {
+        session.command(Command::Click {
+            at,
+            button,
+            mods: Mods::default(),
+        });
+    };
+    press((100, 790), Button::Right);
+    let facts = session.wait_for(|facts| menu(facts).is_some());
+    let (_, namespace, _, opaque) = menu(&facts).expect("waited for");
+    assert_eq!(namespace, "perspicax-menu-HEADLESS-1");
+    assert_eq!(opaque[0].x0, 100.0, "the root menu, where the click was");
+
+    // With it open, the start button is still in reach.
+    press((360, 780), Button::Left);
+    let facts = session
+        .wait_for(|facts| menu(facts).is_some_and(|(_, _, _, opaque)| opaque[0].x0 == 340.0));
+    let (_, _, _, opaque) = menu(&facts).expect("waited for");
+    assert_eq!(
+        opaque[0].y1,
+        800.0 - PANEL_HEIGHT,
+        "the start menu, on the bar"
+    );
+
+    shell.stop_with(session);
+}
+
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn the_start_menu_opens_on_the_monitor_under_the_pointer() {

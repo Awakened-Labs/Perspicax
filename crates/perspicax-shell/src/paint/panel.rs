@@ -1,15 +1,17 @@
 //! A panel: a bar in the theme's colours (dark, in the default one) along
-//! the edge of a monitor, with a rule where it meets the desktop. The start button is a grid of four squares, drawn in
-//! the accent's shade while its menu is open. Each task is a face a
-//! little lighter than the bar, holding its application's icon and its
-//! window's title: the window with the keyboard in the accent's shade,
-//! with a line of the accent along the screen's edge, and a minimized one
-//! with no face and its title faint. The pager is a grid of small screens,
-//! each with its workspace's name, the one showing lit. Each of the tray's
-//! icons sits in the middle of its slot, drawn from the icon its program
-//! names if it is found, otherwise from the picture its program sent
-//! nearest the size. The clock is the time, in the panel's ink. Every pixel
-//! of it is opaque.
+//! the edge of a monitor, with a rule where it meets the desktop: along its
+//! length, and across each end that stops short of the monitor's side. The
+//! start button is a grid of four squares, drawn in the accent's shade
+//! while its menu is open. Each task is a face a little lighter than the
+//! bar, holding its application's icon and its window's title: the window
+//! with the keyboard in the accent's shade, with a line of the accent along
+//! the screen's edge, and a minimized one with no face and its title faint.
+//! The pager is a grid of small screens, each with its workspace's name,
+//! the one showing lit. Each of the tray's icons sits in the middle of its
+//! slot, drawn from the icon its program names if it is found, otherwise
+//! from the picture its program sent nearest the size. The clock is the
+//! time, in the panel's ink. Every pixel of the bar is opaque, and the rest
+//! of its strip clear.
 
 use perspicax_config::{Edge, Item};
 use tiny_skia::PixmapMut;
@@ -24,7 +26,7 @@ use super::{
 };
 use crate::layout::{
     Measure, Rect,
-    panel::{CLOCK_PAD, Cell, Placed, Task},
+    panel::{CLOCK_PAD, Cell, Placed, TASK_LEAST, Task},
 };
 
 /// The panel's colours, from the theme, as fills take them.
@@ -72,6 +74,9 @@ const LINE: i32 = 2;
 /// A task's icon, square, and the room around it and the title.
 const ICON: i32 = 22;
 const INSET: i32 = 6;
+// A task shrunk as far as its bar lets it before growing still shows its
+// icon.
+const _: () = assert!(TASK_LEAST - 2 * MARGIN.0 >= ICON + 2 * INSET);
 /// The icon a window is drawn with when its application has none, and a
 /// status icon whose program gives none that can be drawn.
 const GENERIC: &str = "application-x-executable";
@@ -81,7 +86,8 @@ const TRAY_MARGIN: i32 = 2;
 
 /// What a panel shows.
 pub(crate) struct Shown<'a> {
-    /// The panel's size, in its own logical pixels.
+    /// The panel's size, in its own logical pixels: its whole strip, the
+    /// bar `placed` holds within it.
     pub(crate) size: (i32, i32),
     pub(crate) edge: Edge,
     pub(crate) placed: &'a Placed,
@@ -106,12 +112,18 @@ pub(crate) fn paint(
 ) {
     let colours = Colours::of(palette);
     let px = |rect: Rect| scaled(rect, scale);
-    let (width, height) = shown.size;
-    fill(canvas, px(Rect::new(0, 0, width, height)), colours.bar);
-    let rule = match shown.edge {
-        Edge::Bottom => Rect::new(0, 0, width, 1),
-        Edge::Top => Rect::new(0, height - 1, width, 1),
+    let width = shown.size.0;
+    let bar = shown.placed.bar;
+    canvas.fill(tiny_skia::Color::TRANSPARENT);
+    fill(canvas, px(bar), colours.bar);
+    let along = match shown.edge {
+        Edge::Bottom => Rect::new(bar.x, bar.y, bar.w, 1),
+        Edge::Top => Rect::new(bar.x, bar.bottom() - 1, bar.w, 1),
     };
+    let ends = [
+        (bar.x > 0).then_some(Rect::new(bar.x, bar.y, 1, bar.h)),
+        (bar.right() < width).then_some(Rect::new(bar.right() - 1, bar.y, 1, bar.h)),
+    ];
     for &(item, place) in &shown.placed.items {
         match item {
             Item::Start => {
@@ -156,7 +168,9 @@ pub(crate) fn paint(
             pen.status(item, *place, images);
         }
     }
-    fill(pen.canvas, px(rule), colours.rule);
+    for rule in ends.into_iter().flatten().chain([along]) {
+        fill(pen.canvas, px(rule), colours.rule);
+    }
 }
 
 /// What tasks and cells are drawn on, and written with.
@@ -290,6 +304,7 @@ fn grid(canvas: &mut PixmapMut<'_>, place: Rect, s: i32, ink: [u8; 4]) {
 
 #[cfg(test)]
 mod tests {
+    use perspicax_config::{Align, PanelWidth};
     use tiny_skia::Pixmap;
 
     use super::*;
@@ -358,8 +373,13 @@ mod tests {
     }
 
     /// Two windows, the second with the keyboard unless it is `minimized`,
-    /// and two workspaces, the first showing.
+    /// and two workspaces, the first showing, on a bar the panel's width.
     fn laid(minimized: bool) -> Placed {
+        laid_in(minimized, (PanelWidth::FULL, Align::Center))
+    }
+
+    /// As [`laid`], on a bar shaped as `shape`.
+    fn laid_in(minimized: bool, shape: (PanelWidth, Align)) -> Placed {
         let task = |serial: u64, title: &str, second: bool| Task {
             serial,
             title: title.to_owned(),
@@ -385,6 +405,7 @@ mod tests {
                 tray: Vec::new(),
             },
             (600, 40),
+            shape,
             &mut Monospace(8.0),
         )
     }
@@ -431,6 +452,41 @@ mod tests {
                 "the top row, at {scale}x"
             );
             assert_eq!(pixel(&picture, 430 * s, 20 * s), BAR, "the pager's margin");
+        }
+    }
+
+    #[test]
+    fn a_narrow_bar_is_opaque_and_the_rest_of_its_strip_clear() {
+        const CLEAR: [u8; 4] = [0, 0, 0, 0];
+        for scale in [1, 2] {
+            let s = scale as i32;
+            let middle = laid_in(false, (PanelWidth::Pixels(400), Align::Center));
+            assert_eq!(middle.bar, Rect::new(100, 0, 400, 40));
+            let picture = painted(&middle, false, scale);
+            assert_eq!(
+                pixel(&picture, 50 * s, 20 * s),
+                CLEAR,
+                "beside it, at {scale}x"
+            );
+            assert_eq!(pixel(&picture, 550 * s, 20 * s), CLEAR);
+            assert_eq!(
+                pixel(&picture, 100 * s, 20 * s),
+                RULE,
+                "across its left end"
+            );
+            assert_eq!(pixel(&picture, 500 * s - 1, 20 * s), RULE, "and its right");
+            assert_eq!(pixel(&picture, 300 * s, 0), RULE, "along it");
+            assert_eq!(pixel(&picture, 330 * s, 20 * s), BAR, "the pager's margin");
+
+            let left = laid_in(false, (PanelWidth::Pixels(400), Align::Left));
+            let picture = painted(&left, false, scale);
+            assert_eq!(
+                pixel(&picture, 0, 20 * s),
+                BAR,
+                "no rule against the monitor's side, at {scale}x"
+            );
+            assert_eq!(pixel(&picture, 400 * s - 1, 20 * s), RULE);
+            assert_eq!(pixel(&picture, 450 * s, 20 * s), CLEAR);
         }
     }
 

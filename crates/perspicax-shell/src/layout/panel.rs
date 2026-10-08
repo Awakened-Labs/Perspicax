@@ -1,17 +1,22 @@
 //! A panel: which monitors have one, the strip of the monitor it takes, and
 //! where on it each thing it holds sits.
 //!
-//! A panel runs the whole width of its monitor, along the top or the
-//! bottom. The start button is a square as tall as the panel, the pager as
+//! A panel takes the whole width of its monitor along the top or the
+//! bottom, and keeps windows out of all of it, but draws its bar only as
+//! wide as it is asked to be, at the left, in the middle or at the right.
+//! The start button is a square as tall as the panel, the pager as
 //! wide as its grid of workspaces, the tray a slot [`TRAY_SLOT`] wide for
 //! each icon it shows, and the clock as wide as the time it shows, as is
 //! the layout indicator as wide as its label, while there is a choice of
 //! layouts to show. The
 //! taskbar takes whatever room is left, and shares it among the windows it
-//! lists, each no wider than [`TASK_WIDTH`]; a panel without one keeps its
-//! last item at the right end, and the rest at the left.
+//! lists, each no wider than [`TASK_WIDTH`]; a bar without one keeps its
+//! last item at its right end, and the rest at its left. A bar too narrow
+//! for what it holds shrinks its tasks to their icons, [`TASK_LEAST`] wide,
+//! and then grows as wide as it needs to be, up to the monitor's width;
+//! there, its tasks shrink further.
 
-use perspicax_config::{Edge, Item, PanelOutputs};
+use perspicax_config::{Align, Edge, Item, PanelOutputs, PanelWidth};
 
 use super::{Measure, Rect};
 
@@ -20,6 +25,9 @@ pub(crate) const CLOCK_PAD: i32 = 10;
 /// The widest a task is: a few windows are each this wide, and many share
 /// the taskbar.
 pub(crate) const TASK_WIDTH: i32 = 200;
+/// The narrowest a task is while its bar can still grow: room for its icon
+/// alone, as a task is drawn.
+pub(crate) const TASK_LEAST: i32 = 36;
 /// Room around the pager's grid, and between its cells.
 pub(crate) const PAGER_PAD: i32 = 4;
 pub(crate) const PAGER_GAP: i32 = 2;
@@ -77,10 +85,13 @@ pub(crate) struct Holding<'a> {
     pub(crate) tray: Vec<TrayIcon>,
 }
 
-/// A panel, laid out: each thing it holds, and where, in its own logical
-/// pixels.
+/// A panel, laid out: its bar, each thing it holds, and where, in its own
+/// logical pixels.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Placed {
+    /// Where the bar is drawn. The rest of the panel is clear, and takes no
+    /// clicks.
+    pub(crate) bar: Rect,
     pub(crate) items: Vec<(Item, Rect)>,
     pub(crate) tasks: Vec<(Task, Rect)>,
     pub(crate) cells: Vec<(Cell, Rect)>,
@@ -117,7 +128,8 @@ pub(crate) fn chosen<'a>(rule: &PanelOutputs, monitors: &[(&'a str, (i32, i32))]
     }
 }
 
-/// The strip of `monitor` a panel `height` high along `edge` takes.
+/// The strip of `monitor` a panel `height` high along `edge` takes: the
+/// whole of its width, however wide the bar drawn in it.
 #[cfg_attr(
     not(any(feature = "menus", test)),
     expect(
@@ -134,13 +146,16 @@ pub(crate) fn strip(edge: Edge, height: i32, monitor: Rect) -> Rect {
 }
 
 /// Where each of `items` sits on a panel `size` big, in its own logical
-/// pixels, holding what `holding` says.
+/// pixels, holding what `holding` says: in a bar as wide as `shape` asks
+/// and along the panel where it says, or wider if what it holds needs it.
 pub(crate) fn lay_out(
     items: &[Item],
     holding: Holding<'_>,
-    (width, height): (i32, i32),
+    size: (i32, i32),
+    shape: (PanelWidth, Align),
     measure: &mut impl Measure,
 ) -> Placed {
+    let height = size.1;
     let grid = Grid::of(&holding.cells, height);
     let widths: Vec<i32> = items
         .iter()
@@ -160,12 +175,19 @@ pub(crate) fn lay_out(
             Item::Tray => 0,
         })
         .collect();
-    let room = (width - widths.iter().sum::<i32>()).max(0);
+    let fixed = widths.iter().sum::<i32>();
+    let tasks = if items.contains(&Item::Taskbar) {
+        holding.tasks.len() as i32
+    } else {
+        0
+    };
+    let bar = bar(size, shape, fixed + tasks * TASK_LEAST);
+    let room = (bar.w - fixed).max(0);
     let stretch = items
         .iter()
         .position(|&item| item == Item::Taskbar)
         .unwrap_or(items.len().saturating_sub(1));
-    let mut x = 0;
+    let mut x = bar.x;
     let items: Vec<(Item, Rect)> = items
         .iter()
         .zip(widths)
@@ -226,12 +248,30 @@ pub(crate) fn lay_out(
             .collect()
     });
     Placed {
+        bar,
         items,
         tasks,
         cells,
         #[cfg(feature = "tray")]
         tray,
     }
+}
+
+/// The bar of a panel `size` big, as wide as `shape` asks or as `needed`,
+/// whichever is wider, but no wider than the panel, and along it where
+/// `shape` says.
+fn bar((width, height): (i32, i32), (asked, align): (PanelWidth, Align), needed: i32) -> Rect {
+    let asked = match asked {
+        PanelWidth::Pixels(pixels) => i32::try_from(pixels).unwrap_or(i32::MAX),
+        PanelWidth::Percent(share) => width * share as i32 / 100,
+    };
+    let wide = asked.max(needed).min(width);
+    let x = match align {
+        Align::Left => 0,
+        Align::Center => (width - wide) / 2,
+        Align::Right => width - wide,
+    };
+    Rect::new(x, 0, wide, height)
 }
 
 /// The pager's grid: how many columns and rows of cells, each how big.
@@ -354,6 +394,8 @@ mod tests {
     use crate::layout::Monospace;
 
     const PANEL: (i32, i32) = (1280, 40);
+    /// The whole width of the panel, as by default.
+    const FULL: (PanelWidth, Align) = (PanelWidth::FULL, Align::Center);
 
     fn holding(tasks: usize, cells: &[(u32, u32)]) -> Holding<'static> {
         Holding {
@@ -385,7 +427,7 @@ mod tests {
     }
 
     fn laid(items: &[Item]) -> Vec<(Item, Rect)> {
-        lay_out(items, holding(0, &[]), PANEL, &mut Monospace(8.0)).items
+        lay_out(items, holding(0, &[]), PANEL, FULL, &mut Monospace(8.0)).items
     }
 
     #[test]
@@ -427,6 +469,7 @@ mod tests {
                 ..holding(0, &[])
             },
             PANEL,
+            FULL,
             &mut Monospace(8.0),
         );
         let clock = 5 * 8 + 2 * CLOCK_PAD;
@@ -456,7 +499,7 @@ mod tests {
     #[test]
     fn tasks_share_the_taskbar_each_no_wider_than_a_task() {
         let items = [Item::Start, Item::Taskbar];
-        let few = lay_out(&items, holding(2, &[]), PANEL, &mut Monospace(8.0));
+        let few = lay_out(&items, holding(2, &[]), PANEL, FULL, &mut Monospace(8.0));
         let rects: Vec<Rect> = few.tasks.iter().map(|&(_, rect)| rect).collect();
         assert_eq!(
             rects,
@@ -467,7 +510,7 @@ mod tests {
             "from the taskbar's left end, in order"
         );
 
-        let many = lay_out(&items, holding(16, &[]), PANEL, &mut Monospace(8.0));
+        let many = lay_out(&items, holding(16, &[]), PANEL, FULL, &mut Monospace(8.0));
         let each = (1280 - 40) / 16;
         assert!(each < TASK_WIDTH);
         assert!(many.tasks.iter().all(|(_, rect)| rect.w == each));
@@ -476,7 +519,13 @@ mod tests {
             "every one in the panel"
         );
 
-        let none = lay_out(&[Item::Start], holding(2, &[]), PANEL, &mut Monospace(8.0));
+        let none = lay_out(
+            &[Item::Start],
+            holding(2, &[]),
+            PANEL,
+            FULL,
+            &mut Monospace(8.0),
+        );
         assert!(none.tasks.is_empty(), "no taskbar, no tasks");
     }
 
@@ -487,6 +536,7 @@ mod tests {
             &items,
             holding(0, &[(0, 0), (1, 0), (2, 0), (3, 0)]),
             PANEL,
+            FULL,
             &mut Monospace(8.0),
         );
         // A row of cells as tall as the panel leaves, 16 by 10.
@@ -505,6 +555,7 @@ mod tests {
             &items,
             holding(0, &[(0, 0), (1, 0), (0, 1), (1, 1)]),
             PANEL,
+            FULL,
             &mut Monospace(8.0),
         );
         let cells: Vec<Rect> = square.cells.iter().map(|&(_, rect)| rect).collect();
@@ -524,6 +575,7 @@ mod tests {
             &items,
             holding(2, &[(0, 0), (1, 0)]),
             PANEL,
+            FULL,
             &mut Monospace(8.0),
         );
         assert_eq!(placed.at((20.0, 20.0)), Some(Part::Start));
@@ -561,6 +613,7 @@ mod tests {
             &[Item::Start, Item::Taskbar, Item::Tray, Item::Clock],
             holding,
             PANEL,
+            FULL,
             &mut Monospace(8.0),
         );
         let clock = 5 * 8 + 2 * CLOCK_PAD;
@@ -589,6 +642,7 @@ mod tests {
             &[Item::Start, Item::Tray, Item::Clock],
             self::holding(0, &[]),
             PANEL,
+            FULL,
             &mut Monospace(8.0),
         );
         assert_eq!(empty.items[1].1.w, 0, "no icons, no room taken");
@@ -619,6 +673,132 @@ mod tests {
             "a name with no monitor is no panel"
         );
         assert!(chosen(&PanelOutputs::First, &[]).is_empty());
+    }
+
+    /// `items` holding `tasks` windows on a bar shaped as `shape`.
+    fn shaped(items: &[Item], tasks: usize, shape: (PanelWidth, Align)) -> Placed {
+        lay_out(
+            items,
+            holding(tasks, &[]),
+            PANEL,
+            shape,
+            &mut Monospace(8.0),
+        )
+    }
+
+    const CLOCK: i32 = 5 * 8 + 2 * CLOCK_PAD;
+
+    #[test]
+    fn a_narrow_bar_sits_at_the_left_in_the_middle_or_at_the_right() {
+        let items = [Item::Start, Item::Clock];
+        for (align, x) in [(Align::Left, 0), (Align::Center, 340), (Align::Right, 680)] {
+            let placed = shaped(&items, 0, (PanelWidth::Pixels(600), align));
+            assert_eq!(placed.bar, Rect::new(x, 0, 600, 40), "{align:?}");
+            assert_eq!(placed.items[0].1, Rect::new(x, 0, 40, 40), "start first");
+            assert_eq!(
+                placed.items[1].1.right(),
+                x + 600,
+                "the clock at the bar's right end"
+            );
+        }
+        assert_eq!(
+            shaped(&items, 0, (PanelWidth::Percent(50), Align::Right)).bar,
+            Rect::new(640, 0, 640, 40),
+            "a share of the panel"
+        );
+        assert_eq!(
+            shaped(&items, 0, (PanelWidth::Pixels(4000), Align::Right)).bar,
+            Rect::new(0, 0, 1280, 40),
+            "never wider than the panel"
+        );
+        assert_eq!(
+            shaped(&items, 0, FULL).bar,
+            Rect::new(0, 0, 1280, 40),
+            "the whole of it, by default"
+        );
+    }
+
+    #[test]
+    fn a_narrow_bar_shrinks_its_tasks_to_their_icons_and_then_grows() {
+        let items = [Item::Start, Item::Taskbar, Item::Clock];
+        let narrow = (PanelWidth::Pixels(300), Align::Center);
+        let fixed = 40 + CLOCK;
+
+        let few = shaped(&items, 5, narrow);
+        assert_eq!(few.bar, Rect::new(490, 0, 300, 40), "room enough");
+        assert!(
+            few.tasks
+                .iter()
+                .all(|(_, rect)| rect.w == (300 - fixed) / 5)
+        );
+        assert!((300 - fixed) / 5 > TASK_LEAST);
+
+        let many = shaped(&items, 10, narrow);
+        let wide = fixed + 10 * TASK_LEAST;
+        assert_eq!(
+            many.bar,
+            Rect::new((1280 - wide) / 2, 0, wide, 40),
+            "as wide as its icons need, still in the middle"
+        );
+        assert!(many.tasks.iter().all(|(_, rect)| rect.w == TASK_LEAST));
+        assert_eq!(
+            many.tasks.last().unwrap().1.right(),
+            many.bar.right() - CLOCK,
+            "the last against the clock"
+        );
+
+        let more = shaped(&items, 11, narrow);
+        assert_eq!(more.bar.w, many.bar.w + TASK_LEAST, "a task's icon wider");
+        assert_eq!(
+            more.bar.x,
+            many.bar.x - TASK_LEAST / 2,
+            "half of it either side"
+        );
+        let left = shaped(&items, 11, (PanelWidth::Pixels(300), Align::Left));
+        assert_eq!(left.bar.x, 0, "a bar at the left grows to the right");
+        let right = shaped(&items, 11, (PanelWidth::Pixels(300), Align::Right));
+        assert_eq!(right.bar.right(), 1280, "and one at the right to the left");
+    }
+
+    #[test]
+    fn a_bar_as_wide_as_the_panel_shrinks_its_tasks_further() {
+        let items = [Item::Start, Item::Taskbar, Item::Clock];
+        let placed = shaped(&items, 40, (PanelWidth::Pixels(300), Align::Center));
+        assert_eq!(placed.bar, Rect::new(0, 0, 1280, 40), "grown to the panel");
+        let each = (1280 - 40 - CLOCK) / 40;
+        assert!(each < TASK_LEAST);
+        assert!(placed.tasks.iter().all(|(_, rect)| rect.w == each));
+        assert_eq!(
+            shaped(&items, 40, FULL).tasks,
+            placed.tasks,
+            "as on a panel the whole width"
+        );
+    }
+
+    #[test]
+    fn a_bar_narrower_than_what_it_holds_grows_to_hold_it() {
+        let placed = shaped(
+            &[Item::Start, Item::Clock],
+            0,
+            (PanelWidth::Pixels(50), Align::Center),
+        );
+        let wide = 40 + CLOCK;
+        assert_eq!(placed.bar, Rect::new((1280 - wide) / 2, 0, wide, 40));
+        assert_eq!(placed.items[1].1.right(), placed.bar.right());
+    }
+
+    #[test]
+    fn a_point_finds_the_start_button_on_a_narrow_bar_and_nothing_beside_it() {
+        let placed = shaped(
+            &[Item::Start, Item::Taskbar, Item::Clock],
+            1,
+            (PanelWidth::Pixels(600), Align::Center),
+        );
+        assert_eq!(placed.item(Item::Start), Some(Rect::new(340, 0, 40, 40)));
+        assert_eq!(placed.at((360.0, 20.0)), Some(Part::Start));
+        assert_eq!(placed.at((400.0, 20.0)), Some(Part::Task(0)));
+        assert_eq!(placed.at((20.0, 20.0)), None, "clear of the bar");
+        assert_eq!(placed.at((1260.0, 20.0)), None);
     }
 
     #[test]

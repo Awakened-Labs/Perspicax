@@ -100,6 +100,19 @@ impl Canvas {
         }
     }
 
+    /// Have `layer` take clicks only in `area`: a panel's bar, so that a
+    /// click on the clear rest of its strip reaches what is under it. From
+    /// its next picture.
+    #[cfg(feature = "panel")]
+    pub(super) fn take_clicks_in(&self, layer: &LayerSurface, (x, y, w, h): Area) {
+        if let Ok(region) = Region::new(&self.compositor) {
+            region.add(x, y, w, h);
+            layer
+                .wl_surface()
+                .set_input_region(Some(region.wl_region()));
+        }
+    }
+
     /// Show on `layer` a picture `size` logical pixels at `scale`, painted
     /// by `draw`: opaque in `opaque`, and clear everywhere else.
     pub(super) fn show(

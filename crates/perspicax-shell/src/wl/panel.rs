@@ -1,7 +1,11 @@
 //! The panels: one surface on the `top` layer of each monitor the config
 //! names, along its bottom or its top, with an exclusive zone as tall as it
 //! is, so that windows are kept out of the strip it takes. A fullscreen
-//! window in use still covers it, as perspicax arranges.
+//! window in use still covers it, as perspicax arranges. The surface is the
+//! whole strip even when the bar drawn on it is narrower: the rest is clear
+//! and takes no clicks, so a click there reaches the desktop under it.
+//! Anchored to a corner instead, the surface would have smithay keep
+//! windows out of a column down the monitor's side, not the strip.
 //!
 //! Its namespace is `perspicax-panel-<connector>`, and its accessibility
 //! window carries the same name, which is how perspicax joins the two.
@@ -520,7 +524,13 @@ impl Panels {
             palette,
         } = kit;
         let text = fonts.get();
-        bar.placed = lay_out(&panel.items, holding, (width, height), &mut *text);
+        bar.placed = lay_out(
+            &panel.items,
+            holding,
+            (width, height),
+            (panel.width, panel.align),
+            &mut *text,
+        );
         let open = self.open_on.as_deref() == Some(bar.name.as_str());
         let shown = paint::panel::Shown {
             size: (width, height),
@@ -532,17 +542,15 @@ impl Panels {
             #[cfg(feature = "tray")]
             tray: &self.tray,
         };
+        let drawn = bar.placed.bar;
+        let area = (drawn.x, drawn.y, drawn.w, drawn.h);
+        canvas.take_clicks_in(&bar.layer, area);
         let started = Instant::now();
-        // Wholly opaque, which lets the compositor skip what is under it.
-        canvas.show(
-            &bar.layer,
-            size,
-            bar.scale,
-            &[(0, 0, width, height)],
-            |picture| {
-                paint::panel::paint(&shown, picture, bar.scale, text, images, palette);
-            },
-        );
+        // The bar wholly opaque, which lets the compositor skip what is under
+        // it, and the rest of the strip clear.
+        canvas.show(&bar.layer, size, bar.scale, &[area], |picture| {
+            paint::panel::paint(&shown, picture, bar.scale, text, images, palette);
+        });
         tracing::debug!(output = bar.name, took = ?started.elapsed(), "a panel was drawn");
         bar.a11y.show(a11y::panel(
             &bar.namespace,
@@ -563,7 +571,8 @@ fn title<O>(window: &Window<O>) -> String {
         .map_or_else(|| "Window".to_owned(), String::clone)
 }
 
-/// Put `layer` along the panel's edge, as tall as it, keeping windows out.
+/// Put `layer` along the panel's edge, as tall as it and as wide as the
+/// monitor whatever the width of its bar, keeping windows out.
 fn place(layer: &LayerSurface, panel: &Panel) {
     let edge = match panel.edge {
         Edge::Top => Anchor::TOP,
