@@ -48,6 +48,7 @@ pub mod host;
 mod keyboard;
 mod layers;
 mod lock;
+mod mouse;
 mod origin;
 mod output_management;
 mod outputs;

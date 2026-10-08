@@ -16,6 +16,8 @@
 //! integers.
 //!
 //! The decisions, by module: focus and what a chord means (`focus`, `binds`);
+//! what a button, a double-click or the wheel means where the pointer is
+//! (`mouse`);
 //! where a window goes and how big (`geometry`); where each monitor sits
 //! (`layout`); which workspace shows which windows (`workspace`); changing
 //! workspace with the pointer (`flip`); snapping to halves and quarters
@@ -37,6 +39,7 @@ mod geometry;
 mod heads;
 mod keyboard;
 mod layout;
+mod mouse;
 mod restart;
 mod snap;
 mod tabs;
@@ -46,12 +49,13 @@ mod workspace;
 
 pub use crate::{
     access::{Access, Program, Protocol, Rule},
-    binds::{Action, Bindings, Button, Chord, Drag, Mods, Towards, candidates},
+    binds::{Action, Bindings, Chord, Drag, Mods, Towards, candidates},
     flip::{EdgeDwell, Flipping, NOTCH_PIXELS, Notches, arrival, edge_at},
     focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},
     frame::{
-        Colour, Decorations, FrameButton, GRIP, Insets, Look, Part, Press, buttons, buttons_in,
-        fit, frame_rects, inset, is_double, outset, part_at, tab_rects, titlebar,
+        Colour, DOUBLE_CLICK_MS, Decorations, FrameButton, GRIP, Insets, Look, Part, Press,
+        buttons, buttons_in, fit, frame_rects, inset, is_double, outset, part_at, tab_rects,
+        titlebar,
     },
     geometry::{
         DRAG_THRESHOLD, Edges, Rect, anchor, carry, dragged, edges_near, neighbour, place, resize,
@@ -60,6 +64,7 @@ pub use crate::{
     heads::{Head, HeadChange, HeadMode, ModeChoice, Rejection, check_heads},
     keyboard::{LayoutMemory, Switching},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
+    mouse::{Button, Clicks, Context, Gesture, MouseBindings, MouseChord, Wheel},
     restart::{EX_CONFIG, Ended, Restart, Restarts},
     snap::{Snapping, Zone, keyed, zone},
     tabs::Groups,

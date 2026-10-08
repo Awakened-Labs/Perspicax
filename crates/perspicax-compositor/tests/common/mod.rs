@@ -40,7 +40,7 @@ use smithay_client_toolkit::{
     subcompositor::SubcompositorState,
 };
 use wayland_client::{
-    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
     backend::ObjectId,
     event_created_child,
     globals::{GlobalList, registry_queue_init},
@@ -344,6 +344,11 @@ pub struct Desk {
     /// The serial of the pointer's last arrival on one of our surfaces: what
     /// `set_cursor` has to name to be heard.
     pub entered: Option<u32>,
+    /// Every button the pointer pressed (`true`) or let go (`false`) on one
+    /// of our surfaces, by Linux code, in order.
+    pub buttons: Vec<(u32, bool)>,
+    /// How many scroll events the pointer brought one of our surfaces.
+    pub scrolls: usize,
     /// How many times the compositor asked one of our windows to close.
     pub asked_to_close: usize,
     pub pager: Option<ExtWorkspaceManagerV1>,
@@ -408,6 +413,8 @@ impl Desk {
             seat: None,
             pointer: None,
             entered: None,
+            buttons: Vec::new(),
+            scrolls: 0,
             asked_to_close: 0,
             pager: None,
             pager_done: 0,
@@ -1261,6 +1268,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
         match event {
             wl_pointer::Event::Enter { serial, .. } => desk.entered = Some(serial),
             wl_pointer::Event::Leave { .. } => desk.entered = None,
+            wl_pointer::Event::Button { button, state, .. } => desk.buttons.push((
+                button,
+                state == WEnum::Value(wl_pointer::ButtonState::Pressed),
+            )),
+            wl_pointer::Event::Axis { .. } => desk.scrolls += 1,
             _ => {}
         }
     }

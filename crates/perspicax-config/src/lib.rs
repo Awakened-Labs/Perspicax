@@ -28,11 +28,15 @@ pub mod desktop;
 mod keys;
 mod shell;
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use perspicax_policy::{
-    Access, Action, Bindings, Chord, Decorations, Direction, Flipping, Focus, FocusModel, Grid,
-    Keysym, Mods, Place, Program, Protocol, Rule, Shape, Side, Snapping, Switching, Towards,
+    Access, Action, Bindings, Chord, Context, Decorations, Direction, Drag, Flipping, Focus,
+    FocusModel, Gesture, Grid, Keysym, Mods, MouseBindings, MouseChord, Place, Program, Protocol,
+    Rule, Shape, Side, Snapping, Switching, Towards,
 };
 use serde::Deserialize;
 
@@ -41,6 +45,8 @@ pub use crate::shell::{
     Edge, Item, Leave, Panel, PanelOutputs, Shell, ShellBuilt, TaskbarScope, UntrustedLaunchers,
     Wallpaper, WallpaperMode,
 };
+/// The double-click time, in milliseconds, of a config that does not say.
+pub use perspicax_policy::DOUBLE_CLICK_MS;
 /// The theme's types, as the shell reads them from [`Shell`].
 pub use perspicax_policy::{
     Appearance, Builtin, ColorScheme, Contrast, Family, Font, Palette, Rgba, Role, Theme,
@@ -76,6 +82,11 @@ pub struct Config {
     pub profile: Profile,
     pub focus: Focus,
     pub bindings: Bindings,
+    /// What a mouse button or the wheel does, by where the pointer is: the
+    /// `[mouse]` tables. No profile binds any; what a press on a frame, a
+    /// middle-drag of a title and the drag modifier do is built in, and a
+    /// binding here comes before them.
+    pub mouse: MouseBindings,
     pub keyboard: Keyboard,
     pub pointer: Pointer,
     /// Per-output settings, matched by connector name (`DP-1`, `HDMI-A-1`).
@@ -184,10 +195,6 @@ impl Default for Pointer {
         }
     }
 }
-
-/// The double-click time, in milliseconds, of a config that does not say:
-/// GTK's and Qt's.
-pub const DOUBLE_CLICK_MS: u32 = 400;
 
 /// The double-click times a config may ask for. Faster than the shortest, a
 /// hand cannot click twice on purpose; slower than the longest, two clicks
@@ -403,6 +410,7 @@ impl Config {
             profile,
             focus,
             bindings,
+            mouse: MouseBindings::default(),
             keyboard: Keyboard::default(),
             pointer: Pointer::default(),
             outputs: Vec::new(),
@@ -600,8 +608,9 @@ struct Raw {
     profile: Profile,
     focus: Option<RawFocus>,
     #[serde(default)]
-    keys: std::collections::BTreeMap<String, RawAction>,
+    keys: BTreeMap<String, RawAction>,
     drag: Option<String>,
+    mouse: Option<RawMouse>,
     input: Option<RawInput>,
     #[serde(default, rename = "output")]
     outputs: Vec<RawOutput>,
@@ -735,6 +744,82 @@ enum RawModel {
     Strict,
 }
 
+/// The `[mouse]` tables, one for each place a binding can apply.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMouse {
+    #[serde(default)]
+    desktop: BTreeMap<String, RawAction>,
+    #[serde(default)]
+    titlebar: BTreeMap<String, RawAction>,
+    #[serde(default)]
+    window: BTreeMap<String, RawAction>,
+    #[serde(default)]
+    anywhere: BTreeMap<String, RawAction>,
+}
+
+impl RawMouse {
+    /// Put every binding in `[mouse]` in force over `config`'s, refusing one
+    /// written twice in a table under two spellings, and one that would take
+    /// the drag modifier away. `drag_from` says whose drag that is, when it
+    /// is not the file's own.
+    fn apply(self, config: &mut Config, drag_from: &str) -> Result<(), Error> {
+        let tables = [
+            ("desktop", Context::Desktop, self.desktop),
+            ("titlebar", Context::Titlebar, self.titlebar),
+            ("window", Context::Window, self.window),
+            ("anywhere", Context::Anywhere, self.anywhere),
+        ];
+        for (table, context, entries) in tables {
+            let mut written_as = Vec::new();
+            for (written, action) in entries {
+                let key = format!("mouse.{table}.{written}");
+                let chord = keys::mouse(&written).map_err(|reason| invalid(key.clone(), reason))?;
+                if let Some((_, first)) = written_as.iter().find(|(seen, _)| *seen == chord) {
+                    return Err(invalid(
+                        key,
+                        format!("is the same as `{first}`, already written; write it once"),
+                    ));
+                }
+                let action = action_for(action).map_err(|reason| invalid(key.clone(), reason))?;
+                if action.is_some() && config.bindings.takes_drag(context, &chord) {
+                    return Err(invalid(
+                        key,
+                        drag_taken(&config.bindings, &chord, drag_from),
+                    ));
+                }
+                let mouse = std::mem::take(&mut config.mouse);
+                config.mouse = match action {
+                    Some(action) => mouse.bind(context, chord, action),
+                    None => mouse.unbind(context, chord),
+                };
+                written_as.push((chord, written));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Why a mouse binding that would take the drag away is refused, naming
+/// `drag` and what it does with this press.
+fn drag_taken(bindings: &Bindings, chord: &MouseChord, drag_from: &str) -> String {
+    let does = match chord.gesture {
+        Gesture::Press(button) => bindings.drag(chord.mods, button),
+        Gesture::Double(_) | Gesture::Wheel(_) => None,
+    };
+    let does = match does {
+        Some(Drag::Move) => "moves",
+        Some(Drag::Resize) => "resizes",
+        None => "drags",
+    };
+    format!(
+        "`drag` is {}{drag_from}, which {does} a window with this press anywhere on it; a \
+         binding here would always come first and the drag would never happen. Add a \
+         modifier, bind it in `[mouse.titlebar]`, or change `drag`",
+        keys::spelled(chord.mods)
+    )
+}
+
 /// A binding's value: an action's name, or `{ spawn = [...] }`.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -865,6 +950,11 @@ impl Raw {
                 (keys::Trigger::LogoTap, None) => config.bindings.unbind_tap(),
             };
         }
+        let drag_from = match (&self.drag, self.profile) {
+            (Some(_), _) => "",
+            (None, Profile::Classic) => ", the classic profile's",
+            (None, Profile::Minimal) => ", the minimal profile's",
+        };
         if let Some(drag) = self.drag {
             config.bindings = match keys::modifiers(&drag)
                 .map_err(|reason| invalid("drag".to_owned(), reason))?
@@ -872,6 +962,10 @@ impl Raw {
                 Some(mods) => config.bindings.drag_with(mods),
                 None => config.bindings.no_drag(),
             };
+        }
+        // After `drag`, so a binding is checked against the drag in force.
+        if let Some(mouse) = self.mouse {
+            mouse.apply(&mut config, drag_from)?;
         }
 
         if let Some(input) = self.input {
@@ -1403,12 +1497,15 @@ fn action_for(action: RawAction) -> Result<Option<Action>, String> {
             "root-menu" => Action::RootMenu,
             "next-layout" => Action::CycleLayout { forward: true },
             "previous-layout" => Action::CycleLayout { forward: false },
+            "next-workspace" => Action::CycleWorkspace { forward: true },
+            "previous-workspace" => Action::CycleWorkspace { forward: false },
             other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
                 format!(
                     "`{other}` is not an action; use close, cycle-focus, reload, \
                          toggle-sticky, toggle-maximize, minimize, next-tab, previous-tab, \
                          tab-with-previous, detach-tab, start-menu, root-menu, \
                          next-layout, previous-layout, layout-<1-4>, \
+                         next-workspace, previous-workspace, \
                          move-to-next-output, move-to-previous-output, \
                          move-to-output-<side>, workspace-<side>, workspace-<number>, \
                          send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
@@ -1586,6 +1683,184 @@ mod tests {
     fn an_unknown_action_is_named() {
         let error = parse("[keys]\n\"Alt+x\" = \"explode\"", SEAT).unwrap_err();
         assert!(error.to_string().contains("`explode`"), "{error}");
+    }
+
+    const SIDE: Gesture = Gesture::Press(perspicax_policy::Button::Side);
+
+    #[test]
+    fn each_mouse_table_binds_where_the_pointer_is() {
+        let config = parse(
+            r#"
+            [mouse.desktop]
+            "Mouse8" = "workspace-left"
+            "WheelDown" = "next-workspace"
+
+            [mouse.titlebar]
+            "Double+Mouse1" = "minimize"
+
+            [mouse.window]
+            "Alt+Mouse9" = "toggle-sticky"
+
+            [mouse.anywhere]
+            "Logo+Mouse8" = { spawn = ["foot"] }
+            "#,
+            SEAT,
+        )
+        .unwrap();
+        let none = Mods::default();
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        let mouse = &config.mouse;
+        assert_eq!(
+            mouse.resolve(Context::Desktop, none, SIDE),
+            Some(&Action::Workspace(Direction::Left))
+        );
+        assert_eq!(
+            mouse.resolve(Context::Window, none, SIDE),
+            None,
+            "the desktop's thumb button is not taken from a window"
+        );
+        assert_eq!(
+            mouse.resolve(
+                Context::Desktop,
+                none,
+                Gesture::Wheel(perspicax_policy::Wheel::Down)
+            ),
+            Some(&Action::CycleWorkspace { forward: true })
+        );
+        assert_eq!(
+            mouse.resolve(
+                Context::Titlebar,
+                none,
+                Gesture::Double(perspicax_policy::Button::Left)
+            ),
+            Some(&Action::Minimize)
+        );
+        assert_eq!(
+            mouse.resolve(
+                Context::Titlebar,
+                Mods::alt(),
+                Gesture::Press(perspicax_policy::Button::Extra)
+            ),
+            Some(&Action::ToggleSticky),
+            "a titlebar is part of its window"
+        );
+        assert_eq!(
+            mouse.resolve(Context::Window, logo, SIDE),
+            Some(&Action::Spawn(vec!["foot".to_owned()]))
+        );
+    }
+
+    #[test]
+    fn no_profile_binds_a_mouse_button() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            assert_eq!(
+                Config::profile(profile, SEAT).mouse,
+                MouseBindings::default()
+            );
+        }
+    }
+
+    #[test]
+    fn a_misspelled_mouse_table_or_button_is_an_error_naming_it() {
+        let error = parse("[mouse.panel]\n\"Mouse8\" = \"close\"", SEAT).unwrap_err();
+        assert!(error.to_string().contains("`panel`"), "{error}");
+        let error = parse("[mouse.desktop]\n\"thumb\" = \"close\"", SEAT).unwrap_err();
+        assert!(
+            error.to_string().contains("`mouse.desktop.thumb`"),
+            "{error}"
+        );
+        let error = parse("[mouse.desktop]\n\"Mouse8\" = \"explode\"", SEAT).unwrap_err();
+        assert!(error.to_string().contains("`explode`"), "{error}");
+    }
+
+    #[test]
+    fn one_button_written_twice_in_a_table_is_refused_naming_both() {
+        let text = "[mouse.desktop]\n\"Mouse8\" = \"close\"\n\"side\" = \"minimize\"";
+        let error = parse(text, SEAT).unwrap_err().to_string();
+        assert!(error.contains("`mouse.desktop.side`"), "{error}");
+        assert!(error.contains("`Mouse8`"), "{error}");
+        // In two tables it is two bindings.
+        let text = "[mouse.desktop]\n\"Mouse8\" = \"close\"\n[mouse.window]\n\"side\" = \"none\"";
+        assert!(parse(text, SEAT).is_ok());
+    }
+
+    #[test]
+    fn a_window_binding_that_would_take_the_drag_away_is_refused_naming_drag() {
+        let error = parse(
+            "drag = \"Alt\"\n[mouse.window]\n\"Alt+Mouse1\" = \"close\"",
+            SEAT,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("`mouse.window.Alt+Mouse1`"), "{error}");
+        assert!(error.contains("`drag` is Alt,"), "{error}");
+        assert!(error.contains("moves"), "{error}");
+        // The classic profile drags with Alt without a word in the file.
+        let error = parse("[mouse.anywhere]\n\"Alt+Mouse3\" = \"close\"", SEAT)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("the classic profile's"), "{error}");
+        assert!(error.contains("resizes"), "{error}");
+    }
+
+    #[test]
+    fn a_binding_that_leaves_the_drag_some_press_is_accepted() {
+        for text in [
+            "drag = \"Logo\"\n[mouse.window]\n\"Alt+Mouse1\" = \"close\"",
+            "drag = \"none\"\n[mouse.window]\n\"Alt+Mouse1\" = \"close\"",
+            "[mouse.titlebar]\n\"Alt+Mouse1\" = \"close\"",
+            "[mouse.desktop]\n\"Alt+Mouse1\" = \"close\"",
+            "[mouse.window]\n\"Double+Alt+Mouse1\" = \"close\"",
+            "[mouse.window]\n\"Alt+Mouse2\" = \"close\"",
+            "[mouse.window]\n\"Alt+Mouse1\" = \"none\"",
+        ] {
+            assert!(parse(text, SEAT).is_ok(), "{text}");
+        }
+    }
+
+    #[test]
+    fn none_in_a_mouse_table_hands_the_button_back_there() {
+        let config = parse(
+            "[mouse.anywhere]\n\"Mouse8\" = \"workspace-left\"\n\
+             [mouse.window]\n\"Mouse8\" = \"none\"",
+            SEAT,
+        )
+        .unwrap();
+        let none = Mods::default();
+        assert_eq!(config.mouse.resolve(Context::Window, none, SIDE), None);
+        assert_eq!(
+            config.mouse.resolve(Context::Desktop, none, SIDE),
+            Some(&Action::Workspace(Direction::Left))
+        );
+    }
+
+    #[test]
+    fn the_next_and_previous_workspace_are_actions_for_keys_too() {
+        let config = parse(
+            "[keys]\n\"Logo+n\" = \"next-workspace\"\n\"Logo+p\" = \"previous-workspace\"",
+            SEAT,
+        )
+        .unwrap();
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::n]),
+            Some(&Action::CycleWorkspace { forward: true })
+        );
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::p]),
+            Some(&Action::CycleWorkspace { forward: false })
+        );
+    }
+
+    #[test]
+    fn the_shell_reads_a_file_with_mouse_bindings() {
+        assert!(shell("[mouse.desktop]\n\"Mouse8\" = \"close\"", ShellBuilt::FULL).is_ok());
     }
 
     #[test]

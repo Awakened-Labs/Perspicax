@@ -1,5 +1,5 @@
 //! What a binding does, carried out: the same code whichever backend is
-//! running and whoever asked, a person's keys on a seat or a
+//! running and whoever asked, a person's keys or mouse on a seat or a
 //! [`crate::Command::Perform`] from a test.
 //!
 //! Two actions need the seat, and say so in the log rather than pretending:
@@ -16,8 +16,16 @@ use super::{id_of, surface_of};
 use crate::{framed::Framed, state::Compositor};
 
 impl Compositor {
-    /// Carry out a binding.
+    /// Carry out a key binding, on the monitor the person is working on.
     pub(crate) fn perform(&mut self, action: &Action) {
+        self.perform_on(action, self.working_monitor());
+    }
+
+    /// Carry out a binding, switching workspaces on `monitor`. A key binding
+    /// acts where the person is working, a mouse binding where the hand is:
+    /// a click on the desktop of one monitor switches that one, wherever the
+    /// focused window is.
+    pub(crate) fn perform_on(&mut self, action: &Action, monitor: Option<String>) {
         let focused = self.focused_surface().and_then(|id| self.window_for_id(id));
         match action {
             Action::Close => {
@@ -44,8 +52,13 @@ impl Compositor {
                     self.move_to_output(&window, *towards);
                 }
             }
-            Action::Workspace(direction) => self.switch_workspace(*direction),
-            Action::GoToWorkspace(number) => self.go_to_workspace(*number),
+            Action::Workspace(direction) => self.switch_workspace(monitor, *direction),
+            Action::GoToWorkspace(number) => self.go_to_workspace(monitor, *number),
+            Action::CycleWorkspace { forward } => {
+                if let Some(monitor) = monitor {
+                    self.scroll_workspace(&monitor, *forward);
+                }
+            }
             Action::SendToWorkspace(direction) => self.send_to_workspace(*direction, false),
             Action::CarryToWorkspace(direction) => self.send_to_workspace(*direction, true),
             Action::ToggleSticky => self.toggle_sticky(),
