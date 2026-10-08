@@ -37,12 +37,14 @@ pub mod events;
 pub mod map;
 pub mod read;
 
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use atspi::{
-    AccessibilityConnection,
-    proxy::application::ApplicationProxy,
-    zbus::{Connection, names::BusName, proxy::CacheProperties},
+    proxy::{application::ApplicationProxy, bus::BusProxy},
+    zbus::{self, Address, Connection, names::BusName, proxy::CacheProperties},
 };
 use perspicax_index::{Change, Ingest, Interner};
 use perspicax_node::{NodeId, ObservedNode};
@@ -51,7 +53,7 @@ pub use crate::{
     app::{AppRef, ObjectKey},
     error::Error,
     events::Subscription,
-    read::Strategy,
+    read::{GaveUp, Patience, Strategy},
 };
 
 /// The one id map for a desktop, shared by every ingest reading it.
@@ -97,7 +99,9 @@ fn lock(ids: &Ids) -> std::sync::MutexGuard<'_, Interner<ObjectKey>> {
 /// produce.
 #[derive(Debug)]
 pub struct AtspiIngest {
-    bus: AccessibilityConnection,
+    /// The accessibility bus, with a deadline on every call. See
+    /// [`reading_bus`].
+    bus: Connection,
     app: AppRef,
     /// AT-SPI's `(bus name, object path)` in, opaque [`NodeId`]s out.
     ///
@@ -112,6 +116,14 @@ pub struct AtspiIngest {
     /// case; see [`AtspiIngest::forcing`].
     forced: Option<Strategy>,
     with_geometry: bool,
+    /// How long one read keeps asking before it settles for what it has.
+    /// `None` is no budget; see [`AtspiIngest::within`].
+    budget: Option<Duration>,
+    /// How much silence the walk sits through, remembered from one read of
+    /// this application to the next.
+    walking: Patience,
+    /// The same for asking each node where it is.
+    placing: Patience,
     /// The live signal subscription. Opened by [`AtspiIngest::connect`] before
     /// any tree is read, so that nothing can change in the gap between reading
     /// a tree and starting to listen.
@@ -129,7 +141,7 @@ impl AtspiIngest {
     /// [`Error::NoSuchApp`] if the bus is fine and nothing on it answers to
     /// `name`; it carries the names that were present.
     pub async fn connect(name: &str) -> Result<Self, Error> {
-        let bus = AccessibilityConnection::new().await?;
+        let bus = reading_bus().await?;
 
         let mut available = Vec::new();
         for candidate in applications(&bus).await? {
@@ -167,7 +179,7 @@ impl AtspiIngest {
     /// [`Error::Bus`] if the accessibility bus cannot be reached, or if the
     /// application has gone since it was enumerated.
     pub async fn attach(app: AppRef) -> Result<Self, Error> {
-        let bus = AccessibilityConnection::new().await?;
+        let bus = reading_bus().await?;
         // Subscribe before returning, and therefore before the caller can take
         // a snapshot. The alternative -- snapshot, then subscribe -- silently
         // loses every change that happens in between, and produces an index
@@ -180,6 +192,9 @@ impl AtspiIngest {
             strategy: None,
             forced: None,
             with_geometry: false,
+            budget: None,
+            walking: Patience::new(),
+            placing: Patience::new(),
             events,
         })
     }
@@ -193,6 +208,25 @@ impl AtspiIngest {
     #[must_use]
     pub fn with_geometry(mut self, geometry: bool) -> Self {
         self.with_geometry = geometry;
+        self
+    }
+
+    /// Stop asking `budget` after a read begins, and keep what was read by
+    /// then.
+    ///
+    /// Without one, a read asks until it has the tree -- which is what a
+    /// measurement wants, since a budget would cut short exactly the slow
+    /// read it is measuring. A reader of a desktop wants the opposite: one
+    /// application, however slowly it answers, must not hold up every other,
+    /// and a partial tree of it is worth more than none. A node the read did
+    /// not reach is missing, and one it did not place is refused, so settling
+    /// early costs what can be acted on and nothing worse.
+    ///
+    /// Every call is bounded on its own, by [`read::ANSWER`], so a read with a
+    /// budget ends within about one node's calls of it.
+    #[must_use]
+    pub fn within(mut self, budget: Duration) -> Self {
+        self.budget = Some(budget);
         self
     }
 
@@ -264,13 +298,20 @@ impl AtspiIngest {
             .ok_or(Error::UnknownRoot(root.0))?
             .clone();
 
-        let connection: Connection = self.bus.connection().clone();
+        let connection = self.bus.clone();
+        // One budget for the whole read, shared by both passes: a walk that
+        // spends it leaves nothing for geometry, which is the right order --
+        // a node unplaced is refused, a node unread is not there at all.
+        let until = self.budget.map(|budget| Instant::now() + budget);
+        self.walking.begin(until);
+        self.placing.begin(until);
+
         let (strategy, nodes) = match self.forced {
             Some(forced) => (
                 forced,
-                read::read_with(&connection, &self.app, forced).await?,
+                read::read_with(&connection, &self.app, forced, &mut self.walking).await?,
             ),
-            None => read::cold_read(&connection, &self.app).await?,
+            None => read::cold_read(&connection, &self.app, &mut self.walking).await?,
         };
         self.strategy = Some(strategy);
         tracing::debug!(
@@ -279,15 +320,76 @@ impl AtspiIngest {
             nodes = nodes.len(),
             "cold read"
         );
+        settled(self.app.name(), "walking its tree", &self.walking);
 
         let mut nodes = read::subtree(nodes, &key);
         if self.with_geometry {
-            for node in &mut nodes {
-                node.bounds = read::extents(&connection, &node.key).await;
-            }
+            read::geometry(&connection, &mut nodes, &mut self.placing).await;
+            settled(self.app.name(), "asking GetExtents", &self.placing);
         }
         Ok(read::to_observed(nodes, &mut lock(&self.interner)))
     }
+}
+
+/// Say, once per pass of a read, that it stopped asking and why.
+///
+/// Once, not per call: the calls themselves are logged at debug, and an
+/// application that leaves sixty-four unanswered must not fill a log with
+/// sixty-four warnings about one fact.
+fn settled(app: &str, pass: &str, patience: &Patience) {
+    match patience.gave_up() {
+        Some(GaveUp::Unanswered { calls }) => tracing::warn!(
+            app,
+            calls,
+            "stopped {pass}: the application left {calls} call(s) unanswered, \
+             so the rest go unasked this read and what was read is kept"
+        ),
+        Some(GaveUp::OutOfTime) => tracing::warn!(
+            app,
+            "stopped {pass}: the read ran out of time, and what was read is kept"
+        ),
+        None => {}
+    }
+}
+
+/// The accessibility bus, with a deadline on every call made over it.
+///
+/// # Why not `AccessibilityConnection`
+///
+/// Because it cannot be given one. It builds its connection itself, from the
+/// bus's address, with nothing to say how long a call may wait -- and a call
+/// that waits forever is how one Flutter application, which never answers
+/// `GetExtents`, used to cost its whole tree (#51). So this asks the session
+/// bus for the address the same way it does, and builds the connection with
+/// [`read::ANSWER`] as zbus's `method_timeout`. Every call a read makes goes
+/// over it, so none can be made without the deadline.
+///
+/// It also leaves out what `AccessibilityConnection` adds that a read never
+/// uses: a registry proxy, and peer-to-peer connections to applications.
+///
+/// # Errors
+///
+/// [`Error::Bus`] if the session bus, or the accessibility bus it names,
+/// cannot be reached.
+async fn reading_bus() -> Result<Connection, Error> {
+    // Every failure here is the bus being out of reach rather than a call
+    // failing, and says so.
+    let unreachable = |error: zbus::Error| Error::Bus(error.into());
+    let session = Connection::session().await.map_err(unreachable)?;
+    let address: Address = BusProxy::new(&session)
+        .await
+        .map_err(unreachable)?
+        .get_address()
+        .await
+        .map_err(unreachable)?
+        .parse()
+        .map_err(unreachable)?;
+    zbus::connection::Builder::address(address)
+        .map_err(unreachable)?
+        .method_timeout(read::ANSWER)
+        .build()
+        .await
+        .map_err(unreachable)
 }
 
 impl Ingest for AtspiIngest {
@@ -369,14 +471,22 @@ pub async fn enable() -> Result<(), Error> {
 ///
 /// [`Error::Bus`] if the accessibility bus cannot be reached.
 pub async fn on_the_bus() -> Result<Vec<AppRef>, Error> {
-    let bus = AccessibilityConnection::new().await?;
-    applications(&bus).await
+    applications(&reading_bus().await?).await
 }
 
 /// Every application currently on the accessibility bus.
-async fn applications(bus: &AccessibilityConnection) -> Result<Vec<AppRef>, Error> {
-    let registry = bus.root_accessible_on_registry().await?;
-    let connection = bus.connection();
+///
+/// Each is asked its name and its toolkit over the reading connection, so an
+/// application that does not answer costs [`read::ANSWER`] and is left out,
+/// rather than holding up the list of every other one. Every application on
+/// the bus is asked, not only the ones a caller wants, so this matters even
+/// to a reader that would never have read it.
+async fn applications(connection: &Connection) -> Result<Vec<AppRef>, Error> {
+    let registry = read::accessible(
+        connection,
+        &ObjectKey::new("org.a11y.atspi.Registry", "/org/a11y/atspi/accessible/root"),
+    )
+    .await?;
     let dbus = atspi::zbus::fdo::DBusProxy::new(connection).await?;
 
     let mut apps = Vec::new();

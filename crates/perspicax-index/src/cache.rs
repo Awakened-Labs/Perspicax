@@ -927,7 +927,9 @@ mod tests {
     }
 
     /// A bridge that reports no extents leaves a node unjudged rather than
-    /// judged visible. There is no rect, so there is no answer.
+    /// judged visible. There is no rect, so there is no answer -- and the
+    /// refusal says it is the application's silence, not the judging, that is
+    /// missing.
     #[test]
     fn a_node_with_no_bounds_is_not_judged() {
         let mut index = joined();
@@ -943,7 +945,7 @@ mod tests {
         index.join_subtree(NodeId(9), SurfaceId(1), &origin());
         let tally = index.judge(&desktop(None));
         assert_eq!(tally.unjudged, 1);
-        assert_eq!(index.actable(NodeId(9)).unwrap_err(), Refusal::Unjudged);
+        assert_eq!(index.actable(NodeId(9)).unwrap_err(), Refusal::Unplaced);
     }
 
     /// Staleness outranks every other verdict, and the order is the point: an

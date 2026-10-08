@@ -6,8 +6,19 @@
 //! to learn the tree is to walk it: `Accessible.GetChildren` from the root and
 //! then, per node, a call for each property. The distance between those two is
 //! the measurement M1 exists to produce.
+//!
+//! # An application that stops answering
+//!
+//! Every call made here has a deadline, [`ANSWER`], and every read has
+//! [`Patience`]. Neither is a precaution against something hypothetical. A
+//! Flutter application answers everything about its nodes except where they
+//! are, and before #51 one `GetExtents` it left unanswered cost perspicax the
+//! whole application, every time it was read, for as long as it ran.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use atspi::{
     CacheItem, CoordType, InterfaceSet, LegacyCacheItem, Role as AtspiRole, State, StateSet,
@@ -287,11 +298,148 @@ pub fn to_observed(raw: Vec<RawNode>, interner: &mut Interner<ObjectKey>) -> Vec
         .collect()
 }
 
+/// How long a call waits for its answer before it is treated as failed.
+///
+/// Set once, on the connection every read goes over, rather than around each
+/// call, so that no call made through this crate can forget it. A healthy call
+/// answers in about two milliseconds -- the M1 latency table reads a Qt tree
+/// with geometry, some 1,500 calls, in about three seconds -- so a second is
+/// five hundred times that, and still short against a read's own budget.
+pub const ANSWER: Duration = Duration::from_secs(1);
+
+/// How many unanswered calls one pass of a read sits through before it stops
+/// asking. See [`Patience`].
+pub const STRIKES: u8 = 3;
+
+/// How much silence one pass of a read sits through -- the walk, or asking
+/// every node where it is -- and what the application's last read taught it.
+///
+/// # Why a deadline per call is not enough
+///
+/// [`ANSWER`] bounds a call, not a read. A Flutter application leaves
+/// `GetExtents` unanswered for its view and for every node under it, so a game
+/// board of 64 squares costs 64 deadlines, and a read that waits out each one
+/// is a read that does not finish in any time worth having. So a pass counts
+/// the calls an application leaves unanswered, and after [`STRIKES`] of them
+/// it stops asking: the rest of the walk is not read, or the rest of the nodes
+/// are not placed, and what was read is kept.
+///
+/// Stopping early costs actability and nothing worse. A node the walk never
+/// reached is not in the index, and a node never asked where it is has no
+/// bounds and is refused -- neither is guessed at.
+///
+/// # Why it remembers
+///
+/// An application that ran a pass out of patience is given **one** unanswered
+/// call on that pass in its next read, not [`STRIKES`]. Re-reads are the
+/// keeper's, inline, and every second one spends waiting is a second in which
+/// no other application's signals are drained -- while a pass that ran out
+/// last time will almost certainly run out again. One call is still asked, so
+/// an application that has started answering is believed at once, and a read
+/// in which it does not run out puts its patience back to full.
+///
+/// The memory is one application's, never a toolkit's. Nothing here knows what
+/// Flutter is, because any bridge can stop answering any call.
+///
+/// # And a budget
+///
+/// A read may also be given a moment at which it stops asking whatever the
+/// count, which is how an application that answers everything, slowly, is
+/// still read in bounded time. What was read by then is kept, rather than the
+/// whole read thrown away for being late.
+#[derive(Debug, Clone)]
+pub struct Patience {
+    /// Unanswered calls this read will still sit through.
+    left: u8,
+    /// How many this read was given.
+    given: u8,
+    /// When this read stops asking, if it has a budget.
+    until: Option<Instant>,
+    /// Why this read stopped asking, once it has. Read by the next
+    /// [`begin`](Patience::begin): it is the memory.
+    gave_up: Option<GaveUp>,
+}
+
+/// Why a pass of a read stopped asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GaveUp {
+    /// The application left `calls` calls unanswered, which was all the pass
+    /// had.
+    Unanswered {
+        /// How many it was given: [`STRIKES`], or one after a read that ran
+        /// out the same way.
+        calls: u8,
+    },
+    /// The read's budget ran out.
+    OutOfTime,
+}
+
+impl Default for Patience {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Patience {
+    /// Full patience, for an application not read yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            left: STRIKES,
+            given: STRIKES,
+            until: None,
+            gave_up: None,
+        }
+    }
+
+    /// Start a read, which stops asking at `until` if it has a budget.
+    ///
+    /// Patience is full again, unless the last read ran out of it by silence:
+    /// then this read is given one unanswered call. Running out of *time* is
+    /// not held against an application, since it says how long its tree is
+    /// rather than whether it answers.
+    pub fn begin(&mut self, until: Option<Instant>) {
+        let silenced = matches!(self.gave_up, Some(GaveUp::Unanswered { .. }));
+        self.given = if silenced { 1 } else { STRIKES };
+        self.left = self.given;
+        self.until = until;
+        self.gave_up = None;
+    }
+
+    /// Whether this read is still asking.
+    fn holds(&mut self) -> bool {
+        if self.gave_up.is_none() && self.until.is_some_and(|until| Instant::now() >= until) {
+            self.gave_up = Some(GaveUp::OutOfTime);
+        }
+        self.gave_up.is_none()
+    }
+
+    /// Weigh a call's result. One the application never answered costs a
+    /// strike, and the last strike ends the asking.
+    fn heard<T>(&mut self, result: Result<T, Error>) -> Result<T, Error> {
+        if result.as_ref().is_err_and(Error::is_unanswered) {
+            self.left = self.left.saturating_sub(1);
+            if self.left == 0 && self.gave_up.is_none() {
+                self.gave_up = Some(GaveUp::Unanswered { calls: self.given });
+            }
+        }
+        result
+    }
+
+    /// Why this read stopped asking, or `None` if it never did.
+    #[must_use]
+    pub fn gave_up(&self) -> Option<GaveUp> {
+        self.gave_up
+    }
+}
+
 /// Read an application's tree, choosing a strategy by what it answers.
 ///
 /// Returns the strategy that worked alongside the nodes, because the choice is
 /// itself a result: it is the difference the M1 latency table is measuring, and
 /// a caller that cannot see which path ran cannot report it.
+///
+/// A walk sits through as much silence as `patience` allows; see [`walk`].
 ///
 /// # Errors
 ///
@@ -300,6 +448,7 @@ pub fn to_observed(raw: Vec<RawNode>, interner: &mut Interner<ObjectKey>) -> Vec
 pub async fn cold_read(
     connection: &Connection,
     app: &AppRef,
+    patience: &mut Patience,
 ) -> Result<(Strategy, Vec<RawNode>), Error> {
     if let Some((strategy, nodes)) = try_cache(connection, app).await {
         return Ok((strategy, nodes));
@@ -309,7 +458,10 @@ pub async fn cold_read(
         toolkit = app.toolkit(),
         "no usable cache; falling back to a per-node walk"
     );
-    Ok((Strategy::Walk, walk(connection, app.root()).await?))
+    Ok((
+        Strategy::Walk,
+        walk(connection, app.root(), patience).await?,
+    ))
 }
 
 /// Read with a strategy already chosen, skipping the probe.
@@ -326,9 +478,10 @@ pub async fn read_with(
     connection: &Connection,
     app: &AppRef,
     strategy: Strategy,
+    patience: &mut Patience,
 ) -> Result<Vec<RawNode>, Error> {
     match strategy {
-        Strategy::Walk => walk(connection, app.root()).await,
+        Strategy::Walk => walk(connection, app.root(), patience).await,
         // The *raw* cache read, deliberately skipping the completeness gate
         // that [`cold_read`] applies. A caller naming a strategy is measuring
         // it, and answering "nothing" because the cache is cold would hide the
@@ -424,24 +577,42 @@ async fn cache_items(connection: &Connection, app: &AppRef) -> Option<(Strategy,
 /// be worse than losing the node. The root is the exception: if that cannot be
 /// read there is nothing to return and the caller should hear why.
 ///
+/// A node that goes unanswered is skipped the same way, and costs `patience`
+/// a strike. Once patience runs out, by silence or by its budget, the walk
+/// stops and returns the nodes it has: the rest of the tree is missing, and
+/// what was read is kept. The root is always asked, so a read that returns at
+/// all returns something.
+///
 /// # Errors
 ///
-/// [`Error::Call`] if `root` itself cannot be read.
-pub async fn walk(connection: &Connection, root: &ObjectKey) -> Result<Vec<RawNode>, Error> {
+/// [`Error::Call`] if `root` itself cannot be read, including when it does
+/// not answer: [`Error::is_unanswered`].
+pub async fn walk(
+    connection: &Connection,
+    root: &ObjectKey,
+    patience: &mut Patience,
+) -> Result<Vec<RawNode>, Error> {
     let mut nodes = Vec::new();
     let mut seen: std::collections::HashSet<ObjectKey> = std::collections::HashSet::new();
     let mut queue = std::collections::VecDeque::from([(root.clone(), None::<ObjectKey>, 0i32)]);
 
     while let Some((key, parent, index)) = queue.pop_front() {
+        if !nodes.is_empty() && !patience.holds() {
+            break;
+        }
         if !seen.insert(key.clone()) {
             continue;
         }
         let is_root = nodes.is_empty() && parent.is_none();
-        let node = match read_one(connection, &key, parent, index).await {
+        let node = match patience.heard(read_one(connection, &key, parent, index).await) {
             Ok(node) => node,
             Err(error) if is_root => return Err(error),
             Err(error) => {
-                tracing::debug!(path = key.path(), %error, "skipping a node that vanished mid-walk");
+                tracing::debug!(
+                    path = key.path(),
+                    %error,
+                    "skipping a node that vanished, or went unanswered, mid-walk"
+                );
                 continue;
             }
         };
@@ -523,8 +694,32 @@ pub async fn accessible<'a>(
         .await?)
 }
 
+/// Ask each node where it is, in order, for as long as `patience` holds.
+///
+/// A node with no bounds to give -- no `Component`, or an error -- is left
+/// without any, and so is one that never answers, at the cost of a strike.
+/// Once patience runs out, the nodes not yet asked are never asked, and keep
+/// no bounds either. That is the difference between 64 squares that will
+/// never answer costing three deadlines and costing sixty-four: see
+/// [`Patience`].
+pub async fn geometry(connection: &Connection, nodes: &mut [RawNode], patience: &mut Patience) {
+    for node in nodes {
+        if !patience.holds() {
+            break;
+        }
+        match patience.heard(extents(connection, &node.key).await) {
+            Ok(bounds) => node.bounds = bounds,
+            Err(error) if error.is_unanswered() => {
+                tracing::debug!(path = node.key.path(), "GetExtents went unanswered");
+            }
+            Err(_) => {}
+        }
+    }
+}
+
 /// One node's bounds in node space -- window-relative, from whichever origin
-/// its toolkit calls the window's -- or `None` if it does not have any.
+/// its toolkit calls the window's -- or `None` if it answers with no usable
+/// size.
 ///
 /// Separate from the tree read, and separately measured, because **no bulk
 /// geometry API exists on either toolkit**. `Cache.GetItems` carries role,
@@ -553,21 +748,23 @@ pub async fn accessible<'a>(
 /// `HostView` turns window-relative bounds into anything global, once the
 /// index has measured which origin "window" meant: see
 /// `perspicax_index::Index::window_origin`.
-pub async fn extents(connection: &Connection, key: &ObjectKey) -> Option<Rect> {
+///
+/// # Errors
+///
+/// [`Error::Call`] if the node has no `Component`, has gone, or does not
+/// answer before [`ANSWER`] -- that last one is [`Error::is_unanswered`], and
+/// it is the one a caller must not simply shrug off, because it costs the
+/// whole deadline every time it is asked.
+pub async fn extents(connection: &Connection, key: &ObjectKey) -> Result<Option<Rect>, Error> {
     let proxy = ComponentProxy::builder(connection)
-        .destination(key.bus().to_owned())
-        .ok()?
-        .path(key.path().to_owned())
-        .ok()?
+        .destination(key.bus().to_owned())?
+        .path(key.path().to_owned())?
         .cache_properties(CacheProperties::No)
         .build()
-        .await
-        .ok()?;
-    proxy
-        .get_extents(CoordType::Window)
-        .await
-        .ok()
-        .and_then(map::extents_to_rect)
+        .await?;
+    Ok(map::extents_to_rect(
+        proxy.get_extents(CoordType::Window).await?,
+    ))
 }
 
 /// The modern cache layout, which reports parentage from the child's end.
@@ -776,6 +973,83 @@ mod tests {
     fn a_source_that_declares_no_count_is_not_judged_incomplete() {
         let nodes = vec![raw("/window", None, 0)];
         assert!(cache_is_complete(&nodes));
+    }
+
+    /// What zbus returns when the reading connection's deadline runs out.
+    fn unanswered() -> Result<(), Error> {
+        Err(Error::Call(atspi::zbus::Error::from(std::io::Error::from(
+            std::io::ErrorKind::TimedOut,
+        ))))
+    }
+
+    /// A call that fails at once costs no time, so it costs no patience.
+    #[test]
+    fn only_an_unanswered_call_is_a_strike() {
+        assert!(unanswered().unwrap_err().is_unanswered());
+        assert!(!Error::UnknownRoot(1).is_unanswered());
+
+        let mut patience = Patience::new();
+        patience.begin(None);
+        for _ in 0..10 {
+            let _ = patience.heard(Err::<(), _>(Error::UnknownRoot(1)));
+        }
+        assert!(patience.holds());
+        assert_eq!(patience.gave_up(), None);
+    }
+
+    #[test]
+    fn a_pass_stops_asking_at_its_last_strike_and_says_so() {
+        let mut patience = Patience::new();
+        patience.begin(None);
+        for _ in 1..STRIKES {
+            let _ = patience.heard(unanswered());
+            assert!(patience.holds());
+        }
+        let _ = patience.heard(unanswered());
+        assert!(!patience.holds());
+        assert_eq!(
+            patience.gave_up(),
+            Some(GaveUp::Unanswered { calls: STRIKES })
+        );
+    }
+
+    /// The keeper's re-read of an application that went silent waits one
+    /// deadline, not three -- and the read after one in which it answered
+    /// waits the full three again, so an application that recovers is not
+    /// held to its worst read forever.
+    #[test]
+    fn patience_run_out_by_silence_is_one_strike_until_a_read_does_not_run_out() {
+        let mut patience = Patience::new();
+        patience.begin(None);
+        for _ in 0..STRIKES {
+            let _ = patience.heard(unanswered());
+        }
+
+        patience.begin(None);
+        let _ = patience.heard(unanswered());
+        assert_eq!(patience.gave_up(), Some(GaveUp::Unanswered { calls: 1 }));
+
+        patience.begin(None);
+        let _ = patience.heard(Ok(()));
+        assert_eq!(patience.gave_up(), None, "it answered");
+
+        patience.begin(None);
+        let _ = patience.heard(unanswered());
+        assert!(patience.holds(), "and is given its full patience again");
+    }
+
+    /// Running out of time says how long a tree is, not whether its
+    /// application answers, so it is not held against the next read.
+    #[test]
+    fn a_read_out_of_time_is_not_held_against_the_next() {
+        let mut patience = Patience::new();
+        patience.begin(Some(Instant::now()));
+        assert!(!patience.holds());
+        assert_eq!(patience.gave_up(), Some(GaveUp::OutOfTime));
+
+        patience.begin(None);
+        let _ = patience.heard(unanswered());
+        assert!(patience.holds());
     }
 
     /// The M1 invariant, stated where the nodes are made. No compositor exists,
