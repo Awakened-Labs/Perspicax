@@ -58,7 +58,8 @@ use perspicax_index::{
 };
 use perspicax_node::{NodeId, ObservedNode, Origin, Role, SurfaceId, Vec2};
 
-/// How long one application gets to be read before it is given up on.
+/// How long one application gets to be read: once to connect to it, and once
+/// to read it.
 ///
 /// Generous: the M1 measurements put a cold Qt tree with geometry at about
 /// three seconds, and a loaded machine is slower. It exists because the
@@ -66,6 +67,14 @@ use perspicax_node::{NodeId, ObservedNode, Origin, Role, SurfaceId, Vec2};
 /// bed answers the registry and then fails its own peer handshake, and reading
 /// it never returns. One application must not be able to hide the desktop, and
 /// saying so in a doc comment is not the same as arranging it.
+///
+/// Connecting is cut off when it runs out, since a connection that never
+/// finishes has nothing in it. Reading is not: the read is given this as its
+/// budget ([`AtspiIngest::within`]) and stops asking when it is spent,
+/// keeping what it read. Until #51 it was cut off too, and a Flutter
+/// application -- which never answers `GetExtents` -- lost its whole tree to
+/// the one call it left unanswered, every read, for as long as it ran. Every
+/// call has a deadline of its own now, so the read ends when its budget does.
 const PER_APP: Duration = Duration::from_secs(20);
 
 /// One application this compositor drew: what it turned out to be, and the
@@ -124,15 +133,19 @@ impl App {
     /// deliberately the caller's decision rather than something
     /// [`App::changes`] does on its own.
     ///
+    /// A re-read that runs out of [`PER_APP`] returns what it read by then.
+    /// A node it did not reach keeps the mark the invalidation gave it, and
+    /// is refused as stale until a later read reaches it.
+    ///
     /// # Errors
     ///
-    /// Fails if the application cannot be read -- it has exited, or the bus
-    /// has gone.
+    /// Fails if the application cannot be read -- it has exited, the bus has
+    /// gone, or its root does not answer.
     pub async fn reread(&mut self) -> Result<Vec<ObservedNode>> {
         let root = self.root;
-        tokio::time::timeout(PER_APP, self.ingest.snapshot(root))
+        self.ingest
+            .snapshot(root)
             .await
-            .with_context(|| format!("gave up re-reading {}", self.name))?
             .with_context(|| format!("could not re-read {}", self.name))
     }
 
@@ -273,6 +286,7 @@ pub async fn observe(facts: &Facts) -> Result<Reading> {
     let mut index = Index::new();
     let apps = read(&ours, &ids, facts)
         .await?
+        .snapshots
         .into_iter()
         .map(|snapshot| snapshot.admit(&mut index))
         .collect();
@@ -302,6 +316,18 @@ pub fn drawing(facts: &HostFacts) -> HashSet<u32> {
         .collect()
 }
 
+/// What reading a set of processes found.
+#[derive(Default)]
+pub struct Reads {
+    /// The applications that were read.
+    pub snapshots: Vec<Snapshot>,
+    /// Every process asked for that is on the accessibility bus, read or
+    /// not. One that is on the bus and was not read is an application that
+    /// could not be read, which is a different thing to say about it than
+    /// that it has not joined the bus yet.
+    pub on_the_bus: HashSet<u32>,
+}
+
 /// Read every application on the accessibility bus whose process is one of
 /// `pids`, minting ids from `ids`.
 ///
@@ -310,40 +336,42 @@ pub fn drawing(facts: &HostFacts) -> HashSet<u32> {
 /// Fails only if the accessibility bus itself cannot be reached. An
 /// individual application that cannot be read is reported and skipped: one
 /// misbehaving toolkit must not be able to hide the desktop.
-pub async fn read(pids: &HashSet<u32>, ids: &Ids, facts: &Facts) -> Result<Vec<Snapshot>> {
+pub async fn read(pids: &HashSet<u32>, ids: &Ids, facts: &Facts) -> Result<Reads> {
     let bus = perspicax_atspi::on_the_bus()
         .await
         .context("the accessibility bus could not be reached")?;
-    let mut snapshots = Vec::new();
+    let mut reads = Reads::default();
     let mut skipped = 0;
     for app in bus {
         let Some(pid) = app.bus_pid().filter(|pid| pids.contains(pid)) else {
             skipped += 1;
             continue;
         };
+        reads.on_the_bus.insert(pid);
         let name = app.name().to_owned();
         // By reference, not by name. A desktop can be running two copies of one
         // program -- the test bed was, one of them a leftover -- and resolving
         // by name reads the first twice while never reaching the second.
-        match tokio::time::timeout(PER_APP, snapshot(app, pid, ids, facts)).await {
-            Ok(Ok(snapshot)) => snapshots.push(snapshot),
-            Ok(Err(error)) => tracing::warn!(app = %name, %error, "could not read application"),
-            Err(_) => tracing::warn!(app = %name, "gave up reading application"),
+        match snapshot(app, pid, ids, facts).await {
+            Ok(snapshot) => reads.snapshots.push(snapshot),
+            Err(error) => tracing::warn!(app = %name, "could not read application: {error:#}"),
         }
     }
     if skipped > 0 {
         tracing::debug!(skipped, "applications on the bus that were not asked for");
     }
-    Ok(snapshots)
+    Ok(reads)
 }
 
-/// Read one application's tree, with geometry.
+/// Read one application's tree, with geometry, in about [`PER_APP`] at most.
 async fn snapshot(app: AppRef, pid: u32, ids: &Ids, facts: &Facts) -> Result<Snapshot> {
     let (name, toolkit) = (app.name().to_owned(), app.toolkit().to_owned());
-    let mut ingest = AtspiIngest::attach(app)
-        .await?
+    let mut ingest = tokio::time::timeout(PER_APP, AtspiIngest::attach(app))
+        .await
+        .context("gave up connecting to it")??
         .sharing(ids)
-        .with_geometry(true);
+        .with_geometry(true)
+        .within(PER_APP);
     let root = ingest.root_id();
 
     // The state of the host *before* the read, kept so the reconciliation

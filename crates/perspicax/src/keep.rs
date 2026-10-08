@@ -146,15 +146,15 @@ impl Keeper {
         if due.is_empty() {
             return;
         }
-        let snapshots = match observe::read(&due, &self.ids, &self.facts).await {
-            Ok(snapshots) => snapshots,
+        let reads = match observe::read(&due, &self.ids, &self.facts).await {
+            Ok(reads) => reads,
             Err(error) => {
                 tracing::warn!("{error:#}");
-                Vec::new()
+                observe::Reads::default()
             }
         };
         let mut found = HashSet::new();
-        for snapshot in snapshots {
+        for snapshot in reads.snapshots {
             found.insert(snapshot.pid());
             self.desk.update(|index, _| {
                 let app = snapshot.admit(index);
@@ -167,12 +167,25 @@ impl Keeper {
                 self.apps.push(app);
             });
         }
+        // Either way it is asked about again later, and less often each time.
+        // What differs is what to say: one that is on the bus and was not
+        // read has already said why, in `observe::read`'s warning, and
+        // calling it absent would send whoever reads this log after the
+        // wrong thing -- as it did for #51, whose application was on the bus
+        // throughout.
         let at = millis(self.epoch.elapsed());
         for pid in due.difference(&found) {
-            tracing::debug!(
-                pid,
-                "draws on the host, and is not on the accessibility bus yet"
-            );
+            if reads.on_the_bus.contains(pid) {
+                tracing::debug!(
+                    pid,
+                    "is on the accessibility bus, and could not be read; asking again later"
+                );
+            } else {
+                tracing::debug!(
+                    pid,
+                    "draws on the host, and is not on the accessibility bus yet"
+                );
+            }
             self.arrivals.missed(*pid, at);
         }
     }

@@ -275,6 +275,15 @@ own control and nothing else. A disabled control stays actable, since a press
 on it lands where the agent aimed and `state.disabled` already says it will do
 nothing.
 
+A control its application gives no bounds for is refused as `unplaced`.
+Without a rectangle there is nothing to judge, and unlike `unjudged`, waiting
+does not help while the application stays silent. A Flutter application is
+the case that prompted it: its bridge answers what every control is and never
+where, so its labels can be read and none of its controls acted on. A call an
+application leaves unanswered costs perspicax a deadline of one second, and a
+read stops asking after three, keeping what it has read: one silent call does
+not cost the rest of the tree.
+
 `type` has one refusal of its own. Keys go wherever keyboard focus is, so
 typing is done only while the node's window holds it, and otherwise refused as
 `focus_elsewhere`, naming the surface that does. The agent `focus`es the node

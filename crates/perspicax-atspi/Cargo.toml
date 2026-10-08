@@ -24,7 +24,11 @@ tracing.workspace = true
 [dev-dependencies]
 # Only the tests need a runtime. The crate itself names no executor: it returns
 # futures and lets whoever drives `Ingest` decide what runs them.
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+# `tests/silence.rs` serves an application of its own over a peer-to-peer
+# connection, which needs zbus's own interface macro and its p2p builder.
+# Already in the tree through atspi, at the same version and features.
+zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }
 # The live tests need to *cause* a change, not just observe one. Poking a real
 # widget is the harness playing the part of a user, and it has to reach the bus
 # directly to do it -- going through this crate would be a test that proves

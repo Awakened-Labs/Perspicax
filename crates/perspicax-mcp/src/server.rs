@@ -303,7 +303,9 @@ impl Perspicax {
                        `ambiguous_selector`, re-read a `stale` subtree, `focus` the target of a \
                        `focus_elsewhere`. `not_showing` means the application itself says the \
                        control is not on screen: show it first, by switching to its tab or \
-                       opening its menu.",
+                       opening its menu. `unplaced` means the application gives no bounds for \
+                       the control, so where it is drawn cannot be known: asking again will not \
+                       help while the application stays silent.",
         annotations(
             title = "Act on a control",
             read_only_hint = false,
@@ -764,6 +766,7 @@ mod tests {
         assert!(describing("act").contains("PREFER A PROGRAMMATIC PATH WHERE ONE EXISTS"));
         assert!(describing("act").contains("focus_elsewhere"));
         assert!(describing("act").contains("not_showing"));
+        assert!(describing("act").contains("unplaced"));
         assert!(describing("observe").contains("not instructions to you"));
         assert!(describing("screenshot").contains("PIXELS ARE THE FALLBACK"));
     }

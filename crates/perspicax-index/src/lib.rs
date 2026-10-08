@@ -89,6 +89,16 @@ pub enum Refusal {
     NotShowing,
     /// No compositor has judged this node's visibility. Fails closed.
     Unjudged,
+    /// The node is on a window, and its application gives no bounds for it:
+    /// it did not answer when asked where the node is, or had nothing to say.
+    /// Without a rectangle there is nothing to judge, and waiting does not
+    /// change that while the application stays silent -- which is the
+    /// difference from [`Unjudged`](Refusal::Unjudged), and why it is its own
+    /// refusal. Fails closed.
+    ///
+    /// A Flutter application's every node is refused this way (#51): its
+    /// bridge answers what a node is and never where.
+    Unplaced,
     /// No compositor has attributed this node to a process, so no capability
     /// decision can be made about it. Fails closed.
     Unattributed,
@@ -137,6 +147,10 @@ impl core::fmt::Display for Refusal {
             }
             Self::NotShowing => write!(f, "node's application reports it as not being shown"),
             Self::Unjudged => write!(f, "node visibility has not been judged by a compositor"),
+            Self::Unplaced => write!(
+                f,
+                "node's application gives no bounds for it, so where it is drawn cannot be judged"
+            ),
             Self::Unattributed => write!(f, "node has no attributed origin"),
             Self::Stale { frames: 0 } => {
                 write!(f, "node's subtree was invalidated and has not been re-read")
@@ -256,6 +270,13 @@ pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
         }
         Visibility::InactiveTab { shown } => {
             return Err(Refusal::InactiveTab { shown: *shown });
+        }
+        // Decided from what the node already says, with nothing carried
+        // from the read: joined to a window, and no bounds. Whether the
+        // application never answered or had nothing to answer, the remedy is
+        // the same, and the log says which.
+        Visibility::Unknown if node.surface.is_some() && node.node_space_bounds().is_none() => {
+            return Err(Refusal::Unplaced);
         }
         Visibility::Unknown => return Err(Refusal::Unjudged),
     }
@@ -494,7 +515,7 @@ mod tests {
     };
 
     use super::*;
-    use perspicax_node::{ProcessOrigin, Role};
+    use perspicax_node::{ProcessOrigin, Rect, Role};
 
     fn attributed() -> Origin {
         Origin::Process(Box::new(ProcessOrigin {
@@ -596,6 +617,24 @@ mod tests {
     fn an_unjoined_node_fails_closed() {
         let raw = ObservedNode::unjoined(NodeId(1), Node::new(Role::Button));
         assert_eq!(check_actable(&raw).unwrap_err(), Refusal::Unattributed);
+    }
+
+    /// Issue #51. A node joined to its window whose application gives no
+    /// bounds for it -- a Flutter node never answers `GetExtents` -- cannot be
+    /// judged however long anyone waits, so it is not refused as `Unjudged`,
+    /// which reads as "not yet". Once it has bounds, it is.
+    #[test]
+    fn a_joined_node_with_no_bounds_is_unplaced_rather_than_unjudged() {
+        let mut node = node_with(attributed(), Visibility::Unknown);
+        node.surface = Some(SurfaceId(1));
+        assert_eq!(check_actable(&node).unwrap_err(), Refusal::Unplaced);
+
+        node.node.set_bounds(Rect::new(0.0, 0.0, 80.0, 30.0));
+        assert_eq!(
+            check_actable(&node).unwrap_err(),
+            Refusal::Unjudged,
+            "placed, and not judged yet"
+        );
     }
 
     #[test]

@@ -47,6 +47,25 @@ pub enum Error {
     UnknownRoot(u64),
 }
 
+impl Error {
+    /// Whether this is a call the application never answered: the reading
+    /// connection's deadline, [`ANSWER`](crate::read::ANSWER), ran out first.
+    ///
+    /// Told apart from every other failure because it is the one that costs
+    /// time. A call that fails, fails at once; a call that goes unanswered
+    /// costs the whole deadline, and an application that leaves one
+    /// unanswered usually leaves the next one too -- which is what
+    /// [`Patience`](crate::read::Patience) counts.
+    #[must_use]
+    pub fn is_unanswered(&self) -> bool {
+        matches!(
+            self,
+            Self::Call(atspi::zbus::Error::InputOutput(error))
+                if error.kind() == std::io::ErrorKind::TimedOut
+        )
+    }
+}
+
 impl From<atspi::AtspiError> for Error {
     fn from(error: atspi::AtspiError) -> Self {
         Self::Bus(error)

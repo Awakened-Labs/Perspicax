@@ -216,8 +216,8 @@ impl From<Rect> for Bounds {
 pub struct Refused {
     /// One of `occluded`, `clipped`, `unmapped`, `off_screen`,
     /// `other_workspace`, `inactive_tab`, `not_showing`, `unjudged`,
-    /// `unattributed`, `stale`, `no_capability`, `ambiguous_selector`,
-    /// `not_found`, `not_a_window`, `focus_elsewhere`.
+    /// `unplaced`, `unattributed`, `stale`, `no_capability`,
+    /// `ambiguous_selector`, `not_found`, `not_a_window`, `focus_elsewhere`.
     pub kind: &'static str,
     /// The refusal in words.
     pub message: String,
@@ -257,6 +257,7 @@ impl From<&Refusal> for Refused {
                 Refusal::InactiveTab { .. } => "inactive_tab",
                 Refusal::NotShowing => "not_showing",
                 Refusal::Unjudged => "unjudged",
+                Refusal::Unplaced => "unplaced",
                 Refusal::Unattributed => "unattributed",
                 Refusal::Stale { .. } => "stale",
                 Refusal::NoCapability { .. } => "no_capability",
@@ -942,6 +943,19 @@ mod tests {
             serde_json::to_value(Refused::from(&Refusal::NotShowing)).unwrap(),
             serde_json::json!({"kind": "not_showing",
             "message": "node's application reports it as not being shown"})
+        );
+    }
+
+    /// Issue #51. A node its application will not place is not one that has
+    /// not been judged *yet*, and the wire says so, so that an agent stops
+    /// waiting for a verdict that cannot come.
+    #[test]
+    fn unplaced_goes_on_the_wire_as_its_kind_and_its_message_alone() {
+        assert_eq!(
+            serde_json::to_value(Refused::from(&Refusal::Unplaced)).unwrap(),
+            serde_json::json!({"kind": "unplaced",
+            "message": "node's application gives no bounds for it, \
+                        so where it is drawn cannot be judged"})
         );
     }
 
