@@ -116,7 +116,8 @@ macro_rules! pass_through {
     };
 }
 
-/// Moving a window: it follows the pointer from where it was grabbed.
+/// Moving a window: it follows the pointer from where it was grabbed, and
+/// the edges of screens and panels hold it a while (see `shell::resist`).
 pub(crate) struct MoveGrab {
     start: GrabStartData<Compositor>,
     window: Framed,
@@ -125,6 +126,11 @@ pub(crate) struct MoveGrab {
     /// is, once the pointer has travelled far enough to make the press a
     /// drag. Until then nothing moves, so a click is only a click.
     filled: bool,
+    /// Where this grab last put the window. Anywhere else, and something
+    /// else moved it.
+    last: Point<i32, Logical>,
+    /// [`Compositor::desk_jumps`] as this grab last saw it.
+    jumps: u64,
 }
 
 impl MoveGrab {
@@ -133,12 +139,15 @@ impl MoveGrab {
         window: Framed,
         origin: Point<i32, Logical>,
         filled: bool,
+        jumps: u64,
     ) -> Self {
         Self {
             start,
             window,
             origin,
             filled,
+            last: origin,
+            jumps,
         }
     }
 }
@@ -327,7 +336,19 @@ impl PointerGrab<Compositor> for MoveGrab {
                 self.origin = origin;
             }
         }
-        let to = (self.origin.to_f64() + (event.location - self.start.location)).to_i32_round();
+        let free = (self.origin.to_f64() + (event.location - self.start.location)).to_i32_round();
+        // An edge holds the window against a push, not a jump: the pointer
+        // carried round the desk by a flip, or the window put somewhere new
+        // by anything but this grab, as the restore just above does.
+        let jumped = self.jumps != data.desk_jumps
+            || data.space.element_location(&self.window) != Some(self.last);
+        self.jumps = data.desk_jumps;
+        let to = if jumped {
+            free
+        } else {
+            data.resist(&self.window, free)
+        };
+        self.last = to;
         data.space.map_element(self.window.clone(), to, false);
         // An X client keeps its own idea of where it is, and places its
         // menus from it, so it is told.

@@ -480,7 +480,11 @@ profile, which is Plasma's and Windows' habits:
 `minimal` is Fluxbox's and Enlightenment's: focus follows the pointer, a 2×2
 grid of workspaces that wraps, and resting the pointer against an edge of the
 desk flips to the next one, taking along a window being dragged, as does
-scrolling over the desktop. It does not snap. In both, a fullscreen window
+scrolling over the desktop. A window being moved stops at the edge of a
+screen or a panel until it is pushed 20 pixels further. The pointer itself
+stops at the edge of the desk, so a window grabbed nearer than that to the
+side it is pushed towards, as a titlebar is to the top, stays on screen.
+It does not snap. In both, a fullscreen window
 covers the panels while it is the one in use, and goes back under them when
 another window or a menu takes the keyboard. Every key below is optional and
 overrides the profile one setting at a time. A misspelled key, or a key for a
@@ -535,6 +539,12 @@ scroll = true                  # scroll over the desktop: down and right to the
 [snap]
 drag = true
 threshold = 4                  # pixels from the edge
+
+[resistance]
+edges = 20                     # a window being moved stops at the edge of a
+                               # screen or a panel until pushed this many
+                               # pixels past it; 0 lets it straight through
+seams = 0                      # the same where two monitors meet
 
 [decorations]
 mode = "server"                # draw titlebars for clients that ask; "client"
@@ -601,7 +611,8 @@ Monitors are placed relative to each other, so the layout survives one being
 unplugged: a monitor beside one that is missing goes to the right of the
 rest, and windows left on a monitor that goes away come onto the nearest one
 that remains. Only the outer edges of the desk flip and snap; between two
-monitors the pointer passes through.
+monitors the pointer passes through, and so does a window being moved unless
+`[resistance] seams` holds it there.
 
 None of that needs a second monitor to try. `--headless --size 2560x1440
 --size 1920x1080` runs two virtual ones, which is what the live tests in

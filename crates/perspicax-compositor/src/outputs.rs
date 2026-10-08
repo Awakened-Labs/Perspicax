@@ -27,6 +27,9 @@ impl Compositor {
     /// the output it is on, and rescue every window that is on none.
     pub(crate) fn arrange_outputs(&mut self) {
         let placements = self.backend.placements();
+        // The pointer is put back on a monitor at its next motion, wherever
+        // that is now: a jump, to a window being moved.
+        self.desk_jumps = self.desk_jumps.wrapping_add(1);
 
         // Which output each window is on, before anything moves, and where
         // that output was. A window on an output that has just been unplugged
