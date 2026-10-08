@@ -529,7 +529,8 @@ wrap = true
 edge = true                    # rest the pointer on an outer edge of the desk
 delay-ms = 300
 while-dragging = true          # and take the window being dragged along
-scroll = true                  # scroll over the desktop
+scroll = true                  # scroll over the desktop: down and right to the
+                               # next one; see Mouse to turn it round
 
 [snap]
 drag = true
@@ -943,8 +944,6 @@ in four tables, by where the pointer is:
 [mouse.desktop]                # the empty desktop: no window, no panel
 "Mouse8" = "previous-workspace"
 "Mouse9" = "next-workspace"    # both in reading order, as scroll flipping goes
-"WheelUp" = "next-workspace"   # a binding comes before scroll flipping
-"WheelDown" = "previous-workspace"
 "Mouse2" = "root-menu"
 
 [mouse.titlebar]               # a window's title, or its tabs
@@ -977,6 +976,24 @@ wheel, and `Mouse8` on the thumb buttons and beyond. The wheel is `WheelUp`,
 a touchpad's 60 pixels counting as one. Modifiers come first, as in `[keys]`,
 and `Double+` makes a double-click within `double-click-ms`; its first click is
 a click like any other.
+
+Scroll flipping goes down and right to the next workspace, as Fluxbox does out
+of the box. To turn it round, as a Fluxbox `keys` file with
+`OnDesktop Mouse4 :NextWorkspace` does, bind the wheel over the desktop all
+four ways:
+
+```toml
+[mouse.desktop]
+"Mouse4" = "next-workspace"    # WheelUp
+"Mouse5" = "previous-workspace"
+"WheelLeft" = "next-workspace" # sideways goes as up and down do
+"WheelRight" = "previous-workspace"
+```
+
+A way left unbound is still scroll flipping's, so a tilt wheel or a sideways
+swipe would go against the wheel. A binding goes by the direction libinput
+reports, so with `natural-scroll = true`, `WheelUp` is scrolling up as
+applications see it.
 
 To find a button's name, run `sudo libinput debug-events` and press it:
 

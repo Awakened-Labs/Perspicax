@@ -25,7 +25,9 @@ pub struct Flipping {
     /// Off, a drag never flips.
     pub while_dragging: bool,
     /// Scrolling over the desktop (no window under the pointer) flips: down
-    /// and right to the next workspace, up and left to the previous.
+    /// and right to the next workspace, up and left to the previous. A
+    /// desktop wheel binding ([`crate::MouseBindings`]) comes first, and is
+    /// how a person turns it round.
     pub scroll: bool,
 }
 
