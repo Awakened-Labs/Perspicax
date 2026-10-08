@@ -2170,6 +2170,39 @@ mod tests {
     }
 
     #[test]
+    fn the_wheel_flips_the_other_way_with_a_fluxbox_keys_files_own_lines() {
+        // `OnDesktop Mouse4 :NextWorkspace`, and so on round the wheel.
+        let config = parse(
+            r#"
+            profile = "minimal"
+
+            [mouse.desktop]
+            "Mouse4" = "next-workspace"
+            "Mouse5" = "previous-workspace"
+            "WheelLeft" = "next-workspace"
+            "WheelRight" = "previous-workspace"
+            "#,
+            SEAT,
+        )
+        .unwrap();
+        let turned = |wheel| {
+            config
+                .mouse
+                .resolve(Context::Desktop, Mods::default(), Gesture::Wheel(wheel))
+        };
+        let next = Some(&Action::CycleWorkspace { forward: true });
+        let previous = Some(&Action::CycleWorkspace { forward: false });
+        assert_eq!(turned(perspicax_policy::Wheel::Up), next);
+        assert_eq!(turned(perspicax_policy::Wheel::Left), next);
+        assert_eq!(turned(perspicax_policy::Wheel::Down), previous);
+        assert_eq!(turned(perspicax_policy::Wheel::Right), previous);
+        assert!(
+            config.flipping.scroll,
+            "the profile's, untouched: the bindings come before it"
+        );
+    }
+
+    #[test]
     fn a_flip_delay_of_minutes_is_refused() {
         let error = parse("[workspaces.flip]\ndelay-ms = 600000", SEAT).unwrap_err();
         assert!(

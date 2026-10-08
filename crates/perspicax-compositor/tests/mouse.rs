@@ -5,10 +5,11 @@
 //! over a window is still the window's: a thumb button that flips
 //! workspaces over the wallpaper is Back in a browser. A press a binding
 //! takes is never seen by a client, and neither is its release. A
-//! double-click binding waits for the second click; the wheel steps once a
-//! notch; and per output, a binding acts on the monitor under the pointer,
-//! not the focused window's. An agent's click or scroll on the very same
-//! spot sets nothing off.
+//! double-click binding waits for the second click. The wheel steps once a
+//! notch, and bound all the way round it flips the other way from scroll
+//! flipping, up and left forward. Per output, a binding acts on the monitor
+//! under the pointer, not the focused window's. An agent's click or scroll
+//! on the very same spot sets nothing off.
 //!
 //! The person's hand is [`Command::Click`] and [`Command::Scroll`], which
 //! find what is under the pointer from the clients' buffers, so this needs
@@ -235,6 +236,59 @@ fn a_wheel_binding_steps_once_a_notch_and_leaves_the_wheel_to_a_window() {
     until(&mut queue, &mut desk, |desk| {
         desk.active_workspaces() == ["4"]
     });
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn wheel_bindings_turn_flipping_round_up_and_left_to_the_next_workspace() {
+    let session = session("mouse-wheel-round");
+    let (mut desk, mut queue, _qh) = with_window(&session);
+    let previous = Action::CycleWorkspace { forward: false };
+    let turned = [
+        (Wheel::Up, NEXT),
+        (Wheel::Left, NEXT),
+        (Wheel::Down, previous.clone()),
+        (Wheel::Right, previous),
+    ]
+    .into_iter()
+    .fold(MouseBindings::default(), |bindings, (wheel, action)| {
+        bindings.bind(
+            Context::Desktop,
+            MouseChord {
+                mods: Mods::default(),
+                gesture: Gesture::Wheel(wheel),
+            },
+            action,
+        )
+    });
+    session.command(Command::MouseBindings(turned));
+    let turn = |at, v120| {
+        session.command(Command::Scroll {
+            at,
+            v120,
+            mods: Mods::default(),
+        });
+    };
+
+    // Over the window the wheel is the window's, whichever way it turns.
+    turn(centre_of_first(&session), (0, -120));
+    until(&mut queue, &mut desk, |desk| desk.scrolls > 0);
+    assert_eq!(desk.active_workspaces(), ["1"]);
+
+    let spot = beside_first(&session);
+    for (v120, shown) in [
+        ((0, -120), "2"),
+        ((-120, 0), "3"),
+        ((0, 120), "2"),
+        ((120, 0), "1"),
+    ] {
+        turn(spot, v120);
+        until(&mut queue, &mut desk, |desk| {
+            desk.active_workspaces() == [shown]
+        });
+    }
 
     session.stop((desk, queue));
 }

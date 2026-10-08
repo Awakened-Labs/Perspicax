@@ -634,7 +634,8 @@ fn arm_dwell(session: &mut super::Session, now: u64) {
 /// A scroll over the desktop, with scroll flipping on: step the workspace
 /// under the pointer once per notch, down and right forward, up and left
 /// back. Returns whether the scroll was the compositor's, in which case no
-/// client hears of it.
+/// client hears of it. A `[mouse]` wheel binding is looked for first, so
+/// binding the wheel over the desktop turns this round.
 fn scroll_flips(
     state: &mut Compositor,
     event: &impl PointerAxisEvent<LibinputInputBackend>,
