@@ -412,7 +412,7 @@ pub trait HostView {
     /// Who owns this surface. From the client's credentials, never its claims.
     fn origin(&self, surface: SurfaceId) -> Origin;
 
-    /// Whether a window-relative rect on this surface can actually be seen,
+    /// Whether a window-space rect on this surface can actually be seen,
     /// accounting for z-order, the opaque regions of everything above it, and
     /// whether the surface is mapped at all.
     fn visibility(&self, surface: SurfaceId, rect: Rect) -> Visibility;
@@ -451,7 +451,12 @@ pub trait HostView {
 /// keeps focus and grabs honest, so the two vocabularies stay separate.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
-    /// Move the pointer to a point and click it.
+    /// Move the pointer to the centre of `at` and click it.
+    ///
+    /// `at` is in window space, relative to the window geometry's origin and
+    /// never to a toolkit's own: the index has already measured the
+    /// difference ([`Index::window_bounds`]), and a host that corrected it
+    /// again would put the click a shadow's width away.
     Click { at: Rect, button: PointerButton },
     /// Type text through the seat's keyboard, xkb-mapped, into this surface's
     /// window.
@@ -463,7 +468,7 @@ pub enum Action {
     /// no target of its own, so typing regardless would deliver to whatever
     /// holds focus.
     Type { text: String },
-    /// Scroll at a point.
+    /// Scroll at the centre of `at`, in window space like a click's.
     Scroll { at: Rect, dx: f64, dy: f64 },
     /// Give this surface keyboard focus.
     Focus,

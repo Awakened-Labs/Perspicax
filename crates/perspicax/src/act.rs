@@ -112,8 +112,11 @@ pub fn act(
     // rectangle. These two are therefore unreachable rather than defensive --
     // but they fail closed rather than unwrapping, because "unreachable" is a
     // claim about today's `check_actable` and this is the act path.
+    // In window space, which is what the gate judged, what the compositor
+    // aims at and what the damage witness below looks for. One rect for all
+    // three, so they cannot disagree about where the target is.
     let surface = node.surface.ok_or(Refusal::Unattributed)?;
-    let rect = node.bounds().ok_or(Refusal::Unjudged)?;
+    let rect = index.window_bounds(id).ok_or(Refusal::Unjudged)?;
     let origin = node.origin.clone();
 
     // Marked before the act, never after. See the module docs.

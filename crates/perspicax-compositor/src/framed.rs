@@ -11,8 +11,9 @@
 //!
 //! [`SpaceElement::geometry`] passes straight through. Every
 //! `element_location` in this crate therefore keeps meaning the origin of the
-//! client's window geometry, which is what accessibility rectangles are
-//! relative to. The agent's click aiming in [`crate::act`] relies on that.
+//! client's window geometry, which is window space's origin: where the index
+//! puts every accessible rectangle, whatever origin its toolkit measured it
+//! from. The agent's click aiming in [`crate::act`] relies on that.
 //! A frame that moved the location would land every agent click one title
 //! height off, and the receipt would still say it hit. Only [`bbox`] and the
 //! input region grow to take in the frame.

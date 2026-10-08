@@ -106,8 +106,8 @@ pub struct RawNode {
     pub label: String,
     /// The accessible's longer description.
     pub description: String,
-    /// Window-relative bounds, present only when geometry was asked for --
-    /// it costs a round trip per node on both toolkits. See [`extents`].
+    /// Bounds in node space, present only when geometry was asked for -- it
+    /// costs a round trip per node on both toolkits. See [`extents`].
     pub bounds: Option<Rect>,
     /// How many children the application *says* this node has.
     ///
@@ -523,7 +523,8 @@ pub async fn accessible<'a>(
         .await?)
 }
 
-/// One node's window-relative bounds, or `None` if it does not have any.
+/// One node's bounds in node space -- window-relative, from whichever origin
+/// its toolkit calls the window's -- or `None` if it does not have any.
 ///
 /// Separate from the tree read, and separately measured, because **no bulk
 /// geometry API exists on either toolkit**. `Cache.GetItems` carries role,
@@ -549,7 +550,9 @@ pub async fn accessible<'a>(
 /// So `Screen` is not merely unavailable under Wayland, it is unreliable
 /// everywhere -- and unreliable in the shape that matters, since a plausible
 /// wrong box is what makes a system click in the wrong place. Only a
-/// `HostView` turns window-relative bounds into anything global.
+/// `HostView` turns window-relative bounds into anything global, once the
+/// index has measured which origin "window" meant: see
+/// `perspicax_index::Index::window_origin`.
 pub async fn extents(connection: &Connection, key: &ObjectKey) -> Option<Rect> {
     let proxy = ComponentProxy::builder(connection)
         .destination(key.bus().to_owned())

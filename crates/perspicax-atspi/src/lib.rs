@@ -14,7 +14,10 @@
 //!   application offers it, and invalidate from signals otherwise.
 //! - **Never trust its coordinates as global.** A Wayland client cannot know
 //!   its own position on screen, so `Component.GetExtents` is window-relative
-//!   at best. Only a [`HostView`] turns bounds into anything global.
+//!   at best, and relative to whatever the toolkit calls its window: GTK and
+//!   Qt the window geometry, Firefox its buffer, shadow included. These are
+//!   *node space*. The index measures where each window begins in it, and
+//!   only a [`HostView`] turns bounds into anything global.
 //!
 //! # What this crate refuses to conclude
 //!

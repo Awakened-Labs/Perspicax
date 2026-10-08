@@ -56,7 +56,7 @@ use perspicax_index::{
     Change, Finding, HostFacts, Index, Ingest as _, Join, SurfaceClaim, SurfaceFacts, Tally,
     WindowClaim, join,
 };
-use perspicax_node::{NodeId, ObservedNode, Origin, Role, SurfaceId};
+use perspicax_node::{NodeId, ObservedNode, Origin, Role, SurfaceId, Vec2};
 
 /// How long one application gets to be read before it is given up on.
 ///
@@ -202,6 +202,26 @@ impl Snapshot {
         };
         app.relink(index, &self.before);
         for join in &app.joins {
+            // Where the toolkit's coordinates begin, once per window read: a
+            // toolkit with a convention nobody has measured yet shows up here
+            // as a number, and not as clicks beside their targets.
+            match index.window_origin(join.surface) {
+                Some(origin) => tracing::info!(
+                    app = app.name,
+                    window = join.node.0,
+                    surface = join.surface.0,
+                    x = origin.x,
+                    y = origin.y,
+                    "the window begins here in its own coordinates"
+                ),
+                None => tracing::warn!(
+                    app = app.name,
+                    window = join.node.0,
+                    surface = join.surface.0,
+                    "the window node reports no extents, so nothing on the \
+                     window can be placed and every node on it is refused"
+                ),
+            }
             // Credited with the generation the surface was at when the read
             // STARTED. A GTK tree takes tens of milliseconds at best, during
             // which that application repaints its window perhaps twice;
@@ -405,29 +425,32 @@ pub fn report(reading: &Reading, host: &HostFacts) {
                     .join(", ")
             );
 
-            // The measurement M2 owes: node space against the window geometry
-            // the host placed. A bridge whose window node reports its own
-            // extents as `0,0 -> w,h` is measuring from the same origin the
-            // compositor calls the window's, and `node_space_offset` is
-            // genuinely zero. Anything else is the shadow margin, and printing
-            // both is how that stops being a guess.
-            let node_bounds = index.get(join.node).and_then(|node| node.bounds());
-            let surface = index.get(join.node).and_then(|node| node.surface);
+            // Where this window's coordinates begin, as its own node says,
+            // beside where the host placed it. The index subtracts the first
+            // from every node on the window (`Index::window_origin`), and
+            // printing all three is how a toolkit with a convention of its own
+            // shows up as a number rather than as clicks beside their targets.
+            let node_bounds = index
+                .get(join.node)
+                .and_then(ObservedNode::node_space_bounds);
+            let facts = host.surface(join.surface);
             println!(
                 "    damage: {} frames",
-                surface
-                    .and_then(|id| host.surface(id))
-                    .map_or(0, |facts| facts.damage_generation),
+                facts.map_or(0, |facts| facts.damage_generation),
             );
             println!(
                 "    node space: {:?}   host geometry: {:?}",
                 node_bounds.map(|b| (b.x0, b.y0, b.x1, b.y1)),
-                surface.and_then(|id| host.surface(id)).map(|facts| (
+                facts.map(|facts| (
                     facts.geometry.x0,
                     facts.geometry.y0,
                     facts.geometry.x1,
                     facts.geometry.y1
                 )),
+            );
+            println!(
+                "    window origin: {}",
+                window_origin(index, join.surface, facts)
             );
         }
         for finding in &app.findings {
@@ -456,13 +479,58 @@ pub fn report(reading: &Reading, host: &HostFacts) {
     );
 }
 
+/// Where a window's coordinates begin in its toolkit's node space, and which
+/// convention that is.
+///
+/// Two are known. GTK and Qt measure from the window geometry, so their
+/// window node is at `(0, 0)`; Firefox measures from its buffer, so its window
+/// node is the shadow's width in, which is the host's `geometry` less its
+/// `buffer_origin`. Anything else, or a window node whose size is not the
+/// geometry's, is named, because the index's rule -- subtract the window
+/// node's origin -- assumes the window node is the window.
+fn window_origin(index: &Index, surface: SurfaceId, facts: Option<&SurfaceFacts>) -> String {
+    let Some(origin) = index.window_origin(surface) else {
+        return "unmeasured: the window node reports no extents, so every node \
+                on it is refused"
+            .to_owned();
+    };
+    let mut said = format!("({}, {})", origin.x, origin.y);
+    let Some(facts) = facts else {
+        return said;
+    };
+    let shadow = facts.geometry.origin() - facts.buffer_origin.to_point();
+    said.push_str(if origin == Vec2::ZERO {
+        ", measured from the window geometry"
+    } else if origin == shadow {
+        ", measured from the buffer: the shadow's width"
+    } else {
+        ", which is neither the window geometry nor the buffer: CHECK THIS TOOLKIT"
+    });
+    let window = index
+        .window_node(surface)
+        .and_then(|node| index.get(node))
+        .and_then(ObservedNode::node_space_bounds);
+    if let Some(window) = window
+        && window.size() != facts.geometry.size()
+    {
+        said.push_str(&format!(
+            "; its size {}x{} is not the geometry's {}x{}",
+            window.width(),
+            window.height(),
+            facts.geometry.width(),
+            facts.geometry.height()
+        ));
+    }
+    said
+}
+
 /// A leaf worth showing: something with a label, a role that is not a
 /// container, and bounds.
 fn sample_node(index: &Index, app: &App) -> Option<NodeId> {
     app.nodes(index).into_iter().find(|id| {
         index.get(*id).is_some_and(|node| {
             node.node.label().is_some()
-                && node.bounds().is_some()
+                && node.node_space_bounds().is_some()
                 && matches!(
                     node.node.role(),
                     Role::Button | Role::CheckBox | Role::Label

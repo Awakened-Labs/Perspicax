@@ -18,30 +18,35 @@
 //!   to re-decide what `Occluded` means. That is the same argument that puts
 //!   the refusal gate in this crate rather than in the MCP server.
 //!
-//! # Three coordinate spaces, and the offset between two of them
+//! # Four coordinate spaces, and who measures the way between them
 //!
-//! - **Node space** is what an accessibility bridge reports: window-relative at
-//!   best, and never global. See
-//!   [`ObservedNode::bounds`](perspicax_node::ObservedNode::bounds).
+//! - **Node space** is what an accessibility bridge reports: window-relative,
+//!   from whatever origin its toolkit calls the window's, and never global.
+//!   See [`ObservedNode::node_space_bounds`](perspicax_node::ObservedNode::node_space_bounds).
+//! - **Window space** is relative to the origin of the window geometry the
+//!   host placed: the visible frame, inside any client-side shadow. Every
+//!   toolkit's node space is brought into it, and it is what a verdict, an
+//!   act and a receipt are computed in.
 //! - **Surface space** is what the Wayland protocol delivers regions in: an
-//!   opaque region's rectangles are surface-local.
+//!   opaque region's rectangles and a commit's damage are surface-local.
 //! - **Global space** is the host's own, and the only one in which two windows
 //!   can be compared at all.
 //!
-//! [`SurfaceFacts::geometry`] places a surface in global space, and
-//! [`SurfaceFacts::node_space_offset`] is the correction between node space and
-//! that origin.
+//! [`SurfaceFacts::geometry`] places window space in global space, and
+//! [`SurfaceFacts::buffer_origin`] places surface space. Both are the host's
+//! to say, because the host placed them.
 //!
-//! **Measured 2026-09-04 against GTK 4.18.6 and Qt 6.8.2, both under
-//! client-side decoration: it is zero for both.** Each bridge reports its
-//! window node's own extents as starting at `0,0`, and GTK's reported size
-//! (1666x881) is exactly the window geometry this compositor placed
-//! (`32,32 -> 1698,913`). So a bridge measures from the same origin the host
-//! calls the window's, and *not* from the buffer, which under decoration starts
-//! outside it by the shadow margin. The field stays, because "both toolkits we
-//! have tried" is not "every toolkit", and because a host that has not checked
-//! should be able to say zero and mean "unmeasured" rather than "measured
-//! zero".
+//! The way from node space to window space is *not* the host's to say, and
+//! this crate measures it from the join: the window node's own extents
+//! origin, which [`Index::window_origin`](crate::Index::window_origin)
+//! subtracts. **It is zero for GTK 4.18.6 and Qt 6.8.2** (measured 2026-09-04,
+//! both under client-side decoration: each window node starts at `0,0`, and
+//! GTK's reported size, 1666x881, is exactly the geometry this compositor
+//! placed, `32,32 -> 1698,913`). **It is the shadow for Firefox 148**, which
+//! measures from its buffer: its window node starts at `(26, 23)`, and a
+//! click aimed as though it were zero landed beside every button it was
+//! sent to (issue #45). A host cannot tell which convention a toolkit uses;
+//! the toolkit's own window node can.
 //!
 //! # The occlusion policy, stated once
 //!
@@ -145,11 +150,9 @@ pub struct SurfaceFacts {
     /// Whether it is on screen at all. An unmapped surface is a closed menu or
     /// a hidden window, and nothing on it can be seen or acted on.
     pub mapped: bool,
-    /// Where the surface sits in global space, as the host places it.
+    /// Where the surface sits in global space, as the host places it: the
+    /// window geometry, which is window space's origin.
     pub geometry: Rect,
-    /// Node space's origin, relative to `geometry`'s origin. See the module
-    /// documentation; zero means "unmeasured", which is also usually correct.
-    pub node_space_offset: Vec2,
     /// Where surface-local `(0, 0)` sits in global space.
     ///
     /// Usually `geometry`'s own origin and *not* under client-side decoration,
@@ -242,15 +245,14 @@ pub struct SurfaceFacts {
 
 impl SurfaceFacts {
     /// A mapped surface at `geometry`, with nothing else claimed about it: no
-    /// declared opacity, no node-space correction, no attributed origin, and no
-    /// damage. Every builder below moves one of those away from its default.
+    /// declared opacity, no shadow, no attributed origin, and no damage. Every
+    /// builder below moves one of those away from its default.
     #[must_use]
     pub fn new(id: SurfaceId, geometry: Rect) -> Self {
         Self {
             id,
             mapped: true,
             geometry,
-            node_space_offset: Vec2::ZERO,
             buffer_origin: Vec2::new(geometry.x0, geometry.y0),
             opaque: None,
             origin: Origin::Unattributed,
@@ -381,13 +383,6 @@ impl SurfaceFacts {
         self
     }
 
-    /// The same surface, with node space offset from `geometry`'s origin.
-    #[must_use]
-    pub fn with_node_space_offset(mut self, offset: Vec2) -> Self {
-        self.node_space_offset = offset;
-        self
-    }
-
     /// The same surface, with surface-local `(0, 0)` somewhere other than the
     /// window geometry's own origin -- which is what client-side decoration
     /// does.
@@ -441,15 +436,17 @@ impl SurfaceFacts {
         }
     }
 
-    /// A node-space rect, in global space.
+    /// A window-space rect, in global space.
+    ///
+    /// Window space, not node space: a node's bounds come here through
+    /// [`Index::window_bounds`](crate::Index::window_bounds), which has
+    /// already measured where its toolkit's origin is.
     #[must_use]
     pub fn to_global(&self, rect: Rect) -> Rect {
-        let dx = self.geometry.x0 + self.node_space_offset.x;
-        let dy = self.geometry.y0 + self.node_space_offset.y;
-        Rect::new(rect.x0 + dx, rect.y0 + dy, rect.x1 + dx, rect.y1 + dy)
+        rect + self.geometry.origin().to_vec2()
     }
 
-    /// Whether damage newer than `reconciled` landed on a window-relative rect.
+    /// Whether damage newer than `reconciled` landed on a window-space rect.
     ///
     /// The region scoping is the whole point and it is what only a compositor
     /// can do. "This surface changed" is nearly always true -- an idle
@@ -483,10 +480,10 @@ impl SurfaceFacts {
             .any(|region| overlaps(self.surface_local_to_global(*region), covered))
     }
 
-    /// A surface-local region, in global space. Regions are *not* subject to
-    /// `node_space_offset`: that offset corrects an accessibility bridge's idea
-    /// of an origin, and the Wayland protocol does not share it. They are
-    /// subject to `buffer_origin`, which is the protocol's own.
+    /// A surface-local region, in global space. Regions are placed from
+    /// `buffer_origin`, which is the protocol's own origin, and not from
+    /// `geometry`'s, which under client-side decoration is the shadow's width
+    /// inside it.
     fn surface_local_to_global(&self, region: Rect) -> Rect {
         let (dx, dy) = (self.buffer_origin.x, self.buffer_origin.y);
         Rect::new(
@@ -719,7 +716,8 @@ fn contains(outer: Rect, inner: Rect) -> bool {
 /// Exists so that a policy can be *watched*. Two ratios carry the information:
 /// `unproven` against `occluded`, which is the share of refusals resting on a
 /// client having declared nothing, and `unjudged`, which should be zero once a
-/// host is joined and is a bug in the join when it is not.
+/// host is joined. When it is not, either the join has a bug or a bridge left
+/// a window with no extents to measure from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Tally {
     /// Nodes judged in this pass.
@@ -736,8 +734,9 @@ pub struct Tally {
     pub unmapped: usize,
     /// Not wholly on any output.
     pub off_screen: usize,
-    /// Not judged at all: no surface joined, no bounds reported, or a surface
-    /// the host has never heard of.
+    /// Not judged at all: no surface joined, no bounds reported, a window
+    /// whose own node reported none to measure from, or a surface the host
+    /// has never heard of.
     pub unjudged: usize,
 }
 
@@ -1022,25 +1021,6 @@ mod tests {
         assert_eq!(verdict(&facts).visibility, Visibility::Visible);
     }
 
-    /// Node space and the host's idea of a window origin need not agree, and
-    /// under client-side decoration they do not. The offset is what a host
-    /// supplies once it has measured the difference.
-    #[test]
-    fn node_space_offset_moves_the_node_and_nothing_else() {
-        let shifted = window().with_node_space_offset(Vec2::new(37.0, 51.0));
-        assert_eq!(
-            shifted.to_global(BUTTON),
-            rect(137.0, 151.0, 237.0, 191.0),
-            "a node-space rect is displaced by the offset"
-        );
-        assert_eq!(
-            shifted.surface_local_to_global(rect(0.0, 0.0, 10.0, 10.0)),
-            rect(0.0, 0.0, 10.0, 10.0),
-            "a surface-local region is not: the Wayland protocol does not \
-             share an accessibility bridge's idea of an origin"
-        );
-    }
-
     /// A window that is not at the origin is where a coordinate mistake would
     /// actually show up, so the arithmetic gets its own test rather than being
     /// implied by the ones above.
@@ -1083,7 +1063,7 @@ mod tests {
         assert_eq!(
             decorated.to_global(rect(0.0, 0.0, 10.0, 10.0)),
             rect(100.0, 100.0, 110.0, 110.0),
-            "a node is placed from the window geometry's origin"
+            "a window-space rect is placed from the window geometry's origin"
         );
     }
 

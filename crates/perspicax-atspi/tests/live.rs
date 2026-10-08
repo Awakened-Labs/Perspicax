@@ -167,7 +167,7 @@ async fn geometry_is_opt_in_and_produces_boxes() {
 
     let boxed: Vec<_> = nodes
         .iter()
-        .filter_map(perspicax_node::ObservedNode::bounds)
+        .filter_map(perspicax_node::ObservedNode::node_space_bounds)
         .collect();
     assert!(!boxed.is_empty(), "no node reported extents");
     for rect in &boxed {

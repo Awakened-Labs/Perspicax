@@ -148,6 +148,16 @@ where it is. GTK answers `Screen` with coordinates that contradict its own
 `10,57`. This crate therefore only ever asks for `Window`, and only a compositor
 may turn those into anything global.
 
+**`Window` is not one origin either.** GTK and Qt measure from the window
+geometry, the frame a person sees, and report their window node at `0,0`.
+Firefox measures from its buffer, client-side shadow included, and reports its
+window node at the shadow's width: `26,23` on the first seat it was tried on,
+where every agent click on Firefox landed that far from its target while the
+receipt said `on_target` (#45). A compositor cannot tell which convention a
+toolkit uses, and the toolkit's own window node can. So the index measures
+each window from its window node's origin, and refuses every node of a window
+whose node reports no extents to measure from.
+
 Geometry is a separate row because no bulk API exists for it on either toolkit:
 `Cache.GetItems` carries roles, names, states and parentage and no extents at
 all, so bounds are a round trip per node even on the fast path.

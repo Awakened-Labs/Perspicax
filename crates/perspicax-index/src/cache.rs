@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use perspicax_node::{NodeId, ObservedNode, Origin, Rect, SurfaceId, Visibility};
+use perspicax_node::{NodeId, ObservedNode, Origin, Rect, SurfaceId, Vec2, Visibility};
 
 use crate::{
     Change, Consent, Refusal, check_actable,
@@ -43,6 +43,11 @@ pub struct Index {
     /// surface absent from here has never been reconciled, which is generation
     /// zero and therefore behind everything.
     reconciled: HashMap<SurfaceId, u64>,
+    /// Each surface's window node: the root of the subtree a join bound to it,
+    /// whose own extents say where that window is in its bridge's node space.
+    /// Believed only while that node is still joined to the surface; see
+    /// [`Index::window_node`].
+    windows: HashMap<SurfaceId, NodeId>,
     /// Nodes that cannot be trusted, and how many frames of surface damage
     /// each one owes. Zero is a real value and the common one: an
     /// accessibility-side invalidation says the tree changed shape, which is
@@ -164,6 +169,8 @@ impl Index {
             self.parents.remove(&id);
             self.stale.remove(&id);
         }
+        let nodes = &self.nodes;
+        self.windows.retain(|_, window| nodes.contains_key(window));
     }
 
     /// Mark a subtree as no longer trustworthy.
@@ -326,22 +333,31 @@ impl Index {
     /// that quietly implied `Visible` would be the whole failure of this
     /// project in one line. [`Index::judge`] is what answers that, against
     /// facts, and a node between the two calls is `Unknown` and refused.
-    pub fn join(&mut self, id: NodeId, surface: SurfaceId, origin: &Origin) {
+    ///
+    /// Private, so that every attribution goes through
+    /// [`Index::join_subtree`] and names the window it is measured from.
+    fn join(&mut self, id: NodeId, surface: SurfaceId, origin: &Origin) {
         if let Some(node) = self.nodes.get_mut(&id) {
             node.surface = Some(surface);
             node.origin = origin.clone();
         }
     }
 
-    /// Attribute a node and everything beneath it, and say how many were
-    /// attributed.
+    /// Attribute a window -- a node and everything beneath it -- to a surface,
+    /// and say how many nodes were attributed.
     ///
     /// The natural unit: an accessibility bridge reports one tree per window,
     /// and every node in it was drawn on that window's surface. The exception
     /// is a menu or a combo popup, which is its own surface while its
     /// accessible nodes hang off the toplevel -- so a caller that has resolved
     /// a popup joins it separately rather than letting this walk cover it.
+    ///
+    /// `root` becomes the surface's window node, the one its subtree's
+    /// coordinates are measured from: see [`Index::window_origin`].
     pub fn join_subtree(&mut self, root: NodeId, surface: SurfaceId, origin: &Origin) -> usize {
+        if self.nodes.contains_key(&root) {
+            self.windows.insert(surface, root);
+        }
         let mut joined = 0;
         for id in core::iter::once(root).chain(self.descendants(root)) {
             if self.nodes.contains_key(&id) {
@@ -350,6 +366,68 @@ impl Index {
             }
         }
         joined
+    }
+
+    /// The node a join bound to this surface as its window.
+    ///
+    /// Only while it is still joined there. A join is never undone -- a
+    /// re-join binds afresh and leaves an earlier attribution standing -- so a
+    /// window node can be recorded for a surface it has since been bound away
+    /// from, and believing the record then would measure one window from
+    /// another's origin.
+    #[must_use]
+    pub fn window_node(&self, surface: SurfaceId) -> Option<NodeId> {
+        let window = *self.windows.get(&surface)?;
+        self.nodes
+            .get(&window)
+            .filter(|node| node.surface == Some(surface))
+            .map(|_| window)
+    }
+
+    /// Where this surface's window geometry begins in its bridge's node
+    /// space: its window node's own extents origin.
+    ///
+    /// # Measured, because toolkits disagree
+    ///
+    /// AT-SPI's `Window` coordinates are relative to "the window", and
+    /// toolkits do not agree on where a window begins. GTK 4 and Qt 6 measure
+    /// from the xdg window geometry, the visible frame, and report their window
+    /// node at `(0, 0)` (2026-09-04). Firefox 148 measures from its buffer,
+    /// client-side shadow and all, and reports its window node at the shadow's
+    /// width, `(26, 23)` on the first seat it was tried on (issue #45).
+    /// Assuming either convention for every toolkit puts the other's clicks
+    /// beside their target, so neither is assumed: each window says where it
+    /// is in its own coordinates, and that is subtracted.
+    ///
+    /// Read from the cached tree on every call rather than kept, so it is
+    /// always as current as the nodes it corrects: the window node and its
+    /// descendants were read together, and a cache behind the screen is behind
+    /// it consistently. A change of this origin alone -- a maximized Firefox
+    /// drops its shadow -- moves every node of the window while only the
+    /// window node is reported [`Delta::Updated`].
+    ///
+    /// `None`, failing closed, when the surface has no window node or its
+    /// window node reports no extents with any area: there is nothing to
+    /// measure from, and guessing is how #45 happened.
+    #[must_use]
+    pub fn window_origin(&self, surface: SurfaceId) -> Option<Vec2> {
+        let bounds = self.get(self.window_node(surface)?)?.node_space_bounds()?;
+        (!bounds.is_empty()).then(|| bounds.origin().to_vec2())
+    }
+
+    /// A node's bounds in **window space**: relative to the origin of its
+    /// window's geometry, whatever origin its toolkit measures from.
+    ///
+    /// The one space every toolkit is brought into, and the one everything
+    /// downstream of the index uses: the visibility verdict, the rect an act
+    /// is aimed at, the receipt's damage witness and what an agent is shown.
+    /// `None` for a node with no bounds, no surface, or a window with no
+    /// [`window_origin`](Index::window_origin), all of which are refused.
+    #[must_use]
+    pub fn window_bounds(&self, id: NodeId) -> Option<Rect> {
+        let node = self.nodes.get(&id)?;
+        let bounds = node.node_space_bounds()?;
+        Some(bounds - self.window_origin(node.surface?)?)
     }
 
     /// Judge every cached node against a host's published facts, and report
@@ -362,20 +440,32 @@ impl Index {
     /// on a description it distrusts.
     pub fn judge(&mut self, facts: &HostFacts) -> Tally {
         self.consent = facts.consent().clone();
+        // Decided first and written after: a node's window bounds are read
+        // from its window node, which is one of the nodes being written.
+        let verdicts: Vec<(NodeId, Judgement)> = self
+            .nodes
+            .iter()
+            .map(|(id, node)| {
+                let verdict = match (node.surface, self.window_bounds(*id)) {
+                    (Some(surface), Some(rect)) => judge(facts, surface, rect),
+                    // No surface joined, a bridge that reported no extents,
+                    // or a window that reported none to measure them from.
+                    // All are "nobody has judged this", which is what
+                    // `Unknown` means and what the gate refuses.
+                    _ => Judgement {
+                        visibility: Visibility::Unknown,
+                        unproven: false,
+                    },
+                };
+                (*id, verdict)
+            })
+            .collect();
         let mut tally = Tally::default();
-        for node in self.nodes.values_mut() {
-            let verdict = match (node.surface, node.bounds()) {
-                (Some(surface), Some(rect)) => judge(facts, surface, rect),
-                // No surface joined, or a bridge that reported no extents at
-                // all. Both are "nobody has judged this", which is what
-                // `Unknown` means and what the gate refuses.
-                _ => Judgement {
-                    visibility: Visibility::Unknown,
-                    unproven: false,
-                },
-            };
+        for (id, verdict) in verdicts {
             tally.record(&verdict);
-            node.visibility = verdict.visibility;
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.visibility = verdict.visibility;
+            }
         }
         tally
     }
@@ -441,7 +531,7 @@ impl Index {
             let Some(node) = self.nodes.get(&id) else {
                 continue;
             };
-            let (Some(surface_id), Some(bounds)) = (node.surface, node.bounds()) else {
+            let (Some(surface_id), Some(bounds)) = (node.surface, self.window_bounds(id)) else {
                 continue;
             };
             let (Some(region), Some(surface)) =
@@ -850,7 +940,7 @@ mod tests {
 
         let mut index = Index::new();
         index.ingest_snapshot([observed(9, Role::Button, Some("No bounds"), &[])]);
-        index.join(NodeId(9), SurfaceId(1), &origin());
+        index.join_subtree(NodeId(9), SurfaceId(1), &origin());
         let tally = index.judge(&desktop(None));
         assert_eq!(tally.unjudged, 1);
         assert_eq!(index.actable(NodeId(9)).unwrap_err(), Refusal::Unjudged);
@@ -1046,7 +1136,7 @@ mod tests {
         let mut hidden = placed(1, "File", Rect::new(0.0, 0.0, 40.0, 26.0));
         hidden.node.set_hidden();
         index.ingest_snapshot([hidden]);
-        index.join(NodeId(1), SurfaceId(1), &origin());
+        index.join_subtree(NodeId(1), SurfaceId(1), &origin());
         index.judge(&desktop(None).with_consent(Consent::Nobody));
         assert_eq!(index.actable(NodeId(1)).unwrap_err(), Refusal::NotShowing);
     }
@@ -1062,5 +1152,163 @@ mod tests {
         let tally = index.judge(&HostFacts::default());
         assert_eq!(tally.unjudged, 3);
         assert_eq!(index.actable(NodeId(2)).unwrap_err(), Refusal::Unjudged);
+    }
+
+    // --- window space: each window measured from its own node (#45) ---------
+
+    /// Firefox's window as issue #45 measured it on a seat. Firefox measures
+    /// from its buffer, so its window node sits at the shadow's width,
+    /// (26, 23), and the Paint button is where Firefox said, (50, 217), 85x41.
+    /// The host placed the 800x600 window geometry at (753, 51), with the
+    /// buffer starting the shadow's width up and to the left of it.
+    fn firefox() -> Index {
+        let mut frame = Node::new(Role::Window);
+        frame.set_label("issue 33");
+        frame.set_children(vec![NodeId(2)]);
+        frame.set_bounds(Rect::new(26.0, 23.0, 826.0, 623.0));
+        let mut index = Index::new();
+        index.ingest_snapshot([
+            ObservedNode::unjoined(NodeId(1), frame),
+            placed(2, "Paint", Rect::new(50.0, 217.0, 135.0, 258.0)),
+        ]);
+        index.join_subtree(NodeId(1), SurfaceId(1), &origin());
+        index
+    }
+
+    fn firefox_window() -> SurfaceFacts {
+        SurfaceFacts::new(SurfaceId(1), Rect::new(753.0, 51.0, 1553.0, 651.0))
+            .with_buffer_origin(Vec2::new(727.0, 28.0))
+    }
+
+    fn firefox_desktop(above: Option<SurfaceFacts>) -> HostFacts {
+        HostFacts::bottom_to_top([firefox_window()].into_iter().chain(above), 1)
+            .with_consent(Consent::Everyone)
+    }
+
+    /// The screenshot in #45 shows Paint drawn at (24, 194)-(109, 235) in the
+    /// window: where Firefox said, less where Firefox's window begins.
+    #[test]
+    fn a_window_measured_from_its_buffer_is_placed_from_its_own_node() {
+        let index = firefox();
+        assert_eq!(
+            index.window_origin(SurfaceId(1)),
+            Some(Vec2::new(26.0, 23.0))
+        );
+        assert_eq!(
+            index.window_bounds(NodeId(2)),
+            Some(Rect::new(24.0, 194.0, 109.0, 235.0)),
+            "the button where it is drawn"
+        );
+        assert_eq!(
+            index.window_bounds(NodeId(1)),
+            Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+            "and the window node is the window"
+        );
+    }
+
+    /// GTK and Qt measure from the window geometry, and nothing moves.
+    #[test]
+    fn a_window_measured_from_its_geometry_is_unchanged() {
+        let index = joined();
+        assert_eq!(index.window_origin(SurfaceId(1)), Some(Vec2::ZERO));
+        assert_eq!(
+            index.window_bounds(NodeId(3)),
+            index.get(NodeId(3)).unwrap().node_space_bounds()
+        );
+    }
+
+    /// The verdict is reached where the button is drawn. A window over its
+    /// drawn place covers it; one over the place its raw bounds would put it,
+    /// were they read as the window's, does not -- which is the click that
+    /// landed 2.5 px below Paint in #45, judged visible on the wrong spot.
+    #[test]
+    fn a_node_is_judged_where_its_window_drew_it() {
+        // Paint is drawn at (777, 245)-(862, 286) on the desk; raw bounds
+        // read as window space would put it at (803, 268)-(888, 309).
+        let over_drawn = SurfaceFacts::new(SurfaceId(2), Rect::new(770.0, 240.0, 800.0, 265.0));
+        let over_raw = SurfaceFacts::new(SurfaceId(2), Rect::new(870.0, 290.0, 900.0, 320.0));
+
+        let mut index = firefox();
+        index.judge(&firefox_desktop(Some(over_drawn)));
+        assert_eq!(
+            index.actable(NodeId(2)).unwrap_err(),
+            Refusal::Occluded { by: SurfaceId(2) }
+        );
+
+        index.judge(&firefox_desktop(Some(over_raw)));
+        assert!(index.actable(NodeId(2)).is_ok(), "nothing covers Paint");
+    }
+
+    /// Damage arrives surface-local, which for Firefox is its own node space:
+    /// a repaint of Paint is at (50, 217) in the buffer. The receipt's witness
+    /// and `under_damage` both find it on Paint, and not a repaint where the
+    /// raw bounds would have put it.
+    #[test]
+    fn damage_where_the_window_drew_a_node_is_on_that_node() {
+        let index = firefox();
+        let paint = index.window_bounds(NodeId(2)).unwrap();
+
+        let repainted = firefox_window().damaging([(1, Rect::new(50.0, 217.0, 135.0, 258.0))]);
+        assert!(repainted.damage_touches(0, paint), "on target");
+        let facts = HostFacts::bottom_to_top([repainted], 2).with_consent(Consent::Everyone);
+        assert!(index.under_damage(&facts).contains(&NodeId(2)));
+
+        // In the buffer, (140, 262)-(170, 290) is clear of Paint and inside
+        // where its raw bounds, read as window space, would have put it.
+        let beside = firefox_window().damaging([(1, Rect::new(140.0, 262.0, 170.0, 290.0))]);
+        assert!(!beside.damage_touches(0, paint), "not on target");
+        let facts = HostFacts::bottom_to_top([beside], 2).with_consent(Consent::Everyone);
+        assert!(!index.under_damage(&facts).contains(&NodeId(2)));
+    }
+
+    /// A window whose own node says nothing about where it is -- no extents,
+    /// or none with any area -- gives nothing to measure from, so nothing on
+    /// it is placed, judged or acted on. Assuming it measures from the window
+    /// geometry is how every Firefox click came to miss.
+    #[test]
+    fn a_window_whose_own_node_reports_no_extents_is_unjudged_throughout() {
+        for frame_bounds in [None, Some(Rect::new(26.0, 23.0, 26.0, 23.0))] {
+            let mut frame = Node::new(Role::Window);
+            frame.set_children(vec![NodeId(2)]);
+            if let Some(bounds) = frame_bounds {
+                frame.set_bounds(bounds);
+            }
+            let mut index = Index::new();
+            index.ingest_snapshot([
+                ObservedNode::unjoined(NodeId(1), frame),
+                placed(2, "Paint", Rect::new(50.0, 217.0, 135.0, 258.0)),
+            ]);
+            index.join_subtree(NodeId(1), SurfaceId(1), &origin());
+
+            assert_eq!(index.window_origin(SurfaceId(1)), None);
+            assert_eq!(index.window_bounds(NodeId(2)), None);
+            let tally = index.judge(&firefox_desktop(None));
+            assert_eq!(tally.unjudged, 2, "{frame_bounds:?}");
+            assert_eq!(index.actable(NodeId(2)).unwrap_err(), Refusal::Unjudged);
+        }
+    }
+
+    #[test]
+    fn a_removed_window_is_no_longer_measured_from() {
+        let mut index = firefox();
+        index.apply(Change::Removed { id: NodeId(1) });
+        assert_eq!(index.window_origin(SurfaceId(1)), None);
+        assert!(index.windows.is_empty());
+    }
+
+    /// A join is never undone, so a surface can still have a window node
+    /// recorded that has since been bound to another surface. It is not that
+    /// surface's window any more, and is not measured from.
+    #[test]
+    fn a_window_node_joined_away_is_not_its_old_surfaces_window() {
+        let mut index = firefox();
+        index.join_subtree(NodeId(1), SurfaceId(2), &origin());
+        assert_eq!(index.window_node(SurfaceId(1)), None);
+        assert_eq!(index.window_node(SurfaceId(2)), Some(NodeId(1)));
+        assert_eq!(
+            index.window_bounds(NodeId(2)),
+            Some(Rect::new(24.0, 194.0, 109.0, 235.0)),
+            "measured from the window it is joined to now"
+        );
     }
 }
