@@ -205,6 +205,15 @@ pub struct Compositor {
     /// The window being moved with the pointer, while it is: an edge flip
     /// takes it along to the next workspace.
     pub(crate) dragging: Option<Framed>,
+    /// The `[mouse]` bindings in force: the config's on a seat, as of the
+    /// last reload; headless, what [`crate::Command::MouseBindings`] said.
+    pub(crate) mouse: perspicax_policy::MouseBindings,
+    /// The person's presses, for double-clicks and for the releases of
+    /// presses a `[mouse]` binding took. See `crate::mouse`.
+    pub(crate) clicks: perspicax_policy::Clicks,
+    /// The wheel's notches toward a `[mouse]` binding, horizontal then
+    /// vertical, gathered from one scroll event to the next.
+    pub(crate) wheel: [perspicax_policy::Notches; 2],
     /// Where the window being dragged would snap if let go now. See
     /// `shell::snap`.
     pub(crate) snap_preview: Option<shell::SnapPreview>,
@@ -296,6 +305,7 @@ impl Compositor {
         let consent = backend.consent();
         let workspace_shape = backend.workspace_shape();
         let gate = crate::access::Gate::new(backend.access());
+        let mouse = backend.mouse();
         let toplevels = crate::toplevels::Toplevels::new(display, &gate);
         let pager = crate::pager::Pager::new(display, &gate);
         let displays = crate::output_management::Displays::new(display, &gate);
@@ -341,6 +351,9 @@ impl Compositor {
             layout_memory: perspicax_policy::LayoutMemory::default(),
             keymap: crate::Keymap::default(),
             dragging: None,
+            mouse,
+            clicks: perspicax_policy::Clicks::default(),
+            wheel: Default::default(),
             snap_preview: None,
             #[cfg(feature = "seat")]
             tab_drop: None,

@@ -38,7 +38,7 @@ use smithay::{
 };
 
 use perspicax_index::Consent;
-use perspicax_policy::{Access, Place, Shape};
+use perspicax_policy::{Access, MouseBindings, Place, Shape};
 
 use crate::{Config, Error, FRAME_INTERVAL, state::Compositor};
 
@@ -247,6 +247,36 @@ impl Running {
             Self::Headless { .. } => perspicax_policy::Decorations::default(),
             #[cfg(feature = "seat")]
             Self::Seat(session) => session.settings.decorations,
+        }
+    }
+
+    /// The focus policy: the person's `[focus]` on a seat. Headless has
+    /// none, for nobody points at anything there.
+    pub(crate) fn focus(&self) -> Option<perspicax_policy::Focus> {
+        match self {
+            Self::Headless { .. } => None,
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => Some(session.settings.focus),
+        }
+    }
+
+    /// What the mouse's buttons and wheel are bound to when the compositor
+    /// starts: the person's `[mouse]` on a seat, and nothing headless.
+    pub(crate) fn mouse(&self) -> MouseBindings {
+        match self {
+            Self::Headless { .. } => MouseBindings::default(),
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.settings.mouse.clone(),
+        }
+    }
+
+    /// How soon, in milliseconds, a second click makes a double-click: the
+    /// person's `double-click-ms` on a seat.
+    pub(crate) fn double_click_ms(&self) -> u32 {
+        match self {
+            Self::Headless { .. } => perspicax_policy::DOUBLE_CLICK_MS,
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.settings.pointer.double_click_ms,
         }
     }
 
@@ -469,6 +499,13 @@ impl Compositor {
             }
             crate::Command::LayoutSwitching(switching) => {
                 self.layout_memory.set_switching(*switching);
+            }
+            crate::Command::MouseBindings(bindings) => self.mouse = bindings.clone(),
+            crate::Command::Click { at, button, mods } => {
+                self.stand_in_click(*at, *button, *mods);
+            }
+            crate::Command::Scroll { at, v120, mods } => {
+                self.stand_in_scroll(*at, *v120, *mods);
             }
         }
     }

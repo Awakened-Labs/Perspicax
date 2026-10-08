@@ -27,6 +27,7 @@ use std::{collections::HashMap, time::Instant};
 
 use perspicax_index::{Action, PointerButton};
 use perspicax_node::{Rect, SurfaceId};
+use perspicax_policy::Button;
 use smithay::{
     backend::input::{Axis, AxisSource, ButtonState, KeyState},
     desktop::LayerSurface,
@@ -54,12 +55,6 @@ struct Aim {
     origin: (f64, f64),
     surface: WlSurface,
 }
-
-/// Linux button codes, from `linux/input-event-codes.h`. Wayland carries these
-/// verbatim rather than an enum of its own, so the numbers are the protocol.
-const BTN_LEFT: u32 = 0x110;
-const BTN_RIGHT: u32 = 0x111;
-const BTN_MIDDLE: u32 = 0x112;
 
 /// Why an action could not be dispatched.
 ///
@@ -435,11 +430,14 @@ impl Compositor {
         #[cfg(feature = "capture")]
         self.flush_screencopy_for_pointer();
 
+        // Wayland carries Linux's button codes verbatim rather than an enum of
+        // its own, so the numbers are the protocol.
         let code = match button {
-            PointerButton::Left => BTN_LEFT,
-            PointerButton::Middle => BTN_MIDDLE,
-            PointerButton::Right => BTN_RIGHT,
-        };
+            PointerButton::Left => Button::Left,
+            PointerButton::Middle => Button::Middle,
+            PointerButton::Right => Button::Right,
+        }
+        .code();
         for state in [ButtonState::Pressed, ButtonState::Released] {
             pointer.button(
                 self,
@@ -651,7 +649,7 @@ impl Compositor {
 
     /// Milliseconds since this compositor started, which is the clock every
     /// other event it sends is stamped with.
-    fn now_ms(&self) -> u32 {
+    pub(crate) fn now_ms(&self) -> u32 {
         u32::try_from(self.started_at().elapsed().as_millis() % u128::from(u32::MAX))
             .unwrap_or(u32::MAX)
     }

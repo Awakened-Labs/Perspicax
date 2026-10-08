@@ -197,10 +197,6 @@ impl Compositor {
         })
     }
 
-    #[cfg_attr(
-        not(feature = "seat"),
-        expect(dead_code, reason = "the seat's input path")
-    )]
     /// The surface of a layer on `layers`, at `at` in global space, and its
     /// origin in global space, topmost first.
     pub(crate) fn layer_surface_under(

@@ -1052,6 +1052,10 @@ fn resume(state: &mut Compositor) {
     }
     session.active = true;
     session.swallowed.clear();
+    // Nor did a button let go there, and a double-click does not span a VT
+    // switch.
+    state.clicks = perspicax_policy::Clicks::default();
+    state.wheel = Default::default();
     // A Logo key let go on another VT never came back up here.
     session.logo_tap = perspicax_policy::LogoTap::default();
     for head in &mut session.heads {

@@ -24,7 +24,13 @@
 //! The pointer is confined to the outputs ([`super::super::pointer`]),
 //! hit-tested against the stack, and every motion and press is put to the
 //! focus policy ([`perspicax_policy::Focus`]), whose decision is then carried
-//! out here.
+//! out here. For a button or the wheel, the order of authority is:
+//!
+//! 1. the `[mouse]` bindings ([`crate::mouse`], shared with headless);
+//! 2. what the compositor does with a press itself: a frame's buttons, edges
+//!    and titlebar, a tab picked up with the middle button, the drag
+//!    modifier, and the wheel flipping workspaces over the desktop;
+//! 3. the client under the pointer.
 
 use std::time::Duration;
 
@@ -42,7 +48,6 @@ use smithay::{
         libinput::LibinputInputBackend,
         session::Session as _,
     },
-    desktop::WindowSurfaceType,
     input::{
         keyboard::{FilterResult, KeyboardHandle, Keycode, LedState, ModifiersState},
         pointer::{
@@ -54,7 +59,6 @@ use smithay::{
     reexports::{
         calloop::timer::{TimeoutAction, Timer},
         input::{Device, DeviceCapability, Led},
-        wayland_server::protocol::wl_surface::WlSurface,
     },
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
 };
@@ -67,13 +71,15 @@ use super::{
     },
     Session, settings,
 };
-use crate::layers;
-use crate::{framed::Framed, shell::id_of, state::Compositor};
+use crate::{
+    framed::Framed,
+    mouse::{Hit, Scrolled, policy, under},
+    shell::id_of,
+    state::Compositor,
+};
 
-/// Linux button codes, from `linux/input-event-codes.h`.
-const BTN_LEFT: u32 = 0x110;
-const BTN_RIGHT: u32 = 0x111;
-const BTN_MIDDLE: u32 = 0x112;
+const BTN_LEFT: u32 = Button::Left.code();
+const BTN_MIDDLE: u32 = Button::Middle.code();
 
 /// A key the compositor kept for itself.
 enum Taken {
@@ -332,13 +338,21 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
             state.focus_plain(surface);
         }
         let frame = hit.as_ref().and_then(|hit| hit.frame);
-        let over = hit.and_then(|hit| hit.window);
+        let over = hit.as_ref().and_then(|hit| hit.window.clone());
         // Focus and raise before the press is delivered, so the client
         // receives its click already on top and focused, as it would under
-        // any desktop.
+        // any desktop. And before a binding, so one that acts on a window
+        // acts on the window clicked.
         if let Some(focus) = policy(state) {
             let decision = focus.pressed(over.as_ref().and_then(id_of), state.focused_surface());
             state.apply_focus(decision);
+        }
+        // A press a binding took is no half of a titlebar's double-click.
+        if state.bound_press(hit.as_ref(), at, code, held(state), time) {
+            if let Running::Seat(session) = &mut state.backend {
+                session.title_press = None;
+            }
+            return;
         }
         // A press on a frame is the compositor's, and no client sees it. The
         // middle button on a title or a tab picks the tab up, to drop on
@@ -381,8 +395,13 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
             }
         }
     }
-    if pressed == ButtonState::Released && code == BTN_LEFT {
-        released_frame(state, at);
+    if pressed == ButtonState::Released {
+        if state.bound_release(code) {
+            return;
+        }
+        if code == BTN_LEFT {
+            released_frame(state, at);
+        }
     }
     // Delivered to the client, or to the grab just started, which is how the
     // grab learns which button to wait for the release of.
@@ -468,14 +487,19 @@ fn drag(state: &Compositor, code: u32) -> Option<Drag> {
     let Running::Seat(session) = &state.backend else {
         return None;
     };
-    let held = state.keyboard.as_ref()?.modifier_state();
-    let button = match code {
-        BTN_LEFT => Button::Left,
-        BTN_RIGHT => Button::Right,
-        BTN_MIDDLE => Button::Middle,
-        _ => return None,
-    };
-    session.settings.bindings.drag(mods(&held), button)
+    session
+        .settings
+        .bindings
+        .drag(held(state), Button::from_code(code))
+}
+
+/// The modifiers held now.
+fn held(state: &Compositor) -> Mods {
+    state
+        .keyboard
+        .as_ref()
+        .map(|keyboard| mods(&keyboard.modifier_state()))
+        .unwrap_or_default()
 }
 
 /// A scroll. Continuous amounts where the device reports them; otherwise the
@@ -488,6 +512,16 @@ fn axis(state: &mut Compositor, event: &impl PointerAxisEvent<LibinputInputBacke
     // Logo held while scrolling is a gesture, not a tap.
     if let Running::Seat(session) = &mut state.backend {
         session.logo_tap.interrupt();
+    }
+    let at = handle.current_location();
+    let scrolled = [Axis::Horizontal, Axis::Vertical].map(|axis| Scrolled {
+        v120: event.amount_v120(axis),
+        pixels: event.amount(axis).unwrap_or(0.0),
+        lifted: event.source() == AxisSource::Finger && event.amount(axis) == Some(0.0),
+    });
+    let hit = under(state, at);
+    if state.bound_scroll(hit.as_ref(), at, held(state), scrolled) {
+        return;
     }
     if scroll_flips(state, event) {
         return;
@@ -618,9 +652,7 @@ fn scroll_flips(
         return false;
     }
     let at = pointer.current_location();
-    let over_root = state.layer_surface_under(&layers::ABOVE, at).is_none()
-        && state.space.element_under(at).is_none();
-    if !over_root {
+    if !state.over_desktop(at) {
         return false;
     }
     let Some(output) = state.space.output_under(at).next().map(Output::name) else {
@@ -642,92 +674,6 @@ fn scroll_flips(
         state.scroll_workspace(&output, notches > 0);
     }
     true
-}
-
-/// What the pointer is over.
-struct Hit {
-    /// Set when it is a window, which is all the focus policy decides about.
-    window: Option<Framed>,
-    /// Set when it is a layer surface that may take the keyboard on a click.
-    takes_focus: bool,
-    /// The surface there (a subsurface, a popup, the thing itself) and its
-    /// origin in global space -- the pair `PointerHandle::motion` wants.
-    /// `None` on a window's frame, which no client drew.
-    surface: Option<WlSurface>,
-    origin: Point<f64, Logical>,
-    /// Set when it is the frame this compositor drew around a window.
-    frame: Option<Part>,
-}
-
-/// The topmost thing at `at`, in the order the person sees them: while
-/// locked, only the lock surface; otherwise the top and overlay layers, then
-/// the windows, then the bottom and background layers.
-fn under(state: &Compositor, at: Point<f64, Logical>) -> Option<Hit> {
-    if state.lock.is_some() {
-        let (surface, origin) = state.lock_surface_at(at)?;
-        return Some(Hit {
-            window: None,
-            takes_focus: true,
-            surface: Some(surface),
-            origin,
-            frame: None,
-        });
-    }
-    let layer = |layers: &[_]| {
-        state
-            .layer_surface_under(layers, at)
-            .map(|(layer, surface, origin)| Hit {
-                window: None,
-                takes_focus: layer.can_receive_keyboard_focus(),
-                surface: Some(surface),
-                origin,
-                frame: None,
-            })
-    };
-    // `raised`: only a window over the panels, the fullscreen one in use.
-    let window = |raised: bool| {
-        let (window, location) = state.space.element_under(at)?;
-        if raised && !crate::shell::covers_panels(window) {
-            return None;
-        }
-        // The client first, so a popup hanging over the titlebar gets its
-        // clicks; then the frame around it.
-        if let Some((surface, offset)) =
-            window.surface_under(at - location.to_f64(), WindowSurfaceType::ALL)
-        {
-            return Some(Hit {
-                window: Some(window.clone()),
-                takes_focus: false,
-                surface: Some(surface),
-                origin: (location + offset).to_f64(),
-                frame: None,
-            });
-        }
-        Some(Hit {
-            window: Some(window.clone()),
-            takes_focus: false,
-            surface: None,
-            origin: location.to_f64(),
-            frame: Some(state.frame_part(window, at)?),
-        })
-    };
-    layer(&layers::OVERLAY)
-        .or_else(|| window(true))
-        .or_else(|| layer(&layers::TOP))
-        .or_else(|| window(false))
-        .or_else(|| layer(&layers::BELOW))
-}
-
-/// The focus policy, unless the session is locked: then the lock surface
-/// holds the keyboard and no pointing may move it.
-fn policy(state: &Compositor) -> Option<perspicax_policy::Focus> {
-    if state.lock.is_some() {
-        return None;
-    }
-    match &state.backend {
-        Running::Seat(session) => Some(session.settings.focus),
-        Running::Headless { .. } => None,
-    }
 }
 
 /// The bounding box of every output.

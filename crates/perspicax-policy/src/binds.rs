@@ -7,7 +7,7 @@
 
 use xkeysym::Keysym;
 
-use crate::Direction;
+use crate::{Button, Context, Direction, Gesture, MouseChord};
 
 /// Modifiers, as far as a binding cares. Caps Lock and Num Lock are left out
 /// on purpose: a binding that stopped working because Num Lock was on is a
@@ -54,6 +54,9 @@ pub enum Action {
     Workspace(Direction),
     /// Show the workspace a person calls this number, counting from 1.
     GoToWorkspace(u16),
+    /// Show the next workspace in reading order, or the previous one, as a
+    /// scroll over the desktop does. See [`crate::Grid::next`].
+    CycleWorkspace { forward: bool },
     /// Move the focused window one workspace across the grid, and stay.
     SendToWorkspace(Direction),
     /// Move the focused window one workspace across the grid, and go with it.
@@ -116,14 +119,6 @@ pub enum Towards {
     /// The nearest on that side, as the monitors sit on the desk. No
     /// wrapping: there is nothing left of the leftmost monitor.
     Side(Direction),
-}
-
-/// A pointer button, as far as a binding cares.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Button {
-    Left,
-    Middle,
-    Right,
 }
 
 /// What dragging a window with the drag modifier held does.
@@ -247,8 +242,26 @@ impl Bindings {
         match button {
             Button::Left => Some(Drag::Move),
             Button::Right => Some(Drag::Resize),
-            Button::Middle => None,
+            _ => None,
         }
+    }
+
+    /// Whether a mouse binding of `chord` in `context` would take the drag
+    /// away from every window: the drag's own modifiers, on a button that
+    /// drags, in a context that covers a whole window. The binding would
+    /// always be found first, and the drag would never happen.
+    ///
+    /// A titlebar binding takes the drag only from the titlebar, as it takes
+    /// a press there from the frame, and the desktop has no window to drag.
+    /// A double-click leaves the first press to drag. None of those takes
+    /// the drag away.
+    #[must_use]
+    pub fn takes_drag(&self, context: Context, chord: &MouseChord) -> bool {
+        matches!(context, Context::Window | Context::Anywhere)
+            && matches!(
+                chord.gesture,
+                Gesture::Press(button) if self.drag(chord.mods, button).is_some()
+            )
     }
 
     /// What this key press means, if anything.
@@ -398,6 +411,45 @@ mod tests {
     #[test]
     fn with_no_drag_modifier_nothing_drags() {
         assert_eq!(Bindings::default().drag(Mods::alt(), Button::Left), None);
+    }
+
+    #[test]
+    fn a_window_binding_on_the_drag_takes_it_and_a_titlebar_one_does_not() {
+        let classic = Bindings::classic();
+        let alt = |gesture| MouseChord {
+            mods: Mods::alt(),
+            gesture,
+        };
+        for button in [Button::Left, Button::Right] {
+            for context in [Context::Window, Context::Anywhere] {
+                assert!(
+                    classic.takes_drag(context, &alt(Gesture::Press(button))),
+                    "{context:?} {button:?}"
+                );
+            }
+            for context in [Context::Titlebar, Context::Desktop] {
+                assert!(
+                    !classic.takes_drag(context, &alt(Gesture::Press(button))),
+                    "{context:?} {button:?}"
+                );
+            }
+            assert!(
+                !classic.takes_drag(Context::Window, &alt(Gesture::Double(button))),
+                "a double-click leaves the first press to drag"
+            );
+        }
+        assert!(!classic.takes_drag(Context::Window, &alt(Gesture::Press(Button::Middle))));
+        assert!(!classic.takes_drag(
+            Context::Window,
+            &MouseChord {
+                mods: Mods::default(),
+                gesture: Gesture::Press(Button::Left)
+            }
+        ));
+        assert!(
+            !Bindings::default().takes_drag(Context::Window, &alt(Gesture::Press(Button::Left))),
+            "no drag modifier, nothing to take"
+        );
     }
 
     fn logo(key: Keysym) -> Chord {

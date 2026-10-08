@@ -505,6 +505,10 @@ autoraise = false
 "Logo" = "none"                # Logo alone is a tap: pressed, let go, nothing
                                # in between; no other modifier can be tapped
 
+[mouse.desktop]                # buttons and the wheel, by where the pointer is;
+"Mouse8" = "workspace-left"    # see Mouse below
+"Mouse9" = "workspace-right"
+
 [input.keyboard]
 layout = "gb"
 options = "ctrl:nocaps"
@@ -714,7 +718,7 @@ them; none is on by default. The profiles turn on what the build has:
 |---|---|---|---|---|---|
 | Wallpaper | `wallpaper` | Plasma's blue | a dark grey | background, `perspicax-desktop-<output>` | a `Window` named for its surface |
 | Desktop icons | `icons` (with `wallpaper`, `menus`) | the first monitor | off | drawn on the wallpaper's | a `List` "Desktop" of a `ListItem` for each icon, the selected one selected |
-| Root menu | `menus` | right-click on the wallpaper, or `root-menu`'s key | the same | overlay, `perspicax-menu-<output>`, while open | a `Menu` "Root menu" of `MenuItem`s |
+| Root menu | `menus` | right-click on the wallpaper, or a key or button bound to `root-menu` | the same | overlay, `perspicax-menu-<output>`, while open | a `Menu` "Root menu" of `MenuItem`s |
 | Panel | `panel` | along the bottom of every monitor | none | top, `perspicax-panel-<output>` | a `Toolbar` "Panel" holding what follows |
 | Start button and menu | `menus` | the panel's first item; a tap of Logo | — | the panel's; its menu as the root menu's | a `Button` "Start"; a `Menu` "Start menu" with a search line |
 | Taskbar | `panel` | each monitor's own windows | — | the panel's | a `TabList` "Taskbar", the window in use selected |
@@ -929,6 +933,76 @@ that character in the layout in use, which on many layouts needs Shift or
 AltGr; a chord's modifiers must match exactly, so such a chord cannot be
 pressed as written. And a dead key, an accent waiting for its letter, makes no
 character to write a chord with.
+
+## Mouse
+
+`[mouse]` binds a mouse's buttons and its wheel to the actions `[keys]` takes,
+in four tables, by where the pointer is:
+
+```toml
+[mouse.desktop]                # the empty desktop: no window, no panel
+"Mouse8" = "previous-workspace"
+"Mouse9" = "next-workspace"    # both in reading order, as scroll flipping goes
+"WheelUp" = "next-workspace"   # a binding comes before scroll flipping
+"WheelDown" = "previous-workspace"
+"Mouse2" = "root-menu"
+
+[mouse.titlebar]               # a window's title, or its tabs
+"Double+Mouse1" = "minimize"   # instead of maximizing
+"Mouse3" = { spawn = ["foot"] }
+
+[mouse.window]                 # anywhere on a window, its frame or what it drew
+"Logo+Mouse9" = "toggle-sticky"
+
+[mouse.anywhere]               # wherever no other table says
+"Logo+Mouse8" = "workspace-left"
+```
+
+A press is looked for in the titlebar's table, then the window's, then
+`anywhere`; over the desktop, in the desktop's, then `anywhere`. Over a panel
+or a menu only `anywhere` applies. A binding comes before everything the
+compositor does with a press itself -- a titlebar dragged or double-clicked, a
+tab picked up with the middle button, the drag modifier, scroll flipping -- so
+`"Double+Mouse1"` above replaces the maximize, and neither the press nor its
+release reaches an application. `"none"` hands a button back where it is
+written: `[mouse.window] "Mouse8" = "none"` keeps Back for the browser while
+`[mouse.anywhere]` flips workspaces with it everywhere else.
+
+A button is written by name -- `left`, `middle`, `right`, `side` and `extra`
+(the two thumb buttons, which browsers take as Back and Forward), `forward`,
+`back`, `task` -- or by X's number, so a Fluxbox `keys` line carries over:
+`Mouse1` to `Mouse3` are left, middle and right, `Mouse4` to `Mouse7` the
+wheel, and `Mouse8` on the thumb buttons and beyond. The wheel is `WheelUp`,
+`WheelDown`, `WheelLeft` and `WheelRight`, and a binding acts once a notch,
+a touchpad's 60 pixels counting as one. Modifiers come first, as in `[keys]`,
+and `Double+` makes a double-click within `double-click-ms`; its first click is
+a click like any other.
+
+To find a button's name, run `sudo libinput debug-events` and press it:
+
+```
+event5   POINTER_BUTTON   +1.21s   BTN_SIDE (275) pressed, seat count: 1
+```
+
+`BTN_SIDE` is `side`, or `Mouse8`, and any button can be written by its code,
+`Button275`. A mouse whose extra buttons arrive as keys (`KEYBOARD_KEY`) binds
+them in `[keys]`.
+
+Three things to know before binding one:
+
+- An unmodified button in `[mouse.window]` or `[mouse.anywhere]` is taken from
+  every application: `"Mouse8"` there is no longer Back in Firefox. `desktop`
+  and `titlebar` take nothing from an application.
+- A binding on `Mouse3` in `[mouse.desktop]` replaces the shell's root menu;
+  write `"Mouse3" = "root-menu"` to keep it.
+- A binding that would take the drag away -- `drag`'s modifiers with `Mouse1`
+  or `Mouse3`, in `window` or `anywhere` -- is refused, naming `drag`. In
+  `titlebar` it is allowed, and the rest of the window still drags.
+
+A workspace binding acts on the monitor under the pointer, and a window binding
+on the window clicked, which the click has focused. Nothing is bound at the
+lock screen. An agent's clicks and scrolls never set a binding off: they go
+straight to the window or surface the agent named.
 
 ## Test
 

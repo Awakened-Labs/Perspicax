@@ -84,10 +84,10 @@ impl Compositor {
         }
     }
 
-    /// Switch the workspace showing on the monitor the person is working on
-    /// (every monitor, when workspaces span them).
-    pub(crate) fn switch_workspace(&mut self, direction: Direction) {
-        let Some(output) = self.working_monitor() else {
+    /// Switch the workspace showing on `monitor` (every monitor, when
+    /// workspaces span them).
+    pub(crate) fn switch_workspace(&mut self, monitor: Option<String>, direction: Direction) {
+        let Some(output) = monitor else {
             return;
         };
         if self.workspaces.switch(&output, direction).is_some() {
@@ -122,10 +122,6 @@ impl Compositor {
 
     /// Step the workspace on `output` to the next one in reading order, or
     /// the previous, as a scroll over the desktop does.
-    #[cfg_attr(
-        not(feature = "seat"),
-        expect(dead_code, reason = "the seat's pointer")
-    )]
     pub(crate) fn scroll_workspace(&mut self, output: &str, forward: bool) {
         let output = output.to_owned();
         let grid = self.workspaces.shape().grid;
@@ -137,12 +133,10 @@ impl Compositor {
         }
     }
 
-    /// Show the workspace a person calls `number`.
-    pub(crate) fn go_to_workspace(&mut self, number: u16) {
-        let (Some(output), Some(cell)) = (
-            self.working_monitor(),
-            self.workspaces.shape().grid.numbered(number),
-        ) else {
+    /// Show the workspace a person calls `number` on `monitor`.
+    pub(crate) fn go_to_workspace(&mut self, monitor: Option<String>, number: u16) {
+        let (Some(output), Some(cell)) = (monitor, self.workspaces.shape().grid.numbered(number))
+        else {
             return;
         };
         if self.workspaces.go_to(&output, cell).is_some() {
@@ -270,8 +264,8 @@ impl Compositor {
     }
 
     /// The monitor the person is working on: the focused window's, or the
-    /// one under the pointer.
-    fn working_monitor(&self) -> Option<String> {
+    /// one under the pointer. Where a key binding acts.
+    pub(crate) fn working_monitor(&self) -> Option<String> {
         self.focused_surface()
             .and_then(|id| self.window_for_id(id))
             .and_then(|window| self.monitor_of(&window))

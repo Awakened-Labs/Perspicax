@@ -341,6 +341,10 @@ pub fn part_at(
 /// A press of a button: when, in milliseconds, and where.
 pub type Press = (u32, (f64, f64));
 
+/// The double-click time, in milliseconds, of a config that does not say:
+/// GTK's and Qt's.
+pub const DOUBLE_CLICK_MS: u32 = 400;
+
 /// Whether a press at `second` makes a double-click of the press at
 /// `first`: soon enough after, within `within_ms`, and near enough, that a
 /// hand meant the two as one gesture.

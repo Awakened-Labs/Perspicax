@@ -115,10 +115,6 @@ impl SessionLockHandler for Compositor {
 
 impl Compositor {
     /// The lock surface at a point, if the session is locked.
-    #[cfg_attr(
-        not(feature = "seat"),
-        expect(dead_code, reason = "the seat's input path")
-    )]
     pub(crate) fn lock_surface_at(
         &self,
         at: smithay::utils::Point<f64, smithay::utils::Logical>,

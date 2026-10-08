@@ -207,7 +207,6 @@ impl Compositor {
     }
 
     /// What part of `window`'s frame the pointer at `at` is on, if any.
-    #[cfg(feature = "seat")]
     pub(crate) fn frame_part(
         &self,
         window: &Framed,

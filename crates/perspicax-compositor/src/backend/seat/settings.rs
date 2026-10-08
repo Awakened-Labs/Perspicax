@@ -252,6 +252,8 @@ pub(crate) fn reload(state: &mut Compositor) {
             session.settings.theme.cursor_size,
         );
     let access = (fresh.protocols != session.settings.protocols).then(|| fresh.protocols.clone());
+    let mouse_changed = fresh.mouse != session.settings.mouse;
+    let mouse = fresh.mouse.clone();
     let shell_changed = fresh.shell != session.settings.shell;
     let shell = session.settings.shell.clone();
     let workspaces = fresh.workspaces;
@@ -306,6 +308,7 @@ pub(crate) fn reload(state: &mut Compositor) {
     if let Some(access) = access {
         state.set_access(access);
     }
+    state.mouse = mouse;
     // After the rules, so a shell they no longer admit is not counted as
     // listening.
     supervise::reloaded(state, &shell, access_changed);
@@ -315,6 +318,7 @@ pub(crate) fn reload(state: &mut Compositor) {
         decorations_changed,
         theme_changed,
         access_changed,
+        mouse_changed,
         shell_changed,
         "config reloaded"
     );

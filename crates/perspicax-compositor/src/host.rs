@@ -96,6 +96,34 @@ pub enum Command {
     /// Make the layout in use the session's, or each window's own, as a seat
     /// does when a save changes `[input.keyboard] switching`.
     LayoutSwitching(perspicax_policy::Switching),
+    /// Put `[mouse]` bindings in force, as a seat does when a save changes
+    /// them. Headless starts with none.
+    MouseBindings(perspicax_policy::MouseBindings),
+    /// Click a button at a point on the desk, in global coordinates, with
+    /// `mods` held, as a person's hand would: the pointer goes there, a
+    /// `[mouse]` binding is looked for, and whatever no binding takes goes to
+    /// the client under the pointer. So a test can drive mouse bindings with
+    /// no mouse.
+    ///
+    /// Not an MCP tool, for the reason [`Command::Perform`] is not, and not
+    /// an agent's click either: an agent clicks through [`Request`], which
+    /// never sets a binding off. Only what both backends share is run, so a
+    /// seat's focus policy, and the presses a window's frame takes for
+    /// itself, are not. A headless build without `capture` keeps no buffers
+    /// to find a surface's size by, so it refuses this in the log.
+    Click {
+        at: (i32, i32),
+        button: perspicax_policy::Button,
+        mods: perspicax_policy::Mods,
+    },
+    /// Turn the wheel at a point on the desk, as [`Command::Click`] presses a
+    /// button: `v120` horizontal then vertical, 120 to a notch, positive
+    /// right and down.
+    Scroll {
+        at: (i32, i32),
+        v120: (i32, i32),
+        mods: perspicax_policy::Mods,
+    },
 }
 
 /// A picture asked for, with somewhere to put it.
