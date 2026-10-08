@@ -762,6 +762,12 @@ leave = ["lock", "log-out", "suspend", "reboot", "power-off"]   # and which
 enabled = true                 # false: no panel
 edge = "top"                   # or "bottom"
 height = 32
+width = 600                    # or "60%" of the monitor; "100%" by default.
+                               # Windows keep out of the whole strip all the
+                               # same. A bar too narrow for what it holds
+                               # shrinks its tasks to their icons, then widens
+align = "center"               # "left" or "right" of the strip: only with a
+                               # width
 outputs = "first"              # "all", or a list of connectors: ["DP-1"]
 taskbar = "all"                # every window on every panel; "this-output"
                                # lists each monitor's own

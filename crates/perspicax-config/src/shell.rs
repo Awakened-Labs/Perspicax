@@ -145,6 +145,11 @@ pub struct Panel {
     pub edge: Edge,
     /// In logical pixels. Windows are kept out of it.
     pub height: u32,
+    /// How wide its bar is. Windows are kept out of the whole strip along
+    /// the edge all the same.
+    pub width: PanelWidth,
+    /// Where along its edge a bar narrower than its monitor sits.
+    pub align: Align,
     /// Which monitors have one.
     pub outputs: PanelOutputs,
     /// Which windows each panel's taskbar lists.
@@ -160,6 +165,31 @@ pub struct Panel {
 pub enum Edge {
     Top,
     Bottom,
+}
+
+/// How wide a panel's bar is asked to be. It is wider when what it holds
+/// needs more room, once its tasks are shrunk to their icons, and never
+/// wider than its monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelWidth {
+    /// In logical pixels, as `height` is.
+    Pixels(u32),
+    /// A share of its monitor's width, from 1 to 100.
+    Percent(u32),
+}
+
+impl PanelWidth {
+    /// The whole width of its monitor.
+    pub const FULL: Self = Self::Percent(100);
+}
+
+/// Where along its edge a panel's bar sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Align {
+    Left,
+    Center,
+    Right,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -343,6 +373,8 @@ impl Panel {
         Self {
             edge: Edge::Bottom,
             height: 40,
+            width: PanelWidth::FULL,
+            align: Align::Center,
             outputs: PanelOutputs::All,
             taskbar: TaskbarScope::ThisOutput,
             items: items
@@ -385,6 +417,8 @@ struct RawPanel {
     enabled: Option<bool>,
     edge: Option<Edge>,
     height: Option<u32>,
+    width: Option<RawWidth>,
+    align: Option<Align>,
     outputs: Option<RawOutputs>,
     taskbar: Option<TaskbarScope>,
     items: Option<Vec<Item>>,
@@ -405,6 +439,14 @@ enum RawWorkspaceWallpaper {
 struct RawWorkspaceTable {
     wallpaper: String,
     mode: Option<WallpaperMode>,
+}
+
+/// A number of pixels, or a share of the monitor such as `"60%"`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawWidth {
+    Pixels(i64),
+    Written(String),
 }
 
 /// `"all"`, `"first"`, or a list of connector names.
@@ -640,6 +682,8 @@ impl RawPanel {
     fn apply(self, profile: Option<Panel>, built: ShellBuilt) -> Result<Option<Panel>, Error> {
         let written = self.edge.is_some()
             || self.height.is_some()
+            || self.width.is_some()
+            || self.align.is_some()
             || self.outputs.is_some()
             || self.taskbar.is_some()
             || self.items.is_some()
@@ -657,6 +701,19 @@ impl RawPanel {
                 ));
             }
             panel.height = height;
+        }
+        if let Some(width) = self.width {
+            panel.width = width.apply()?;
+        }
+        if let Some(align) = self.align {
+            if panel.width == PanelWidth::FULL {
+                return Err(invalid(
+                    "shell.panel.align".to_owned(),
+                    "a panel as wide as its monitor has nowhere to align; give it a `width` too"
+                        .to_owned(),
+                ));
+            }
+            panel.align = align;
         }
         if let Some(outputs) = self.outputs {
             panel.outputs = outputs.apply()?;
@@ -692,6 +749,43 @@ impl RawPanel {
                 "this profile has no panel to configure; write `enabled = true` to have one"
                     .to_owned(),
             )),
+        }
+    }
+}
+
+impl RawWidth {
+    fn apply(self) -> Result<PanelWidth, Error> {
+        let refused = |reason: String| invalid("shell.panel.width".to_owned(), reason);
+        match self {
+            Self::Pixels(..=0) => Err(refused(
+                "a panel is at least a pixel wide; write `enabled = false` for none".to_owned(),
+            )),
+            // Wider than any monitor is clamped to its monitor, but past
+            // this it is a typo, not a width.
+            Self::Pixels(pixels) => u32::try_from(pixels)
+                .map(PanelWidth::Pixels)
+                .map_err(|_| refused(format!("{pixels} is not a width in pixels"))),
+            Self::Written(written) => {
+                let percent = written
+                    .trim()
+                    .strip_suffix('%')
+                    .and_then(|share| share.trim().parse::<u32>().ok())
+                    .ok_or_else(|| {
+                        refused(format!(
+                            "{written:?} is not a width; write a number of pixels, as 600, or \
+                             a share of the monitor, as \"60%\""
+                        ))
+                    })?;
+                match percent {
+                    0 => Err(refused(
+                        "0% leaves no panel; write `enabled = false` for none".to_owned(),
+                    )),
+                    1..=100 => Ok(PanelWidth::Percent(percent)),
+                    _ => Err(refused(format!(
+                        "{percent}% is wider than the monitor; \"100%\" is the whole of it"
+                    ))),
+                }
+            }
         }
     }
 }
@@ -1034,6 +1128,75 @@ mod tests {
             .unwrap();
         assert_eq!(panel.edge, Edge::Top);
         assert_eq!(panel.height, 40, "the rest is classic's");
+
+        for key in ["width = 600", "width = \"60%\"\nalign = \"left\""] {
+            let error = minimal(key).unwrap_err();
+            assert!(
+                error.to_string().contains("enabled = true"),
+                "{key}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_panel_can_be_narrower_than_its_monitor_and_sit_along_its_edge() {
+        let panel = |keys: &str| {
+            shell(&format!("[shell.panel]\n{keys}"), ShellBuilt::FULL)
+                .map(|shell| shell.panel.unwrap())
+        };
+        let full = panel("").unwrap();
+        assert_eq!(
+            (full.width, full.align),
+            (PanelWidth::FULL, Align::Center),
+            "the whole width, by default"
+        );
+        let narrow = panel("width = 600").unwrap();
+        assert_eq!(
+            (narrow.width, narrow.align),
+            (PanelWidth::Pixels(600), Align::Center),
+            "in the middle, by default"
+        );
+        assert_eq!(
+            panel("width = \"60%\"").unwrap().width,
+            PanelWidth::Percent(60)
+        );
+        assert_eq!(
+            panel("width = 4000").unwrap().width,
+            PanelWidth::Pixels(4000),
+            "wider than a monitor: the monitor's width, once laid out"
+        );
+        for (written, align) in [
+            ("left", Align::Left),
+            ("center", Align::Center),
+            ("right", Align::Right),
+        ] {
+            let keys = format!("width = \"50%\"\nalign = \"{written}\"");
+            assert_eq!(panel(&keys).unwrap().align, align);
+        }
+    }
+
+    #[test]
+    fn a_width_of_nothing_or_past_the_monitor_or_unreadable_is_refused() {
+        let refused = |keys: &str| {
+            shell(&format!("[shell.panel]\n{keys}"), ShellBuilt::FULL)
+                .unwrap_err()
+                .to_string()
+        };
+        for width in [
+            "0", "-40", "\"0%\"", "\"101%\"", "\"600\"", "\"wide\"", "\"%\"",
+        ] {
+            let error = refused(&format!("width = {width}"));
+            assert!(error.contains("shell.panel.width"), "{width}: {error}");
+        }
+        assert!(refused("width = \"600\"").contains("\"60%\""), "says how");
+
+        for keys in ["align = \"left\"", "width = \"100%\"\nalign = \"right\""] {
+            let error = refused(keys);
+            assert!(
+                error.contains("shell.panel.align") && error.contains("`width`"),
+                "a full-width panel has nowhere to align: {error}"
+            );
+        }
     }
 
     #[test]

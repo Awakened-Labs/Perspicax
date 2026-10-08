@@ -658,8 +658,8 @@ mod panels {
         let mut root = window(namespace, size);
         let mut bar = Node::new(Role::Toolbar);
         bar.set_label("Panel");
-        if let Some((width, height)) = size {
-            bar.set_bounds(rect(Rect::new(0, 0, width as i32, height as i32)));
+        if size.is_some() {
+            bar.set_bounds(rect(placed.bar));
         }
         let mut nodes = Vec::new();
         for &(item, place) in placed.items.iter().filter(|(_, place)| place.w > 0) {
@@ -771,11 +771,16 @@ mod panels {
 
     #[cfg(test)]
     mod tests {
+        use perspicax_config::{Align, PanelWidth};
+
         use super::*;
         use crate::layout::{
             Monospace,
             panel::{Cell, Holding, Task, lay_out},
         };
+
+        /// The panel's whole width, as by default.
+        const FULL: (PanelWidth, Align) = (PanelWidth::FULL, Align::Center);
 
         fn node(tree: &TreeUpdate, id: NodeId) -> &Node {
             &tree
@@ -796,7 +801,7 @@ mod panels {
                 #[cfg(feature = "tray")]
                 tray: Vec::new(),
             };
-            lay_out(&items, holding, (1280, 40), &mut Monospace(8.0))
+            lay_out(&items, holding, (1280, 40), FULL, &mut Monospace(8.0))
         }
 
         #[cfg(feature = "tray")]
@@ -819,6 +824,7 @@ mod panels {
                     tray: vec![icon(3, "Network", true), icon(8, "Updates", false)],
                 },
                 (1280, 40),
+                FULL,
                 &mut Monospace(8.0),
             );
             let tree = panel(
@@ -861,6 +867,46 @@ mod panels {
             );
             let second = node(&tree, tray.children()[1]);
             assert_eq!(second.bounds(), Some(rect(placed.tray[1].1)));
+        }
+
+        #[test]
+        fn a_narrow_panels_toolbar_is_its_bar_and_its_window_the_strip() {
+            let holding = Holding {
+                time: "14:05",
+                layout: None,
+                tasks: Vec::new(),
+                cells: Vec::new(),
+                #[cfg(feature = "tray")]
+                tray: Vec::new(),
+            };
+            let placed = lay_out(
+                &[Item::Start, Item::Clock],
+                holding,
+                (1280, 40),
+                (PanelWidth::Pixels(600), Align::Right),
+                &mut Monospace(8.0),
+            );
+            let tree = panel(
+                "perspicax-panel-DP-1",
+                Some((1280, 40)),
+                &placed,
+                "14:05",
+                false,
+                None,
+            );
+            assert_eq!(
+                node(&tree, TOOLBAR).bounds(),
+                Some(rect(Rect::new(680, 0, 600, 40)))
+            );
+            assert_eq!(
+                node(&tree, ROOT).bounds(),
+                Some(rect(Rect::new(0, 0, 1280, 40))),
+                "the surface, the whole strip"
+            );
+            assert_eq!(
+                node(&tree, START).bounds(),
+                Some(rect(Rect::new(680, 0, 40, 40)))
+            );
         }
 
         #[test]
@@ -923,7 +969,13 @@ mod panels {
                 name: "Russian".to_owned(),
                 short: "RU".to_owned(),
             };
-            let placed = lay_out(&items, holding(Some("RU")), (1280, 40), &mut Monospace(8.0));
+            let placed = lay_out(
+                &items,
+                holding(Some("RU")),
+                (1280, 40),
+                FULL,
+                &mut Monospace(8.0),
+            );
             let tree = panel(
                 "perspicax-panel-DP-1",
                 None,
@@ -943,7 +995,7 @@ mod panels {
             assert_eq!(button.bounds(), Some(rect(placed.items[1].1)));
             assert_eq!(part_of(LAYOUT), Some(Part::Layout));
 
-            let one = lay_out(&items, holding(None), (1280, 40), &mut Monospace(8.0));
+            let one = lay_out(&items, holding(None), (1280, 40), FULL, &mut Monospace(8.0));
             let tree = panel("perspicax-panel-DP-1", None, &one, "14:05", false, None);
             assert_eq!(
                 node(&tree, TOOLBAR).children(),

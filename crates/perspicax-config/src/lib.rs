@@ -42,8 +42,8 @@ use serde::Deserialize;
 
 use crate::shell::RawShell;
 pub use crate::shell::{
-    Edge, Item, Leave, Panel, PanelOutputs, Shell, ShellBuilt, TaskbarScope, UntrustedLaunchers,
-    Wallpaper, WallpaperMode,
+    Align, Edge, Item, Leave, Panel, PanelOutputs, PanelWidth, Shell, ShellBuilt, TaskbarScope,
+    UntrustedLaunchers, Wallpaper, WallpaperMode,
 };
 /// The double-click time, in milliseconds, of a config that does not say.
 pub use perspicax_policy::DOUBLE_CLICK_MS;
