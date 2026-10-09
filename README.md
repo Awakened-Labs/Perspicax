@@ -782,6 +782,8 @@ align = "center"               # "left" or "right" of the strip: only with a
 outputs = "first"              # "all", or a list of connectors: ["DP-1"]
 taskbar = "all"                # every window on every panel; "this-output"
                                # lists each monitor's own
+task-titles = false            # each task its icon alone; true, by default,
+                               # writes its window's title beside it
 items = ["start", "taskbar", "pager", "layout", "tray", "clock"]
 clock = "%a %e %b %H:%M"       # as strftime writes it
 ```
@@ -860,7 +862,7 @@ the first colour toward the second. The last column is the `perspicax` theme.
 | `panel-rule` | the rule along the panel's edge, and the edge of a workspace not showing | `panel` 12% toward `panel-ink` | `#3b4045` |
 | `panel-face` | a task's button, and a workspace not showing | `panel` 7.5% toward `panel-ink` | `#31363b` |
 | `panel-open` | the start button with its menu open, the task in use, the workspace showing | `panel` 30% toward `accent` | `#2b4f63` |
-| `panel-faint` | a minimized task's title | `panel` 57% toward `panel-ink` | `#9aa0a6` |
+| `panel-faint` | a minimized task's title, and the window drawn for one with no icon | `panel` 57% toward `panel-ink` | `#9aa0a6` |
 | `menu` | a menu's background | — | `#fcfcfc` |
 | `menu-ink` | a menu's text | its ink | `#232629` |
 | `menu-edge` | a menu's border | `menu` 42% toward `menu-ink` | `#a0a4a8` |

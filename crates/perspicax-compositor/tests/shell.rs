@@ -1267,6 +1267,60 @@ fn an_agents_click_on_a_task_brings_its_window_forward() {
 #[cfg(feature = "capture")]
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_taskbar_without_titles_gives_each_window_its_icon_and_a_save_brings_titles_back() {
+    /// A task showing its icon alone.
+    const ICON: f64 = 36.0;
+
+    let session = Session::start("shell-icons", Backend::headless((1280, 800)));
+    let config = format!("{CLASSIC}[shell.panel]\ntask-titles = false\n");
+    let shell = Shell::start(&session, "icons", &config);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.open_coloured(&qh, "first", "first", 0xffff_8000);
+    desk.open_coloured(&qh, "second", "second", 0xff00_80ff);
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.task("first").is_some() && activated(desk, "second")
+    });
+
+    // Each task an icon's width from the start button's right, read at its
+    // right end, clear of its icon; past the second, the bar.
+    let face = |end: f64| (end as usize - 4, 800 - 30);
+    let (first, second) = (PANEL_HEIGHT + ICON, PANEL_HEIGHT + 2.0 * ICON);
+    until_colour(&session, face(first), FACE);
+    until_colour(&session, face(second), LIT);
+    assert_eq!(
+        colour_at(&session, (second + 10.0) as usize, 800 - 30),
+        BAR,
+        "no more to the taskbar than its icons"
+    );
+
+    // A click on the first's icon brings it forward.
+    click(
+        &session,
+        panel,
+        (PANEL_HEIGHT + ICON / 2.0, 20.0),
+        PointerButton::Left,
+    );
+    common::until(&mut queue, &mut desk, |desk| activated(desk, "first"));
+    until_colour(&session, face(first), LIT);
+
+    // Saved with titles, the same panel widens its tasks again.
+    shell.rewrite(CLASSIC);
+    session.command(Command::ReconfigureShell);
+    until_colour(&session, face(PANEL_HEIGHT + TASK), LIT);
+    until_colour(&session, face(PANEL_HEIGHT + 2.0 * TASK), FACE);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    assert_eq!(panels(&facts)[0].1, panel, "redrawn in place");
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn the_pager_follows_a_switch_by_key() {
     let session = Session::start("shell-pager-key", four_workspaces());
     let shell = Shell::start(&session, "pager-key", PAGER_FIRST);

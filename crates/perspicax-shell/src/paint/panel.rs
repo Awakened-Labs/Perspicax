@@ -3,9 +3,12 @@
 //! length, and across each end that stops short of the monitor's side. The
 //! start button is a grid of four squares, drawn in the accent's shade
 //! while its menu is open. Each task is a face a little lighter than the
-//! bar, holding its application's icon and its window's title: the window
-//! with the keyboard in the accent's shade, with a line of the accent along
-//! the screen's edge, and a minimized one with no face and its title faint.
+//! bar, holding its application's icon and, where there is room, its
+//! window's title; a face too narrow for both holds its icon alone, in its
+//! middle. An application with no icon, in a theme with no generic one
+//! either, is drawn as a window. The window with the keyboard is in the
+//! accent's shade, with a line of the accent along the screen's edge, and a
+//! minimized one has no face and its title and drawn window faint.
 //! The pager is a grid of small screens, each with its workspace's name,
 //! the one showing lit. Each of the tray's icons sits in the middle of its
 //! slot, drawn from the icon its program names if it is found, otherwise
@@ -74,15 +77,15 @@ const LINE: i32 = 2;
 /// A task's icon, square, and the room around it and the title.
 const ICON: i32 = 22;
 const INSET: i32 = 6;
-// A task shrunk as far as its bar lets it before growing still shows its
-// icon.
-const _: () = assert!(TASK_LEAST - 2 * MARGIN.0 >= ICON + 2 * INSET);
+// A task as narrow as its bar lets it be before growing, which is as wide
+// as one showing its icon alone, has room for its icon and none for its
+// title: so its icon sits in its middle.
+const _: () = assert!(TASK_LEAST - 2 * MARGIN.0 == ICON + 2 * INSET);
 /// The icon a window is drawn with when its application has none, and a
 /// status icon whose program gives none that can be drawn.
 const GENERIC: &str = "application-x-executable";
-/// The least room above and below a status icon.
-#[cfg(feature = "tray")]
-const TRAY_MARGIN: i32 = 2;
+/// The least room around a task's or a status icon.
+const ICON_MARGIN: i32 = 2;
 
 /// What a panel shows.
 pub(crate) struct Shown<'a> {
@@ -186,7 +189,9 @@ impl Pen<'_, '_, '_> {
         scaled(rect, self.scale)
     }
 
-    /// A task, at `place`, on a panel along `edge`.
+    /// A task, at `place`, on a panel along `edge`: its icon, then its
+    /// window's title in what room is left, or in a face too narrow for
+    /// both, its icon alone in the middle.
     fn task(&mut self, task: &Task, place: Rect, edge: Edge, images: &mut Images) {
         let (side, end) = MARGIN;
         let face = Rect::new(
@@ -209,35 +214,63 @@ impl Pen<'_, '_, '_> {
         } else if !task.minimized {
             fill(self.canvas, self.px(face), colours.face);
         }
-        let mut left = face.x + INSET;
-        if face.w >= ICON + 2 * INSET {
-            let size = ICON as u32;
-            let name = task
-                .icon
-                .as_deref()
-                .filter(|name| images.get(name, size, self.scale).is_some())
-                .unwrap_or(GENERIC);
-            if let Some(image) = images.get(name, size, self.scale) {
-                let at = Rect::new(left, face.y + (face.h - ICON) / 2, ICON, ICON);
-                icons::draw(self.canvas, image, self.px(at));
-            }
-            left += ICON + INSET;
-        }
-        let words = Rect::new(left, face.y, face.right() - INSET - left, face.h);
         let ink = if task.minimized {
             colours.faint
         } else {
             colours.ink
         };
-        let size = self.text.size() * self.scale as f32;
-        self.text
-            .write(self.canvas, &task.title, self.px(words), size, ink);
+        // Found at the one size the panel's height asks, however wide the
+        // task, so that each icon is read once.
+        let icon = fitted(place.h);
+        if face.w < ICON + 2 * INSET {
+            let shown = icon.min(face.w - 2 * ICON_MARGIN);
+            if shown > 0 {
+                let at = Rect::new(
+                    face.x + (face.w - shown) / 2,
+                    face.y + (face.h - shown) / 2,
+                    shown,
+                    shown,
+                );
+                self.icon(task, at, icon, ink, images);
+            }
+            return;
+        }
+        let slot = face.x + INSET;
+        let at = Rect::new(
+            slot + (ICON - icon) / 2,
+            face.y + (face.h - icon) / 2,
+            icon,
+            icon,
+        );
+        self.icon(task, at, icon, ink, images);
+        let left = slot + ICON + INSET;
+        let words = Rect::new(left, face.y, face.right() - INSET - left, face.h);
+        if words.w > 0 {
+            let size = self.text.size() * self.scale as f32;
+            self.text
+                .write(self.canvas, &task.title, self.px(words), size, ink);
+        }
+    }
+
+    /// `task`'s icon at `at`, found `size` square: its application's, or the
+    /// generic one, or with neither to draw, a window in `ink`.
+    fn icon(&mut self, task: &Task, at: Rect, size: i32, ink: [u8; 4], images: &mut Images) {
+        let (size, at) = (size as u32, self.px(at));
+        let name = task
+            .icon
+            .as_deref()
+            .filter(|name| images.get(name, size, self.scale).is_some())
+            .unwrap_or(GENERIC);
+        match images.get(name, size, self.scale) {
+            Some(image) => icons::draw(self.canvas, image, at),
+            None => window(self.canvas, at, self.scale as i32, ink),
+        }
     }
 
     /// A status icon, in the middle of its slot at `place`.
     #[cfg(feature = "tray")]
     fn status(&mut self, item: &crate::model::tray::Item, place: Rect, images: &mut Images) {
-        let side = ICON.min(place.h - 2 * TRAY_MARGIN).max(1);
+        let side = fitted(place.h);
         let at = self.px(Rect::new(
             place.x + (place.w - side) / 2,
             place.y + (place.h - side) / 2,
@@ -282,6 +315,36 @@ impl Pen<'_, '_, '_> {
     }
 }
 
+/// How big an icon is on a panel `tall` high: [`ICON`], or less on a panel
+/// too short for it.
+fn fitted(tall: i32) -> i32 {
+    ICON.min(tall - 2 * ICON_MARGIN).max(1)
+}
+
+/// A window, centred in `place`, `s` pixels to a logical one: an outline
+/// with its title bar across the top, as wide as most of `place`. Nothing,
+/// where it would be too small to make out.
+fn window(canvas: &mut PixmapMut<'_>, place: Rect, s: i32, ink: [u8; 4]) {
+    let (wide, line) = (place.w * 9 / 11, s);
+    let tall = wide * 7 / 9;
+    if wide < 4 * line || tall < 4 * line {
+        return;
+    }
+    let (left, top) = (
+        place.x + (place.w - wide) / 2,
+        place.y + (place.h - tall) / 2,
+    );
+    let title = (tall / 4).max(2 * line);
+    for edge in [
+        Rect::new(left, top, wide, title),
+        Rect::new(left, top, line, tall),
+        Rect::new(left + wide - line, top, line, tall),
+        Rect::new(left, top + tall - line, wide, line),
+    ] {
+        fill(canvas, edge, ink);
+    }
+}
+
 /// Four squares, two by two, centred in `place`, `s` pixels to a logical
 /// one.
 fn grid(canvas: &mut PixmapMut<'_>, place: Rect, s: i32, ink: [u8; 4]) {
@@ -321,6 +384,7 @@ mod tests {
     const OPEN: [u8; 4] = [0x2b, 0x4f, 0x63, 0xff];
     const HIGHLIGHT: [u8; 4] = [0x3d, 0xae, 0xe9, 0xff];
     const FACE: [u8; 4] = [0x31, 0x36, 0x3b, 0xff];
+    const FAINT: [u8; 4] = [0x9a, 0xa0, 0xa6, 0xff];
 
     #[test]
     fn the_default_theme_paints_the_panel_as_it_was() {
@@ -335,15 +399,7 @@ mod tests {
                 colours.face,
                 colours.faint,
             ],
-            [
-                BAR,
-                INK,
-                RULE,
-                OPEN,
-                HIGHLIGHT,
-                FACE,
-                [0x9a, 0xa0, 0xa6, 0xff]
-            ]
+            [BAR, INK, RULE, OPEN, HIGHLIGHT, FACE, FAINT]
         );
     }
 
@@ -380,6 +436,11 @@ mod tests {
 
     /// As [`laid`], on a bar shaped as `shape`.
     fn laid_in(minimized: bool, shape: (PanelWidth, Align)) -> Placed {
+        laid_as(minimized, shape, true)
+    }
+
+    /// As [`laid_in`], its tasks showing their titles or not.
+    fn laid_as(minimized: bool, shape: (PanelWidth, Align), task_titles: bool) -> Placed {
         let task = |serial: u64, title: &str, second: bool| Task {
             serial,
             title: title.to_owned(),
@@ -400,6 +461,7 @@ mod tests {
                 time: "14:05",
                 layout: None,
                 tasks: vec![task(0, "Editor", false), task(1, "Mail", true)],
+                task_titles,
                 cells: vec![cell(10, 0), cell(11, 1)],
                 #[cfg(feature = "tray")]
                 tray: Vec::new(),
@@ -538,6 +600,141 @@ mod tests {
         let picture = painted(&placed, false, 1);
         let (x, y) = inside(placed.tasks[1].1);
         assert_eq!(pixel(&picture, x, y), BAR, "minimized: no face");
+    }
+
+    /// Where a task at `place`, on a panel 40 high, has the window drawn in
+    /// place of an icon it has none of: across its title bar, inside its
+    /// outline, and down its left side.
+    fn drawn_window(place: Rect) -> [(i32, i32); 3] {
+        // The icon's 22 pixels from 6 inside the face; the window 18 of
+        // them wide and 14 high in their middle, its title bar 3.
+        let (left, top) = (place.x + 1 + 6 + 2, 3 + 6 + 4);
+        [(left + 9, top + 1), (left + 9, top + 9), (left, top + 7)]
+    }
+
+    #[test]
+    fn a_window_with_no_icon_to_draw_is_drawn_as_a_window() {
+        let placed = laid(false);
+        let picture = painted(&placed, false, 1);
+        let [title, inside, side] = drawn_window(placed.tasks[0].1);
+        assert_eq!(pixel(&picture, title.0, title.1), INK, "its title bar");
+        assert_eq!(pixel(&picture, inside.0, inside.1), FACE, "hollow");
+        assert_eq!(pixel(&picture, side.0, side.1), INK, "its outline");
+
+        let placed = laid(true);
+        let picture = painted(&placed, false, 1);
+        let [title, inside, _] = drawn_window(placed.tasks[1].1);
+        assert_eq!(pixel(&picture, title.0, title.1), FAINT, "minimized: faint");
+        assert_eq!(pixel(&picture, inside.0, inside.1), BAR, "and no face");
+    }
+
+    #[test]
+    fn a_task_as_narrow_as_its_icon_shows_it_alone_in_the_middle() {
+        let placed = laid_as(false, (PanelWidth::FULL, Align::Center), false);
+        let (editor, mail) = (placed.tasks[0].1, placed.tasks[1].1);
+        assert_eq!((editor.w, mail.x), (TASK_LEAST, editor.right()));
+        for scale in [1, 2] {
+            let s = scale as i32;
+            let picture = painted(&placed, false, scale);
+            let at = |(x, y): (i32, i32)| pixel(&picture, x * s, y * s);
+            let [title, inside, side] = drawn_window(editor);
+            assert_eq!(at(title), INK, "at {scale}x");
+            assert_eq!(at(inside), FACE);
+            assert_eq!(at(side), INK);
+            assert_eq!(
+                title.0,
+                editor.x + editor.w / 2,
+                "the window in the task's middle"
+            );
+            assert_eq!(at((editor.x + 3, 20)), FACE, "the face either side");
+            assert_eq!(at((editor.right() - 3, 20)), FACE);
+            let [title, ..] = drawn_window(mail);
+            assert_eq!(at(title), INK, "the next straight after");
+            assert_eq!(at((mail.right() + 10, 20)), BAR, "and the rest empty");
+        }
+    }
+
+    /// `place`'s task, holding no icon, painted alone on a panel 600 by
+    /// `tall`.
+    fn one_task(place: Rect, tall: i32) -> Pixmap {
+        let placed = Placed {
+            bar: Rect::new(0, 0, 600, tall),
+            tasks: vec![(
+                Task {
+                    serial: 0,
+                    title: "Editor".to_owned(),
+                    icon: None,
+                    active: false,
+                    minimized: false,
+                },
+                place,
+            )],
+            ..Placed::default()
+        };
+        let mut picture = Pixmap::new(600, tall as u32).expect("a picture");
+        paint(
+            &Shown {
+                size: (600, tall),
+                edge: Edge::Bottom,
+                placed: &placed,
+                time: "14:05",
+                layout: None,
+                open: false,
+                #[cfg(feature = "tray")]
+                tray: &[],
+            },
+            &mut picture.as_mut(),
+            1,
+            &mut Text::without_fonts(),
+            &mut Images::default(),
+            &Palette::default(),
+        );
+        picture
+    }
+
+    /// The least rect holding every pixel of ink within `place`, if any.
+    fn inked(picture: &Pixmap, place: Rect) -> Option<Rect> {
+        let mut found: Vec<(i32, i32)> = Vec::new();
+        for y in place.y..place.bottom() {
+            for x in place.x..place.right() {
+                if pixel(picture, x, y) == INK {
+                    found.push((x, y));
+                }
+            }
+        }
+        let (xs, ys) = (found.iter().map(|&(x, _)| x), found.iter().map(|&(_, y)| y));
+        let (left, right) = (xs.clone().min()?, xs.max()?);
+        let (top, bottom) = (ys.clone().min()?, ys.max()?);
+        Some(Rect::new(left, top, right - left + 1, bottom - top + 1))
+    }
+
+    #[test]
+    fn a_crowded_task_shows_a_smaller_icon_in_its_middle() {
+        let place = Rect::new(40, 0, 20, 40);
+        let window = inked(&one_task(place, 40), place).expect("a window drawn");
+        assert!(
+            window.w < 18,
+            "smaller than in a task with room: {window:?}"
+        );
+        let (before, after) = (window.x - place.x, place.right() - window.right());
+        assert!((before - after).abs() <= 1, "in the middle: {window:?}");
+    }
+
+    #[test]
+    fn a_short_panels_task_icons_fit_it_as_its_tray_icons_do() {
+        let place = Rect::new(40, 0, 200, 16);
+        let window = inked(&one_task(place, 16), place).expect("a window drawn");
+        assert_eq!(fitted(16), 12, "as a status icon is");
+        assert!(
+            window.y >= ICON_MARGIN && window.bottom() <= 16 - ICON_MARGIN,
+            "inside the panel: {window:?}"
+        );
+    }
+
+    #[test]
+    fn a_window_too_small_to_make_out_is_not_drawn() {
+        let place = Rect::new(40, 0, 8, 40);
+        assert_eq!(inked(&one_task(place, 40), place), None);
     }
 
     #[test]

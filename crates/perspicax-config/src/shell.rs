@@ -154,6 +154,9 @@ pub struct Panel {
     pub outputs: PanelOutputs,
     /// Which windows each panel's taskbar lists.
     pub taskbar: TaskbarScope,
+    /// Each task shows its window's title beside its icon. Without, it shows
+    /// its icon alone, and is no wider than that needs.
+    pub task_titles: bool,
     /// What it holds, in order from the left.
     pub items: Vec<Item>,
     /// The clock's format, as strftime writes it.
@@ -377,6 +380,7 @@ impl Panel {
             align: Align::Center,
             outputs: PanelOutputs::All,
             taskbar: TaskbarScope::ThisOutput,
+            task_titles: true,
             items: items
                 .into_iter()
                 .filter(|item| match item {
@@ -421,6 +425,7 @@ struct RawPanel {
     align: Option<Align>,
     outputs: Option<RawOutputs>,
     taskbar: Option<TaskbarScope>,
+    task_titles: Option<bool>,
     items: Option<Vec<Item>>,
     clock: Option<String>,
 }
@@ -686,6 +691,7 @@ impl RawPanel {
             || self.align.is_some()
             || self.outputs.is_some()
             || self.taskbar.is_some()
+            || self.task_titles.is_some()
             || self.items.is_some()
             || self.clock.is_some();
         let had = profile.is_some();
@@ -720,6 +726,9 @@ impl RawPanel {
         }
         if let Some(taskbar) = self.taskbar {
             panel.taskbar = taskbar;
+        }
+        if let Some(titles) = self.task_titles {
+            panel.task_titles = titles;
         }
         if let Some(items) = self.items {
             if let Some(twice) = twice(&items) {
@@ -1129,7 +1138,11 @@ mod tests {
         assert_eq!(panel.edge, Edge::Top);
         assert_eq!(panel.height, 40, "the rest is classic's");
 
-        for key in ["width = 600", "width = \"60%\"\nalign = \"left\""] {
+        for key in [
+            "width = 600",
+            "width = \"60%\"\nalign = \"left\"",
+            "task-titles = false",
+        ] {
             let error = minimal(key).unwrap_err();
             assert!(
                 error.to_string().contains("enabled = true"),
@@ -1173,6 +1186,29 @@ mod tests {
             let keys = format!("width = \"50%\"\nalign = \"{written}\"");
             assert_eq!(panel(&keys).unwrap().align, align);
         }
+    }
+
+    #[test]
+    fn a_taskbar_can_show_its_tasks_icons_alone() {
+        let panel = |keys: &str| {
+            shell(&format!("[shell.panel]\n{keys}"), ShellBuilt::FULL)
+                .map(|shell| shell.panel.unwrap())
+        };
+        assert!(panel("").unwrap().task_titles, "titles, by default");
+        assert!(!panel("task-titles = false").unwrap().task_titles);
+        assert!(panel("task-titles = true").unwrap().task_titles);
+        let without = panel("items = [\"start\", \"clock\"]\ntask-titles = false").unwrap();
+        assert!(
+            !without.task_titles,
+            "kept for a taskbar put back later, as `taskbar` is"
+        );
+        let minimal = shell(
+            "profile = \"minimal\"\n[shell.panel]\nenabled = true\ntask-titles = false",
+            ShellBuilt::FULL,
+        )
+        .unwrap();
+        assert!(!minimal.panel.unwrap().task_titles);
+        assert!(panel("task-titles = \"no\"").is_err(), "true or false");
     }
 
     #[test]

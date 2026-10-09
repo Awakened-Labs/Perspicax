@@ -514,6 +514,7 @@ impl Panels {
             time: &self.time,
             layout: layout.map(|layout| layout.short.as_str()),
             tasks,
+            task_titles: panel.task_titles,
             cells,
             #[cfg(feature = "tray")]
             tray,
