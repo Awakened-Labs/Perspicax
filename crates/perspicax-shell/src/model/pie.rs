@@ -9,15 +9,25 @@
 //! is named by its desktop file ID, or by the path to a desktop file, one
 //! with a `/` in it, which is read even when it says not to be listed: the
 //! person named it.
+//!
+//! A running window is known by a name, as PieDock knew one: the first of
+//! the pie's aliases that matches its app-id or title, else its app-id, in
+//! lower case. A program's slot stands for the windows of its label's
+//! name, an application's for those its desktop entry claims too, and a
+//! submenu's for all of those below it. Where the first ring has
+//! `running`, each running application no slot of the first ring stands
+//! for gets a slot of its own there, though a submenu may have it: the
+//! first ring is where any window is one click away.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
 use perspicax_config::{
     desktop::{self, Locale},
     menu::Item,
+    pie::{Alias, Match},
 };
 
 use super::{
@@ -40,15 +50,60 @@ pub(crate) struct Slot {
     /// in the icon theme.
     pub(crate) icons: Vec<String>,
     pub(crate) does: Does,
+    /// The running windows it stands for, by serial, in the order they
+    /// opened.
+    pub(crate) windows: Vec<u64>,
 }
 
 /// What a slot does when it is chosen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Does {
-    /// Start a program.
+    /// Start a program, or bring its next window forward if it has any.
     Launch(Run),
     /// Open a pie of its own.
     Open(Vec<Slot>),
+    /// Bring a running application's next window forward; and, when its
+    /// desktop entry is known, start another of it.
+    Switch(Option<Run>),
+}
+
+/// A running window, as a pie sees it when it opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Seen {
+    pub(crate) serial: u64,
+    pub(crate) app_id: String,
+    /// What it is known by, in lower case.
+    pub(crate) name: String,
+    /// The same as written: an alias's, or its app-id.
+    pub(crate) label: String,
+}
+
+/// The windows a pie shows, each `(serial, app-id, title)`, named as
+/// `aliases` name them, less those `ignore` matches.
+pub(crate) fn seen<'w>(
+    windows: impl IntoIterator<Item = (u64, &'w str, &'w str)>,
+    aliases: &[Alias],
+    ignore: &[Match],
+) -> Vec<Seen> {
+    windows
+        .into_iter()
+        .filter(|&(_, app_id, title)| !ignore.iter().any(|matches| matches.matches(app_id, title)))
+        .map(|(serial, app_id, title)| {
+            let label = aliases
+                .iter()
+                .find(|alias| alias.matches.matches(app_id, title))
+                .map(|alias| alias.name.as_str())
+                .or((!app_id.is_empty()).then_some(app_id))
+                .unwrap_or(title)
+                .to_owned();
+            Seen {
+                serial,
+                app_id: app_id.to_owned(),
+                name: label.to_lowercase(),
+                label,
+            }
+        })
+        .collect()
 }
 
 /// A folder of icons named for what they stand for, by name in lower case.
@@ -98,15 +153,90 @@ pub(crate) struct Sources<'a, F> {
     /// The config file, for a path written beside it.
     pub(crate) config: Option<&'a Path>,
     pub(crate) locale: &'a Locale,
+    /// The windows running, named.
+    pub(crate) running: &'a [Seen],
 }
 
 impl<F: Fs> Sources<'_, F> {
+    /// The first ring of a pie of `items`, its `running` filled in.
+    pub(crate) fn pie(&self, items: &[Item]) -> Vec<Slot> {
+        let mut slots = Vec::new();
+        let mut running_at = None;
+        for item in items {
+            if let Item::Running = item {
+                running_at = Some(slots.len());
+            } else {
+                slots.extend(self.slot(item));
+            }
+        }
+        if let Some(at) = running_at {
+            let claimed: HashSet<u64> = slots
+                .iter()
+                .filter(|slot| !matches!(slot.does, Does::Open(_)))
+                .flat_map(|slot| slot.windows.iter().copied())
+                .collect();
+            let running = self.running_apps(&claimed);
+            slots.splice(at..at, running);
+        }
+        slots
+    }
+
     /// The slots of `items`. An application that is not installed, or a
     /// desktop file that cannot be read, is left out with a log line, as
     /// the menu file's is: the same config may travel to a machine without
     /// it.
     pub(crate) fn slots(&self, items: &[Item]) -> Vec<Slot> {
         items.iter().filter_map(|item| self.slot(item)).collect()
+    }
+
+    /// A slot for each running application with a window none of `claimed`
+    /// is, in the order their first windows opened.
+    fn running_apps(&self, claimed: &HashSet<u64>) -> Vec<Slot> {
+        let mut groups: Vec<(&Seen, Vec<u64>)> = Vec::new();
+        for seen in self
+            .running
+            .iter()
+            .filter(|seen| !claimed.contains(&seen.serial))
+        {
+            match groups.iter_mut().find(|(first, _)| first.name == seen.name) {
+                Some((_, windows)) => windows.push(seen.serial),
+                None => groups.push((seen, vec![seen.serial])),
+            }
+        }
+        groups
+            .into_iter()
+            .map(|(first, windows)| {
+                let app = apps::of_window(self.apps, &first.app_id)
+                    .or_else(|| apps::of_window(self.apps, &first.name));
+                let mut names = vec![first.name.as_str()];
+                names.extend(app.and_then(|app| app.icon.as_deref()));
+                names.extend([first.app_id.as_str(), PROGRAM]);
+                Slot {
+                    label: app.map_or_else(|| first.label.clone(), |app| app.name.clone()),
+                    icons: self.icons(names.into_iter().filter(|name| !name.is_empty())),
+                    does: Does::Switch(app.map(|app| app.run.clone())),
+                    windows,
+                }
+            })
+            .collect()
+    }
+
+    /// The running windows named `label`, or claimed by `app`'s desktop
+    /// entry.
+    fn windows_of(&self, label: &str, app: Option<&App>) -> Vec<u64> {
+        let name = label.to_lowercase();
+        self.running
+            .iter()
+            .filter(|seen| {
+                seen.name == name
+                    || app.is_some_and(|app| {
+                        let one = std::slice::from_ref(app);
+                        apps::of_window(one, &seen.app_id).is_some()
+                            || apps::of_window(one, &seen.name).is_some()
+                    })
+            })
+            .map(|seen| seen.serial)
+            .collect()
     }
 
     fn slot(&self, item: &Item) -> Option<Slot> {
@@ -124,6 +254,7 @@ impl<F: Fs> Sources<'_, F> {
                     terminal: *terminal,
                     dir: None,
                 }),
+                windows: self.windows_of(label, None),
             },
             Item::App { app, label, icon } => {
                 let found = self.app(app)?;
@@ -135,15 +266,26 @@ impl<F: Fs> Sources<'_, F> {
                 names.extend([found.id.as_str(), PROGRAM]);
                 Slot {
                     icons: self.icons(names),
+                    windows: self.windows_of(&label, Some(&found)),
                     label,
                     does: Does::Launch(found.run),
                 }
             }
-            Item::Open { label, icon, items } => Slot {
-                label: label.clone(),
-                icons: self.icons([icon.as_deref().unwrap_or(label), SUBMENU]),
-                does: Does::Open(self.slots(items)),
-            },
+            Item::Open { label, icon, items } => {
+                let below = self.slots(items);
+                let mut windows: Vec<u64> = Vec::new();
+                for serial in below.iter().flat_map(|slot| &slot.windows) {
+                    if !windows.contains(serial) {
+                        windows.push(*serial);
+                    }
+                }
+                Slot {
+                    label: label.clone(),
+                    icons: self.icons([icon.as_deref().unwrap_or(label), SUBMENU]),
+                    does: Does::Open(below),
+                    windows,
+                }
+            }
             Item::Running | Item::Separator | Item::Applications | Item::Session => return None,
         })
     }
@@ -245,6 +387,10 @@ mod tests {
     }
 
     fn resolve(fs: &Files, text: &str, apps: &[App]) -> Vec<Slot> {
+        resolve_with(fs, text, apps, &[])
+    }
+
+    fn resolve_with(fs: &Files, text: &str, apps: &[App], running: &[Seen]) -> Vec<Slot> {
         let folder = Folder::read(fs, Path::new("/home/ada/.piedock/icons"));
         Sources {
             fs,
@@ -253,8 +399,124 @@ mod tests {
             home: Some(Path::new("/home/ada")),
             config: Some(Path::new("/home/ada/.config/perspicax/config.toml")),
             locale: &Locale::default(),
+            running,
         }
-        .slots(&items(text))
+        .pie(&items(text))
+    }
+
+    /// Windows `(serial, app-id, title)`, named with no aliases.
+    fn running(windows: &[(u64, &str, &str)]) -> Vec<Seen> {
+        seen(windows.iter().copied(), &[], &[])
+    }
+
+    fn labels(slots: &[Slot]) -> Vec<(&str, &[u64])> {
+        slots
+            .iter()
+            .map(|slot| (slot.label.as_str(), slot.windows.as_slice()))
+            .collect()
+    }
+
+    #[test]
+    fn a_window_is_named_by_the_first_alias_that_matches_else_its_app_id() {
+        let aliases = [
+            Alias {
+                matches: Match::AppId("com.mitchellh.ghostty".to_owned()),
+                name: "Ghostty".to_owned(),
+            },
+            Alias {
+                matches: Match::Title("Steam".to_owned()),
+                name: "steam".to_owned(),
+            },
+        ];
+        let ignore = [Match::Title("100".to_owned())];
+        let named = seen(
+            [
+                (1, "com.mitchellh.ghostty", "~"),
+                (2, "steamwebhelper", "Steam"),
+                (3, "Firefox", "Mozilla Firefox"),
+                (4, "xclock", "100"),
+                (5, "", "Untitled"),
+            ],
+            &aliases,
+            &ignore,
+        );
+        let names: Vec<_> = named
+            .iter()
+            .map(|seen| (seen.serial, seen.name.as_str(), seen.label.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                (1, "ghostty", "Ghostty"),
+                (2, "steam", "steam"),
+                (3, "firefox", "Firefox"),
+                (5, "untitled", "Untitled"),
+            ]
+        );
+    }
+
+    #[test]
+    fn running_applications_fill_the_first_ring_unless_a_slot_there_stands_for_them() {
+        let fs = Files::default().with("/home/ada/.piedock/icons/ghostty.png", "");
+        let windows = running(&[
+            (1, "ghostty", "a"),
+            (2, "firefox", "b"),
+            (3, "slack", "c"),
+            (4, "ghostty", "d"),
+            (5, "firefox", "e"),
+        ]);
+        let slots = resolve_with(
+            &fs,
+            r#"items = [
+                { label = "terminal", exec = ["foot"] },
+                { label = "internet", items = [
+                    { label = "slack", exec = ["slack"] },
+                    { app = "org.mozilla.firefox" },
+                ] },
+                { running = true },
+                { label = "Ghostty", exec = ["ghostty"] },
+            ]"#,
+            &[firefox()],
+            &windows,
+        );
+        assert_eq!(
+            labels(&slots),
+            [
+                ("terminal", &[][..]),
+                ("internet", &[3, 2, 5][..]),
+                // In the submenu, and still on the first ring.
+                ("Firefox", &[2, 5][..]),
+                ("slack", &[3][..]),
+                ("Ghostty", &[1, 4][..]),
+            ],
+            "ghostty's windows are its own slot's, so it is not added"
+        );
+        assert_eq!(
+            slots[2].does,
+            Does::Switch(Some(firefox().run)),
+            "an application's, which the middle button starts again"
+        );
+        assert_eq!(slots[3].does, Does::Switch(None));
+        assert_eq!(slots[3].icons, ["slack", "application-x-executable"]);
+        let Does::Open(below) = &slots[1].does else {
+            panic!("a submenu");
+        };
+        assert_eq!(
+            labels(below),
+            [("slack", &[3][..]), ("Firefox", &[2, 5][..])]
+        );
+    }
+
+    #[test]
+    fn with_no_running_marker_running_applications_get_no_slots() {
+        let windows = running(&[(1, "slack", "c")]);
+        let slots = resolve_with(
+            &Files::default(),
+            r#"items = [{ label = "slack", exec = ["slack"] }, { label = "foot", exec = ["foot"] }]"#,
+            &[],
+            &windows,
+        );
+        assert_eq!(labels(&slots), [("slack", &[1][..]), ("foot", &[][..])]);
     }
 
     #[test]

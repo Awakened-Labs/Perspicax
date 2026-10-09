@@ -536,6 +536,7 @@ impl App {
         for effect in effects {
             match effect {
                 crate::pie::Effect::Run(run) => self.start(&run),
+                crate::pie::Effect::Activate(serial) => self.activate_window(serial),
                 crate::pie::Effect::Redraw => {}
             }
         }

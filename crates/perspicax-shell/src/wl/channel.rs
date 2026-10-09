@@ -67,7 +67,21 @@ impl App {
             let Some(monitor) = self.output_name(&output) else {
                 return;
             };
-            let Some((size, slots)) = self.pies.built(name, &mut self.installed) else {
+            // The windows as they are now, before the pie takes the
+            // keyboard and none of them has it.
+            let windows: Vec<_> = self
+                .panels
+                .tasks
+                .all()
+                .map(|(serial, window)| (serial, window.app_id.clone(), window.title.clone()))
+                .collect();
+            let active = self
+                .panels
+                .tasks
+                .all()
+                .find(|(_, window)| window.active)
+                .map(|(serial, _)| serial);
+            let Some((size, slots)) = self.pies.built(name, &mut self.installed, &windows) else {
                 tracing::warn!(name, "asked for a pie the config does not have");
                 return;
             };
@@ -79,6 +93,7 @@ impl App {
                 size,
                 at: (x, y),
                 slots,
+                active,
             });
         }
         #[cfg(not(feature = "pie"))]

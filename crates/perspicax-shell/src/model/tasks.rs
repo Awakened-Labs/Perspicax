@@ -198,6 +198,25 @@ impl<H: PartialEq, O: Clone + PartialEq> Tasks<H, O> {
         })
     }
 
+    /// Every window that does not belong to another, by serial, in the
+    /// order they opened, wherever it is: what a pie lists.
+    #[cfg(feature = "pie")]
+    pub(crate) fn all(&self) -> impl Iterator<Item = (u64, &Window<O>)> {
+        self.each.iter().filter_map(|toplevel| {
+            let window = toplevel.now.as_ref()?;
+            (!window.child).then_some((toplevel.serial, window))
+        })
+    }
+
+    /// The handle to ask window `serial` things by, while it is open.
+    #[cfg(feature = "pie")]
+    pub(crate) fn handle(&self, serial: u64) -> Option<&H> {
+        self.each
+            .iter()
+            .find(|known| known.serial == serial && known.now.is_some())
+            .map(|known| &known.handle)
+    }
+
     /// Every window shown so far.
     pub(crate) fn windows(&self) -> impl Iterator<Item = &Window<O>> {
         self.each

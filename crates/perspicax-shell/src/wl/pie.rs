@@ -38,7 +38,7 @@ use crate::{
     model::{
         fs::Disk,
         image,
-        pie::{Folder, Slot, Sources},
+        pie::{Folder, Slot, Sources, seen},
     },
     paint::{self, Kit},
     pie::{Effect, Event, State},
@@ -109,10 +109,23 @@ impl Pies {
     }
 
     /// How big the pies are across, and the slots of the one named `name`,
-    /// if the config has it.
-    pub(super) fn built(&self, name: &str, installed: &mut Installed) -> Option<(u32, Vec<Slot>)> {
+    /// if the config has it, with the running `windows`, each `(serial,
+    /// app-id, title)`.
+    pub(super) fn built(
+        &self,
+        name: &str,
+        installed: &mut Installed,
+        windows: &[(u64, String, String)],
+    ) -> Option<(u32, Vec<Slot>)> {
         let pie = self.pie.as_ref()?;
         let items = pie.menus.get(name)?;
+        let running = seen(
+            windows
+                .iter()
+                .map(|(serial, app_id, title)| (*serial, app_id.as_str(), title.as_str())),
+            &pie.aliases,
+            &pie.ignore,
+        );
         installed.refresh();
         let folder = self
             .folder
@@ -126,8 +139,9 @@ impl Pies {
             home: self.home.as_deref(),
             config: self.config.as_deref(),
             locale: &installed.places().locale,
+            running: &running,
         };
-        Some((pie.size, sources.slots(items)))
+        Some((pie.size, sources.pie(items)))
     }
 
     /// The wheel turned `notches`, up negative, in fractions of one: the

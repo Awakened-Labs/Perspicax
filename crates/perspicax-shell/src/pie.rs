@@ -10,8 +10,10 @@
 //! it, by direction (see [`crate::layout::pie`]); a button acts on what is
 //! picked when it comes up, and only if it went down on the pie. The left
 //! button opens a submenu in the pie's place, or starts a program, or,
-//! when a program has windows open, raises the next of them; the middle
-//! one starts the program whatever is open; the right one goes back out of
+//! when a program has windows open, brings the next of them forward: the
+//! one after the window that had the keyboard when the pie was asked for,
+//! so asking again and choosing again goes round them. The middle button
+//! starts the program whatever is open; the right one goes back out of
 //! a submenu, and closes the pie from its first ring. The wheel spins the
 //! pie a place a notch. Escape closes it, Enter is the left button, the
 //! arrows up and down spin it, and Backspace is the right button. Losing
@@ -48,6 +50,9 @@ pub(crate) enum Event {
         size: u32,
         at: (i32, i32),
         slots: Vec<Slot>,
+        /// The window that had the keyboard when it was asked for: the
+        /// pie takes it, so it is told here.
+        active: Option<u64>,
     },
     /// The pointer came onto the pie's surface, or moved on it.
     Motion((f64, f64)),
@@ -69,6 +74,8 @@ pub(crate) enum Effect {
     Redraw,
     /// Start a program.
     Run(Run),
+    /// Bring the window of this serial forward.
+    Activate(u64),
 }
 
 /// The pie that is open, if one is.
@@ -91,6 +98,8 @@ struct Open {
     pointer: Option<(f64, f64)>,
     /// The button that went down on the pie and has not come up.
     pressed: Option<Button>,
+    /// The window that had the keyboard when the pie was asked for.
+    active: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -141,6 +150,7 @@ impl State {
             size,
             at,
             slots,
+            active,
         } = event
         {
             let same = self
@@ -160,6 +170,7 @@ impl State {
                 at,
                 pointer: None,
                 pressed: None,
+                active,
             });
             return vec![Effect::Redraw];
         }
@@ -251,13 +262,14 @@ impl Open {
         (Then::Stay, vec![Effect::Redraw])
     }
 
-    /// Do what slot `index` does: open its submenu, or start its program.
+    /// Do what slot `index` does: open its submenu, bring its next window
+    /// forward, or start its program.
     fn choose(&mut self, index: Option<usize>) -> (Then, Vec<Effect>) {
         let Some(slot) = index.and_then(|index| self.levels.last()?.slots.get(index)) else {
             return (Then::Stay, Vec::new());
         };
-        match &slot.does {
-            Does::Open(below) => {
+        match (&slot.does, self.next(&slot.windows)) {
+            (Does::Open(below), _) => {
                 let level = Level {
                     label: slot.label.clone(),
                     slots: below.clone(),
@@ -266,7 +278,11 @@ impl Open {
                 self.levels.push(level);
                 (Then::Stay, Vec::new())
             }
-            Does::Launch(run) => (Then::Close, vec![Effect::Run(run.clone())]),
+            (Does::Launch(_) | Does::Switch(_), Some(window)) => {
+                (Then::Close, vec![Effect::Activate(window)])
+            }
+            (Does::Launch(run), None) => (Then::Close, vec![Effect::Run(run.clone())]),
+            (Does::Switch(_), None) => (Then::Stay, Vec::new()),
         }
     }
 
@@ -276,9 +292,21 @@ impl Open {
             .and_then(|index| self.levels.last()?.slots.get(index))
             .map(|slot| &slot.does)
         {
-            Some(Does::Launch(run)) => (Then::Close, vec![Effect::Run(run.clone())]),
+            Some(Does::Launch(run) | Does::Switch(Some(run))) => {
+                (Then::Close, vec![Effect::Run(run.clone())])
+            }
             _ => (Then::Stay, Vec::new()),
         }
+    }
+
+    /// Which of `windows` comes forward next: the one after the window that
+    /// had the keyboard, if it is one of them, else the first.
+    fn next(&self, windows: &[u64]) -> Option<u64> {
+        let after = self
+            .active
+            .and_then(|active| windows.iter().position(|&window| window == active))
+            .map_or(0, |at| at + 1);
+        windows.get(after % windows.len().max(1)).copied()
     }
 
     /// Out of the submenu open, or closed from the first ring.
@@ -316,6 +344,7 @@ mod tests {
             label: label.to_owned(),
             icons: Vec::new(),
             does: Does::Launch(run(label)),
+            windows: Vec::new(),
         }
     }
 
@@ -324,6 +353,7 @@ mod tests {
             label: label.to_owned(),
             icons: Vec::new(),
             does: Does::Open(slots),
+            windows: Vec::new(),
         }
     }
 
@@ -348,7 +378,36 @@ mod tests {
                 launcher("firefox"),
                 launcher("editor"),
             ],
+            active: None,
         }
+    }
+
+    /// A pie of a terminal with windows 7 and 9 open (up), and a running
+    /// application, slack, with window 4 (down), asked for while `active`
+    /// had the keyboard.
+    fn running(active: Option<u64>) -> State {
+        let mut state = State::default();
+        state.update(Event::Asked {
+            name: "launchers".to_owned(),
+            output: "eDP-1".to_owned(),
+            area: SCREEN,
+            size: 512,
+            at: MIDDLE,
+            slots: vec![
+                Slot {
+                    windows: vec![7, 9],
+                    ..launcher("terminal")
+                },
+                Slot {
+                    label: "slack".to_owned(),
+                    icons: Vec::new(),
+                    does: Does::Switch(Some(run("slack"))),
+                    windows: vec![4],
+                },
+            ],
+            active,
+        });
+        state
     }
 
     fn click(state: &mut State, at: (f64, f64), button: Button) -> Vec<Effect> {
@@ -480,5 +539,40 @@ mod tests {
         let mut state = opened();
         state.update(Event::KeyboardLost);
         assert!(state.view().is_none());
+    }
+
+    #[test]
+    fn a_left_click_on_a_program_with_windows_brings_the_next_forward_round_them() {
+        assert_eq!(
+            click(&mut running(None), UP, Button::Left),
+            [Effect::Activate(7), Effect::Redraw],
+            "the first, when none of its own has the keyboard"
+        );
+        assert_eq!(
+            click(&mut running(Some(7)), UP, Button::Left),
+            [Effect::Activate(9), Effect::Redraw]
+        );
+        assert_eq!(
+            click(&mut running(Some(9)), UP, Button::Left),
+            [Effect::Activate(7), Effect::Redraw],
+            "after the last, the first again"
+        );
+        assert_eq!(
+            click(&mut running(Some(9)), DOWN, Button::Left),
+            [Effect::Activate(4), Effect::Redraw],
+            "a running application's"
+        );
+    }
+
+    #[test]
+    fn the_middle_button_starts_another_even_with_windows_open() {
+        assert_eq!(
+            click(&mut running(Some(7)), UP, Button::Middle),
+            [Effect::Run(run("terminal")), Effect::Redraw]
+        );
+        assert_eq!(
+            click(&mut running(None), DOWN, Button::Middle),
+            [Effect::Run(run("slack")), Effect::Redraw]
+        );
     }
 }

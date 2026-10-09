@@ -839,6 +839,39 @@ fn a_pie_opens_at_the_pointer_and_a_slot_pointed_at_runs_its_program() {
     std::fs::remove_file(marker).ok();
 }
 
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_pies_running_application_brings_its_next_window_forward_each_time() {
+    let session = Session::start("shell-pie-running", Backend::headless((1280, 800)));
+    let config = "profile = \"minimal\"\n[shell.pie.menus]\nt = [{ running = true }]\n";
+    let shell = Shell::start(&session, "pie-running", config);
+    let facts = session.wait_for(|facts| desktops(facts).len() == 1);
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.open_window(&qh, "first", "slack");
+    desk.open_window(&qh, "second", "slack");
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.task("first").is_some() && activated(desk, "second")
+    });
+    // The pointer on the wallpaper, clear of the windows.
+    click(&session, desktop(&facts), (20.0, 20.0), PointerButton::Left);
+
+    // One slot, slack's, standing for both windows: choosing it brings
+    // forward the one after the window that has the keyboard, and again.
+    for next in ["first", "second", "first"] {
+        session.perform(Action::Pie("t".to_owned()));
+        let facts = session.wait_for(|facts| pie(facts).is_some());
+        let (surface, _, _) = pie(&facts).expect("waited for");
+        // Kept inside the monitor, the pie's middle is at (256, 256); its
+        // one slot is at the top, and straight up from there picks it.
+        click(&session, surface, (256.0, 6.0), PointerButton::Left);
+        session.wait_for(|facts| pie(facts).is_none());
+        common::until(&mut queue, &mut desk, |desk| activated(desk, next));
+    }
+
+    shell.stop_with(session);
+}
+
 /// An orange window, with the root menu open over it: the window's id and
 /// where it is, and the menus' surface's id and where the menu is.
 fn menu_over_a_window(

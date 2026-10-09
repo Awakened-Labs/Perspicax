@@ -50,6 +50,22 @@ impl App {
     }
 }
 
+impl App {
+    /// Bring window `serial` forward, as a left click on its task does: a
+    /// pie's choice.
+    #[cfg(feature = "pie")]
+    pub(super) fn activate_window(&self, serial: u64) {
+        let Some(handle) = self.panels.tasks.handle(serial) else {
+            tracing::debug!(serial, "a window the pie chose has gone");
+            return;
+        };
+        match self.seat.state.seats().next() {
+            Some(seat) => handle.activate(&seat),
+            None => tracing::debug!("no seat to bring a window forward with"),
+        }
+    }
+}
+
 impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for App {
     fn event(
         app: &mut Self,
