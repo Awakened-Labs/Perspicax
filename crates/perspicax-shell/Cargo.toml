@@ -138,4 +138,8 @@ tray = ["panel", "menus", "dep:zbus", "dep:tokio"]
 icons = ["wallpaper", "menus"]
 # Icons drawn from SVG, as most icon themes ship them.
 svg = ["dep:resvg"]
-full = ["wallpaper", "panel", "menus", "tray", "icons", "svg"]
+# Pie menus, PieDock's way, opened at the pointer by a binding: drawn,
+# launched and read as the menus are, and knowing the running windows
+# through the taskbar's protocol, so it takes both.
+pie = ["menus", "dep:wayland-protocols-wlr"]
+full = ["wallpaper", "panel", "menus", "tray", "icons", "svg", "pie"]

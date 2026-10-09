@@ -55,6 +55,7 @@ pub const BUILT: ShellBuilt = ShellBuilt {
     menus: cfg!(feature = "menus"),
     tray: cfg!(feature = "tray"),
     icons: cfg!(feature = "icons"),
+    pie: cfg!(feature = "pie"),
 };
 
 /// How to run.

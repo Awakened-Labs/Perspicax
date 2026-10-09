@@ -28,6 +28,7 @@ pub mod autostart;
 pub mod desktop;
 mod keys;
 pub mod menu;
+pub mod pie;
 mod shell;
 
 use std::{
