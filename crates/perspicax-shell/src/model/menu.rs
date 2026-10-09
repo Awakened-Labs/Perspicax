@@ -9,12 +9,14 @@
 //! may put items of its own above them, or replace the lot. The start menu
 //! is built the same way, from `[shell.start-menu]`'s items and never the
 //! menu file's: with none written, or with items that go above the rest, it
-//! is where every application can always be found. A tray icon's menu is its program's, and what is
+//! is where every application can always be found, and one written in
+//! place of the rest can still find them all by typing (`search = "all"`).
+//! A tray icon's menu is its program's, and what is
 //! chosen in it is told back to that program.
 
 use std::path::PathBuf;
 
-use perspicax_config::{Leave, Shell};
+use perspicax_config::{Leave, Shell, start_menu::Search};
 
 use super::{
     apps::{App, Run},
@@ -277,6 +279,42 @@ pub(crate) fn root(apps: &[App], file: Option<&MenuFile>, session: &Session) -> 
 /// a menu file's go in the root menu.
 pub(crate) fn start(apps: &[App], written: Option<&MenuFile>, session: &Session) -> Menu {
     root(apps, written, session)
+}
+
+/// What typing in the start menu looks through.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum Finds {
+    /// The start menu itself.
+    #[default]
+    Itself,
+    /// This, which holds more: the start menu's own items first, each where
+    /// the start menu has it, and then the rest.
+    Among(Menu),
+    /// Nothing: the start menu has no search line.
+    Nothing,
+}
+
+/// What typing in the start menu built from `written` finds, as `search`
+/// says. Finding everything in a menu written in place of everything is
+/// finding in it as it would be above everything; a menu with everything
+/// in it already finds everything in itself.
+pub(crate) fn finds(
+    apps: &[App],
+    written: Option<&MenuFile>,
+    search: Search,
+    session: &Session,
+) -> Finds {
+    match (search, written) {
+        (Search::Nothing, _) => Finds::Nothing,
+        (Search::All, Some(written)) if written.mode == Mode::Replace => {
+            let above = MenuFile {
+                mode: Mode::Extend,
+                items: written.items.clone(),
+            };
+            Finds::Among(start(apps, Some(&above), session))
+        }
+        _ => Finds::Itself,
+    }
 }
 
 /// One submenu per group that has an application in it, each listing its
@@ -585,6 +623,46 @@ mod tests {
         );
         let menu = start(&apps(), Some(&written), &session());
         assert_eq!(labels(&menu), ["Text Editor"]);
+    }
+
+    #[test]
+    fn a_start_menu_finds_what_it_holds_everything_or_nothing_as_written() {
+        let favourites =
+            written("mode = \"replace\"\nitems = [{ app = \"firefox\" }, { separator = true }]");
+        let menu = start(&apps(), Some(&favourites), &session());
+        let searching = |search| finds(&apps(), Some(&favourites), search, &session());
+        assert_eq!(searching(Search::Menu), Finds::Itself);
+        assert_eq!(searching(Search::Nothing), Finds::Nothing);
+        let Finds::Among(all) = searching(Search::All) else {
+            panic!("a tree of everything");
+        };
+        assert_eq!(
+            labels(&all),
+            [
+                "Firefox",
+                "--",
+                "Accessories",
+                "Internet",
+                "System",
+                "--",
+                "Lock",
+                "Log Out"
+            ]
+        );
+        assert_eq!(
+            all.items[..menu.items.len()],
+            menu.items,
+            "the start menu's own items where it has them"
+        );
+        assert_eq!(all.find("htop"), [vec![4, 1]], "and what it does not hold");
+
+        let above = written("items = [{ app = \"firefox\" }]");
+        assert_eq!(
+            finds(&apps(), Some(&above), Search::All, &session()),
+            Finds::Itself,
+            "above everything, it holds everything"
+        );
+        assert_eq!(finds(&apps(), None, Search::All, &session()), Finds::Itself);
     }
 
     /// A favourite above the groups is also in its group; typing finds it
