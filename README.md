@@ -461,12 +461,14 @@ that asks to be maximized fills what the panels leave. Either may ask before
 it even maps, as a game that starts fullscreen does. Minimized, by its own
 request or from the taskbar, an X11 window is told it is iconic (ICCCM's
 `WM_STATE`, and `_NET_WM_STATE_HIDDEN`), and normal again when it comes back,
-which is the change Wine waits for before it draws again. A window on a
-workspace that is not showing is not minimized, and is not told it is. Every
-request is answered, even one that changes nothing, because Wine changes
-nothing more about a window while one of its requests is waiting. As with a
-Wayland window, all of this is for a person at the seat: an agent's headless
-desk does not rearrange itself.
+which is the change Wine waits for before it draws again. One that maps
+asking to start minimized (ICCCM's initial state, as `xterm -iconic` and Wine
+set it) starts that way and is told so, and the keyboard stays where it was.
+A window on a workspace that is not showing is not minimized, and is not told
+it is. Every request is answered, even one that changes nothing, because Wine
+changes nothing more about a window while one of its requests is waiting. As
+with a Wayland window, all of this is for a person at the seat: an agent's
+headless desk does not rearrange itself.
 
 An X11 window may also ask to be the active one (`_NET_ACTIVE_WINDOW`), as a
 program does when a second copy of it is started, or as Wine does to bring a
