@@ -1,10 +1,18 @@
-//! An X11 window under Xwayland, and who the index is told drew it.
+//! X11 windows under Xwayland: who the index is told drew one, which takes
+//! the keyboard, and what the window manager does and says when one asks
+//! for a state.
 //!
-//! The claim this checks is the provenance one. The compositor's Wayland
-//! credentials name only Xwayland, so the X client's pid has to come from
-//! somewhere else: first from the window's own `_NET_WM_PID`, a claim, then
-//! from the X-Resource extension, the X server's own word. The facts must end
-//! up saying `XRes`, with the server attested separately.
+//! Provenance: the compositor's Wayland credentials name only Xwayland, so
+//! the X client's pid has to come from somewhere else: first from the
+//! window's own `_NET_WM_PID`, a claim, then from the X-Resource extension,
+//! the X server's own word. The facts must end up saying `XRes`, with the
+//! server attested separately.
+//!
+//! States (issue #90): the client asks as Wine does -- a client message to
+//! the root, or `_NET_WM_STATE` written before it maps -- and waits for the
+//! answer, a change to `WM_STATE` or `_NET_WM_STATE`, as Wine does before it
+//! changes anything more. Most of these seat a person at the headless
+//! compositor, since a window rearranges itself only for a person.
 //!
 //! The X client is this test process, speaking X11 through x11rb, so nothing
 //! beyond `Xwayland` itself has to be installed. Needs `XDG_RUNTIME_DIR` and

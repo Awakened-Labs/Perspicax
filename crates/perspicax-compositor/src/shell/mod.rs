@@ -14,7 +14,10 @@
 //! written against those deterministic rectangles, and a headless client
 //! reorganising its own geometry mid-test would be measuring this module
 //! instead of the index. So every entry point that would move or resize a
-//! window checks [`crate::backend::Running::has_person`] first.
+//! window checks [`crate::backend::Running::has_person`] first. An X11
+//! window's requests are answered all the same, with the state it is in (see
+//! `crate::xwayland`), and a test can seat a person to see what one gets
+//! (`Backend::with_person`).
 
 mod actions;
 mod grabs;

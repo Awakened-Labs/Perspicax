@@ -454,6 +454,20 @@ X11 window's origin says so: the X client's pid comes from the X server's
 X-Resource answer rather than the kernel, and every X client shares one consent
 decision, because X11 lets them read and drive each other.
 
+An X11 window gets what a Wayland one gets, and is told so in X11's terms. One
+that asks to go fullscreen -- a game, as Wine asks -- covers its monitor and
+the panels, with no frame, and keeps it if it then asks for another size; one
+that asks to be maximized fills what the panels leave. Either may ask before
+it even maps, as a game that starts fullscreen does. Minimized, by its own
+request or from the taskbar, an X11 window is told it is iconic (ICCCM's
+`WM_STATE`, and `_NET_WM_STATE_HIDDEN`), and normal again when it comes back,
+which is the change Wine waits for before it draws again. A window on a
+workspace that is not showing is not minimized, and is not told it is. Every
+request is answered, even one that changes nothing, because Wine changes
+nothing more about a window while one of its requests is waiting. As with a
+Wayland window, all of this is for a person at the seat: an agent's headless
+desk does not rearrange itself.
+
 The session reads `$XDG_CONFIG_HOME/perspicax/config.toml` (or `--config PATH`),
 and reads it again whenever it is saved. Without one it runs the `classic`
 profile, which is Plasma's and Windows' habits:
