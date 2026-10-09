@@ -313,6 +313,7 @@ fn run(cli: &Cli) -> Result<()> {
             access: Default::default(),
             // Nobody sits at it, so no window rearranges itself.
             person: false,
+            opacity: Default::default(),
         }
     };
     // First, before the accessibility bus is touched: a backend this binary

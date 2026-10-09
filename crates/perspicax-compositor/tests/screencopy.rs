@@ -45,6 +45,7 @@ fn session(name: &str, access: Access) -> Session {
             workspaces: Shape::default(),
             access,
             person: false,
+            opacity: Default::default(),
         },
     )
 }

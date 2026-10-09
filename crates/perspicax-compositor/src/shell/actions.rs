@@ -67,6 +67,16 @@ impl Compositor {
             Action::Pie(name) => self.ask_shell(crate::shell_protocol::Menu::Pie(name.clone())),
             Action::CycleLayout { forward } => self.cycle_layout(*forward),
             Action::Layout(number) => self.go_to_layout(*number),
+            Action::OpacityUp | Action::OpacityDown => {
+                if let Some(window) = focused {
+                    self.step_opacity(&window, *action == Action::OpacityUp);
+                }
+            }
+            Action::OpacityReset => {
+                if let Some(window) = focused {
+                    self.reset_opacity(&window);
+                }
+            }
             Action::CycleFocus => {
                 // Minimized windows on this workspace count as below the
                 // bottom of the stack, so cycling reaches them first and

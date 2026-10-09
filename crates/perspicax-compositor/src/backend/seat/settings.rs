@@ -244,6 +244,7 @@ pub(crate) fn reload(state: &mut Compositor) {
         .filter(|_| fresh.keyboard.numlock != session.settings.keyboard.numlock);
     let outputs_changed = fresh.outputs != session.settings.outputs;
     let decorations_changed = fresh.decorations != session.settings.decorations;
+    let opacity_changed = fresh.opacity != session.settings.opacity;
     let theme_changed = fresh.theme != session.settings.theme;
     let appearance_changed = fresh.theme.apps != session.settings.theme.apps;
     let pointer_changed = (&fresh.theme.cursor, fresh.theme.cursor_size)
@@ -304,6 +305,13 @@ pub(crate) fn reload(state: &mut Compositor) {
     if theme_changed {
         state.backend.redraw();
     }
+    // Each application's rule and the dimming are read as each frame is
+    // drawn, so only the windows' look and their facts follow. A value the
+    // keys set is the window's, and stays.
+    if opacity_changed {
+        state.backend.redraw();
+        state.publish_facts();
+    }
     let access_changed = access.is_some();
     if let Some(access) = access {
         state.set_access(access);
@@ -316,6 +324,7 @@ pub(crate) fn reload(state: &mut Compositor) {
         keyboard_changed,
         outputs_changed,
         decorations_changed,
+        opacity_changed,
         theme_changed,
         access_changed,
         mouse_changed,

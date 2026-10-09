@@ -293,8 +293,10 @@ focus cannot move between the two.
 **A titlebar is pixels no client drew.** The frame perspicax draws around a
 window goes into the facts beside the window, so a node of another window
 under a titlebar is refused as `occluded`, naming the window the titlebar
-belongs to, and the verdict is proof rather than policy: the frame is drawn
-solid. A window's own frame sits outside it and never covers its own nodes.
+belongs to, and the verdict is proof rather than policy: the frame is solid
+to an agent, even drawn see-through for a person (see [See-through
+windows](#see-through-windows)). A window's own frame sits outside it and
+never covers its own nodes.
 One cost of drawing the frame: a toolkit that would have drawn close and
 maximize buttons no longer does, so they are not in its accessibility tree;
 `window_close` and `tab_forward` are the agent's way to do what they did.
@@ -574,6 +576,9 @@ edges = 20                     # a window being moved stops at the edge of a
                                # screen or a panel until pushed this many
                                # pixels past it; 0 lets it straight through
 seams = 0                      # the same where two monitors meet
+
+[opacity]                      # windows drawn see-through, for your eyes
+unfocused = 85                 # only; see See-through windows below
 
 [decorations]
 mode = "server"                # draw titlebars for clients that ask; "client"
@@ -1025,6 +1030,62 @@ libadwaita takes the accent from GNOME 47 on, rounded to the nearest of its
 nine. Firefox follows on "System theme — auto". GTK 3 and Qt 5 ignore the
 portal's colour scheme, and Qt 6 follows only with a platform theme that
 reads it.
+
+## See-through windows
+
+A window can be drawn see-through: by its application, by a key, and dimmed
+while it does not have the keyboard. All of it is off until written.
+
+```toml
+[keys]
+"Logo+Page_Up" = "opacity-up"       # the focused window, a step at a time
+"Logo+Page_Down" = "opacity-down"
+"Logo+End" = "opacity-reset"        # back to its application's, or opaque
+
+[opacity]
+step = 10              # percent a press moves it; the default
+floor = 20             # the lowest the keys take a window; the default
+unfocused = 85         # a window without the keyboard, as a share of its
+                       # own; 100, the default, dims nothing
+
+[opacity.apps]         # where each application's windows start
+foot = 90
+"org.gnome.Nautilus" = 95
+```
+
+Every value is a whole percent from 1 to 100, and `unfocused` and each
+application's may not be below `floor`. No profile binds the three actions;
+any key or mouse binding can.
+
+- **A window starts at its application's value,** or opaque. The app id
+  under Wayland, or the `WM_CLASS` class under X11, is matched exactly, case
+  included.
+- **The keys move it from there,** within `floor` and opaque. What they set
+  stays with that window, through reloads, until `opacity-reset`; a reload
+  changes every other window at once.
+- **A window without the keyboard** is drawn at `unfocused` of its own: foot
+  at 90 with `unfocused = 85` shows at about 77. That can go below `floor`,
+  which is only how far the keys go. A window whose own menu is open still
+  has the keyboard. While the start menu or a launcher holds it, no window
+  does, and every one is dimmed, as every titlebar shows unfocused.
+- **A fullscreen window is drawn opaque,** so a video is never dimmed, and
+  the keys leave it alone. Its own returns when it leaves fullscreen.
+- **A tab group shares** what the keys set; with nothing set, each tab
+  follows its own application.
+- **The whole window shows through:** its titlebar and border, and its
+  menus. Each of its surfaces is drawn on its own, so where an application
+  draws one over another, as a browser does a video, the one beneath shows
+  faintly through it.
+- **X11 menus and tooltips are drawn opaque,** since nothing ties one to its
+  window. A client's own `_NET_WM_WINDOW_OPACITY` is ignored.
+
+**For your eyes, not an agent's.** A see-through window still covers what is
+behind it as far as an agent is told: a node beneath it is `occluded`, naming
+it, exactly as if it were opaque. You chose to look through it, and an agent
+is not expected to read what shows there. A picture of the monitor shows what
+you see, the text faintly behind the window included, and `window_list` gives
+such a window an `opacity`, so an agent shown that text and told it is
+covered has the reason. A picture of the window by itself shows it whole.
 
 ## Keyboards
 

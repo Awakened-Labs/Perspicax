@@ -131,6 +131,10 @@ mod taking {
         /// Over the panels: the fullscreen window in use. See
         /// `crate::shell::covers_panels`.
         raised: bool,
+        /// How opaque it is drawn, as on the monitor: a picture shows what
+        /// the person sees, translucency included, though an agent is still
+        /// told what is behind a translucent window is covered.
+        alpha: f32,
     }
 
     pub(super) fn take(state: &mut Compositor, target: &ShotTarget) -> Result<Shot, ActError> {
@@ -234,6 +238,9 @@ mod taking {
             }
         };
 
+        // Asked before the layer map is locked below, and once: which
+        // window is in use decides which are dimmed.
+        let in_use = state.window_in_use();
         let stack = crate::shell::stack(space, &output)
             .ok_or_else(|| ActError::NoSuchOutput(output.name()))?;
         let layers = layer_map_for_output(&output);
@@ -264,6 +271,7 @@ mod taking {
                 cover: Rectangle::new(bbox.loc - area.loc, bbox.size),
                 redacted: hidden,
                 raised,
+                alpha: crate::shell::alpha(state.opacity_of(window, in_use)),
             });
         }
         for (layer, at) in &stack.lower {
@@ -324,6 +332,9 @@ mod taking {
                 cover: Rectangle::from_size(bbox.size),
                 redacted: false,
                 raised: false,
+                // A picture of the window alone: nothing is behind it to
+                // show through, so it is drawn whole.
+                alpha: 1.0,
             }],
             lower: Vec::new(),
             drawn: vec![Drawn {
@@ -409,6 +420,8 @@ mod taking {
             let mut elements = Vec::new();
             for placed in plan.windows.iter().filter(|placed| placed.raised == raised) {
                 if placed.redacted {
+                    // Solid, however the window is drawn: what shows through
+                    // a block would be the next thing to redact.
                     let block = SolidColorBuffer::new(placed.cover.size, REDACTED);
                     elements.push(Scene::Solid(SolidColorRenderElement::from_buffer(
                         &block,
@@ -425,7 +438,7 @@ mod taking {
                                 renderer,
                                 placed.at.to_physical_precise_round(scale),
                                 scale,
-                                1.0,
+                                placed.alpha,
                             )
                             .into_iter()
                             .map(Scene::Window),

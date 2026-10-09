@@ -38,12 +38,16 @@ use smithay::{
 };
 
 use perspicax_index::Consent;
-use perspicax_policy::{Access, MouseBindings, Place, Shape};
+use perspicax_policy::{Access, MouseBindings, Opacity, Place, Shape};
 
 use crate::{Config, Error, FRAME_INTERVAL, state::Compositor};
 
 /// Where the compositor puts its output and gets its input.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a setting, made once as the compositor starts and never moved in a loop"
+)]
 pub enum Backend {
     /// No window system at all: virtual outputs, no renderer, and input only
     /// from [`crate::Host`]. What CI and an agent with no person present run.
@@ -65,6 +69,10 @@ pub enum Backend {
         /// For tests of exactly that; an agent's desk has nobody, and the
         /// default is `false`. See [`Backend::with_person`].
         person: bool,
+        /// How see-through windows are drawn, as a seat's `[opacity]` table
+        /// would say. The default draws nothing see-through; what an agent
+        /// is told a window covers is the same either way.
+        opacity: Opacity,
     },
     /// A real session: the outputs the GPU has connected, the keyboards and
     /// pointers libinput finds, device access negotiated through libseat.
@@ -112,6 +120,7 @@ impl Backend {
             workspaces: Shape::default(),
             access: Access::open(),
             person: false,
+            opacity: Opacity::default(),
         }
     }
 
@@ -166,6 +175,7 @@ pub(crate) enum Running {
         access: Box<Access>,
         /// Whether a person sits at it. See [`Running::has_person`].
         person: bool,
+        opacity: Opacity,
         /// Virtual monitors a display tool turned off, kept so it can turn
         /// them on again.
         dark: Vec<Virtual>,
@@ -201,11 +211,13 @@ impl Running {
                 workspaces,
                 access,
                 person,
+                opacity,
             } => Ok(Self::Headless {
                 outputs: outputs.iter().map(|out| plug(display, out)).collect(),
                 workspaces: *workspaces,
                 access: Box::new(access.clone()),
                 person: *person,
+                opacity: opacity.clone(),
                 dark: Vec::new(),
                 #[cfg(feature = "capture")]
                 pictures: None,
@@ -269,6 +281,16 @@ impl Running {
             Self::Headless { .. } => None,
             #[cfg(feature = "seat")]
             Self::Seat(session) => Some(session.settings.resistance),
+        }
+    }
+
+    /// How see-through windows are drawn: the person's `[opacity]` on a seat,
+    /// and what the backend was given headless.
+    pub(crate) fn opacity(&self) -> &Opacity {
+        match self {
+            Self::Headless { opacity, .. } => opacity,
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => &session.settings.opacity,
         }
     }
 

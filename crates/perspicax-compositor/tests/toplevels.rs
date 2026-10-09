@@ -26,6 +26,7 @@ fn backend(access: Access) -> Backend {
         workspaces: Shape::default(),
         access,
         person: false,
+        opacity: Default::default(),
     }
 }
 

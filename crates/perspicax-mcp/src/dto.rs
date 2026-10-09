@@ -504,6 +504,12 @@ pub struct Window {
     /// Its tab group, when it is in one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tabs: Option<Tabs>,
+    /// How opaque it is drawn, in percent, when the person has made it less
+    /// than wholly so; absent when it is opaque. What is behind it then shows
+    /// through in a picture of the monitor, and is still covered: `observe`
+    /// and `act` treat the window as solid, by the person's decision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<u8>,
 }
 
 /// A window's tab group: every tab, and which is in front.
@@ -569,6 +575,7 @@ impl Window {
                 members: facts.tabs.iter().map(|tab| tab.0).collect(),
                 front: facts.behind_tab.unwrap_or(facts.id).0,
             }),
+            opacity: facts.drawn_opacity,
         }
     }
 }
@@ -1041,6 +1048,23 @@ mod tests {
             undescribed.rendered_by.as_ref().map(|by| by.pid),
             Some(5150)
         );
+    }
+
+    /// A window the person made see-through says how opaque it is drawn, and
+    /// one that is opaque says nothing: no `opacity: 100` on every window.
+    #[test]
+    fn a_see_through_window_says_how_opaque_it_is_drawn_and_an_opaque_one_is_silent() {
+        let facts = HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(WINDOW, Rect::new(0.0, 0.0, 400.0, 300.0)).drawn_at(77),
+                SurfaceFacts::new(OVERLAY, Rect::new(100.0, 100.0, 300.0, 250.0)),
+            ],
+            1,
+        );
+        let windows = Window::all(&index(), &facts);
+        let wire = serde_json::to_value(&windows).unwrap();
+        assert_eq!(wire[0]["opacity"], 77);
+        assert!(wire[1].get("opacity").is_none(), "{}", wire[1]);
     }
 
     /// The window node is the shallowest node on its surface, and finding it

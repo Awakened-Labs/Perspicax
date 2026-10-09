@@ -181,14 +181,18 @@ impl Compositor {
         crate::facts::title(window.toplevel()?.wl_surface())
     }
 
-    /// Tell every window on screen how its frame looks, for drawing it:
-    /// how far it reaches, and whether it is the one with the keyboard.
+    /// Tell every window on screen how it and its frame look, for drawing
+    /// them: how far the frame reaches, whether it is the window in use, and
+    /// how opaque the window is.
+    ///
+    /// In use is where the keys go, through any menu the window opened: a
+    /// window whose own menu is open still looks in use, lit and undimmed.
     #[cfg(feature = "seat")]
     pub(crate) fn dress_frames(&self) {
         let decorations = self.backend.decorations();
-        let focused = self.focused_surface();
+        let in_use = self.window_in_use();
         for window in self.space.elements() {
-            let (colour, ink) = if focused.is_some() && crate::shell::id_of(window) == focused {
+            let (colour, ink) = if in_use.is_some() && crate::shell::id_of(window) == in_use {
                 (decorations.focused, decorations.focused_ink)
             } else {
                 (decorations.unfocused, decorations.unfocused_ink)
@@ -203,6 +207,7 @@ impl Compositor {
                 0
             };
             window.wear(insets, grip, colour, ink, title_at);
+            window.fade(crate::shell::alpha(self.opacity_of(window, in_use)));
         }
     }
 

@@ -229,8 +229,17 @@ impl Compositor {
             .space
             .elements()
             .partition(|window| crate::shell::covers_panels(window));
-        let window =
-            |window: &crate::framed::Framed| Some(self.grouped(window, self.facts_for(window)?));
+        // How see-through each window on screen is drawn, for an agent
+        // puzzled by a picture. Never judged by: see `drawn_opacity`.
+        let in_use = self.window_in_use();
+        let window = |window: &crate::framed::Framed| {
+            let mut facts = self.grouped(window, self.facts_for(window)?);
+            if facts.mapped {
+                facts.drawn_opacity = Some(self.opacity_of(window, in_use))
+                    .filter(|&percent| percent < perspicax_policy::OPAQUE);
+            }
+            Some(facts)
+        };
         let layer = |(layer, placed): &(smithay::desktop::LayerSurface, _)| {
             let id = *layer.user_data().get::<SurfaceId>()?;
             let mut facts = self.plain_facts(id, layer.wl_surface(), *placed);
@@ -404,6 +413,9 @@ impl Compositor {
                     smithay::utils::Rectangle::new(location, declared.size),
                 )
             },
+            // Filled by `publish_facts`, which asks once which window is in
+            // use.
+            drawn_opacity: None,
             // Filled by `grouped`, for X11 windows too.
             app_id: None,
             tabs: Vec::new(),
@@ -451,6 +463,8 @@ impl Compositor {
             off_workspace: None,
             behind_tab: None,
             frame: Vec::new(),
+            // Layers and lock covers are drawn as their clients drew them.
+            drawn_opacity: None,
             app_id: None,
             tabs: Vec::new(),
             workspace: None,

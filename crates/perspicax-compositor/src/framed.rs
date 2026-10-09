@@ -82,9 +82,9 @@ pub(crate) fn whole_scale(scale: f64) -> i32 {
 #[cfg(feature = "seat")]
 const TITLES: usize = 2;
 
-/// How a window's frame looks right now, set by the compositor before each
-/// frame is drawn (see `Compositor::dress_frames`), and read while drawing,
-/// which cannot ask the compositor anything.
+/// How a window and its frame look right now, set by the compositor before
+/// each frame is drawn (see `Compositor::dress_frames`), and read while
+/// drawing, which cannot ask the compositor anything.
 ///
 /// The buffers are kept rather than made each frame: a buffer's id is what
 /// damage tracking compares, and a new one every frame would redraw every
@@ -104,6 +104,11 @@ struct Dress {
     /// bar. `None` until the frame is first dressed.
     #[cfg(feature = "seat")]
     ink: Option<perspicax_policy::Colour>,
+    /// The alpha the whole window is drawn at, frame and menus included:
+    /// how opaque the person has it (`Compositor::opacity_of`). `None`, read
+    /// as opaque, until it is first dressed; a derived 0.0 would be nothing.
+    #[cfg(feature = "seat")]
+    alpha: Option<f32>,
     titles: Vec<Title>,
 }
 
@@ -150,6 +155,18 @@ impl Framed {
                 dress.titles.clear();
             }
         });
+    }
+
+    /// Set the alpha the whole window is drawn at.
+    #[cfg(feature = "seat")]
+    pub(crate) fn fade(&self, alpha: f32) {
+        self.dress(|dress| dress.alpha = Some(alpha));
+    }
+
+    /// The alpha the whole window is drawn at: opaque until it is dressed.
+    #[cfg(feature = "seat")]
+    pub(crate) fn alpha(&self) -> f32 {
+        self.dress(|dress| dress.alpha.unwrap_or(1.0))
     }
 
     /// Where the title is written, relative to the client's geometry.

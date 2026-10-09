@@ -21,6 +21,7 @@
 
 mod actions;
 mod grabs;
+mod opacity;
 mod resist;
 mod snap;
 mod stacking;
@@ -54,6 +55,8 @@ use smithay::{
 use crate::{framed::Framed, state::Compositor};
 
 pub(crate) use grabs::{MoveGrab, ResizeGrab};
+#[cfg(any(feature = "seat", feature = "capture"))]
+pub(crate) use opacity::alpha;
 pub(crate) use snap::SnapPreview;
 pub(crate) use stacking::covers_panels;
 #[cfg(any(feature = "seat", feature = "capture"))]
@@ -79,6 +82,11 @@ pub(crate) struct Placement {
     /// A resize in progress, or finished and waiting for the client's last
     /// commit. See [`Compositor::settle_resize`].
     pub(crate) resize: Option<Resize>,
+    /// How opaque the person's keys made it, in percent. `None` follows its
+    /// application's rule in `[opacity]`, read afresh each time it is drawn,
+    /// so a reload changes it; a value the keys set stays until
+    /// `opacity-reset`. See [`Compositor::opacity_of`].
+    pub(crate) opacity: Option<u8>,
 }
 
 /// How a window fills its monitor.
