@@ -290,6 +290,7 @@ impl Wants {
 /// with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WmState {
+    Withdrawn,
     Normal,
     Iconic,
 }
@@ -298,6 +299,7 @@ impl WmState {
     /// As ICCCM numbers it.
     fn value(self) -> u32 {
         match self {
+            Self::Withdrawn => 0,
             Self::Normal => 1,
             Self::Iconic => 3,
         }
@@ -618,11 +620,13 @@ impl XwmHandler for Compositor {
         self.publish_facts();
     }
 
+    /// A window its client withdrew. Told so, before the keyboard moves on
+    /// from it: see `withdraw_x11`.
     fn unmapped_window(&mut self, _xwm: XwmId, x11: X11Surface) {
-        self.forget_x11(&x11);
         if !x11.is_override_redirect() {
-            let _ = x11.set_mapped(false);
+            self.withdraw_x11(&x11);
         }
+        self.forget_x11(&x11);
     }
 
     fn destroyed_window(&mut self, _xwm: XwmId, x11: X11Surface) {
@@ -878,6 +882,20 @@ impl Compositor {
             WmState::Normal
         };
         self.tell_wm_state(x11, state);
+    }
+
+    /// Tell a window its client withdrew that it is withdrawn, as ICCCM has
+    /// a window manager do: Wine maps a window again only once it has seen
+    /// that. Smithay unmaps the frame of its own accord and writes nothing.
+    /// And take back the states this window manager gave it, as EWMH has it,
+    /// so it maps again as a new window would and not, say, still focused or
+    /// fullscreen.
+    fn withdraw_x11(&self, x11: &X11Surface) {
+        let _ = x11.set_activated(false);
+        let _ = x11.set_fullscreen(false);
+        let _ = x11.set_maximized(false);
+        let _ = x11.set_suspended(false);
+        self.tell_wm_state(x11, WmState::Withdrawn);
     }
 
     fn tell_wm_state(&self, x11: &X11Surface, state: WmState) {

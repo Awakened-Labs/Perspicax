@@ -455,6 +455,7 @@ x11rb::atom_manager! {
 }
 
 /// ICCCM's `WM_STATE`, as a window manager writes it.
+const WITHDRAWN: u32 = 0;
 const NORMAL: u32 = 1;
 const ICONIC: u32 = 3;
 
@@ -1259,6 +1260,129 @@ fn with_nobody_at_the_seat_an_x11_window_that_maps_fullscreen_is_placed_as_any_o
         .unwrap_or_else(|| panic!("never framed: {:?}", x11.facts()));
     let (x0, y0, x1, y1) = rect_of(&game);
     assert_eq!((x1 - x0, y1 - y0), (320.0, 200.0), "not at its own size");
+
+    x11.stop();
+}
+
+/// Whether a window is told it has the keyboard, once the compositor has had
+/// time to say so either way.
+fn says_focused(x11: &X11, window: u32, focused: bool) -> bool {
+    eventually(Duration::from_secs(5), || {
+        (x11.net_wm_state(window)
+            .contains(&x11.atoms._NET_WM_STATE_FOCUSED)
+            == focused)
+            .then_some(())
+    })
+    .is_some()
+}
+
+/// Issue #90: only the window with the keyboard is told it is focused. A
+/// window minimized while it had the keyboard used to keep saying so, beside
+/// the one that took it -- Steam, the EVE launcher and EVE all at once.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn only_the_x11_window_with_the_keyboard_says_it_is_focused_after_another_is_minimized() {
+    let x11 = X11::start(
+        "x11-focused-minimized",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let first = x11.open("first");
+    let second = x11.open("second");
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == second).then_some(())
+    })
+    .expect("the second never took the keyboard");
+    assert!(says_focused(&x11, second, true));
+
+    x11.perform(Action::Minimize);
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == first).then_some(())
+    })
+    .expect("the keyboard never went to the first");
+    assert!(says_focused(&x11, first, true), "the first is not told");
+    assert!(
+        says_focused(&x11, second, false),
+        "minimized, the second still says it is focused"
+    );
+
+    x11.stop();
+}
+
+/// Issue #90: a window left on a workspace no longer showing is not told it
+/// is still focused.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_left_on_another_workspace_no_longer_says_it_is_focused() {
+    let x11 = X11::start("x11-focused-workspace", two_workspaces().with_person());
+    let window = x11.open("game");
+    assert!(says_focused(&x11, window, true));
+
+    x11.perform(Action::Workspace(perspicax_policy::Direction::Right));
+    x11.surface_where("game", |surface| surface.off_workspace.is_some())
+        .expect("never left behind");
+    assert!(
+        says_focused(&x11, window, false),
+        "left behind, it still says it is focused"
+    );
+
+    x11.stop();
+}
+
+/// Issue #90: a window its client withdraws is told it is withdrawn, as
+/// ICCCM has a window manager do -- Wine maps a window again only once it has
+/// seen that -- and no longer says it is focused.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_withdrawn_x11_window_is_told_it_is_withdrawn_and_no_longer_says_it_is_focused() {
+    let x11 = X11::start(
+        "x11-withdrawn",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let first = x11.open("first");
+    let second = x11.open("second");
+    assert!(says_focused(&x11, second, true));
+
+    x11.drain();
+    x11.x.unmap_window(second).expect("unmap_window");
+    x11.x.flush().expect("flush");
+    assert!(
+        x11.answered(second, x11.atoms.WM_STATE),
+        "never told it is withdrawn"
+    );
+    assert_eq!(x11.wm_state(second), [WITHDRAWN, 0]);
+    assert!(says_focused(&x11, second, false));
+    assert!(says_focused(&x11, first, true), "the first never took over");
+
+    x11.stop();
+}
+
+/// Issue #90: a fullscreen window withdrawn and mapped again comes back as a
+/// plain window, framed, as a new one would: the window manager clears the
+/// states it gave a window when it is withdrawn.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_withdrawn_from_fullscreen_maps_again_as_a_plain_window() {
+    let x11 = X11::start(
+        "x11-withdrawn-fullscreen",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let window = x11.open("game");
+    x11.ask_state(window, ADD, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    x11.surface_where("game", |surface| surface.frame.is_empty())
+        .expect("never fullscreen");
+
+    x11.drain();
+    x11.x.unmap_window(window).expect("unmap_window");
+    x11.x.flush().expect("flush");
+    assert!(x11.answered(window, x11.atoms.WM_STATE), "never told");
+    x11.x.map_window(window).expect("map_window");
+    x11.x.flush().expect("flush");
+    x11.surface_where("game", |surface| surface.mapped && surface.frame.len() == 4)
+        .unwrap_or_else(|| panic!("never mapped again, framed: {:?}", x11.facts()));
+    assert!(
+        !x11.net_wm_state(window)
+            .contains(&x11.atoms._NET_WM_STATE_FULLSCREEN)
+    );
 
     x11.stop();
 }

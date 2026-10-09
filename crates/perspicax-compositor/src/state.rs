@@ -541,6 +541,38 @@ impl Compositor {
     }
 
     /// Give the keyboard back to the topmost window, or to nothing.
+    /// Take the keyboard from whatever has it. Smithay 0.7 tells
+    /// `focus_changed` of a new focus but not of none, so what has to follow
+    /// is done here: no window looks active any more. Every focus cleared to
+    /// none goes through this.
+    pub(crate) fn clear_focus(&mut self) {
+        if let Some(keyboard) = self.keyboard.clone() {
+            keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+        }
+        self.show_active(None);
+    }
+
+    /// On a seat, make the window with the keyboard, `focused`, the one that
+    /// looks active, and no other -- parked windows too: one minimized or
+    /// left on another workspace while it had the keyboard would otherwise go
+    /// on saying it has it.
+    fn show_active(&self, focused: Option<&WlSurface>) {
+        if !self.backend.has_person() {
+            return;
+        }
+        for window in self.space.elements().chain(&self.parked) {
+            let active = shell::surface_of(window).as_ref() == focused;
+            // An X11 window is told at once; an xdg toplevel needs the
+            // configure that carries its new state.
+            if window.set_activated(active) {
+                tracing::debug!(window = ?shell::id_of(window), active, "activation changed");
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.send_pending_configure();
+                }
+            }
+        }
+    }
+
     pub(crate) fn focus_top_window(&mut self) {
         let top = self
             .space
@@ -549,11 +581,7 @@ impl Compositor {
             .and_then(|window| Some((shell::surface_of(window)?, shell::id_of(window)?)));
         match top {
             Some((surface, id)) => self.focus_surface(surface, id),
-            None => {
-                if let Some(keyboard) = self.keyboard.clone() {
-                    keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
-                }
-            }
+            None => self.clear_focus(),
         }
     }
 
@@ -1036,7 +1064,7 @@ impl SeatHandler for Compositor {
     }
 
     /// On a seat, the window holding the keyboard is the one that looks
-    /// active, and no other. Headless leaves every toplevel activated from the
+    /// active, and no other (see `show_active`). Headless leaves every toplevel activated from the
     /// start (see `new_toplevel`), because the toolkits it hosts for reading
     /// render differently when they believe they are in the background.
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&FocusTarget>) {
@@ -1065,20 +1093,7 @@ impl SeatHandler for Compositor {
                 .insert_idle(move |state| state.follow_layout(window));
         }
 
-        if !self.backend.has_person() {
-            return;
-        }
-        for window in self.space.elements() {
-            let active = shell::surface_of(window).as_ref() == focused;
-            // An X11 window is told at once; an xdg toplevel needs the
-            // configure that carries its new state.
-            if window.set_activated(active) {
-                tracing::debug!(window = ?shell::id_of(window), active, "activation changed");
-                if let Some(toplevel) = window.toplevel() {
-                    toplevel.send_pending_configure();
-                }
-            }
-        }
+        self.show_active(focused);
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
