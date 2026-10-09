@@ -8,10 +8,10 @@
 //! the X server's own word. The facts must end up saying `XRes`, with the
 //! server attested separately.
 //!
-//! States (issue #90): the client asks as Wine does -- a client message to
-//! the root, or `_NET_WM_STATE` written before it maps -- and waits for the
-//! answer, a change to `WM_STATE` or `_NET_WM_STATE`, as Wine does before it
-//! changes anything more. Most of these seat a person at the headless
+//! States (issues #90 and #95): the client asks as Wine does -- a client
+//! message to the root, or `_NET_WM_STATE` or `WM_HINTS` written before it
+//! maps -- and waits for the answer, a change to `WM_STATE` or
+//! `_NET_WM_STATE`, as Wine does before it changes anything more. Most of these seat a person at the headless
 //! compositor, since a window rearranges itself only for a person.
 //!
 //! The X client is this test process, speaking X11 through x11rb, so nothing
@@ -34,6 +34,7 @@ use perspicax_node::{Origin, Rect, Visibility, X11Basis};
 use perspicax_policy::Action;
 use x11rb::{
     connection::Connection as _,
+    properties::{WmHints, WmHintsState},
     protocol::{
         Event,
         xproto::{
@@ -549,6 +550,34 @@ impl X11 {
     /// client starting fullscreen sets it: EWMH lets a withdrawn window write
     /// its own.
     fn open_with_state(&self, title: &str, state: &[u32]) -> u32 {
+        let window = self.create(title, state);
+        self.x.map_window(window).expect("map_window");
+        self.x.flush().expect("flush");
+        self.surface_where(title, |surface| surface.mapped)
+            .unwrap_or_else(|| panic!("{title} never mapped: {:?}", self.facts()));
+        window
+    }
+
+    /// A 320 by 200 window titled `title` that maps asking to start
+    /// minimized, as `xterm -iconic` and Wine ask: ICCCM's `WM_HINTS` initial
+    /// state, iconic, set before it maps. Not waited for, since it may never
+    /// be on screen.
+    fn open_iconic(&self, title: &str) -> u32 {
+        let window = self.create(title, &[]);
+        WmHints {
+            initial_state: Some(WmHintsState::Iconic),
+            ..WmHints::new()
+        }
+        .set(&self.x, window)
+        .expect("WM_HINTS");
+        self.x.map_window(window).expect("map_window");
+        self.x.flush().expect("flush");
+        window
+    }
+
+    /// A window titled `title`, not yet mapped, with `_NET_WM_STATE` set to
+    /// `state` if that is not empty. Its property changes are heard.
+    fn create(&self, title: &str, state: &[u32]) -> u32 {
         let window = self.x.generate_id().expect("an X id");
         self.x
             .create_window(
@@ -587,10 +616,6 @@ impl X11 {
                 )
                 .expect("_NET_WM_STATE");
         }
-        self.x.map_window(window).expect("map_window");
-        self.x.flush().expect("flush");
-        self.surface_where(title, |surface| surface.mapped)
-            .unwrap_or_else(|| panic!("{title} never mapped: {:?}", self.facts()));
         window
     }
 
@@ -1364,6 +1389,78 @@ fn with_nobody_at_the_seat_an_x11_window_that_maps_fullscreen_is_placed_as_any_o
         .unwrap_or_else(|| panic!("never framed: {:?}", x11.facts()));
     let (x0, y0, x1, y1) = rect_of(&game);
     assert_eq!((x1 - x0, y1 - y0), (320.0, 200.0), "not at its own size");
+
+    x11.stop();
+}
+
+/// Issue #95: a window that maps asking to start minimized -- ICCCM's
+/// `WM_HINTS` initial state, as `xterm -iconic` and Wine set it -- starts
+/// minimized, leaving the keyboard where it was, and is told it is iconic,
+/// which Wine waits for. Its frame is mapped all the same, so it has its
+/// surface when it is brought back, and takes the keyboard then.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_that_maps_iconic_starts_minimized_and_is_told_so() {
+    let x11 = X11::start(
+        "x11-maps-iconic",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let first = x11.open("first");
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == first).then_some(())
+    })
+    .expect("the first never took the keyboard");
+
+    let game = x11.open_iconic("game");
+    eventually(Duration::from_secs(5), || {
+        (x11.wm_state(game) == [ICONIC, 0]).then_some(())
+    })
+    .unwrap_or_else(|| panic!("never told it is iconic: {:?}", x11.wm_state(game)));
+    assert!(
+        x11.net_wm_state(game)
+            .contains(&x11.atoms._NET_WM_STATE_HIDDEN)
+    );
+    assert!(x11.viewable(game), "minimized by state, not unmapped");
+    x11.surface_where("game", |surface| {
+        !surface.mapped && surface.off_workspace.is_none()
+    })
+    .unwrap_or_else(|| panic!("not minimized: {:?}", x11.facts()));
+    assert_eq!(
+        x11.focus(),
+        first,
+        "took the keyboard as it started minimized"
+    );
+    assert!(x11.names_active(first));
+
+    x11.drain();
+    x11.perform(Action::CycleFocus);
+    x11.surface_where("game", |surface| surface.mapped)
+        .unwrap_or_else(|| panic!("never brought back: {:?}", x11.facts()));
+    assert_eq!(x11.wm_state(game), [NORMAL, 0]);
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == game).then_some(())
+    })
+    .unwrap_or_else(|| panic!("restored, it never took the keyboard: {:?}", x11.facts()));
+
+    x11.stop();
+}
+
+/// Issue #95: with nobody at the seat a window that maps asking to start
+/// minimized is mapped as any other is, and told it is normal: an agent's
+/// desk does not rearrange itself.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn with_nobody_at_the_seat_an_x11_window_that_maps_iconic_is_placed_as_any_other() {
+    let x11 = X11::start("x11-nobody-maps-iconic", Backend::headless((1280, 1024)));
+    let game = x11.open_iconic("game");
+
+    x11.surface_where("game", |surface| surface.mapped)
+        .unwrap_or_else(|| panic!("never mapped: {:?}", x11.facts()));
+    assert_eq!(x11.wm_state(game), [NORMAL, 0]);
+    assert!(
+        !x11.net_wm_state(game)
+            .contains(&x11.atoms._NET_WM_STATE_HIDDEN)
+    );
 
     x11.stop();
 }
