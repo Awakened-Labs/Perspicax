@@ -17,7 +17,6 @@ use perspicax_policy::{Protocol, Zone};
 use smithay::{
     output::Output,
     reexports::{
-        wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_protocols_wlr::foreign_toplevel::v1::server::{
             zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
             zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
@@ -30,7 +29,11 @@ use smithay::{
 };
 
 use super::{Known, Snapshot, still_admitted};
-use crate::{access::Filtered, shell::surface_of, state::Compositor};
+use crate::{
+    access::Filtered,
+    shell::{Fill, surface_of},
+    state::Compositor,
+};
 
 /// The version this compositor speaks: 3 adds a window's parent.
 pub(super) const VERSION: u32 = 3;
@@ -286,29 +289,19 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, SurfaceId> for Compositor {
                 state.publish_facts();
             }
             Request::SetMaximized => match toplevel {
-                Some(toplevel) => {
-                    state.fill(&toplevel, xdg_toplevel::State::Maximized, None);
-                }
+                Some(_) => state.fill(&window, Fill::Maximized, None),
                 None if !Self::is_snapped(&window) => state.snap(&window, Zone::Top, None),
                 None => {}
             },
             Request::UnsetMaximized => match toplevel {
-                Some(toplevel) => {
-                    state.unfill(&toplevel, xdg_toplevel::State::Maximized, None);
-                }
+                Some(_) => state.unfill(&window, Fill::Maximized, None),
                 None if Self::is_snapped(&window) => state.unsnap(&window, None),
                 None => {}
             },
             Request::SetFullscreen { output } => {
-                if let Some(toplevel) = toplevel {
-                    state.fill(&toplevel, xdg_toplevel::State::Fullscreen, output.as_ref());
-                }
+                state.fill(&window, Fill::Fullscreen, output.as_ref());
             }
-            Request::UnsetFullscreen => {
-                if let Some(toplevel) = toplevel {
-                    state.unfill(&toplevel, xdg_toplevel::State::Fullscreen, None);
-                }
-            }
+            Request::UnsetFullscreen => state.unfill(&window, Fill::Fullscreen, None),
             // Where the taskbar's button is, for a minimize animation there
             // is none of; and Destroy, which `destroyed` handles.
             _ => {}

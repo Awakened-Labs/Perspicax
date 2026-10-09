@@ -59,8 +59,8 @@ impl Compositor {
             self.clear_tiling(window);
             // Maximized on the output it is mostly on, which for a window
             // dragged to the top of a monitor is that monitor.
-            if let Some(toplevel) = window.toplevel().cloned() {
-                self.fill(&toplevel, xdg_toplevel::State::Maximized, None);
+            if window.toplevel().is_some() {
+                self.fill(window, super::Fill::Maximized, None);
                 return;
             }
         }
@@ -102,6 +102,8 @@ impl Compositor {
         #[cfg(feature = "xwayland")]
         if let Some(x11) = window.x11_surface() {
             // Said to the X client too, which also decides the frame's look.
+            // A zone is not fullscreen, whatever it was before.
+            let _ = x11.set_fullscreen(false);
             let _ = x11.set_maximized(zone == Zone::Top);
             let _ = x11.configure(Rectangle::new(
                 (target.x, target.y).into(),
@@ -165,11 +167,10 @@ impl Compositor {
         };
         match (keyed(current, direction), current) {
             (Some(zone), _) => self.snap(&window, zone, None),
-            (None, Some(Zone::Top)) => {
-                if let Some(toplevel) = window.toplevel().cloned() {
-                    self.unfill(&toplevel, xdg_toplevel::State::Maximized, None);
-                }
+            (None, Some(Zone::Top)) if window.toplevel().is_some() => {
+                self.unfill(&window, super::Fill::Maximized, None);
             }
+            (None, Some(Zone::Top)) => {}
             (None, Some(_)) => self.unsnap(&window, None),
             (None, None) => {}
         }

@@ -93,6 +93,127 @@ fn fullscreen(desk: &Desk, title: &str) {
         .set_fullscreen(None);
 }
 
+/// The top left of a window, as the facts place it.
+fn top_left(facts: &HostFacts, title: &str) -> (f64, f64) {
+    let surface = facts
+        .surface(window(facts, title))
+        .expect("a window of that title");
+    (surface.geometry.x0, surface.geometry.y0)
+}
+
+/// Whether a window is on screen, as the facts say.
+fn mapped(facts: &HostFacts, title: &str) -> bool {
+    facts
+        .surface(window(facts, title))
+        .is_some_and(|surface| surface.mapped)
+}
+
+/// Issue #90: a panel that reserves room moves the windows out from under
+/// it, but not a fullscreen one, which covers the panel and keeps the corner
+/// of its monitor. It used to be fitted below the panel with the rest.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_fullscreen_window_keeps_the_corner_of_its_monitor_when_a_panel_reserves_room() {
+    let session = Session::start("fullscreen-reserved", Backend::headless((1280, 1024)));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.open_coloured(&qh, "plain", "plain", 0xffff_ffff);
+    desk.open_coloured(&qh, "video", "video", VIDEO);
+    until(&mut queue, &mut desk, |desk| {
+        desk.task("plain").is_some() && desk.task("video").is_some()
+    });
+    fullscreen(&desk, "video");
+    until(&mut queue, &mut desk, |desk| {
+        desk.offered == Some((1280, 1024))
+    });
+    session.wait_for(|facts| top_left(facts, "video") == (0.0, 0.0));
+
+    desk.open_panel(&qh, "panel", 40, PANEL);
+    until(&mut queue, &mut desk, |desk| desk.layers_drawn == 1);
+    let facts = session.wait_for(|facts| top_left(facts, "plain").1 >= 40.0);
+    assert_eq!(
+        top_left(&facts, "video"),
+        (0.0, 0.0),
+        "the fullscreen window was fitted below the panel"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// Issue #90: a fullscreen window minimized and brought back comes back
+/// covering its monitor, where it was, and not fitted below the panel as a
+/// window that does not fill its monitor would be.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_fullscreen_window_comes_back_to_the_corner_of_its_monitor_after_it_was_minimized() {
+    let session = Session::start("fullscreen-restored", Backend::headless((1280, 1024)));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.open_panel(&qh, "panel", 40, PANEL);
+    until(&mut queue, &mut desk, |desk| desk.layers_drawn == 1);
+    desk.open_coloured(&qh, "video", "video", VIDEO);
+    until(&mut queue, &mut desk, |desk| desk.task("video").is_some());
+    fullscreen(&desk, "video");
+    queue.flush().expect("sent");
+    session.wait_for(|facts| top_left(facts, "video") == (0.0, 0.0));
+
+    desk.task("video")
+        .expect("a known window")
+        .handle
+        .set_minimized();
+    queue.flush().expect("sent");
+    session.wait_for(|facts| !mapped(facts, "video"));
+    desk.activate("video");
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| mapped(facts, "video"));
+    assert_eq!(
+        top_left(&facts, "video"),
+        (0.0, 0.0),
+        "the fullscreen window came back fitted below the panel"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// Issue #90: a window made fullscreen while it is minimized stays
+/// minimized, and is fullscreen once it is brought back. It used to be drawn
+/// over the screen while still counted as minimized, and then bringing it
+/// back never showed it, since it was already there.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_minimized_window_made_fullscreen_stays_minimized_until_it_is_restored() {
+    let session = Session::start("fullscreen-minimized", Backend::headless((1280, 1024)));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.open_coloured(&qh, "plain", "plain", 0xffff_ffff);
+    desk.open_coloured(&qh, "video", "video", VIDEO);
+    until(&mut queue, &mut desk, |desk| {
+        desk.task("plain").is_some() && desk.task("video").is_some()
+    });
+    desk.task("video")
+        .expect("a known window")
+        .handle
+        .set_minimized();
+    queue.flush().expect("sent");
+    session.wait_for(|facts| !mapped(facts, "video"));
+
+    fullscreen(&desk, "video");
+    queue.roundtrip(&mut desk).expect("dispatch");
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert!(
+        !mapped(&session.facts.read(), "video"),
+        "made fullscreen, a minimized window came back on screen"
+    );
+
+    desk.activate("video");
+    until(&mut queue, &mut desk, |desk| {
+        desk.offered == Some((1280, 1024))
+    });
+    session.wait_for(|facts| mapped(facts, "video") && top_left(facts, "video") == (0.0, 0.0));
+
+    session.stop((desk, queue));
+}
+
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_fullscreen_window_in_use_covers_a_panel_on_the_top_layer() {

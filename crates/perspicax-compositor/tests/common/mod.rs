@@ -93,6 +93,16 @@ pub struct Session {
 impl Session {
     /// A headless compositor on `backend`, on a socket named for `name`.
     pub fn start(name: &str, backend: Backend) -> Self {
+        Self::start_with(name, backend, false)
+    }
+
+    /// The same, with Xwayland: its display is in the facts once it is
+    /// ready.
+    pub fn start_with_xwayland(name: &str, backend: Backend) -> Self {
+        Self::start_with(name, backend, true)
+    }
+
+    fn start_with(name: &str, backend: Backend, xwayland: bool) -> Self {
         let socket = format!("perspicax-{name}-{}", std::process::id());
         let facts = Facts::new();
         let requests = Requests::new();
@@ -112,7 +122,7 @@ impl Session {
                     run_for: Some(Duration::from_secs(30)),
                     config: None,
                     socket: Some(socket),
-                    xwayland: false,
+                    xwayland,
                 };
                 perspicax_compositor::run(&config, &facts, &requests, &stop)
             })
@@ -463,6 +473,27 @@ impl Desk {
         strip.set_size(0, height);
         strip.commit();
         self.layers.push((strip, colour, height));
+    }
+
+    /// A panel `height` tall across the top of the screen on `top`, drawn
+    /// in one colour, ARGB, that reserves its strip: windows are fitted
+    /// below it, as a real panel's are.
+    pub fn open_panel(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        namespace: &str,
+        height: u32,
+        colour: u32,
+    ) {
+        let surface = self.compositor.create_surface(qh);
+        let panel =
+            self.layer_shell
+                .create_layer_surface(qh, surface, Layer::Top, Some(namespace), None);
+        panel.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
+        panel.set_size(0, height);
+        panel.set_exclusive_zone(i32::try_from(height).expect("a panel's height"));
+        panel.commit();
+        self.layers.push((panel, colour, height));
     }
 
     pub fn open_window(&mut self, qh: &QueueHandle<Self>, title: &str, app_id: &str) {

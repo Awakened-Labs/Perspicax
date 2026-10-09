@@ -302,9 +302,7 @@ impl Compositor {
         let toplevel = front.toplevel().cloned();
         match (zone, toplevel) {
             (Some(zone), _) => self.snap(front, zone, None),
-            (None, Some(toplevel)) if maximized => {
-                self.fill(&toplevel, xdg_toplevel::State::Maximized, None);
-            }
+            (None, Some(_)) if maximized => self.fill(front, super::Fill::Maximized, None),
             (None, toplevel) => {
                 if let Some(location) = location {
                     if let Some(toplevel) = toplevel {

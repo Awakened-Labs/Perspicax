@@ -59,9 +59,7 @@ impl SessionLockHandler for Compositor {
     fn lock(&mut self, confirmation: SessionLocker) {
         tracing::info!("session locked");
         self.lock = Some(Locked::default());
-        if let Some(keyboard) = self.keyboard.clone() {
-            keyboard.set_focus(self, None, smithay::utils::SERIAL_COUNTER.next_serial());
-        }
+        self.clear_focus();
         confirmation.lock();
         self.backend.redraw();
         self.publish_facts();

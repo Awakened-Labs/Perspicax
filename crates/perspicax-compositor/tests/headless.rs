@@ -7,8 +7,11 @@
 //! test that silently passes by skipping itself is worse than one that has to
 //! be asked for. `ci/live-tests.sh` runs them with `--include-ignored`.
 
+mod common;
+
 use std::time::{Duration, Instant};
 
+use common::{Session, until};
 use perspicax_compositor::{Backend, Config, Error, Facts, Requests, Stop};
 use perspicax_index::Consent;
 
@@ -148,4 +151,46 @@ fn the_socket_is_published_to_whoever_watches_the_session() {
         "the socket was never published: {heard:?}"
     );
     assert_eq!(facts.session().x11_display, None);
+}
+
+/// Issue #90: a headless compositor can seat a person, so that what only a
+/// person gets -- here a window maximizing itself -- is tested where CI runs.
+/// The window is offered its whole monitor.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_asking_to_be_maximized_is_when_a_person_sits_at_the_seat() {
+    let session = Session::start(
+        "person-maximize",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_window(&qh, "asking", "asking");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+
+    desk.windows[0].set_maximized();
+    until(&mut queue, &mut desk, |desk| {
+        desk.offered == Some((1280, 1024))
+    });
+
+    session.stop((desk, queue));
+}
+
+/// The other half of the above: with nobody at the seat, a window asking to
+/// be maximized is left as it was, the deterministic behaviour an agent's
+/// desk is built on.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_asking_to_be_maximized_is_left_as_it_was_with_nobody_at_the_seat() {
+    let session = Session::start("nobody-maximize", Backend::headless((1280, 1024)));
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_window(&qh, "asking", "asking");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    let offered = desk.offered;
+
+    desk.windows[0].set_maximized();
+    queue.roundtrip(&mut desk).expect("dispatch");
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert_eq!(desk.offered, offered, "nobody asked for it to be maximized");
+
+    session.stop((desk, queue));
 }

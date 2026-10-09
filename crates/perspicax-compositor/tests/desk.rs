@@ -223,6 +223,7 @@ impl Session {
                             },
                         },
                         access: perspicax_policy::Access::open(),
+                        person: false,
                     },
                     spawn: Vec::new(),
                     env: Vec::new(),

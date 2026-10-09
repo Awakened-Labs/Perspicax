@@ -20,8 +20,14 @@ use perspicax_policy::Workspaces;
 use smithay::wayland::seat::WaylandFocus;
 
 use crate::{
-    act::Keys, backend::Running, damage, facts::Facts, focus::FocusTarget, framed::Framed, origin,
-    shell,
+    act::Keys,
+    backend::Running,
+    damage,
+    facts::Facts,
+    focus::FocusTarget,
+    framed::Framed,
+    origin,
+    shell::{self, Fill},
 };
 
 use smithay::{
@@ -535,6 +541,38 @@ impl Compositor {
     }
 
     /// Give the keyboard back to the topmost window, or to nothing.
+    /// Take the keyboard from whatever has it. Smithay 0.7 tells
+    /// `focus_changed` of a new focus but not of none, so what has to follow
+    /// is done here: no window looks active any more. Every focus cleared to
+    /// none goes through this.
+    pub(crate) fn clear_focus(&mut self) {
+        if let Some(keyboard) = self.keyboard.clone() {
+            keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+        }
+        self.show_active(None);
+    }
+
+    /// On a seat, make the window with the keyboard, `focused`, the one that
+    /// looks active, and no other -- parked windows too: one minimized or
+    /// left on another workspace while it had the keyboard would otherwise go
+    /// on saying it has it.
+    fn show_active(&self, focused: Option<&WlSurface>) {
+        if !self.backend.has_person() {
+            return;
+        }
+        for window in self.space.elements().chain(&self.parked) {
+            let active = shell::surface_of(window).as_ref() == focused;
+            // An X11 window is told at once; an xdg toplevel needs the
+            // configure that carries its new state.
+            if window.set_activated(active) {
+                tracing::debug!(window = ?shell::id_of(window), active, "activation changed");
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.send_pending_configure();
+                }
+            }
+        }
+    }
+
     pub(crate) fn focus_top_window(&mut self) {
         let top = self
             .space
@@ -543,11 +581,7 @@ impl Compositor {
             .and_then(|window| Some((shell::surface_of(window)?, shell::id_of(window)?)));
         match top {
             Some((surface, id)) => self.focus_surface(surface, id),
-            None => {
-                if let Some(keyboard) = self.keyboard.clone() {
-                    keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
-                }
-            }
+            None => self.clear_focus(),
         }
     }
 
@@ -941,31 +975,19 @@ impl XdgShellHandler for Compositor {
     }
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
-        if self.backend.has_person() {
-            self.fill(&surface, xdg_toplevel::State::Maximized, None);
-        } else {
-            surface.send_configure();
-        }
+        self.fill_request(&surface, Fill::Maximized, None);
     }
 
     fn unmaximize_request(&mut self, surface: ToplevelSurface) {
-        if self.backend.has_person() {
-            self.unfill(&surface, xdg_toplevel::State::Maximized, None);
-        }
+        self.unfill_request(&surface, Fill::Maximized);
     }
 
     fn fullscreen_request(&mut self, surface: ToplevelSurface, output: Option<WlOutput>) {
-        if self.backend.has_person() {
-            self.fill(&surface, xdg_toplevel::State::Fullscreen, output.as_ref());
-        } else {
-            surface.send_configure();
-        }
+        self.fill_request(&surface, Fill::Fullscreen, output.as_ref());
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
-        if self.backend.has_person() {
-            self.unfill(&surface, xdg_toplevel::State::Fullscreen, None);
-        }
+        self.unfill_request(&surface, Fill::Fullscreen);
     }
 
     fn minimize_request(&mut self, surface: ToplevelSurface) {
@@ -979,6 +1001,32 @@ impl XdgShellHandler for Compositor {
 }
 
 impl Compositor {
+    /// A toplevel asking to fill its monitor: only with a person at the
+    /// seat. Otherwise, or before it is a window, it is answered with the
+    /// plain configure it would have had anyway.
+    fn fill_request(&mut self, surface: &ToplevelSurface, fill: Fill, on: Option<&WlOutput>) {
+        match self.window_for(surface.wl_surface()) {
+            Some(window) if self.backend.has_person() => self.fill(&window, fill, on),
+            _ => {
+                surface.send_configure();
+            }
+        }
+    }
+
+    /// A toplevel asking to stop filling its monitor: only with a person at
+    /// the seat.
+    fn unfill_request(&mut self, surface: &ToplevelSurface, fill: Fill) {
+        if !self.backend.has_person() {
+            return;
+        }
+        if let Some(window) = self.window_for(surface.wl_surface()) {
+            self.unfill(&window, fill, None);
+        } else {
+            surface.with_pending_state(|pending| pending.states.unset(fill.state()));
+            surface.send_pending_configure();
+        }
+    }
+
     /// The window and grab start for an interactive move or resize, if the
     /// request is one to honour: a person at the seat, a window we know, and a
     /// serial that is the press currently holding the pointer.
@@ -1016,7 +1064,7 @@ impl SeatHandler for Compositor {
     }
 
     /// On a seat, the window holding the keyboard is the one that looks
-    /// active, and no other. Headless leaves every toplevel activated from the
+    /// active, and no other (see `show_active`). Headless leaves every toplevel activated from the
     /// start (see `new_toplevel`), because the toolkits it hosts for reading
     /// render differently when they believe they are in the background.
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&FocusTarget>) {
@@ -1045,20 +1093,7 @@ impl SeatHandler for Compositor {
                 .insert_idle(move |state| state.follow_layout(window));
         }
 
-        if !self.backend.has_person() {
-            return;
-        }
-        for window in self.space.elements() {
-            let active = shell::surface_of(window).as_ref() == focused;
-            // An X11 window is told at once; an xdg toplevel needs the
-            // configure that carries its new state.
-            if window.set_activated(active) {
-                tracing::debug!(window = ?shell::id_of(window), active, "activation changed");
-                if let Some(toplevel) = window.toplevel() {
-                    toplevel.send_pending_configure();
-                }
-            }
-        }
+        self.show_active(focused);
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {

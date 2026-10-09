@@ -144,7 +144,7 @@ impl Compositor {
     }
 
     /// Which state `window` is in, as far as its frame cares. Pending, like
-    /// `is_filling`: a window asked to maximize is framed as maximized from
+    /// `filling`: a window asked to maximize is framed as maximized from
     /// the moment it is asked, so the size it is asked for and the frame it
     /// gets agree.
     fn look(window: &Framed) -> Look {
@@ -249,7 +249,13 @@ impl Compositor {
     /// free area. A window is placed before its client says who draws the
     /// frame, so a frame that arrives afterwards may start above the screen,
     /// where its titlebar could not be grabbed.
+    ///
+    /// Not a window that fills its monitor: a fullscreen one is meant to be
+    /// over the panels, and fitting it would push it below them.
     pub(crate) fn fit_frame(&mut self, window: &Framed) {
+        if Self::filling(window).is_some() {
+            return;
+        }
         let insets = self.insets(window);
         let (Some(location), Some(area)) = (
             self.space.element_location(window),
@@ -292,22 +298,19 @@ impl Compositor {
         self.publish_facts();
     }
 
-    /// Give a window that fills a zone or a monitor the size that leaves
-    /// room for its frame as it is now, and keep any other one's titlebar on
-    /// screen.
-    fn refit(&mut self, window: &Framed) {
+    /// Give a window that fills a monitor or a zone the size that leaves
+    /// room for its frame and the panels as they are now, and keep any other
+    /// one's titlebar on screen. Only for a window on screen: a parked one
+    /// is refitted when it comes back.
+    pub(crate) fn refit(&mut self, window: &Framed) {
+        if self.space.element_location(window).is_none() {
+            return;
+        }
         let window = window.clone();
-        let zone = placement(&window, |placement| placement.snapped);
-        let toplevel = window.toplevel().cloned();
-        let maximized = toplevel.as_ref().is_some_and(|toplevel| {
-            toplevel.with_pending_state(|pending| {
-                pending.states.contains(xdg_toplevel::State::Maximized)
-            })
-        });
-        if let (Some(zone), true) = (zone, self.space.element_location(&window).is_some()) {
+        if let Some(fill) = Self::filling(&window) {
+            self.fill(&window, fill, None);
+        } else if let Some(zone) = placement(&window, |placement| placement.snapped) {
             self.snap(&window, zone, None);
-        } else if let (Some(toplevel), true) = (toplevel, maximized) {
-            self.fill(&toplevel, xdg_toplevel::State::Maximized, None);
         } else {
             self.fit_frame(&window);
         }

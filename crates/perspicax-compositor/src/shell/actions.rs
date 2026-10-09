@@ -8,9 +8,7 @@
 
 use perspicax_node::SurfaceId;
 use perspicax_policy::{Action, Change, Decision, cycle};
-use smithay::{
-    reexports::wayland_protocols::xdg::shell::server::xdg_toplevel, utils::SERIAL_COUNTER,
-};
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 
 use super::{id_of, surface_of};
 use crate::{framed::Framed, state::Compositor};
@@ -115,9 +113,9 @@ impl Compositor {
                 pending.states.contains(xdg_toplevel::State::Maximized)
             });
             if maximized {
-                self.unfill(&toplevel, xdg_toplevel::State::Maximized, None);
+                self.unfill(window, super::Fill::Maximized, None);
             } else {
-                self.fill(&toplevel, xdg_toplevel::State::Maximized, None);
+                self.fill(window, super::Fill::Maximized, None);
             }
         } else if Self::is_snapped(window) {
             self.unsnap(window, None);
@@ -159,11 +157,7 @@ impl Compositor {
                     self.focus_surface(surface, id);
                 }
             }
-            Change::Clear => {
-                if let Some(keyboard) = self.keyboard.clone() {
-                    keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
-                }
-            }
+            Change::Clear => self.clear_focus(),
         }
         if let Some(window) = decision.raise.and_then(|id| self.window_for_id(id)) {
             self.space.raise_element(&window, false);
