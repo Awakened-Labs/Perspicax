@@ -48,13 +48,15 @@
 use std::{cell::RefCell, os::fd::OwnedFd, process::Stdio, sync::mpsc};
 
 use perspicax_node::{Origin, SurfaceId, X11Basis, X11Origin};
+use perspicax_policy::Zone;
 use smithay::{
     desktop::Window,
+    output::Output,
     reexports::{
         calloop::{LoopHandle, channel},
-        wayland_server::{Client, Resource as _},
+        wayland_server::{Client, Resource as _, protocol::wl_output::WlOutput},
     },
-    utils::{Logical, Rectangle, SERIAL_COUNTER},
+    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
     wayland::{
         selection::{
             SelectionTarget,
@@ -76,11 +78,18 @@ use smithay::{
 };
 
 use x11rb::{
-    connection::Connection as _, protocol::xproto::PropMode, rust_connection::RustConnection,
+    connection::Connection as _,
+    protocol::xproto::{AtomEnum, PropMode},
+    rust_connection::RustConnection,
     wrapper::ConnectionExt as _,
 };
 
-use crate::{Error, framed::Framed, shell, state::Compositor};
+use crate::{
+    Error,
+    framed::Framed,
+    shell::{self, Fill, placement},
+    state::Compositor,
+};
 
 /// Everything about the running Xwayland.
 #[derive(Default)]
@@ -240,6 +249,7 @@ x11rb::atom_manager! {
     /// The atoms the side connection writes.
     SideAtoms: SideAtomsCookie {
         WM_STATE,
+        _NET_WM_STATE,
     }
 }
 
@@ -301,6 +311,20 @@ impl Side {
             self.atoms.WM_STATE,
             self.atoms.WM_STATE,
             &[state.value(), x11rb::NONE],
+        );
+        self.settle();
+    }
+
+    /// Answer a request about `_NET_WM_STATE` without changing it: appending
+    /// nothing still tells the window its property changed, which is what a
+    /// client that asked waits for.
+    fn answer(&self, window: u32) {
+        let _ = self.connection.change_property32(
+            PropMode::APPEND,
+            window,
+            self.atoms._NET_WM_STATE,
+            AtomEnum::ATOM,
+            &[],
         );
         self.settle();
     }
@@ -536,7 +560,10 @@ impl XwmHandler for Compositor {
     }
 
     /// An X11 window asking for a size. Granted: the size is the client's to
-    /// choose. The position is not: that is the window manager's.
+    /// choose. The position is not: that is the window manager's. Nor is the
+    /// size of a window that fills its monitor or a zone: it keeps it, and is
+    /// told the rect it has, as ICCCM answers a request not granted. A game
+    /// going fullscreen asks for sizes as it sets its mode.
     fn configure_request(
         &mut self,
         _xwm: XwmId,
@@ -547,6 +574,13 @@ impl XwmHandler for Compositor {
         h: Option<u32>,
         _reorder: Option<Reorder>,
     ) {
+        let held = self
+            .x11_window(&x11)
+            .is_some_and(|window| Self::filling(&window).is_some() || Self::is_snapped(&window));
+        if held {
+            let _ = x11.configure(None);
+            return;
+        }
         let mut geometry = x11.geometry();
         if let Some(w) = w.and_then(|w| i32::try_from(w).ok()) {
             geometry.size.w = w;
@@ -682,6 +716,47 @@ impl XwmHandler for Compositor {
         }
     }
 
+    /// An X11 window asking to go fullscreen: EWMH's `_NET_WM_STATE`, which is
+    /// how a Wine game does. Only with a person at the seat, as for a Wayland
+    /// window, and answered either way.
+    fn fullscreen_request(&mut self, _xwm: XwmId, x11: X11Surface) {
+        if let Some(window) = self.honoured(&x11).filter(|_| !x11.is_fullscreen()) {
+            self.fill(&window, Fill::Fullscreen, None);
+        }
+        self.answer_net_wm_state(&x11);
+    }
+
+    fn unfullscreen_request(&mut self, _xwm: XwmId, x11: X11Surface) {
+        if let Some(window) = self.honoured(&x11).filter(|_| x11.is_fullscreen()) {
+            self.unfill(&window, Fill::Fullscreen, None);
+        }
+        self.answer_net_wm_state(&x11);
+    }
+
+    /// Maximized both ways at once; Smithay passes on nothing less. Under
+    /// fullscreen it is only noted, and shows once fullscreen ends.
+    fn maximize_request(&mut self, _xwm: XwmId, x11: X11Surface) {
+        if let Some(window) = self.honoured(&x11).filter(|_| !x11.is_maximized()) {
+            if x11.is_fullscreen() {
+                let _ = x11.set_maximized(true);
+            } else {
+                self.fill(&window, Fill::Maximized, None);
+            }
+        }
+        self.answer_net_wm_state(&x11);
+    }
+
+    fn unmaximize_request(&mut self, _xwm: XwmId, x11: X11Surface) {
+        if let Some(window) = self.honoured(&x11).filter(|_| x11.is_maximized()) {
+            if x11.is_fullscreen() {
+                let _ = x11.set_maximized(false);
+            } else {
+                self.unfill(&window, Fill::Maximized, None);
+            }
+        }
+        self.answer_net_wm_state(&x11);
+    }
+
     /// An X11 window asking to be brought back from minimized. Restored and
     /// raised, but not given the keyboard: a window may not take that for
     /// itself, as with an xdg activation no input is behind.
@@ -739,6 +814,88 @@ impl Compositor {
         if let Some(side) = &self.xwayland.side {
             side.set_wm_state(x11.window_id(), state);
         }
+    }
+
+    /// Answer a request about `_NET_WM_STATE`, whether it changed anything
+    /// or not: a client waits for the answer either way.
+    fn answer_net_wm_state(&self, x11: &X11Surface) {
+        if let Some(side) = &self.xwayland.side {
+            side.answer(x11.window_id());
+        }
+    }
+
+    /// The window an X11 request to change its state is about, if the
+    /// request is one to honour: a person at the seat, and a window we know.
+    fn honoured(&self, x11: &X11Surface) -> Option<Framed> {
+        if !self.backend.has_person() {
+            return None;
+        }
+        self.x11_window(x11)
+    }
+
+    /// Make an X11 window fullscreen on `on`, or the monitor it is on: the
+    /// whole of it, over the panels and with no frame, which follow
+    /// `_NET_WM_STATE`. A window in a zone comes out of it, maximized
+    /// included, and `restore` keeps where it was before the zone; leaving
+    /// fullscreen goes back to maximized, if it was. A parked window is only
+    /// told, as an xdg one is.
+    pub(crate) fn fill_x11(&mut self, window: &Framed, on: Option<&WlOutput>) {
+        let Some(x11) = window.x11_surface() else {
+            return;
+        };
+        let _ = x11.set_fullscreen(true);
+        placement(window, |placement| placement.snapped = None);
+        let Some(current) = self.extent(window) else {
+            Self::restore_from_parked(window);
+            self.publish_facts();
+            return;
+        };
+        let output = on
+            .and_then(Output::from_resource)
+            .or_else(|| self.output_of(window));
+        let Some(area) = output.and_then(|output| self.space.output_geometry(&output)) else {
+            return;
+        };
+        placement(window, |placement| {
+            placement.restore.get_or_insert(current);
+        });
+        let _ = x11.configure(area);
+        self.space.map_element(window.clone(), area.loc, false);
+        self.window_moved(window);
+        self.backend.redraw();
+        self.publish_facts();
+    }
+
+    /// Take an X11 window out of fullscreen: back to maximized, if it was
+    /// maximized under it, or else to where it was at the size it was -- or
+    /// to `at`, for one dragged out of it.
+    pub(crate) fn unfill_x11(&mut self, window: &Framed, at: Option<Point<i32, Logical>>) {
+        let Some(x11) = window.x11_surface() else {
+            return;
+        };
+        let _ = x11.set_fullscreen(false);
+        let shown = self.space.element_location(window).is_some();
+        if x11.is_maximized() {
+            if shown {
+                self.snap(window, Zone::Top, None);
+            } else {
+                placement(window, |placement| placement.snapped = Some(Zone::Top));
+                self.publish_facts();
+            }
+            return;
+        }
+        if let Some(restore) = placement(window, |placement| placement.restore.take()) {
+            let to = at.unwrap_or(restore.loc);
+            let _ = x11.configure(Rectangle::new(to, restore.size));
+            if shown {
+                self.space.map_element(window.clone(), to, false);
+                self.window_moved(window);
+            } else {
+                placement(window, |placement| placement.parked = Some(to));
+            }
+        }
+        self.backend.redraw();
+        self.publish_facts();
     }
 
     fn forget_x11(&mut self, x11: &X11Surface) {

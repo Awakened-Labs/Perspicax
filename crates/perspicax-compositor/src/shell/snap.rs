@@ -102,6 +102,8 @@ impl Compositor {
         #[cfg(feature = "xwayland")]
         if let Some(x11) = window.x11_surface() {
             // Said to the X client too, which also decides the frame's look.
+            // A zone is not fullscreen, whatever it was before.
+            let _ = x11.set_fullscreen(false);
             let _ = x11.set_maximized(zone == Zone::Top);
             let _ = x11.configure(Rectangle::new(
                 (target.x, target.y).into(),

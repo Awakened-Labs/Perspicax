@@ -214,27 +214,39 @@ impl Compositor {
     /// `unpark_window`).
     pub(crate) fn fill(&mut self, window: &Framed, fill: Fill, on: Option<&WlOutput>) {
         let Some(surface) = window.toplevel().cloned() else {
-            // An X11 window has no xdg state to carry being maximized, so it
-            // is snapped to the whole monitor instead, which is the same rect
-            // by the same path.
-            if fill == Fill::Maximized {
-                self.snap(
-                    window,
-                    perspicax_policy::Zone::Top,
-                    on.and_then(Output::from_resource),
-                );
+            let shown = self.space.element_location(window).is_some();
+            match fill {
+                // An X11 window has no xdg state to carry being maximized, so
+                // it is snapped to the whole monitor instead, which is the
+                // same rect by the same path.
+                Fill::Maximized if shown => {
+                    self.snap(
+                        window,
+                        perspicax_policy::Zone::Top,
+                        on.and_then(Output::from_resource),
+                    );
+                }
+                // Parked, it is told, and snapped once it comes back.
+                Fill::Maximized => {
+                    Self::restore_from_parked(window);
+                    placement(window, |placement| {
+                        placement.snapped = Some(perspicax_policy::Zone::Top);
+                    });
+                    #[cfg(feature = "xwayland")]
+                    if let Some(x11) = window.x11_surface() {
+                        let _ = x11.set_maximized(true);
+                    }
+                    self.publish_facts();
+                }
+                Fill::Fullscreen => {
+                    #[cfg(feature = "xwayland")]
+                    self.fill_x11(window, on);
+                }
             }
             return;
         };
         let Some(current) = self.space.element_geometry(window) else {
-            let parked = placement(window, |placement| placement.parked);
-            if let Some(at) = parked {
-                placement(window, |placement| {
-                    placement
-                        .restore
-                        .get_or_insert(Rectangle::new(at, extent_size(window)));
-                });
-            }
+            Self::restore_from_parked(window);
             surface.with_pending_state(|pending| pending.states.set(fill.state()));
             surface.send_configure();
             self.publish_facts();
@@ -277,8 +289,13 @@ impl Compositor {
     /// window comes back there when it comes back at all.
     pub(crate) fn unfill(&mut self, window: &Framed, fill: Fill, at: Option<Point<i32, Logical>>) {
         let Some(surface) = window.toplevel().cloned() else {
-            if fill == Fill::Maximized && Self::is_snapped(window) {
-                self.unsnap(window, at);
+            match fill {
+                Fill::Maximized if Self::is_snapped(window) => self.unsnap(window, at),
+                Fill::Maximized => {}
+                Fill::Fullscreen => {
+                    #[cfg(feature = "xwayland")]
+                    self.unfill_x11(window, at);
+                }
             }
             return;
         };
@@ -298,6 +315,17 @@ impl Compositor {
             placement(window, |placement| placement.parked = Some(to));
         }
         self.publish_facts();
+    }
+
+    /// Where a parked window comes back to once it no longer fills anything:
+    /// where it was parked, at its own size. Kept if it has one already.
+    pub(crate) fn restore_from_parked(window: &Framed) {
+        let size = extent_size(window);
+        placement(window, |placement| {
+            if let Some(at) = placement.parked {
+                placement.restore.get_or_insert(Rectangle::new(at, size));
+            }
+        });
     }
 
     /// How a window fills its monitor, if it does: fullscreen over
@@ -465,6 +493,19 @@ impl Compositor {
                     pending.states.unset(xdg_toplevel::State::Fullscreen);
                 });
                 self.unfill(window, Fill::Maximized, Some(at.into()));
+            }
+        } else if Self::filling(window) == Some(Fill::Fullscreen) {
+            // An X11 window: out of fullscreen and out of the maximized under
+            // it at once, hanging from the pointer, as an xdg one comes out.
+            #[cfg(feature = "xwayland")]
+            if let Some(x11) = window.x11_surface() {
+                let _ = x11.set_maximized(false);
+            }
+            let filled = self.extent(window);
+            let restored = placement(window, |placement| placement.restore.map(|r| r.size));
+            if let (Some(filled), Some(restored)) = (filled, restored) {
+                let at = unmaximized_at((at.x, at.y), rect(filled), (restored.w, restored.h));
+                self.unfill(window, Fill::Fullscreen, Some(at.into()));
             }
         } else if Self::is_snapped(window) {
             // The same for a window snapped to a half or a quarter: it comes

@@ -299,15 +299,9 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, SurfaceId> for Compositor {
                 None => {}
             },
             Request::SetFullscreen { output } => {
-                if toplevel.is_some() {
-                    state.fill(&window, Fill::Fullscreen, output.as_ref());
-                }
+                state.fill(&window, Fill::Fullscreen, output.as_ref());
             }
-            Request::UnsetFullscreen => {
-                if toplevel.is_some() {
-                    state.unfill(&window, Fill::Fullscreen, None);
-                }
-            }
+            Request::UnsetFullscreen => state.unfill(&window, Fill::Fullscreen, None),
             // Where the taskbar's button is, for a minimize animation there
             // is none of; and Destroy, which `destroyed` handles.
             _ => {}

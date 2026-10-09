@@ -93,6 +93,16 @@ pub struct Session {
 impl Session {
     /// A headless compositor on `backend`, on a socket named for `name`.
     pub fn start(name: &str, backend: Backend) -> Self {
+        Self::start_with(name, backend, false)
+    }
+
+    /// The same, with Xwayland: its display is in the facts once it is
+    /// ready.
+    pub fn start_with_xwayland(name: &str, backend: Backend) -> Self {
+        Self::start_with(name, backend, true)
+    }
+
+    fn start_with(name: &str, backend: Backend, xwayland: bool) -> Self {
         let socket = format!("perspicax-{name}-{}", std::process::id());
         let facts = Facts::new();
         let requests = Requests::new();
@@ -112,7 +122,7 @@ impl Session {
                     run_for: Some(Duration::from_secs(30)),
                     config: None,
                     socket: Some(socket),
-                    xwayland: false,
+                    xwayland,
                 };
                 perspicax_compositor::run(&config, &facts, &requests, &stop)
             })

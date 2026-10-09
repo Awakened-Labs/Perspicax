@@ -12,22 +12,25 @@
 
 #![cfg(feature = "xwayland")]
 
+mod common;
+
 use std::{
     thread,
     time::{Duration, Instant},
 };
 
+use common::{Session, until};
 use perspicax_compositor::{Backend, Command, Config, Error, Facts, Requests, Stop};
-use perspicax_index::SurfaceFacts;
-use perspicax_node::{Origin, X11Basis};
+use perspicax_index::{HostFacts, SurfaceFacts, judge};
+use perspicax_node::{Origin, Rect, Visibility, X11Basis};
 use perspicax_policy::Action;
 use x11rb::{
     connection::Connection as _,
     protocol::{
         Event,
         xproto::{
-            AtomEnum, ClientMessageEvent, ConnectionExt as _, CreateWindowAux, EventMask, MapState,
-            PropMode, WindowClass,
+            AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
+            EventMask, MapState, PropMode, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -455,14 +458,33 @@ x11rb::atom_manager! {
 const NORMAL: u32 = 1;
 const ICONIC: u32 = 3;
 
+/// `_NET_WM_STATE`'s actions.
+const REMOVE: u32 = 0;
+const ADD: u32 = 1;
+
+/// A panel's colour, ARGB.
+const PANEL: u32 = 0xffee_8822;
+
+/// A corner of a window that a panel across the top of the screen covers,
+/// relative to the window.
+const CORNER: Rect = Rect {
+    x0: 5.0,
+    y0: 5.0,
+    x1: 25.0,
+    y1: 25.0,
+};
+
+/// A window's place and size, as the facts give it.
+fn rect_of(surface: &SurfaceFacts) -> (f64, f64, f64, f64) {
+    let geometry = surface.geometry;
+    (geometry.x0, geometry.y0, geometry.x1, geometry.y1)
+}
+
 /// A compositor with Xwayland, a person at it or not, and this test's own X
 /// connection to it: an X client asking for states the way Wine does, and
 /// reading back what the window manager told it.
 struct X11 {
-    facts: Facts,
-    requests: Requests,
-    stop: Stop,
-    compositor: thread::JoinHandle<Result<(), Error>>,
+    session: Session,
     x: RustConnection,
     root: u32,
     white: u32,
@@ -470,41 +492,26 @@ struct X11 {
 }
 
 impl X11 {
-    fn start(backend: Backend) -> Self {
-        let facts = Facts::new();
-        let requests = Requests::new();
-        let stop = Stop::new();
-        let compositor = {
-            let (facts, requests, stop) = (facts.clone(), requests.clone(), stop.clone());
-            thread::spawn(move || {
-                let config = Config {
-                    backend,
-                    spawn: Vec::new(),
-                    env: Vec::new(),
-                    run_for: Some(Duration::from_secs(60)),
-                    config: None,
-                    socket: None,
-                    xwayland: true,
-                };
-                perspicax_compositor::run(&config, &facts, &requests, &stop)
-            })
-        };
-        let display = eventually(Duration::from_secs(15), || facts.x11_display())
+    fn start(name: &str, backend: Backend) -> Self {
+        let session = Session::start_with_xwayland(name, backend);
+        let display = eventually(Duration::from_secs(15), || session.facts.x11_display())
             .expect("Xwayland never became ready");
         let (x, screen) = x11rb::connect(Some(&format!(":{display}"))).expect("an X connection");
         let root = x.setup().roots[screen].root;
         let white = x.setup().roots[screen].white_pixel;
         let atoms = Atoms::new(&x).expect("intern").reply().expect("the atoms");
         Self {
-            facts,
-            requests,
-            stop,
-            compositor,
+            session,
             x,
             root,
             white,
             atoms,
         }
+    }
+
+    /// What the compositor publishes now.
+    fn facts(&self) -> HostFacts {
+        self.session.facts.read()
     }
 
     /// A 320 by 200 window titled `title`, mapped, once the compositor has
@@ -559,7 +566,7 @@ impl X11 {
         self.x.map_window(window).expect("map_window");
         self.x.flush().expect("flush");
         self.surface_where(title, |surface| surface.mapped)
-            .unwrap_or_else(|| panic!("{title} never mapped: {:?}", self.facts.read()));
+            .unwrap_or_else(|| panic!("{title} never mapped: {:?}", self.facts()));
         window
     }
 
@@ -577,6 +584,44 @@ impl X11 {
             )
             .expect("send_event");
         self.x.flush().expect("flush");
+    }
+
+    /// Ask for `_NET_WM_STATE` `first` (and `second`) to be added or removed.
+    fn ask_state(&self, window: u32, action: u32, first: u32, second: u32) {
+        // Source 1: an application, as Wine says it is.
+        self.ask(
+            window,
+            self.atoms._NET_WM_STATE,
+            [action, first, second, 1, 0],
+        );
+    }
+
+    /// Ask to be maximized, both ways at once as EWMH has it, or not.
+    fn ask_maximized(&self, window: u32, action: u32) {
+        self.ask_state(
+            window,
+            action,
+            self.atoms._NET_WM_STATE_MAXIMIZED_VERT,
+            self.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
+        );
+    }
+
+    /// Wait for every request sent so far to have been carried out: the
+    /// window manager handles a client's requests in order, and answers this
+    /// one, asking a window that is not minimized to be normal, by writing
+    /// its `WM_STATE`.
+    fn settled(&self, window: u32) {
+        self.change_state(window, NORMAL);
+        assert!(self.answered(window, self.atoms.WM_STATE), "never answered");
+    }
+
+    /// A panel across the top of the screen, `height` tall, reserving its
+    /// strip, from a Wayland client of the test's own.
+    fn panel(&self, height: u32) -> (common::Desk, wayland_client::EventQueue<common::Desk>) {
+        let (mut desk, mut queue, qh, _) = self.session.client();
+        desk.open_panel(&qh, "panel", height, PANEL);
+        until(&mut queue, &mut desk, |desk| desk.layers_drawn == 1);
+        (desk, queue)
     }
 
     /// Ask to be iconified or made normal, with ICCCM's `WM_CHANGE_STATE`.
@@ -675,8 +720,7 @@ impl X11 {
         ready: impl Fn(&SurfaceFacts) -> bool,
     ) -> Option<SurfaceFacts> {
         eventually(Duration::from_secs(10), || {
-            self.facts
-                .read()
+            self.facts()
                 .surfaces()
                 .iter()
                 .find(|surface| surface.title.as_deref() == Some(title) && ready(surface))
@@ -685,17 +729,11 @@ impl X11 {
     }
 
     fn perform(&self, action: Action) {
-        self.requests
-            .command(Command::Perform(action))
-            .expect("the compositor is listening");
+        self.session.perform(action);
     }
 
     fn stop(self) {
-        self.stop.request();
-        self.compositor
-            .join()
-            .expect("the compositor thread panicked")
-            .expect("the compositor failed");
+        self.session.stop(());
     }
 }
 
@@ -707,7 +745,7 @@ impl X11 {
 #[test]
 #[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
 fn an_x11_window_that_iconifies_itself_is_minimized_and_told_it_is_iconic() {
-    let x11 = X11::start(Backend::headless((1280, 1024)).with_person());
+    let x11 = X11::start("x11-iconify", Backend::headless((1280, 1024)).with_person());
     let window = x11.open("game");
 
     x11.change_state(window, ICONIC);
@@ -718,7 +756,7 @@ fn an_x11_window_that_iconifies_itself_is_minimized_and_told_it_is_iconic() {
     x11.surface_where("game", |surface| {
         !surface.mapped && surface.off_workspace.is_none()
     })
-    .unwrap_or_else(|| panic!("never minimized: {:?}", x11.facts.read()));
+    .unwrap_or_else(|| panic!("never minimized: {:?}", x11.facts()));
     assert_eq!(x11.wm_state(window), [ICONIC, 0]);
     assert!(
         x11.net_wm_state(window)
@@ -736,7 +774,7 @@ fn an_x11_window_that_iconifies_itself_is_minimized_and_told_it_is_iconic() {
 #[test]
 #[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
 fn a_minimized_x11_window_is_told_it_is_normal_and_takes_the_keyboard_when_restored() {
-    let x11 = X11::start(Backend::headless((1280, 1024)).with_person());
+    let x11 = X11::start("x11-restore", Backend::headless((1280, 1024)).with_person());
     let first = x11.open("first");
     let second = x11.open("second");
     eventually(Duration::from_secs(10), || {
@@ -768,12 +806,7 @@ fn a_minimized_x11_window_is_told_it_is_normal_and_takes_the_keyboard_when_resto
     eventually(Duration::from_secs(10), || {
         (x11.focus() == second).then_some(())
     })
-    .unwrap_or_else(|| {
-        panic!(
-            "restored, it never took the keyboard: {:?}",
-            x11.facts.read()
-        )
-    });
+    .unwrap_or_else(|| panic!("restored, it never took the keyboard: {:?}", x11.facts()));
 
     x11.stop();
 }
@@ -784,12 +817,12 @@ fn a_minimized_x11_window_is_told_it_is_normal_and_takes_the_keyboard_when_resto
 #[test]
 #[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
 fn an_x11_window_on_a_workspace_not_showing_stays_normal() {
-    let x11 = X11::start(two_workspaces().with_person());
+    let x11 = X11::start("x11-workspace", two_workspaces().with_person());
     let window = x11.open("game");
 
     x11.perform(Action::Workspace(perspicax_policy::Direction::Right));
     x11.surface_where("game", |surface| surface.off_workspace.is_some())
-        .unwrap_or_else(|| panic!("never left behind: {:?}", x11.facts.read()));
+        .unwrap_or_else(|| panic!("never left behind: {:?}", x11.facts()));
     assert_eq!(x11.wm_state(window), [NORMAL, 0]);
     assert!(
         !x11.net_wm_state(window)
@@ -804,7 +837,7 @@ fn an_x11_window_on_a_workspace_not_showing_stays_normal() {
 #[test]
 #[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
 fn an_x11_window_asking_to_be_normal_again_is_restored() {
-    let x11 = X11::start(Backend::headless((1280, 1024)).with_person());
+    let x11 = X11::start("x11-normal", Backend::headless((1280, 1024)).with_person());
     let window = x11.open("game");
     x11.change_state(window, ICONIC);
     x11.surface_where("game", |surface| !surface.mapped)
@@ -813,7 +846,7 @@ fn an_x11_window_asking_to_be_normal_again_is_restored() {
     x11.change_state(window, NORMAL);
     assert!(x11.answered(window, x11.atoms.WM_STATE), "never told");
     x11.surface_where("game", |surface| surface.mapped)
-        .unwrap_or_else(|| panic!("never restored: {:?}", x11.facts.read()));
+        .unwrap_or_else(|| panic!("never restored: {:?}", x11.facts()));
     assert_eq!(x11.wm_state(window), [NORMAL, 0]);
 
     x11.stop();
@@ -826,20 +859,320 @@ fn an_x11_window_asking_to_be_normal_again_is_restored() {
 #[test]
 #[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
 fn with_nobody_at_the_seat_an_x11_window_that_iconifies_itself_stays_and_is_told_so() {
-    let x11 = X11::start(Backend::headless((1280, 1024)));
+    let x11 = X11::start("x11-nobody-iconify", Backend::headless((1280, 1024)));
     let window = x11.open("game");
 
     x11.change_state(window, ICONIC);
     assert!(x11.answered(window, x11.atoms.WM_STATE), "never answered");
     assert_eq!(x11.wm_state(window), [NORMAL, 0]);
     assert!(
-        x11.facts
-            .read()
+        x11.facts()
             .surfaces()
             .iter()
             .any(|surface| surface.title.as_deref() == Some("game") && surface.mapped),
         "an agent's desk rearranged itself"
     );
+
+    x11.stop();
+}
+
+/// Issue #90: an X11 window asking to go fullscreen, as a Wine game does,
+/// fills its whole monitor, over the panel, with no frame, and is told so.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_asking_for_fullscreen_fills_its_monitor_over_the_panel_with_no_frame() {
+    let x11 = X11::start(
+        "x11-fullscreen",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let panel = x11.panel(40);
+    let window = x11.open("game");
+
+    x11.ask_state(window, ADD, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    assert!(
+        x11.answered(window, x11.atoms._NET_WM_STATE),
+        "never answered"
+    );
+    let game = x11
+        .surface_where("game", |surface| {
+            rect_of(surface) == (0.0, 0.0, 1280.0, 1024.0) && surface.frame.is_empty()
+        })
+        .unwrap_or_else(|| panic!("never filled its monitor: {:?}", x11.facts()));
+    assert!(
+        x11.net_wm_state(window)
+            .contains(&x11.atoms._NET_WM_STATE_FULLSCREEN)
+    );
+    eventually(Duration::from_secs(5), || {
+        (judge(&x11.facts(), game.id, CORNER).visibility == Visibility::Visible).then_some(())
+    })
+    .unwrap_or_else(|| panic!("never over the panel: {:?}", x11.facts()));
+
+    drop(panel);
+    x11.stop();
+}
+
+/// Issue #90: an X11 window leaving fullscreen goes back where it was, at
+/// the size it was, framed again.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_leaving_fullscreen_goes_back_where_it_was() {
+    let x11 = X11::start(
+        "x11-unfullscreen",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let window = x11.open("game");
+    let before = x11
+        .surface_where("game", |surface| surface.frame.len() == 4)
+        .map(|surface| rect_of(&surface))
+        .expect("framed");
+    x11.ask_state(window, ADD, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    x11.surface_where("game", |surface| surface.frame.is_empty())
+        .expect("never fullscreen");
+
+    x11.ask_state(window, REMOVE, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    assert!(
+        x11.answered(window, x11.atoms._NET_WM_STATE),
+        "never answered"
+    );
+    x11.surface_where("game", |surface| {
+        rect_of(surface) == before && surface.frame.len() == 4
+    })
+    .unwrap_or_else(|| panic!("never back where it was, {before:?}: {:?}", x11.facts()));
+    assert!(
+        !x11.net_wm_state(window)
+            .contains(&x11.atoms._NET_WM_STATE_FULLSCREEN)
+    );
+
+    x11.stop();
+}
+
+/// Issue #90: a fullscreen X11 window asking for another size keeps its
+/// monitor, and is told the size it has. Its size used to be granted, which
+/// shrank a game in a corner of a monitor it was still meant to cover.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_fullscreen_x11_window_asking_for_another_size_keeps_its_monitor() {
+    let x11 = X11::start(
+        "x11-fullscreen-size",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let window = x11.open("game");
+    x11.ask_state(window, ADD, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    x11.surface_where("game", |surface| {
+        rect_of(surface) == (0.0, 0.0, 1280.0, 1024.0)
+    })
+    .expect("never fullscreen");
+
+    x11.x
+        .configure_window(window, &ConfigureWindowAux::new().width(320).height(200))
+        .expect("configure_window");
+    x11.settled(window);
+    let geometry = x11
+        .x
+        .get_geometry(window)
+        .expect("get_geometry")
+        .reply()
+        .expect("the geometry");
+    assert_eq!((geometry.width, geometry.height), (1280, 1024));
+    let game = x11.surface_where("game", |_| true).expect("still there");
+    assert_eq!(rect_of(&game), (0.0, 0.0, 1280.0, 1024.0));
+
+    x11.stop();
+}
+
+/// Issue #90: an X11 window asking to be maximized, both ways at once, fills
+/// what the panel leaves under a titlebar; asking back puts it where it was.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_asking_to_be_maximized_fills_the_work_area_and_asking_back_restores_it() {
+    let x11 = X11::start(
+        "x11-maximize",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let panel = x11.panel(40);
+    let window = x11.open("game");
+    let before = x11
+        .surface_where("game", |surface| surface.frame.len() == 4)
+        .map(|surface| rect_of(&surface))
+        .expect("framed");
+
+    x11.ask_maximized(window, ADD);
+    assert!(
+        x11.answered(window, x11.atoms._NET_WM_STATE),
+        "never answered"
+    );
+    x11.surface_where("game", |surface| {
+        surface.frame.len() == 1 && rect_of(surface) == (0.0, 64.0, 1280.0, 1024.0)
+    })
+    .unwrap_or_else(|| panic!("never maximized under the panel: {:?}", x11.facts()));
+    let state = x11.net_wm_state(window);
+    assert!(state.contains(&x11.atoms._NET_WM_STATE_MAXIMIZED_VERT));
+    assert!(state.contains(&x11.atoms._NET_WM_STATE_MAXIMIZED_HORZ));
+
+    x11.ask_maximized(window, REMOVE);
+    assert!(
+        x11.answered(window, x11.atoms._NET_WM_STATE),
+        "never answered"
+    );
+    x11.surface_where("game", |surface| {
+        surface.frame.len() == 4 && rect_of(surface) == before
+    })
+    .unwrap_or_else(|| panic!("never back where it was, {before:?}: {:?}", x11.facts()));
+
+    drop(panel);
+    x11.stop();
+}
+
+/// Issue #90: fullscreen is over maximized, as EWMH has it: a maximized X11
+/// window made fullscreen is maximized again when it leaves fullscreen.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_maximized_x11_window_made_fullscreen_is_maximized_again_when_it_leaves() {
+    let x11 = X11::start(
+        "x11-maximized-fullscreen",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let panel = x11.panel(40);
+    let window = x11.open("game");
+    x11.ask_maximized(window, ADD);
+    x11.surface_where("game", |surface| surface.frame.len() == 1)
+        .expect("never maximized");
+
+    x11.ask_state(window, ADD, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    x11.surface_where("game", |surface| {
+        surface.frame.is_empty() && rect_of(surface) == (0.0, 0.0, 1280.0, 1024.0)
+    })
+    .unwrap_or_else(|| panic!("never fullscreen: {:?}", x11.facts()));
+    x11.ask_state(window, REMOVE, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    x11.surface_where("game", |surface| {
+        surface.frame.len() == 1 && rect_of(surface) == (0.0, 64.0, 1280.0, 1024.0)
+    })
+    .unwrap_or_else(|| panic!("never maximized again: {:?}", x11.facts()));
+    let state = x11.net_wm_state(window);
+    assert!(state.contains(&x11.atoms._NET_WM_STATE_MAXIMIZED_VERT));
+    assert!(!state.contains(&x11.atoms._NET_WM_STATE_FULLSCREEN));
+
+    drop(panel);
+    x11.stop();
+}
+
+/// Issue #90: snapping a fullscreen X11 window to half its monitor takes it
+/// out of fullscreen, and it is told so: framed by a half, it is not
+/// fullscreen any more.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn snapping_a_fullscreen_x11_window_takes_it_out_of_fullscreen() {
+    let x11 = X11::start(
+        "x11-snap-fullscreen",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let window = x11.open("game");
+    x11.ask_state(window, ADD, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    x11.surface_where("game", |surface| surface.frame.is_empty())
+        .expect("never fullscreen");
+
+    x11.perform(Action::Snap(perspicax_policy::Direction::Left));
+    x11.surface_where("game", |surface| {
+        surface.geometry.x1 <= 640.0 && surface.frame.len() == 4
+    })
+    .unwrap_or_else(|| panic!("never snapped to the left half: {:?}", x11.facts()));
+    assert!(
+        !x11.net_wm_state(window)
+            .contains(&x11.atoms._NET_WM_STATE_FULLSCREEN)
+    );
+
+    x11.stop();
+}
+
+/// Issue #90: a window asking for a state it already has is still answered.
+/// Nothing changes, but Wine waits for the answer all the same, and changes
+/// nothing more about the window until it comes.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_asking_again_for_a_state_it_has_is_still_answered() {
+    let x11 = X11::start(
+        "x11-asked-again",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let window = x11.open("game");
+    x11.ask_state(window, ADD, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    x11.surface_where("game", |surface| surface.frame.is_empty())
+        .expect("never fullscreen");
+
+    x11.ask_state(window, ADD, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    assert!(
+        x11.answered(window, x11.atoms._NET_WM_STATE),
+        "asked again, never answered"
+    );
+    assert!(
+        x11.net_wm_state(window)
+            .contains(&x11.atoms._NET_WM_STATE_FULLSCREEN)
+    );
+
+    x11.stop();
+}
+
+/// Issue #90: a window on a workspace that is not showing, asking to go
+/// fullscreen, is told it is, and fills its monitor when its workspace is
+/// shown -- not before.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_on_a_workspace_not_showing_that_asks_for_fullscreen_stays_there_until_shown() {
+    let x11 = X11::start("x11-parked-fullscreen", two_workspaces().with_person());
+    let window = x11.open("game");
+    x11.perform(Action::Workspace(perspicax_policy::Direction::Right));
+    x11.surface_where("game", |surface| surface.off_workspace.is_some())
+        .expect("never left behind");
+
+    x11.ask_state(window, ADD, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    assert!(
+        x11.answered(window, x11.atoms._NET_WM_STATE),
+        "never answered"
+    );
+    assert!(
+        x11.net_wm_state(window)
+            .contains(&x11.atoms._NET_WM_STATE_FULLSCREEN)
+    );
+    x11.settled(window);
+    assert!(
+        x11.surface_where("game", |surface| surface.off_workspace.is_some())
+            .is_some_and(|surface| !surface.mapped),
+        "shown on a workspace not showing"
+    );
+
+    x11.perform(Action::Workspace(perspicax_policy::Direction::Left));
+    x11.surface_where("game", |surface| {
+        surface.mapped && rect_of(surface) == (0.0, 0.0, 1280.0, 1024.0)
+    })
+    .unwrap_or_else(|| panic!("never filled its monitor once shown: {:?}", x11.facts()));
+
+    x11.stop();
+}
+
+/// Issue #90: with nobody at the seat a window asking to go fullscreen stays
+/// as it was placed, and is told so.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn with_nobody_at_the_seat_an_x11_window_asking_for_fullscreen_stays_as_placed_and_is_answered() {
+    let x11 = X11::start("x11-nobody-fullscreen", Backend::headless((1280, 1024)));
+    let window = x11.open("game");
+    let before = x11
+        .surface_where("game", |surface| surface.frame.len() == 4)
+        .map(|surface| rect_of(&surface))
+        .expect("framed");
+
+    x11.ask_state(window, ADD, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    assert!(
+        x11.answered(window, x11.atoms._NET_WM_STATE),
+        "never answered"
+    );
+    assert!(
+        !x11.net_wm_state(window)
+            .contains(&x11.atoms._NET_WM_STATE_FULLSCREEN)
+    );
+    x11.settled(window);
+    let game = x11.surface_where("game", |_| true).expect("still there");
+    assert_eq!(rect_of(&game), before, "an agent's desk rearranged itself");
 
     x11.stop();
 }
