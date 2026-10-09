@@ -10,11 +10,12 @@
 //! the layout indicator as wide as its label, while there is a choice of
 //! layouts to show. The
 //! taskbar takes whatever room is left, and shares it among the windows it
-//! lists, each no wider than [`TASK_WIDTH`]; a bar without one keeps its
-//! last item at its right end, and the rest at its left. A bar too narrow
-//! for what it holds shrinks its tasks to their icons, [`TASK_LEAST`] wide,
-//! and then grows as wide as it needs to be, up to the monitor's width;
-//! there, its tasks shrink further.
+//! lists, each no wider than [`TASK_WIDTH`], or than [`TASK_LEAST`] when its
+//! tasks show their icons alone; a bar without one keeps its last item at
+//! its right end, and the rest at its left. A bar too narrow for what it
+//! holds shrinks its tasks to their icons, [`TASK_LEAST`] wide, and then
+//! grows as wide as it needs to be, up to the monitor's width; there, its
+//! tasks shrink further.
 
 use perspicax_config::{Align, Edge, Item, PanelOutputs, PanelWidth};
 
@@ -25,8 +26,8 @@ pub(crate) const CLOCK_PAD: i32 = 10;
 /// The widest a task is: a few windows are each this wide, and many share
 /// the taskbar.
 pub(crate) const TASK_WIDTH: i32 = 200;
-/// The narrowest a task is while its bar can still grow: room for its icon
-/// alone, as a task is drawn.
+/// The narrowest a task is while its bar can still grow, and the widest one
+/// showing its icon alone: room for its icon alone, as a task is drawn.
 pub(crate) const TASK_LEAST: i32 = 36;
 /// Room around the pager's grid, and between its cells.
 pub(crate) const PAGER_PAD: i32 = 4;
@@ -80,6 +81,8 @@ pub(crate) struct Holding<'a> {
     /// The layout in use's label, if there is a choice of layouts.
     pub(crate) layout: Option<&'a str>,
     pub(crate) tasks: Vec<Task>,
+    /// Its tasks show their windows' titles beside their icons.
+    pub(crate) task_titles: bool,
     pub(crate) cells: Vec<Cell>,
     #[cfg(feature = "tray")]
     pub(crate) tray: Vec<TrayIcon>,
@@ -210,10 +213,15 @@ pub(crate) fn lay_out(
             .find(|&&(item, _)| item == wanted)
             .map(|&(_, rect)| rect)
     };
+    let widest = if holding.task_titles {
+        TASK_WIDTH
+    } else {
+        TASK_LEAST
+    };
     let tasks = within(Item::Taskbar).map_or_else(Vec::new, |taskbar| {
         let each = match holding.tasks.len() {
             0 => 0,
-            many => (taskbar.w / many as i32).min(TASK_WIDTH),
+            many => (taskbar.w / many as i32).min(widest),
         };
         holding
             .tasks
@@ -412,6 +420,7 @@ mod tests {
                     minimized: false,
                 })
                 .collect(),
+            task_titles: true,
             cells: cells
                 .iter()
                 .zip(100..)
@@ -686,6 +695,20 @@ mod tests {
         )
     }
 
+    /// As [`shaped`], each task showing its icon alone.
+    fn untitled(items: &[Item], tasks: usize, shape: (PanelWidth, Align)) -> Placed {
+        lay_out(
+            items,
+            Holding {
+                task_titles: false,
+                ..holding(tasks, &[])
+            },
+            PANEL,
+            shape,
+            &mut Monospace(8.0),
+        )
+    }
+
     const CLOCK: i32 = 5 * 8 + 2 * CLOCK_PAD;
 
     #[test]
@@ -773,6 +796,53 @@ mod tests {
             placed.tasks,
             "as on a panel the whole width"
         );
+    }
+
+    #[test]
+    fn tasks_without_titles_are_each_as_wide_as_an_icon() {
+        let items = [Item::Start, Item::Taskbar, Item::Clock];
+        let placed = untitled(&items, 2, FULL);
+        let rects: Vec<Rect> = placed.tasks.iter().map(|&(_, rect)| rect).collect();
+        assert_eq!(
+            rects,
+            [
+                Rect::new(40, 0, TASK_LEAST, 40),
+                Rect::new(40 + TASK_LEAST, 0, TASK_LEAST, 40)
+            ],
+            "from the taskbar's left end, in order"
+        );
+        assert_eq!(
+            placed.items,
+            shaped(&items, 2, FULL).items,
+            "the taskbar takes the same room, the rest of it empty"
+        );
+        assert_eq!(
+            placed.at((40.0 + 1.5 * TASK_LEAST as f64, 20.0)),
+            Some(Part::Task(1))
+        );
+        assert_eq!(placed.at((40.0 + 2.5 * TASK_LEAST as f64, 20.0)), None);
+    }
+
+    #[test]
+    fn many_tasks_without_titles_share_the_taskbar_as_titled_ones_do() {
+        let items = [Item::Start, Item::Taskbar, Item::Clock];
+        for (tasks, shape) in [
+            (40, FULL),
+            (40, (PanelWidth::Pixels(300), Align::Center)),
+            (11, (PanelWidth::Pixels(300), Align::Left)),
+            (5, (PanelWidth::Pixels(300), Align::Right)),
+        ] {
+            let (titled, untitled) = (shaped(&items, tasks, shape), untitled(&items, tasks, shape));
+            assert_eq!(
+                untitled.bar, titled.bar,
+                "{tasks} on {shape:?}: the same bar"
+            );
+            if titled.tasks[0].1.w <= TASK_LEAST {
+                assert_eq!(untitled.tasks, titled.tasks, "{tasks} on {shape:?}");
+            } else {
+                assert!(untitled.tasks.iter().all(|(_, rect)| rect.w == TASK_LEAST));
+            }
+        }
     }
 
     #[test]

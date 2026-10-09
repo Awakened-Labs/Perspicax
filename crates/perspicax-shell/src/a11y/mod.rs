@@ -792,11 +792,17 @@ mod panels {
         }
 
         fn laid(tasks: Vec<Task>, cells: Vec<Cell>) -> Placed {
+            laid_titled(tasks, cells, true)
+        }
+
+        /// As [`laid`], its tasks showing their titles or not.
+        fn laid_titled(tasks: Vec<Task>, cells: Vec<Cell>, task_titles: bool) -> Placed {
             let items = [Item::Start, Item::Taskbar, Item::Pager, Item::Clock];
             let holding = Holding {
                 time: "14:05",
                 layout: None,
                 tasks,
+                task_titles,
                 cells,
                 #[cfg(feature = "tray")]
                 tray: Vec::new(),
@@ -820,6 +826,7 @@ mod panels {
                     time: "14:05",
                     layout: None,
                     tasks: Vec::new(),
+                    task_titles: true,
                     cells: Vec::new(),
                     tray: vec![icon(3, "Network", true), icon(8, "Updates", false)],
                 },
@@ -875,6 +882,7 @@ mod panels {
                 time: "14:05",
                 layout: None,
                 tasks: Vec::new(),
+                task_titles: true,
                 cells: Vec::new(),
                 #[cfg(feature = "tray")]
                 tray: Vec::new(),
@@ -961,6 +969,7 @@ mod panels {
                 time: "14:05",
                 layout,
                 tasks: Vec::new(),
+                task_titles: true,
                 cells: Vec::new(),
                 #[cfg(feature = "tray")]
                 tray: Vec::new(),
@@ -1085,6 +1094,43 @@ mod panels {
             assert_eq!(part_of(START), Some(Part::Start));
             assert_eq!(part_of(TASKBAR), None);
             assert_eq!(part_of(ROOT), None);
+        }
+
+        #[test]
+        fn a_taskbar_of_icons_alone_still_names_each_task_by_its_title() {
+            use crate::layout::panel::TASK_LEAST;
+
+            let task = |serial: u64, title: &str| Task {
+                serial,
+                title: title.to_owned(),
+                icon: Some("firefox".to_owned()),
+                active: false,
+                minimized: false,
+            };
+            let placed = laid_titled(vec![task(3, "Editor"), task(7, "Mail")], Vec::new(), false);
+            let tree = panel("perspicax-panel-DP-1", None, &placed, "14:05", false, None);
+            let tabs: Vec<_> = node(&tree, TASKBAR)
+                .children()
+                .iter()
+                .map(|&id| {
+                    let tab = node(&tree, id);
+                    (tab.label().map(str::to_owned), tab.bounds())
+                })
+                .collect();
+            assert_eq!(
+                tabs,
+                [
+                    (
+                        Some("Editor".to_owned()),
+                        Some(rect(Rect::new(40, 0, TASK_LEAST, 40)))
+                    ),
+                    (
+                        Some("Mail".to_owned()),
+                        Some(rect(Rect::new(40 + TASK_LEAST, 0, TASK_LEAST, 40)))
+                    ),
+                ],
+                "what a person no longer reads, a screen reader still does"
+            );
         }
     }
 }
