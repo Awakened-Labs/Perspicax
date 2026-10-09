@@ -818,7 +818,7 @@ mod tests {
                 (Leave::LogOut, Does::LogOut),
             ],
         };
-        State::new(root(&apps, None, &session), start(&apps, &session))
+        State::new(root(&apps, None, &session), start(&apps, None, &session))
     }
 
     struct Shell {

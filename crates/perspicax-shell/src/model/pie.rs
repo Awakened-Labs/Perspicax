@@ -33,7 +33,7 @@ use perspicax_config::{
 use super::{
     apps::{self, App, Run},
     fs::Fs,
-    image,
+    image, menu_file,
 };
 
 /// The icon of a program that has none of its own.
@@ -343,13 +343,7 @@ impl<F: Fs> Sources<'_, F> {
 
     /// `word` with a leading `~` as the home folder.
     fn tilde(&self, word: &str) -> String {
-        match (word.strip_prefix('~'), self.home) {
-            (Some(""), Some(home)) => home.display().to_string(),
-            (Some(rest), Some(home)) if rest.starts_with('/') => {
-                home.join(&rest[1..]).display().to_string()
-            }
-            _ => word.to_owned(),
-        }
+        menu_file::tilde(word, self.home)
     }
 }
 

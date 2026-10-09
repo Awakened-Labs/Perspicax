@@ -7,8 +7,9 @@
 //! no dialog to confirm, and Suspend does not lock first (that is for
 //! swayidle's `before-sleep`, so that every way to sleep locks). A menu file
 //! may put items of its own above them, or replace the lot. The start menu
-//! is the same, without the menu file's say: it is where every application
-//! can always be found. A tray icon's menu is its program's, and what is
+//! is built the same way, from `[shell.start-menu]`'s items and never the
+//! menu file's: with none written, or with items that go above the rest, it
+//! is where every application can always be found. A tray icon's menu is its program's, and what is
 //! chosen in it is told back to that program.
 
 use std::path::PathBuf;
@@ -271,9 +272,11 @@ pub(crate) fn root(apps: &[App], file: Option<&MenuFile>, session: &Session) -> 
     Menu { items }.tidy()
 }
 
-/// The start menu: the applications by group, then the ways to leave.
-pub(crate) fn start(apps: &[App], session: &Session) -> Menu {
-    root(apps, None, session)
+/// The start menu: the applications by group, then the ways to leave; with
+/// the items `[shell.start-menu]` writes above them, or in their place, as
+/// a menu file's go in the root menu.
+pub(crate) fn start(apps: &[App], written: Option<&MenuFile>, session: &Session) -> Menu {
+    root(apps, written, session)
 }
 
 /// One submenu per group that has an application in it, each listing its
@@ -332,8 +335,9 @@ fn launcher(app: &App, label: Option<&str>, icon: Option<&str>) -> Item {
     }
 }
 
-/// A menu file's items as menu items. An `app` that is not installed is
-/// left out, as a menu item that does nothing would be worse.
+/// A menu file's items, or the start menu's, as menu items. An `app` that is
+/// not installed is left out, as a menu item that does nothing would be
+/// worse: the same config may be used where it is not.
 fn resolve(written: &[FileItem], apps: &[App], session: &Session) -> Vec<Item> {
     let mut items = Vec::new();
     for item in written {
@@ -348,7 +352,7 @@ fn resolve(written: &[FileItem], apps: &[App], session: &Session) -> Vec<Item> {
                 let id = id.strip_suffix(".desktop").unwrap_or(id);
                 match apps.iter().find(|app| app.id == id) {
                     Some(app) => items.push(launcher(app, label.as_deref(), icon.as_deref())),
-                    None => tracing::info!("the menu file names {id}, which is not installed"),
+                    None => tracing::info!("the application {id} is not installed; left out"),
                 }
             }
             FileItem::Open {
@@ -508,14 +512,88 @@ mod tests {
         );
     }
 
+    /// The start menu `[shell.start-menu]` writes with `text`, as the shell
+    /// takes it from the config.
+    fn written(text: &str) -> MenuFile {
+        let shell =
+            perspicax_config::shell(&format!("[shell.start-menu]\n{text}"), ShellBuilt::FULL)
+                .expect("a config");
+        let start_menu = shell.start_menu.expect("a start menu");
+        menu_file::written(start_menu.mode, start_menu.items, None)
+    }
+
     #[test]
-    fn the_start_menu_lists_every_application_whatever_the_menu_file_says() {
+    fn with_no_start_menu_written_the_start_menu_is_every_application_whatever_the_menu_file_says()
+    {
         let replaced = root(&apps(), Some(&file("mode = \"replace\"\n")), &session());
         assert!(replaced.items.is_empty(), "the root menu as the file says");
+        let menu = start(&apps(), None, &session());
         assert_eq!(
-            labels(&start(&apps(), &session())),
+            labels(&menu),
             ["Accessories", "Internet", "System", "--", "Lock", "Log Out"]
         );
+        assert_eq!(menu, root(&apps(), None, &session()), "as it always was");
+    }
+
+    #[test]
+    fn a_replacing_start_menu_is_its_items_then_the_ways_to_leave_where_written() {
+        let written = written(
+            r#"
+            mode = "replace"
+            items = [{ app = "firefox" }, { separator = true }, { session = true }]
+            "#,
+        );
+        let menu = start(&apps(), Some(&written), &session());
+        assert_eq!(labels(&menu), ["Firefox", "--", "Lock", "Log Out"]);
+        assert_eq!(
+            menu.items[0].does,
+            Does::Run(run(&["firefox"])),
+            "the application, as installed"
+        );
+    }
+
+    #[test]
+    fn a_start_menu_of_only_the_session_is_the_ways_to_leave() {
+        let written = written("mode = \"replace\"\nitems = [{ session = true }]");
+        let menu = start(&apps(), Some(&written), &session());
+        assert_eq!(labels(&menu), ["Lock", "Log Out"]);
+    }
+
+    #[test]
+    fn an_extending_start_menu_goes_above_the_applications() {
+        let written = written("items = [{ label = \"Terminal\", exec = [\"foot\", \"~/x\"] }]");
+        let menu = start(&apps(), Some(&written), &session());
+        assert_eq!(
+            labels(&menu),
+            [
+                "Terminal",
+                "--",
+                "Accessories",
+                "Internet",
+                "System",
+                "--",
+                "Lock",
+                "Log Out"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_start_menu_app_that_is_not_installed_is_left_out() {
+        let written = written(
+            "mode = \"replace\"\nitems = [{ app = \"steam\" }, { app = \"gedit.desktop\" }]",
+        );
+        let menu = start(&apps(), Some(&written), &session());
+        assert_eq!(labels(&menu), ["Text Editor"]);
+    }
+
+    /// A favourite above the groups is also in its group; typing finds it
+    /// once.
+    #[test]
+    fn an_app_listed_and_in_its_group_is_found_once() {
+        let written = written("items = [{ app = \"firefox\" }]");
+        let menu = start(&apps(), Some(&written), &session());
+        assert_eq!(menu.find("fire"), [vec![0]], "the first it comes to");
     }
 
     #[test]
@@ -566,7 +644,7 @@ mod tests {
         let files = Files::default().program("/usr/bin/loginctl");
         let path = [PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin")];
         let shell = Shell::profile(Profile::Classic, ShellBuilt::FULL);
-        let menu = start(&[], &Session::of(&shell, true, &files, &path));
+        let menu = start(&[], None, &Session::of(&shell, true, &files, &path));
         assert_eq!(
             labels(&menu),
             ["Log Out", "Suspend", "Restart", "Shut Down"],
@@ -595,13 +673,18 @@ mod tests {
         };
         let files = files.program("/opt/lock/bin/lock");
         assert_eq!(
-            labels(&start(&[], &Session::of(&shell, false, &files, &path))),
+            labels(&start(
+                &[],
+                None,
+                &Session::of(&shell, false, &files, &path)
+            )),
             ["Shut Down", "Lock"],
             "in the order written, a path as written, and no compositor to log out of"
         );
         assert_eq!(
             labels(&start(
                 &[],
+                None,
                 &Session::of(&shell, true, &Files::default(), &path)
             )),
             ["Log Out"],
@@ -614,7 +697,7 @@ mod tests {
         let files = Files::default().program("/usr/bin/loginctl");
         let shell = Shell::profile(Profile::Classic, ShellBuilt::FULL);
         let session = Session::of(&shell, true, &files, &[PathBuf::from("/usr/bin")]);
-        let menu = start(&[], &session);
+        let menu = start(&[], None, &session);
         let found = |query: &str| -> Vec<&str> {
             menu.find(query)
                 .iter()
