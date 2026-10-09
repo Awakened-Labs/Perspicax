@@ -129,6 +129,8 @@ pub(crate) fn run(
         tray: tray::Tray::new(bus, news),
         #[cfg(any(feature = "menus", feature = "panel"))]
         seat: seat::Seat::new(&globals, &qh),
+        #[cfg(feature = "pie")]
+        pies: pie::Pies::new(&shell, config.as_deref(), actions.clone()),
         #[cfg(feature = "menus")]
         menus: menu::Menus::new(
             &shell,
@@ -137,8 +139,6 @@ pub(crate) fn run(
             actions,
             channel.is_some(),
         ),
-        #[cfg(feature = "pie")]
-        pies: pie::Pies::new(&shell, config.as_deref()),
         #[cfg(any(feature = "menus", feature = "panel"))]
         installed,
         #[cfg(feature = "menus")]
@@ -259,6 +259,9 @@ pub(crate) enum Asked {
     /// To select it.
     #[cfg(feature = "icons")]
     SelectIcon(accesskit::NodeId),
+    /// Something of the open pie: to choose a slot, or move to one.
+    #[cfg(feature = "pie")]
+    Pie(crate::pie::Event),
 }
 
 /// The icon theme named `theme`, looked for in the data folders of
@@ -452,6 +455,8 @@ impl App {
             Asked::SelectIcon(node) => {
                 self.desktops.select(&mut self.canvas, &mut self.kit, node);
             }
+            #[cfg(feature = "pie")]
+            Asked::Pie(event) => self.pie_event(event),
         }
     }
 }

@@ -371,6 +371,7 @@ impl KeyboardHandler for App {
         #[cfg(feature = "pie")]
         {
             self.seat.keyboard_on = Some(surface.clone());
+            self.pies.keyboard(surface, true);
         }
         self.menus.keyboard(surface, true);
     }
@@ -391,7 +392,7 @@ impl KeyboardHandler for App {
             if self.seat.keyboard_on.as_ref() == Some(surface) {
                 self.seat.keyboard_on = None;
             }
-            if self.pies.keyboard(surface) {
+            if self.pies.keyboard(surface, false) {
                 self.pie_event(crate::pie::Event::KeyboardLost);
             }
         }

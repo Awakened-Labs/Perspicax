@@ -65,6 +65,10 @@ pub(crate) enum Event {
     Key(Key),
     /// The pie's surface lost the keyboard to something else.
     KeyboardLost,
+    /// An assistive technology chose the slot `index` of the ring open.
+    Choose(usize),
+    /// An assistive technology moved to it.
+    Select(usize),
 }
 
 /// What to do about it.
@@ -96,6 +100,8 @@ struct Open {
     levels: Vec<Level>,
     /// Where the pointer is on the surface, once it is known.
     pointer: Option<(f64, f64)>,
+    /// What an assistive technology moved to, until the pointer moves.
+    selected: Option<usize>,
     /// The button that went down on the pie and has not come up.
     pressed: Option<Button>,
     /// The window that had the keyboard when the pie was asked for.
@@ -169,6 +175,7 @@ impl State {
                 size,
                 at,
                 pointer: None,
+                selected: None,
                 pressed: None,
                 active,
             });
@@ -206,6 +213,11 @@ impl State {
             Event::Key(Key::Up) => open.spin(1),
             Event::Key(Key::Down) => open.spin(-1),
             Event::Key(Key::Back) => open.back(),
+            Event::Choose(index) => open.choose(Some(index)),
+            Event::Select(index) => {
+                open.selected = Some(index);
+                (Then::Stay, Vec::new())
+            }
         };
         match then {
             Then::Close => self.open = None,
@@ -238,6 +250,7 @@ impl Open {
         let ring = self.ring();
         let grows = ring.zooms(self.pointer) || ring.zooms(at);
         self.pointer = at;
+        self.selected = None;
         (
             Then::Stay,
             if grows {
@@ -248,10 +261,12 @@ impl Open {
         )
     }
 
-    /// The slot pointed at.
+    /// The slot moved to, or else pointed at.
     fn picked(&self) -> Option<usize> {
         let level = self.levels.last()?;
-        self.ring().pointed(self.pointer?, level.spin)
+        self.selected
+            .filter(|&index| index < level.slots.len())
+            .or_else(|| self.ring().pointed(self.pointer?, level.spin))
     }
 
     /// Spin the ring open `by` places, clockwise.
@@ -276,6 +291,7 @@ impl Open {
                     spin: 0,
                 };
                 self.levels.push(level);
+                self.selected = None;
                 (Then::Stay, Vec::new())
             }
             (Does::Launch(_) | Does::Switch(_), Some(window)) => {
@@ -313,6 +329,7 @@ impl Open {
     fn back(&mut self) -> (Then, Vec<Effect>) {
         if self.levels.len() > 1 {
             self.levels.pop();
+            self.selected = None;
             (Then::Stay, Vec::new())
         } else {
             (Then::Close, Vec::new())
@@ -573,6 +590,25 @@ mod tests {
         assert_eq!(
             click(&mut running(None), DOWN, Button::Middle),
             [Effect::Run(run("slack")), Effect::Redraw]
+        );
+    }
+
+    #[test]
+    fn an_assistive_technology_selects_and_chooses_by_index() {
+        let mut state = opened();
+        assert_eq!(state.update(Event::Select(3)), [Effect::Redraw]);
+        assert_eq!(picked(&state), Some("editor"));
+        state.update(Event::Motion(UP));
+        assert_eq!(picked(&state), Some("terminal"), "the pointer takes over");
+        assert_eq!(
+            state.update(Event::Choose(2)),
+            [Effect::Run(run("firefox")), Effect::Redraw]
+        );
+        assert_eq!(opened().update(Event::Choose(9)), []);
+        assert_eq!(
+            opened().update(Event::Choose(1)),
+            [Effect::Redraw],
+            "a submenu"
         );
     }
 }

@@ -19,9 +19,11 @@
 
 use std::path::{Path, PathBuf};
 
+use accesskit::{Action, ActionHandler, ActionRequest};
 use perspicax_config::{Shell, pie::Pie};
 use smithay_client_toolkit::{
     output::OutputState,
+    reexports::calloop::channel::Sender,
     shell::{
         WaylandSurface,
         wlr_layer::{LayerSurface, LayerSurfaceConfigure},
@@ -30,11 +32,12 @@ use smithay_client_toolkit::{
 use wayland_client::{QueueHandle, protocol::wl_surface};
 
 use super::{
-    App,
+    App, Asked,
     canvas::{Canvas, Frames, whole},
     installed::Installed,
 };
 use crate::{
+    a11y::{self, adapter::Served},
     model::{
         fs::Disk,
         image,
@@ -57,13 +60,17 @@ pub(super) struct Pies {
     home: Option<PathBuf>,
     /// What the wheel turned short of a notch.
     wheel: f64,
+    /// Where an assistive technology's requests are sent, to reach the loop.
+    actions: Sender<Asked>,
 }
 
 /// The pie's surface.
 struct Shown {
     /// The monitor's connector name.
     name: String,
+    namespace: String,
     layer: LayerSurface,
+    a11y: Served,
     scale: u32,
     /// In the surface's own units, once the compositor has said.
     size: Option<(u32, u32)>,
@@ -76,7 +83,7 @@ struct Shown {
 }
 
 impl Pies {
-    pub(super) fn new(shell: &Shell, config: Option<&Path>) -> Self {
+    pub(super) fn new(shell: &Shell, config: Option<&Path>, actions: Sender<Asked>) -> Self {
         let mut pies = Self {
             state: State::default(),
             shown: None,
@@ -85,6 +92,7 @@ impl Pies {
             config: config.map(Path::to_owned),
             home: std::env::var_os("HOME").map(PathBuf::from),
             wheel: 0.0,
+            actions,
         };
         pies.reconfigure(shell, config);
         pies
@@ -209,9 +217,15 @@ impl Pies {
                 return;
             };
             let namespace = format!("perspicax-pie-{}", view.output);
+            let a11y = Served::acting(
+                a11y::pie(&namespace, None, None),
+                Forward(self.actions.clone()),
+            );
             self.shown = Some(Shown {
                 name: view.output.to_owned(),
                 layer: canvas.overlay(qh, &namespace, &output),
+                namespace,
+                a11y,
                 scale: whole(scale),
                 size: None,
                 frames: Frames::default(),
@@ -258,6 +272,9 @@ impl Pies {
         tracing::debug!(took = ?started.elapsed(), "the pie was drawn");
         shown.waiting = shown_now;
         shown.stale = !shown_now;
+        shown
+            .a11y
+            .show(a11y::pie(&shown.namespace, Some(size), Some(&view)));
     }
 
     /// The compositor showed the last picture on `surface`: draw what
@@ -314,8 +331,37 @@ impl Pies {
         }
     }
 
-    /// Whether the keyboard came to, or left, the pie's surface.
-    pub(super) fn keyboard(&self, surface: &wl_surface::WlSurface) -> bool {
-        self.owns(surface)
+    /// The keyboard came to `surface`, or left it: whether it is the
+    /// pie's.
+    pub(super) fn keyboard(&mut self, surface: &wl_surface::WlSurface, entered: bool) -> bool {
+        let Some(shown) = self
+            .shown
+            .as_mut()
+            .filter(|shown| shown.layer.wl_surface() == surface)
+        else {
+            return false;
+        };
+        shown.a11y.focused(entered);
+        true
+    }
+}
+
+/// An assistive technology's requests of a pie, sent on to the shell's
+/// loop: clicking a slot chooses it, focusing it moves to it.
+struct Forward(Sender<Asked>);
+
+impl ActionHandler for Forward {
+    fn do_action(&mut self, request: ActionRequest) {
+        let Some(index) = a11y::slot_of(request.target_node) else {
+            return;
+        };
+        let event = match request.action {
+            Action::Click => Event::Choose(index),
+            Action::Focus => Event::Select(index),
+            _ => return,
+        };
+        if self.0.send(Asked::Pie(event)).is_err() {
+            tracing::debug!("the shell is stopping; the request is dropped");
+        }
     }
 }
