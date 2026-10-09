@@ -19,6 +19,7 @@ use serde::Deserialize;
 use crate::{
     Error, Profile, invalid,
     pie::{Pie, RawPie},
+    start_menu::{RawStartMenu, StartMenu},
 };
 
 /// Which of perspicax-shell's components it was built with: its cargo
@@ -101,6 +102,10 @@ pub struct Shell {
     pub panel: Option<Panel>,
     /// The pie menus a binding can open, or `None` for none.
     pub pie: Option<Pie>,
+    /// The start menu and its button as `[shell.start-menu]` writes them,
+    /// or `None` for every application, then the ways to leave, behind
+    /// Perspicax's mark.
+    pub start_menu: Option<StartMenu>,
     /// The colours everything is drawn in: `[theme]`'s, read here so that a
     /// change to the theme reaches the shell as one to `[shell]` does.
     pub palette: Palette,
@@ -348,6 +353,7 @@ impl Shell {
             leave: Leave::ALL.to_vec(),
             panel: panel.filter(|_| built.panel),
             pie: None,
+            start_menu: None,
             palette: Palette::default(),
             font: Font::default(),
         }
@@ -426,6 +432,7 @@ pub(crate) struct RawShell {
     leave: Option<Vec<Leave>>,
     panel: Option<RawPanel>,
     pie: Option<RawPie>,
+    start_menu: Option<RawStartMenu>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -582,6 +589,9 @@ impl RawShell {
         if let Some(pie) = self.pie {
             shell.pie = Some(pie.apply()?);
         }
+        if let Some(start_menu) = self.start_menu {
+            shell.start_menu = Some(start_menu.apply()?);
+        }
         Ok(shell)
     }
 
@@ -692,6 +702,20 @@ impl RawShell {
                 "tray",
             ),
             (self.pie.is_some(), "shell.pie", built.pie, "pie"),
+            (
+                self.start_menu.is_some(),
+                "shell.start-menu",
+                built.menus,
+                "menus",
+            ),
+            (
+                self.start_menu
+                    .as_ref()
+                    .is_some_and(RawStartMenu::names_icon),
+                "shell.start-menu.icon",
+                built.panel,
+                "panel",
+            ),
         ];
         match checks
             .into_iter()
