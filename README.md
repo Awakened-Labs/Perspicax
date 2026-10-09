@@ -739,6 +739,7 @@ them; none is on by default. The profiles turn on what the build has:
 | Keyboard layout | `panel` | before the tray, with two layouts or more | — | the panel's | a `Button` "Keyboard layout", the layout's name its value |
 | Tray | `tray` (with `panel`, `menus`) | before the clock | — | the panel's; its menus as the root menu's | a `Group` "Tray" of a `Button` for each icon, named by its tooltip |
 | Clock | `panel` | the time, last | — | the panel's | a `Status` "Clock", the time its value |
+| Pies | `pie` (with `menus`, `panel`) | a key or button bound to `{ pie = "<name>" }` | the same | overlay, `perspicax-pie-<output>`, while open | a `Menu` named for the pie of a `MenuItem` for each slot, the one pointed at selected |
 
 An agent reads the shell as it reads any application. On a seat it cannot
 click it: like everything else the person's session starts, the shell gets no
@@ -807,6 +808,60 @@ registry the programs look for, or shows what another program's lists if one
 was there first. A left click activates the icon, a middle click activates it
 the other way, and a right click opens its menu at the icon, as the start menu
 opens at its button.
+
+### Pies
+
+A pie is PieDock's: a ring of icons that opens centred on the pointer when a
+key or a button bound to `{ pie = "<name>" }` is pressed, and chooses by
+direction. Pointing anywhere past its middle, out to the screen's edge,
+picks the icon that way, which grows as the pointer turns toward it and has
+its name in the middle. Then:
+
+- **Left button.** It opens a submenu in the pie's place, or starts the
+  program. If the program has windows open, it brings the next of them
+  forward instead, so pressing again goes round them.
+- **Middle button.** It starts the program, whatever is open.
+- **Right button.** It goes back out of a submenu, and closes the pie from
+  its first ring.
+- **Wheel.** It spins the pie a place a notch.
+- **Keys.** Escape closes it, Enter is the left button, Up and Down spin
+  it, and Backspace is the right button.
+- **Its own binding.** Pressed again, it closes the pie.
+
+```toml
+[mouse.anywhere]
+"Mouse8" = { pie = "launchers" }    # the thumb button, taken from every window
+
+[shell.pie]
+size = 512                          # across, in pixels; 128 to 1024
+icons = "~/.piedock/icons"          # <name>.png or .svg, any case, looked for
+                                    # before the icon theme
+aliases = [                         # what names a running window: its app-id,
+  { app-id = "com.mitchellh.ghostty", as = "ghostty" },   # unless one of these
+  { title = "Steam", as = "steam" },                     # matches it exactly
+]
+ignore = [{ title = "Picture-in-Picture" }]   # windows no pie shows
+
+[shell.pie.menus]
+launchers = [
+  { label = "terminal", exec = ["foot"] },  # its icon is its label's, unless
+                                            # `icon` names another
+  { app = "firefox" },                      # an installed application, or a
+  { app = "~/apps/tool.desktop" },          # desktop file by its path
+  { label = "games", items = [              # a submenu
+    { label = "steam", exec = ["steam"] },
+  ] },
+  { running = true },                       # each running application no slot
+]                                           # of this ring stands for
+```
+
+A pie is written in the menu file's words, less `separator`, `applications`
+and `session`, plus `running`, which only a first ring has, once. A running
+window is known by the first alias that matches its app-id or title, and
+otherwise by its app-id. An X11 window's app-id is its `WM_CLASS` class. That
+name finds the slot that stands for it (a program's label, or an application
+whose desktop entry claims the window) and its icon in the folder. A slot
+with windows open has a dot for each, up to three.
 
 **Coming from W4.** `classic` now starts the shell, so a config that starts
 waybar and swaybg from `autostart` gets two panels and two wallpapers. Take
