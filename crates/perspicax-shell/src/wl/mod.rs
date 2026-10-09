@@ -20,6 +20,8 @@ mod menu;
 mod pager;
 #[cfg(feature = "panel")]
 mod panel;
+#[cfg(feature = "pie")]
+mod pie;
 #[cfg(any(feature = "menus", feature = "panel"))]
 mod seat;
 #[cfg(feature = "panel")]
@@ -127,6 +129,8 @@ pub(crate) fn run(
         tray: tray::Tray::new(bus, news),
         #[cfg(any(feature = "menus", feature = "panel"))]
         seat: seat::Seat::new(&globals, &qh),
+        #[cfg(feature = "pie")]
+        pies: pie::Pies::new(&shell, config.as_deref(), actions.clone()),
         #[cfg(feature = "menus")]
         menus: menu::Menus::new(
             &shell,
@@ -213,6 +217,8 @@ pub(crate) struct App {
     seat: seat::Seat,
     #[cfg(feature = "menus")]
     menus: menu::Menus,
+    #[cfg(feature = "pie")]
+    pies: pie::Pies,
     /// Whether a timer is collecting the programs the menus started.
     #[cfg(feature = "menus")]
     reaping: bool,
@@ -253,6 +259,9 @@ pub(crate) enum Asked {
     /// To select it.
     #[cfg(feature = "icons")]
     SelectIcon(accesskit::NodeId),
+    /// Something of the open pie: to choose a slot, or move to one.
+    #[cfg(feature = "pie")]
+    Pie(crate::pie::Event),
 }
 
 /// The icon theme named `theme`, looked for in the data folders of
@@ -349,6 +358,8 @@ impl App {
         self.follow_tray(&shell);
         #[cfg(feature = "menus")]
         self.menus.reconfigure(&shell, self.config.as_deref());
+        #[cfg(feature = "pie")]
+        self.pies.reconfigure(&shell, self.config.as_deref());
         self.monitors_changed();
         #[cfg(feature = "icons")]
         self.watch_folder();
@@ -444,6 +455,8 @@ impl App {
             Asked::SelectIcon(node) => {
                 self.desktops.select(&mut self.canvas, &mut self.kit, node);
             }
+            #[cfg(feature = "pie")]
+            Asked::Pie(event) => self.pie_event(event),
         }
     }
 }
@@ -514,6 +527,22 @@ impl App {
                 #[cfg(feature = "tray")]
                 Effect::Tell { key, id } => self.tell_status(key, id),
                 Effect::Redraw => {}
+            }
+        }
+    }
+
+    /// Pass `event` to the pie, and carry out what it calls for.
+    #[cfg(feature = "pie")]
+    fn pie_event(&mut self, event: crate::pie::Event) {
+        let qh = self.qh.clone();
+        let effects = self
+            .pies
+            .send(&mut self.canvas, &qh, &self.outputs, &mut self.kit, event);
+        for effect in effects {
+            match effect {
+                crate::pie::Effect::Run(run) => self.start(&run),
+                crate::pie::Effect::Activate(serial) => self.activate_window(serial),
+                crate::pie::Effect::Redraw => {}
             }
         }
     }

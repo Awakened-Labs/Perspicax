@@ -179,6 +179,16 @@ fn admit(fs: &impl Fs, places: &Places, id: String, entry: Entry) -> Option<App>
     if !shown {
         return None;
     }
+    from_entry(id, entry)
+}
+
+/// `entry` as an application, whether a menu would list it or not: one
+/// that is an application and runs something. A pie names a desktop file
+/// by its path to have it whatever it says of being listed.
+pub(crate) fn from_entry(id: String, entry: Entry) -> Option<App> {
+    if !entry.application {
+        return None;
+    }
     Some(App {
         id,
         name: entry.name,

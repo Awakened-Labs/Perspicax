@@ -33,7 +33,7 @@ use smithay_client_toolkit::{
     reexports::calloop::channel::Sender,
     shell::{
         WaylandSurface,
-        wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerSurface, LayerSurfaceConfigure},
+        wlr_layer::{LayerSurface, LayerSurfaceConfigure},
     },
 };
 use wayland_client::{QueueHandle, protocol::wl_output, protocol::wl_surface};
@@ -382,12 +382,7 @@ impl Shown {
         scale: u32,
         actions: Forward,
     ) -> Self {
-        let layer = canvas.layer(qh, Layer::Overlay, &namespace, output);
-        layer.set_anchor(Anchor::all());
-        layer.set_exclusive_zone(-1);
-        layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-        layer.set_size(0, 0);
-        layer.commit();
+        let layer = canvas.overlay(qh, &namespace, output);
         Self {
             name: name.to_owned(),
             a11y: Served::acting(a11y::menu(&namespace, None, None), actions),

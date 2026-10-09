@@ -88,6 +88,9 @@ pub enum Action {
     /// Ask the desktop shell for the root menu, at the pointer: the menu a
     /// right-click on the wallpaper opens.
     RootMenu,
+    /// Ask the desktop shell for the pie of this name, centred at the
+    /// pointer: one of `[shell.pie.menus]`. Asked again, it closes.
+    Pie(String),
     /// Switch the keyboard to its next layout, or its previous one, wrapping
     /// round. With one layout there is nothing to switch to.
     CycleLayout { forward: bool },

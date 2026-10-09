@@ -36,6 +36,8 @@ mod layout;
 mod model;
 #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
 mod paint;
+#[cfg(feature = "pie")]
+mod pie;
 #[cfg(feature = "tray")]
 mod tray;
 #[cfg(feature = "menus")]
@@ -55,6 +57,7 @@ pub const BUILT: ShellBuilt = ShellBuilt {
     menus: cfg!(feature = "menus"),
     tray: cfg!(feature = "tray"),
     icons: cfg!(feature = "icons"),
+    pie: cfg!(feature = "pie"),
 };
 
 /// How to run.

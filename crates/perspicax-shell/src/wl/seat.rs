@@ -13,7 +13,7 @@
 //! button's closes the menus, as a click anywhere off them does, and one on
 //! the tray icon whose menu is open does only that. The pointer and the
 //! buttons on the menus' surface, and every key while it has the keyboard,
-//! are the menus'.
+//! are the menus'; on a pie's, with the wheel, they are the pie's.
 //!
 //! The pointer is drawn as the cursor theme's arrow on every surface of the
 //! shell's, rather than as whatever the last window left it as.
@@ -55,9 +55,13 @@ const BTN_MIDDLE: u32 = 0x112;
 pub(super) struct Seat {
     pub(super) state: SeatState,
     pointer: Option<ThemedPointer>,
-    /// Only the menus take keys.
+    /// Only the menus and the pie take keys.
     #[cfg(feature = "menus")]
     keyboard: Option<wl_keyboard::WlKeyboard>,
+    /// The surface of ours the keyboard is on, to tell the pie's keys from
+    /// the menus'.
+    #[cfg(feature = "pie")]
+    keyboard_on: Option<wl_surface::WlSurface>,
 }
 
 impl Seat {
@@ -67,14 +71,28 @@ impl Seat {
             pointer: None,
             #[cfg(feature = "menus")]
             keyboard: None,
+            #[cfg(feature = "pie")]
+            keyboard_on: None,
         }
     }
 }
 
 #[cfg(feature = "menus")]
 impl App {
-    /// A key pressed, or repeating, on the menus.
+    /// A key pressed, or repeating, on the menus or the pie.
     fn key(&mut self, event: &KeyEvent) {
+        #[cfg(feature = "pie")]
+        if self
+            .seat
+            .keyboard_on
+            .as_ref()
+            .is_some_and(|surface| self.pies.owns(surface))
+        {
+            if let Some(key) = pie_key(event) {
+                self.pie_event(crate::pie::Event::Key(key));
+            }
+            return;
+        }
         if let Some(key) = key(event) {
             self.menu_event(Event::Key(key));
         }
@@ -114,6 +132,51 @@ fn key(event: &KeyEvent) -> Option<Key> {
                 .filter(|text| text.chars().all(|c| !c.is_control()) && !text.is_empty())?,
         ),
     })
+}
+
+/// What a key is to a pie, if anything.
+#[cfg(feature = "pie")]
+fn pie_key(event: &KeyEvent) -> Option<crate::pie::Key> {
+    use crate::pie::Key;
+    Some(match event.keysym {
+        Keysym::Escape => Key::Escape,
+        Keysym::Return | Keysym::KP_Enter => Key::Enter,
+        Keysym::Up | Keysym::KP_Up => Key::Up,
+        Keysym::Down | Keysym::KP_Down => Key::Down,
+        Keysym::BackSpace => Key::Back,
+        _ => return None,
+    })
+}
+
+#[cfg(feature = "pie")]
+impl App {
+    /// The pointer, a button or the wheel, on the pie's surface.
+    fn pie_pointer(&mut self, event: &PointerEvent) {
+        use crate::pie::Event as Pie;
+        let at = event.position;
+        let pie = match event.kind {
+            PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => Pie::Motion(at),
+            PointerEventKind::Leave { .. } => Pie::Leave,
+            PointerEventKind::Press { button: code, .. } => Pie::Press(at, button(code)),
+            PointerEventKind::Release { button: code, .. } => Pie::Release(at, button(code)),
+            PointerEventKind::Axis { vertical, .. } => {
+                // A wheel's notches, in 120ths or whole; a touchpad's
+                // pixels, fifteen a notch.
+                let notches = if vertical.value120 != 0 {
+                    f64::from(vertical.value120) / 120.0
+                } else if vertical.discrete != 0 {
+                    f64::from(vertical.discrete)
+                } else {
+                    vertical.absolute / 15.0
+                };
+                match self.pies.turned(notches) {
+                    0 => return,
+                    whole => Pie::Wheel(whole),
+                }
+            }
+        };
+        self.pie_event(pie);
+    }
 }
 
 fn button(code: u32) -> Button {
@@ -205,20 +268,22 @@ impl PointerHandler for App {
         events: &[PointerEvent],
     ) {
         for event in events {
+            if let PointerEventKind::Enter { .. } = event.kind
+                && let Some(pointer) = &self.seat.pointer
+                && let Err(error) = pointer.set_cursor(connection, CursorIcon::Default)
+            {
+                tracing::debug!("no cursor drawn: {error}");
+            }
+            #[cfg(feature = "pie")]
+            if self.pies.owns(&event.surface) {
+                self.pie_pointer(event);
+                continue;
+            }
             let on_menus = self.on_menus(&event.surface);
             let at = event.position;
             match event.kind {
-                PointerEventKind::Enter { .. } => {
-                    if let Some(pointer) = &self.seat.pointer
-                        && let Err(error) = pointer.set_cursor(connection, CursorIcon::Default)
-                    {
-                        tracing::debug!("no cursor drawn: {error}");
-                    }
-                    #[cfg(feature = "menus")]
-                    if on_menus {
-                        self.menu_event(Event::Motion(at));
-                    }
-                }
+                #[cfg(feature = "menus")]
+                PointerEventKind::Enter { .. } if on_menus => self.menu_event(Event::Motion(at)),
                 #[cfg(feature = "menus")]
                 PointerEventKind::Motion { .. } if on_menus => self.menu_event(Event::Motion(at)),
                 #[cfg(feature = "menus")]
@@ -303,6 +368,11 @@ impl KeyboardHandler for App {
         _: &[u32],
         _: &[Keysym],
     ) {
+        #[cfg(feature = "pie")]
+        {
+            self.seat.keyboard_on = Some(surface.clone());
+            self.pies.keyboard(surface, true);
+        }
         self.menus.keyboard(surface, true);
     }
 
@@ -315,7 +385,17 @@ impl KeyboardHandler for App {
         _: u32,
     ) {
         // Something else took the keyboard: a window an agent focused, a
-        // screen locker. A menu without it closes, as a menu does.
+        // screen locker. A menu without it closes, as a menu does, and so
+        // does a pie.
+        #[cfg(feature = "pie")]
+        {
+            if self.seat.keyboard_on.as_ref() == Some(surface) {
+                self.seat.keyboard_on = None;
+            }
+            if self.pies.keyboard(surface, false) {
+                self.pie_event(crate::pie::Event::KeyboardLost);
+            }
+        }
         if self.menus.keyboard(surface, false) {
             self.menu_event(Event::KeyboardLost);
         }

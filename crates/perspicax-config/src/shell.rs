@@ -8,12 +8,18 @@
 //! which refuses such a key by name and names the cargo feature that would
 //! provide it, as [`crate::parse`] does for the compositor's own keys.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use perspicax_policy::{Colour, Font, Palette};
 use serde::Deserialize;
 
-use crate::{Error, Profile, invalid};
+use crate::{
+    Error, Profile, invalid,
+    pie::{Pie, RawPie},
+};
 
 /// Which of perspicax-shell's components it was built with: its cargo
 /// features, as far as config cares. The shell fills it in with `cfg!`.
@@ -25,6 +31,8 @@ pub struct ShellBuilt {
     pub tray: bool,
     /// Desktop icons.
     pub icons: bool,
+    /// Pie menus.
+    pub pie: bool,
 }
 
 impl ShellBuilt {
@@ -36,6 +44,7 @@ impl ShellBuilt {
         menus: true,
         tray: true,
         icons: true,
+        pie: true,
     };
 }
 
@@ -90,6 +99,8 @@ pub struct Shell {
     pub leave: Vec<Leave>,
     /// The panel, or `None` for none.
     pub panel: Option<Panel>,
+    /// The pie menus a binding can open, or `None` for none.
+    pub pie: Option<Pie>,
     /// The colours everything is drawn in: `[theme]`'s, read here so that a
     /// change to the theme reaches the shell as one to `[shell]` does.
     pub palette: Palette,
@@ -336,6 +347,7 @@ impl Shell {
             power_off: loginctl("poweroff"),
             leave: Leave::ALL.to_vec(),
             panel: panel.filter(|_| built.panel),
+            pie: None,
             palette: Palette::default(),
             font: Font::default(),
         }
@@ -413,6 +425,7 @@ pub(crate) struct RawShell {
     power_off: Option<Vec<String>>,
     leave: Option<Vec<Leave>>,
     panel: Option<RawPanel>,
+    pie: Option<RawPie>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -566,7 +579,16 @@ impl RawShell {
         if let Some(panel) = self.panel {
             shell.panel = panel.apply(shell.panel, built)?;
         }
+        if let Some(pie) = self.pie {
+            shell.pie = Some(pie.apply()?);
+        }
         Ok(shell)
+    }
+
+    /// The names of the pies written, for the bindings that open them to be
+    /// checked against: those are read before `[shell]` is.
+    pub(crate) fn pie_names(&self) -> BTreeSet<String> {
+        self.pie.as_ref().map(RawPie::names).unwrap_or_default()
     }
 
     /// Refuse a key that turns on, or configures, a component `built`
@@ -669,6 +691,7 @@ impl RawShell {
                 built.tray,
                 "tray",
             ),
+            (self.pie.is_some(), "shell.pie", built.pie, "pie"),
         ];
         match checks
             .into_iter()
@@ -943,6 +966,7 @@ mod tests {
         menus: false,
         tray: false,
         icons: false,
+        pie: false,
     };
 
     #[test]

@@ -21,15 +21,18 @@
 //!
 //! Beside the file, the one other thing both processes read: [`desktop`]
 //! entries, which the shell lists in its menus and the session starts in
-//! [`autostart`](mod@autostart), by the same rules.
+//! [`autostart`](mod@autostart), by the same rules. And the [`menu`]
+//! vocabulary, which the menu file and a pie are written in.
 
 pub mod autostart;
 pub mod desktop;
 mod keys;
+pub mod menu;
+pub mod pie;
 mod shell;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -786,8 +789,14 @@ impl RawMouse {
     /// Put every binding in `[mouse]` in force over `config`'s, refusing one
     /// written twice in a table under two spellings, and one that would take
     /// the drag modifier away. `drag_from` says whose drag that is, when it
-    /// is not the file's own.
-    fn apply(self, config: &mut Config, drag_from: &str) -> Result<(), Error> {
+    /// is not the file's own; `pies` are the pies a `{ pie = "..." }` may
+    /// name.
+    fn apply(
+        self,
+        config: &mut Config,
+        drag_from: &str,
+        pies: &BTreeSet<String>,
+    ) -> Result<(), Error> {
         let tables = [
             ("desktop", Context::Desktop, self.desktop),
             ("titlebar", Context::Titlebar, self.titlebar),
@@ -805,7 +814,8 @@ impl RawMouse {
                         format!("is the same as `{first}`, already written; write it once"),
                     ));
                 }
-                let action = action_for(action).map_err(|reason| invalid(key.clone(), reason))?;
+                let action =
+                    action_for(action, pies).map_err(|reason| invalid(key.clone(), reason))?;
                 if action.is_some() && config.bindings.takes_drag(context, &chord) {
                     return Err(invalid(
                         key,
@@ -844,18 +854,26 @@ fn drag_taken(bindings: &Bindings, chord: &MouseChord, drag_from: &str) -> Strin
     )
 }
 
-/// A binding's value: an action's name, or `{ spawn = [...] }`.
+/// A binding's value: an action's name, `{ spawn = [...] }` or
+/// `{ pie = "..." }`.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum RawAction {
     Named(String),
     Spawn(RawSpawn),
+    Pie(RawOpenPie),
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSpawn {
     spawn: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawOpenPie {
+    pie: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -962,11 +980,18 @@ impl Raw {
             }
         }
 
+        // The pies a binding may open, before the bindings are read and
+        // `[shell]` after them.
+        let pies = self
+            .shell
+            .as_ref()
+            .map(RawShell::pie_names)
+            .unwrap_or_default();
         for (written, action) in self.keys {
             let trigger = keys::trigger(&written)
                 .map_err(|reason| invalid(format!("keys.{written}"), reason))?;
-            let action =
-                action_for(action).map_err(|reason| invalid(format!("keys.{written}"), reason))?;
+            let action = action_for(action, &pies)
+                .map_err(|reason| invalid(format!("keys.{written}"), reason))?;
             config.bindings = match (trigger, action) {
                 (keys::Trigger::Chord(chord), Some(action)) => config.bindings.bind(chord, action),
                 (keys::Trigger::Chord(chord), None) => config.bindings.unbind(chord),
@@ -989,7 +1014,7 @@ impl Raw {
         }
         // After `drag`, so a binding is checked against the drag in force.
         if let Some(mouse) = self.mouse {
-            mouse.apply(&mut config, drag_from)?;
+            mouse.apply(&mut config, drag_from, &pies)?;
         }
 
         if let Some(input) = self.input {
@@ -1515,12 +1540,27 @@ fn cycle(outputs: &[OutputRule]) -> Option<&str> {
         })
 }
 
-fn action_for(action: RawAction) -> Result<Option<Action>, String> {
+/// The action a binding's value names. `pies` are the pies
+/// `[shell.pie.menus]` names, which a `{ pie = "..." }` must be one of.
+fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Action>, String> {
     Ok(Some(match action {
         RawAction::Spawn(RawSpawn { spawn }) if spawn.is_empty() => {
             return Err("`spawn` needs a program".to_owned());
         }
         RawAction::Spawn(RawSpawn { spawn }) => Action::Spawn(spawn),
+        RawAction::Pie(RawOpenPie { pie }) if pies.contains(&pie) => Action::Pie(pie),
+        RawAction::Pie(RawOpenPie { pie }) if pies.is_empty() => {
+            return Err(format!(
+                "there is no pie `{pie}`: write it in `[shell.pie.menus]`"
+            ));
+        }
+        RawAction::Pie(RawOpenPie { pie }) => {
+            let named: Vec<&str> = pies.iter().map(String::as_str).collect();
+            return Err(format!(
+                "there is no pie `{pie}`; `[shell.pie.menus]` names {}",
+                named.join(", ")
+            ));
+        }
         RawAction::Named(name) => match name.as_str() {
             "none" => return Ok(None),
             "close" => Action::Close,
@@ -1551,8 +1591,8 @@ fn action_for(action: RawAction) -> Result<Option<Action>, String> {
                          move-to-next-output, move-to-previous-output, \
                          move-to-output-<side>, workspace-<side>, workspace-<number>, \
                          send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
-                         none, or \
-                         {{ spawn = [...] }}, where <side> is left, right, up or down"
+                         none, {{ spawn = [...] }}, or \
+                         {{ pie = \"<name>\" }}, where <side> is left, right, up or down"
                 )
             })?,
         },
@@ -2713,6 +2753,69 @@ mod tests {
         assert_eq!(
             config.bindings.resolve(logo, &[Keysym::space]),
             Some(&Action::StartMenu)
+        );
+    }
+
+    #[test]
+    fn a_pie_is_opened_by_a_key_a_button_or_a_tap_of_logo_by_its_name() {
+        let pies = "[shell.pie.menus]\nlaunchers = [{ running = true }]\n";
+        let config = parse(
+            &format!(
+                "[keys]\n\"Logo+p\" = {{ pie = \"launchers\" }}\n\
+                 [mouse.anywhere]\n\"Mouse8\" = {{ pie = \"launchers\" }}\n{pies}"
+            ),
+            SEAT,
+        )
+        .unwrap();
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        let launchers = Action::Pie("launchers".to_owned());
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::p]),
+            Some(&launchers)
+        );
+        assert_eq!(
+            config.mouse.resolve(Context::Window, Mods::default(), SIDE),
+            Some(&launchers)
+        );
+        let tapped = parse(
+            &format!("[keys]\n\"Logo\" = {{ pie = \"launchers\" }}\n{pies}"),
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(tapped.bindings.tap(), Some(&launchers));
+    }
+
+    #[test]
+    fn a_pie_no_shell_pie_names_is_refused_by_its_binding() {
+        let reason = |text: &str| match parse(text, SEAT) {
+            Err(Error::Invalid { key, reason }) => (key, reason),
+            other => panic!("not refused: {other:?}"),
+        };
+        assert_eq!(
+            reason(
+                "[mouse.anywhere]\n\"Mouse8\" = { pie = \"launcher\" }\n\
+                 [shell.pie.menus]\nlaunchers = [{ running = true }]\nwindows = [{ running = true }]"
+            ),
+            (
+                "mouse.anywhere.Mouse8".to_owned(),
+                "there is no pie `launcher`; `[shell.pie.menus]` names launchers, windows"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            reason("[keys]\n\"Logo+p\" = { pie = \"launchers\" }"),
+            (
+                "keys.Logo+p".to_owned(),
+                "there is no pie `launchers`: write it in `[shell.pie.menus]`".to_owned()
+            )
+        );
+        let error = parse("[keys]\n\"Logo+p\" = \"explode\"", SEAT).unwrap_err();
+        assert!(
+            error.to_string().contains("{ pie = \"<name>\" }"),
+            "{error}"
         );
     }
 

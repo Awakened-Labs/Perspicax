@@ -125,6 +125,8 @@ impl WlrLayerShellHandler for Compositor {
         if self.keyboard_focus().as_ref() == Some(surface.wl_surface()) {
             self.focus_top_window();
         }
+        // And the pointer to what it uncovered.
+        self.repoint();
         self.backend.redraw();
         self.publish_facts();
     }
@@ -179,6 +181,8 @@ impl Compositor {
         if reserved {
             self.refit_frames();
         }
+        // A surface that came up under the pointer has it, still or not.
+        self.repoint();
         self.backend.redraw();
         layer.user_data().get::<SurfaceId>().copied()
     }

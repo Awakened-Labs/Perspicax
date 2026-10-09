@@ -20,10 +20,13 @@ use perspicax_policy::{Button, Context, Focus, Gesture, Mods, Part, Wheel};
 use smithay::{
     backend::input::{Axis, AxisSource, ButtonState},
     desktop::WindowSurfaceType,
-    input::pointer::{AxisFrame, ButtonEvent, MotionEvent, PointerHandle},
+    input::pointer::{
+        AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, MotionEvent, PointerHandle,
+    },
     output::Output,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Point, SERIAL_COUNTER},
+    wayland::seat::WaylandFocus,
 };
 
 use crate::{framed::Framed, layers, shell::id_of, state::Compositor};
@@ -338,6 +341,69 @@ impl Compositor {
         #[cfg(feature = "capture")]
         self.flush_screencopy_for_pointer();
         Some(Pointed { pointer, at, hit })
+    }
+}
+
+impl Compositor {
+    /// Give the pointer to whatever is under it now, though it has not
+    /// moved: a layer surface came up under a still pointer, or went from
+    /// under it. Without this a hand had to nudge the mouse before a click
+    /// reached the menu or pie it had just opened, and the click went to
+    /// the window beneath; and a closed menu left the window it uncovered
+    /// without the pointer until the mouse moved.
+    ///
+    /// Only when what is under the pointer changed, so a panel's clock
+    /// committing each second moves nothing. Never under a grab, which
+    /// owns the pointer, and only with the clients' buffers: without them
+    /// every point looks like the empty desktop (see `stand_in_at`). The
+    /// focus policy is not asked, since the pointer went nowhere: the
+    /// keyboard stays where it is.
+    pub(crate) fn repoint(&mut self) {
+        if !self.backend.keeps_buffers() {
+            return;
+        }
+        let Some(pointer) = self.pointer.clone() else {
+            return;
+        };
+        if pointer.is_grabbed() {
+            return;
+        }
+        let at = pointer.current_location();
+        let hit = under(self, at);
+        let now = hit.as_ref().and_then(|hit| hit.surface.clone());
+        let was = pointer
+            .current_focus()
+            .and_then(|focus| focus.wl_surface().map(|surface| surface.into_owned()));
+        if now == was {
+            return;
+        }
+        match hit.as_ref() {
+            Some(Hit {
+                frame: Some(part), ..
+            }) => self.cursor = CursorImageStatus::Named(cursor_for(*part)),
+            None => self.cursor = CursorImageStatus::default_named(),
+            Some(_) => {}
+        }
+        let event = MotionEvent {
+            location: at,
+            serial: SERIAL_COUNTER.next_serial(),
+            time: self.now_ms(),
+        };
+        pointer.motion(
+            self,
+            hit.and_then(|hit| Some((hit.surface?.into(), hit.origin))),
+            &event,
+        );
+        pointer.frame(self);
+        self.backend.redraw();
+    }
+}
+
+/// The cursor for a part of a frame: a resize arrow at an edge.
+pub(crate) fn cursor_for(part: Part) -> CursorIcon {
+    match part {
+        Part::Edge(edges) => crate::shell::resize_cursor(edges),
+        _ => CursorIcon::Default,
     }
 }
 

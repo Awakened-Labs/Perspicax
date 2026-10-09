@@ -138,4 +138,9 @@ tray = ["panel", "menus", "dep:zbus", "dep:tokio"]
 icons = ["wallpaper", "menus"]
 # Icons drawn from SVG, as most icon themes ship them.
 svg = ["dep:resvg"]
-full = ["wallpaper", "panel", "menus", "tray", "icons", "svg"]
+# Pie menus, PieDock's way, opened at the pointer by a binding: drawn,
+# launched and read as the menus are, and knowing the running windows as
+# the taskbar does, from the list a panel keeps, so it takes both. A pie
+# needs no panel shown: the list is kept whether or not one is.
+pie = ["menus", "panel"]
+full = ["wallpaper", "panel", "menus", "tray", "icons", "svg", "pie"]

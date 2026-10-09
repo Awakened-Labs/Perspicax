@@ -1135,6 +1135,177 @@ mod panels {
     }
 }
 
+#[cfg(feature = "pie")]
+pub(crate) use pies::{pie, slot_of};
+
+#[cfg(feature = "pie")]
+mod pies {
+    use accesskit::{Action, HasPopup, Node, NodeId, Rect, Role, TreeId, TreeInfo, TreeUpdate};
+
+    use super::{ROOT, rect, window};
+    use crate::{model::pie::Does, pie::View};
+
+    /// The ring open's node.
+    const RING: NodeId = NodeId(1 << 62);
+    /// A slot's node: its place in the ring open below this, one more than
+    /// its index. Stable while that ring is open.
+    const SLOT: u64 = 1 << 60;
+
+    /// The index of the slot a node is, if it is a slot's.
+    pub(crate) fn slot_of(id: NodeId) -> Option<usize> {
+        (id.0 & !(SLOT - 1) == SLOT && id.0 != SLOT).then(|| (id.0 - SLOT - 1) as usize)
+    }
+
+    /// The pie's surface: a window named `namespace` covering it, holding
+    /// a `Menu` for the ring open, named for its pie or its submenu, and in
+    /// it a `MenuItem` for each slot, named as its title is and bounded by
+    /// its icon as drawn: a submenu's says so, and one with windows open
+    /// says how many. The focus is the slot pointed at, or the ring.
+    pub(crate) fn pie(
+        namespace: &str,
+        size: Option<(u32, u32)>,
+        view: Option<&View<'_>>,
+    ) -> TreeUpdate {
+        let mut root = window(namespace, size);
+        let mut nodes = Vec::new();
+        let mut focus = ROOT;
+        if let Some(view) = view {
+            root.push_child(RING);
+            focus = RING;
+            let mut ring = Node::new(Role::Menu);
+            ring.set_label(view.label);
+            ring.set_bounds(rect(view.ring.square()));
+            for (index, slot) in view.slots.iter().enumerate() {
+                let id = NodeId(SLOT + 1 + index as u64);
+                let mut entry = Node::new(Role::MenuItem);
+                entry.set_label(slot.label.as_str());
+                let ((x, y), side) = view.ring.place(index, view.spin, view.pointer);
+                let half = side / 2.0;
+                entry.set_bounds(Rect::new(x - half, y - half, x + half, y + half));
+                if let Does::Open(_) = slot.does {
+                    entry.set_has_popup(HasPopup::Menu);
+                }
+                match slot.windows.len() {
+                    0 => {}
+                    1 => entry.set_description("running, 1 window"),
+                    windows => entry.set_description(format!("running, {windows} windows")),
+                }
+                if view.picked == Some(index) {
+                    entry.set_selected(true);
+                    focus = id;
+                }
+                entry.add_action(Action::Click);
+                entry.add_action(Action::Focus);
+                ring.push_child(id);
+                nodes.push((id, entry));
+            }
+            nodes.push((RING, ring));
+        }
+        nodes.insert(0, (ROOT, root));
+        TreeUpdate {
+            nodes,
+            tree: Some(TreeInfo::new(ROOT)),
+            tree_id: TreeId::ROOT,
+            focus,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::{
+            layout::{Rect as Area, pie::Ring},
+            model::{
+                apps::Run,
+                pie::{Does, Slot},
+            },
+        };
+
+        fn slot(label: &str, does: Does, windows: Vec<u64>) -> Slot {
+            Slot {
+                label: label.to_owned(),
+                icons: Vec::new(),
+                does,
+                windows,
+            }
+        }
+
+        fn node(tree: &TreeUpdate, id: NodeId) -> &Node {
+            &tree
+                .nodes
+                .iter()
+                .find(|(known, _)| *known == id)
+                .expect("the node")
+                .1
+        }
+
+        #[test]
+        fn a_pie_is_a_menu_of_its_slots_with_the_one_pointed_at_focused() {
+            let run = Run {
+                argv: vec!["foot".to_owned()],
+                terminal: false,
+                dir: None,
+            };
+            let slots = vec![
+                slot("terminal", Does::Launch(run), vec![3, 4]),
+                slot("games", Does::Open(Vec::new()), Vec::new()),
+                slot("slack", Does::Switch(None), vec![9]),
+            ];
+            let view = View {
+                output: "eDP-1",
+                label: "launchers",
+                ring: Ring::new(3, 512, (960, 500), Area::new(0, 0, 1920, 1048)),
+                slots: &slots,
+                spin: 0,
+                pointer: Some((960.0, 2.0)),
+                picked: Some(0),
+            };
+            let tree = pie("perspicax-pie-eDP-1", Some((1920, 1080)), Some(&view));
+            let ring = node(&tree, RING);
+            assert_eq!((ring.role(), ring.label()), (Role::Menu, Some("launchers")));
+            assert_eq!(ring.children().len(), 3);
+            let first = node(&tree, ring.children()[0]);
+            assert_eq!(first.label(), Some("terminal"));
+            assert_eq!(first.description(), Some("running, 2 windows"));
+            assert!(first.is_selected().unwrap_or(false));
+            assert_eq!(tree.focus, ring.children()[0]);
+            let ((x, y), side) = view.ring.place(0, 0, view.pointer);
+            assert_eq!(
+                first.bounds(),
+                Some(Rect::new(
+                    x - side / 2.0,
+                    y - side / 2.0,
+                    x + side / 2.0,
+                    y + side / 2.0
+                ))
+            );
+            let games = node(&tree, ring.children()[1]);
+            assert_eq!(games.has_popup(), Some(HasPopup::Menu));
+            assert_eq!(games.description(), None);
+            assert_eq!(
+                node(&tree, ring.children()[2]).description(),
+                Some("running, 1 window")
+            );
+            assert_eq!(
+                ring.children()
+                    .iter()
+                    .map(|&id| slot_of(id))
+                    .collect::<Vec<_>>(),
+                [Some(0), Some(1), Some(2)]
+            );
+            assert_eq!(slot_of(RING), None);
+            assert_eq!(slot_of(ROOT), None);
+        }
+
+        #[test]
+        fn a_closed_pie_is_its_window_alone() {
+            let tree = pie("perspicax-pie-eDP-1", None, None);
+            assert_eq!(tree.nodes.len(), 1);
+            assert_eq!(tree.focus, ROOT);
+        }
+    }
+}
+
 #[cfg(all(test, feature = "wallpaper"))]
 mod tests {
     use super::*;
