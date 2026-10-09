@@ -66,6 +66,7 @@ impl Compositor {
             Action::Reload => self.reload(),
             Action::StartMenu => self.ask_shell(crate::shell_protocol::Menu::Start),
             Action::RootMenu => self.ask_shell(crate::shell_protocol::Menu::Root),
+            Action::Pie(name) => self.ask_shell(crate::shell_protocol::Menu::Pie(name.clone())),
             Action::CycleLayout { forward } => self.cycle_layout(*forward),
             Action::Layout(number) => self.go_to_layout(*number),
             Action::CycleFocus => {

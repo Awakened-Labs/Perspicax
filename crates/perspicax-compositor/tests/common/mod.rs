@@ -307,6 +307,9 @@ pub enum Told {
     StartMenu(Option<String>),
     /// The root menu, on the monitor of this name, at this point on it.
     RootMenu(Option<String>, i32, i32),
+    /// The pie of this name, on the monitor of this name, at this point on
+    /// it.
+    PieMenu(Option<String>, i32, i32, String),
     Reconfigure,
 }
 
@@ -799,6 +802,11 @@ impl Desk {
     /// Bind the shell channel, as perspicax-shell does. Panics if it is not
     /// advertised.
     pub fn bind_shell(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.bind_shell_up_to(globals, qh, 3);
+    }
+
+    /// Bind the channel as a shell from before pies were in it would.
+    pub fn bind_shell_v2(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
         self.bind_shell_up_to(globals, qh, 2);
     }
 
@@ -972,6 +980,10 @@ impl Dispatch<PerspicaxShellV1, ()> for Desk {
             Event::RootMenu { output, x, y } => {
                 let name = output.and_then(|output| desk.output_name(&output));
                 desk.told.push(Told::RootMenu(name, x, y));
+            }
+            Event::PieMenu { output, x, y, name } => {
+                let output = output.and_then(|output| desk.output_name(&output));
+                desk.told.push(Told::PieMenu(output, x, y, name));
             }
             Event::Reconfigure => desk.told.push(Told::Reconfigure),
             Event::Finished => desk.shell_finished = true,

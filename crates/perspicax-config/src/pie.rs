@@ -23,7 +23,10 @@
 //! one: the first alias that matches its app-id or title, else its app-id.
 //! That name finds the entry it belongs to and the icon it is drawn with.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use serde::Deserialize;
 
@@ -110,6 +113,12 @@ struct RawMatch {
 }
 
 impl RawPie {
+    /// The pies' names, for a binding to be checked against before the
+    /// pies themselves are.
+    pub(crate) fn names(&self) -> BTreeSet<String> {
+        self.menus.keys().cloned().collect()
+    }
+
     pub(crate) fn apply(self) -> Result<Pie, Error> {
         let size = self.size.unwrap_or(SIZE);
         if !(SIZE_MIN..=SIZE_MAX).contains(&size) {

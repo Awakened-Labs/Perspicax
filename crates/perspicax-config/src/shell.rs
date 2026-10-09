@@ -8,7 +8,10 @@
 //! which refuses such a key by name and names the cargo feature that would
 //! provide it, as [`crate::parse`] does for the compositor's own keys.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use perspicax_policy::{Colour, Font, Palette};
 use serde::Deserialize;
@@ -575,6 +578,12 @@ impl RawShell {
             shell.pie = Some(pie.apply()?);
         }
         Ok(shell)
+    }
+
+    /// The names of the pies written, for the bindings that open them to be
+    /// checked against: those are read before `[shell]` is.
+    pub(crate) fn pie_names(&self) -> BTreeSet<String> {
+        self.pie.as_ref().map(RawPie::names).unwrap_or_default()
     }
 
     /// Refuse a key that turns on, or configures, a component `built`

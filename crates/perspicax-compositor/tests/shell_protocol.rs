@@ -120,6 +120,62 @@ fn the_root_menu_action_says_where_the_pointer_is() {
 
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_pie_is_asked_for_by_name_where_the_pointer_is_of_a_shell_that_knows_pies() {
+    let session = Session::start("shell-pie", backend(Access::open()));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.open_window(&qh, "target", "target");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    desk.bind_shell(&globals, &qh);
+    queue.roundtrip(&mut desk).expect("bound");
+    // A shell from before pies, which must not hear of one.
+    let (mut old, mut old_queue, old_qh, old_globals) = session.client();
+    old.bind_shell_v2(&old_globals, &old_qh);
+    old_queue.roundtrip(&mut old).expect("bound");
+    let facts = session.wait_for(|facts| {
+        facts
+            .surfaces()
+            .iter()
+            .any(|surface| surface.title.as_deref() == Some("target") && surface.mapped)
+    });
+    let window = facts
+        .surfaces()
+        .iter()
+        .find(|surface| surface.title.as_deref() == Some("target"))
+        .expect("the window");
+
+    let host = Host::new(&session.facts, &session.requests);
+    host.act(
+        window.id,
+        &Verb::Click {
+            at: Rect::new(30.0, 10.0, 50.0, 30.0),
+            button: PointerButton::Left,
+        },
+    )
+    .expect("dispatched");
+    session.perform(Action::Pie("launchers".to_owned()));
+    until(&mut queue, &mut desk, |desk| !desk.told.is_empty());
+
+    let (x, y) = (
+        window.geometry.x0 as i32 + 40,
+        window.geometry.y0 as i32 + 20,
+    );
+    assert_eq!(
+        desk.told,
+        [Told::PieMenu(
+            Some("HEADLESS-1".to_owned()),
+            x,
+            y,
+            "launchers".to_owned()
+        )]
+    );
+    settle(&mut old_queue, &mut old);
+    assert!(old.told.is_empty(), "{:?}", old.told);
+
+    session.stop(((desk, queue), (old, old_queue)));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn the_shell_is_told_nothing_and_ends_nothing_while_locked() {
     let session = Session::start("shell-locked", backend(Access::open()));
     let (mut desk, mut queue, qh, globals) = session.client();
@@ -129,6 +185,7 @@ fn the_shell_is_told_nothing_and_ends_nothing_while_locked() {
 
     session.perform(Action::StartMenu);
     session.perform(Action::RootMenu);
+    session.perform(Action::Pie("launchers".to_owned()));
     desk.shell.as_ref().expect("bound").exit_session();
     queue.roundtrip(&mut desk).expect("dispatch");
     thread::sleep(Duration::from_millis(200));

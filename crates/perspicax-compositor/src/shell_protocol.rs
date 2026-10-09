@@ -7,6 +7,11 @@
 //! pointer only while it is over the client's own surfaces. The other way,
 //! the shell may end the session when the person chooses to log out.
 //!
+//! From version 3 a binding may ask for a pie by name, and the shell is told
+//! that name and where the pointer is, as for the root menu. A shell bound
+//! at an earlier version is not told: an event it does not know would break
+//! it, and wayland-backend sends whatever it is asked to.
+//!
 //! When a save changes the config's `[shell]` table, every shell is told to
 //! read it again, and applies it in place.
 //!
@@ -40,10 +45,12 @@ use crate::{
 };
 
 /// Which menu a binding asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Menu {
     Start,
     Root,
+    /// A pie, by its name in `[shell.pie.menus]`.
+    Pie(String),
 }
 
 /// Every shell bound to the channel.
@@ -59,7 +66,7 @@ impl Shells {
     /// Advertise the global, filtered by `gate`.
     pub(crate) fn new(display: &DisplayHandle, gate: &Gate) -> Self {
         display.create_global::<Compositor, PerspicaxShellV1, _>(
-            2,
+            3,
             Filtered {
                 gate: gate.clone(),
                 protocol: Protocol::Shell,
@@ -98,9 +105,17 @@ impl Compositor {
             let wl_output = output
                 .as_ref()
                 .and_then(|output| output.client_outputs(&client).next());
-            match menu {
+            match &menu {
                 Menu::Start => shell.start_menu(wl_output.as_ref()),
                 Menu::Root => shell.root_menu(wl_output.as_ref(), local.x, local.y),
+                Menu::Pie(name) if shell.version() >= perspicax_shell_v1::EVT_PIE_MENU_SINCE => {
+                    shell.pie_menu(wl_output.as_ref(), local.x, local.y, name.clone());
+                }
+                Menu::Pie(name) => tracing::info!(
+                    name,
+                    version = shell.version(),
+                    "a pie was asked for, and this shell is too old to show one"
+                ),
             }
         }
     }

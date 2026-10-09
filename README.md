@@ -505,7 +505,8 @@ autoraise = false
 "Logo+Return" = { spawn = ["foot"] }
 "Logo+d" = { spawn = ["fuzzel"] }
 "Alt+F4" = "none"              # hand a profile's chord back to the client
-"Alt+F1" = "root-menu"         # or "start-menu": the desktop shell's menus
+"Alt+F1" = "root-menu"         # or "start-menu": the desktop shell's menus;
+                               # { pie = "<name>" } opens a pie, see Pies
 "Logo" = "none"                # Logo alone is a tap: pressed, let go, nothing
                                # in between; no other modifier can be tapped
 
@@ -581,7 +582,7 @@ their own windows: a taskbar's list of windows (`foreign-toplevel-list`, and
 `foreign-toplevel-management` to activate and close them), a pager
 (`workspace`), a screenshot tool (`screencopy`), a display tool
 (`output-management`) and the desktop shell (`shell`), which is told when a
-key asks for a menu and may end the session. Listing windows and workspaces
+key asks for a menu or a pie and may end the session. Listing windows and workspaces
 is open by default; reading pixels, moving monitors and speaking for the shell
 are for the usual programs, by name. A name is
 whatever the kernel says the client is running, which any program can be
