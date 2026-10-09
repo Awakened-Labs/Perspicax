@@ -51,8 +51,7 @@ use smithay::{
     input::{
         keyboard::{FilterResult, KeyboardHandle, Keycode, LedState, ModifiersState},
         pointer::{
-            AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, GrabStartData, MotionEvent,
-            PointerHandle,
+            AxisFrame, ButtonEvent, CursorImageStatus, GrabStartData, MotionEvent, PointerHandle,
         },
     },
     output::Output,
@@ -73,7 +72,7 @@ use super::{
 };
 use crate::{
     framed::Framed,
-    mouse::{Hit, Scrolled, policy, under},
+    mouse::{Hit, Scrolled, cursor_for, policy, under},
     shell::id_of,
     state::Compositor,
 };
@@ -471,14 +470,6 @@ fn released_frame(state: &mut Compositor, at: Point<f64, Logical>) {
         FrameButton::Close => Compositor::close(&window),
         FrameButton::Maximize => state.toggle_maximize(&window),
         FrameButton::Minimize => state.minimize(&window),
-    }
-}
-
-/// The cursor for a part of a frame: a resize arrow at an edge.
-fn cursor_for(part: Part) -> CursorIcon {
-    match part {
-        Part::Edge(edges) => crate::shell::resize_cursor(edges),
-        _ => CursorIcon::Default,
     }
 }
 

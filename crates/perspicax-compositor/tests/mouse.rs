@@ -424,3 +424,31 @@ fn wallpaper(facts: &HostFacts) -> Option<SurfaceId> {
         })
         .map(|surface| surface.id)
 }
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_overlay_that_comes_up_under_a_still_pointer_has_it_and_gives_it_back_when_it_goes() {
+    let session = session("mouse-repoint");
+    let (mut desk, mut queue, _qh) = with_window(&session);
+    // A person's click on the window leaves the pointer resting there.
+    click(&session, centre_of_first(&session), Button::Left);
+    until(&mut queue, &mut desk, |desk| {
+        desk.entered.is_some() && desk.buttons.len() == 2
+    });
+
+    // A menu comes up over the whole screen, from another client, and the
+    // hand does not move: the pointer is the menu's, and no longer the
+    // window's, as if it had.
+    let (mut menu, mut menu_queue, menu_qh, menu_globals) = session.client();
+    menu.bind_pointer(&menu_globals, &menu_qh);
+    menu.open_strip(&menu_qh, Strip::Overlay, "menu", 800, 0xff44_4444);
+    until(&mut menu_queue, &mut menu, |menu| menu.entered.is_some());
+    until(&mut queue, &mut desk, |desk| desk.entered.is_none());
+
+    // It goes, and the window has the pointer back, still without a move.
+    menu.layers.clear();
+    menu_queue.roundtrip(&mut menu).expect("destroyed");
+    until(&mut queue, &mut desk, |desk| desk.entered.is_some());
+
+    session.stop(((desk, queue), (menu, menu_queue)));
+}
