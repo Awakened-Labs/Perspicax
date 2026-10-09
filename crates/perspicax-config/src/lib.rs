@@ -39,8 +39,8 @@ use std::{
 
 use perspicax_policy::{
     Access, Action, Bindings, Chord, Context, Decorations, Direction, Drag, Flipping, Focus,
-    FocusModel, Gesture, Grid, Keysym, Mods, MouseBindings, MouseChord, Place, Program, Protocol,
-    Resistance, Rule, Shape, Side, Snapping, Switching, Towards,
+    FocusModel, Gesture, Grid, Keysym, Mods, MouseBindings, MouseChord, OPAQUE, Opacity, Place,
+    Program, Protocol, Resistance, Rule, Shape, Side, Snapping, Switching, Towards,
 };
 use serde::Deserialize;
 
@@ -117,6 +117,11 @@ pub struct Config {
     /// How hard the edges of screens and panels hold a window being moved
     /// against them.
     pub resistance: Resistance,
+    /// How see-through windows are drawn: each application's, how far the
+    /// keys move one, and how far a window without the keyboard is dimmed.
+    /// For the person's eyes only: a see-through window still covers what is
+    /// behind it, as far as an agent is told.
+    pub opacity: Opacity,
     /// Who draws a window's titlebar and border, and what they look like.
     /// Its colours are the theme's titlebar colours.
     pub decorations: Decorations,
@@ -438,6 +443,8 @@ impl Config {
                     seams: 0,
                 },
             },
+            // Nothing see-through in either: it is a taste, and asked for.
+            opacity: Opacity::default(),
             flipping: match profile {
                 Profile::Classic => Flipping::default(),
                 // The Fluxbox and Enlightenment habit: the desk is a loop the
@@ -638,6 +645,7 @@ struct Raw {
     workspaces: Option<RawWorkspaces>,
     snap: Option<RawSnap>,
     resistance: Option<RawResistance>,
+    opacity: Option<RawOpacity>,
     decorations: Option<RawDecorations>,
     theme: Option<RawTheme>,
     protocols: Option<RawProtocols>,
@@ -728,6 +736,18 @@ struct RawResistance {
 
 /// More than this and an edge is a wall a person has to fight.
 const RESISTANCE_MAX: i32 = 128;
+
+/// Read wider than a percent, so that a value out of range is refused by its
+/// key rather than by serde.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawOpacity {
+    step: Option<i64>,
+    floor: Option<i64>,
+    unfocused: Option<i64>,
+    /// By app id or `WM_CLASS` class, which no schema could list.
+    apps: Option<BTreeMap<String, i64>>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -1132,6 +1152,10 @@ impl Raw {
             }
         }
 
+        if let Some(opacity) = self.opacity {
+            config.opacity = opacity.apply(config.opacity)?;
+        }
+
         config.theme = theme(self.theme, self.decorations.as_ref())?;
         if let Some(decorations) = self.decorations {
             config.decorations = decorations.apply(config.decorations)?;
@@ -1166,6 +1190,57 @@ impl Raw {
         }
         config.autostart = self.autostart;
         Ok(config)
+    }
+}
+
+impl RawOpacity {
+    fn apply(self, mut opacity: Opacity) -> Result<Opacity, Error> {
+        let percent = |key: String, value: i64| {
+            u8::try_from(value)
+                .ok()
+                .filter(|percent| (1..=OPAQUE).contains(percent))
+                .ok_or_else(|| invalid(key, format!("{value} is outside 1 to {OPAQUE} percent")))
+        };
+        for (key, value, into) in [
+            ("step", self.step, &mut opacity.step),
+            ("floor", self.floor, &mut opacity.floor),
+            ("unfocused", self.unfocused, &mut opacity.unfocused),
+        ] {
+            if let Some(value) = value {
+                *into = percent(format!("opacity.{key}"), value)?;
+            }
+        }
+        // The floor keeps a window from vanishing under the keys. Dimming
+        // multiplies, so a window could still go fainter, but not by less
+        // than the floor allows the keys.
+        if opacity.unfocused < opacity.floor {
+            return Err(invalid(
+                "opacity.unfocused".to_owned(),
+                format!(
+                    "{} is below the floor, {}; dim no further than the keys can go",
+                    opacity.unfocused, opacity.floor
+                ),
+            ));
+        }
+        for (app, value) in self.apps.unwrap_or_default() {
+            if app.is_empty() {
+                return Err(invalid(
+                    "opacity.apps".to_owned(),
+                    "an application is named \"\"; name it by its app id or WM_CLASS".to_owned(),
+                ));
+            }
+            let key = format!("opacity.apps.{app}");
+            let value = percent(key.clone(), value)?;
+            // Below it, opacity-down would take the window up to the floor.
+            if value < opacity.floor {
+                return Err(invalid(
+                    key,
+                    format!("{value} is below the floor, {}", opacity.floor),
+                ));
+            }
+            opacity.apps.insert(app, value);
+        }
+        Ok(opacity)
     }
 }
 
@@ -2371,6 +2446,103 @@ mod tests {
         assert!(
             parse("[resistance]\nwindows = 4", SEAT).is_err(),
             "resisting other windows is not a key yet"
+        );
+    }
+
+    #[test]
+    fn no_profile_draws_anything_see_through() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            assert_eq!(
+                Config::profile(profile, SEAT).opacity,
+                Opacity::default(),
+                "{profile:?}"
+            );
+        }
+        assert_eq!(parse("", SEAT).unwrap().opacity, Opacity::default());
+    }
+
+    #[test]
+    fn opacity_is_configured_in_its_own_table_with_each_applications_beneath() {
+        let config = parse(
+            "[opacity]\nstep = 5\nfloor = 30\nunfocused = 85\n\
+             [opacity.apps]\nfoot = 90\n\"org.gnome.Nautilus\" = 95",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(
+            config.opacity,
+            Opacity {
+                step: 5,
+                floor: 30,
+                unfocused: 85,
+                apps: BTreeMap::from([
+                    ("foot".to_owned(), 90),
+                    ("org.gnome.Nautilus".to_owned(), 95),
+                ]),
+            }
+        );
+        let apps_alone = parse("[opacity.apps]\nfoot = 90", SEAT).unwrap();
+        assert_eq!(apps_alone.opacity.step, 10, "the default, kept");
+        assert_eq!(apps_alone.opacity.ruled(Some("foot")), 90);
+        let bounds = parse("[opacity]\nstep = 100\nfloor = 1\nunfocused = 1", SEAT).unwrap();
+        assert_eq!(
+            (
+                bounds.opacity.step,
+                bounds.opacity.floor,
+                bounds.opacity.unfocused
+            ),
+            (100, 1, 1)
+        );
+    }
+
+    #[test]
+    fn an_opacity_out_of_range_is_refused_by_name() {
+        for (text, key) in [
+            ("[opacity]\nstep = 0", "opacity.step"),
+            ("[opacity]\nstep = 101", "opacity.step"),
+            ("[opacity]\nfloor = 0", "opacity.floor"),
+            ("[opacity]\nfloor = -20", "opacity.floor"),
+            ("[opacity]\nunfocused = 150", "opacity.unfocused"),
+            ("[opacity.apps]\nfoot = 0", "opacity.apps.foot"),
+            ("[opacity.apps]\nfoot = 101", "opacity.apps.foot"),
+            ("[opacity.apps]\nfoot = 300", "opacity.apps.foot"),
+        ] {
+            let error = parse(text, SEAT).unwrap_err();
+            assert!(
+                matches!(&error, Error::Invalid { key: at, .. } if at == key),
+                "{text}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_may_be_set_below_the_floor_but_by_dimming() {
+        for (text, key) in [
+            ("[opacity]\nunfocused = 15", "opacity.unfocused"),
+            ("[opacity]\nfloor = 50\nunfocused = 40", "opacity.unfocused"),
+            (
+                "[opacity]\nfloor = 50\n[opacity.apps]\nfoot = 40",
+                "opacity.apps.foot",
+            ),
+            ("[opacity.apps]\nfoot = 10", "opacity.apps.foot"),
+        ] {
+            let error = parse(text, SEAT).unwrap_err();
+            assert!(
+                matches!(&error, Error::Invalid { key: at, .. } if at == key),
+                "{text}: {error}"
+            );
+        }
+        assert!(parse("[opacity]\nfloor = 50\nunfocused = 50", SEAT).is_ok());
+    }
+
+    #[test]
+    fn an_opacity_key_misspelled_or_an_application_unnamed_is_refused() {
+        assert!(parse("[opacity]\nfocused = 80", SEAT).is_err());
+        assert!(parse("[opacity]\nstep = 7.5", SEAT).is_err());
+        let error = parse("[opacity.apps]\n\"\" = 90", SEAT).unwrap_err();
+        assert!(
+            matches!(&error, Error::Invalid { key, .. } if key == "opacity.apps"),
+            "{error}"
         );
     }
 
