@@ -1742,6 +1742,101 @@ fn with_nobody_at_the_seat_an_x11_window_asking_to_be_active_is_answered_and_not
     x11.stop();
 }
 
+/// Issue #91: a window asking with `_NET_WM_STATE_HIDDEN` is minimized, and
+/// asking back brings it back, as with `WM_CHANGE_STATE`. Smithay dropped the
+/// request, unanswered.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_asking_to_be_hidden_is_minimized_and_asking_back_restores_it() {
+    let x11 = X11::start("x11-hidden", Backend::headless((1280, 1024)).with_person());
+    let window = x11.open("game");
+
+    x11.ask_state(window, ADD, x11.atoms._NET_WM_STATE_HIDDEN, 0);
+    x11.surface_where("game", |surface| {
+        !surface.mapped && surface.off_workspace.is_none()
+    })
+    .unwrap_or_else(|| panic!("never minimized: {:?}", x11.facts()));
+    assert!(
+        x11.answered(window, x11.atoms._NET_WM_STATE),
+        "never answered"
+    );
+    assert_eq!(x11.wm_state(window), [ICONIC, 0]);
+    assert!(
+        x11.net_wm_state(window)
+            .contains(&x11.atoms._NET_WM_STATE_HIDDEN)
+    );
+
+    x11.ask_state(window, REMOVE, x11.atoms._NET_WM_STATE_HIDDEN, 0);
+    x11.surface_where("game", |surface| surface.mapped)
+        .unwrap_or_else(|| panic!("never brought back: {:?}", x11.facts()));
+    assert!(
+        x11.answered(window, x11.atoms._NET_WM_STATE),
+        "never answered"
+    );
+    assert_eq!(x11.wm_state(window), [NORMAL, 0]);
+    assert!(
+        !x11.net_wm_state(window)
+            .contains(&x11.atoms._NET_WM_STATE_HIDDEN)
+    );
+
+    x11.stop();
+}
+
+/// Issue #91: with nobody at the seat a window asking to be hidden stays as
+/// it is, and is still answered.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn with_nobody_at_the_seat_an_x11_window_asking_to_be_hidden_stays_and_is_answered() {
+    let x11 = X11::start("x11-nobody-hidden", Backend::headless((1280, 1024)));
+    let window = x11.open("game");
+
+    x11.ask_state(window, ADD, x11.atoms._NET_WM_STATE_HIDDEN, 0);
+    assert!(
+        x11.answered(window, x11.atoms._NET_WM_STATE),
+        "never answered"
+    );
+    assert_eq!(x11.wm_state(window), [NORMAL, 0]);
+    assert!(
+        x11.facts()
+            .surfaces()
+            .iter()
+            .any(|surface| surface.title.as_deref() == Some("game") && surface.mapped),
+        "an agent's desk rearranged itself"
+    );
+
+    x11.stop();
+}
+
+/// Issue #91: a minimized window on a workspace that is not showing, asking
+/// with `WM_CHANGE_STATE` to be normal again, is brought back but waits on
+/// its own workspace: showing that one would take the keyboard from the
+/// window that has it, with no input behind the request.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_on_a_workspace_not_showing_asking_to_be_normal_waits_there() {
+    let x11 = X11::start("x11-normal-elsewhere", two_workspaces().with_person());
+    let window = x11.open("game");
+    x11.perform(Action::Minimize);
+    x11.surface_where("game", |surface| !surface.mapped)
+        .expect("never minimized");
+    x11.perform(Action::Workspace(perspicax_policy::Direction::Right));
+
+    x11.change_state(window, NORMAL);
+    assert!(x11.answered(window, x11.atoms.WM_STATE), "never told");
+    assert_eq!(x11.wm_state(window), [NORMAL, 0]);
+    x11.surface_where("game", |surface| {
+        !surface.mapped && surface.off_workspace.is_some()
+    })
+    .unwrap_or_else(|| panic!("not left on its own workspace: {:?}", x11.facts()));
+    assert_ne!(
+        x11.focus(),
+        window,
+        "took the keyboard with no input behind it"
+    );
+
+    x11.stop();
+}
+
 /// One 1280 by 1024 monitor with two workspaces side by side.
 fn two_workspaces() -> Backend {
     Backend::Headless {

@@ -316,6 +316,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE_FULLSCREEN,
         _NET_WM_STATE_MAXIMIZED_HORZ,
         _NET_WM_STATE_MAXIMIZED_VERT,
+        _NET_WM_STATE_HIDDEN,
         _NET_ACTIVE_WINDOW,
     }
 }
@@ -366,6 +367,10 @@ enum Asked {
     /// EWMH's `_NET_ACTIVE_WINDOW`: for `window` to be the active one, with
     /// `stamp` the X time of the input behind the request, or 0 for none.
     Activate { window: u32, stamp: u32 },
+    /// EWMH's `_NET_WM_STATE` with `_NET_WM_STATE_HIDDEN`: for `window` to
+    /// be minimized, or brought back. Smithay's window manager answers the
+    /// other states asked for beside it, if any.
+    Hidden { window: u32, change: Change },
 }
 
 impl Asked {
@@ -374,10 +379,47 @@ impl Asked {
             return None;
         }
         let data = message.data.as_data32();
-        (message.type_ == atoms._NET_ACTIVE_WINDOW).then_some(Self::Activate {
-            window: message.window,
-            stamp: data[1],
-        })
+        let window = message.window;
+        if message.type_ == atoms._NET_ACTIVE_WINDOW {
+            return Some(Self::Activate {
+                window,
+                stamp: data[1],
+            });
+        }
+        if message.type_ == atoms._NET_WM_STATE && data[1..=2].contains(&atoms._NET_WM_STATE_HIDDEN)
+        {
+            return Change::read(data[0]).map(|change| Self::Hidden { window, change });
+        }
+        None
+    }
+}
+
+/// How a `_NET_WM_STATE` request changes a state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Change {
+    Remove,
+    Add,
+    Toggle,
+}
+
+impl Change {
+    /// As EWMH numbers it.
+    fn read(action: u32) -> Option<Self> {
+        match action {
+            0 => Some(Self::Remove),
+            1 => Some(Self::Add),
+            2 => Some(Self::Toggle),
+            _ => None,
+        }
+    }
+
+    /// Whether a state that is `on` now is on once changed.
+    fn applied_to(self, on: bool) -> bool {
+        match self {
+            Self::Remove => false,
+            Self::Add => true,
+            Self::Toggle => !on,
+        }
     }
 }
 
@@ -694,6 +736,15 @@ impl Compositor {
             .cloned()
     }
 
+    /// The window for the X window `id`, and its surface, if it is one the
+    /// window manager manages -- not a menu or a tooltip, which place
+    /// themselves.
+    fn managed_x11_by_id(&self, id: u32) -> Option<(Framed, X11Surface)> {
+        let window = self.x11_window_by_id(id)?;
+        let x11 = window.x11_surface()?.clone();
+        (!x11.is_override_redirect()).then_some((window, x11))
+    }
+
     /// The mapped or parked window wrapping this X11 surface.
     fn x11_window(&self, surface: &X11Surface) -> Option<Framed> {
         self.space
@@ -991,14 +1042,7 @@ impl XwmHandler for Compositor {
     /// state it is now in: Wine changes nothing more about a window while a
     /// request of its is waiting.
     fn minimize_request(&mut self, _xwm: XwmId, x11: X11Surface) {
-        let Some(window) = self.x11_window(&x11) else {
-            return;
-        };
-        if self.backend.has_person() && !Self::is_minimized(&window) {
-            self.minimize(&window);
-        } else {
-            self.answer_wm_state(&window, &x11);
-        }
+        self.minimize_asked(&x11);
     }
 
     /// An X11 window asking to go fullscreen: EWMH's `_NET_WM_STATE`, which is
@@ -1042,21 +1086,13 @@ impl XwmHandler for Compositor {
         self.answer_net_wm_state(&x11);
     }
 
-    /// An X11 window asking to be brought back from minimized. Restored and
-    /// raised, but not given the keyboard: a window may not take that for
-    /// itself, as with an xdg activation no input is behind.
+    /// An X11 window asking to be brought back from minimized. Brought back
+    /// where it is and raised, but not given the keyboard -- a window may not
+    /// take that for itself, as with an xdg activation no input is behind --
+    /// nor shown on its workspace, if that is not the one showing, which
+    /// would move the keyboard just the same.
     fn unminimize_request(&mut self, _xwm: XwmId, x11: X11Surface) {
-        let Some(window) = self.x11_window(&x11) else {
-            return;
-        };
-        if self.backend.has_person() && Self::is_minimized(&window) {
-            self.restore(&window);
-            self.raise_x11(&window, &x11);
-            self.backend.redraw();
-            self.publish_facts();
-        } else {
-            self.answer_wm_state(&window, &x11);
-        }
+        self.unminimize_asked(&x11);
     }
 }
 
@@ -1066,6 +1102,7 @@ impl Compositor {
     fn x11_asked(&mut self, asked: Asked) {
         match asked {
             Asked::Activate { window, stamp } => self.activate_x11(window, stamp),
+            Asked::Hidden { window, change } => self.hide_x11(window, change),
         }
     }
 
@@ -1081,12 +1118,8 @@ impl Compositor {
     /// Answered either way, by the root naming the active window again.
     fn activate_x11(&mut self, window: u32, stamp: u32) {
         let asked = self
-            .x11_window_by_id(window)
-            .filter(|_| self.backend.has_person())
-            .and_then(|window| {
-                let x11 = window.x11_surface()?.clone();
-                (!x11.is_override_redirect()).then_some((window, x11))
-            });
+            .managed_x11_by_id(window)
+            .filter(|_| self.backend.has_person());
         if let Some((window, x11)) = asked {
             let now = Clock::<Monotonic>::new().now().as_millis();
             let input = stamp != x11rb::CURRENT_TIME;
@@ -1097,16 +1130,65 @@ impl Compositor {
                     self.focus_x11(&window, id);
                 }
             } else {
-                self.unminimize(&window);
-                if self.space.element_location(&window).is_some() {
-                    self.raise_x11(&window, &x11);
-                }
+                self.bring_back_x11(&window, &x11);
             }
             self.backend.redraw();
             self.publish_facts();
         }
         if let Some(side) = &self.xwayland.side {
             side.answer_active();
+        }
+    }
+
+    /// An X11 window asking with `_NET_WM_STATE_HIDDEN` to be minimized or
+    /// brought back. EWMH would have a window manager ignore that, the state
+    /// being its own to set, but a program that asks waits for an answer, so
+    /// it is taken as `WM_CHANGE_STATE` is, as Openbox takes it. Answered in
+    /// `_NET_WM_STATE` as well, which is what was asked about.
+    fn hide_x11(&mut self, window: u32, change: Change) {
+        let Some((window, x11)) = self.managed_x11_by_id(window) else {
+            return;
+        };
+        if change.applied_to(Self::is_minimized(&window)) {
+            self.minimize_asked(&x11);
+        } else {
+            self.unminimize_asked(&x11);
+        }
+        self.answer_net_wm_state(&x11);
+    }
+
+    /// A request to be minimized: see `minimize_request`.
+    fn minimize_asked(&mut self, x11: &X11Surface) {
+        let Some(window) = self.x11_window(x11) else {
+            return;
+        };
+        if self.backend.has_person() && !Self::is_minimized(&window) {
+            self.minimize(&window);
+        } else {
+            self.answer_wm_state(&window, x11);
+        }
+    }
+
+    /// A request to be brought back from minimized: see
+    /// `unminimize_request`.
+    fn unminimize_asked(&mut self, x11: &X11Surface) {
+        let Some(window) = self.x11_window(x11) else {
+            return;
+        };
+        if self.backend.has_person() && Self::is_minimized(&window) {
+            self.bring_back_x11(&window, x11);
+            self.publish_facts();
+        } else {
+            self.answer_wm_state(&window, x11);
+        }
+    }
+
+    /// Bring an X11 window back from minimized where it is, and raise it if
+    /// it shows: what a window asking with no input behind it gets.
+    fn bring_back_x11(&mut self, window: &Framed, x11: &X11Surface) {
+        self.unminimize(window);
+        if self.space.element_location(window).is_some() {
+            self.raise_x11(window, x11);
         }
     }
 
@@ -1320,6 +1402,7 @@ mod tests {
             _NET_WM_STATE_MAXIMIZED_HORZ: 4,
             _NET_WM_STATE_MAXIMIZED_VERT: 5,
             _NET_ACTIVE_WINDOW: 6,
+            _NET_WM_STATE_HIDDEN: 7,
         }
     }
 
@@ -1356,6 +1439,41 @@ mod tests {
         assert_eq!(Asked::read(&state, &atoms), None);
         let bytes = ClientMessageEvent::new(8, 0x40_0001_u32, 6_u32, [0_u8; 20]);
         assert_eq!(Asked::read(&bytes, &atoms), None);
+    }
+
+    #[test]
+    fn a_request_to_be_hidden_is_found_in_either_place() {
+        let atoms = atoms();
+        let first = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [1_u32, 7, 0, 1, 0]);
+        let second = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [0_u32, 3, 7, 1, 0]);
+        assert_eq!(
+            Asked::read(&first, &atoms),
+            Some(Asked::Hidden {
+                window: 0x40_0001,
+                change: Change::Add,
+            })
+        );
+        assert_eq!(
+            Asked::read(&second, &atoms),
+            Some(Asked::Hidden {
+                window: 0x40_0001,
+                change: Change::Remove,
+            })
+        );
+    }
+
+    #[test]
+    fn a_request_to_be_hidden_that_changes_it_no_known_way_asks_nothing() {
+        let message = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [3_u32, 7, 0, 1, 0]);
+        assert_eq!(Asked::read(&message, &atoms()), None);
+    }
+
+    #[test]
+    fn a_toggle_turns_a_state_the_other_way() {
+        assert!(Change::Toggle.applied_to(false));
+        assert!(!Change::Toggle.applied_to(true));
+        assert!(Change::Add.applied_to(true));
+        assert!(!Change::Remove.applied_to(true));
     }
 
     #[test]
