@@ -32,6 +32,8 @@ pub(crate) mod icons;
 pub(crate) mod menu;
 #[cfg(feature = "menus")]
 pub(crate) mod menu_file;
+#[cfg(feature = "pie")]
+pub(crate) mod pie;
 
 /// A pointer button, as what the shell shows tells them apart.
 #[cfg(any(feature = "menus", feature = "panel"))]

@@ -6,6 +6,8 @@
 //! the buffer the compositor will read, as premultiplied RGBA, then put in
 //! the byte order Wayland reads.
 
+#[cfg(feature = "menus")]
+use smithay_client_toolkit::shell::wlr_layer::{Anchor, KeyboardInteractivity};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
     delegate_compositor, delegate_layer, delegate_shm,
@@ -79,6 +81,25 @@ impl Canvas {
         )
     }
 
+    /// A clear surface over the whole of `output`, over everything, that
+    /// takes the keyboard while it is up: what a menu or a pie is drawn on.
+    /// Committed, for the compositor to size.
+    #[cfg(feature = "menus")]
+    pub(super) fn overlay(
+        &self,
+        qh: &QueueHandle<App>,
+        namespace: &str,
+        output: &wl_output::WlOutput,
+    ) -> LayerSurface {
+        let layer = self.layer(qh, Layer::Overlay, namespace, output);
+        layer.set_anchor(Anchor::all());
+        layer.set_exclusive_zone(-1);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        layer.set_size(0, 0);
+        layer.commit();
+        layer
+    }
+
     /// Have `layer`, `size` big, take clicks everywhere but `cut`: where a
     /// panel of the shell's is, which takes its own. From its next picture.
     #[cfg(feature = "menus")]
@@ -118,8 +139,38 @@ impl Canvas {
     pub(super) fn show(
         &mut self,
         layer: &LayerSurface,
+        size: (u32, u32),
+        scale: u32,
+        opaque: &[Area],
+        draw: impl FnOnce(&mut PixmapMut<'_>),
+    ) {
+        self.present(layer, size, scale, opaque, opaque, draw);
+    }
+
+    /// Show on `layer` a picture `size` logical pixels at `scale`, painted
+    /// by `draw` in `painted` and clear everywhere else, and opaque nowhere:
+    /// a pie, round and see-through. What is under it shows through, and an
+    /// agent is told it covers nothing.
+    #[cfg(feature = "pie")]
+    pub(super) fn show_clear(
+        &mut self,
+        layer: &LayerSurface,
+        size: (u32, u32),
+        scale: u32,
+        painted: Area,
+        draw: impl FnOnce(&mut PixmapMut<'_>),
+    ) {
+        self.present(layer, size, scale, &[painted], &[], draw);
+    }
+
+    /// Show a picture painted by `draw`, its `painted` areas put in the
+    /// byte order Wayland reads and its `opaque` areas said to be opaque.
+    fn present(
+        &mut self,
+        layer: &LayerSurface,
         (width, height): (u32, u32),
         scale: u32,
+        painted: &[Area],
         opaque: &[Area],
         draw: impl FnOnce(&mut PixmapMut<'_>),
     ) {
@@ -142,7 +193,7 @@ impl Canvas {
             return;
         };
         draw(&mut picture);
-        let pixels: Vec<_> = opaque
+        let pixels: Vec<_> = painted
             .iter()
             .filter_map(|&(x, y, w, h)| {
                 let px = |n: i32| u32::try_from(n).ok().map(|n| n * scale);
@@ -183,6 +234,8 @@ impl LayerShellHandler for App {
         self.panels.closed(layer);
         #[cfg(feature = "menus")]
         self.menus.closed(&mut self.kit.fonts, layer);
+        #[cfg(feature = "pie")]
+        self.pies.closed(layer);
     }
 
     fn configure(
@@ -206,6 +259,9 @@ impl LayerShellHandler for App {
         );
         #[cfg(feature = "menus")]
         self.menus
+            .configure(&mut self.canvas, &mut self.kit, layer, &configure);
+        #[cfg(feature = "pie")]
+        self.pies
             .configure(&mut self.canvas, &mut self.kit, layer, &configure);
     }
 }

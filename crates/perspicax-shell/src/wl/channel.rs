@@ -59,12 +59,35 @@ impl App {
     /// monitor the pointer is on, or `None` for one this client has not
     /// bound yet.
     fn pie_menu(&mut self, output: Option<wl_output::WlOutput>, x: i32, y: i32, name: &str) {
+        #[cfg(feature = "pie")]
+        {
+            let Some(output) = output.or_else(|| self.outputs.outputs().next()) else {
+                return;
+            };
+            let Some(monitor) = self.output_name(&output) else {
+                return;
+            };
+            let Some((size, slots)) = self.pies.built(name, &mut self.installed) else {
+                tracing::warn!(name, "asked for a pie the config does not have");
+                return;
+            };
+            let area = self.area(&output);
+            self.pie_event(crate::pie::Event::Asked {
+                name: name.to_owned(),
+                output: monitor,
+                area,
+                size,
+                at: (x, y),
+                slots,
+            });
+        }
+        #[cfg(not(feature = "pie"))]
         tracing::info!(
             output = output.and_then(|output| self.output_name(&output)),
             x,
             y,
             name,
-            "asked for a pie, and this shell does not draw one yet"
+            "asked for a pie, and this shell was built without pies"
         );
     }
 }

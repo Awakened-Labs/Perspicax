@@ -20,6 +20,8 @@ mod menu;
 mod pager;
 #[cfg(feature = "panel")]
 mod panel;
+#[cfg(feature = "pie")]
+mod pie;
 #[cfg(any(feature = "menus", feature = "panel"))]
 mod seat;
 #[cfg(feature = "panel")]
@@ -135,6 +137,8 @@ pub(crate) fn run(
             actions,
             channel.is_some(),
         ),
+        #[cfg(feature = "pie")]
+        pies: pie::Pies::new(&shell, config.as_deref()),
         #[cfg(any(feature = "menus", feature = "panel"))]
         installed,
         #[cfg(feature = "menus")]
@@ -213,6 +217,8 @@ pub(crate) struct App {
     seat: seat::Seat,
     #[cfg(feature = "menus")]
     menus: menu::Menus,
+    #[cfg(feature = "pie")]
+    pies: pie::Pies,
     /// Whether a timer is collecting the programs the menus started.
     #[cfg(feature = "menus")]
     reaping: bool,
@@ -349,6 +355,8 @@ impl App {
         self.follow_tray(&shell);
         #[cfg(feature = "menus")]
         self.menus.reconfigure(&shell, self.config.as_deref());
+        #[cfg(feature = "pie")]
+        self.pies.reconfigure(&shell, self.config.as_deref());
         self.monitors_changed();
         #[cfg(feature = "icons")]
         self.watch_folder();
@@ -514,6 +522,21 @@ impl App {
                 #[cfg(feature = "tray")]
                 Effect::Tell { key, id } => self.tell_status(key, id),
                 Effect::Redraw => {}
+            }
+        }
+    }
+
+    /// Pass `event` to the pie, and carry out what it calls for.
+    #[cfg(feature = "pie")]
+    fn pie_event(&mut self, event: crate::pie::Event) {
+        let qh = self.qh.clone();
+        let effects = self
+            .pies
+            .send(&mut self.canvas, &qh, &self.outputs, &mut self.kit, event);
+        for effect in effects {
+            match effect {
+                crate::pie::Effect::Run(run) => self.start(&run),
+                crate::pie::Effect::Redraw => {}
             }
         }
     }

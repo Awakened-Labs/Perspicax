@@ -9,6 +9,8 @@ pub(crate) mod icons;
 pub(crate) mod menu;
 #[cfg(feature = "panel")]
 pub(crate) mod panel;
+#[cfg(feature = "pie")]
+pub(crate) mod pie;
 #[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) mod text;
 #[cfg(feature = "wallpaper")]

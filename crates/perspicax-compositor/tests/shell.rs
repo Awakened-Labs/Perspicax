@@ -767,6 +767,78 @@ fn the_root_menu_action_opens_it_at_the_pointer() {
     std::fs::remove_file(file).ok();
 }
 
+/// The pie's surface, if one is up: its id, its namespace and where it is.
+/// It says it is opaque nowhere, so it is told from the menus' by its name.
+fn pie(facts: &HostFacts) -> Option<(SurfaceId, String, Rect)> {
+    facts
+        .surfaces()
+        .iter()
+        .find_map(|surface| match &surface.kind {
+            SurfaceKind::Layer {
+                layer: Layer::Overlay,
+                namespace,
+            } if surface.mapped && namespace.starts_with("perspicax-pie-") => {
+                Some((surface.id, namespace.clone(), surface.geometry))
+            }
+            _ => None,
+        })
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_pie_opens_at_the_pointer_and_a_slot_pointed_at_runs_its_program() {
+    let session = Session::start("shell-pie", Backend::headless((1280, 800)));
+    let marker = std::env::temp_dir().join(format!("perspicax-shell-pie-{}", std::process::id()));
+    std::fs::remove_file(&marker).ok();
+    let config = format!(
+        "profile = \"minimal\"\n[shell.pie.menus]\n\
+         t = [{{ label = \"Marker\", exec = [\"touch\", {:?}] }}]\n",
+        marker.display().to_string()
+    );
+    let shell = Shell::start(&session, "pie", &config);
+    let facts = session.wait_for(|facts| desktops(facts).len() == 1);
+    // A left click puts the pointer on the wallpaper and opens nothing.
+    click(
+        &session,
+        desktop(&facts),
+        (640.0, 400.0),
+        PointerButton::Left,
+    );
+
+    session.perform(Action::Pie("t".to_owned()));
+    let facts = session.wait_for(|facts| pie(facts).is_some());
+    let (surface, namespace, area) = pie(&facts).expect("waited for");
+    assert_eq!(namespace, "perspicax-pie-HEADLESS-1");
+    assert_eq!(
+        (area.x0, area.y0, area.x1, area.y1),
+        (0.0, 0.0, 1280.0, 800.0),
+        "over the whole monitor"
+    );
+    // Asked again, it closes; and opens once more.
+    session.perform(Action::Pie("t".to_owned()));
+    session.wait_for(|facts| pie(facts).is_none());
+    session.perform(Action::Pie("t".to_owned()));
+    let facts = session.wait_for(|facts| pie(facts).is_some());
+    let (surface_again, _, _) = pie(&facts).expect("waited for");
+    assert_ne!(surface, surface_again, "a surface of its own each time");
+
+    // Its one slot is at the top; pointing straight up, out at the edge,
+    // picks it, and a click there runs it and closes the pie.
+    click(&session, surface_again, (640.0, 6.0), PointerButton::Left);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the slot's program ran"
+        );
+        thread::sleep(std::time::Duration::from_millis(20));
+    }
+    session.wait_for(|facts| pie(facts).is_none());
+
+    shell.stop_with(session);
+    std::fs::remove_file(marker).ok();
+}
+
 /// An orange window, with the root menu open over it: the window's id and
 /// where it is, and the menus' surface's id and where the menu is.
 fn menu_over_a_window(

@@ -36,6 +36,8 @@ mod layout;
 mod model;
 #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
 mod paint;
+#[cfg(feature = "pie")]
+mod pie;
 #[cfg(feature = "tray")]
 mod tray;
 #[cfg(feature = "menus")]
