@@ -16,7 +16,6 @@
 use perspicax_policy::{Rect, Screen, arrange, overlapping, rescue};
 use smithay::{
     output::Output,
-    reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
     utils::{Logical, Point, Rectangle, Size},
 };
 
@@ -125,18 +124,10 @@ impl Compositor {
             tracing::info!(?at, "a window on no output is brought back onto one");
             self.space.map_element(window.clone(), at, false);
             self.window_moved(&window);
-            let Some(toplevel) = window.toplevel().filter(|t| Self::is_filling(t)).cloned() else {
-                self.fit_frame(&window);
-                continue;
-            };
-            let state = if toplevel.with_pending_state(|pending| {
-                pending.states.contains(xdg_toplevel::State::Fullscreen)
-            }) {
-                xdg_toplevel::State::Fullscreen
-            } else {
-                xdg_toplevel::State::Maximized
-            };
-            self.fill(&toplevel, state, None);
+            match Self::filling(&window) {
+                Some(fill) => self.fill(&window, fill, None),
+                None => self.fit_frame(&window),
+            }
         }
     }
 

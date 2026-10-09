@@ -45,10 +45,7 @@ use smithay::{
         wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface},
     },
     utils::{Logical, Point, Rectangle, Serial, Size},
-    wayland::{
-        seat::WaylandFocus as _,
-        shell::xdg::{PopupSurface, ToplevelSurface},
-    },
+    wayland::{seat::WaylandFocus as _, shell::xdg::PopupSurface},
 };
 
 use crate::{framed::Framed, state::Compositor};
@@ -79,6 +76,33 @@ pub(crate) struct Placement {
     /// A resize in progress, or finished and waiting for the client's last
     /// commit. See [`Compositor::settle_resize`].
     pub(crate) resize: Option<Resize>,
+}
+
+/// How a window fills its monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fill {
+    /// What the panels leave free, framed by its titlebar alone.
+    Maximized,
+    /// The whole monitor, over the panels, with no frame.
+    Fullscreen,
+}
+
+impl Fill {
+    /// How its frame is drawn.
+    fn look(self) -> Look {
+        match self {
+            Self::Maximized => Look::Maximized,
+            Self::Fullscreen => Look::Fullscreen,
+        }
+    }
+
+    /// The xdg state that says it.
+    pub(crate) fn state(self) -> xdg_toplevel::State {
+        match self {
+            Self::Maximized => xdg_toplevel::State::Maximized,
+            Self::Fullscreen => xdg_toplevel::State::Fullscreen,
+        }
+    }
 }
 
 /// A resize, as the grab started it.
@@ -180,31 +204,50 @@ impl Compositor {
 
     /// Fill an output with a window, remembering where it was.
     ///
-    /// `state` is `Maximized` or `Fullscreen`. They differ in what the client
-    /// draws (a fullscreen window drops its own decorations) and in what they
-    /// fill: a maximized window stops at the panels' exclusive zones, a
-    /// fullscreen one covers them.
-    pub(crate) fn fill(
-        &mut self,
-        surface: &ToplevelSurface,
-        state: xdg_toplevel::State,
-        on: Option<&WlOutput>,
-    ) {
-        let Some(window) = self.window_for(surface.wl_surface()) else {
+    /// Maximized and fullscreen differ in what the client draws (a
+    /// fullscreen window drops its own decorations) and in what they fill: a
+    /// maximized window stops at the panels' exclusive zones, a fullscreen
+    /// one covers them.
+    ///
+    /// A parked window -- minimized, or on a workspace not showing -- is only
+    /// told. It stays parked, and fills its monitor when it comes back (see
+    /// `unpark_window`).
+    pub(crate) fn fill(&mut self, window: &Framed, fill: Fill, on: Option<&WlOutput>) {
+        let Some(surface) = window.toplevel().cloned() else {
+            // An X11 window has no xdg state to carry being maximized, so it
+            // is snapped to the whole monitor instead, which is the same rect
+            // by the same path.
+            if fill == Fill::Maximized {
+                self.snap(
+                    window,
+                    perspicax_policy::Zone::Top,
+                    on.and_then(Output::from_resource),
+                );
+            }
+            return;
+        };
+        let Some(current) = self.space.element_geometry(window) else {
+            let parked = placement(window, |placement| placement.parked);
+            if let Some(at) = parked {
+                placement(window, |placement| {
+                    placement
+                        .restore
+                        .get_or_insert(Rectangle::new(at, extent_size(window)));
+                });
+            }
+            surface.with_pending_state(|pending| pending.states.set(fill.state()));
             surface.send_configure();
+            self.publish_facts();
             return;
         };
         let output = on
             .and_then(Output::from_resource)
-            .or_else(|| self.output_of(&window));
+            .or_else(|| self.output_of(window));
         // Maximized fills what the panels leave free; fullscreen covers the
         // panels too, which is the difference between the two.
-        let area = output.and_then(|output| {
-            if state == xdg_toplevel::State::Fullscreen {
-                self.space.output_geometry(&output)
-            } else {
-                self.usable_area(&output)
-            }
+        let area = output.and_then(|output| match fill {
+            Fill::Fullscreen => self.space.output_geometry(&output),
+            Fill::Maximized => self.usable_area(&output),
         });
         let Some(area) = area else {
             surface.send_configure();
@@ -212,24 +255,17 @@ impl Compositor {
         };
         // The client gets what its frame leaves: the titlebar of a maximized
         // window is inside the area, not above it.
-        let look = if state == xdg_toplevel::State::Fullscreen {
-            Look::Fullscreen
-        } else {
-            Look::Maximized
-        };
-        let client = inset(rect(area), self.insets_as(&window, look));
+        let client = inset(rect(area), self.insets_as(window, fill.look()));
         let area = Rectangle::new((client.x, client.y).into(), (client.w, client.h).into());
-        if let Some(current) = self.space.element_geometry(&window) {
-            placement(&window, |placement| {
-                placement.restore.get_or_insert(current);
-            });
-        }
+        placement(window, |placement| {
+            placement.restore.get_or_insert(current);
+        });
         surface.with_pending_state(|pending| {
-            pending.states.set(state);
+            pending.states.set(fill.state());
             pending.size = Some(area.size);
         });
         surface.send_configure();
-        self.space.map_element(window, area.loc, false);
+        self.space.map_element(window.clone(), area.loc, false);
         self.publish_facts();
     }
 
@@ -237,35 +273,56 @@ impl Compositor {
     ///
     /// `at` overrides where it goes back to, which is how a maximized window
     /// dragged by its titlebar comes out from under the pointer rather than
-    /// jumping back to wherever it was before it was maximized.
-    pub(crate) fn unfill(
-        &mut self,
-        surface: &ToplevelSurface,
-        state: xdg_toplevel::State,
-        at: Option<Point<i32, Logical>>,
-    ) {
-        let window = self.window_for(surface.wl_surface());
-        let restore = window
-            .as_ref()
-            .and_then(|window| placement(window, |placement| placement.restore.take()));
+    /// jumping back to wherever it was before it was maximized. A parked
+    /// window comes back there when it comes back at all.
+    pub(crate) fn unfill(&mut self, window: &Framed, fill: Fill, at: Option<Point<i32, Logical>>) {
+        let Some(surface) = window.toplevel().cloned() else {
+            if fill == Fill::Maximized && Self::is_snapped(window) {
+                self.unsnap(window, at);
+            }
+            return;
+        };
+        let restore = placement(window, |placement| placement.restore.take());
         surface.with_pending_state(|pending| {
-            pending.states.unset(state);
+            pending.states.unset(fill.state());
             pending.size = restore.map(|restore| restore.size);
         });
         surface.send_pending_configure();
-        if let (Some(window), Some(restore)) = (window, restore) {
-            self.space
-                .map_element(window, at.unwrap_or(restore.loc), false);
-            self.publish_facts();
+        let Some(restore) = restore else {
+            return;
+        };
+        let to = at.unwrap_or(restore.loc);
+        if self.space.element_location(window).is_some() {
+            self.space.map_element(window.clone(), to, false);
+        } else {
+            placement(window, |placement| placement.parked = Some(to));
         }
+        self.publish_facts();
     }
 
-    /// Whether this toplevel currently fills an output.
-    pub(crate) fn is_filling(surface: &ToplevelSurface) -> bool {
-        surface.with_pending_state(|pending| {
-            pending.states.contains(xdg_toplevel::State::Maximized)
-                || pending.states.contains(xdg_toplevel::State::Fullscreen)
-        })
+    /// How a window fills its monitor, if it does: fullscreen over
+    /// maximized, since a window can be both and fullscreen is what shows.
+    /// Pending, like its frame's look: a window asked to fill is treated as
+    /// filling from the moment it is asked. An X11 window says fullscreen in
+    /// `_NET_WM_STATE`; maximized, it is snapped instead (see
+    /// [`Compositor::fill`]).
+    pub(crate) fn filling(window: &Framed) -> Option<Fill> {
+        if let Some(toplevel) = window.toplevel() {
+            return toplevel.with_pending_state(|pending| {
+                if pending.states.contains(xdg_toplevel::State::Fullscreen) {
+                    Some(Fill::Fullscreen)
+                } else if pending.states.contains(xdg_toplevel::State::Maximized) {
+                    Some(Fill::Maximized)
+                } else {
+                    None
+                }
+            });
+        }
+        #[cfg(feature = "xwayland")]
+        if window.x11_surface().is_some_and(|x11| x11.is_fullscreen()) {
+            return Some(Fill::Fullscreen);
+        }
+        None
     }
 
     /// Send a window to the output beside the one it is on. A maximized or
@@ -288,18 +345,10 @@ impl Compositor {
         else {
             return;
         };
-        let filled = window.toplevel().filter(|t| Self::is_filling(t)).cloned();
-        if let Some(toplevel) = filled {
-            let state = if toplevel.with_pending_state(|pending| {
-                pending.states.contains(xdg_toplevel::State::Fullscreen)
-            }) {
-                xdg_toplevel::State::Fullscreen
-            } else {
-                xdg_toplevel::State::Maximized
-            };
+        if let Some(fill) = Self::filling(window) {
             self.space
                 .map_element(window.clone(), (areas[to].x, areas[to].y), false);
-            self.fill(&toplevel, state, None);
+            self.fill(window, fill, None);
         } else {
             let at = carry(rect(bounds), areas[from], areas[to]);
             self.space.map_element(window.clone(), at, false);
@@ -379,7 +428,7 @@ impl Compositor {
         // A maximized or snapped window is not restored yet: only once the
         // pointer has really moved (see `MoveGrab`), so a click on its
         // titlebar leaves it as it is.
-        let filled = window.toplevel().is_some_and(Self::is_filling) || Self::is_snapped(window);
+        let filled = Self::filling(window).is_some() || Self::is_snapped(window);
         let grab = MoveGrab::new(start, window.clone(), origin, filled, self.desk_jumps);
         pointer.set_grab(self, grab, serial, Focus::Clear);
         // After, not before: replacing a grab unsets the one before it.
@@ -390,7 +439,7 @@ impl Compositor {
     /// back to its own size, hanging from the pointer at `at` where it was
     /// grabbed, rather than moving while still claiming to fill the screen.
     pub(crate) fn release_fill(&mut self, window: &Framed, at: Point<f64, Logical>) {
-        if let Some(toplevel) = window.toplevel().filter(|t| Self::is_filling(t)).cloned() {
+        if let (Some(toplevel), Some(_)) = (window.toplevel(), Self::filling(window)) {
             let filled = self.space.element_geometry(window);
             let restored = placement(window, |placement| placement.restore.map(|r| r.size));
             if let (Some(filled), Some(restored)) = (filled, restored) {
@@ -398,7 +447,7 @@ impl Compositor {
                 toplevel.with_pending_state(|pending| {
                     pending.states.unset(xdg_toplevel::State::Fullscreen);
                 });
-                self.unfill(&toplevel, xdg_toplevel::State::Maximized, Some(at.into()));
+                self.unfill(window, Fill::Maximized, Some(at.into()));
             }
         } else if Self::is_snapped(window) {
             // The same for a window snapped to a half or a quarter: it comes
@@ -423,7 +472,7 @@ impl Compositor {
         let Some(pointer) = self.pointer.clone() else {
             return;
         };
-        if window.toplevel().is_some_and(Self::is_filling) {
+        if Self::filling(window).is_some() {
             return;
         }
         let Some(bounds) = self.space.element_geometry(window) else {

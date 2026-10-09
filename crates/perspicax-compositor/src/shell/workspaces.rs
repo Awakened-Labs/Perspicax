@@ -232,13 +232,15 @@ impl Compositor {
     }
 
     /// Map a parked window back where it was, or onto the nearest monitor if
-    /// that one is gone.
+    /// that one is gone, then fit it to the room it has now: one that fills
+    /// its monitor or a zone fills it again, as the panels now leave it, and
+    /// one made fullscreen while it was parked becomes it.
     fn unpark_window(&mut self, window: &Framed) {
         self.parked.retain(|parked| parked != window);
         let parked = placement(window, |placement| placement.parked.take());
         let at = self.unpark(window, parked.unwrap_or_default());
         self.space.map_element(window.clone(), at, false);
-        self.fit_frame(window);
+        self.refit(window);
     }
 
     /// The monitor a window is on, by name, whether it is on screen or

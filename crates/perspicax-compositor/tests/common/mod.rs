@@ -465,6 +465,27 @@ impl Desk {
         self.layers.push((strip, colour, height));
     }
 
+    /// A panel `height` tall across the top of the screen on `top`, drawn
+    /// in one colour, ARGB, that reserves its strip: windows are fitted
+    /// below it, as a real panel's are.
+    pub fn open_panel(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        namespace: &str,
+        height: u32,
+        colour: u32,
+    ) {
+        let surface = self.compositor.create_surface(qh);
+        let panel =
+            self.layer_shell
+                .create_layer_surface(qh, surface, Layer::Top, Some(namespace), None);
+        panel.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
+        panel.set_size(0, height);
+        panel.set_exclusive_zone(i32::try_from(height).expect("a panel's height"));
+        panel.commit();
+        self.layers.push((panel, colour, height));
+    }
+
     pub fn open_window(&mut self, qh: &QueueHandle<Self>, title: &str, app_id: &str) {
         self.open_coloured(qh, title, app_id, 0xffff_ffff);
     }

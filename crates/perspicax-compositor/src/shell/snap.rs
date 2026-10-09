@@ -59,8 +59,8 @@ impl Compositor {
             self.clear_tiling(window);
             // Maximized on the output it is mostly on, which for a window
             // dragged to the top of a monitor is that monitor.
-            if let Some(toplevel) = window.toplevel().cloned() {
-                self.fill(&toplevel, xdg_toplevel::State::Maximized, None);
+            if window.toplevel().is_some() {
+                self.fill(window, super::Fill::Maximized, None);
                 return;
             }
         }
@@ -165,11 +165,10 @@ impl Compositor {
         };
         match (keyed(current, direction), current) {
             (Some(zone), _) => self.snap(&window, zone, None),
-            (None, Some(Zone::Top)) => {
-                if let Some(toplevel) = window.toplevel().cloned() {
-                    self.unfill(&toplevel, xdg_toplevel::State::Maximized, None);
-                }
+            (None, Some(Zone::Top)) if window.toplevel().is_some() => {
+                self.unfill(&window, super::Fill::Maximized, None);
             }
+            (None, Some(Zone::Top)) => {}
             (None, Some(_)) => self.unsnap(&window, None),
             (None, None) => {}
         }

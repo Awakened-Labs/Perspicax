@@ -20,8 +20,14 @@ use perspicax_policy::Workspaces;
 use smithay::wayland::seat::WaylandFocus;
 
 use crate::{
-    act::Keys, backend::Running, damage, facts::Facts, focus::FocusTarget, framed::Framed, origin,
-    shell,
+    act::Keys,
+    backend::Running,
+    damage,
+    facts::Facts,
+    focus::FocusTarget,
+    framed::Framed,
+    origin,
+    shell::{self, Fill},
 };
 
 use smithay::{
@@ -941,31 +947,19 @@ impl XdgShellHandler for Compositor {
     }
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
-        if self.backend.has_person() {
-            self.fill(&surface, xdg_toplevel::State::Maximized, None);
-        } else {
-            surface.send_configure();
-        }
+        self.fill_request(&surface, Fill::Maximized, None);
     }
 
     fn unmaximize_request(&mut self, surface: ToplevelSurface) {
-        if self.backend.has_person() {
-            self.unfill(&surface, xdg_toplevel::State::Maximized, None);
-        }
+        self.unfill_request(&surface, Fill::Maximized);
     }
 
     fn fullscreen_request(&mut self, surface: ToplevelSurface, output: Option<WlOutput>) {
-        if self.backend.has_person() {
-            self.fill(&surface, xdg_toplevel::State::Fullscreen, output.as_ref());
-        } else {
-            surface.send_configure();
-        }
+        self.fill_request(&surface, Fill::Fullscreen, output.as_ref());
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
-        if self.backend.has_person() {
-            self.unfill(&surface, xdg_toplevel::State::Fullscreen, None);
-        }
+        self.unfill_request(&surface, Fill::Fullscreen);
     }
 
     fn minimize_request(&mut self, surface: ToplevelSurface) {
@@ -979,6 +973,32 @@ impl XdgShellHandler for Compositor {
 }
 
 impl Compositor {
+    /// A toplevel asking to fill its monitor: only with a person at the
+    /// seat. Otherwise, or before it is a window, it is answered with the
+    /// plain configure it would have had anyway.
+    fn fill_request(&mut self, surface: &ToplevelSurface, fill: Fill, on: Option<&WlOutput>) {
+        match self.window_for(surface.wl_surface()) {
+            Some(window) if self.backend.has_person() => self.fill(&window, fill, on),
+            _ => {
+                surface.send_configure();
+            }
+        }
+    }
+
+    /// A toplevel asking to stop filling its monitor: only with a person at
+    /// the seat.
+    fn unfill_request(&mut self, surface: &ToplevelSurface, fill: Fill) {
+        if !self.backend.has_person() {
+            return;
+        }
+        if let Some(window) = self.window_for(surface.wl_surface()) {
+            self.unfill(&window, fill, None);
+        } else {
+            surface.with_pending_state(|pending| pending.states.unset(fill.state()));
+            surface.send_pending_configure();
+        }
+    }
+
     /// The window and grab start for an interactive move or resize, if the
     /// request is one to honour: a person at the seat, a window we know, and a
     /// serial that is the press currently holding the pointer.

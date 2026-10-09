@@ -115,9 +115,9 @@ impl Compositor {
                 pending.states.contains(xdg_toplevel::State::Maximized)
             });
             if maximized {
-                self.unfill(&toplevel, xdg_toplevel::State::Maximized, None);
+                self.unfill(window, super::Fill::Maximized, None);
             } else {
-                self.fill(&toplevel, xdg_toplevel::State::Maximized, None);
+                self.fill(window, super::Fill::Maximized, None);
             }
         } else if Self::is_snapped(window) {
             self.unsnap(window, None);
