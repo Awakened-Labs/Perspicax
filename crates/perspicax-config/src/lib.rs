@@ -1657,6 +1657,9 @@ fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Actio
             "previous-layout" => Action::CycleLayout { forward: false },
             "next-workspace" => Action::CycleWorkspace { forward: true },
             "previous-workspace" => Action::CycleWorkspace { forward: false },
+            "opacity-up" => Action::OpacityUp,
+            "opacity-down" => Action::OpacityDown,
+            "opacity-reset" => Action::OpacityReset,
             other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
                 format!(
                     "`{other}` is not an action; use close, cycle-focus, reload, \
@@ -1664,6 +1667,7 @@ fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Actio
                          tab-with-previous, detach-tab, start-menu, root-menu, \
                          next-layout, previous-layout, layout-<1-4>, \
                          next-workspace, previous-workspace, \
+                         opacity-up, opacity-down, opacity-reset, \
                          move-to-next-output, move-to-previous-output, \
                          move-to-output-<side>, workspace-<side>, workspace-<number>, \
                          send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
@@ -2871,6 +2875,48 @@ mod tests {
         assert_eq!(
             config.bindings.resolve(logo, &[Keysym::n]),
             Some(&Action::Minimize)
+        );
+    }
+
+    #[test]
+    fn opacity_is_three_actions_a_chord_can_have_and_neither_profile_binds() {
+        let config = parse(
+            "[keys]\n\"Logo+Page_Up\" = \"opacity-up\"\n\
+             \"Logo+Page_Down\" = \"opacity-down\"\n\"Logo+End\" = \"opacity-reset\"",
+            SEAT,
+        )
+        .unwrap();
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        for (key, action) in [
+            (Keysym::Page_Up, Action::OpacityUp),
+            (Keysym::Page_Down, Action::OpacityDown),
+            (Keysym::End, Action::OpacityReset),
+        ] {
+            assert_eq!(config.bindings.resolve(logo, &[key]), Some(&action));
+        }
+        let opacity = |action: &Action| {
+            matches!(
+                action,
+                Action::OpacityUp | Action::OpacityDown | Action::OpacityReset
+            )
+        };
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let bindings = Config::profile(profile, SEAT).bindings;
+            assert!(
+                !bindings.iter().any(|(_, action)| opacity(action)),
+                "{profile:?} binds one"
+            );
+            assert!(!bindings.tap().is_some_and(opacity), "{profile:?}'s tap");
+        }
+        let error = parse("[keys]\n\"Logo+x\" = \"opacity\"", SEAT).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("opacity-up, opacity-down, opacity-reset"),
+            "the refusal lists them: {error}"
         );
     }
 

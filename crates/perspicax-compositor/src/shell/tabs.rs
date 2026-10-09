@@ -270,8 +270,9 @@ impl Compositor {
     /// `place` is parked if the groups say it is no longer in front.
     ///
     /// A group has one state, and the tab coming forward takes all of it,
-    /// dropping its own: the rect it would be restored to, and whether it is
-    /// maximized or tiled. A tab that was maximized while it was in front
+    /// dropping its own: the rect it would be restored to, whether it is
+    /// maximized or tiled, and how opaque the person's keys made it. With
+    /// none from the keys, each tab follows its own application's rule. A tab that was maximized while it was in front
     /// otherwise came back maximized into a group that had since been
     /// restored, and restoring it went back to its own stale rect.
     fn bring_forward(&mut self, front: &Framed, place: &Framed) {
@@ -283,7 +284,9 @@ impl Compositor {
             .element_location(place)
             .or_else(|| placement(place, |placement| placement.parked));
         let size = extent_size(place);
-        let (zone, restore) = placement(place, |placement| (placement.snapped, placement.restore));
+        let (zone, restore, opacity) = placement(place, |placement| {
+            (placement.snapped, placement.restore, placement.opacity)
+        });
         let maximized = place.toplevel().is_some_and(|toplevel| {
             toplevel.with_pending_state(|pending| {
                 pending.states.contains(xdg_toplevel::State::Maximized)
@@ -297,6 +300,7 @@ impl Compositor {
         placement(front, |placement| {
             placement.restore = restore;
             placement.snapped = None;
+            placement.opacity = opacity;
         });
 
         let toplevel = front.toplevel().cloned();

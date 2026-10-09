@@ -98,6 +98,16 @@ pub enum Action {
     /// counting from 1 in the order the config lists them. A number past
     /// the last layout does nothing.
     Layout(u8),
+    /// Make the focused window more opaque by `[opacity] step`, as far as
+    /// wholly opaque. For the person's eyes: a see-through window still
+    /// covers what is behind it, as far as an agent is told.
+    OpacityUp,
+    /// Make the focused window less opaque by `[opacity] step`, as far as
+    /// `[opacity] floor`.
+    OpacityDown,
+    /// Put the focused window back to its application's rule in
+    /// `[opacity]`, or opaque, forgetting what the keys set.
+    OpacityReset,
 }
 
 impl Action {

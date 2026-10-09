@@ -4,9 +4,10 @@
 //! A window under its application's rule is drawn that opaque, so a picture
 //! shows what is behind it mixed in; one without the keyboard is dimmed by a
 //! share of its own; a fullscreen window, and a picture of one window alone,
-//! are drawn whole. The facts say how opaque each window is drawn, and an
-//! agent is still told what is behind one is covered: translucency is for the
-//! person's eyes.
+//! are drawn whole. The keys step the focused window within the floor and
+//! opaque, and what they set goes with its tab group. The facts say how opaque
+//! each window is drawn, and an agent is still told what is behind one is
+//! covered: translucency is for the person's eyes.
 //!
 //! The clients here draw ARGB buffers. Pictures are drawn with pixman, which
 //! draws a buffer without an alpha channel by copying rather than blending,
@@ -26,7 +27,7 @@ use common::{Session, until};
 use perspicax_compositor::{Backend, Host};
 use perspicax_index::{HostFacts, Shot, ShotTarget, SurfaceFacts, judge};
 use perspicax_node::{Rect, Visibility};
-use perspicax_policy::Opacity;
+use perspicax_policy::{Action, Opacity};
 
 /// ARGB, as the client writes it.
 const BLUE: u32 = 0xff33_6699;
@@ -225,6 +226,142 @@ fn a_picture_of_a_see_through_window_alone_shows_it_whole() {
         .expect("a picture");
     assert_eq!(pixel(&shot, 10.0, 10.0), rgba(BLUE));
     assert_eq!(pixel(&shot, 390.0, 290.0), rgba(BLUE));
+
+    session.stop((desk, queue));
+}
+
+/// `times` presses of a key, as a binding to it would make them.
+fn press(session: &Session, action: &Action, times: usize) {
+    for _ in 0..times {
+        session.perform(action.clone());
+    }
+}
+
+/// What the facts say `title` is drawn at, once they say `wanted`.
+fn drawn(session: &Session, title: &str, wanted: Option<u8>) -> HostFacts {
+    session.wait_for(|facts| {
+        facts.surfaces().iter().any(|surface| {
+            surface.title.as_deref() == Some(title) && surface.drawn_opacity == wanted
+        })
+    })
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_keys_step_the_focused_window_within_the_floor_and_opaque_and_reset_forgets_them() {
+    let session = Session::start("opacity-keys", see_through(Opacity::default()));
+    let host = Host::new(&session.facts, &session.requests);
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_coloured(&qh, "blue", "blue", BLUE);
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    session.wait_for(|facts| facts.surfaces().iter().any(|surface| surface.mapped));
+
+    press(&session, &Action::OpacityDown, 5);
+    let facts = drawn(&session, "blue", Some(50));
+    let shot = host.capture(ShotTarget::Output(None)).expect("a picture");
+    let backdrop = pixel(&shot, 799.0, 599.0);
+    let blue = surface(&facts, "blue").geometry;
+    let seen = pixel(&shot, blue.x0 + 10.0, blue.y0 + 10.0);
+    assert!(
+        near(seen, mixed(rgba(BLUE), backdrop, 50)),
+        "blue at half over the backdrop {backdrop:?}: {seen:?}"
+    );
+
+    // Down past the floor, then up one: had it gone below 20, this would
+    // not be 30.
+    press(&session, &Action::OpacityDown, 5);
+    press(&session, &Action::OpacityUp, 1);
+    drawn(&session, "blue", Some(30));
+    // And up past opaque, then down one.
+    press(&session, &Action::OpacityUp, 9);
+    press(&session, &Action::OpacityDown, 1);
+    drawn(&session, "blue", Some(90));
+
+    press(&session, &Action::OpacityReset, 1);
+    drawn(&session, "blue", None);
+    let shot = host.capture(ShotTarget::Output(None)).expect("a picture");
+    assert_eq!(pixel(&shot, blue.x0 + 10.0, blue.y0 + 10.0), rgba(BLUE));
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_keys_step_from_the_applications_rule_and_reset_goes_back_to_it() {
+    let session = Session::start("opacity-keys-rule", see_through(ruled("blue", 50)));
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_coloured(&qh, "blue", "blue", BLUE);
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    drawn(&session, "blue", Some(50));
+
+    press(&session, &Action::OpacityDown, 1);
+    drawn(&session, "blue", Some(40));
+    press(&session, &Action::OpacityReset, 1);
+    drawn(&session, "blue", Some(50));
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_keys_leave_a_fullscreen_window_alone_and_what_they_set_returns_after_it() {
+    let session = Session::start("opacity-keys-fullscreen", see_through(Opacity::default()));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.open_coloured(&qh, "blue", "blue", BLUE);
+    until(&mut queue, &mut desk, |desk| desk.task("blue").is_some());
+    press(&session, &Action::OpacityDown, 6);
+    drawn(&session, "blue", Some(40));
+
+    desk.task("blue")
+        .expect("a known window")
+        .handle
+        .set_fullscreen(None);
+    queue.flush().expect("sent");
+    session.wait_for(|facts| {
+        let blue = surface(facts, "blue");
+        (blue.geometry.x0, blue.geometry.y0) == (0.0, 0.0) && blue.drawn_opacity.is_none()
+    });
+    // Unseen while it is fullscreen, so not taken.
+    press(&session, &Action::OpacityDown, 2);
+
+    desk.task("blue")
+        .expect("a known window")
+        .handle
+        .unset_fullscreen();
+    queue.flush().expect("sent");
+    drawn(&session, "blue", Some(40));
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn what_the_keys_set_goes_with_the_tab_group_and_with_both_tabs_apart() {
+    let session = Session::start("opacity-tabs", see_through(Opacity::default()));
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_coloured(&qh, "orange", "orange", ORANGE);
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    desk.open_coloured(&qh, "blue", "blue", BLUE);
+    until(&mut queue, &mut desk, |desk| desk.drawn == 2);
+    session.wait_for(|facts| facts.surfaces().iter().filter(|s| s.mapped).count() == 2);
+
+    // Blue, focused, joins orange's group in front, and is made fainter.
+    session.perform(Action::TabWithPrevious);
+    session.wait_for(|facts| !surface(facts, "orange").mapped);
+    press(&session, &Action::OpacityDown, 5);
+    drawn(&session, "blue", Some(50));
+
+    // Orange comes forward into the group's place, and its look.
+    session.perform(Action::CycleTab { forward: true });
+    let facts = drawn(&session, "orange", Some(50));
+    assert!(!surface(&facts, "blue").mapped, "blue is behind it");
+
+    // Apart, each keeps it: the one detached, and the one taking its place.
+    session.perform(Action::DetachTab);
+    let facts = session.wait_for(|facts| facts.surfaces().iter().filter(|s| s.mapped).count() == 2);
+    assert_eq!(surface(&facts, "orange").drawn_opacity, Some(50));
+    assert_eq!(surface(&facts, "blue").drawn_opacity, Some(50));
 
     session.stop((desk, queue));
 }
