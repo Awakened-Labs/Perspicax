@@ -1177,6 +1177,92 @@ fn with_nobody_at_the_seat_an_x11_window_asking_for_fullscreen_stays_as_placed_a
     x11.stop();
 }
 
+/// Issue #90: a window that maps already asking to be fullscreen -- set in
+/// its own `_NET_WM_STATE` before it maps, as EWMH lets a withdrawn window
+/// and as Wine does for a game that starts fullscreen -- opens filling its
+/// monitor. And it is still told it is fullscreen once it has the keyboard:
+/// the window manager's first write of `_NET_WM_STATE` used to replace the
+/// request with `FOCUSED` alone.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_that_maps_fullscreen_opens_filling_its_monitor_and_keeps_saying_so_once_focused() {
+    let x11 = X11::start(
+        "x11-maps-fullscreen",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let window = x11.open_with_state("game", &[x11.atoms._NET_WM_STATE_FULLSCREEN]);
+
+    x11.surface_where("game", |surface| {
+        rect_of(surface) == (0.0, 0.0, 1280.0, 1024.0) && surface.frame.is_empty()
+    })
+    .unwrap_or_else(|| panic!("never filled its monitor: {:?}", x11.facts()));
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == window).then_some(())
+    })
+    .expect("never took the keyboard");
+    let state = eventually(Duration::from_secs(5), || {
+        let state = x11.net_wm_state(window);
+        state
+            .contains(&x11.atoms._NET_WM_STATE_FOCUSED)
+            .then_some(state)
+    })
+    .expect("never told it is focused");
+    assert!(
+        state.contains(&x11.atoms._NET_WM_STATE_FULLSCREEN),
+        "told it is focused, and no longer fullscreen: {state:?}"
+    );
+
+    x11.stop();
+}
+
+/// Issue #90: a window that maps already asking to be maximized, both ways,
+/// opens maximized.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_that_maps_maximized_opens_maximized() {
+    let x11 = X11::start(
+        "x11-maps-maximized",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let window = x11.open_with_state(
+        "game",
+        &[
+            x11.atoms._NET_WM_STATE_MAXIMIZED_VERT,
+            x11.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
+        ],
+    );
+
+    x11.surface_where("game", |surface| {
+        surface.frame.len() == 1 && rect_of(surface) == (0.0, 24.0, 1280.0, 1024.0)
+    })
+    .unwrap_or_else(|| panic!("never maximized: {:?}", x11.facts()));
+    let state = x11.net_wm_state(window);
+    assert!(state.contains(&x11.atoms._NET_WM_STATE_MAXIMIZED_VERT));
+    assert!(state.contains(&x11.atoms._NET_WM_STATE_MAXIMIZED_HORZ));
+
+    x11.stop();
+}
+
+/// Issue #90: with nobody at the seat a window that maps asking to be
+/// fullscreen is placed as any other is, framed, at its own size.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn with_nobody_at_the_seat_an_x11_window_that_maps_fullscreen_is_placed_as_any_other() {
+    let x11 = X11::start(
+        "x11-nobody-maps-fullscreen",
+        Backend::headless((1280, 1024)),
+    );
+    x11.open_with_state("game", &[x11.atoms._NET_WM_STATE_FULLSCREEN]);
+
+    let game = x11
+        .surface_where("game", |surface| surface.frame.len() == 4)
+        .unwrap_or_else(|| panic!("never framed: {:?}", x11.facts()));
+    let (x0, y0, x1, y1) = rect_of(&game);
+    assert_eq!((x1 - x0, y1 - y0), (320.0, 200.0), "not at its own size");
+
+    x11.stop();
+}
+
 /// One 1280 by 1024 monitor with two workspaces side by side.
 fn two_workspaces() -> Backend {
     Backend::Headless {

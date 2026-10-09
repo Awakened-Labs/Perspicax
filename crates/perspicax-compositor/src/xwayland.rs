@@ -38,6 +38,17 @@
 //! declined included. A window parked with a workspace that is not showing
 //! is not minimized, and is not told it is.
 //!
+//! A window may also ask before it maps, by writing `_NET_WM_STATE` itself,
+//! as EWMH lets a withdrawn window and as Wine does for a game that starts
+//! fullscreen. Smithay never reads that, and replaces it with its own set the
+//! first time it writes one, when the window is first activated. So [`Side`]
+//! reads it as the window asks to be mapped, before anything is written. That
+//! read is the one X round trip this module makes on the compositor's thread,
+//! against the rule the XRes thread keeps: its answer is needed before the
+//! window is activated, and it is asked beside Smithay's own reads of the
+//! same window, at a moment Xwayland has just sent the request and is not
+//! waiting on us.
+//!
 //! # Started eagerly, not lazily
 //!
 //! Smithay 0.7 creates the X11 sockets and starts the server in one call, with
@@ -79,7 +90,7 @@ use smithay::{
 
 use x11rb::{
     connection::Connection as _,
-    protocol::xproto::{AtomEnum, PropMode},
+    protocol::xproto::{AtomEnum, ConnectionExt as _, PropMode},
     rust_connection::RustConnection,
     wrapper::ConnectionExt as _,
 };
@@ -246,10 +257,32 @@ fn provenance(handle: &LoopHandle<'static, Compositor>, display: u32) -> Option<
 }
 
 x11rb::atom_manager! {
-    /// The atoms the side connection writes.
+    /// The atoms the side connection reads and writes.
     SideAtoms: SideAtomsCookie {
         WM_STATE,
         _NET_WM_STATE,
+        _NET_WM_STATE_FULLSCREEN,
+        _NET_WM_STATE_MAXIMIZED_HORZ,
+        _NET_WM_STATE_MAXIMIZED_VERT,
+    }
+}
+
+/// What a window asked to be by the `_NET_WM_STATE` it set on itself before
+/// it mapped.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Wants {
+    fullscreen: bool,
+    /// Both ways at once: Smithay counts nothing less as maximized.
+    maximized: bool,
+}
+
+impl Wants {
+    fn read(state: &[u32], atoms: &SideAtoms) -> Self {
+        Self {
+            fullscreen: state.contains(&atoms._NET_WM_STATE_FULLSCREEN),
+            maximized: state.contains(&atoms._NET_WM_STATE_MAXIMIZED_HORZ)
+                && state.contains(&atoms._NET_WM_STATE_MAXIMIZED_VERT),
+        }
     }
 }
 
@@ -300,6 +333,27 @@ impl Side {
                 tracing::warn!(%error, "no side X connection: X11 windows are not told they are minimized");
             })
             .ok()
+    }
+
+    /// What `window` asked to be, by the `_NET_WM_STATE` it set before it
+    /// mapped. The one read this connection makes, and so its one round trip
+    /// on the compositor's thread: see the module docs.
+    fn wants(&self, window: u32) -> Wants {
+        let state: Vec<u32> = self
+            .connection
+            .get_property(
+                false,
+                window,
+                self.atoms._NET_WM_STATE,
+                AtomEnum::ATOM,
+                0,
+                32,
+            )
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .and_then(|reply| reply.value32().map(Iterator::collect))
+            .unwrap_or_default();
+        Wants::read(&state, &self.atoms)
     }
 
     /// Tell `window` it is in `state`. Written whatever it was before: the
@@ -500,6 +554,14 @@ impl XwmHandler for Compositor {
     /// placed, tell it where it is, and give it the keyboard, as a new
     /// Wayland window takes it.
     fn map_window_request(&mut self, _xwm: XwmId, x11: X11Surface) {
+        // What it asked to be before it mapped -- a game starting
+        // fullscreen, say -- read before anything writes `_NET_WM_STATE`,
+        // which Smithay replaces with its own set. Only with a person at the
+        // seat, as for a request.
+        let wants = match &self.xwayland.side {
+            Some(side) if self.backend.has_person() => side.wants(x11.window_id()),
+            _ => Wants::default(),
+        };
         if let Err(error) = x11.set_mapped(true) {
             tracing::warn!(%error, "could not map X11 window");
             return;
@@ -516,6 +578,14 @@ impl XwmHandler for Compositor {
         // and the titlebar has to start on screen.
         self.fit_frame(&window);
         self.adopt(&window);
+        // Maximized first, so that leaving fullscreen lands on it; both
+        // before it takes the keyboard, whose activation is the first write.
+        if wants.maximized {
+            self.fill(&window, Fill::Maximized, None);
+        }
+        if wants.fullscreen {
+            self.fill(&window, Fill::Fullscreen, None);
+        }
         if let Some(wm) = self.xwayland.wm.as_mut() {
             let _ = wm.raise_window(&x11);
         }
@@ -924,3 +994,40 @@ impl Compositor {
 }
 
 smithay::delegate_xwayland_shell!(Compositor);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn atoms() -> SideAtoms {
+        SideAtoms {
+            WM_STATE: 1,
+            _NET_WM_STATE: 2,
+            _NET_WM_STATE_FULLSCREEN: 3,
+            _NET_WM_STATE_MAXIMIZED_HORZ: 4,
+            _NET_WM_STATE_MAXIMIZED_VERT: 5,
+        }
+    }
+
+    #[test]
+    fn a_window_maximized_one_way_is_not_asking_to_be_maximized() {
+        let atoms = atoms();
+        assert_eq!(Wants::read(&[5], &atoms), Wants::default());
+        assert_eq!(Wants::read(&[4], &atoms), Wants::default());
+        assert_eq!(
+            Wants::read(&[5, 4], &atoms),
+            Wants {
+                fullscreen: false,
+                maximized: true,
+            }
+        );
+    }
+
+    #[test]
+    fn fullscreen_is_found_anywhere_in_the_list() {
+        let atoms = atoms();
+        assert!(Wants::read(&[7, 9, 3], &atoms).fullscreen);
+        assert!(Wants::read(&[3], &atoms).fullscreen);
+        assert!(!Wants::read(&[], &atoms).fullscreen);
+    }
+}
