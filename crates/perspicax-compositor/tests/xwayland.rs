@@ -472,6 +472,11 @@ const ICONIC: u32 = 3;
 const REMOVE: u32 = 0;
 const ADD: u32 = 1;
 
+/// EWMH's sources of a request: an application, or a pager or taskbar --
+/// which Wine says it is when it asks to be active.
+const APPLICATION: u32 = 1;
+const PAGER: u32 = 2;
+
 /// A panel's colour, ARGB.
 const PANEL: u32 = 0xffee_8822;
 
@@ -607,12 +612,42 @@ impl X11 {
 
     /// Ask for `_NET_WM_STATE` `first` (and `second`) to be added or removed.
     fn ask_state(&self, window: u32, action: u32, first: u32, second: u32) {
-        // Source 1: an application, as Wine says it is.
+        // From an application, as Wine says it is.
         self.ask(
             window,
             self.atoms._NET_WM_STATE,
-            [action, first, second, 1, 0],
+            [action, first, second, APPLICATION, 0],
         );
+    }
+
+    /// Ask for `window` to be made the active one, as EWMH has a client do:
+    /// from `source`, with `stamp` the X time of the input behind the
+    /// request, or 0 for none.
+    fn activate(&self, window: u32, source: u32, stamp: u32) {
+        self.ask(
+            window,
+            self.atoms._NET_ACTIVE_WINDOW,
+            [source, stamp, 0, 0, 0],
+        );
+    }
+
+    /// The X server's time now, as a client learns it: from a change of its
+    /// own to a property, which the server stamps. Changes heard before it
+    /// are forgotten.
+    fn server_time(&self) -> u32 {
+        self.drain();
+        self.x
+            .change_property8(
+                PropMode::APPEND,
+                self.root,
+                AtomEnum::CUT_BUFFE_R0,
+                AtomEnum::STRING,
+                &[],
+            )
+            .expect("change_property8");
+        self.x.flush().expect("flush");
+        self.heard(self.root, AtomEnum::CUT_BUFFE_R0.into())
+            .expect("the server never stamped the change")
     }
 
     /// Ask to be maximized, both ways at once as EWMH has it, or not.
@@ -656,20 +691,24 @@ impl X11 {
     /// Wait for the window manager to change `property` on `window`: the
     /// answer a client like Wine waits for after each request.
     fn answered(&self, window: u32, property: u32) -> bool {
+        self.heard(window, property).is_some()
+    }
+
+    /// The X time `property` on `window` changed at, once it has.
+    fn heard(&self, window: u32, property: u32) -> Option<u32> {
         eventually(Duration::from_secs(5), || {
             loop {
                 match self.x.poll_for_event().ok()? {
                     Some(Event::PropertyNotify(notify))
                         if notify.window == window && notify.atom == property =>
                     {
-                        return Some(());
+                        return Some(notify.time);
                     }
                     Some(_) => {}
                     None => return None,
                 }
             }
         })
-        .is_some()
     }
 
     /// The window's `WM_STATE`, as ICCCM spells it: the state, then the
@@ -763,6 +802,20 @@ impl X11 {
             .expect("the attributes")
             .map_state
             == MapState::VIEWABLE
+    }
+
+    /// Whether the window titled `title` comes to be on top of the others on
+    /// screen, as the facts give them, bottom to top.
+    fn on_top(&self, title: &str) -> bool {
+        eventually(Duration::from_secs(5), || {
+            let facts = self.facts();
+            let top = facts
+                .surfaces()
+                .iter()
+                .rfind(|surface| surface.mapped && surface.title.is_some())?;
+            (top.title.as_deref() == Some(title)).then_some(())
+        })
+        .is_some()
     }
 
     /// The facts of the window titled `title`, once `ready` holds of them.
@@ -1516,6 +1569,175 @@ fn with_nobody_at_the_seat_the_root_names_no_window_once_the_active_one_is_withd
         first,
         "the keyboard moved on with nobody at the seat"
     );
+
+    x11.stop();
+}
+
+/// Issue #91: a window asking to be active with no input behind the request
+/// -- Wine asks so, as a pager, at time 0 -- is raised, but does not take
+/// the keyboard from the window that has it, as an xdg window may not
+/// without a token from the person's input. Answered, by the root naming the
+/// active window again: Wine holds back its idea of which window is in front
+/// until it is.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_asking_to_be_active_without_input_is_raised_but_not_focused() {
+    let x11 = X11::start(
+        "x11-activate-raised",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let first = x11.open("first");
+    let second = x11.open("second");
+    assert!(x11.names_active(second), "the second is not named");
+
+    x11.activate(first, PAGER, 0);
+    assert!(
+        x11.answered(x11.root, x11.atoms._NET_ACTIVE_WINDOW),
+        "never answered"
+    );
+    assert!(x11.on_top("first"), "never raised: {:?}", x11.facts());
+    assert_eq!(
+        x11.focus(),
+        second,
+        "took the keyboard with no input behind it"
+    );
+    assert!(x11.names_active(second));
+
+    x11.stop();
+}
+
+/// Issue #91: a minimized window asking to be active with no input behind
+/// the request -- a Wine program bringing itself back -- comes back, and is
+/// told it is normal again, but does not take the keyboard.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_minimized_x11_window_asking_to_be_active_without_input_comes_back() {
+    let x11 = X11::start(
+        "x11-activate-minimized",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let first = x11.open("first");
+    let second = x11.open("second");
+    x11.perform(Action::Minimize);
+    x11.surface_where("second", |surface| !surface.mapped)
+        .expect("never minimized");
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == first).then_some(())
+    })
+    .expect("the keyboard never went to the first");
+
+    x11.activate(second, PAGER, 0);
+    x11.surface_where("second", |surface| surface.mapped)
+        .unwrap_or_else(|| panic!("never came back: {:?}", x11.facts()));
+    assert_eq!(x11.wm_state(second), [NORMAL, 0]);
+    assert!(x11.on_top("second"), "came back underneath");
+    assert_eq!(
+        x11.focus(),
+        first,
+        "took the keyboard with no input behind it"
+    );
+    assert!(x11.names_active(first));
+
+    x11.stop();
+}
+
+/// Issue #91: a window asking to be active with fresh input behind the
+/// request -- a program the person just started, raising its first
+/// instance -- takes the keyboard, as an xdg window does with a fresh token.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_asking_to_be_active_with_fresh_input_takes_the_keyboard() {
+    let x11 = X11::start(
+        "x11-activate-input",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let first = x11.open("first");
+    let second = x11.open("second");
+    assert!(x11.names_active(second), "the second is not named");
+
+    x11.activate(first, APPLICATION, x11.server_time());
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == first).then_some(())
+    })
+    .unwrap_or_else(|| panic!("never took the keyboard: {:?}", x11.facts()));
+    assert!(x11.on_top("first"), "never raised");
+    assert!(x11.names_active(first), "not named");
+
+    x11.stop();
+}
+
+/// Issue #91: a minimized window on a workspace that is not showing, asking
+/// to be active with no input behind the request, is minimized no longer
+/// but waits on its own workspace: showing that one would take the keyboard
+/// from the window that has it.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_on_a_workspace_not_showing_asking_to_be_active_without_input_waits_there() {
+    let x11 = X11::start("x11-activate-elsewhere", two_workspaces().with_person());
+    let window = x11.open("game");
+    x11.perform(Action::Minimize);
+    x11.surface_where("game", |surface| !surface.mapped)
+        .expect("never minimized");
+    x11.perform(Action::Workspace(perspicax_policy::Direction::Right));
+
+    x11.activate(window, PAGER, 0);
+    assert!(x11.answered(window, x11.atoms.WM_STATE), "never told");
+    assert_eq!(x11.wm_state(window), [NORMAL, 0]);
+    x11.surface_where("game", |surface| {
+        !surface.mapped && surface.off_workspace.is_some()
+    })
+    .unwrap_or_else(|| panic!("not left on its own workspace: {:?}", x11.facts()));
+    assert_ne!(
+        x11.focus(),
+        window,
+        "took the keyboard with no input behind it"
+    );
+
+    x11.stop();
+}
+
+/// Issue #91: a window on a workspace that is not showing, asking to be
+/// active with fresh input behind the request, is shown there with the
+/// keyboard, as an xdg window with a fresh token is.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_on_a_workspace_not_showing_asking_to_be_active_with_fresh_input_is_shown() {
+    let x11 = X11::start("x11-activate-shown", two_workspaces().with_person());
+    let window = x11.open("game");
+    x11.perform(Action::Workspace(perspicax_policy::Direction::Right));
+    x11.surface_where("game", |surface| surface.off_workspace.is_some())
+        .expect("never left behind");
+
+    x11.activate(window, APPLICATION, x11.server_time());
+    x11.surface_where("game", |surface| surface.mapped)
+        .unwrap_or_else(|| panic!("its workspace never showed: {:?}", x11.facts()));
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == window).then_some(())
+    })
+    .unwrap_or_else(|| panic!("never took the keyboard: {:?}", x11.facts()));
+
+    x11.stop();
+}
+
+/// Issue #91: with nobody at the seat a window asking to be active stays as
+/// it is, even with input behind the request -- an agent's desk does not
+/// rearrange itself -- and is still answered.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn with_nobody_at_the_seat_an_x11_window_asking_to_be_active_is_answered_and_nothing_moves() {
+    let x11 = X11::start("x11-nobody-activate", Backend::headless((1280, 1024)));
+    let first = x11.open("first");
+    let second = x11.open("second");
+    assert!(x11.names_active(second), "the second is not named");
+
+    x11.activate(first, APPLICATION, x11.server_time());
+    assert!(
+        x11.answered(x11.root, x11.atoms._NET_ACTIVE_WINDOW),
+        "never answered"
+    );
+    assert!(x11.on_top("second"), "an agent's desk rearranged itself");
+    assert_eq!(x11.focus(), second, "an agent's desk moved the keyboard");
+    assert!(x11.names_active(second));
 
     x11.stop();
 }
