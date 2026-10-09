@@ -11,6 +11,11 @@
 //!
 //! A pie is built from the config each time it opens: what it lists is
 //! never older than the installed applications and the folder of icons.
+//!
+//! It is drawn again on every move of the pointer, as its icons grow, but
+//! no faster than the monitor shows it: a picture waits for the compositor
+//! to say it showed the one before, and only the last of what changed
+//! meanwhile is drawn.
 
 use std::path::{Path, PathBuf};
 
@@ -26,7 +31,7 @@ use wayland_client::{QueueHandle, protocol::wl_surface};
 
 use super::{
     App,
-    canvas::{Canvas, whole},
+    canvas::{Canvas, Frames, whole},
     installed::Installed,
 };
 use crate::{
@@ -62,6 +67,12 @@ struct Shown {
     scale: u32,
     /// In the surface's own units, once the compositor has said.
     size: Option<(u32, u32)>,
+    frames: Frames,
+    /// Whether a picture is shown that the compositor has not yet said it
+    /// put on the monitor.
+    waiting: bool,
+    /// Whether what is shown is older than what the pie is.
+    stale: bool,
 }
 
 impl Pies {
@@ -189,30 +200,72 @@ impl Pies {
                 layer: canvas.overlay(qh, &namespace, &output),
                 scale: whole(scale),
                 size: None,
+                frames: Frames::default(),
+                waiting: false,
+                stale: false,
             });
         }
-        self.draw(canvas, kit);
+        self.draw(canvas, kit, qh);
     }
 
     /// Draw the pie on the surface, once the compositor has given it a
-    /// size.
-    fn draw(&mut self, canvas: &mut Canvas, kit: &mut Kit) {
-        let (Some(shown), Some(view)) = (&self.shown, self.state.view()) else {
+    /// size, and not before it has shown the last picture.
+    fn draw(&mut self, canvas: &mut Canvas, kit: &mut Kit, qh: &QueueHandle<App>) {
+        let (Some(shown), Some(view)) = (self.shown.as_mut(), self.state.view()) else {
             return;
         };
         let Some(size) = shown.size else {
             return;
         };
+        if shown.waiting {
+            shown.stale = true;
+            return;
+        }
         let square = view.ring.square();
+        let Kit {
+            fonts,
+            images,
+            palette,
+        } = kit;
+        let text = fonts.get();
+        let scale = shown.scale;
         let started = std::time::Instant::now();
-        canvas.show_clear(
+        // Asked with the picture, so the compositor says when it shows it.
+        let surface = shown.layer.wl_surface();
+        surface.frame(qh, surface.clone());
+        let shown_now = canvas.show_part(
             &shown.layer,
+            &mut shown.frames,
             size,
-            shown.scale,
+            scale,
             (square.x, square.y, square.w, square.h),
-            |picture| paint::pie::paint(&view, picture, shown.scale, &mut kit.images),
+            |picture| paint::pie::paint(&view, picture, scale, text, images, palette),
         );
         tracing::debug!(took = ?started.elapsed(), "the pie was drawn");
+        shown.waiting = shown_now;
+        shown.stale = !shown_now;
+    }
+
+    /// The compositor showed the last picture on `surface`: draw what
+    /// changed since, if anything did.
+    pub(super) fn frame(
+        &mut self,
+        canvas: &mut Canvas,
+        kit: &mut Kit,
+        qh: &QueueHandle<App>,
+        surface: &wl_surface::WlSurface,
+    ) {
+        let Some(shown) = self
+            .shown
+            .as_mut()
+            .filter(|shown| shown.layer.wl_surface() == surface)
+        else {
+            return;
+        };
+        shown.waiting = false;
+        if shown.stale {
+            self.draw(canvas, kit, qh);
+        }
     }
 
     /// The compositor sized the surface: draw the pie on it.
@@ -220,6 +273,7 @@ impl Pies {
         &mut self,
         canvas: &mut Canvas,
         kit: &mut Kit,
+        qh: &QueueHandle<App>,
         layer: &LayerSurface,
         configure: &LayerSurfaceConfigure,
     ) {
@@ -231,7 +285,7 @@ impl Pies {
             return;
         }
         shown.size = Some((width, height));
-        self.draw(canvas, kit);
+        self.draw(canvas, kit, qh);
     }
 
     /// The compositor took the surface away: the monitor went.

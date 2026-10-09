@@ -107,6 +107,12 @@ impl Ring {
         (dx.hypot(dy) >= DEAD * self.radius && self.places > 0).then(|| dy.atan2(dx))
     }
 
+    /// Whether the icons grow with the pointer at `pointer`: whether it is
+    /// out of the dead middle.
+    pub(crate) fn zooms(&self, pointer: Option<(f64, f64)>) -> bool {
+        pointer.and_then(|pointer| self.pointing(pointer)).is_some()
+    }
+
     /// The icon `pointer` points at, spun round `spin` places, if any.
     pub(crate) fn pointed(&self, pointer: (f64, f64), spin: i32) -> Option<usize> {
         let towards = self.pointing(pointer)?;

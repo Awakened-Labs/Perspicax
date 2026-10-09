@@ -169,14 +169,8 @@ impl State {
         let before = (open.picked(), open.levels.len());
         let (then, mut effects) = match event {
             Event::Asked { .. } => unreachable!("handled above"),
-            Event::Motion(at) => {
-                open.pointer = Some(at);
-                (Then::Stay, Vec::new())
-            }
-            Event::Leave => {
-                open.pointer = None;
-                (Then::Stay, Vec::new())
-            }
+            Event::Motion(at) => open.point(Some(at)),
+            Event::Leave => open.point(None),
             Event::Press(at, button) => {
                 open.pointer = Some(at);
                 open.pressed = Some(button);
@@ -225,6 +219,22 @@ impl Open {
     fn ring(&self) -> Ring {
         let places = self.levels.last().map_or(0, |level| level.slots.len());
         Ring::new(places, self.size, self.at, self.area)
+    }
+
+    /// The pointer is at `at` now, or off the pie. The icons grow as it
+    /// turns, so every move out of the dead middle draws them again.
+    fn point(&mut self, at: Option<(f64, f64)>) -> (Then, Vec<Effect>) {
+        let ring = self.ring();
+        let grows = ring.zooms(self.pointer) || ring.zooms(at);
+        self.pointer = at;
+        (
+            Then::Stay,
+            if grows {
+                vec![Effect::Redraw]
+            } else {
+                Vec::new()
+            },
+        )
     }
 
     /// The slot pointed at.
@@ -371,16 +381,22 @@ mod tests {
     }
 
     #[test]
-    fn pointing_picks_by_direction_and_only_a_change_is_drawn() {
+    fn pointing_picks_by_direction_and_only_the_dead_middle_draws_nothing() {
         let mut state = opened();
         assert_eq!(picked(&state), None, "the pointer is not known yet");
         assert_eq!(state.update(Event::Motion(UP)), [Effect::Redraw]);
         assert_eq!(picked(&state), Some("terminal"));
-        assert_eq!(state.update(Event::Motion((961.0, 3.0))), []);
+        // The icons grow as the pointer turns, so a move is drawn.
+        assert_eq!(state.update(Event::Motion((961.0, 3.0))), [Effect::Redraw]);
         state.update(Event::Motion(RIGHT));
         assert_eq!(picked(&state), Some("games"));
-        state.update(Event::Motion((960.0, 500.0)));
+        assert_eq!(
+            state.update(Event::Motion((960.0, 500.0))),
+            [Effect::Redraw]
+        );
         assert_eq!(picked(&state), None, "the dead middle");
+        assert_eq!(state.update(Event::Motion((961.0, 501.0))), []);
+        assert_eq!(state.update(Event::Leave), []);
     }
 
     #[test]
