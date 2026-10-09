@@ -381,13 +381,6 @@ impl Placed {
     }
 
     /// Where `item` is, if the panel holds it.
-    #[cfg_attr(
-        not(any(feature = "menus", test)),
-        expect(
-            dead_code,
-            reason = "where the start menu stands; no menus, no start menu"
-        )
-    )]
     pub(crate) fn item(&self, wanted: Item) -> Option<Rect> {
         self.items
             .iter()

@@ -180,11 +180,8 @@ impl RawPie {
                 if items.is_empty() {
                     return Err(invalid(key, "a pie with nothing in it".to_owned()));
                 }
-                let items = menu::check(items, Vocabulary::Pie).map_err(|refused| {
-                    let (first, below) = refused.at.split_first().unwrap_or((&0, &[]));
-                    let place: String = below.iter().map(|n| format!(".items[{n}]")).collect();
-                    invalid(format!("{key}[{first}]{place}"), refused.why.to_owned())
-                })?;
+                let items = menu::check(items, Vocabulary::Pie)
+                    .map_err(|refused| invalid(refused.key(&key), refused.why.to_owned()))?;
                 Ok((name, items))
             })
             .collect::<Result<_, Error>>()?;

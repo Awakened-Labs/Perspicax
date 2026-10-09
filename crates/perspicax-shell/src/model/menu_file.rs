@@ -27,8 +27,9 @@
 //! would have it.
 //!
 //! The words, and the checking of them, are perspicax-config's
-//! [`menu`](perspicax_config::menu) vocabulary, which a pie is written in
-//! too. What is left here is reading the file and the `~`.
+//! [`menu`](perspicax_config::menu) vocabulary, which `[shell.start-menu]`
+//! and a pie are written in too. What is left here is reading the file, and
+//! the `~`, which the start menu's items go through as well.
 
 use std::path::{Path, PathBuf};
 
@@ -107,10 +108,17 @@ pub(crate) fn parse(text: &str, home: Option<&Path>) -> Result<MenuFile, MenuFil
             why: refused.why,
         }
     })?;
-    Ok(MenuFile {
-        mode: raw.mode,
+    Ok(written(raw.mode, items, home))
+}
+
+/// Items written in the menu vocabulary, already checked, as a menu file's,
+/// going where `mode` says: the menu file's own, or `[shell.start-menu]`'s.
+/// `home` is what `~` stands for.
+pub(crate) fn written(mode: Mode, items: Vec<Item>, home: Option<&Path>) -> MenuFile {
+    MenuFile {
+        mode,
         items: file_items(items, home),
-    })
+    }
 }
 
 /// The checked items, with `~` in each argument as the home folder. The
@@ -154,7 +162,7 @@ fn file_items(items: Vec<Item>, home: Option<&Path>) -> Vec<FileItem> {
 }
 
 /// `word` with a leading `~` as the home folder.
-fn tilde(word: &str, home: Option<&Path>) -> String {
+pub(crate) fn tilde(word: &str, home: Option<&Path>) -> String {
     let Some(home) = home else {
         return word.to_owned();
     };
@@ -254,5 +262,34 @@ mod tests {
             refused("[[items]]\ncolour = 1"),
             MenuFileError::Parse(_)
         ));
+    }
+
+    /// The start menu's items, written in the config, come out as the menu
+    /// file's would, `~` and all.
+    #[test]
+    fn a_menu_written_in_the_config_reads_as_a_menu_file_does() {
+        let items = r#"
+            { label = "Terminal", exec = ["foot", "-D", "~/code"] },
+            { app = "firefox" },
+            { label = "More", items = [{ applications = true }] },
+            { separator = true },
+            { session = true },
+        "#;
+        let home = Path::new("/home/someone");
+        let in_a_file = parse(&format!("items = [{items}]"), Some(home)).unwrap();
+        let shell = perspicax_config::shell(
+            &format!("[shell.start-menu]\nitems = [{items}]"),
+            perspicax_config::ShellBuilt::FULL,
+        )
+        .unwrap();
+        let start_menu = shell.start_menu.unwrap();
+        assert_eq!(
+            written(start_menu.mode, start_menu.items, Some(home)),
+            in_a_file
+        );
+        let FileItem::Run { run, .. } = &in_a_file.items[0] else {
+            panic!("a program");
+        };
+        assert_eq!(run.argv, ["foot", "-D", "/home/someone/code"]);
     }
 }

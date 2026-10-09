@@ -27,7 +27,7 @@ use std::{
 };
 
 use accesskit::{Action, ActionHandler, ActionRequest};
-use perspicax_config::Shell;
+use perspicax_config::{Shell, start_menu::Search};
 use smithay_client_toolkit::{
     output::OutputState,
     reexports::calloop::channel::Sender,
@@ -53,7 +53,7 @@ use crate::{
         fs::Disk,
         image,
         menu::{self, Session},
-        menu_file,
+        menu_file::{self, MenuFile},
     },
     paint::{self, Kit, text::Fonts},
     update::{Effect, Event, State},
@@ -87,6 +87,11 @@ pub(super) struct Menus {
 struct Settings {
     /// Found from what the file says.
     menu_file: Option<PathBuf>,
+    /// The start menu's items, as `[shell.start-menu]` writes them, with `~`
+    /// as the home folder.
+    start_menu: Option<MenuFile>,
+    /// What typing in the start menu finds.
+    search: Search,
     /// The rest as the file says it: whether there is a root menu, and the
     /// ways to leave and what each runs.
     shell: Shell,
@@ -236,7 +241,13 @@ impl Menus {
         let session = Session::of(&self.settings.shell, self.log_out, &Disk, &self.path);
         self.state.set_menus(
             menu::root(apps, file.as_ref(), &session),
-            menu::start(apps, &session),
+            menu::start(apps, self.settings.start_menu.as_ref(), &session),
+            menu::finds(
+                apps,
+                self.settings.start_menu.as_ref(),
+                self.settings.search,
+                &session,
+            ),
         );
         tracing::debug!(applications = apps.len(), "the menus were built");
         self.built_from = Some(now);
@@ -402,6 +413,14 @@ impl Settings {
                 .menu_file
                 .as_deref()
                 .map(|written| image::locate(written, config, home.as_deref())),
+            start_menu: shell.start_menu.as_ref().map(|start_menu| {
+                menu_file::written(start_menu.mode, start_menu.items.clone(), home.as_deref())
+            }),
+            search: shell
+                .start_menu
+                .as_ref()
+                .map(|start_menu| start_menu.search)
+                .unwrap_or_default(),
             shell: shell.clone(),
         }
     }

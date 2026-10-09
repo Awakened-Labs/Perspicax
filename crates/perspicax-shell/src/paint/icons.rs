@@ -63,6 +63,16 @@ impl Images {
             .as_ref()
     }
 
+    /// Forget that icon `name` could not be found or read, at every size,
+    /// so that it is looked for again; whether it could not.
+    #[cfg(feature = "panel")]
+    pub(crate) fn forget_failed(&mut self, name: &str) -> bool {
+        let before = self.read.len();
+        self.read
+            .retain(|(read, _), image| read != name || image.is_some());
+        self.read.len() != before
+    }
+
     /// The image of icon `name`, as [`Images::get`] finds it, but looked for
     /// first in `folder`, a program's own folder of icons, if it has one:
     /// among its loose images, and in its copy of each theme's folders.

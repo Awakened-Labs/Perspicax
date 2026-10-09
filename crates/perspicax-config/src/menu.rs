@@ -9,8 +9,9 @@
 //! ]
 //! ```
 //!
-//! The menu file (`[shell] menu-file`) and a pie (`[shell.pie]`) share them,
-//! so a menu is written one way whichever menu it is. Each item is exactly
+//! The menu file (`[shell] menu-file`), the start menu (`[shell.start-menu]`)
+//! and a pie (`[shell.pie]`) share them, so a menu is written one way
+//! whichever menu it is. Each item is exactly
 //! one kind of thing, and each [`Vocabulary`] admits its own kinds: a menu
 //! also has `separator`, `applications` (the applications by group) and
 //! `session` (the ways to leave); a pie has `running`, where the running
@@ -22,7 +23,8 @@
 
 use serde::Deserialize;
 
-/// Where a menu file's items go.
+/// Where a hand-written menu's items go: the menu file's in the root menu,
+/// `[shell.start-menu]`'s in the start menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Mode {
@@ -36,7 +38,8 @@ pub enum Mode {
 /// Which menu the items are for, and so which kinds of item it admits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Vocabulary {
-    /// The menu file's: separators, the applications, the ways to leave.
+    /// A menu's, the menu file's and the start menu's: separators, the
+    /// applications, the ways to leave.
     Menu,
     /// A pie's: `running`, once, in its first ring.
     Pie,
@@ -79,6 +82,16 @@ pub enum Item {
 pub struct Refused {
     pub at: Vec<usize>,
     pub why: &'static str,
+}
+
+impl Refused {
+    /// The key of the item refused, in the list written under `list`:
+    /// `list[2].items[1]` for the first item of the second.
+    pub(crate) fn key(&self, list: &str) -> String {
+        let (first, below) = self.at.split_first().unwrap_or((&0, &[]));
+        let place: String = below.iter().map(|n| format!(".items[{n}]")).collect();
+        format!("{list}[{first}]{place}")
+    }
 }
 
 /// One item as written.

@@ -15,7 +15,8 @@
 //! choosing an item in it runs the item's program. In the classic profile a
 //! panel along the bottom of each monitor keeps windows above it, and its
 //! start button, or the start menu's key, opens the start menu standing on
-//! it. Its taskbar lists the windows, and a click on one brings it forward,
+//! it. The start menu holds, and its button wears, what `[shell.start-menu]`
+//! says, and a save changes them while the shell runs. Its taskbar lists the windows, and a click on one brings it forward,
 //! puts it away or closes it; its pager shows the workspaces, follows a
 //! switch, and switches on a click. Its tray shows a program's status icon
 //! once the program registers it, asks the program for what a click on it
@@ -1326,6 +1327,134 @@ fn an_agents_click_on_the_start_button_opens_it() {
     session.wait_for(|facts| menu(facts).is_none());
 
     shell.stop_with(session);
+}
+
+/// The start menu `[shell.start-menu]` writes is what the start button
+/// opens: here one item and no search line. One saved while the shell runs
+/// is what it opens next.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_start_menu_written_in_the_config_is_what_its_button_opens_and_a_save_changes_it() {
+    use std::time::{Duration, Instant};
+
+    let session = Session::start("shell-start-menu", Backend::headless((1280, 800)));
+    let marker =
+        std::env::temp_dir().join(format!("perspicax-shell-start-menu-{}", std::process::id()));
+    std::fs::remove_file(&marker).ok();
+    let config = |search: &str| {
+        format!(
+            "{CLASSIC}[shell.start-menu]\nmode = \"replace\"\nsearch = \"{search}\"\n\
+             items = [{{ label = \"Marker\", exec = [\"touch\", {:?}] }}]\n",
+            marker.display().to_string()
+        )
+    };
+    let shell = Shell::start(&session, "start-menu", &config("none"));
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let start = (PANEL_HEIGHT / 2.0, PANEL_HEIGHT / 2.0);
+
+    click(&session, panel, start, PointerButton::Left);
+    let facts = session.wait_for(|facts| menu(facts).is_some());
+    let (surface, _, _, opaque) = menu(&facts).expect("waited for");
+    let one_line = opaque[0].y1 - opaque[0].y0;
+    // One line and no search line, so the menu's middle is the line's.
+    click(&session, surface, middle(opaque[0]), PointerButton::Left);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(Instant::now() < deadline, "the item's program ran");
+        thread::sleep(Duration::from_millis(20));
+    }
+    session.wait_for(|facts| menu(facts).is_none());
+
+    // Saved with a search line: the menu is that much taller once the
+    // shell has read it, which it does when the menu next opens.
+    shell.rewrite(&config("menu"));
+    session.command(Command::ReconfigureShell);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        click(&session, panel, start, PointerButton::Left);
+        let facts = session.wait_for(|facts| menu(facts).is_some());
+        let (_, _, _, opaque) = menu(&facts).expect("waited for");
+        let tall = opaque[0].y1 - opaque[0].y0;
+        click(&session, panel, start, PointerButton::Left);
+        session.wait_for(|facts| menu(facts).is_none());
+        if tall > one_line {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the saved start menu has its search line"
+        );
+    }
+
+    shell.stop_with(session);
+    std::fs::remove_file(marker).ok();
+}
+
+/// The start button wears Perspicax's mark, or the icon `[shell.start-menu]`
+/// names once it can be read. A file mended after it failed is read on the
+/// next save, though the config saved is the same, and a name the icon
+/// theme lacks is the mark again.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_start_button_wears_the_mark_or_the_icon_the_config_names() {
+    // The mark's inks; and in it, 22 pixels square in the middle of the
+    // button at the panel's left end, the middle of its pane and a point on
+    // the left side of its run.
+    const SKY: [u8; 4] = [0x7b, 0xae, 0xcd, 0xff];
+    const TERRACOTTA: [u8; 4] = [0xc0, 0x6a, 0x3c, 0xff];
+    const PANE: (usize, usize) = (20, 780);
+    const RUN: (usize, usize) = (10, 780);
+    const GREEN: [u8; 4] = [0x22, 0x88, 0x44, 0xff];
+    const DIM: [u8; 4] = [0x10, 0x20, 0x30, 0xff];
+
+    let session = Session::start("shell-start-icon", Backend::headless((1280, 800)));
+    let icon = std::env::temp_dir().join(format!(
+        "perspicax-shell-start-icon-{}.svg",
+        std::process::id()
+    ));
+    std::fs::remove_file(&icon).ok();
+    let shell = Shell::start(&session, "start-icon", CLASSIC);
+    session.wait_for(|facts| panels(facts).len() == 1);
+    until_colour(&session, PANE, SKY);
+    assert_eq!(colour_at(&session, RUN.0, RUN.1), TERRACOTTA);
+
+    // An icon not there yet, saved with another bar colour: once the bar is
+    // that colour, the panel has been drawn since, and the icon looked for.
+    let named = format!(
+        "{CLASSIC}[theme.palette]\npanel = \"#102030\"\n\
+         [shell.start-menu]\nicon = {:?}\n",
+        icon.display().to_string()
+    );
+    shell.rewrite(&named);
+    session.command(Command::ReconfigureShell);
+    until_colour(&session, (640, 790), DIM);
+    assert_eq!(
+        colour_at(&session, PANE.0, PANE.1),
+        SKY,
+        "the mark meanwhile"
+    );
+
+    std::fs::write(
+        &icon,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#228844"/></svg>"##,
+    )
+    .expect("an icon");
+    shell.rewrite(&named);
+    session.command(Command::ReconfigureShell);
+    until_colour(&session, PANE, GREEN);
+    assert_eq!(colour_at(&session, RUN.0, RUN.1), GREEN, "all of it");
+
+    shell.rewrite(&format!(
+        "{CLASSIC}[shell.start-menu]\nicon = \"no-such-icon\"\n"
+    ));
+    session.command(Command::ReconfigureShell);
+    until_colour(&session, PANE, SKY);
+    assert_eq!(colour_at(&session, RUN.0, RUN.1), TERRACOTTA);
+
+    shell.stop_with(session);
+    std::fs::remove_file(icon).ok();
 }
 
 #[cfg(feature = "capture")]
