@@ -85,7 +85,7 @@ use smithay::{
     desktop::Window,
     output::Output,
     reexports::{
-        calloop::{LoopHandle, channel},
+        calloop::{LoopHandle, RegistrationToken, channel},
         wayland_server::{Client, Resource as _, protocol::wl_output::WlOutput},
     },
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
@@ -141,6 +141,9 @@ pub(crate) struct Xwayland {
     /// The connection that tells windows what Smithay's window manager does
     /// not. See [`Side`].
     side: Option<Side>,
+    /// The source that started Xwayland, which holds its display. See
+    /// [`stop`].
+    source: Option<RegistrationToken>,
 }
 
 /// Start Xwayland, and become its window manager once it is ready. `ready`
@@ -164,7 +167,7 @@ pub(crate) fn start(
 
     let wm_handle = handle.clone();
     let mut ready = Some(ready);
-    handle
+    let source = handle
         .insert_source(xwayland, move |event, (), state| match event {
             XWaylandEvent::Ready {
                 x11_socket,
@@ -198,8 +201,21 @@ pub(crate) fn start(
             }
         })
         .map_err(|error| Error::EventLoop(error.to_string()))?;
+    state.xwayland.source = Some(source);
     state.xwayland_shell = Some(XWaylandShellState::new::<Compositor>(&state.display));
     Ok(())
+}
+
+/// Give Xwayland's display back as the compositor stops, rather than when
+/// the process ends. Smithay's window manager keeps a handle on the loop in
+/// a source of its own, so the loop outlives the compositor, and with it
+/// whatever its sources hold -- Xwayland's among them, holding the display's
+/// lock. A process that runs compositors one after another, as the tests
+/// do, would otherwise run out of displays.
+pub(crate) fn stop(state: &mut Compositor, handle: &LoopHandle<'static, Compositor>) {
+    if let Some(source) = state.xwayland.source.take() {
+        handle.remove(source);
+    }
 }
 
 /// Xwayland's pid, from the kernel's process tree.
