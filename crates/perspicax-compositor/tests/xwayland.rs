@@ -18,11 +18,19 @@ use std::{
 };
 
 use perspicax_compositor::{Backend, Command, Config, Error, Facts, Requests, Stop};
+use perspicax_index::SurfaceFacts;
 use perspicax_node::{Origin, X11Basis};
 use perspicax_policy::Action;
 use x11rb::{
     connection::Connection as _,
-    protocol::xproto::{AtomEnum, ConnectionExt as _, CreateWindowAux, PropMode, WindowClass},
+    protocol::{
+        Event,
+        xproto::{
+            AtomEnum, ClientMessageEvent, ConnectionExt as _, CreateWindowAux, EventMask, MapState,
+            PropMode, WindowClass,
+        },
+    },
+    rust_connection::RustConnection,
     wrapper::ConnectionExt as _,
 };
 
@@ -427,4 +435,428 @@ fn a_new_x11_window_takes_the_keyboard_when_it_maps() {
         .join()
         .expect("the compositor thread panicked")
         .expect("the compositor failed");
+}
+
+x11rb::atom_manager! {
+    /// The atoms an X11 window's state is asked for and told in.
+    Atoms: AtomsCookie {
+        WM_STATE,
+        WM_CHANGE_STATE,
+        _NET_WM_STATE,
+        _NET_WM_STATE_FULLSCREEN,
+        _NET_WM_STATE_MAXIMIZED_HORZ,
+        _NET_WM_STATE_MAXIMIZED_VERT,
+        _NET_WM_STATE_HIDDEN,
+        _NET_WM_STATE_FOCUSED,
+    }
+}
+
+/// ICCCM's `WM_STATE`, as a window manager writes it.
+const NORMAL: u32 = 1;
+const ICONIC: u32 = 3;
+
+/// A compositor with Xwayland, a person at it or not, and this test's own X
+/// connection to it: an X client asking for states the way Wine does, and
+/// reading back what the window manager told it.
+struct X11 {
+    facts: Facts,
+    requests: Requests,
+    stop: Stop,
+    compositor: thread::JoinHandle<Result<(), Error>>,
+    x: RustConnection,
+    root: u32,
+    white: u32,
+    atoms: Atoms,
+}
+
+impl X11 {
+    fn start(backend: Backend) -> Self {
+        let facts = Facts::new();
+        let requests = Requests::new();
+        let stop = Stop::new();
+        let compositor = {
+            let (facts, requests, stop) = (facts.clone(), requests.clone(), stop.clone());
+            thread::spawn(move || {
+                let config = Config {
+                    backend,
+                    spawn: Vec::new(),
+                    env: Vec::new(),
+                    run_for: Some(Duration::from_secs(60)),
+                    config: None,
+                    socket: None,
+                    xwayland: true,
+                };
+                perspicax_compositor::run(&config, &facts, &requests, &stop)
+            })
+        };
+        let display = eventually(Duration::from_secs(15), || facts.x11_display())
+            .expect("Xwayland never became ready");
+        let (x, screen) = x11rb::connect(Some(&format!(":{display}"))).expect("an X connection");
+        let root = x.setup().roots[screen].root;
+        let white = x.setup().roots[screen].white_pixel;
+        let atoms = Atoms::new(&x).expect("intern").reply().expect("the atoms");
+        Self {
+            facts,
+            requests,
+            stop,
+            compositor,
+            x,
+            root,
+            white,
+            atoms,
+        }
+    }
+
+    /// A 320 by 200 window titled `title`, mapped, once the compositor has
+    /// it on screen. Its property changes are heard, so an answer can be
+    /// waited for.
+    fn open(&self, title: &str) -> u32 {
+        self.open_with_state(title, &[])
+    }
+
+    /// The same, with `_NET_WM_STATE` set to `state` before it maps, as a
+    /// client starting fullscreen sets it: EWMH lets a withdrawn window write
+    /// its own.
+    fn open_with_state(&self, title: &str, state: &[u32]) -> u32 {
+        let window = self.x.generate_id().expect("an X id");
+        self.x
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                window,
+                self.root,
+                0,
+                0,
+                320,
+                200,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new()
+                    .background_pixel(self.white)
+                    .event_mask(EventMask::PROPERTY_CHANGE),
+            )
+            .expect("create_window");
+        self.x
+            .change_property8(
+                PropMode::REPLACE,
+                window,
+                AtomEnum::WM_NAME,
+                AtomEnum::STRING,
+                title.as_bytes(),
+            )
+            .expect("WM_NAME");
+        if !state.is_empty() {
+            self.x
+                .change_property32(
+                    PropMode::REPLACE,
+                    window,
+                    self.atoms._NET_WM_STATE,
+                    AtomEnum::ATOM,
+                    state,
+                )
+                .expect("_NET_WM_STATE");
+        }
+        self.x.map_window(window).expect("map_window");
+        self.x.flush().expect("flush");
+        self.surface_where(title, |surface| surface.mapped)
+            .unwrap_or_else(|| panic!("{title} never mapped: {:?}", self.facts.read()));
+        window
+    }
+
+    /// Ask, as a client does: a client message to the root, which the window
+    /// manager redirects to itself.
+    fn ask(&self, window: u32, kind: u32, data: [u32; 5]) {
+        self.drain();
+        let event = ClientMessageEvent::new(32, window, kind, data);
+        self.x
+            .send_event(
+                false,
+                self.root,
+                EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+                event,
+            )
+            .expect("send_event");
+        self.x.flush().expect("flush");
+    }
+
+    /// Ask to be iconified or made normal, with ICCCM's `WM_CHANGE_STATE`.
+    fn change_state(&self, window: u32, state: u32) {
+        self.ask(window, self.atoms.WM_CHANGE_STATE, [state, 0, 0, 0, 0]);
+    }
+
+    /// Forget the property changes heard so far.
+    fn drain(&self) {
+        while let Ok(Some(_)) = self.x.poll_for_event() {}
+    }
+
+    /// Wait for the window manager to change `property` on `window`: the
+    /// answer a client like Wine waits for after each request.
+    fn answered(&self, window: u32, property: u32) -> bool {
+        eventually(Duration::from_secs(5), || {
+            loop {
+                match self.x.poll_for_event().ok()? {
+                    Some(Event::PropertyNotify(notify))
+                        if notify.window == window && notify.atom == property =>
+                    {
+                        return Some(());
+                    }
+                    Some(_) => {}
+                    None => return None,
+                }
+            }
+        })
+        .is_some()
+    }
+
+    /// The window's `WM_STATE`, as ICCCM spells it: the state, then the
+    /// icon window.
+    fn wm_state(&self, window: u32) -> Vec<u32> {
+        self.x
+            .get_property(
+                false,
+                window,
+                self.atoms.WM_STATE,
+                self.atoms.WM_STATE,
+                0,
+                2,
+            )
+            .expect("get_property")
+            .reply()
+            .expect("WM_STATE")
+            .value32()
+            .map(Iterator::collect)
+            .unwrap_or_default()
+    }
+
+    /// The window's `_NET_WM_STATE`.
+    fn net_wm_state(&self, window: u32) -> Vec<u32> {
+        self.x
+            .get_property(
+                false,
+                window,
+                self.atoms._NET_WM_STATE,
+                AtomEnum::ATOM,
+                0,
+                32,
+            )
+            .expect("get_property")
+            .reply()
+            .expect("_NET_WM_STATE")
+            .value32()
+            .map(Iterator::collect)
+            .unwrap_or_default()
+    }
+
+    /// The window the X server sends keys to.
+    fn focus(&self) -> u32 {
+        self.x
+            .get_input_focus()
+            .expect("get_input_focus")
+            .reply()
+            .expect("the focus")
+            .focus
+    }
+
+    /// Whether the X server still shows the window: its frame is mapped.
+    fn viewable(&self, window: u32) -> bool {
+        self.x
+            .get_window_attributes(window)
+            .expect("get_window_attributes")
+            .reply()
+            .expect("the attributes")
+            .map_state
+            == MapState::VIEWABLE
+    }
+
+    /// The facts of the window titled `title`, once `ready` holds of them.
+    fn surface_where(
+        &self,
+        title: &str,
+        ready: impl Fn(&SurfaceFacts) -> bool,
+    ) -> Option<SurfaceFacts> {
+        eventually(Duration::from_secs(10), || {
+            self.facts
+                .read()
+                .surfaces()
+                .iter()
+                .find(|surface| surface.title.as_deref() == Some(title) && ready(surface))
+                .cloned()
+        })
+    }
+
+    fn perform(&self, action: Action) {
+        self.requests
+            .command(Command::Perform(action))
+            .expect("the compositor is listening");
+    }
+
+    fn stop(self) {
+        self.stop.request();
+        self.compositor
+            .join()
+            .expect("the compositor thread panicked")
+            .expect("the compositor failed");
+    }
+}
+
+/// Issue #90: Wine minimizes a window by asking with `WM_CHANGE_STATE`, and
+/// waits to be told it is iconic before it does anything more with it. The
+/// window is minimized and told, with `WM_STATE` and `_NET_WM_STATE_HIDDEN`.
+/// Its frame stays mapped, so Xwayland keeps its surface: minimized is a
+/// state here, not an unmapping.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_that_iconifies_itself_is_minimized_and_told_it_is_iconic() {
+    let x11 = X11::start(Backend::headless((1280, 1024)).with_person());
+    let window = x11.open("game");
+
+    x11.change_state(window, ICONIC);
+    assert!(
+        x11.answered(window, x11.atoms.WM_STATE),
+        "never told it is iconic"
+    );
+    x11.surface_where("game", |surface| {
+        !surface.mapped && surface.off_workspace.is_none()
+    })
+    .unwrap_or_else(|| panic!("never minimized: {:?}", x11.facts.read()));
+    assert_eq!(x11.wm_state(window), [ICONIC, 0]);
+    assert!(
+        x11.net_wm_state(window)
+            .contains(&x11.atoms._NET_WM_STATE_HIDDEN)
+    );
+    assert!(x11.viewable(window), "minimized by state, not unmapped");
+
+    x11.stop();
+}
+
+/// Issue #90: a window minimized by the person, then brought back, is told
+/// both: iconic, then normal, which is the change Wine restores a window on.
+/// Brought back, it takes the keyboard -- the surface Xwayland gave it is
+/// still its own.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_minimized_x11_window_is_told_it_is_normal_and_takes_the_keyboard_when_restored() {
+    let x11 = X11::start(Backend::headless((1280, 1024)).with_person());
+    let first = x11.open("first");
+    let second = x11.open("second");
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == second).then_some(())
+    })
+    .expect("the second never took the keyboard");
+
+    x11.drain();
+    x11.perform(Action::Minimize);
+    assert!(x11.answered(second, x11.atoms.WM_STATE), "never told");
+    assert_eq!(x11.wm_state(second), [ICONIC, 0]);
+    assert!(
+        x11.net_wm_state(second)
+            .contains(&x11.atoms._NET_WM_STATE_HIDDEN)
+    );
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == first).then_some(())
+    })
+    .expect("the keyboard never went to the window left on screen");
+
+    x11.drain();
+    x11.perform(Action::CycleFocus);
+    assert!(x11.answered(second, x11.atoms.WM_STATE), "never told");
+    assert_eq!(x11.wm_state(second), [NORMAL, 0]);
+    assert!(
+        !x11.net_wm_state(second)
+            .contains(&x11.atoms._NET_WM_STATE_HIDDEN)
+    );
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == second).then_some(())
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "restored, it never took the keyboard: {:?}",
+            x11.facts.read()
+        )
+    });
+
+    x11.stop();
+}
+
+/// Issue #90: a window on a workspace that is not showing is not minimized,
+/// and is not told it is: Wine would minimize a game merely because its
+/// workspace is not the one in front.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_on_a_workspace_not_showing_stays_normal() {
+    let x11 = X11::start(two_workspaces().with_person());
+    let window = x11.open("game");
+
+    x11.perform(Action::Workspace(perspicax_policy::Direction::Right));
+    x11.surface_where("game", |surface| surface.off_workspace.is_some())
+        .unwrap_or_else(|| panic!("never left behind: {:?}", x11.facts.read()));
+    assert_eq!(x11.wm_state(window), [NORMAL, 0]);
+    assert!(
+        !x11.net_wm_state(window)
+            .contains(&x11.atoms._NET_WM_STATE_HIDDEN)
+    );
+
+    x11.stop();
+}
+
+/// Issue #90: a minimized window asking to be normal again, with
+/// `WM_CHANGE_STATE`, is brought back and told so.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_asking_to_be_normal_again_is_restored() {
+    let x11 = X11::start(Backend::headless((1280, 1024)).with_person());
+    let window = x11.open("game");
+    x11.change_state(window, ICONIC);
+    x11.surface_where("game", |surface| !surface.mapped)
+        .expect("never minimized");
+
+    x11.change_state(window, NORMAL);
+    assert!(x11.answered(window, x11.atoms.WM_STATE), "never told");
+    x11.surface_where("game", |surface| surface.mapped)
+        .unwrap_or_else(|| panic!("never restored: {:?}", x11.facts.read()));
+    assert_eq!(x11.wm_state(window), [NORMAL, 0]);
+
+    x11.stop();
+}
+
+/// Issue #90: with nobody at the seat a window asking to be iconified stays
+/// as it is -- an agent's desk does not rearrange itself -- and is still
+/// answered, with the state it is in: Wine makes no other change to a window
+/// while a request of its is unanswered.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn with_nobody_at_the_seat_an_x11_window_that_iconifies_itself_stays_and_is_told_so() {
+    let x11 = X11::start(Backend::headless((1280, 1024)));
+    let window = x11.open("game");
+
+    x11.change_state(window, ICONIC);
+    assert!(x11.answered(window, x11.atoms.WM_STATE), "never answered");
+    assert_eq!(x11.wm_state(window), [NORMAL, 0]);
+    assert!(
+        x11.facts
+            .read()
+            .surfaces()
+            .iter()
+            .any(|surface| surface.title.as_deref() == Some("game") && surface.mapped),
+        "an agent's desk rearranged itself"
+    );
+
+    x11.stop();
+}
+
+/// One 1280 by 1024 monitor with two workspaces side by side.
+fn two_workspaces() -> Backend {
+    Backend::Headless {
+        outputs: vec![perspicax_compositor::Virtual::numbered(1, (1280, 1024))],
+        workspaces: perspicax_policy::Shape {
+            mode: perspicax_policy::Mode::Spanning,
+            grid: perspicax_policy::Grid {
+                columns: 2,
+                rows: 1,
+                wrap: false,
+            },
+        },
+        access: perspicax_policy::Access::open(),
+        person: false,
+    }
 }

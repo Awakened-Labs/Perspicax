@@ -24,6 +24,20 @@
 //! the compositor thread would block it on Xwayland, and Xwayland may at that
 //! moment be blocked on a Wayland round trip to us.
 //!
+//! # Telling a window its state
+//!
+//! An X client asks for a state -- minimized, here -- and then waits to be
+//! told it has it: Wine changes nothing more about a window until the window
+//! manager answers, and restores a minimized window only when its `WM_STATE`
+//! goes from iconic back to normal (issue #90). Smithay writes `WM_STATE`
+//! only by mapping or unmapping a window's frame, and unmapping it would cost
+//! the window the surface Xwayland gave it. So a minimized window stays
+//! mapped, as far as X is concerned, and a second connection of the
+//! compositor's own, [`Side`], tells it `WM_STATE` instead; Smithay's
+//! `_NET_WM_STATE_HIDDEN` goes beside it. Every request is answered, the ones
+//! declined included. A window parked with a workspace that is not showing
+//! is not minimized, and is not told it is.
+//!
 //! # Started eagerly, not lazily
 //!
 //! Smithay 0.7 creates the X11 sockets and starts the server in one call, with
@@ -61,6 +75,11 @@ use smithay::{
     },
 };
 
+use x11rb::{
+    connection::Connection as _, protocol::xproto::PropMode, rust_connection::RustConnection,
+    wrapper::ConnectionExt as _,
+};
+
 use crate::{Error, framed::Framed, shell, state::Compositor};
 
 /// Everything about the running Xwayland.
@@ -75,6 +94,9 @@ pub(crate) struct Xwayland {
     /// The window that mapped last, while it waits for the surface it takes
     /// the keyboard with. See `map_window_request`.
     awaiting_focus: Option<SurfaceId>,
+    /// The connection that tells windows what Smithay's window manager does
+    /// not. See [`Side`].
+    side: Option<Side>,
 }
 
 /// Start Xwayland, and become its window manager once it is ready. `ready`
@@ -114,6 +136,7 @@ pub(crate) fn start(
                 state.xwayland.server = server_pid(display_number);
                 state.xwayland.client = Some(client.clone());
                 state.xwayland.ask = provenance(&wm_handle, display_number);
+                state.xwayland.side = Side::open(display_number);
                 if let Some(launch) = state.launch.as_mut() {
                     launch.x11_display = Some(display_number);
                 }
@@ -211,6 +234,84 @@ fn provenance(handle: &LoopHandle<'static, Compositor>, display: u32) -> Option<
         .map_err(|error| tracing::warn!(%error, "no XRes thread"))
         .ok()?;
     Some(ask)
+}
+
+x11rb::atom_manager! {
+    /// The atoms the side connection writes.
+    SideAtoms: SideAtomsCookie {
+        WM_STATE,
+    }
+}
+
+/// ICCCM's `WM_STATE`: what the window manager tells a window it has done
+/// with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WmState {
+    Normal,
+    Iconic,
+}
+
+impl WmState {
+    /// As ICCCM numbers it.
+    fn value(self) -> u32 {
+        match self {
+            Self::Normal => 1,
+            Self::Iconic => 3,
+        }
+    }
+}
+
+/// Perspicax's own X connection, beside the window manager's, for what
+/// Smithay's window manager does not write: `WM_STATE` as a window is
+/// minimized and brought back. Smithay writes it only by mapping or
+/// unmapping a window's frame, and unmapping the frame would cost the window
+/// the surface Xwayland gave it. Only writes, so nothing here waits on
+/// Xwayland.
+pub(crate) struct Side {
+    connection: RustConnection,
+    atoms: SideAtoms,
+}
+
+impl Side {
+    /// Connect to `display` and learn the atoms. Without it, X11 windows are
+    /// minimized as before, untold.
+    fn open(display: u32) -> Option<Self> {
+        let opened = x11rb::connect(Some(&format!(":{display}")))
+            .map_err(|error| error.to_string())
+            .and_then(|(connection, _)| {
+                let atoms = SideAtoms::new(&connection)
+                    .map_err(|error| error.to_string())?
+                    .reply()
+                    .map_err(|error| error.to_string())?;
+                Ok(Self { connection, atoms })
+            });
+        opened
+            .map_err(|error| {
+                tracing::warn!(%error, "no side X connection: X11 windows are not told they are minimized");
+            })
+            .ok()
+    }
+
+    /// Tell `window` it is in `state`. Written whatever it was before: the
+    /// write is the answer a client waits for, even when nothing changed.
+    fn set_wm_state(&self, window: u32, state: WmState) {
+        let _ = self.connection.change_property32(
+            PropMode::REPLACE,
+            window,
+            self.atoms.WM_STATE,
+            self.atoms.WM_STATE,
+            &[state.value(), x11rb::NONE],
+        );
+        self.settle();
+    }
+
+    /// Send what was written, then drop what came back for it -- an error
+    /// for a window gone before the write arrived -- which nothing waits for
+    /// and which would otherwise pile up unread.
+    fn settle(&self) {
+        let _ = self.connection.flush();
+        while let Ok(Some(_)) = self.connection.poll_for_event() {}
+    }
 }
 
 /// Where an X11 window's origin is kept, updated when XRes answers.
@@ -562,10 +663,84 @@ impl XwmHandler for Compositor {
     fn disconnected(&mut self, _xwm: XwmId) {
         tracing::warn!("Xwayland's window manager connection closed");
         self.xwayland.wm = None;
+        self.xwayland.side = None;
+    }
+
+    /// An X11 window asking to be minimized: ICCCM's `WM_CHANGE_STATE` to
+    /// iconic, which is how Wine minimizes one. Only with a person at the
+    /// seat, as for a Wayland window. Either way it is answered with the
+    /// state it is now in: Wine changes nothing more about a window while a
+    /// request of its is waiting.
+    fn minimize_request(&mut self, _xwm: XwmId, x11: X11Surface) {
+        let Some(window) = self.x11_window(&x11) else {
+            return;
+        };
+        if self.backend.has_person() && !Self::is_minimized(&window) {
+            self.minimize(&window);
+        } else {
+            self.answer_wm_state(&window, &x11);
+        }
+    }
+
+    /// An X11 window asking to be brought back from minimized. Restored and
+    /// raised, but not given the keyboard: a window may not take that for
+    /// itself, as with an xdg activation no input is behind.
+    fn unminimize_request(&mut self, _xwm: XwmId, x11: X11Surface) {
+        let Some(window) = self.x11_window(&x11) else {
+            return;
+        };
+        if self.backend.has_person() && Self::is_minimized(&window) {
+            self.restore(&window);
+            self.space.raise_element(&window, false);
+            if let Some(wm) = self.xwayland.wm.as_mut() {
+                let _ = wm.raise_window(&x11);
+            }
+            self.backend.redraw();
+            self.publish_facts();
+        } else {
+            self.answer_wm_state(&window, &x11);
+        }
     }
 }
 
 impl Compositor {
+    /// Tell an X11 window it was minimized, or brought back: ICCCM's
+    /// `WM_STATE`, whose change from iconic to normal is what Wine restores a
+    /// window on, and EWMH's `_NET_WM_STATE_HIDDEN`. Its frame stays mapped,
+    /// so the surface Xwayland gave it stays its own.
+    pub(crate) fn x11_minimized(&self, window: &Framed, minimized: bool) {
+        let Some(x11) = window.x11_surface() else {
+            return;
+        };
+        if x11.is_override_redirect() {
+            return;
+        }
+        let _ = x11.set_suspended(minimized);
+        let state = if minimized {
+            WmState::Iconic
+        } else {
+            WmState::Normal
+        };
+        self.tell_wm_state(x11, state);
+    }
+
+    /// Answer a request to be minimized or brought back with the state the
+    /// window is in.
+    fn answer_wm_state(&self, window: &Framed, x11: &X11Surface) {
+        let state = if Self::is_minimized(window) {
+            WmState::Iconic
+        } else {
+            WmState::Normal
+        };
+        self.tell_wm_state(x11, state);
+    }
+
+    fn tell_wm_state(&self, x11: &X11Surface, state: WmState) {
+        if let Some(side) = &self.xwayland.side {
+            side.set_wm_state(x11.window_id(), state);
+        }
+    }
+
     fn forget_x11(&mut self, x11: &X11Surface) {
         if let Some(window) = self.x11_window(x11) {
             self.forget_window(&window);

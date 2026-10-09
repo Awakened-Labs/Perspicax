@@ -359,9 +359,11 @@ impl Compositor {
     }
 
     /// Take a window off the screen, keeping its place. Focus moves to
-    /// whatever is on top now, as it would if the window had closed.
+    /// whatever is on top now, as it would if the window had closed. An X11
+    /// window is told it is minimized; one parked with its workspace is not.
     pub(crate) fn minimize(&mut self, window: &Framed) {
         placement(window, |placement| placement.minimized = true);
+        self.tell_minimized(window, true);
         self.show_what_belongs();
         self.backend.redraw();
         self.publish_facts();
@@ -373,7 +375,10 @@ impl Compositor {
     /// comes back where it was, or onto the nearest monitor if that one is
     /// gone. The caller raises and focuses it, if that is what it wants.
     pub(crate) fn restore(&mut self, window: &Framed) {
-        placement(window, |placement| placement.minimized = false);
+        let minimized = placement(window, |placement| std::mem::take(&mut placement.minimized));
+        if minimized {
+            self.tell_minimized(window, false);
+        }
         self.go_to_workspace_of(window);
         self.show_what_belongs();
         self.backend.redraw();
@@ -390,6 +395,18 @@ impl Compositor {
     /// Whether the person minimized this window.
     pub(crate) fn is_minimized(window: &Framed) -> bool {
         placement(window, |placement| placement.minimized)
+    }
+
+    /// Tell a window it was minimized or brought back, if it is a kind that
+    /// is told: an X11 one (see `crate::xwayland`). A Wayland window learns
+    /// nothing, as xdg-shell has no state for it.
+    #[cfg_attr(
+        not(feature = "xwayland"),
+        expect(unused_variables, reason = "only an X11 window is told")
+    )]
+    fn tell_minimized(&self, window: &Framed, minimized: bool) {
+        #[cfg(feature = "xwayland")]
+        self.x11_minimized(window, minimized);
     }
 
     /// The last commit of a resize from the left or top: move the window so
