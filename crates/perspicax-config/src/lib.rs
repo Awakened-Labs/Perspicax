@@ -21,11 +21,13 @@
 //!
 //! Beside the file, the one other thing both processes read: [`desktop`]
 //! entries, which the shell lists in its menus and the session starts in
-//! [`autostart`](mod@autostart), by the same rules.
+//! [`autostart`](mod@autostart), by the same rules. And the [`menu`]
+//! vocabulary, which the menu file and a pie are written in.
 
 pub mod autostart;
 pub mod desktop;
 mod keys;
+pub mod menu;
 mod shell;
 
 use std::{

@@ -25,9 +25,15 @@
 //! a menu that replaces the root menu can still hold them wherever it likes. Each item is exactly one of
 //! these. `~` at the start of an argument is the home folder, as a shell
 //! would have it.
+//!
+//! The words, and the checking of them, are perspicax-config's
+//! [`menu`](perspicax_config::menu) vocabulary, which a pie is written in
+//! too. What is left here is reading the file and the `~`.
 
 use std::path::{Path, PathBuf};
 
+pub(crate) use perspicax_config::menu::Mode;
+use perspicax_config::menu::{self, Item, RawItem, Vocabulary};
 use serde::Deserialize;
 
 use super::apps::Run;
@@ -37,17 +43,6 @@ use super::apps::Run;
 pub(crate) struct MenuFile {
     pub(crate) mode: Mode,
     pub(crate) items: Vec<FileItem>,
-}
-
-/// Where a menu file's items go.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum Mode {
-    /// Above the applications.
-    #[default]
-    Extend,
-    /// In place of everything else.
-    Replace,
 }
 
 /// One item of a menu file.
@@ -94,24 +89,6 @@ struct RawFile {
     items: Vec<RawItem>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawItem {
-    label: Option<String>,
-    icon: Option<String>,
-    exec: Option<Vec<String>>,
-    #[serde(default)]
-    terminal: bool,
-    items: Option<Vec<RawItem>>,
-    app: Option<String>,
-    #[serde(default)]
-    separator: bool,
-    #[serde(default)]
-    applications: bool,
-    #[serde(default)]
-    session: bool,
-}
-
 /// Read the menu file at `path`.
 pub(crate) fn read(path: &Path, home: Option<&Path>) -> Result<MenuFile, MenuFileError> {
     let text =
@@ -123,93 +100,57 @@ pub(crate) fn read(path: &Path, home: Option<&Path>) -> Result<MenuFile, MenuFil
 pub(crate) fn parse(text: &str, home: Option<&Path>) -> Result<MenuFile, MenuFileError> {
     let raw: RawFile =
         toml::from_str(text).map_err(|error| MenuFileError::Parse(error.to_string()))?;
+    let items = menu::check(raw.items, Vocabulary::Menu).map_err(|refused| {
+        let at: Vec<String> = refused.at.iter().map(usize::to_string).collect();
+        MenuFileError::Item {
+            at: at.join("."),
+            why: refused.why,
+        }
+    })?;
     Ok(MenuFile {
         mode: raw.mode,
-        items: items(raw.items, "", home)?,
+        items: file_items(items, home),
     })
 }
 
-fn items(
-    raw: Vec<RawItem>,
-    above: &str,
-    home: Option<&Path>,
-) -> Result<Vec<FileItem>, MenuFileError> {
-    raw.into_iter()
-        .enumerate()
-        .map(|(n, item)| {
-            let at = format!("{above}{}", n + 1);
-            item.check(&at, home)
+/// The checked items, with `~` in each argument as the home folder. The
+/// menu vocabulary has no `running`, so there is none to leave out.
+fn file_items(items: Vec<Item>, home: Option<&Path>) -> Vec<FileItem> {
+    items
+        .into_iter()
+        .filter_map(|item| {
+            Some(match item {
+                Item::Run {
+                    label,
+                    icon,
+                    exec,
+                    terminal,
+                } => FileItem::Run {
+                    label,
+                    icon,
+                    run: Run {
+                        argv: exec.iter().map(|word| tilde(word, home)).collect(),
+                        terminal,
+                        dir: None,
+                    },
+                },
+                Item::App { app, label, icon } => FileItem::App {
+                    id: app,
+                    label,
+                    icon,
+                },
+                Item::Open { label, icon, items } => FileItem::Open {
+                    label,
+                    icon,
+                    items: file_items(items, home),
+                },
+                Item::Separator => FileItem::Separator,
+                Item::Applications => FileItem::Applications,
+                Item::Session => FileItem::Session,
+                Item::Running => return None,
+            })
         })
         .collect()
-}
-
-impl RawItem {
-    fn check(self, at: &str, home: Option<&Path>) -> Result<FileItem, MenuFileError> {
-        let refuse = |why| MenuFileError::Item {
-            at: at.to_owned(),
-            why,
-        };
-        let kinds = [
-            self.exec.is_some(),
-            self.items.is_some(),
-            self.app.is_some(),
-            self.separator,
-            self.applications,
-            self.session,
-        ];
-        if kinds.into_iter().filter(|&kind| kind).count() != 1 {
-            return Err(refuse(
-                "give it exactly one of exec, items, app, separator, applications or session",
-            ));
-        }
-        let decorated = self.label.is_some() || self.icon.is_some();
-        if (self.separator || self.applications || self.session) && decorated {
-            return Err(refuse(
-                "a separator, applications or session has no label or icon",
-            ));
-        }
-        if self.terminal && self.exec.is_none() {
-            return Err(refuse("terminal goes with exec"));
-        }
-        let label = || {
-            self.label
-                .clone()
-                .filter(|label| !label.trim().is_empty())
-                .ok_or_else(|| refuse("it needs a label"))
-        };
-        Ok(if let Some(argv) = &self.exec {
-            if argv.first().is_none_or(String::is_empty) {
-                return Err(refuse("exec names no program"));
-            }
-            FileItem::Run {
-                label: label()?,
-                icon: self.icon.clone(),
-                run: Run {
-                    argv: argv.iter().map(|word| tilde(word, home)).collect(),
-                    terminal: self.terminal,
-                    dir: None,
-                },
-            }
-        } else if let Some(below) = self.items {
-            FileItem::Open {
-                label: label()?,
-                icon: self.icon.clone(),
-                items: items(below, &format!("{at}."), home)?,
-            }
-        } else if let Some(id) = self.app {
-            FileItem::App {
-                id,
-                label: self.label,
-                icon: self.icon,
-            }
-        } else if self.separator {
-            FileItem::Separator
-        } else if self.applications {
-            FileItem::Applications
-        } else {
-            FileItem::Session
-        })
-    }
 }
 
 /// `word` with a leading `~` as the home folder.
