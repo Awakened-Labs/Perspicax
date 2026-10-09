@@ -49,6 +49,26 @@
 //! same window, at a moment Xwayland has just sent the request and is not
 //! waiting on us.
 //!
+//! # Asking to be active, and the active window
+//!
+//! A client asks for its window to be the active one with
+//! `_NET_ACTIVE_WINDOW`, a message to the root: a program bringing its window
+//! forward when a second copy is started, Wine bringing one back. Smithay's
+//! window manager drops it, so [`Side`] hears it too, on a thread of its own,
+//! and passes it on (issue #91). The window comes back and is raised; it
+//! takes the keyboard only with fresh input behind the request, as an xdg
+//! window does.
+//!
+//! EWMH has a window manager name the window with the keyboard in the
+//! root's `_NET_ACTIVE_WINDOW`, and clients go by it: Wine takes it for the
+//! window in front, and holds back its own idea of which that is until the
+//! name changes (issue #91). Smithay names the root itself there, a moment
+//! after every change of focus: it writes the window its focus events
+//! arrive at, and only the root hears them. So [`Side`] names the window as
+//! the keyboard moves, and listens on a thread of its own for the root's
+//! property changing; whenever it no longer names that window, it is named
+//! again. A client that reads between the two writes still reads the root.
+//!
 //! # Started eagerly, not lazily
 //!
 //! Smithay 0.7 creates the X11 sockets and starts the server in one call, with
@@ -56,7 +76,17 @@
 //! Xwayland starts with the seat, costing one idle process, and `xwayland =
 //! false` in the config turns it off.
 
-use std::{cell::RefCell, os::fd::OwnedFd, process::Stdio, sync::mpsc};
+use std::{
+    cell::RefCell,
+    os::fd::OwnedFd,
+    process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+        mpsc,
+    },
+    time::Duration,
+};
 
 use perspicax_node::{Origin, SurfaceId, X11Basis, X11Origin};
 use perspicax_policy::Zone;
@@ -64,10 +94,10 @@ use smithay::{
     desktop::Window,
     output::Output,
     reexports::{
-        calloop::{LoopHandle, channel},
+        calloop::{LoopHandle, RegistrationToken, channel},
         wayland_server::{Client, Resource as _, protocol::wl_output::WlOutput},
     },
-    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
+    utils::{Clock, Logical, Monotonic, Point, Rectangle, SERIAL_COUNTER},
     wayland::{
         selection::{
             SelectionTarget,
@@ -90,7 +120,13 @@ use smithay::{
 
 use x11rb::{
     connection::Connection as _,
-    protocol::xproto::{AtomEnum, ConnectionExt as _, PropMode},
+    protocol::{
+        Event,
+        xproto::{
+            AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt as _, EventMask,
+            PropMode,
+        },
+    },
     rust_connection::RustConnection,
     wrapper::ConnectionExt as _,
 };
@@ -117,6 +153,9 @@ pub(crate) struct Xwayland {
     /// The connection that tells windows what Smithay's window manager does
     /// not. See [`Side`].
     side: Option<Side>,
+    /// The source that started Xwayland, which holds its display. See
+    /// [`stop`].
+    source: Option<RegistrationToken>,
 }
 
 /// Start Xwayland, and become its window manager once it is ready. `ready`
@@ -140,7 +179,7 @@ pub(crate) fn start(
 
     let wm_handle = handle.clone();
     let mut ready = Some(ready);
-    handle
+    let source = handle
         .insert_source(xwayland, move |event, (), state| match event {
             XWaylandEvent::Ready {
                 x11_socket,
@@ -156,7 +195,7 @@ pub(crate) fn start(
                 state.xwayland.server = server_pid(display_number);
                 state.xwayland.client = Some(client.clone());
                 state.xwayland.ask = provenance(&wm_handle, display_number);
-                state.xwayland.side = Side::open(display_number);
+                state.xwayland.side = Side::open(&wm_handle, display_number);
                 if let Some(launch) = state.launch.as_mut() {
                     launch.x11_display = Some(display_number);
                 }
@@ -174,8 +213,21 @@ pub(crate) fn start(
             }
         })
         .map_err(|error| Error::EventLoop(error.to_string()))?;
+    state.xwayland.source = Some(source);
     state.xwayland_shell = Some(XWaylandShellState::new::<Compositor>(&state.display));
     Ok(())
+}
+
+/// Give Xwayland's display back as the compositor stops, rather than when
+/// the process ends. Smithay's window manager keeps a handle on the loop in
+/// a source of its own, so the loop outlives the compositor, and with it
+/// whatever its sources hold -- Xwayland's among them, holding the display's
+/// lock. A process that runs compositors one after another, as the tests
+/// do, would otherwise run out of displays.
+pub(crate) fn stop(state: &mut Compositor, handle: &LoopHandle<'static, Compositor>) {
+    if let Some(source) = state.xwayland.source.take() {
+        handle.remove(source);
+    }
 }
 
 /// Xwayland's pid, from the kernel's process tree.
@@ -264,6 +316,8 @@ x11rb::atom_manager! {
         _NET_WM_STATE_FULLSCREEN,
         _NET_WM_STATE_MAXIMIZED_HORZ,
         _NET_WM_STATE_MAXIMIZED_VERT,
+        _NET_WM_STATE_HIDDEN,
+        _NET_ACTIVE_WINDOW,
     }
 }
 
@@ -306,35 +360,248 @@ impl WmState {
     }
 }
 
+/// What an X client asks of the window manager that Smithay's drops, heard
+/// by [`Side`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asked {
+    /// EWMH's `_NET_ACTIVE_WINDOW`: for `window` to be the active one, with
+    /// `stamp` the X time of the input behind the request, or 0 for none.
+    Activate { window: u32, stamp: u32 },
+    /// EWMH's `_NET_WM_STATE` with `_NET_WM_STATE_HIDDEN`: for `window` to
+    /// be minimized, or brought back. Smithay's window manager answers the
+    /// other states asked for beside it, if any.
+    Hidden { window: u32, change: Change },
+}
+
+impl Asked {
+    fn read(message: &ClientMessageEvent, atoms: &SideAtoms) -> Option<Self> {
+        if message.format != 32 {
+            return None;
+        }
+        let data = message.data.as_data32();
+        let window = message.window;
+        if message.type_ == atoms._NET_ACTIVE_WINDOW {
+            return Some(Self::Activate {
+                window,
+                stamp: data[1],
+            });
+        }
+        if message.type_ == atoms._NET_WM_STATE && data[1..=2].contains(&atoms._NET_WM_STATE_HIDDEN)
+        {
+            return Change::read(data[0]).map(|change| Self::Hidden { window, change });
+        }
+        None
+    }
+}
+
+/// How a `_NET_WM_STATE` request changes a state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Change {
+    Remove,
+    Add,
+    Toggle,
+}
+
+impl Change {
+    /// As EWMH numbers it.
+    fn read(action: u32) -> Option<Self> {
+        match action {
+            0 => Some(Self::Remove),
+            1 => Some(Self::Add),
+            2 => Some(Self::Toggle),
+            _ => None,
+        }
+    }
+
+    /// Whether a state that is `on` now is on once changed.
+    fn applied_to(self, on: bool) -> bool {
+        match self {
+            Self::Remove => false,
+            Self::Add => true,
+            Self::Toggle => !on,
+        }
+    }
+}
+
+/// How long before `now` the X time `stamp` was. Xwayland keeps time as the
+/// milliseconds of the monotonic clock, as Smithay's `Clock<Monotonic>`
+/// does, in 32 bits that wrap; a time from the future comes out as weeks
+/// ago, and so as stale.
+fn activation_age(now: u32, stamp: u32) -> Duration {
+    Duration::from_millis(u64::from(now.wrapping_sub(stamp)))
+}
+
 /// Perspicax's own X connection, beside the window manager's, for what
 /// Smithay's window manager does not write: `WM_STATE` as a window is
-/// minimized and brought back. Smithay writes it only by mapping or
-/// unmapping a window's frame, and unmapping the frame would cost the window
-/// the surface Xwayland gave it. Only writes, so nothing here waits on
-/// Xwayland.
+/// minimized and brought back, and the root's `_NET_ACTIVE_WINDOW`. Smithay
+/// writes the first only by mapping or unmapping a window's frame, and
+/// unmapping the frame would cost the window the surface Xwayland gave it;
+/// the second it writes wrong. Writes from the compositor's thread, so
+/// nothing there waits on Xwayland, and listens on a thread of its own: see
+/// [`Side::listen`].
+#[derive(Clone)]
 pub(crate) struct Side {
-    connection: RustConnection,
+    connection: Arc<RustConnection>,
     atoms: SideAtoms,
+    root: u32,
+    /// The X11 window with the keyboard, or `NONE`: what the root's
+    /// `_NET_ACTIVE_WINDOW` is kept saying.
+    active: Arc<AtomicU32>,
 }
 
 impl Side {
-    /// Connect to `display` and learn the atoms. Without it, X11 windows are
-    /// minimized as before, untold.
-    fn open(display: u32) -> Option<Self> {
+    /// Connect to `display`, learn the atoms, and listen. Without it, X11
+    /// windows are minimized as before, untold, the root names none as
+    /// active, and a window cannot ask to be.
+    fn open(handle: &LoopHandle<'static, Compositor>, display: u32) -> Option<Self> {
         let opened = x11rb::connect(Some(&format!(":{display}")))
             .map_err(|error| error.to_string())
-            .and_then(|(connection, _)| {
+            .and_then(|(connection, screen)| {
+                let root = connection.setup().roots[screen].root;
                 let atoms = SideAtoms::new(&connection)
                     .map_err(|error| error.to_string())?
                     .reply()
                     .map_err(|error| error.to_string())?;
-                Ok(Self { connection, atoms })
+                Ok(Self {
+                    connection: Arc::new(connection),
+                    atoms,
+                    root,
+                    active: Arc::default(),
+                })
             });
-        opened
+        let side = opened
             .map_err(|error| {
                 tracing::warn!(%error, "no side X connection: X11 windows are not told they are minimized");
             })
+            .ok()?;
+        side.listen(handle);
+        Some(side)
+    }
+
+    /// Hear what Smithay's window manager drops, on a thread of its own: a
+    /// client asking to be active, passed to the compositor's loop, and the
+    /// root's property changes, so the root goes on naming the window with
+    /// the keyboard when Smithay writes otherwise there. A thread, as for
+    /// XRes, because that is answered by reading the root back, and a read
+    /// on the compositor's thread would wait on Xwayland. Everything else it
+    /// hears it drops, the errors that come back for writes to a window
+    /// already gone included. It ends when Xwayland does, its connection
+    /// with it.
+    fn listen(&self, handle: &LoopHandle<'static, Compositor>) {
+        // A client asks with a message to the root for the window manager,
+        // sent to whoever redirects the root's children or hears of them:
+        // Smithay redirects, which only one connection may, so this one
+        // hears of them.
+        let selected = self
+            .connection
+            .change_window_attributes(
+                self.root,
+                &ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::SUBSTRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE),
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|cookie| cookie.check().map_err(|error| error.to_string()));
+        if let Err(error) = selected {
+            tracing::warn!(%error, "the side X connection hears nothing: X11 windows cannot ask to be active");
+            return;
+        }
+        let (ask, asked) = channel::channel::<Asked>();
+        if let Err(error) = handle.insert_source(asked, |event, (), state| {
+            if let channel::Event::Msg(asked) = event {
+                state.x11_asked(asked);
+            }
+        }) {
+            tracing::warn!(%error, "no side X requests: X11 windows cannot ask to be active");
+            return;
+        }
+        let side = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("perspicax-x11-side".to_owned())
+            .spawn(move || {
+                while let Ok(event) = side.connection.wait_for_event() {
+                    match event {
+                        Event::ClientMessage(message) => {
+                            if let Some(asked) = Asked::read(&message, &side.atoms)
+                                && ask.send(asked).is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Event::PropertyNotify(notify)
+                            if notify.window == side.root
+                                && notify.atom == side.atoms._NET_ACTIVE_WINDOW =>
+                        {
+                            side.keep_active();
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "no side X thread: X11 windows cannot ask to be active");
+        }
+    }
+
+    /// Name `window` as the one with the keyboard, or `NONE`, in the root's
+    /// `_NET_ACTIVE_WINDOW`. Written whatever it was before: a client that
+    /// asked to be active waits for the write, even when nothing changed.
+    pub(crate) fn set_active(&self, window: u32) {
+        self.active.store(window, Ordering::Relaxed);
+        self.write_active(window);
+    }
+
+    /// A window that is gone: if the root names it, name none instead.
+    fn forget_active(&self, window: u32) {
+        let named =
+            self.active
+                .compare_exchange(window, x11rb::NONE, Ordering::Relaxed, Ordering::Relaxed);
+        if named.is_ok() {
+            self.write_active(x11rb::NONE);
+        }
+    }
+
+    /// The root's `_NET_ACTIVE_WINDOW` changed: if it no longer names the
+    /// window with the keyboard -- Smithay writes the root there a moment
+    /// after every change of focus -- name that window again. Smithay does
+    /// not answer the root's property changes, so this cannot go back and
+    /// forth with it.
+    fn keep_active(&self) {
+        let says = self
+            .connection
+            .get_property(
+                false,
+                self.root,
+                self.atoms._NET_ACTIVE_WINDOW,
+                AtomEnum::WINDOW,
+                0,
+                1,
+            )
             .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .and_then(|reply| reply.value32().and_then(|mut value| value.next()));
+        // Read again rather than kept from before the round trip: focus may
+        // have moved meanwhile, and the write must be the latest word.
+        let active = self.active.load(Ordering::Relaxed);
+        if says != Some(active) {
+            self.write_active(active);
+        }
+    }
+
+    /// Answer a request to be active without changing which is: naming the
+    /// same window again still tells a client the root's property changed.
+    fn answer_active(&self) {
+        self.write_active(self.active.load(Ordering::Relaxed));
+    }
+
+    fn write_active(&self, window: u32) {
+        let _ = self.connection.change_property32(
+            PropMode::REPLACE,
+            self.root,
+            self.atoms._NET_ACTIVE_WINDOW,
+            AtomEnum::WINDOW,
+            &[window],
+        );
+        let _ = self.connection.flush();
     }
 
     /// What `window` asked to be, by the `_NET_WM_STATE` it set before it
@@ -368,7 +635,7 @@ impl Side {
             self.atoms.WM_STATE,
             &[state.value(), x11rb::NONE],
         );
-        self.settle();
+        let _ = self.connection.flush();
     }
 
     /// Answer a request about `_NET_WM_STATE` without changing it: appending
@@ -382,15 +649,7 @@ impl Side {
             AtomEnum::ATOM,
             &[],
         );
-        self.settle();
-    }
-
-    /// Send what was written, then drop what came back for it -- an error
-    /// for a window gone before the write arrived -- which nothing waits for
-    /// and which would otherwise pile up unread.
-    fn settle(&self) {
         let _ = self.connection.flush();
-        while let Ok(Some(_)) = self.connection.poll_for_event() {}
     }
 }
 
@@ -413,17 +672,8 @@ impl Compositor {
         let Some(pid) = pid else {
             return;
         };
-        let window = self
-            .space
-            .elements()
-            .chain(&self.parked)
-            .find(|window| {
-                window
-                    .x11_surface()
-                    .is_some_and(|x11| x11.window_id() == window_id)
-            })
-            .cloned();
-        let (Some(window), Some(server)) = (window, self.xwayland.server) else {
+        let (Some(window), Some(server)) = (self.x11_window_by_id(window_id), self.xwayland.server)
+        else {
             return;
         };
         let client = match crate::origin::of_pid(i32::try_from(pid).unwrap_or(-1)) {
@@ -471,6 +721,28 @@ impl Compositor {
         if let Some(ask) = &self.xwayland.ask {
             let _ = ask.send(x11.window_id());
         }
+    }
+
+    /// The mapped or parked window for the X window `id`.
+    fn x11_window_by_id(&self, id: u32) -> Option<Framed> {
+        self.space
+            .elements()
+            .chain(&self.parked)
+            .find(|window| {
+                window
+                    .x11_surface()
+                    .is_some_and(|x11| x11.window_id() == id)
+            })
+            .cloned()
+    }
+
+    /// The window for the X window `id`, and its surface, if it is one the
+    /// window manager manages -- not a menu or a tooltip, which place
+    /// themselves.
+    fn managed_x11_by_id(&self, id: u32) -> Option<(Framed, X11Surface)> {
+        let window = self.x11_window_by_id(id)?;
+        let x11 = window.x11_surface()?.clone();
+        (!x11.is_override_redirect()).then_some((window, x11))
     }
 
     /// The mapped or parked window wrapping this X11 surface.
@@ -591,17 +863,7 @@ impl XwmHandler for Compositor {
         if let Some(wm) = self.xwayland.wm.as_mut() {
             let _ = wm.raise_window(&x11);
         }
-        // The keyboard goes to a surface, and a window maps before Xwayland
-        // has given it one, as a rule: then it waits for `surface_associated`.
-        // Dropping it instead left the keyboard with the window before, which
-        // got whatever was typed next.
-        self.xwayland.awaiting_focus = match shell::surface_of(&window) {
-            Some(surface) => {
-                self.focus_surface(surface, id);
-                None
-            }
-            None => Some(id),
-        };
+        self.focus_x11(&window, id);
         tracing::info!(surface = id.0, title = x11.title(), "X11 window mapped");
         self.backend.redraw();
         self.publish_facts();
@@ -780,14 +1042,7 @@ impl XwmHandler for Compositor {
     /// state it is now in: Wine changes nothing more about a window while a
     /// request of its is waiting.
     fn minimize_request(&mut self, _xwm: XwmId, x11: X11Surface) {
-        let Some(window) = self.x11_window(&x11) else {
-            return;
-        };
-        if self.backend.has_person() && !Self::is_minimized(&window) {
-            self.minimize(&window);
-        } else {
-            self.answer_wm_state(&window, &x11);
-        }
+        self.minimize_asked(&x11);
     }
 
     /// An X11 window asking to go fullscreen: EWMH's `_NET_WM_STATE`, which is
@@ -831,28 +1086,135 @@ impl XwmHandler for Compositor {
         self.answer_net_wm_state(&x11);
     }
 
-    /// An X11 window asking to be brought back from minimized. Restored and
-    /// raised, but not given the keyboard: a window may not take that for
-    /// itself, as with an xdg activation no input is behind.
+    /// An X11 window asking to be brought back from minimized. Brought back
+    /// where it is and raised, but not given the keyboard -- a window may not
+    /// take that for itself, as with an xdg activation no input is behind --
+    /// nor shown on its workspace, if that is not the one showing, which
+    /// would move the keyboard just the same.
     fn unminimize_request(&mut self, _xwm: XwmId, x11: X11Surface) {
-        let Some(window) = self.x11_window(&x11) else {
-            return;
-        };
-        if self.backend.has_person() && Self::is_minimized(&window) {
-            self.restore(&window);
-            self.space.raise_element(&window, false);
-            if let Some(wm) = self.xwayland.wm.as_mut() {
-                let _ = wm.raise_window(&x11);
-            }
-            self.backend.redraw();
-            self.publish_facts();
-        } else {
-            self.answer_wm_state(&window, &x11);
-        }
+        self.unminimize_asked(&x11);
     }
 }
 
 impl Compositor {
+    /// What an X client asked that Smithay's window manager drops, heard by
+    /// [`Side`].
+    fn x11_asked(&mut self, asked: Asked) {
+        match asked {
+            Asked::Activate { window, stamp } => self.activate_x11(window, stamp),
+            Asked::Hidden { window, change } => self.hide_x11(window, change),
+        }
+    }
+
+    /// An X11 window asking to be the active one: EWMH's
+    /// `_NET_ACTIVE_WINDOW`, which is how a program brings its window
+    /// forward when a second copy is started, and how Wine brings one back.
+    /// Only with a person at the seat, as for a request of any other kind.
+    /// It comes back from minimized and is raised. It takes the keyboard --
+    /// shown on its own workspace, if that is not the one showing -- only
+    /// with fresh input behind the request, as an xdg window does with a
+    /// token: here the X time of that input, which the request carries. Wine
+    /// sends none, so a Wine window comes back without the keyboard.
+    /// Answered either way, by the root naming the active window again.
+    fn activate_x11(&mut self, window: u32, stamp: u32) {
+        let asked = self
+            .managed_x11_by_id(window)
+            .filter(|_| self.backend.has_person());
+        if let Some((window, x11)) = asked {
+            let now = Clock::<Monotonic>::new().now().as_millis();
+            let input = stamp != x11rb::CURRENT_TIME;
+            if perspicax_policy::grants_activation(activation_age(now, stamp), input) {
+                self.restore(&window);
+                self.raise_x11(&window, &x11);
+                if let Some(id) = shell::id_of(&window) {
+                    self.focus_x11(&window, id);
+                }
+            } else {
+                self.bring_back_x11(&window, &x11);
+            }
+            self.backend.redraw();
+            self.publish_facts();
+        }
+        if let Some(side) = &self.xwayland.side {
+            side.answer_active();
+        }
+    }
+
+    /// An X11 window asking with `_NET_WM_STATE_HIDDEN` to be minimized or
+    /// brought back. EWMH would have a window manager ignore that, the state
+    /// being its own to set, but a program that asks waits for an answer, so
+    /// it is taken as `WM_CHANGE_STATE` is, as Openbox takes it. Answered in
+    /// `_NET_WM_STATE` as well, which is what was asked about.
+    fn hide_x11(&mut self, window: u32, change: Change) {
+        let Some((window, x11)) = self.managed_x11_by_id(window) else {
+            return;
+        };
+        if change.applied_to(Self::is_minimized(&window)) {
+            self.minimize_asked(&x11);
+        } else {
+            self.unminimize_asked(&x11);
+        }
+        self.answer_net_wm_state(&x11);
+    }
+
+    /// A request to be minimized: see `minimize_request`.
+    fn minimize_asked(&mut self, x11: &X11Surface) {
+        let Some(window) = self.x11_window(x11) else {
+            return;
+        };
+        if self.backend.has_person() && !Self::is_minimized(&window) {
+            self.minimize(&window);
+        } else {
+            self.answer_wm_state(&window, x11);
+        }
+    }
+
+    /// A request to be brought back from minimized: see
+    /// `unminimize_request`.
+    fn unminimize_asked(&mut self, x11: &X11Surface) {
+        let Some(window) = self.x11_window(x11) else {
+            return;
+        };
+        if self.backend.has_person() && Self::is_minimized(&window) {
+            self.bring_back_x11(&window, x11);
+            self.publish_facts();
+        } else {
+            self.answer_wm_state(&window, x11);
+        }
+    }
+
+    /// Bring an X11 window back from minimized where it is, and raise it if
+    /// it shows: what a window asking with no input behind it gets.
+    fn bring_back_x11(&mut self, window: &Framed, x11: &X11Surface) {
+        self.unminimize(window);
+        if self.space.element_location(window).is_some() {
+            self.raise_x11(window, x11);
+        }
+    }
+
+    /// Give an X11 window the keyboard. The keyboard goes to a surface, and
+    /// a window maps before Xwayland has given it one, as a rule: then it
+    /// waits for `surface_associated`. Dropping it instead left the keyboard
+    /// with the window before, which got whatever was typed next.
+    fn focus_x11(&mut self, window: &Framed, id: SurfaceId) {
+        self.xwayland.awaiting_focus = match shell::surface_of(window) {
+            Some(surface) => {
+                self.focus_surface(surface, id);
+                None
+            }
+            None => Some(id),
+        };
+    }
+
+    /// Raise an X11 window over the others: on screen, and in X's own
+    /// stacking.
+    fn raise_x11(&mut self, window: &Framed, x11: &X11Surface) {
+        self.space.raise_element(window, false);
+        if let Some(wm) = self.xwayland.wm.as_mut() {
+            let _ = wm.raise_window(x11);
+        }
+    }
+
     /// Tell an X11 window it was minimized, or brought back: ICCCM's
     /// `WM_STATE`, whose change from iconic to normal is what Wine restores a
     /// window on, and EWMH's `_NET_WM_STATE_HIDDEN`. Its frame stays mapped,
@@ -896,6 +1258,15 @@ impl Compositor {
         let _ = x11.set_maximized(false);
         let _ = x11.set_suspended(false);
         self.tell_wm_state(x11, WmState::Withdrawn);
+    }
+
+    /// Name the X11 window with the keyboard, `focused`, or none, in the
+    /// root's `_NET_ACTIVE_WINDOW`, as EWMH has a window manager do. With or
+    /// without a person at the seat: it is a fact about the keyboard.
+    pub(crate) fn tell_active_x11(&self, focused: Option<&X11Surface>) {
+        if let Some(side) = &self.xwayland.side {
+            side.set_active(focused.map_or(x11rb::NONE, X11Surface::window_id));
+        }
     }
 
     fn tell_wm_state(&self, x11: &X11Surface, state: WmState) {
@@ -986,12 +1357,18 @@ impl Compositor {
         self.publish_facts();
     }
 
+    /// A window gone. If the keyboard has not moved on from it -- with
+    /// nobody at the seat it does not -- the root names none as active,
+    /// rather than a window that is not there.
     fn forget_x11(&mut self, x11: &X11Surface) {
         if let Some(window) = self.x11_window(x11) {
             self.forget_window(&window);
             self.refocus_after_close(x11.wl_surface().as_ref());
             self.backend.redraw();
             self.publish_facts();
+        }
+        if let Some(side) = &self.xwayland.side {
+            side.forget_active(x11.window_id());
         }
     }
 
@@ -1024,6 +1401,8 @@ mod tests {
             _NET_WM_STATE_FULLSCREEN: 3,
             _NET_WM_STATE_MAXIMIZED_HORZ: 4,
             _NET_WM_STATE_MAXIMIZED_VERT: 5,
+            _NET_ACTIVE_WINDOW: 6,
+            _NET_WM_STATE_HIDDEN: 7,
         }
     }
 
@@ -1039,6 +1418,82 @@ mod tests {
                 maximized: true,
             }
         );
+    }
+
+    #[test]
+    fn a_request_to_be_active_carries_its_window_and_the_time_of_its_input() {
+        let message = ClientMessageEvent::new(32, 0x40_0001_u32, 6_u32, [2_u32, 1234, 0, 0, 0]);
+        assert_eq!(
+            Asked::read(&message, &atoms()),
+            Some(Asked::Activate {
+                window: 0x40_0001,
+                stamp: 1234,
+            })
+        );
+    }
+
+    #[test]
+    fn a_message_about_anything_else_asks_nothing() {
+        let atoms = atoms();
+        let state = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [1_u32, 3, 0, 1, 0]);
+        assert_eq!(Asked::read(&state, &atoms), None);
+        let bytes = ClientMessageEvent::new(8, 0x40_0001_u32, 6_u32, [0_u8; 20]);
+        assert_eq!(Asked::read(&bytes, &atoms), None);
+    }
+
+    #[test]
+    fn a_request_to_be_hidden_is_found_in_either_place() {
+        let atoms = atoms();
+        let first = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [1_u32, 7, 0, 1, 0]);
+        let second = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [0_u32, 3, 7, 1, 0]);
+        assert_eq!(
+            Asked::read(&first, &atoms),
+            Some(Asked::Hidden {
+                window: 0x40_0001,
+                change: Change::Add,
+            })
+        );
+        assert_eq!(
+            Asked::read(&second, &atoms),
+            Some(Asked::Hidden {
+                window: 0x40_0001,
+                change: Change::Remove,
+            })
+        );
+    }
+
+    #[test]
+    fn a_request_to_be_hidden_that_changes_it_no_known_way_asks_nothing() {
+        let message = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [3_u32, 7, 0, 1, 0]);
+        assert_eq!(Asked::read(&message, &atoms()), None);
+    }
+
+    #[test]
+    fn a_toggle_turns_a_state_the_other_way() {
+        assert!(Change::Toggle.applied_to(false));
+        assert!(!Change::Toggle.applied_to(true));
+        assert!(Change::Add.applied_to(true));
+        assert!(!Change::Remove.applied_to(true));
+    }
+
+    #[test]
+    fn the_age_of_an_x_time_is_how_long_before_now_it_was() {
+        assert_eq!(activation_age(10_000, 9_700), Duration::from_millis(300));
+        assert_eq!(activation_age(10_000, 10_000), Duration::ZERO);
+    }
+
+    #[test]
+    fn an_x_time_from_before_the_clock_wrapped_is_still_recent() {
+        assert_eq!(
+            activation_age(200, u32::MAX - 99),
+            Duration::from_millis(300)
+        );
+    }
+
+    #[test]
+    fn an_x_time_from_the_future_is_too_old_to_activate_with() {
+        let age = activation_age(10_000, 10_001);
+        assert!(!perspicax_policy::grants_activation(age, true), "{age:?}");
     }
 
     #[test]

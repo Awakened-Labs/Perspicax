@@ -396,6 +396,8 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         let _ = child.kill();
         let _ = child.wait();
     }
+    #[cfg(feature = "xwayland")]
+    xwayland::stop(&mut state, &event_loop.handle());
     result
 }
 

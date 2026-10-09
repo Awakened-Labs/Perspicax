@@ -406,11 +406,18 @@ impl Compositor {
     /// comes back where it was, or onto the nearest monitor if that one is
     /// gone. The caller raises and focuses it, if that is what it wants.
     pub(crate) fn restore(&mut self, window: &Framed) {
+        self.go_to_workspace_of(window);
+        self.unminimize(window);
+    }
+
+    /// Un-minimize a window where it is: it shows again if its workspace is
+    /// showing, and waits there if not. The workspaces are left as they are,
+    /// and so the keyboard is too: showing another workspace would move it.
+    pub(crate) fn unminimize(&mut self, window: &Framed) {
         let minimized = placement(window, |placement| std::mem::take(&mut placement.minimized));
         if minimized {
             self.tell_minimized(window, false);
         }
-        self.go_to_workspace_of(window);
         self.show_what_belongs();
         self.backend.redraw();
     }
