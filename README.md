@@ -468,6 +468,18 @@ nothing more about a window while one of its requests is waiting. As with a
 Wayland window, all of this is for a person at the seat: an agent's headless
 desk does not rearrange itself.
 
+An X11 window may also ask to be the active one (`_NET_ACTIVE_WINDOW`), as a
+program does when a second copy of it is started, or as Wine does to bring a
+window back. It comes back from minimized and is raised, but takes the
+keyboard only with fresh input behind the request, as a Wayland window needs
+an activation token for: the X time of that input, under ten seconds old.
+Wine sends none, so its window comes back without the keyboard; without
+input a window on a workspace that is not showing waits there, since showing
+that workspace would move the keyboard. Asking with `_NET_WM_STATE_HIDDEN`
+minimizes or brings back, as Openbox takes it. And the root's
+`_NET_ACTIVE_WINDOW` names the X11 window with the keyboard, or none while a
+Wayland window has it, which Wine goes by for the window in front.
+
 The session reads `$XDG_CONFIG_HOME/perspicax/config.toml` (or `--config PATH`),
 and reads it again whenever it is saved. Without one it runs the `classic`
 profile, which is Plasma's and Windows' habits:
