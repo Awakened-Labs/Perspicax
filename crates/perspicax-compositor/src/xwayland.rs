@@ -49,6 +49,18 @@
 //! same window, at a moment Xwayland has just sent the request and is not
 //! waiting on us.
 //!
+//! # The active window
+//!
+//! EWMH has a window manager name the window with the keyboard in the
+//! root's `_NET_ACTIVE_WINDOW`, and clients go by it: Wine takes it for the
+//! window in front, and holds back its own idea of which that is until the
+//! name changes (issue #91). Smithay names the root itself there, a moment
+//! after every change of focus: it writes the window its focus events
+//! arrive at, and only the root hears them. So [`Side`] names the window as
+//! the keyboard moves, and listens on a thread of its own for the root's
+//! property changing; whenever it no longer names that window, it is named
+//! again. A client that reads between the two writes still reads the root.
+//!
 //! # Started eagerly, not lazily
 //!
 //! Smithay 0.7 creates the X11 sockets and starts the server in one call, with
@@ -56,7 +68,16 @@
 //! Xwayland starts with the seat, costing one idle process, and `xwayland =
 //! false` in the config turns it off.
 
-use std::{cell::RefCell, os::fd::OwnedFd, process::Stdio, sync::mpsc};
+use std::{
+    cell::RefCell,
+    os::fd::OwnedFd,
+    process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+        mpsc,
+    },
+};
 
 use perspicax_node::{Origin, SurfaceId, X11Basis, X11Origin};
 use perspicax_policy::Zone;
@@ -90,7 +111,10 @@ use smithay::{
 
 use x11rb::{
     connection::Connection as _,
-    protocol::xproto::{AtomEnum, ConnectionExt as _, PropMode},
+    protocol::{
+        Event,
+        xproto::{AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, EventMask, PropMode},
+    },
     rust_connection::RustConnection,
     wrapper::ConnectionExt as _,
 };
@@ -264,6 +288,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE_FULLSCREEN,
         _NET_WM_STATE_MAXIMIZED_HORZ,
         _NET_WM_STATE_MAXIMIZED_VERT,
+        _NET_ACTIVE_WINDOW,
     }
 }
 
@@ -308,33 +333,144 @@ impl WmState {
 
 /// Perspicax's own X connection, beside the window manager's, for what
 /// Smithay's window manager does not write: `WM_STATE` as a window is
-/// minimized and brought back. Smithay writes it only by mapping or
-/// unmapping a window's frame, and unmapping the frame would cost the window
-/// the surface Xwayland gave it. Only writes, so nothing here waits on
-/// Xwayland.
+/// minimized and brought back, and the root's `_NET_ACTIVE_WINDOW`. Smithay
+/// writes the first only by mapping or unmapping a window's frame, and
+/// unmapping the frame would cost the window the surface Xwayland gave it;
+/// the second it writes wrong. Writes from the compositor's thread, so
+/// nothing there waits on Xwayland, and listens on a thread of its own: see
+/// [`Side::listen`].
+#[derive(Clone)]
 pub(crate) struct Side {
-    connection: RustConnection,
+    connection: Arc<RustConnection>,
     atoms: SideAtoms,
+    root: u32,
+    /// The X11 window with the keyboard, or `NONE`: what the root's
+    /// `_NET_ACTIVE_WINDOW` is kept saying.
+    active: Arc<AtomicU32>,
 }
 
 impl Side {
-    /// Connect to `display` and learn the atoms. Without it, X11 windows are
-    /// minimized as before, untold.
+    /// Connect to `display`, learn the atoms, and listen. Without it, X11
+    /// windows are minimized as before, untold, and the root names none as
+    /// active.
     fn open(display: u32) -> Option<Self> {
         let opened = x11rb::connect(Some(&format!(":{display}")))
             .map_err(|error| error.to_string())
-            .and_then(|(connection, _)| {
+            .and_then(|(connection, screen)| {
+                let root = connection.setup().roots[screen].root;
                 let atoms = SideAtoms::new(&connection)
                     .map_err(|error| error.to_string())?
                     .reply()
                     .map_err(|error| error.to_string())?;
-                Ok(Self { connection, atoms })
+                Ok(Self {
+                    connection: Arc::new(connection),
+                    atoms,
+                    root,
+                    active: Arc::default(),
+                })
             });
-        opened
+        let side = opened
             .map_err(|error| {
                 tracing::warn!(%error, "no side X connection: X11 windows are not told they are minimized");
             })
+            .ok()?;
+        side.listen();
+        Some(side)
+    }
+
+    /// Hear what Smithay's window manager drops, on a thread of its own: the
+    /// root's property changes, so the root goes on naming the window with
+    /// the keyboard when Smithay writes otherwise there. A thread, as for
+    /// XRes, because that is answered by reading the root back, and a read
+    /// on the compositor's thread would wait on Xwayland. Everything else it
+    /// hears it drops, the errors that come back for writes to a window
+    /// already gone included. It ends when Xwayland does, its connection
+    /// with it.
+    fn listen(&self) {
+        let selected = self
+            .connection
+            .change_window_attributes(
+                self.root,
+                &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|cookie| cookie.check().map_err(|error| error.to_string()));
+        if let Err(error) = selected {
+            tracing::warn!(%error, "the side X connection hears nothing: the root may name the wrong window as active");
+            return;
+        }
+        let side = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("perspicax-x11-side".to_owned())
+            .spawn(move || {
+                while let Ok(event) = side.connection.wait_for_event() {
+                    if let Event::PropertyNotify(notify) = event
+                        && notify.window == side.root
+                        && notify.atom == side.atoms._NET_ACTIVE_WINDOW
+                    {
+                        side.keep_active();
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "no side X thread: the root may name the wrong window as active");
+        }
+    }
+
+    /// Name `window` as the one with the keyboard, or `NONE`, in the root's
+    /// `_NET_ACTIVE_WINDOW`. Written whatever it was before: a client that
+    /// asked to be active waits for the write, even when nothing changed.
+    pub(crate) fn set_active(&self, window: u32) {
+        self.active.store(window, Ordering::Relaxed);
+        self.write_active(window);
+    }
+
+    /// A window that is gone: if the root names it, name none instead.
+    fn forget_active(&self, window: u32) {
+        let named =
+            self.active
+                .compare_exchange(window, x11rb::NONE, Ordering::Relaxed, Ordering::Relaxed);
+        if named.is_ok() {
+            self.write_active(x11rb::NONE);
+        }
+    }
+
+    /// The root's `_NET_ACTIVE_WINDOW` changed: if it no longer names the
+    /// window with the keyboard -- Smithay writes the root there a moment
+    /// after every change of focus -- name that window again. Smithay does
+    /// not answer the root's property changes, so this cannot go back and
+    /// forth with it.
+    fn keep_active(&self) {
+        let says = self
+            .connection
+            .get_property(
+                false,
+                self.root,
+                self.atoms._NET_ACTIVE_WINDOW,
+                AtomEnum::WINDOW,
+                0,
+                1,
+            )
             .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .and_then(|reply| reply.value32().and_then(|mut value| value.next()));
+        // Read again rather than kept from before the round trip: focus may
+        // have moved meanwhile, and the write must be the latest word.
+        let active = self.active.load(Ordering::Relaxed);
+        if says != Some(active) {
+            self.write_active(active);
+        }
+    }
+
+    fn write_active(&self, window: u32) {
+        let _ = self.connection.change_property32(
+            PropMode::REPLACE,
+            self.root,
+            self.atoms._NET_ACTIVE_WINDOW,
+            AtomEnum::WINDOW,
+            &[window],
+        );
+        let _ = self.connection.flush();
     }
 
     /// What `window` asked to be, by the `_NET_WM_STATE` it set before it
@@ -368,7 +504,7 @@ impl Side {
             self.atoms.WM_STATE,
             &[state.value(), x11rb::NONE],
         );
-        self.settle();
+        let _ = self.connection.flush();
     }
 
     /// Answer a request about `_NET_WM_STATE` without changing it: appending
@@ -382,15 +518,7 @@ impl Side {
             AtomEnum::ATOM,
             &[],
         );
-        self.settle();
-    }
-
-    /// Send what was written, then drop what came back for it -- an error
-    /// for a window gone before the write arrived -- which nothing waits for
-    /// and which would otherwise pile up unread.
-    fn settle(&self) {
         let _ = self.connection.flush();
-        while let Ok(Some(_)) = self.connection.poll_for_event() {}
     }
 }
 
@@ -898,6 +1026,15 @@ impl Compositor {
         self.tell_wm_state(x11, WmState::Withdrawn);
     }
 
+    /// Name the X11 window with the keyboard, `focused`, or none, in the
+    /// root's `_NET_ACTIVE_WINDOW`, as EWMH has a window manager do. With or
+    /// without a person at the seat: it is a fact about the keyboard.
+    pub(crate) fn tell_active_x11(&self, focused: Option<&X11Surface>) {
+        if let Some(side) = &self.xwayland.side {
+            side.set_active(focused.map_or(x11rb::NONE, X11Surface::window_id));
+        }
+    }
+
     fn tell_wm_state(&self, x11: &X11Surface, state: WmState) {
         if let Some(side) = &self.xwayland.side {
             side.set_wm_state(x11.window_id(), state);
@@ -986,12 +1123,18 @@ impl Compositor {
         self.publish_facts();
     }
 
+    /// A window gone. If the keyboard has not moved on from it -- with
+    /// nobody at the seat it does not -- the root names none as active,
+    /// rather than a window that is not there.
     fn forget_x11(&mut self, x11: &X11Surface) {
         if let Some(window) = self.x11_window(x11) {
             self.forget_window(&window);
             self.refocus_after_close(x11.wl_surface().as_ref());
             self.backend.redraw();
             self.publish_facts();
+        }
+        if let Some(side) = &self.xwayland.side {
+            side.forget_active(x11.window_id());
         }
     }
 
@@ -1024,6 +1167,7 @@ mod tests {
             _NET_WM_STATE_FULLSCREEN: 3,
             _NET_WM_STATE_MAXIMIZED_HORZ: 4,
             _NET_WM_STATE_MAXIMIZED_VERT: 5,
+            _NET_ACTIVE_WINDOW: 6,
         }
     }
 

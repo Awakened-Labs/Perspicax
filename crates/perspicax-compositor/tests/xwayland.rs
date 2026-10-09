@@ -37,8 +37,8 @@ use x11rb::{
     protocol::{
         Event,
         xproto::{
-            AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
-            EventMask, MapState, PropMode, WindowClass,
+            AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConfigureWindowAux,
+            ConnectionExt as _, CreateWindowAux, EventMask, MapState, PropMode, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -459,6 +459,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE_MAXIMIZED_VERT,
         _NET_WM_STATE_HIDDEN,
         _NET_WM_STATE_FOCUSED,
+        _NET_ACTIVE_WINDOW,
     }
 }
 
@@ -509,6 +510,15 @@ impl X11 {
         let root = x.setup().roots[screen].root;
         let white = x.setup().roots[screen].white_pixel;
         let atoms = Atoms::new(&x).expect("intern").reply().expect("the atoms");
+        // The root's property changes are heard too: `_NET_ACTIVE_WINDOW`
+        // is written there.
+        x.change_window_attributes(
+            root,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+        )
+        .expect("change_window_attributes")
+        .check()
+        .expect("the root's property changes");
         Self {
             session,
             x,
@@ -699,6 +709,39 @@ impl X11 {
             .value32()
             .map(Iterator::collect)
             .unwrap_or_default()
+    }
+
+    /// The window the root's `_NET_ACTIVE_WINDOW` names: what an X client
+    /// reads as the one with the keyboard, or `NONE`.
+    fn active(&self) -> u32 {
+        self.x
+            .get_property(
+                false,
+                self.root,
+                self.atoms._NET_ACTIVE_WINDOW,
+                AtomEnum::WINDOW,
+                0,
+                1,
+            )
+            .expect("get_property")
+            .reply()
+            .expect("_NET_ACTIVE_WINDOW")
+            .value32()
+            .and_then(|mut value| value.next())
+            .unwrap_or(x11rb::NONE)
+    }
+
+    /// Whether the root comes to name `window` as active, and still does a
+    /// moment later: Smithay writes the root there after every change of
+    /// focus, a little after the change, and that must not be the last word.
+    fn names_active(&self, window: u32) -> bool {
+        let named = eventually(Duration::from_secs(5), || {
+            (self.active() == window).then_some(())
+        });
+        named.is_some() && {
+            thread::sleep(Duration::from_millis(300));
+            self.active() == window
+        }
     }
 
     /// The window the X server sends keys to.
@@ -1390,6 +1433,88 @@ fn an_x11_window_withdrawn_from_fullscreen_maps_again_as_a_plain_window() {
     assert!(
         !x11.net_wm_state(window)
             .contains(&x11.atoms._NET_WM_STATE_FULLSCREEN)
+    );
+
+    x11.stop();
+}
+
+/// Issue #91: the root's `_NET_ACTIVE_WINDOW` names the X11 window with the
+/// keyboard, and none once a Wayland window has it, as EWMH has a window
+/// manager say. Smithay wrote the root there after every change of focus, so
+/// a client reading it -- Wine, which goes by it for which window is in
+/// front -- read that the desktop was.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn the_root_names_the_x11_window_with_the_keyboard_and_none_once_a_wayland_one_has_it() {
+    let x11 = X11::start("x11-active", Backend::headless((1280, 1024)).with_person());
+    let first = x11.open("first");
+    assert!(x11.names_active(first), "the first is not named");
+    let second = x11.open("second");
+    assert!(x11.names_active(second), "the second is not named");
+
+    let (mut desk, mut queue, qh, _) = x11.session.client();
+    desk.open_window(&qh, "wayland", "perspicax.test.wayland");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    assert!(
+        x11.names_active(x11rb::NONE),
+        "still names {:#x} with a Wayland window at the keyboard",
+        x11.active()
+    );
+
+    x11.stop();
+}
+
+/// Issue #91: the keyboard moving between X11 windows, here because the one
+/// with it is minimized, moves the name with it -- and it stays, after
+/// Smithay has written the root there.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn the_root_goes_on_naming_the_x11_window_with_the_keyboard_after_focus_moves() {
+    let x11 = X11::start(
+        "x11-active-moves",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let first = x11.open("first");
+    let second = x11.open("second");
+    assert!(x11.names_active(second), "the second is not named");
+
+    x11.perform(Action::Minimize);
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == first).then_some(())
+    })
+    .expect("the keyboard never went to the first");
+    assert!(
+        x11.names_active(first),
+        "names {:#x}, not the first",
+        x11.active()
+    );
+
+    x11.stop();
+}
+
+/// Issue #91: with nobody at the seat, the keyboard does not move on when
+/// the window with it is withdrawn, and the root names no window rather than
+/// one that is gone.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn with_nobody_at_the_seat_the_root_names_no_window_once_the_active_one_is_withdrawn() {
+    let x11 = X11::start("x11-nobody-active", Backend::headless((1280, 1024)));
+    let first = x11.open("first");
+    let second = x11.open("second");
+    assert!(x11.names_active(second), "the second is not named");
+
+    x11.x.unmap_window(second).expect("unmap_window");
+    x11.x.flush().expect("flush");
+    assert!(x11.answered(second, x11.atoms.WM_STATE), "never withdrawn");
+    assert!(
+        x11.names_active(x11rb::NONE),
+        "names {:#x}, though the second is gone and the first never took the keyboard",
+        x11.active()
+    );
+    assert_ne!(
+        x11.focus(),
+        first,
+        "the keyboard moved on with nobody at the seat"
     );
 
     x11.stop();

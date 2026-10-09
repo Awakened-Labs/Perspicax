@@ -543,13 +543,15 @@ impl Compositor {
     /// Give the keyboard back to the topmost window, or to nothing.
     /// Take the keyboard from whatever has it. Smithay 0.7 tells
     /// `focus_changed` of a new focus but not of none, so what has to follow
-    /// is done here: no window looks active any more. Every focus cleared to
-    /// none goes through this.
+    /// is done here: no window looks active any more, nor is named so to X
+    /// clients. Every focus cleared to none goes through this.
     pub(crate) fn clear_focus(&mut self) {
         if let Some(keyboard) = self.keyboard.clone() {
             keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
         }
         self.show_active(None);
+        #[cfg(feature = "xwayland")]
+        self.tell_active_x11(None);
     }
 
     /// On a seat, make the window with the keyboard, `focused`, the one that
@@ -1068,6 +1070,12 @@ impl SeatHandler for Compositor {
     /// start (see `new_toplevel`), because the toolkits it hosts for reading
     /// render differently when they believe they are in the background.
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&FocusTarget>) {
+        // X clients read which window has the keyboard off the root.
+        #[cfg(feature = "xwayland")]
+        self.tell_active_x11(match focused {
+            Some(FocusTarget::X11(x11)) => Some(x11),
+            _ => None,
+        });
         let focused = focused
             .and_then(WaylandFocus::wl_surface)
             .map(std::borrow::Cow::into_owned);
