@@ -35,6 +35,7 @@ fn session(name: &str) -> Session {
             ],
             workspaces: Shape::default(),
             access: Access::open(),
+            person: false,
         },
     )
 }

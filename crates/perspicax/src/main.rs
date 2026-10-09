@@ -311,6 +311,8 @@ fn run(cli: &Cli) -> Result<()> {
             // One workspace: an agent's desk is whatever it spawned.
             workspaces: Default::default(),
             access: Default::default(),
+            // Nobody sits at it, so no window rearranges itself.
+            person: false,
         }
     };
     // First, before the accessibility bus is touched: a backend this binary

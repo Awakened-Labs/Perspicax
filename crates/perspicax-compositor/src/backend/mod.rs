@@ -59,6 +59,12 @@ pub enum Backend {
         /// windows, as a seat's `[protocols]` table would say. The default
         /// is any client: headless hosts only what it was told to start.
         access: Access,
+        /// Whether a person sits at it, as one does at a seat: windows may
+        /// then maximize, go fullscreen and minimize themselves, `activated`
+        /// follows the keyboard, and the rest of what only a person gets.
+        /// For tests of exactly that; an agent's desk has nobody, and the
+        /// default is `false`. See [`Backend::with_person`].
+        person: bool,
     },
     /// A real session: the outputs the GPU has connected, the keyboards and
     /// pointers libinput finds, device access negotiated through libseat.
@@ -105,7 +111,18 @@ impl Backend {
             outputs: vec![Virtual::numbered(1, size)],
             workspaces: Shape::default(),
             access: Access::open(),
+            person: false,
         }
+    }
+
+    /// The same, with a person sitting at it, so a test can see what a
+    /// person gets on a seat. A seat has one already.
+    #[must_use]
+    pub fn with_person(mut self) -> Self {
+        if let Self::Headless { person, .. } = &mut self {
+            *person = true;
+        }
+        self
     }
 
     /// Refuse a backend this binary was built without, naming the feature
@@ -144,7 +161,11 @@ pub(crate) enum Running {
     Headless {
         outputs: Vec<Plugged>,
         workspaces: Shape,
-        access: Access,
+        /// Boxed: a rule for each protocol makes it most of this variant,
+        /// and the seat's is boxed already.
+        access: Box<Access>,
+        /// Whether a person sits at it. See [`Running::has_person`].
+        person: bool,
         /// Virtual monitors a display tool turned off, kept so it can turn
         /// them on again.
         dark: Vec<Virtual>,
@@ -179,10 +200,12 @@ impl Running {
                 outputs,
                 workspaces,
                 access,
+                person,
             } => Ok(Self::Headless {
                 outputs: outputs.iter().map(|out| plug(display, out)).collect(),
                 workspaces: *workspaces,
-                access: access.clone(),
+                access: Box::new(access.clone()),
+                person: *person,
                 dark: Vec::new(),
                 #[cfg(feature = "capture")]
                 pictures: None,
@@ -223,7 +246,7 @@ impl Running {
     /// person's `[protocols]` on a seat.
     pub(crate) fn access(&self) -> Access {
         match self {
-            Self::Headless { access, .. } => access.clone(),
+            Self::Headless { access, .. } => Access::clone(access),
             #[cfg(feature = "seat")]
             Self::Seat(session) => session.settings.protocols.clone(),
         }
@@ -375,12 +398,13 @@ impl Running {
 
     /// Whether a person sits at this seat. It decides everything that exists
     /// for a person and would get in an agent's way: `activated` following
-    /// the keyboard, interactive moves and resizes, maximize, minimize,
-    /// popup grabs. Headless keeps the deterministic M2 behaviour its tests
-    /// are written against. See `crate::shell`.
+    /// the keyboard, interactive moves and resizes, a window maximizing,
+    /// going fullscreen or minimizing itself, popup grabs. Headless keeps
+    /// the deterministic M2 behaviour its tests are written against, unless
+    /// a test seats a person to see what a person gets. See `crate::shell`.
     pub(crate) fn has_person(&self) -> bool {
         match self {
-            Self::Headless { .. } => false,
+            Self::Headless { person, .. } => *person,
             #[cfg(feature = "seat")]
             Self::Seat(_) => true,
         }

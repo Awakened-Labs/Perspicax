@@ -26,6 +26,7 @@ fn session(name: &str) -> Session {
             outputs: vec![Virtual::numbered(1, (1280, 1024))],
             workspaces: Shape::default(),
             access: Access::open(),
+            person: false,
         },
     )
 }

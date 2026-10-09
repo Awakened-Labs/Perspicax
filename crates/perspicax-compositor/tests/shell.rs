@@ -136,6 +136,7 @@ fn two_monitors() -> Backend {
         ],
         workspaces: Shape::default(),
         access: Access::open(),
+        person: false,
     }
 }
 
@@ -378,6 +379,7 @@ fn four_workspaces() -> Backend {
             },
         },
         access: Access::open(),
+        person: false,
     }
 }
 
@@ -402,6 +404,7 @@ fn two_monitors_each_its_own() -> Backend {
             },
         },
         access,
+        person: false,
     }
 }
 

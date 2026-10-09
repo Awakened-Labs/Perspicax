@@ -44,6 +44,7 @@ fn session(name: &str, access: Access) -> Session {
             outputs: vec![Virtual::numbered(1, (800, 600))],
             workspaces: Shape::default(),
             access,
+            person: false,
         },
     )
 }

@@ -25,6 +25,7 @@ fn backend(access: Access) -> Backend {
         outputs: vec![Virtual::numbered(1, (1280, 1024))],
         workspaces: Shape::default(),
         access,
+        person: false,
     }
 }
 
