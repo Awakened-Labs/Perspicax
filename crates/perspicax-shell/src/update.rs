@@ -8,7 +8,7 @@
 //!
 //! There are two menus, one open at a time: the root menu, at the pointer,
 //! and the start menu, beside the start button, with a search line on top
-//! from the start. Asking for the one that is open closes it, and asking
+//! from the start, unless `[shell.start-menu]` says it finds nothing. Asking for the one that is open closes it, and asking
 //! for the other puts it in its place. With a tray there is a third, any
 //! tray icon's, beside its icon: its program's own menu, read when it was
 //! asked for, in which nothing is searched for, and whose choice is told to
@@ -18,7 +18,8 @@
 //! item under it, and a submenu opens as soon as the pointer is on its item;
 //! a click chooses. The arrows move up and down a menu, into a submenu and
 //! back out; Enter chooses and Escape closes. Typing narrows the menu to
-//! the programs whose names hold what was typed, from anywhere in it, as
+//! the programs whose names hold what was typed, from anywhere in it (or,
+//! in a start menu that finds everything, from every application too), as
 //! many of the best as fit in one column, and Backspace widens it again. A
 //! click anywhere off the menus closes them, on a panel too, and so does
 //! losing the keyboard to something else.
@@ -33,7 +34,7 @@ use crate::{
     model::{
         Button,
         apps::Run,
-        menu::{Does, Item, Menu, Route},
+        menu::{Does, Finds, Item, Menu, Route},
     },
 };
 
@@ -159,6 +160,8 @@ pub(crate) struct State {
 struct Trees {
     root: Menu,
     start: Menu,
+    /// What typing in the start menu looks through.
+    finds: Finds,
     /// The last tray icon's menu asked for, and what the icon is called.
     #[cfg(feature = "tray")]
     tray: (String, Menu),
@@ -210,8 +213,9 @@ pub(crate) struct View<'a> {
     /// What the first menu is called.
     pub(crate) name: &'a str,
     pub(crate) output: &'a str,
-    /// What has been typed, while there is a line to show it on: always in
-    /// the start menu, and in the root menu once something is.
+    /// What has been typed, while there is a line to show it on: in the
+    /// start menu always, unless it finds nothing, and in the root menu once
+    /// something is.
     pub(crate) query: Option<&'a str>,
     pub(crate) menus: Vec<MenuView<'a>>,
 }
@@ -247,6 +251,7 @@ impl State {
             trees: Trees {
                 root,
                 start,
+                finds: Finds::Itself,
                 #[cfg(feature = "tray")]
                 tray: (String::new(), Menu::default()),
             },
@@ -254,13 +259,14 @@ impl State {
         }
     }
 
-    /// Show `root` and `start` from the next time a menu opens. Ignored
-    /// while one is open, so that what a person is looking at does not shift
-    /// under them.
-    pub(crate) fn set_menus(&mut self, root: Menu, start: Menu) {
+    /// Show `root` and `start`, typing in `start` finding what `finds`
+    /// says, from the next time a menu opens. Ignored while one is open, so
+    /// that what a person is looking at does not shift under them.
+    pub(crate) fn set_menus(&mut self, root: Menu, start: Menu, finds: Finds) {
         if self.open.is_none() {
             self.trees.root = root;
             self.trees.start = start;
+            self.trees.finds = finds;
         }
     }
 
@@ -359,7 +365,7 @@ impl State {
     /// The open menus, if they are open.
     pub(crate) fn view(&self) -> Option<View<'_>> {
         let open = self.open.as_ref()?;
-        let tree = self.trees.of(open.which);
+        let tree = open.tree(&self.trees);
         let active = open.active();
         let menus = open
             .levels
@@ -395,7 +401,7 @@ impl State {
         Some(View {
             name: self.trees.name(open.which),
             output: &open.output,
-            query: open.searching().then_some(open.query.as_str()),
+            query: open.searching(&self.trees).then_some(open.query.as_str()),
             menus,
         })
     }
@@ -476,7 +482,7 @@ impl State {
         let Some(open) = &self.open else {
             return Vec::new();
         };
-        let tree = self.trees.of(open.which);
+        let tree = open.tree(&self.trees);
         let active = open.active();
         let level = &open.levels[active];
         let choosable: Vec<usize> = (0..level.lines.len())
@@ -537,10 +543,11 @@ impl State {
     /// Change what has been typed with `edit`, which says whether it did,
     /// and show what it finds now.
     fn typed(&mut self, edit: impl FnOnce(&mut String) -> bool) -> Vec<Effect> {
+        let trees = &self.trees;
         let edited = self
             .open
             .as_mut()
-            .filter(|open| open.finds())
+            .filter(|open| open.finds(trees))
             .is_some_and(|open| edit(&mut open.query));
         if edited { self.narrow() } else { Vec::new() }
     }
@@ -550,7 +557,7 @@ impl State {
         let Some(open) = &mut self.open else {
             return Vec::new();
         };
-        let tree = self.trees.of(open.which);
+        let tree = open.tree(&self.trees);
         open.levels = if open.query.is_empty() {
             vec![Level::of(tree, &[])]
         } else {
@@ -570,7 +577,7 @@ impl State {
         let Some(open) = &mut self.open else {
             return Vec::new();
         };
-        let tree = self.trees.of(open.which);
+        let tree = open.tree(&self.trees);
         let Some(route) = open.levels.get(level).and_then(|it| it.lines.get(line)) else {
             return Vec::new();
         };
@@ -615,7 +622,7 @@ impl State {
             .levels
             .get(level)
             .and_then(|it| it.lines.get(line))
-            .and_then(|route| self.trees.of(open.which).item(route))
+            .and_then(|route| open.tree(&self.trees).item(route))
         else {
             return Vec::new();
         };
@@ -663,13 +670,14 @@ impl State {
         let Some(open) = &mut self.open else {
             return;
         };
-        let tree = self.trees.of(open.which);
+        let tree = open.tree(&self.trees);
+        let searching = open.searching(&self.trees);
         let shown: Vec<Shown<'_>> = open
             .levels
             .iter()
             .enumerate()
             .map(|(k, level)| Shown {
-                header: (k == 0 && open.searching()).then_some(open.query.as_str()),
+                header: (k == 0 && searching).then_some(open.query.as_str()),
                 lines: level
                     .lines
                     .iter()
@@ -712,12 +720,25 @@ impl Trees {
 }
 
 impl Open {
+    /// The tree its lines' routes are in: while something is typed in a
+    /// start menu that finds among more than it holds, that tree, and
+    /// otherwise its own. Each of the start menu's own items is where the
+    /// start menu has it in both, and the rest is past its end, so a route
+    /// in both names the same item in each; and found lines all start
+    /// programs, so no submenu of them is open when the typing changes.
+    fn tree<'t>(&self, trees: &'t Trees) -> &'t Menu {
+        match (self.which, &trees.finds) {
+            (Which::Start, Finds::Among(all)) if !self.query.is_empty() => all,
+            _ => trees.of(self.which),
+        }
+    }
+
     /// Whether the first menu has a search line: the start menu always
-    /// does, and the root menu once something has been typed. A tray
-    /// icon's never does: it starts no programs to find.
-    fn searching(&self) -> bool {
+    /// does unless it finds nothing, and the root menu once something has
+    /// been typed. A tray icon's never does: it starts no programs to find.
+    fn searching(&self, trees: &Trees) -> bool {
         match self.which {
-            Which::Start => true,
+            Which::Start => self.finds(trees),
             Which::Root => !self.query.is_empty(),
             #[cfg(feature = "tray")]
             Which::Tray(_) => false,
@@ -725,13 +746,15 @@ impl Open {
     }
 
     /// Whether typing looks for programs in it: in any but a tray icon's,
-    /// whose items are its program's and start none.
-    fn finds(&self) -> bool {
-        #[cfg(feature = "tray")]
-        if let Which::Tray(_) = self.which {
-            return false;
+    /// whose items are its program's and start none, or a start menu
+    /// written to find nothing.
+    fn finds(&self, trees: &Trees) -> bool {
+        match self.which {
+            Which::Start => !matches!(trees.finds, Finds::Nothing),
+            Which::Root => true,
+            #[cfg(feature = "tray")]
+            Which::Tray(_) => false,
         }
-        true
     }
 
     /// The menu the keyboard is in: the deepest with a line selected.
@@ -766,14 +789,15 @@ impl Level {
 
 #[cfg(test)]
 mod tests {
-    use perspicax_config::Leave;
+    use perspicax_config::{Leave, start_menu::Search};
 
     use super::*;
     use crate::{
         layout::Monospace,
         model::{
             apps::App,
-            menu::{Session, root, start},
+            menu::{Session, finds, root, start},
+            menu_file::{FileItem, MenuFile, Mode},
         },
     };
 
@@ -804,21 +828,30 @@ mod tests {
         }
     }
 
-    /// The root menu and the start menu, both Accessories (gedit, xcalc),
-    /// Internet (firefox), a separator, Lock, Log Out.
-    fn state() -> State {
-        let apps = [
+    fn apps() -> [App; 3] {
+        [
             app("gedit", "Text Editor", "Utility"),
             app("xcalc", "Calculator", "Utility"),
             app("firefox", "Firefox", "Network"),
-        ];
-        let session = Session {
+        ]
+    }
+
+    fn session() -> Session {
+        Session {
             leave: vec![
                 (Leave::Lock, Does::Run(run("swaylock"))),
                 (Leave::LogOut, Does::LogOut),
             ],
-        };
-        State::new(root(&apps, None, &session), start(&apps, &session))
+        }
+    }
+
+    /// The root menu and the start menu, both Accessories (gedit, xcalc),
+    /// Internet (firefox), a separator, Lock, Log Out.
+    fn state() -> State {
+        State::new(
+            root(&apps(), None, &session()),
+            start(&apps(), None, &session()),
+        )
     }
 
     struct Shell {
@@ -828,6 +861,26 @@ mod tests {
     impl Shell {
         fn new() -> Self {
             Self { state: state() }
+        }
+
+        /// A shell whose start menu is Firefox alone, in place of
+        /// everything, finding what `search` says when typed in.
+        fn with_favourites(search: Search) -> Self {
+            let written = MenuFile {
+                mode: Mode::Replace,
+                items: vec![FileItem::App {
+                    id: "firefox".to_owned(),
+                    label: None,
+                    icon: None,
+                }],
+            };
+            let mut shell = Self::new();
+            shell.state.set_menus(
+                root(&apps(), None, &session()),
+                start(&apps(), Some(&written), &session()),
+                finds(&apps(), Some(&written), search, &session()),
+            );
+            shell
         }
 
         fn send(&mut self, event: Event) -> Vec<Effect> {
@@ -1208,6 +1261,75 @@ mod tests {
             shell.key(Key::Enter),
             [Effect::Redraw, Effect::Run(run("firefox"))]
         );
+    }
+
+    #[test]
+    fn the_start_menu_finds_only_what_it_holds_by_default() {
+        let mut shell = Shell::with_favourites(Search::Menu);
+        shell.start_button();
+        assert_eq!(shell.shown(), [rows(&["Firefox"])]);
+        shell.key(Key::Text("calc".to_owned()));
+        assert_eq!(shell.shown(), [rows(&[])], "not in the menu, so not found");
+        for _ in 0..4 {
+            shell.key(Key::Backspace);
+        }
+        shell.key(Key::Text("fire".to_owned()));
+        assert_eq!(shell.shown(), [rows(&["*Firefox"])]);
+    }
+
+    #[test]
+    fn a_start_menu_that_finds_everything_finds_an_application_it_does_not_list() {
+        let mut shell = Shell::with_favourites(Search::All);
+        let xcalc = [Effect::Redraw, Effect::Run(run("xcalc"))];
+        shell.start_button();
+        assert_eq!(shell.shown(), [rows(&["Firefox"])]);
+        shell.key(Key::Text("calc".to_owned()));
+        assert_eq!(shell.state.view().unwrap().query, Some("calc"));
+        assert_eq!(shell.shown(), [rows(&["*Calculator"])]);
+        assert_eq!(shell.key(Key::Enter), xcalc, "chosen by Enter");
+
+        shell.start_button();
+        shell.key(Key::Text("calc".to_owned()));
+        let at = shell.middle_of("Calculator");
+        assert_eq!(shell.click(at), xcalc, "by a click");
+
+        shell.start_button();
+        shell.key(Key::Text("calc".to_owned()));
+        let route = shell.state.view().unwrap().menus[0].lines[0].route.to_vec();
+        assert_eq!(
+            shell.send(Event::Choose(route)),
+            xcalc,
+            "by an assistive technology"
+        );
+
+        shell.start_button();
+        shell.key(Key::Text("fire".to_owned()));
+        assert_eq!(
+            shell.shown(),
+            [rows(&["*Firefox"])],
+            "once, though it is in its group too"
+        );
+        for _ in 0..4 {
+            shell.key(Key::Backspace);
+        }
+        assert_eq!(shell.shown(), [rows(&["Firefox"])], "and the menu again");
+    }
+
+    #[test]
+    fn a_start_menu_that_finds_nothing_has_no_search_line_and_typing_does_nothing() {
+        let mut shell = Shell::with_favourites(Search::Nothing);
+        shell.start_button();
+        let view = shell.state.view().unwrap();
+        assert_eq!(view.query, None);
+        assert!(view.menus[0].header.is_none(), "no line to show it on");
+        assert_eq!(shell.key(Key::Text("calc".to_owned())), []);
+        assert_eq!(shell.shown(), [rows(&["Firefox"])]);
+        assert_eq!(
+            shell.key(Key::Down),
+            [Effect::Redraw],
+            "the arrows still move"
+        );
+        assert_eq!(shell.shown(), [rows(&["*Firefox"])]);
     }
 
     #[test]

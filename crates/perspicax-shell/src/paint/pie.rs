@@ -13,7 +13,7 @@ use tiny_skia::{FillRule, PathBuilder, PixmapMut, Transform};
 use super::{
     colour,
     icons::{self, Images},
-    solid,
+    rounded, solid,
     text::Text,
 };
 use crate::{
@@ -153,24 +153,6 @@ fn title(
     );
     let ink = colour(palette, Role::PanelInk);
     text.write(canvas, label, place, text.size() * s, ink);
-}
-
-/// A rectangle with its corners rounded `radius`, in pixels.
-fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny_skia::Path> {
-    let r = radius.min(w / 2.0).min(h / 2.0);
-    let (right, bottom) = (x + w, y + h);
-    let mut path = PathBuilder::new();
-    path.move_to(x + r, y);
-    path.line_to(right - r, y);
-    path.quad_to(right, y, right, y + r);
-    path.line_to(right, bottom - r);
-    path.quad_to(right, bottom, right - r, bottom);
-    path.line_to(x + r, bottom);
-    path.quad_to(x, bottom, x, bottom - r);
-    path.line_to(x, y + r);
-    path.quad_to(x, y, x + r, y);
-    path.close();
-    path.finish()
 }
 
 #[cfg(test)]

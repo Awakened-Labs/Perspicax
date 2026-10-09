@@ -733,7 +733,7 @@ them; none is on by default. The profiles turn on what the build has:
 | Desktop icons | `icons` (with `wallpaper`, `menus`) | the first monitor | off | drawn on the wallpaper's | a `List` "Desktop" of a `ListItem` for each icon, the selected one selected |
 | Root menu | `menus` | right-click on the wallpaper, or a key or button bound to `root-menu` | the same | overlay, `perspicax-menu-<output>`, while open | a `Menu` "Root menu" of `MenuItem`s |
 | Panel | `panel` | along the bottom of every monitor | none | top, `perspicax-panel-<output>` | a `Toolbar` "Panel" holding what follows |
-| Start button and menu | `menus` | the panel's first item; a tap of Logo | — | the panel's; its menu as the root menu's | a `Button` "Start"; a `Menu` "Start menu" with a search line |
+| Start button and menu | `menus` | the panel's first item; a tap of Logo | — | the panel's; its menu as the root menu's | a `Button` "Start"; a `Menu` "Start menu", with a search line unless `search = "none"` |
 | Taskbar | `panel` | each monitor's own windows | — | the panel's | a `TabList` "Taskbar", the window in use selected |
 | Pager | `panel` | the workspaces | — | the panel's | a `TabList` "Workspaces", the one showing selected |
 | Keyboard layout | `panel` | before the tray, with two layouts or more | — | the panel's | a `Button` "Keyboard layout", the layout's name its value |
@@ -797,7 +797,53 @@ application, `separator = true`, a submenu with `items = [...]`,
 `applications = true` for the applications by group, or `session = true` for
 the ways to leave.
 
-The start menu ends with those ways to leave: Lock, Log Out, Suspend, Restart
+The start menu is written in the same words, in `config.toml` itself, under
+`[shell.start-menu]`; the menu file is the same items in a file of its own.
+With no table, the start menu is every application by group, then the ways to
+leave, and its button is Perspicax's mark. A few chosen entries, then the ways
+to leave:
+
+```toml
+[shell.start-menu]
+icon = "start-here"            # the start button's: an icon theme's name, or
+                               # an image file, anything with a "/" in it
+                               # ("~/Pictures/logo.png", or "./logo.svg" beside
+                               # this file); unset, or not found, is
+                               # Perspicax's mark
+mode = "replace"               # "extend" (the default) puts the items above
+                               # the applications; "replace" puts them instead
+search = "all"                 # what typing finds: "menu" (the default), what
+                               # the menu holds; "all", every application too;
+                               # "none", and there is no search line
+items = [
+  { app = "firefox" },
+  { app = "org.kde.dolphin", label = "Files" },
+  { label = "Terminal", exec = ["foot"], icon = "utilities-terminal" },
+  { label = "Projects", items = [
+      { label = "perspicax", exec = ["foot", "-D", "~/code/perspicax"] },
+  ] },
+  { separator = true },
+  { session = true },          # Lock, Log Out, …, as [shell] leave says
+]
+```
+
+Nothing but the ways to leave:
+
+```toml
+[shell.start-menu]
+mode = "replace"
+search = "none"
+items = [{ session = true }]
+```
+
+A saved change shows the next time the menu opens, and a new icon at once. An
+`app` that is not installed is left out rather than refused, so one config can
+travel between machines; a `"replace"` menu with no items is refused, since it
+would never open. The button is a `Button` "Start" to an agent whatever it
+wears.
+
+The start menu ends with those ways to leave, unless `[shell.start-menu]`
+puts its items in their place without `session = true`: Lock, Log Out, Suspend, Restart
 and Shut Down, as `leave` chooses and orders them (`leave = []` shows none).
 Each runs its program, and shows only when that program is on `PATH`; Log Out
 asks the compositor instead. Typing "sleep", "reboot" or "power off" in the

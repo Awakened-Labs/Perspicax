@@ -295,7 +295,7 @@ mod tests {
         };
         let mut state = State::new(
             root(std::slice::from_ref(&app), None, &Session::default()),
-            start(&[app], &Session::default()),
+            start(&[app], None, &Session::default()),
         );
         state.update(
             Event::DesktopPress {

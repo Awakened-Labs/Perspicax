@@ -438,7 +438,7 @@ mod menus {
                     (Leave::PowerOff, loginctl("poweroff")),
                 ],
             };
-            let mut state = State::new(root(&apps, None, &session), start(&apps, &session));
+            let mut state = State::new(root(&apps, None, &session), start(&apps, None, &session));
             state.update(
                 Event::DesktopPress {
                     output: "DP-1".to_owned(),

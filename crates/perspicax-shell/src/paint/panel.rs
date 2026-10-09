@@ -1,8 +1,9 @@
 //! A panel: a bar in the theme's colours (dark, in the default one) along
 //! the edge of a monitor, with a rule where it meets the desktop: along its
 //! length, and across each end that stops short of the monitor's side. The
-//! start button is a grid of four squares, drawn in the accent's shade
-//! while its menu is open. Each task is a face a little lighter than the
+//! start button is the icon `[shell.start-menu]` names or, with none or one
+//! that cannot be found, Perspicax's mark, in its own inks whatever the
+//! theme; on the accent's shade while its menu is open. Each task is a face a little lighter than the
 //! bar, holding its application's icon and, where there is room, its
 //! window's title; a face too narrow for both holds its icon alone, in its
 //! middle. An application with no icon, in a theme with no generic one
@@ -17,14 +18,14 @@
 //! of its strip clear.
 
 use perspicax_config::{Edge, Item};
-use tiny_skia::PixmapMut;
+use tiny_skia::{FillRule, LineCap, LineJoin, PathBuilder, PixmapMut, Stroke, Transform};
 
 use perspicax_config::{Palette, Role};
 
 use super::{
     colour, fill,
     icons::{self, Images},
-    scaled,
+    rounded, scaled, solid,
     text::Text,
 };
 use crate::layout::{
@@ -65,9 +66,29 @@ impl Colours {
     }
 }
 
-/// One square of the start button's grid, and the room between them.
-const SQUARE: i32 = 7;
-const BETWEEN: i32 = 3;
+/// Perspicax's mark, as its small master draws it, in the master's own
+/// units: `assets/brand/perspicax-mark-small.svg` in the ennius repository,
+/// the brand's file for anything under 48 pixels, the start button by name.
+/// Its viewBox, where it starts and how wide it is; the run, one line round
+/// three sides, stopping short of the top right corner by the same 76 both
+/// ways, so that the opening is a line of sight to the middle; how heavy the
+/// run is; and the pane it sees, where it starts, how wide it is and how
+/// round its corners are, as round as the run's joins. Change these only as
+/// the master changes.
+const VIEW: (f32, f32) = (73.0, 366.0);
+const RUN: [(f32, f32); 5] = [
+    (332.0, 104.0),
+    (104.0, 104.0),
+    (104.0, 408.0),
+    (408.0, 408.0),
+    (408.0, 180.0),
+];
+const WEIGHT: f32 = 46.0;
+const PANE: (f32, f32, f32) = (171.0, 170.0, 23.0);
+/// The mark's inks, the brand's terracotta for the run and sky for the pane:
+/// never the theme's, since the brand keeps them on dark grounds and light.
+const TERRACOTTA: [u8; 4] = [0xc0, 0x6a, 0x3c, 0xff];
+const SKY: [u8; 4] = [0x7b, 0xae, 0xcd, 0xff];
 
 /// A task's face is this far inside its place, above and below, and this
 /// far either side, which leaves a gap between one task and the next.
@@ -99,6 +120,9 @@ pub(crate) struct Shown<'a> {
     pub(crate) layout: Option<&'a str>,
     /// The start menu is open from this panel's button.
     pub(crate) open: bool,
+    /// The start button's icon, as the icon theme finds it, drawn in place
+    /// of Perspicax's mark if it is found.
+    pub(crate) start: Option<&'a str>,
     /// The status icons, by key, to draw those `placed` holds.
     #[cfg(feature = "tray")]
     pub(crate) tray: &'a [(u64, crate::model::tray::Item)],
@@ -133,7 +157,15 @@ pub(crate) fn paint(
                 if shown.open {
                     fill(canvas, px(place), colours.open);
                 }
-                grid(canvas, px(place), scale as i32, colours.ink);
+                let side = fitted(place.h);
+                let at = px(middle(place, side));
+                match shown
+                    .start
+                    .and_then(|icon| images.get(icon, side as u32, scale))
+                {
+                    Some(image) => icons::draw(canvas, image, at),
+                    None => mark(canvas, at),
+                }
             }
             // The layout's label is set as the clock's time is.
             Item::Clock | Item::Layout => {
@@ -271,12 +303,7 @@ impl Pen<'_, '_, '_> {
     #[cfg(feature = "tray")]
     fn status(&mut self, item: &crate::model::tray::Item, place: Rect, images: &mut Images) {
         let side = fitted(place.h);
-        let at = self.px(Rect::new(
-            place.x + (place.w - side) / 2,
-            place.y + (place.h - side) / 2,
-            side,
-            side,
-        ));
+        let at = self.px(middle(place, side));
         let (size, scale) = (side as u32, self.scale);
         let icon = item.drawn();
         if let Some(image) = icon
@@ -317,7 +344,7 @@ impl Pen<'_, '_, '_> {
 
 /// How big an icon is on a panel `tall` high: [`ICON`], or less on a panel
 /// too short for it.
-fn fitted(tall: i32) -> i32 {
+pub(crate) fn fitted(tall: i32) -> i32 {
     ICON.min(tall - 2 * ICON_MARGIN).max(1)
 }
 
@@ -345,23 +372,48 @@ fn window(canvas: &mut PixmapMut<'_>, place: Rect, s: i32, ink: [u8; 4]) {
     }
 }
 
-/// Four squares, two by two, centred in `place`, `s` pixels to a logical
-/// one.
-fn grid(canvas: &mut PixmapMut<'_>, place: Rect, s: i32, ink: [u8; 4]) {
-    let (square, between) = (SQUARE * s, BETWEEN * s);
-    let side = 2 * square + between;
-    let (left, top) = (
+/// A square `side` on a side in the middle of `place`.
+fn middle(place: Rect, side: i32) -> Rect {
+    Rect::new(
         place.x + (place.w - side) / 2,
         place.y + (place.h - side) / 2,
+        side,
+        side,
+    )
+}
+
+/// Perspicax's mark filling `place`, a square in pixels: the master's own
+/// numbers, drawn through its viewBox, so that the run's weight and the
+/// pane's corners scale with it.
+fn mark(canvas: &mut PixmapMut<'_>, place: Rect) {
+    let (from, side) = VIEW;
+    let k = place.w as f32 / side;
+    let through = Transform::from_row(
+        k,
+        0.0,
+        0.0,
+        k,
+        place.x as f32 - from * k,
+        place.y as f32 - from * k,
     );
-    for (column, row) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-        let at = Rect::new(
-            left + column * (square + between),
-            top + row * (square + between),
-            square,
-            square,
-        );
-        fill(canvas, at, ink);
+    let [(x, y), rest @ ..] = RUN;
+    let mut run = PathBuilder::new();
+    run.move_to(x, y);
+    for (x, y) in rest {
+        run.line_to(x, y);
+    }
+    if let Some(run) = run.finish() {
+        let stroke = Stroke {
+            width: WEIGHT,
+            line_cap: LineCap::Round,
+            line_join: LineJoin::Round,
+            ..Stroke::default()
+        };
+        canvas.stroke_path(&run, &solid(TERRACOTTA), &stroke, through, None);
+    }
+    let (at, wide, radius) = PANE;
+    if let Some(pane) = rounded(at, at, wide, wide, radius) {
+        canvas.fill_path(&pane, &solid(SKY), FillRule::Winding, through, None);
     }
 }
 
@@ -416,6 +468,7 @@ mod tests {
                 time: "14:05",
                 layout: None,
                 open: false,
+                start: None,
                 #[cfg(feature = "tray")]
                 tray: &[],
             },
@@ -473,6 +526,18 @@ mod tests {
     }
 
     fn painted(placed: &Placed, open: bool, scale: u32) -> Pixmap {
+        painted_with(placed, open, scale, None, &mut Images::default())
+    }
+
+    /// As [`painted`], the start button's icon `start` looked for in
+    /// `images`.
+    fn painted_with(
+        placed: &Placed,
+        open: bool,
+        scale: u32,
+        start: Option<&str>,
+        images: &mut Images,
+    ) -> Pixmap {
         let mut picture = Pixmap::new(600 * scale, 40 * scale).expect("a picture");
         paint(
             &Shown {
@@ -482,13 +547,14 @@ mod tests {
                 time: "14:05",
                 layout: None,
                 open,
+                start,
                 #[cfg(feature = "tray")]
                 tray: &[],
             },
             &mut picture.as_mut(),
             scale,
             &mut Text::without_fonts(),
-            &mut Images::default(),
+            images,
             &Palette::default(),
         );
         picture
@@ -552,24 +618,182 @@ mod tests {
         }
     }
 
+    /// Points of the mark, in its master's units: on the run, down its left
+    /// side; in the pane; the top right corner, where the opening leaves
+    /// nothing; and between the run and the pane.
+    const ON_RUN: (f32, f32) = (104.0, 256.0);
+    const IN_PANE: (f32, f32) = (256.0, 256.0);
+    const SIGHTLINE: (f32, f32) = (408.0, 104.0);
+    const GAP: (f32, f32) = (149.0, 256.0);
+
+    /// The pixel at `point` of the mark, as it is drawn in `button` at
+    /// `scale`.
+    fn on_mark(button: Rect, scale: u32, point: (f32, f32)) -> (i32, i32) {
+        let s = scale as i32;
+        let at = scaled(middle(button, fitted(button.h)), scale);
+        let (from, side) = VIEW;
+        let k = at.w as f32 / side;
+        let x = at.x as f32 + (point.0 - from) * k;
+        let y = at.y as f32 + (point.1 - from) * k;
+        assert!(at.w == fitted(button.h) * s, "drawn the icons' size");
+        (x as i32, y as i32)
+    }
+
     #[test]
-    fn the_start_button_is_a_grid_lit_while_its_menu_is_open() {
+    fn the_start_button_is_the_mark_lit_while_its_menu_is_open() {
         let placed = laid(false);
         let button = placed.item(Item::Start).unwrap();
-        let closed = painted(&placed, false, 1);
-        let middle = (button.x + button.w / 2, button.y + button.h / 2);
-        // The middle is between the squares; a square's middle is off it.
-        let square = (
-            middle.0 - BETWEEN / 2 - SQUARE / 2 - 1,
-            middle.1 - BETWEEN / 2 - SQUARE / 2 - 1,
-        );
-        assert_eq!(pixel(&closed, middle.0, middle.1), BAR);
-        assert_eq!(pixel(&closed, square.0, square.1), INK);
-        assert_eq!(pixel(&closed, button.x + 2, button.y + 2), BAR);
+        for scale in [1, 2] {
+            let s = scale as i32;
+            let at = |picture: &Pixmap, point| {
+                let (x, y) = on_mark(button, scale, point);
+                pixel(picture, x, y)
+            };
+            let closed = painted(&placed, false, scale);
+            assert_eq!(at(&closed, ON_RUN), TERRACOTTA, "the run, at {scale}x");
+            assert_eq!(at(&closed, IN_PANE), SKY, "the pane, at {scale}x");
+            assert_eq!(at(&closed, SIGHTLINE), BAR, "the opening, at {scale}x");
+            assert_eq!(at(&closed, GAP), BAR, "between them, at {scale}x");
+            assert_eq!(pixel(&closed, (button.x + 2) * s, (button.y + 2) * s), BAR);
 
-        let open = painted(&placed, true, 1);
-        assert_eq!(pixel(&open, button.x + 2, button.y + 2), OPEN);
-        assert_eq!(pixel(&open, square.0, square.1), INK);
+            let open = painted(&placed, true, scale);
+            assert_eq!(
+                pixel(&open, (button.x + 2) * s, (button.y + 2) * s),
+                OPEN,
+                "lit, at {scale}x"
+            );
+            assert_eq!(at(&open, SIGHTLINE), OPEN, "through the opening too");
+            assert_eq!(at(&open, ON_RUN), TERRACOTTA, "the mark over it");
+            assert_eq!(at(&open, IN_PANE), SKY);
+        }
+    }
+
+    /// The mark is the brand's, so another theme draws it the same, on that
+    /// theme's bar.
+    #[test]
+    fn the_mark_keeps_its_inks_whatever_the_theme() {
+        let palette = perspicax_config::Builtin::BreezeLight.palette();
+        let placed = laid(false);
+        let button = placed.item(Item::Start).unwrap();
+        let mut picture = Pixmap::new(600, 40).expect("a picture");
+        paint(
+            &Shown {
+                size: (600, 40),
+                edge: Edge::Bottom,
+                placed: &placed,
+                time: "14:05",
+                layout: None,
+                open: false,
+                start: None,
+                #[cfg(feature = "tray")]
+                tray: &[],
+            },
+            &mut picture.as_mut(),
+            1,
+            &mut Text::without_fonts(),
+            &mut Images::default(),
+            &palette,
+        );
+        let at = |point| {
+            let (x, y) = on_mark(button, 1, point);
+            pixel(&picture, x, y)
+        };
+        assert_ne!(colour(&palette, Role::Panel), BAR, "a theme of its own");
+        assert_eq!(at(ON_RUN), TERRACOTTA);
+        assert_eq!(at(IN_PANE), SKY);
+        assert_eq!(at(SIGHTLINE), colour(&palette, Role::Panel));
+    }
+
+    /// A PNG of one colour, `side` pixels square, written for `test`; its
+    /// whole path.
+    fn png(test: &str, side: u32, colour: [u8; 4]) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "perspicax-shell-panel-{test}-{}.png",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).expect("a file");
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), side, side);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("a header");
+        writer
+            .write_image_data(&colour.repeat((side * side) as usize))
+            .expect("written");
+        path.display().to_string()
+    }
+
+    #[test]
+    fn a_start_icon_that_is_found_is_drawn_in_place_of_the_mark() {
+        const BLUE: [u8; 4] = [0x33, 0x66, 0x99, 0xff];
+        let icon = png("found", 44, BLUE);
+        let placed = laid(false);
+        let button = placed.item(Item::Start).unwrap();
+        let mut images = Images::default();
+        for scale in [1, 2] {
+            let s = scale as i32;
+            for open in [false, true] {
+                let picture = painted_with(&placed, open, scale, Some(&icon), &mut images);
+                for point in [ON_RUN, IN_PANE, GAP] {
+                    let (x, y) = on_mark(button, scale, point);
+                    assert_eq!(
+                        pixel(&picture, x, y),
+                        BLUE,
+                        "the icon over all of it, at {scale}x, open {open}"
+                    );
+                }
+                let face = if open { OPEN } else { BAR };
+                assert_eq!(
+                    pixel(&picture, (button.x + 2) * s, (button.y + 2) * s),
+                    face,
+                    "the button around it, at {scale}x"
+                );
+            }
+        }
+        std::fs::remove_file(&icon).ok();
+    }
+
+    #[test]
+    fn a_start_icon_that_cannot_be_found_is_the_mark() {
+        let placed = laid(false);
+        let button = placed.item(Item::Start).unwrap();
+        for start in ["no-such-icon", "/no/such/icon.png"] {
+            let picture = painted_with(&placed, false, 1, Some(start), &mut Images::default());
+            let at = |point| {
+                let (x, y) = on_mark(button, 1, point);
+                pixel(&picture, x, y)
+            };
+            assert_eq!(at(ON_RUN), TERRACOTTA, "{start}");
+            assert_eq!(at(IN_PANE), SKY, "{start}");
+        }
+    }
+
+    /// An icon file that could not be read when the panel was drawn is read
+    /// once it is mended and the config saved, which forgets the failure.
+    #[test]
+    fn a_start_icon_that_failed_is_looked_for_again_once_forgotten() {
+        const GREEN: [u8; 4] = [0x22, 0x88, 0x44, 0xff];
+        let placed = laid(false);
+        let button = placed.item(Item::Start).unwrap();
+        let (x, y) = on_mark(button, 1, IN_PANE);
+        let icon = std::env::temp_dir()
+            .join(format!(
+                "perspicax-shell-panel-mended-{}.png",
+                std::process::id()
+            ))
+            .display()
+            .to_string();
+        let mut images = Images::default();
+        let before = painted_with(&placed, false, 1, Some(&icon), &mut images);
+        assert_eq!(pixel(&before, x, y), SKY, "not there yet: the mark");
+        assert_eq!(png("mended", 22, GREEN), icon);
+        let cached = painted_with(&placed, false, 1, Some(&icon), &mut images);
+        assert_eq!(pixel(&cached, x, y), SKY, "the failure is remembered");
+        assert!(images.forget_failed(&icon));
+        assert!(!images.forget_failed(&icon), "once");
+        let after = painted_with(&placed, false, 1, Some(&icon), &mut images);
+        assert_eq!(pixel(&after, x, y), GREEN, "and looked for again");
+        assert!(!images.forget_failed(&icon), "a found icon is kept");
+        std::fs::remove_file(&icon).ok();
     }
 
     #[test]
@@ -680,6 +904,7 @@ mod tests {
                 time: "14:05",
                 layout: None,
                 open: false,
+                start: None,
                 #[cfg(feature = "tray")]
                 tray: &[],
             },
