@@ -49,6 +49,15 @@
 //! same window, at a moment Xwayland has just sent the request and is not
 //! waiting on us.
 //!
+//! A window may ask to start minimized, too, with the initial state in its
+//! ICCCM `WM_HINTS`, as `xterm -iconic` and Wine do (issue #95); Smithay
+//! reads that one. Its frame is mapped all the same, for Xwayland to give it
+//! a surface, and it is minimized at once and told so. Smithay tells it
+//! normal as it maps the frame, though, on a connection of its own, and the
+//! X server keeps no order between that and [`Side`]'s: so it is told iconic
+//! once more when its surface arrives, by which time Smithay's word has
+//! landed.
+//!
 //! # Asking to be active, and the active window
 //!
 //! A client asks for its window to be the active one with
@@ -120,6 +129,7 @@ use smithay::{
 
 use x11rb::{
     connection::Connection as _,
+    properties::WmHintsState,
     protocol::{
         Event,
         xproto::{
@@ -321,21 +331,25 @@ x11rb::atom_manager! {
     }
 }
 
-/// What a window asked to be by the `_NET_WM_STATE` it set on itself before
-/// it mapped.
+/// What a window asked to be by what it set on itself before it mapped: the
+/// `_NET_WM_STATE` it wrote, and the initial state in its `WM_HINTS`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Wants {
     fullscreen: bool,
     /// Both ways at once: Smithay counts nothing less as maximized.
     maximized: bool,
+    /// ICCCM's initial state, iconic: as `xterm -iconic` starts, and Wine
+    /// starts a program shown minimized.
+    minimized: bool,
 }
 
 impl Wants {
-    fn read(state: &[u32], atoms: &SideAtoms) -> Self {
+    fn read(state: &[u32], initial: Option<WmHintsState>, atoms: &SideAtoms) -> Self {
         Self {
             fullscreen: state.contains(&atoms._NET_WM_STATE_FULLSCREEN),
             maximized: state.contains(&atoms._NET_WM_STATE_MAXIMIZED_HORZ)
                 && state.contains(&atoms._NET_WM_STATE_MAXIMIZED_VERT),
+            minimized: matches!(initial, Some(WmHintsState::Iconic)),
         }
     }
 }
@@ -604,15 +618,18 @@ impl Side {
         let _ = self.connection.flush();
     }
 
-    /// What `window` asked to be, by the `_NET_WM_STATE` it set before it
-    /// mapped. The one read this connection makes, and so its one round trip
-    /// on the compositor's thread: see the module docs.
-    fn wants(&self, window: u32) -> Wants {
+    /// What `x11` asked to be, by the `_NET_WM_STATE` it set before it
+    /// mapped -- the one read this connection makes, and so its one round
+    /// trip on the compositor's thread: see the module docs -- and by its
+    /// `WM_HINTS`, which Smithay has read already. Asked here, though Smithay
+    /// keeps the hints, because a window started minimized must be told so,
+    /// and only this connection can tell it.
+    fn wants(&self, x11: &X11Surface) -> Wants {
         let state: Vec<u32> = self
             .connection
             .get_property(
                 false,
-                window,
+                x11.window_id(),
                 self.atoms._NET_WM_STATE,
                 AtomEnum::ATOM,
                 0,
@@ -622,7 +639,8 @@ impl Side {
             .and_then(|cookie| cookie.reply().ok())
             .and_then(|reply| reply.value32().map(Iterator::collect))
             .unwrap_or_default();
-        Wants::read(&state, &self.atoms)
+        let initial = x11.hints().and_then(|hints| hints.initial_state);
+        Wants::read(&state, initial, &self.atoms)
     }
 
     /// Tell `window` it is in `state`. Written whatever it was before: the
@@ -773,9 +791,11 @@ impl XWaylandShellHandler for Compositor {
 
     /// An X window now has its surface. If that surface already presented
     /// something, the window has: without this, a window whose only commit
-    /// arrived before the association would be judged empty forever. And if
-    /// it is the window that mapped last, it takes the keyboard it was
-    /// waiting for, unless it has gone off screen meanwhile.
+    /// arrived before the association would be judged empty forever. If it
+    /// is the window that mapped last, it takes the keyboard it was waiting
+    /// for, unless it has gone off screen meanwhile. And if it is minimized
+    /// -- it mapped asking to start so -- it is told so again: see
+    /// `retell_minimized`.
     fn surface_associated(
         &mut self,
         _xwm: XwmId,
@@ -785,20 +805,25 @@ impl XWaylandShellHandler for Compositor {
         let presented = smithay::wayland::compositor::with_states(&surface, |states| {
             states.data_map.get::<PresentedUnclaimed>().is_some()
         });
-        if let Some(id) = self.x11_window(&x11).as_ref().and_then(shell::id_of) {
-            if presented {
-                self.mark_presented(id);
-            }
-            let awaited = self
-                .xwayland
-                .awaiting_focus
-                .take_if(|awaited| *awaited == id);
-            if awaited.is_some() && self.window_for_id(id).is_some() {
-                self.focus_surface(surface, id);
-            }
-            self.backend.redraw();
-            self.publish_facts();
+        let Some(window) = self.x11_window(&x11) else {
+            return;
+        };
+        let Some(id) = shell::id_of(&window) else {
+            return;
+        };
+        if presented {
+            self.mark_presented(id);
         }
+        let awaited = self
+            .xwayland
+            .awaiting_focus
+            .take_if(|awaited| *awaited == id);
+        if awaited.is_some() && self.window_for_id(id).is_some() {
+            self.focus_surface(surface, id);
+        }
+        self.retell_minimized(&window, &x11);
+        self.backend.redraw();
+        self.publish_facts();
     }
 }
 
@@ -826,14 +851,16 @@ impl XwmHandler for Compositor {
 
     /// A managed X11 window wants to be seen: place it as any new window is
     /// placed, tell it where it is, and give it the keyboard, as a new
-    /// Wayland window takes it.
+    /// Wayland window takes it. One that asks to start minimized is placed
+    /// all the same, then minimized instead, and the keyboard stays where it
+    /// was.
     fn map_window_request(&mut self, _xwm: XwmId, x11: X11Surface) {
         // What it asked to be before it mapped -- a game starting
-        // fullscreen, say -- read before anything writes `_NET_WM_STATE`,
-        // which Smithay replaces with its own set. Only with a person at the
-        // seat, as for a request.
+        // fullscreen, say, or a program starting minimized -- read before
+        // anything writes `_NET_WM_STATE`, which Smithay replaces with its
+        // own set. Only with a person at the seat, as for a request.
         let wants = match &self.xwayland.side {
-            Some(side) if self.backend.has_person() => side.wants(x11.window_id()),
+            Some(side) if self.backend.has_person() => side.wants(&x11),
             _ => Wants::default(),
         };
         if let Err(error) = x11.set_mapped(true) {
@@ -860,11 +887,22 @@ impl XwmHandler for Compositor {
         if wants.fullscreen {
             self.fill(&window, Fill::Fullscreen, None);
         }
-        if let Some(wm) = self.xwayland.wm.as_mut() {
-            let _ = wm.raise_window(&x11);
+        // Its frame stays mapped, minimized or not, so Xwayland gives it its
+        // surface: minimized is a state here.
+        if wants.minimized {
+            self.minimize(&window);
+        } else {
+            if let Some(wm) = self.xwayland.wm.as_mut() {
+                let _ = wm.raise_window(&x11);
+            }
+            self.focus_x11(&window, id);
         }
-        self.focus_x11(&window, id);
-        tracing::info!(surface = id.0, title = x11.title(), "X11 window mapped");
+        tracing::info!(
+            surface = id.0,
+            title = x11.title(),
+            minimized = wants.minimized,
+            "X11 window mapped"
+        );
         self.backend.redraw();
         self.publish_facts();
     }
@@ -1235,6 +1273,19 @@ impl Compositor {
         self.tell_wm_state(x11, state);
     }
 
+    /// Tell a window that is minimized as its surface arrives -- one that
+    /// mapped asking to start minimized -- that it is iconic, once more.
+    /// Smithay told it normal as it mapped the frame, on its own connection,
+    /// and [`Side`] told it iconic just after, on another; the X server keeps
+    /// no order between two connections, so normal may have been the last
+    /// word. Xwayland gives a window its surface only once it has mapped the
+    /// frame, so Smithay's word has landed by now, and this lands after it.
+    fn retell_minimized(&self, window: &Framed, x11: &X11Surface) {
+        if Self::is_minimized(window) {
+            self.tell_wm_state(x11, WmState::Iconic);
+        }
+    }
+
     /// Answer a request to be minimized or brought back with the state the
     /// window is in.
     fn answer_wm_state(&self, window: &Framed, x11: &X11Surface) {
@@ -1409,13 +1460,28 @@ mod tests {
     #[test]
     fn a_window_maximized_one_way_is_not_asking_to_be_maximized() {
         let atoms = atoms();
-        assert_eq!(Wants::read(&[5], &atoms), Wants::default());
-        assert_eq!(Wants::read(&[4], &atoms), Wants::default());
+        assert_eq!(Wants::read(&[5], None, &atoms), Wants::default());
+        assert_eq!(Wants::read(&[4], None, &atoms), Wants::default());
         assert_eq!(
-            Wants::read(&[5, 4], &atoms),
+            Wants::read(&[5, 4], None, &atoms),
             Wants {
-                fullscreen: false,
                 maximized: true,
+                ..Wants::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_window_asks_to_start_minimized_only_with_its_initial_state_iconic() {
+        let atoms = atoms();
+        assert!(!Wants::read(&[], None, &atoms).minimized);
+        assert!(!Wants::read(&[], Some(WmHintsState::Normal), &atoms).minimized);
+        assert_eq!(
+            Wants::read(&[3], Some(WmHintsState::Iconic), &atoms),
+            Wants {
+                fullscreen: true,
+                minimized: true,
+                ..Wants::default()
             }
         );
     }
@@ -1499,8 +1565,8 @@ mod tests {
     #[test]
     fn fullscreen_is_found_anywhere_in_the_list() {
         let atoms = atoms();
-        assert!(Wants::read(&[7, 9, 3], &atoms).fullscreen);
-        assert!(Wants::read(&[3], &atoms).fullscreen);
-        assert!(!Wants::read(&[], &atoms).fullscreen);
+        assert!(Wants::read(&[7, 9, 3], None, &atoms).fullscreen);
+        assert!(Wants::read(&[3], None, &atoms).fullscreen);
+        assert!(!Wants::read(&[], None, &atoms).fullscreen);
     }
 }
