@@ -16,10 +16,10 @@ pub(crate) mod text;
 #[cfg(feature = "wallpaper")]
 pub(crate) mod wallpaper;
 
-#[cfg(feature = "menus")]
-pub(crate) use shapes::solid;
+#[cfg(feature = "panel")]
+pub(crate) use shapes::rounded;
 #[cfg(any(feature = "menus", feature = "panel"))]
-pub(crate) use shapes::{fill, scaled};
+pub(crate) use shapes::{fill, scaled, solid};
 
 /// What the menus, the panels and the desktop folder's icons are drawn
 /// with: the fonts, and the icon theme's images, each found once and
@@ -73,6 +73,25 @@ mod shapes {
         ) {
             canvas.fill_rect(rect, &solid(colour), Transform::identity(), None);
         }
+    }
+
+    /// A rectangle with its corners rounded `radius`.
+    #[cfg(feature = "panel")]
+    pub(crate) fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny_skia::Path> {
+        let r = radius.min(w / 2.0).min(h / 2.0);
+        let (right, bottom) = (x + w, y + h);
+        let mut path = tiny_skia::PathBuilder::new();
+        path.move_to(x + r, y);
+        path.line_to(right - r, y);
+        path.quad_to(right, y, right, y + r);
+        path.line_to(right, bottom - r);
+        path.quad_to(right, bottom, right - r, bottom);
+        path.line_to(x + r, bottom);
+        path.quad_to(x, bottom, x, bottom - r);
+        path.line_to(x, y + r);
+        path.quad_to(x, y, x + r, y);
+        path.close();
+        path.finish()
     }
 }
 

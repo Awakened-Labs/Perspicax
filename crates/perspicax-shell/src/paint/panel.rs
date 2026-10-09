@@ -1,8 +1,8 @@
 //! A panel: a bar in the theme's colours (dark, in the default one) along
 //! the edge of a monitor, with a rule where it meets the desktop: along its
 //! length, and across each end that stops short of the monitor's side. The
-//! start button is a grid of four squares, drawn in the accent's shade
-//! while its menu is open. Each task is a face a little lighter than the
+//! start button is Perspicax's mark, in its own inks whatever the theme, on
+//! the accent's shade while its menu is open. Each task is a face a little lighter than the
 //! bar, holding its application's icon and, where there is room, its
 //! window's title; a face too narrow for both holds its icon alone, in its
 //! middle. An application with no icon, in a theme with no generic one
@@ -17,14 +17,14 @@
 //! of its strip clear.
 
 use perspicax_config::{Edge, Item};
-use tiny_skia::PixmapMut;
+use tiny_skia::{FillRule, LineCap, LineJoin, PathBuilder, PixmapMut, Stroke, Transform};
 
 use perspicax_config::{Palette, Role};
 
 use super::{
     colour, fill,
     icons::{self, Images},
-    scaled,
+    rounded, scaled, solid,
     text::Text,
 };
 use crate::layout::{
@@ -65,9 +65,29 @@ impl Colours {
     }
 }
 
-/// One square of the start button's grid, and the room between them.
-const SQUARE: i32 = 7;
-const BETWEEN: i32 = 3;
+/// Perspicax's mark, as its small master draws it, in the master's own
+/// units: `assets/brand/perspicax-mark-small.svg` in the ennius repository,
+/// the brand's file for anything under 48 pixels, the start button by name.
+/// Its viewBox, where it starts and how wide it is; the run, one line round
+/// three sides, stopping short of the top right corner by the same 76 both
+/// ways, so that the opening is a line of sight to the middle; how heavy the
+/// run is; and the pane it sees, where it starts, how wide it is and how
+/// round its corners are, as round as the run's joins. Change these only as
+/// the master changes.
+const VIEW: (f32, f32) = (73.0, 366.0);
+const RUN: [(f32, f32); 5] = [
+    (332.0, 104.0),
+    (104.0, 104.0),
+    (104.0, 408.0),
+    (408.0, 408.0),
+    (408.0, 180.0),
+];
+const WEIGHT: f32 = 46.0;
+const PANE: (f32, f32, f32) = (171.0, 170.0, 23.0);
+/// The mark's inks, the brand's terracotta for the run and sky for the pane:
+/// never the theme's, since the brand keeps them on dark grounds and light.
+const TERRACOTTA: [u8; 4] = [0xc0, 0x6a, 0x3c, 0xff];
+const SKY: [u8; 4] = [0x7b, 0xae, 0xcd, 0xff];
 
 /// A task's face is this far inside its place, above and below, and this
 /// far either side, which leaves a gap between one task and the next.
@@ -133,7 +153,7 @@ pub(crate) fn paint(
                 if shown.open {
                     fill(canvas, px(place), colours.open);
                 }
-                grid(canvas, px(place), scale as i32, colours.ink);
+                mark(canvas, px(middle(place, fitted(place.h))));
             }
             // The layout's label is set as the clock's time is.
             Item::Clock | Item::Layout => {
@@ -271,12 +291,7 @@ impl Pen<'_, '_, '_> {
     #[cfg(feature = "tray")]
     fn status(&mut self, item: &crate::model::tray::Item, place: Rect, images: &mut Images) {
         let side = fitted(place.h);
-        let at = self.px(Rect::new(
-            place.x + (place.w - side) / 2,
-            place.y + (place.h - side) / 2,
-            side,
-            side,
-        ));
+        let at = self.px(middle(place, side));
         let (size, scale) = (side as u32, self.scale);
         let icon = item.drawn();
         if let Some(image) = icon
@@ -345,23 +360,48 @@ fn window(canvas: &mut PixmapMut<'_>, place: Rect, s: i32, ink: [u8; 4]) {
     }
 }
 
-/// Four squares, two by two, centred in `place`, `s` pixels to a logical
-/// one.
-fn grid(canvas: &mut PixmapMut<'_>, place: Rect, s: i32, ink: [u8; 4]) {
-    let (square, between) = (SQUARE * s, BETWEEN * s);
-    let side = 2 * square + between;
-    let (left, top) = (
+/// A square `side` on a side in the middle of `place`.
+fn middle(place: Rect, side: i32) -> Rect {
+    Rect::new(
         place.x + (place.w - side) / 2,
         place.y + (place.h - side) / 2,
+        side,
+        side,
+    )
+}
+
+/// Perspicax's mark filling `place`, a square in pixels: the master's own
+/// numbers, drawn through its viewBox, so that the run's weight and the
+/// pane's corners scale with it.
+fn mark(canvas: &mut PixmapMut<'_>, place: Rect) {
+    let (from, side) = VIEW;
+    let k = place.w as f32 / side;
+    let through = Transform::from_row(
+        k,
+        0.0,
+        0.0,
+        k,
+        place.x as f32 - from * k,
+        place.y as f32 - from * k,
     );
-    for (column, row) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-        let at = Rect::new(
-            left + column * (square + between),
-            top + row * (square + between),
-            square,
-            square,
-        );
-        fill(canvas, at, ink);
+    let [(x, y), rest @ ..] = RUN;
+    let mut run = PathBuilder::new();
+    run.move_to(x, y);
+    for (x, y) in rest {
+        run.line_to(x, y);
+    }
+    if let Some(run) = run.finish() {
+        let stroke = Stroke {
+            width: WEIGHT,
+            line_cap: LineCap::Round,
+            line_join: LineJoin::Round,
+            ..Stroke::default()
+        };
+        canvas.stroke_path(&run, &solid(TERRACOTTA), &stroke, through, None);
+    }
+    let (at, wide, radius) = PANE;
+    if let Some(pane) = rounded(at, at, wide, wide, radius) {
+        canvas.fill_path(&pane, &solid(SKY), FillRule::Winding, through, None);
     }
 }
 
@@ -552,24 +592,89 @@ mod tests {
         }
     }
 
+    /// Points of the mark, in its master's units: on the run, down its left
+    /// side; in the pane; the top right corner, where the opening leaves
+    /// nothing; and between the run and the pane.
+    const ON_RUN: (f32, f32) = (104.0, 256.0);
+    const IN_PANE: (f32, f32) = (256.0, 256.0);
+    const SIGHTLINE: (f32, f32) = (408.0, 104.0);
+    const GAP: (f32, f32) = (149.0, 256.0);
+
+    /// The pixel at `point` of the mark, as it is drawn in `button` at
+    /// `scale`.
+    fn on_mark(button: Rect, scale: u32, point: (f32, f32)) -> (i32, i32) {
+        let s = scale as i32;
+        let at = scaled(middle(button, fitted(button.h)), scale);
+        let (from, side) = VIEW;
+        let k = at.w as f32 / side;
+        let x = at.x as f32 + (point.0 - from) * k;
+        let y = at.y as f32 + (point.1 - from) * k;
+        assert!(at.w == fitted(button.h) * s, "drawn the icons' size");
+        (x as i32, y as i32)
+    }
+
     #[test]
-    fn the_start_button_is_a_grid_lit_while_its_menu_is_open() {
+    fn the_start_button_is_the_mark_lit_while_its_menu_is_open() {
         let placed = laid(false);
         let button = placed.item(Item::Start).unwrap();
-        let closed = painted(&placed, false, 1);
-        let middle = (button.x + button.w / 2, button.y + button.h / 2);
-        // The middle is between the squares; a square's middle is off it.
-        let square = (
-            middle.0 - BETWEEN / 2 - SQUARE / 2 - 1,
-            middle.1 - BETWEEN / 2 - SQUARE / 2 - 1,
-        );
-        assert_eq!(pixel(&closed, middle.0, middle.1), BAR);
-        assert_eq!(pixel(&closed, square.0, square.1), INK);
-        assert_eq!(pixel(&closed, button.x + 2, button.y + 2), BAR);
+        for scale in [1, 2] {
+            let s = scale as i32;
+            let at = |picture: &Pixmap, point| {
+                let (x, y) = on_mark(button, scale, point);
+                pixel(picture, x, y)
+            };
+            let closed = painted(&placed, false, scale);
+            assert_eq!(at(&closed, ON_RUN), TERRACOTTA, "the run, at {scale}x");
+            assert_eq!(at(&closed, IN_PANE), SKY, "the pane, at {scale}x");
+            assert_eq!(at(&closed, SIGHTLINE), BAR, "the opening, at {scale}x");
+            assert_eq!(at(&closed, GAP), BAR, "between them, at {scale}x");
+            assert_eq!(pixel(&closed, (button.x + 2) * s, (button.y + 2) * s), BAR);
 
-        let open = painted(&placed, true, 1);
-        assert_eq!(pixel(&open, button.x + 2, button.y + 2), OPEN);
-        assert_eq!(pixel(&open, square.0, square.1), INK);
+            let open = painted(&placed, true, scale);
+            assert_eq!(
+                pixel(&open, (button.x + 2) * s, (button.y + 2) * s),
+                OPEN,
+                "lit, at {scale}x"
+            );
+            assert_eq!(at(&open, SIGHTLINE), OPEN, "through the opening too");
+            assert_eq!(at(&open, ON_RUN), TERRACOTTA, "the mark over it");
+            assert_eq!(at(&open, IN_PANE), SKY);
+        }
+    }
+
+    /// The mark is the brand's, so another theme draws it the same, on that
+    /// theme's bar.
+    #[test]
+    fn the_mark_keeps_its_inks_whatever_the_theme() {
+        let palette = perspicax_config::Builtin::BreezeLight.palette();
+        let placed = laid(false);
+        let button = placed.item(Item::Start).unwrap();
+        let mut picture = Pixmap::new(600, 40).expect("a picture");
+        paint(
+            &Shown {
+                size: (600, 40),
+                edge: Edge::Bottom,
+                placed: &placed,
+                time: "14:05",
+                layout: None,
+                open: false,
+                #[cfg(feature = "tray")]
+                tray: &[],
+            },
+            &mut picture.as_mut(),
+            1,
+            &mut Text::without_fonts(),
+            &mut Images::default(),
+            &palette,
+        );
+        let at = |point| {
+            let (x, y) = on_mark(button, 1, point);
+            pixel(&picture, x, y)
+        };
+        assert_ne!(colour(&palette, Role::Panel), BAR, "a theme of its own");
+        assert_eq!(at(ON_RUN), TERRACOTTA);
+        assert_eq!(at(IN_PANE), SKY);
+        assert_eq!(at(SIGHTLINE), colour(&palette, Role::Panel));
     }
 
     #[test]
