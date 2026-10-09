@@ -65,6 +65,14 @@
 //! counted ([`Judgement::unproven`], [`Tally::unproven`]), so a toolkit that
 //! declares nothing shows up as a number rather than as a mystery.
 //!
+//! What a client declared and the frame the host drew are judged; how
+//! see-through the host *draws* them is not. A person may have a window, its
+//! frame included, drawn see-through for their own eyes, and it still covers
+//! what is behind it: they chose to look through it, and an agent is not
+//! expected to read what shows there. A picture can show that text faintly
+//! while the verdict calls it covered, and
+//! [`SurfaceFacts::drawn_opacity`] says why. Nothing here reads it.
+//!
 //! # What this module deliberately does not know
 //!
 //! Input regions. "Can a human see this" and "would a click at this point land
@@ -223,11 +231,24 @@ pub struct SurfaceFacts {
     /// and a border, outside `geometry`.
     ///
     /// No client drew these pixels, so no client's opaque region can speak
-    /// for them, and they are opaque by construction: the host drew them
-    /// solid. A node of another window under a titlebar is therefore covered
-    /// as a matter of proof, not policy. Empty for a surface that draws its
-    /// own frame, or has none.
+    /// for them, and they are solid by construction and by decision: the
+    /// host drew them, and stands behind them as covering what is under them
+    /// however see-through it has them drawn (see [`Self::drawn_opacity`]).
+    /// A node of another window under a titlebar is therefore covered on the
+    /// host's own word, not on policy. Empty for a surface that draws its own
+    /// frame, or has none.
     pub frame: Vec<Rect>,
+    /// How opaque the host draws this window, in percent, when the person
+    /// made it less than wholly so (`[opacity]`); `None` when it is opaque.
+    /// Its client's pixels, its menus and its frame all let what is behind
+    /// them show through at this.
+    ///
+    /// Never judged by. A window drawn half see-through still covers what is
+    /// under it, by the person's decision: they chose to look through it, and
+    /// an agent is not expected to read what shows there. It is here for an
+    /// agent shown a picture with text faintly behind a window and told that
+    /// text is covered, so that it has the reason.
+    pub drawn_opacity: Option<u8>,
     /// The app id the client set (`app_id` under Wayland, the class under
     /// X11): a string it chose for itself, like the title.
     pub app_id: Option<String>,
@@ -263,6 +284,7 @@ impl SurfaceFacts {
             off_workspace: None,
             behind_tab: None,
             frame: Vec::new(),
+            drawn_opacity: None,
             app_id: None,
             tabs: Vec::new(),
             workspace: None,
@@ -334,6 +356,13 @@ impl SurfaceFacts {
     #[must_use]
     pub fn framed(mut self, frame: impl IntoIterator<Item = Rect>) -> Self {
         self.frame = frame.into_iter().collect();
+        self
+    }
+
+    /// The same surface, drawn `percent` opaque for the person's eyes.
+    #[must_use]
+    pub fn drawn_at(mut self, percent: u8) -> Self {
+        self.drawn_opacity = Some(percent);
         self
     }
 
@@ -633,7 +662,8 @@ impl Judgement {
 /// 6. Only then, occlusion, from the top down, so the surface named is the one
 ///    an agent has to deal with first. A surface's frame is part of it: a
 ///    titlebar over the node occludes it, and proves it, because the host
-///    drew the titlebar solid. A window's own frame never covers its own
+///    drew the titlebar and stands behind it as solid, however see-through
+///    the person has it drawn. A window's own frame never covers its own
 ///    nodes, because it is outside the window and test 4 has already said
 ///    `Clipped` of anything out there.
 #[must_use]
@@ -915,6 +945,27 @@ mod tests {
             .framed([rect(500.0, 474.0, 600.0, 500.0)]);
         let facts = HostFacts::bottom_to_top([window(), elsewhere], 1);
         assert_eq!(verdict(&facts), Judgement::proven(Visibility::Visible));
+    }
+
+    /// A window the person had drawn see-through still covers what is under
+    /// it, on the same footing as opaque: undeclared on policy, declared and
+    /// framed on proof. Drawn opacity is for the eye, and changes no verdict.
+    #[test]
+    fn a_window_drawn_translucent_still_covers_what_is_under_it() {
+        let over = rect(150.0, 120.0, 300.0, 200.0);
+        let titlebar = rect(0.0, 124.0, 400.0, 150.0);
+        for cover in [
+            SurfaceFacts::new(SurfaceId(2), over),
+            SurfaceFacts::new(SurfaceId(2), over).declaring_opaque([rect(0.0, 0.0, 150.0, 80.0)]),
+            SurfaceFacts::new(SurfaceId(2), rect(0.0, 150.0, 400.0, 400.0))
+                .declaring_opaque([])
+                .framed([titlebar]),
+        ] {
+            let opaque = verdict(&HostFacts::bottom_to_top([window(), cover.clone()], 1));
+            let faint = verdict(&HostFacts::bottom_to_top([window(), cover.drawn_at(20)], 1));
+            assert_eq!(faint, opaque);
+            assert_eq!(faint.visibility, Visibility::Occluded { by: SurfaceId(2) });
+        }
     }
 
     /// A window's own titlebar is not something its nodes can be under.

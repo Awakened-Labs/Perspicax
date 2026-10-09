@@ -1948,5 +1948,6 @@ fn two_workspaces() -> Backend {
         },
         access: perspicax_policy::Access::open(),
         person: false,
+        opacity: Default::default(),
     }
 }

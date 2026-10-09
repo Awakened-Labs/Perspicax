@@ -549,6 +549,8 @@ impl Compositor {
         if let Some(keyboard) = self.keyboard.clone() {
             keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
         }
+        // No window is lit or undimmed now. See `focus_changed`.
+        self.backend.redraw();
         self.show_active(None);
         #[cfg(feature = "xwayland")]
         self.tell_active_x11(None);
@@ -684,16 +686,37 @@ impl Compositor {
     /// one its receipts answer. `None` for a lock surface, or one that is
     /// gone.
     pub(crate) fn keyboard_owner(&self) -> Option<SurfaceId> {
-        let focus = self.keyboard_focus()?;
-        let root = self
-            .popups
-            .find_popup(&focus)
-            .and_then(|popup| find_popup_root_surface(&popup).ok())
-            .unwrap_or(focus);
+        let root = self.keyboard_root()?;
         self.window_for(&root)
             .as_ref()
             .and_then(shell::id_of)
             .or_else(|| self.layer_owning(&root))
+    }
+
+    /// The window the keys go to right now, through any menu it opened: the
+    /// one that looks in use, its frame lit and drawn undimmed.
+    ///
+    /// Wider than [`Self::focused_surface`], which a window answers `None`
+    /// for while its own menu holds the keyboard. Narrower than
+    /// [`Self::keyboard_owner`]: a layer surface holding the keyboard (a
+    /// launcher, the shell's menu) leaves no window in use. And never asked
+    /// of the layer maps, so it can be asked while one is held, as drawing a
+    /// picture holds it.
+    pub(crate) fn window_in_use(&self) -> Option<SurfaceId> {
+        let root = self.keyboard_root()?;
+        self.window_for(&root).as_ref().and_then(shell::id_of)
+    }
+
+    /// The surface holding the keyboard, or the one a menu holding it was
+    /// opened from.
+    fn keyboard_root(&self) -> Option<WlSurface> {
+        let focus = self.keyboard_focus()?;
+        Some(
+            self.popups
+                .find_popup(&focus)
+                .and_then(|popup| find_popup_root_surface(&popup).ok())
+                .unwrap_or(focus),
+        )
     }
 
     /// When this compositor started. The base of every event timestamp it
@@ -896,6 +919,9 @@ impl XdgShellHandler for Compositor {
     }
 
     fn app_id_changed(&mut self, _surface: ToplevelSurface) {
+        // An application that names itself after it maps comes under its
+        // rule in `[opacity]` now.
+        self.backend.redraw();
         self.publish_facts();
     }
 
@@ -1100,6 +1126,10 @@ impl SeatHandler for Compositor {
             self.loop_handle
                 .insert_idle(move |state| state.follow_layout(window));
         }
+        // Which window is lit, and which are dimmed, follows the keyboard:
+        // the next frame is drawn knowing. Only asked for here, which takes
+        // no lock; what is in use is read when the frame is drawn.
+        self.backend.redraw();
 
         self.show_active(focused);
     }

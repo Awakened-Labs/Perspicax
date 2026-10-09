@@ -990,11 +990,13 @@ fn scene(renderer: &mut GlesRenderer, stack: &crate::shell::Stack, scale: f64) -
         pieces
             .iter()
             .flat_map(|(window, at)| {
+                // Read before drawing, which holds the same dress.
+                let alpha = window.alpha();
                 window.render_elements::<FramedElement<GlesRenderer>>(
                     renderer,
                     at.to_physical_precise_round(scale),
                     at_scale,
-                    1.0,
+                    alpha,
                 )
             })
             .map(|element| Elements::Space(SpaceRenderElements::Element(Wrap::from(element))))
