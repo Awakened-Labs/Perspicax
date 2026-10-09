@@ -122,7 +122,12 @@ pub(crate) fn run(
         #[cfg(any(feature = "panel", feature = "wallpaper"))]
         workspaces: pager::Workspaces::bind(&globals, &qh),
         #[cfg(feature = "panel")]
-        panels: panel::Panels::new(&shell, actions.clone(), taskbar::bind(&globals, &qh)),
+        panels: panel::Panels::new(
+            &shell,
+            config.as_deref(),
+            actions.clone(),
+            taskbar::bind(&globals, &qh),
+        ),
         #[cfg(feature = "panel")]
         ticking: None,
         #[cfg(feature = "tray")]

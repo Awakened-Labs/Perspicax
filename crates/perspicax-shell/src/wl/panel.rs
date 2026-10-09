@@ -26,6 +26,7 @@
 
 use std::{
     collections::HashMap,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -62,6 +63,7 @@ use crate::{
         Button,
         apps::{self, App as Application},
         clock::Clock,
+        image,
         layouts::Layouts,
         tasks::{Tasks, Window},
     },
@@ -81,6 +83,15 @@ pub(super) struct Panels {
     each: Vec<Bar>,
     /// The monitor whose start menu is open, for its button to show it.
     open_on: Option<String>,
+    /// The config file, beside which a relative path to the start button's
+    /// icon is.
+    config: Option<PathBuf>,
+    /// The start button's icon, as the icon theme looks for it; `None` for
+    /// Perspicax's mark.
+    start: Option<String>,
+    /// The start button's icon was not found or could not be read, and the
+    /// log has said so since the config last changed.
+    told: bool,
     /// The windows, as the compositor tells a taskbar them, and what it
     /// tells them with: `None` if it does not, or stopped.
     pub(super) tasks: Tasks<ZwlrForeignToplevelHandleV1, wl_output::WlOutput>,
@@ -119,6 +130,7 @@ struct Bar {
 impl Panels {
     pub(super) fn new(
         shell: &Shell,
+        config: Option<&Path>,
         actions: Sender<Asked>,
         taskbar: Option<ZwlrForeignToplevelManagerV1>,
     ) -> Self {
@@ -129,6 +141,9 @@ impl Panels {
             time: String::new(),
             each: Vec::new(),
             open_on: None,
+            config: config.map(Path::to_owned),
+            start: start_icon(shell, config),
+            told: false,
             tasks: Tasks::default(),
             taskbar,
             icons: HashMap::new(),
@@ -142,7 +157,9 @@ impl Panels {
     }
 
     /// Show the panel `shell` asks for now: on the monitors it names, along
-    /// its edge, as tall as it says, holding what it lists.
+    /// its edge, as tall as it says, holding what it lists, its start button
+    /// wearing the icon it names. An icon file that could not be read is
+    /// looked for again, since a save may follow mending it.
     pub(super) fn reconfigure(
         &mut self,
         canvas: &mut Canvas,
@@ -152,7 +169,19 @@ impl Panels {
         kit: &mut Kit,
         workspaces: &Model,
     ) {
+        let start = start_icon(shell, self.config.as_deref());
+        let retried = start
+            .as_deref()
+            .is_some_and(|icon| kit.images.forget_failed(icon));
+        let restarted = retried || start != self.start;
+        if restarted {
+            self.start = start;
+            self.told = false;
+        }
         if shell.panel == self.panel {
+            if restarted {
+                self.redraw(canvas, kit, workspaces);
+            }
             return;
         }
         let was = std::mem::replace(&mut self.panel, shell.panel.clone());
@@ -532,6 +561,17 @@ impl Panels {
             (panel.width, panel.align),
             &mut *text,
         );
+        if let (Some(icon), false) = (self.start.as_deref(), self.told)
+            && let Some(button) = bar.placed.item(Item::Start)
+            && images
+                .get(icon, paint::panel::fitted(button.h) as u32, bar.scale)
+                .is_none()
+        {
+            tracing::warn!(
+                "the start button's icon {icon} cannot be found or read; showing Perspicax's mark"
+            );
+            self.told = true;
+        }
         let open = self.open_on.as_deref() == Some(bar.name.as_str());
         let shown = paint::panel::Shown {
             size: (width, height),
@@ -540,6 +580,7 @@ impl Panels {
             time: &self.time,
             layout: layout.map(|layout| layout.short.as_str()),
             open,
+            start: self.start.as_deref(),
             #[cfg(feature = "tray")]
             tray: &self.tray,
         };
@@ -562,6 +603,13 @@ impl Panels {
             layout,
         ));
     }
+}
+
+/// The start button's icon `shell` names, as the icon theme looks for it.
+fn start_icon(shell: &Shell, config: Option<&Path>) -> Option<String> {
+    let written = shell.start_menu.as_ref()?.icon.as_deref()?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    Some(image::start_icon(written, config, home.as_deref()))
 }
 
 /// What a window's task is called: its title, or with none, its app id.

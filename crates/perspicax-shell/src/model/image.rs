@@ -34,13 +34,6 @@ pub(crate) enum LoadError {
 /// Where the image named `written` in the config file is. `~/` is the home
 /// folder, and a relative path is beside the config file, so a person can
 /// keep a wallpaper next to the config that names it.
-#[cfg_attr(
-    not(any(feature = "wallpaper", feature = "menus", test)),
-    expect(
-        dead_code,
-        reason = "a wallpaper or a menu file; a panel alone names no file"
-    )
-)]
 pub(crate) fn locate(written: &Path, config: Option<&Path>, home: Option<&Path>) -> PathBuf {
     if let (Ok(rest), Some(home)) = (written.strip_prefix("~"), home) {
         return home.join(rest);
@@ -48,6 +41,21 @@ pub(crate) fn locate(written: &Path, config: Option<&Path>, home: Option<&Path>)
     match config.and_then(Path::parent) {
         Some(beside) if written.is_relative() => beside.join(written),
         _ => written.to_owned(),
+    }
+}
+
+/// The start button's icon, `written` in `[shell.start-menu]`, as the icon
+/// theme looks for it: with a `/` in it, an image file, found as a wallpaper
+/// is and named by its whole path, which the theme takes as a file; and
+/// otherwise a name in the theme, as written.
+#[cfg(feature = "panel")]
+pub(crate) fn start_icon(written: &str, config: Option<&Path>, home: Option<&Path>) -> String {
+    if written.contains('/') {
+        locate(Path::new(written), config, home)
+            .display()
+            .to_string()
+    } else {
+        written.to_owned()
     }
 }
 
@@ -411,5 +419,21 @@ mod tests {
         let result = load(&path);
         std::fs::remove_file(&path).ok();
         assert!(matches!(result, Err(LoadError::Format)), "{result:?}");
+    }
+
+    #[cfg(feature = "panel")]
+    #[test]
+    fn a_start_icon_with_a_slash_is_a_file_found_as_a_wallpaper_is() {
+        let config = Path::new("/home/someone/.config/perspicax/config.toml");
+        let home = Path::new("/home/someone");
+        let found = |written| start_icon(written, Some(config), Some(home));
+        assert_eq!(found("start-here"), "start-here", "a theme's name");
+        assert_eq!(found("~/logo.png"), "/home/someone/logo.png");
+        assert_eq!(
+            found("./logo.svg"),
+            "/home/someone/.config/perspicax/./logo.svg",
+            "beside the config"
+        );
+        assert_eq!(found("/usr/share/logo.png"), "/usr/share/logo.png");
     }
 }
