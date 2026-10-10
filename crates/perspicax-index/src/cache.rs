@@ -90,6 +90,24 @@ impl Index {
         self.stale.contains_key(&id)
     }
 
+    /// How many nodes of `root`'s subtree, `root` included, are stale: what a
+    /// re-read left unread.
+    ///
+    /// The subtree as its child lists describe it now. A node a re-read no
+    /// longer finds under its parent keeps its mark and is not counted, since
+    /// no read of this subtree will reach it again -- and a count that held
+    /// it would leave the subtree owed a read for ever.
+    #[must_use]
+    pub fn stale_in(&self, root: NodeId) -> usize {
+        if !self.nodes.contains_key(&root) {
+            return 0;
+        }
+        core::iter::once(root)
+            .chain(self.descendants(root))
+            .filter(|id| self.stale.contains_key(id))
+            .count()
+    }
+
     /// Take everything that has changed since the last call.
     ///
     /// Draining rather than reading: a subscriber that is told twice about one
@@ -793,6 +811,56 @@ mod tests {
         assert!(!index.is_stale(NodeId(3)));
     }
 
+    /// What a keeper asks after a re-read (#41): did it reach everything the
+    /// invalidation marked? One that stopped short -- the application went
+    /// quiet partway -- leaves the rest marked, and only they count.
+    #[test]
+    fn a_re_read_that_stops_short_leaves_only_what_it_missed_stale() {
+        let mut index = sample();
+        index.apply(Change::SubtreeInvalidated { root: NodeId(1) });
+        assert_eq!(index.stale_in(NodeId(1)), 6, "the whole window");
+
+        // The read reached the window and its menu, and no further.
+        index.ingest_snapshot([
+            observed(1, Role::Window, Some("Text Editor"), &[2, 5, 6]),
+            observed(2, Role::Menu, Some("File"), &[3, 4]),
+        ]);
+        assert_eq!(index.stale_in(NodeId(1)), 4, "Open, Save and both Closes");
+        assert_eq!(index.stale_in(NodeId(2)), 2, "and within any subtree");
+
+        index.ingest_snapshot([
+            observed(3, Role::MenuItem, Some("Open"), &[]),
+            observed(4, Role::MenuItem, Some("Save"), &[]),
+            observed(5, Role::Button, Some("Close"), &[]),
+            observed(6, Role::Button, Some("Close"), &[]),
+        ]);
+        assert_eq!(index.stale_in(NodeId(1)), 0, "a read that reached it all");
+    }
+
+    /// A node a re-read no longer finds under its parent is not owed a read.
+    /// No read of the tree will reach it again, so counting it would leave the
+    /// tree owed one forever.
+    #[test]
+    fn a_node_its_parent_no_longer_lists_is_not_counted_stale() {
+        let mut index = sample();
+        index.apply(Change::SubtreeInvalidated { root: NodeId(2) });
+        // The menu lost Save, and nothing said so.
+        index.ingest_snapshot([
+            observed(2, Role::Menu, Some("File"), &[3]),
+            observed(3, Role::MenuItem, Some("Open"), &[]),
+        ]);
+        assert!(
+            index.is_stale(NodeId(4)),
+            "still marked: nothing removed it"
+        );
+        assert_eq!(index.stale_in(NodeId(1)), 0, "but no longer the window's");
+        assert_eq!(
+            index.stale_in(NodeId(99)),
+            0,
+            "and nothing of a node not held"
+        );
+    }
+
     /// A bridge is not a trusted source of structure. A cycle in the child
     /// lists must neither hang the traversal nor swallow the nodes: every
     /// member of the cycle is parented to another member, so none of them is a
@@ -980,7 +1048,7 @@ mod tests {
         index.apply(Change::SubtreeInvalidated { root: NodeId(1) });
         assert_eq!(
             index.actable(NodeId(2)).unwrap_err().to_string(),
-            "node's subtree was invalidated and has not been re-read"
+            "node's subtree was invalidated and has not been re-read yet"
         );
         assert_eq!(
             Refusal::Stale { frames: 4 }.to_string(),

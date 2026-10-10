@@ -135,7 +135,9 @@ impl App {
     ///
     /// A re-read that runs out of [`PER_APP`] returns what it read by then.
     /// A node it did not reach keeps the mark the invalidation gave it, and
-    /// is refused as stale until a later read reaches it.
+    /// is refused as stale until a later read reaches it -- which the keeper
+    /// sees to, reading the application again until one does
+    /// ([`crate::keep::Owed`]).
     ///
     /// # Errors
     ///

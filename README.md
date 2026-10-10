@@ -284,6 +284,14 @@ application leaves unanswered costs perspicax a deadline of one second, and a
 read stops asking after three, keeping what it has read: one silent call does
 not cost the rest of the tree.
 
+A control its application has changed since it was read is refused as
+`stale` until it is read again, and perspicax reads it again itself, at once.
+If the application does not answer then, or the read stops short of the
+control, it reads it again a second later, then two, four, and so on up to a
+minute apart, until a read reaches it. A zenity entry stopped for eight
+seconds in the middle of a re-read is actable two seconds after it goes on.
+An agent has nothing to do but resolve it again in a moment.
+
 `type` has one refusal of its own. Keys go wherever keyboard focus is, so
 typing is done only while the node's window holds it, and otherwise refused as
 `focus_elsewhere`, naming the surface that does. The agent `focus`es the node

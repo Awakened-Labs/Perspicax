@@ -8,8 +8,9 @@
 //!
 //! 1. forgets an application whose process no longer draws anything on the
 //!    host, taking its tree out of the index;
-//! 2. folds in what each application volunteered, and re-reads a subtree
-//!    that changed shape;
+//! 2. folds in what each application volunteered, and re-reads one whose
+//!    tree changed shape -- and, if that read did not reach all of it, reads
+//!    it again later and less often each time, until one does;
 //! 3. binds each application's windows to surfaces again when its tree or
 //!    the host's facts changed, so a window that mapped since is attributed;
 //! 4. reads each process that draws on the host and has not been read, once
@@ -29,6 +30,7 @@ use std::{
 use perspicax_atspi::Ids;
 use perspicax_compositor::{Facts, Stop};
 use perspicax_index::{Change, HostFacts};
+use perspicax_node::NodeId;
 
 use crate::{
     desk::Desk,
@@ -43,8 +45,9 @@ use crate::{
 /// already accepts from an act, which waits 200 ms for damage.
 pub const REFRESH: Duration = Duration::from_millis(250);
 
-/// How long after a miss a process is next asked about: doubled for each
-/// miss, up to [`LONGEST_RETRY_MS`].
+/// How long after a miss a process is next asked about, or an application a
+/// re-read left stale is read again: doubled for each miss, up to
+/// [`LONGEST_RETRY_MS`].
 const FIRST_RETRY_MS: u64 = 1_000;
 const LONGEST_RETRY_MS: u64 = 60_000;
 
@@ -82,6 +85,8 @@ struct Keeper {
     ids: Ids,
     apps: Vec<App>,
     arrivals: Arrivals,
+    /// The applications a re-read left partly stale.
+    owed: Owed,
     /// The facts the windows were last bound against.
     bound_at: Option<u64>,
     epoch: Instant,
@@ -95,6 +100,7 @@ impl Keeper {
             ids: Ids::default(),
             apps: Vec::new(),
             arrivals: Arrivals::new(millis(settle)),
+            owed: Owed::default(),
             bound_at: None,
             epoch: Instant::now(),
         }
@@ -103,7 +109,7 @@ impl Keeper {
     async fn tick(&mut self) {
         let now = self.desk.facts();
         self.forget_gone(&now);
-        refresh(&mut self.apps, &self.desk).await;
+        refresh(&mut self.apps, &self.desk, &mut self.owed, self.epoch).await;
         if self.bound_at != Some(now.generation()) {
             self.bound_at = Some(now.generation());
             let apps = &mut self.apps;
@@ -130,6 +136,7 @@ impl Keeper {
                 pid = app.pid,
                 "draws nothing now; forgotten"
             );
+            self.owed.forget(app.root);
             self.desk
                 .update(|index, _| index.apply(Change::Removed { id: app.root }));
         }
@@ -191,11 +198,12 @@ impl Keeper {
     }
 }
 
-/// Take what each application has volunteered and fold it into the index.
-async fn refresh(apps: &mut [App], desk: &Desk) {
+/// Take what each application has volunteered and fold it into the index,
+/// and read again one whose tree changed -- or one a re-read left partly
+/// stale, once it is due another.
+async fn refresh(apps: &mut [App], desk: &Desk, owed: &mut Owed, epoch: Instant) {
     for app in apps {
         let changes = match app.changes().await {
-            Ok(changes) if changes.is_empty() => continue,
             Ok(changes) => changes,
             Err(error) => {
                 tracing::warn!("{error:#}");
@@ -210,46 +218,95 @@ async fn refresh(apps: &mut [App], desk: &Desk) {
             .iter()
             .any(|change| matches!(change, Change::SubtreeInvalidated { .. }));
 
-        desk.update(|index, facts| {
-            for change in changes {
-                index.apply(change);
-            }
-            // A node the bus has just volunteered arrives unjoined, and an
-            // unjoined node is refused. Re-binding is a tree walk with no I/O
-            // in it, so it happens on every change rather than being something
-            // the next read gets round to -- and a window the change added is
-            // bound to its surface here too.
-            app.relink(index, facts);
-        });
+        if !changes.is_empty() {
+            desk.update(|index, facts| {
+                for change in changes {
+                    index.apply(change);
+                }
+                // A node the bus has just volunteered arrives unjoined, and an
+                // unjoined node is refused. Re-binding is a tree walk with no
+                // I/O in it, so it happens on every change rather than being
+                // something the next read gets round to -- and a window the
+                // change added is bound to its surface here too.
+                app.relink(index, facts);
+            });
+        }
 
-        if !invalidated {
+        if !invalidated && !owed.due(app.root, millis(epoch.elapsed())) {
             continue;
         }
-        // Snapshot the damage counters BEFORE the read, for the same reason
-        // `observe` does: crediting a read with the generation it finished at
-        // would silently swallow the frames that arrived during it.
-        let before: Vec<_> = {
-            let facts = desk.facts();
-            app.joins
-                .iter()
-                .map(|join| {
-                    let generation = facts
-                        .surface(join.surface)
-                        .map_or(0, |facts| facts.damage_generation);
-                    (join.surface, generation)
-                })
-                .collect()
-        };
-        match app.reread().await {
-            Ok(nodes) => desk.update(|index, facts| {
-                index.ingest_snapshot(nodes);
-                app.relink(index, facts);
-                for (surface, generation) in before {
-                    index.reconcile(surface, generation);
-                }
-            }),
-            Err(error) => tracing::warn!("{error:#}"),
+        let started = Instant::now();
+        let read = reread(app, desk).await;
+        // Counted whether or not the read failed: a read that fails leaves
+        // every node it was asked to re-read still marked.
+        let stale = desk.update(|index, _| index.stale_in(app.root));
+        tracing::debug!(
+            app = app.name,
+            stale,
+            ms = millis(started.elapsed()),
+            "re-read"
+        );
+        settle(owed, app, read, stale, millis(epoch.elapsed()));
+    }
+}
+
+/// Read `app` again, and fold what was read into the index.
+///
+/// A node the read did not reach keeps the mark its invalidation gave it, and
+/// a read that fails leaves the index as it was.
+async fn reread(app: &mut App, desk: &Desk) -> anyhow::Result<()> {
+    // Snapshot the damage counters BEFORE the read, for the same reason
+    // `observe` does: crediting a read with the generation it finished at
+    // would silently swallow the frames that arrived during it.
+    let before: Vec<_> = {
+        let facts = desk.facts();
+        app.joins
+            .iter()
+            .map(|join| {
+                let generation = facts
+                    .surface(join.surface)
+                    .map_or(0, |facts| facts.damage_generation);
+                (join.surface, generation)
+            })
+            .collect()
+    };
+    let nodes = app.reread().await?;
+    desk.update(|index, facts| {
+        index.ingest_snapshot(nodes);
+        app.relink(index, facts);
+        for (surface, generation) in before {
+            index.reconcile(surface, generation);
         }
+    });
+    Ok(())
+}
+
+/// Note what a re-read of `app` that finished at `now` left `stale`, and say
+/// so: once when it leaves a debt, once when a later read pays it, and
+/// quietly at every retry in between.
+fn settle(owed: &mut Owed, app: &App, read: anyhow::Result<()>, stale: usize, now: u64) {
+    if stale == 0 {
+        if let Err(error) = read {
+            tracing::warn!("{error:#}");
+        }
+        if owed.paid(app.root) {
+            tracing::info!(app = app.name, "read again, and none of it is stale now");
+        }
+    } else if owed.left(app.root, now) {
+        if let Err(error) = read {
+            tracing::warn!("{error:#}");
+        }
+        tracing::warn!(
+            app = app.name,
+            stale,
+            "a re-read left nodes stale, and they are refused until a read reaches \
+             them; reading it again later, and less often each time"
+        );
+    } else {
+        if let Err(error) = read {
+            tracing::debug!("{error:#}");
+        }
+        tracing::debug!(app = app.name, stale, "still stale; reading it again later");
     }
 }
 
@@ -311,9 +368,69 @@ impl Arrivals {
     /// later, and later each time.
     pub fn missed(&mut self, pid: u32, now: u64) {
         if let Some(wait) = self.waiting.get_mut(&pid) {
-            wait.due = now.saturating_add(wait.retry);
-            wait.retry = (wait.retry * 2).min(LONGEST_RETRY_MS);
+            wait.missed(now);
         }
+    }
+}
+
+impl Wait {
+    /// Missed at `now`: due again a retry from now, and the retry after that
+    /// is twice as long.
+    fn missed(&mut self, now: u64) {
+        self.due = now.saturating_add(self.retry);
+        self.retry = (self.retry * 2).min(LONGEST_RETRY_MS);
+    }
+}
+
+/// The applications a re-read left partly stale, by root, and when each is to
+/// be read again. Fed times like [`Arrivals`], and for the same reason.
+///
+/// A stale node is refused until a read reaches it, and a re-read can fall
+/// short: the application is busy and leaves the walk unanswered, or its
+/// read runs out of time. Until #41, nothing read it again but the next
+/// change the application happened to signal, so one slow moment could leave
+/// a window un-actable for the rest of the session. So a re-read that leaves
+/// nodes stale is owed another, as an unread newcomer is: later, and less
+/// often each time, until one reaches them all.
+///
+/// Not a poll. It asks only while a read owed is not done, and the first
+/// read that reaches everything ends it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Owed {
+    waiting: HashMap<NodeId, Wait>,
+}
+
+impl Owed {
+    /// Whether the application rooted at `root` is owed a re-read by `now`.
+    #[must_use]
+    pub fn due(&self, root: NodeId, now: u64) -> bool {
+        self.waiting.get(&root).is_some_and(|wait| wait.due <= now)
+    }
+
+    /// A re-read of `root`'s application that finished at `now` left part of
+    /// it stale: read it again later, and later each time. `true` if it owed
+    /// nothing until now.
+    pub fn left(&mut self, root: NodeId, now: u64) -> bool {
+        let newly = !self.waiting.contains_key(&root);
+        self.waiting
+            .entry(root)
+            .or_insert(Wait {
+                due: now,
+                retry: FIRST_RETRY_MS,
+            })
+            .missed(now);
+        newly
+    }
+
+    /// A re-read reached all of `root`'s application: nothing is owed.
+    /// `true` if something was.
+    pub fn paid(&mut self, root: NodeId) -> bool {
+        self.waiting.remove(&root).is_some()
+    }
+
+    /// `root`'s application has gone, and what it owed with it.
+    pub fn forget(&mut self, root: NodeId) {
+        self.waiting.remove(&root);
     }
 }
 
@@ -384,5 +501,55 @@ mod tests {
             "and back again is new again, with a settle of its own"
         );
         assert_eq!(arrivals.due(&shell, 8_000), [100]);
+    }
+
+    /// #41: a re-read that left part of an application stale used to be the
+    /// last word on it, until the application happened to change again.
+    #[test]
+    fn a_re_read_that_left_nodes_stale_is_owed_another_less_often_each_time() {
+        let zenity = NodeId(1);
+        let mut owed = Owed::default();
+        assert!(!owed.due(zenity, 0), "nothing is owed before a re-read");
+
+        assert!(owed.left(zenity, 10_000), "newly owed");
+        assert!(!owed.due(zenity, 10_999));
+        assert!(owed.due(zenity, 11_000), "a second after");
+        assert!(!owed.left(zenity, 11_500), "owed still, not newly");
+        assert!(!owed.due(zenity, 13_499));
+        assert!(owed.due(zenity, 13_500), "then two");
+        owed.left(zenity, 13_500);
+        assert!(owed.due(zenity, 17_500), "then four");
+
+        for _ in 0..10 {
+            owed.left(zenity, 20_000);
+        }
+        assert!(!owed.due(zenity, 79_999));
+        assert!(
+            owed.due(zenity, 80_000),
+            "and never more than a minute apart"
+        );
+
+        assert!(owed.paid(zenity), "a read that reached all of it");
+        assert!(!owed.due(zenity, u64::MAX), "pays what was owed");
+        assert!(!owed.paid(zenity), "once");
+        owed.left(zenity, 100_000);
+        assert!(
+            owed.due(zenity, 101_000),
+            "and the next debt starts again at a second"
+        );
+    }
+
+    #[test]
+    fn an_application_that_has_gone_is_owed_nothing() {
+        let (zenity, firefox) = (NodeId(1), NodeId(50));
+        let mut owed = Owed::default();
+        owed.left(zenity, 0);
+        owed.left(firefox, 0);
+        owed.forget(zenity);
+        assert!(!owed.due(zenity, 1_000));
+        assert!(
+            owed.due(firefox, 1_000),
+            "and each application owes its own"
+        );
     }
 }

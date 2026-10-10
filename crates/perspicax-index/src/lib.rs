@@ -163,7 +163,10 @@ impl core::fmt::Display for Refusal {
             ),
             Self::Unattributed => write!(f, "node has no attributed origin"),
             Self::Stale { frames: 0 } => {
-                write!(f, "node's subtree was invalidated and has not been re-read")
+                write!(
+                    f,
+                    "node's subtree was invalidated and has not been re-read yet"
+                )
             }
             Self::Stale { frames } => write!(f, "node is stale by {frames} frame(s) of damage"),
             Self::NoCapability { origin } => write!(f, "no capability for origin {origin:?}"),
