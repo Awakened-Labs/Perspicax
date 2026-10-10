@@ -85,23 +85,22 @@ fn frame(from: &WlSurface) -> Point<i32, Logical> {
     }
 }
 
-/// In a debug build, that a popup hangs where smithay's renderer draws it on
-/// `window`, when the popup is one it draws. Every live test built with
-/// `capture` runs through here, so a placement that drifted from smithay's
-/// would fail them rather than misplace a menu's damage on a seat.
+/// In a debug build, that a popup hangs where smithay's renderer draws it,
+/// and that it draws it once. `frame` is where smithay measures the popups
+/// of `hung.from` from: a window's `Window::geometry()` corner, a panel's
+/// own. Every live test built with `capture` runs through here, so a
+/// placement that drifted from smithay's would fail them rather than
+/// misplace a menu's damage on a seat.
 #[cfg(any(feature = "seat", feature = "capture"))]
-pub(crate) fn check_hung_as_drawn(
-    window: &smithay::desktop::Window,
-    popup: &PopupKind,
-    hung: &Hung,
-) {
-    let Some(toplevel) = window.toplevel() else {
-        return;
-    };
-    let drawn = smithay::desktop::PopupManager::popups_for_surface(toplevel.wl_surface())
-        .find(|(drawn, _)| drawn == popup)
-        .map(|(drawn, location)| window.geometry().loc + location - drawn.geometry().loc);
-    if let Some(drawn) = drawn {
+pub(crate) fn check_hung_as_drawn(frame: Point<i32, Logical>, popup: &PopupKind, hung: &Hung) {
+    let drawn: Vec<_> = smithay::desktop::PopupManager::popups_for_surface(&hung.from)
+        .filter(|(drawn, _)| drawn == popup)
+        .map(|(drawn, location)| frame + location - drawn.geometry().loc)
+        .collect();
+    // Filed under its window or panel by `PopupManager::commit` before this
+    // is asked, at its first commit, so a popup that hangs is always drawn.
+    debug_assert_eq!(drawn.len(), 1, "a popup is drawn once");
+    if let Some(drawn) = drawn.first() {
         debug_assert_eq!(
             Vec2::new(f64::from(drawn.x), f64::from(drawn.y)),
             hung.at,

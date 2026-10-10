@@ -859,11 +859,17 @@ impl CompositorHandler for Compositor {
         // are its root's, and a menu's are its window's or panel's.
         let id = match (&popup, &hung) {
             (Some(_popup), Some(hung)) => {
+                let id = self.hung_from(hung);
                 #[cfg(any(feature = "seat", feature = "capture"))]
-                if renders && let Some(window) = self.window_for(&hung.from) {
-                    popup::check_hung_as_drawn(&window, _popup, hung);
+                if renders && id.is_some() {
+                    let frame = self
+                        .window_for(&hung.from)
+                        .map_or_else(smithay::utils::Point::default, |window| {
+                            Window::geometry(&window).loc
+                        });
+                    popup::check_hung_as_drawn(frame, _popup, hung);
                 }
-                self.hung_from(hung)
+                id
             }
             // A menu with nothing to hang from yet draws on nothing anyone
             // is told about.

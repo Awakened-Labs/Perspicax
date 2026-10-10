@@ -13,7 +13,7 @@
 //! this: a panel occluding a window, judged by a compositor with no screen.
 
 use smithay::{
-    desktop::{LayerSurface, PopupKind, WindowSurfaceType, layer_map_for_output},
+    desktop::{LayerSurface, WindowSurfaceType, layer_map_for_output},
     output::Output,
     reexports::wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface},
     utils::{Logical, Point, Rectangle},
@@ -94,12 +94,12 @@ impl WlrLayerShellHandler for Compositor {
         );
     }
 
-    /// A panel's menu. Tracked so it renders and hit-tests with its panel.
-    fn new_popup(&mut self, _parent: WlrLayerSurface, popup: PopupSurface) {
-        if let Err(error) = self.popups.track_popup(PopupKind::Xdg(popup)) {
-            tracing::warn!(%error, "could not track layer popup");
-        }
-    }
+    /// A panel's menu, given to its panel. Already tracked: a panel's menu
+    /// is made with no parent, so `XdgShellHandler::new_popup` tracked it as
+    /// one waiting for one, and its first commit, after this, files it under
+    /// the panel so it renders and hit-tests there. Tracking it here as well
+    /// would file it twice, and smithay would draw it twice.
+    fn new_popup(&mut self, _parent: WlrLayerSurface, _popup: PopupSurface) {}
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
         let mut freed = false;
