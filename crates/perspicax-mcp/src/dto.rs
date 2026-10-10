@@ -497,8 +497,9 @@ pub struct Window {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub untrusted_title: Option<String>,
     /// How many frames of damage this surface has ever taken, what it drew
-    /// into its subsurfaces included: one for each commit that brought a new
-    /// buffer or named damage. Read it as a rate, not a total: an idle GTK
+    /// into its subsurfaces and menus included: one for each commit that
+    /// brought a new buffer or named damage, and one for each menu that
+    /// closed. Read it as a rate, not a total: an idle GTK
     /// window repaints about forty times a second and an idle Qt one about
     /// once every two.
     pub damage_frames: u64,

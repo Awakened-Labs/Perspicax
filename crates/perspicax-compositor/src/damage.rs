@@ -9,6 +9,11 @@
 //! is its window's, whichever surface it went into, so it is counted against
 //! the window, moved by where the subsurface sits in it.
 //!
+//! A popup -- a menu, a combo list, a tooltip -- is the root of a tree of its
+//! own, and the window it belongs to is found through xdg-shell instead:
+//! [`popup`](crate::popup) says where it is drawn, and its tree is read here
+//! from there, in the window's coordinates.
+//!
 //! # When a subsurface's damage arrives
 //!
 //! Smithay calls the compositor once for each surface whose state it applies,

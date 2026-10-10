@@ -243,11 +243,12 @@ because none could be honest:
 ```
 
 `damage` says what the pixels did in the 200 ms the act was given, scoped to the
-target's own rectangle. Weigh it against the idle rates in the table below: an
-idle GTK window repaints about forty times a second, so `on_target` means less
-there than it does on Qt, and `quiet` — nothing changed at all — is the strong
-answer on both. A boolean would have been confidently wrong on one of the two
-toolkits this project tests against.
+target's own rectangle, a menu the act opened, lit or closed included. Weigh it
+against the idle rates in the table below: an idle GTK window repaints about
+forty times a second, so `on_target` means less there than it does on Qt, and
+`quiet` — nothing changed at all — is the strong answer on both. A boolean would
+have been confidently wrong on one of the two toolkits this project tests
+against.
 
 **A refusal is an answer.** It names what is in the way and what would clear it,
 so a recoverable situation does not become a retry loop:
@@ -427,6 +428,15 @@ or a GTK 4 offloaded picture's. A frame is a commit that brought a new buffer or
 named what changed. One that asks for a frame callback and nothing else is not:
 loading a page, Firefox committed its subsurface 252 times and drew in 79 of
 them.
+
+So is what a window's menus draw. A menu, a combo list or a tooltip is a popup:
+a surface of its own, outside the window's tree of subsurfaces. Its accessible
+nodes hang off the window's all the same, so its frames are the window's too,
+placed where the menu is drawn on it, past the window's edge if it hangs there.
+A menu closing is a frame where it was. A panel's menus are the panel's. Each
+frame is kept where it landed, not as one box around them all: a menu hanging
+below a window and a caret blinking at its top leave every control between
+them untouched.
 
 ## Build
 
