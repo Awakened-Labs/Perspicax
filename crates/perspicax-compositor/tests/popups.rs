@@ -340,6 +340,70 @@ fn a_menu_of_a_panel_counts_for_the_panel() {
 
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_closing_is_damage_where_it_showed() {
+    let session = session("popup-closed");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let (page, _) = settle(&session, &mut desk, &mut queue, &qh, "page");
+
+    let menu = desk.open_popup(&qh, desk.windows[0].xdg_surface(), (40, 30), (120, 80));
+    configured(&mut desk, &mut queue, 1);
+    desk.paint(menu.wl_surface(), (120, 80), MENU);
+    menu.wl_surface().commit();
+    let area = [Rect::new(40.0, 30.0, 160.0, 110.0)];
+    let before = landed(&session, &mut desk, &mut queue, page, &area).damage_generation;
+
+    // An item chosen: the menu goes, as a toolkit closes one, by destroying
+    // it with its picture still in it.
+    drop(menu);
+    let window = landed(&session, &mut desk, &mut queue, page, &area);
+    assert_eq!(
+        window.damage_generation,
+        before + 1,
+        "what the menu covered shows again, where it was"
+    );
+    assert!(window.mapped, "the window is on screen without its menu");
+    assert_eq!(desk.drawn, 1, "no configure redrew the window meanwhile");
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_taking_its_picture_away_and_then_closing_counts_once() {
+    let session = session("popup-removed-then-closed");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let (page, _) = settle(&session, &mut desk, &mut queue, &qh, "page");
+
+    let menu = desk.open_popup(&qh, desk.windows[0].xdg_surface(), (40, 30), (120, 80));
+    configured(&mut desk, &mut queue, 1);
+    // Declared, as a toolkit declares it, so the menu still has a geometry
+    // once its picture is gone.
+    menu.xdg_surface().set_window_geometry(0, 0, 120, 80);
+    desk.paint(menu.wl_surface(), (120, 80), MENU);
+    menu.wl_surface().commit();
+    let area = [Rect::new(40.0, 30.0, 160.0, 110.0)];
+    let before = landed(&session, &mut desk, &mut queue, page, &area).damage_generation;
+
+    menu.wl_surface().attach(None, 0, 0);
+    menu.wl_surface().commit();
+    let hidden = landed(&session, &mut desk, &mut queue, page, &area).damage_generation;
+    assert_eq!(hidden, before + 1, "taking its picture away is one frame");
+
+    drop(menu);
+    queue.roundtrip(&mut desk).expect("round trip");
+    let facts = session.wait_for(|_| true);
+    let window = facts.surface(page).expect("the window");
+    assert_eq!(
+        window.damage_generation, hidden,
+        "a menu that already showed nothing changes nothing as it goes"
+    );
+    assert!(window.mapped);
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_menu_taking_its_picture_away_leaves_its_window_mapped() {
     let session = session("popup-removed");
     let (mut desk, mut queue, qh, _) = session.client();

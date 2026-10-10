@@ -1015,6 +1015,31 @@ impl XdgShellHandler for Compositor {
         }
     }
 
+    /// A menu has gone, and what it covered shows again where it hung: its
+    /// window's or panel's damage, as a menu's commit is. Nothing for a menu
+    /// that showed nothing by then, one that took its picture away having
+    /// been counted when it did.
+    ///
+    /// Choosing an item that changes nothing else -- Copy -- closes the menu
+    /// and nothing more, and without this its receipt would read `quiet`.
+    fn popup_destroyed(&mut self, surface: PopupSurface) {
+        let popup = PopupKind::Xdg(surface);
+        if geometry::shown(popup.wl_surface()).is_none() {
+            return;
+        }
+        let Some(hung) = popup::hung(&popup) else {
+            return;
+        };
+        let Some(id) = self.hung_from(&hung) else {
+            return;
+        };
+        let whole = geometry::window_geometry(popup.wl_surface())
+            .map(|whole| damage::to_rect(whole, 1.0) + hung.at);
+        self.record_damage(id, whole.into_iter().collect());
+        self.backend.redraw();
+        self.publish_facts();
+    }
+
     /// A menu wants the keyboard and pointer until it is dismissed. Only a
     /// person makes that request meaningful: headless, the act path addresses
     /// surfaces directly and a grab would only get in its way.
