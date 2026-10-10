@@ -83,15 +83,15 @@ impl Desk {
         *self.lock() = index;
     }
 
-    /// Change the index under the lock.
+    /// Change the index under the lock, and hand back what `change` returns.
     ///
     /// One critical section for however many steps a refresh takes -- applying
     /// changes, re-joining the nodes they added, re-reading an invalidated
     /// subtree -- because a reader that caught the index between them would see
     /// nodes that exist and have not yet been attributed to anybody.
-    pub fn update(&self, change: impl FnOnce(&mut Index, &HostFacts)) {
+    pub fn update<T>(&self, change: impl FnOnce(&mut Index, &HostFacts) -> T) -> T {
         let facts = self.facts.read();
-        change(&mut self.lock(), &facts);
+        change(&mut self.lock(), &facts)
     }
 
     /// What the compositor is publishing right now.
