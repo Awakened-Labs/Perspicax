@@ -20,7 +20,7 @@ use perspicax_index::HostFacts;
 use perspicax_policy::Action;
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::{CompositorHandler, CompositorState, Region},
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
     delegate_subcompositor, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
@@ -80,6 +80,9 @@ use wayland_protocols_wlr::{
 };
 
 pub const WINDOW: (u32, u32) = (400, 300);
+
+/// A rectangle as the protocol sends one: x, y, width, height.
+pub type Geometry = (i32, i32, i32, i32);
 
 /// A compositor on a thread, and a channel to drive it with.
 pub struct Session {
@@ -338,6 +341,9 @@ pub struct Desk {
     /// one acknowledged and committed with nothing attached.
     pub blank: Vec<Window>,
     pub blank_configured: usize,
+    /// Windows that declare a geometry of their own when they draw, or
+    /// none at all, in place of their whole buffer.
+    pub declaring: Vec<(Window, Option<Geometry>)>,
     /// Each window's colour, ARGB, in the order they opened.
     pub colours: Vec<u32>,
     pub drawn: usize,
@@ -412,6 +418,7 @@ impl Desk {
             windows: Vec::new(),
             blank: Vec::new(),
             blank_configured: 0,
+            declaring: Vec::new(),
             colours: Vec::new(),
             offered: None,
             drawn: 0,
@@ -531,6 +538,37 @@ impl Desk {
         );
         window.commit();
         self.blank.push(window);
+    }
+
+    /// Open a window drawn like any other that declares `geometry` as its
+    /// window geometry, `(x, y, width, height)`, or none at all: what
+    /// GStreamer's `waylandsink` declares.
+    pub fn open_declaring(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        title: &str,
+        geometry: Option<Geometry>,
+    ) {
+        self.open_window(qh, title, title);
+        let window = self.windows.last().expect("just opened").clone();
+        self.declaring.push((window, geometry));
+    }
+
+    /// Open a window that declares no geometry and never draws.
+    pub fn open_bare(&mut self, qh: &QueueHandle<Self>, title: &str) {
+        let surface = self.compositor.create_surface(qh);
+        let window = self.xdg.create_window(surface, WindowDecorations::None, qh);
+        window.set_title(title);
+        window.commit();
+        self.blank.push(window);
+    }
+
+    /// Say that only `(x, y, width, height)` of `surface` is opaque, at its
+    /// next commit.
+    pub fn set_opaque(&self, surface: &wl_surface::WlSurface, rect: Geometry) {
+        let region = Region::new(&self.compositor).expect("a region");
+        region.add(rect.0, rect.1, rect.2, rect.3);
+        surface.set_opaque_region(Some(region.wl_region()));
     }
 
     /// A subsurface of `parent`, at `at` in the parent's coordinates, with
@@ -1439,12 +1477,24 @@ impl WindowHandler for Desk {
         let surface = window.wl_surface();
         buffer.attach_to(surface).expect("attach");
         surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
-        window.xdg_surface().set_window_geometry(
-            0,
-            0,
-            i32::try_from(width).unwrap(),
-            i32::try_from(height).unwrap(),
-        );
+        let declared = self
+            .declaring
+            .iter()
+            .find(|(known, _)| known == window)
+            .map_or(
+                Some((
+                    0,
+                    0,
+                    i32::try_from(width).unwrap(),
+                    i32::try_from(height).unwrap(),
+                )),
+                |(_, geometry)| *geometry,
+            );
+        if let Some((x, y, width, height)) = declared {
+            window
+                .xdg_surface()
+                .set_window_geometry(x, y, width, height);
+        }
         window.commit();
         self.drawn += 1;
     }

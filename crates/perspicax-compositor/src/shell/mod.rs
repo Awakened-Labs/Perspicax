@@ -178,13 +178,12 @@ impl Compositor {
     }
 
     /// Where a window is and how big, in the global space: where it was
-    /// mapped, at the size the client declared for it.
+    /// mapped, at the size of its geometry ([`crate::geometry`]).
     ///
     /// Not `Space::element_geometry`, for the reason `publish_facts` gives:
     /// Smithay sizes a window from buffers only the seat backend records, so
     /// headless every window is `0x0` there, and nothing could tell which
-    /// output one is on. An X11 window's geometry comes from the X server, and
-    /// a client that declared nothing falls back to the buffer's.
+    /// output one is on. An X11 window's geometry comes from the X server.
     pub(crate) fn extent(&self, window: &Framed) -> Option<Rectangle<i32, Logical>> {
         let location = self.space.element_location(window)?;
         Some(Rectangle::new(location, extent_size(window)))
@@ -637,45 +636,29 @@ impl Compositor {
 /// A window's size, as [`Compositor::extent`] measures it, whether it is on
 /// screen or parked.
 pub(crate) fn extent_size(window: &Framed) -> Size<i32, Logical> {
-    let declared = window
-        .toplevel()
-        .and_then(|toplevel| crate::state::declared_geometry(toplevel.wl_surface()))
-        .filter(|declared| !declared.is_empty());
-    match declared {
-        // Whole logical pixels: xdg window geometry is declared in them.
-        Some(declared) => (
-            (declared.x1 - declared.x0).round() as i32,
-            (declared.y1 - declared.y0).round() as i32,
-        )
-            .into(),
-        None => window.geometry().size,
-    }
+    measured(window).map_or_else(|| window.geometry().size, |geometry| geometry.size)
 }
 
 /// Where a window's geometry begins inside its surface: the width and height
 /// of its client-side shadow, or nothing for a window that draws none.
 ///
-/// From the geometry the client declared, as [`extent_size`] and the published
-/// facts' `buffer_origin` measure it, and not from `Window::geometry()`.
-/// Smithay clamps that to a bounding box only a backend that keeps buffers
-/// computes, so a plain headless build answers `(0, 0)` where a seat answers
-/// the shadow, and an agent's click would land a shadow's width from where the
-/// facts placed its target. A window with no declared geometry, X11's or one
-/// that never set it, falls back to smithay's.
+/// From the geometry [`crate::geometry`] measures, as [`extent_size`] and the
+/// published facts' `buffer_origin` measure it, and not from
+/// `Window::geometry()`. Smithay clamps that to a bounding box only a backend
+/// that keeps buffers computes, so a plain headless build answers `(0, 0)`
+/// where a seat answers the shadow, and an agent's click would land a
+/// shadow's width from where the facts placed its target.
 pub(crate) fn geometry_offset(window: &Framed) -> Point<i32, Logical> {
-    let declared = window.toplevel().and_then(|toplevel| {
-        smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
-            states
-                .cached_state
-                .get::<smithay::wayland::shell::xdg::SurfaceCachedState>()
-                .current()
-                .geometry
-        })
-    });
-    match declared.filter(|declared| !declared.size.is_empty()) {
-        Some(declared) => declared.loc,
-        None => window.geometry().loc,
-    }
+    measured(window).map_or_else(|| window.geometry().loc, |geometry| geometry.loc)
+}
+
+/// An xdg window's geometry, as [`crate::geometry::window_geometry`] says.
+/// `None` for an X11 window, whose geometry is the X server's and smithay's
+/// to give, and for one that has neither drawn nor declared anything.
+fn measured(window: &Framed) -> Option<Rectangle<i32, Logical>> {
+    window
+        .toplevel()
+        .and_then(|toplevel| crate::geometry::window_geometry(toplevel.wl_surface()))
 }
 
 pub(crate) fn id_of(window: &Framed) -> Option<SurfaceId> {

@@ -625,9 +625,9 @@ impl Compositor {
     /// so every Firefox click on a seat landed a shadow's width from its
     /// target. `at` is now window space for every toolkit -- the index
     /// subtracts each window's own origin before a rect gets here -- and the
-    /// shadow is the declared one ([`geometry_offset`]), so a plain headless
-    /// build, which never computes smithay's window geometry, aims exactly as
-    /// a seat does.
+    /// shadow is the one this compositor measures ([`geometry_offset`]), so a
+    /// plain headless build, which never computes smithay's window geometry,
+    /// aims exactly as a seat does.
     ///
     /// [`PointerHandle::motion`]: smithay::input::pointer::PointerHandle::motion
     /// [`geometry_offset`]: crate::shell::geometry_offset
