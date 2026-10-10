@@ -264,6 +264,11 @@ fn moved(
     relative: Option<&RelativeMotionEvent>,
 ) {
     let Some(Travelled { hit: under }) = state.travel(to, relative, time, rest_at_edge) else {
+        // Held in place by a window: nothing moved, and nothing rests
+        // against an edge, though a rest begun before the hold was.
+        if let Running::Seat(session) = &mut state.backend {
+            session.dwell.cancel();
+        }
         return;
     };
     // The focus policy is about windows. Over a panel it has nothing to say:
@@ -280,6 +285,8 @@ fn moved(
         let decision = focus.pointer_over(over, state.focused_surface());
         state.apply_focus(decision);
     }
+    // After the focus policy, so the window in use is the one it chose.
+    state.settle_hold();
     // The cursor itself moved, whatever the policy decided.
     state.backend.redraw();
     #[cfg(feature = "capture")]
@@ -532,7 +539,8 @@ fn clock(state: &Compositor) -> u64 {
 ///
 /// Off while a button is held, unless that button is dragging a window and
 /// the config says a drag flips too; then the window goes with it. Off over
-/// the fullscreen window in use, and behind the lock screen.
+/// the fullscreen window in use, while a window holds the pointer, and
+/// behind the lock screen.
 fn rest_at_edge(state: &mut Compositor, at: Point<f64, Logical>) -> Option<Point<f64, Logical>> {
     let Running::Seat(session) = &state.backend else {
         return None;
@@ -580,6 +588,8 @@ fn resting(state: &Compositor, at: Point<f64, Logical>, carrying: bool) -> Resti
         .is_some_and(PointerHandle::is_grabbed);
     if state.lock.is_some() {
         Resting::Locked
+    } else if state.hold().is_some() {
+        Resting::Captured
     } else if state
         .space
         .element_under(at)

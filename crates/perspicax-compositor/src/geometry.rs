@@ -86,6 +86,17 @@ pub(crate) fn record(states: &SurfaceData, size: Option<Size<i32, Logical>>) {
     }
 }
 
+/// The size of the picture `surface` shows, as its last commit left it:
+/// `None` while it shows nothing.
+pub(crate) fn shown(surface: &WlSurface) -> Option<Size<i32, Logical>> {
+    with_states(surface, |states| {
+        states
+            .data_map
+            .get::<Shows>()
+            .and_then(|shows| *shows.0.lock().unwrap_or_else(PoisonError::into_inner))
+    })
+}
+
 /// Measure the tree under `root` again, after a commit changed something in
 /// it, and keep the answer on the root.
 ///

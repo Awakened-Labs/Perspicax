@@ -25,14 +25,17 @@ pub(crate) fn confine(
 /// The nearest point to `point` inside `output`. The far edges are
 /// exclusive: the last pixel of a 1920-wide output is 1919, and a pointer at
 /// 1920 would be on the next output (or none).
-fn nearest_on(point: Point<f64, Logical>, output: Rectangle<i32, Logical>) -> Point<f64, Logical> {
+pub(crate) fn nearest_on(
+    point: Point<f64, Logical>,
+    output: Rectangle<i32, Logical>,
+) -> Point<f64, Logical> {
     let (x0, y0) = (f64::from(output.loc.x), f64::from(output.loc.y));
     let x1 = x0 + f64::from(output.size.w.max(1)) - 1.0;
     let y1 = y0 + f64::from(output.size.h.max(1)) - 1.0;
     (point.x.clamp(x0, x1), point.y.clamp(y0, y1)).into()
 }
 
-fn distance(a: Point<f64, Logical>, b: Point<f64, Logical>) -> f64 {
+pub(crate) fn distance(a: Point<f64, Logical>, b: Point<f64, Logical>) -> f64 {
     (a.x - b.x).hypot(a.y - b.y)
 }
 

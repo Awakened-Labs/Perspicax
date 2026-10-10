@@ -62,6 +62,7 @@ use smithay::{
         idle_inhibit::IdleInhibitManagerState,
         idle_notify::IdleNotifierState,
         output::{OutputHandler, OutputManagerState},
+        pointer_constraints::PointerConstraintsState,
         relative_pointer::RelativePointerManagerState,
         selection::{
             SelectionHandler,
@@ -126,6 +127,10 @@ pub struct Compositor {
     /// its global, as the ones above are.
     #[expect(dead_code, reason = "RAII handle for the relative-pointer global")]
     relative_pointer: RelativePointerManagerState,
+    /// `zwp_pointer_constraints_v1`: a game holding the pointer in place, or
+    /// inside its window. Which window may, and when, is [`crate::hold`]'s.
+    #[expect(dead_code, reason = "RAII handle for the pointer-constraints global")]
+    pointer_constraints: PointerConstraintsState,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) data_device: DataDeviceState,
     pub(crate) seat: Seat<Self>,
@@ -342,6 +347,7 @@ impl Compositor {
             output_manager: OutputManagerState::new_with_xdg_output::<Self>(display),
             cursor_shape: CursorShapeManagerState::new::<Self>(display),
             relative_pointer: RelativePointerManagerState::new::<Self>(display),
+            pointer_constraints: PointerConstraintsState::new::<Self>(display),
             data_device: DataDeviceState::new::<Self>(display),
             seat_state,
             seat,

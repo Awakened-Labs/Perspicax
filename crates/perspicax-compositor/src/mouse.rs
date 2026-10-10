@@ -34,7 +34,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use crate::{framed::Framed, layers, shell::id_of, state::Compositor};
+use crate::{framed::Framed, hold::Hold, layers, shell::id_of, state::Compositor};
 
 /// What the pointer is over.
 pub(crate) struct Hit {
@@ -311,6 +311,7 @@ impl Compositor {
             .travel(from + delta, Some(&relative), time, |_, _| None)
             .is_some()
         {
+            self.settle_hold();
             #[cfg(feature = "capture")]
             self.flush_screencopy_for_pointer();
         }
@@ -356,8 +357,23 @@ impl Compositor {
             return None;
         }
         let pointer = self.pointer.clone()?;
-        let at = Point::<i32, Logical>::from(at).to_f64();
-        let hit = under(self, at);
+        let from = pointer.current_location();
+        let to = Point::<i32, Logical>::from(at).to_f64();
+        // A hand goes where a window holding the pointer lets it, as a
+        // tablet's does on a seat: nowhere while it is locked, when the
+        // press lands where the pointer is.
+        let hold = self.hold();
+        let Some(at) = hold
+            .as_ref()
+            .map_or(Some(to), |hold| hold.moves_to(from, to))
+        else {
+            return Some(Pointed {
+                pointer,
+                at: from,
+                hit: hold.as_ref().map(Hold::hit),
+            });
+        };
+        let hit = hold.as_ref().map(Hold::hit).or_else(|| under(self, at));
         let focus = hit
             .as_ref()
             .and_then(|hit| Some((hit.surface.clone()?.into(), hit.origin)));
@@ -368,6 +384,7 @@ impl Compositor {
         };
         pointer.motion(self, focus, &event);
         pointer.frame(self);
+        self.settle_hold();
         #[cfg(feature = "capture")]
         self.flush_screencopy_for_pointer();
         Some(Pointed { pointer, at, hit })
@@ -407,8 +424,15 @@ impl Compositor {
     /// camera still turns. Smithay keeps one pointer focus for both, so they
     /// are given the same one.
     ///
+    /// A window holding the pointer ([`crate::hold`]) has its say first.
+    /// Locked, the pointer goes nowhere and no client may be told it moved:
+    /// only the mouse's own motion goes, to that window. Confined, it goes
+    /// as far inside the window's region as it can. Either way it stays the
+    /// window's, whatever is drawn over it.
+    ///
     /// No focus policy is asked and nothing is drawn: what follows from the
-    /// motion is the caller's. `None` with no pointer.
+    /// motion is the caller's. `None` when the pointer did not move: there
+    /// is none, or a window holds it in place.
     pub(crate) fn travel(
         &mut self,
         to: Point<f64, Logical>,
@@ -417,16 +441,26 @@ impl Compositor {
         edge: impl FnOnce(&mut Self, Point<f64, Logical>) -> Option<Point<f64, Logical>>,
     ) -> Option<Travelled> {
         let pointer = self.pointer.clone()?;
-        let outputs: Vec<_> = self
-            .space
-            .outputs()
-            .filter_map(|output| self.space.output_geometry(output))
-            .collect();
-        let mut at = crate::backend::pointer::confine(to, &outputs);
+        let hold = self.hold();
+        let to = match &hold {
+            Some(hold) => match hold.moves_to(pointer.current_location(), to) {
+                Some(to) => to,
+                None => {
+                    if let Some(relative) = relative {
+                        let focus = Some((hold.surface.clone().into(), hold.origin));
+                        pointer.relative_motion(self, focus, relative);
+                        pointer.frame(self);
+                    }
+                    return None;
+                }
+            },
+            None => to,
+        };
+        let mut at = self.on_the_desk(to);
         if let Some(arrived) = edge(self, at) {
             at = arrived;
         }
-        let hit = under(self, at);
+        let hit = hold.as_ref().map(Hold::hit).or_else(|| under(self, at));
         // Over a frame no client has the pointer: the one it left is told so,
         // and the compositor picks the cursor.
         // Over nothing at all, no client is drawing the cursor either, and a
