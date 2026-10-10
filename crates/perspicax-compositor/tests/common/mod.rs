@@ -23,7 +23,7 @@ use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
     delegate_compositor, delegate_layer, delegate_output, delegate_pointer_constraints,
     delegate_registry, delegate_relative_pointer, delegate_shm, delegate_subcompositor,
-    delegate_xdg_shell, delegate_xdg_window,
+    delegate_xdg_popup, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -38,7 +38,8 @@ use smithay_client_toolkit::{
             LayerSurfaceConfigure,
         },
         xdg::{
-            XdgShell, XdgSurface as _,
+            XdgPositioner, XdgShell, XdgSurface as _,
+            popup::{Popup, PopupConfigure, PopupHandler},
             window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
         },
     },
@@ -74,6 +75,7 @@ use wayland_protocols::wp::{
     },
     relative_pointer::zv1::client::zwp_relative_pointer_v1::ZwpRelativePointerV1,
 };
+use wayland_protocols::xdg::shell::client::{xdg_positioner, xdg_surface};
 use wayland_protocols_wlr::{
     foreign_toplevel::v1::client::{
         zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
@@ -433,6 +435,9 @@ pub struct Desk {
     /// Strips across the top of the screen, each with its colour and height.
     pub layers: Vec<(LayerSurface, u32, u32)>,
     pub layers_drawn: usize,
+    /// How many configures the popups this client opened have had. Nothing
+    /// is drawn in reply: a test paints a popup itself, once it may.
+    pub popups_configured: usize,
 }
 
 impl Desk {
@@ -501,6 +506,7 @@ impl Desk {
             layer_shell: LayerShell::bind(globals, qh).expect("zwlr_layer_shell_v1"),
             layers: Vec::new(),
             layers_drawn: 0,
+            popups_configured: 0,
         }
     }
 
@@ -639,6 +645,53 @@ impl Desk {
             subsurface.set_desync();
         }
         (subsurface, surface)
+    }
+
+    /// A popup of `parent`, `size` big, with its corner at `at` in the
+    /// parent's window geometry: a menu opened by a click there. Nothing is
+    /// drawn in it: wait for it to be configured, then paint it.
+    pub fn open_popup(
+        &self,
+        qh: &QueueHandle<Self>,
+        parent: &xdg_surface::XdgSurface,
+        at: (i32, i32),
+        size: (u32, u32),
+    ) -> Popup {
+        let positioner = self.positioner(at, size);
+        Popup::new(parent, &positioner, qh, &self.compositor, &self.xdg).expect("xdg_popup")
+    }
+
+    /// A popup of `panel`, as [`Self::open_popup`] opens one of a window:
+    /// opened with no parent, and given to the panel before its first
+    /// commit, as layer-shell asks.
+    pub fn open_panel_popup(
+        &self,
+        qh: &QueueHandle<Self>,
+        panel: &LayerSurface,
+        at: (i32, i32),
+        size: (u32, u32),
+    ) -> Popup {
+        let positioner = self.positioner(at, size);
+        let surface = self.compositor.create_surface(qh);
+        let popup =
+            Popup::from_surface(None, &positioner, qh, surface, &self.xdg).expect("xdg_popup");
+        panel.get_popup(popup.xdg_popup());
+        popup.wl_surface().commit();
+        popup
+    }
+
+    /// Place a popup of `size` with its corner exactly at `at`: hung from a
+    /// one-pixel anchor there, growing down and to the right.
+    fn positioner(&self, at: (i32, i32), size: (u32, u32)) -> XdgPositioner {
+        let positioner = XdgPositioner::new(&self.xdg).expect("xdg_positioner");
+        positioner.set_size(
+            i32::try_from(size.0).unwrap(),
+            i32::try_from(size.1).unwrap(),
+        );
+        positioner.set_anchor_rect(at.0, at.1, 1, 1);
+        positioner.set_anchor(xdg_positioner::Anchor::TopLeft);
+        positioner.set_gravity(xdg_positioner::Gravity::BottomRight);
+        positioner
     }
 
     /// Attach a buffer of `size` to `surface`, all in one colour, ARGB, and
@@ -1642,6 +1695,14 @@ impl LayerShellHandler for Desk {
     }
 }
 
+impl PopupHandler for Desk {
+    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Popup, _: PopupConfigure) {
+        self.popups_configured += 1;
+    }
+
+    fn done(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Popup) {}
+}
+
 impl WindowHandler for Desk {
     fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {
         self.asked_to_close += 1;
@@ -1772,6 +1833,7 @@ delegate_shm!(Desk);
 delegate_subcompositor!(Desk);
 delegate_xdg_shell!(Desk);
 delegate_xdg_window!(Desk);
+delegate_xdg_popup!(Desk);
 delegate_layer!(Desk);
 delegate_registry!(Desk);
 delegate_relative_pointer!(Desk);

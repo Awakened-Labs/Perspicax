@@ -55,6 +55,7 @@ mod origin;
 mod output_management;
 mod outputs;
 mod pager;
+mod popup;
 #[cfg(feature = "capture")]
 mod screencopy;
 mod shell;

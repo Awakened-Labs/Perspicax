@@ -14,7 +14,7 @@ use std::{
 };
 
 use perspicax_index::Consent;
-use perspicax_node::{Origin, Rect, SurfaceId};
+use perspicax_node::{Origin, Rect, SurfaceId, Vec2};
 use perspicax_policy::Workspaces;
 
 use smithay::wayland::seat::WaylandFocus;
@@ -26,7 +26,7 @@ use crate::{
     facts::Facts,
     focus::FocusTarget,
     framed::Framed,
-    geometry, origin,
+    geometry, origin, popup,
     shell::{self, Fill},
 };
 
@@ -654,6 +654,30 @@ impl Compositor {
         self.damage.get(&id).cloned().unwrap_or_default()
     }
 
+    /// Record one frame of damage on this surface: where its pixels changed,
+    /// in its own surface's coordinates. One generation however many
+    /// rectangles there are, and none for none.
+    pub(crate) fn record_damage(&mut self, id: SurfaceId, rects: Vec<Rect>) {
+        if rects.is_empty() {
+            return;
+        }
+        let history = self.damage.entry(id).or_default();
+        let generation = history.last().map_or(0, |(g, _)| *g) + 1;
+        history.extend(rects.into_iter().map(|rect| (generation, rect)));
+        if history.len() > DAMAGE_HISTORY {
+            history.drain(..history.len() - DAMAGE_HISTORY);
+        }
+    }
+
+    /// The window or panel a menu hangs from, if it is one the index is told
+    /// about.
+    pub(crate) fn hung_from(&self, hung: &popup::Hung) -> Option<SurfaceId> {
+        self.window_for(&hung.from)
+            .as_ref()
+            .and_then(shell::id_of)
+            .or_else(|| self.layer_id(&hung.from))
+    }
+
     /// Record that a surface has something in it.
     #[cfg_attr(
         not(feature = "xwayland"),
@@ -802,12 +826,18 @@ impl CompositorHandler for Compositor {
         let renders = self.backend.keeps_buffers();
         let (root, at) = damage::root_of(surface);
         let is_root = root == *surface;
+        // A menu's tree ends at the menu, and what it draws is the window's
+        // or panel's it hangs from, where it is drawn on them.
+        let popup = self.popups.find_popup(&root);
+        let hung = popup.as_ref().and_then(popup::hung);
+        let shift = hung.as_ref().map_or(Vec2::ZERO, |hung| hung.at);
         // Read before the renderer drains what it uses, and released here
         // only when there is no renderer to want it. The whole of the window
-        // is what it was before this commit: what a picture taken away
-        // uncovered.
-        let whole = geometry::window_geometry(&root).map(|whole| damage::to_rect(whole, 1.0));
-        let taken = damage::take(surface, at, whole, !renders);
+        // -- or of the menu -- is what it was before this commit: what a
+        // picture taken away uncovered.
+        let whole =
+            geometry::window_geometry(&root).map(|whole| damage::to_rect(whole, 1.0) + shift);
+        let taken = damage::take(surface, at + shift, whole, !renders);
         #[cfg(any(feature = "seat", feature = "capture"))]
         if renders {
             smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
@@ -826,27 +856,40 @@ impl CompositorHandler for Compositor {
         self.popups.commit(surface);
         // A window or a layer surface: both are described to the index, so
         // both keep the same presentation and damage records. A subsurface's
-        // are its root's.
-        let id = match self.window_for(&root) {
-            Some(window) => {
-                // The window's bounding box takes in its subsurfaces, so it
-                // follows theirs too. A resize is settled only by the
-                // toplevel's own commit, the one that answers it.
-                window.on_commit();
+        // are its root's, and a menu's are its window's or panel's.
+        let id = match (&popup, &hung) {
+            (Some(_popup), Some(hung)) => {
                 #[cfg(any(feature = "seat", feature = "capture"))]
-                if renders {
-                    geometry::check_drawn_as_measured(&window);
+                if renders && let Some(window) = self.window_for(&hung.from) {
+                    popup::check_hung_as_drawn(&window, _popup, hung);
                 }
-                if is_root {
-                    self.settle_resize(&window);
-                }
-                shell::id_of(&window)
+                self.hung_from(hung)
             }
-            None if is_root => self.layer_committed(surface),
-            None => self.layer_id(&root),
+            // A menu with nothing to hang from yet draws on nothing anyone
+            // is told about.
+            (Some(_), None) => None,
+            (None, _) => match self.window_for(&root) {
+                Some(window) => {
+                    // The window's bounding box takes in its subsurfaces, so
+                    // it follows theirs too. A resize is settled only by the
+                    // toplevel's own commit, the one that answers it.
+                    window.on_commit();
+                    #[cfg(any(feature = "seat", feature = "capture"))]
+                    if renders {
+                        geometry::check_drawn_as_measured(&window);
+                    }
+                    if is_root {
+                        self.settle_resize(&window);
+                    }
+                    shell::id_of(&window)
+                }
+                None if is_root => self.layer_committed(surface),
+                None => self.layer_id(&root),
+            },
         };
         #[cfg(feature = "xwayland")]
-        if id.is_none() && is_root && matches!(taken.own, damage::Buffer::New(_)) {
+        if id.is_none() && is_root && popup.is_none() && matches!(taken.own, damage::Buffer::New(_))
+        {
             smithay::wayland::compositor::with_states(surface, |states| {
                 states
                     .data_map
@@ -855,8 +898,9 @@ impl CompositorHandler for Compositor {
         }
         if let Some(id) = id {
             // Whether there is anything to look at is the root's own picture,
-            // and a commit that brought none leaves it as it was.
-            if is_root {
+            // and a commit that brought none leaves it as it was. A menu's
+            // picture is the menu's: its window is on screen without it.
+            if is_root && popup.is_none() {
                 match taken.own {
                     damage::Buffer::New(_) => {
                         self.presented.insert(id);
@@ -869,14 +913,7 @@ impl CompositorHandler for Compositor {
             }
             // One frame for the whole commit, however many surfaces of the
             // tree it changed.
-            if !taken.rects.is_empty() {
-                let history = self.damage.entry(id).or_default();
-                let generation = history.last().map_or(0, |(g, _)| *g) + 1;
-                history.extend(taken.rects.into_iter().map(|rect| (generation, rect)));
-                if history.len() > DAMAGE_HISTORY {
-                    history.drain(..history.len() - DAMAGE_HISTORY);
-                }
-            }
+            self.record_damage(id, taken.rects);
         }
         self.space.refresh();
         self.backend.redraw();
