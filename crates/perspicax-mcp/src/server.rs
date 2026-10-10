@@ -304,8 +304,11 @@ impl Perspicax {
                        `window_list` for what that surface does when nothing is happening.\n\n\
                        A refusal is not a failure of this tool. It names what is in the way and \
                        what would clear it: raise the surface `occluded_by` names, narrow an \
-                       `ambiguous_selector`, re-read a `stale` subtree, `focus` the target of a \
-                       `focus_elsewhere`. `not_showing` means the application itself says the \
+                       `ambiguous_selector`, `focus` the target of a `focus_elsewhere`. `stale` \
+                       means the application changed the control since it was read: perspicax \
+                       reads it again on its own, and again later if the application is too \
+                       busy to answer, so resolve it again in a moment -- there is nothing to \
+                       do that would hurry it. `not_showing` means the application itself says the \
                        control is not on screen: show it first, by switching to its tab or \
                        opening its menu. `unplaced` means the application gives no bounds for \
                        the control, so where it is drawn cannot be known: asking again will not \
@@ -417,8 +420,10 @@ impl Perspicax {
                        `added`, `updated` and `removed` name one node each; `removed` is \
                        emitted for every node of a departed subtree, so you never have to infer \
                        descendants. `invalidated` names the ROOT of a subtree that changed \
-                       shape and has not been re-read: nothing under it is actable until it is, \
-                       and `observe` with that node as `root` is the re-read.",
+                       shape and has not been re-read: nothing under it is actable until it is. \
+                       perspicax re-reads it on its own, and a node it finds unchanged is \
+                       reported nowhere here, so `observe` with that node as `root` to see when \
+                       it is actable again.",
         annotations(
             title = "Drain changes",
             read_only_hint = false,

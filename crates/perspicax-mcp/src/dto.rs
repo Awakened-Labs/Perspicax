@@ -940,7 +940,7 @@ mod tests {
         assert_eq!(stale.frames, Some(0));
         assert_eq!(
             stale.message,
-            "node's subtree was invalidated and has not been re-read"
+            "node's subtree was invalidated and has not been re-read yet"
         );
 
         let json = serde_json::to_value(Refused::from(&Refusal::NotFound)).unwrap();

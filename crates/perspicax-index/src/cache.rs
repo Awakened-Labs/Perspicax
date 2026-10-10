@@ -1048,7 +1048,7 @@ mod tests {
         index.apply(Change::SubtreeInvalidated { root: NodeId(1) });
         assert_eq!(
             index.actable(NodeId(2)).unwrap_err().to_string(),
-            "node's subtree was invalidated and has not been re-read"
+            "node's subtree was invalidated and has not been re-read yet"
         );
         assert_eq!(
             Refusal::Stale { frames: 4 }.to_string(),
