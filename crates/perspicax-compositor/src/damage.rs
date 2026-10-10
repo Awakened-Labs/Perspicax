@@ -32,7 +32,8 @@
 use perspicax_node::{Rect, Vec2};
 use smithay::{
     backend::renderer::buffer_dimensions,
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    reexports::wayland_server::protocol::{wl_output, wl_surface::WlSurface},
+    utils::{Buffer as BufferCoords, Logical, Size},
     wayland::compositor::{
         BufferAssignment, Damage, SubsurfaceCachedState, SurfaceAttributes, SurfaceData,
         TraversalAction, get_parent, with_states, with_surface_tree_downward,
@@ -42,9 +43,9 @@ use smithay::{
 /// What a commit did to a surface's picture.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Buffer {
-    /// A new one. Its extent in the surface's own coordinates, when Smithay
-    /// can read the size of a buffer of its kind.
-    New(Option<Rect>),
+    /// A new one. The size it gives its surface, when Smithay can read the
+    /// size of a buffer of its kind.
+    New(Option<Size<i32, Logical>>),
     /// Taken away: the surface shows nothing now.
     Removed,
     /// The one it had before.
@@ -99,26 +100,27 @@ pub(crate) fn take(start: &WlSurface, at: Vec2, whole: Option<Rect>, releases: b
             };
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
             let current = attributes.current();
-            let scale = f64::from(current.buffer_scale.max(1));
+            let scale = current.buffer_scale.max(1);
             let named: Vec<Rect> = current
                 .damage
                 .iter()
-                .map(|damage| surface_local(damage, scale))
+                .map(|damage| surface_local(damage, f64::from(scale)))
                 .collect();
             let buffer = match &current.buffer {
-                Some(BufferAssignment::NewBuffer(buffer)) => {
-                    Buffer::New(buffer_dimensions(buffer).map(|size| {
-                        Rect::new(
-                            0.0,
-                            0.0,
-                            f64::from(size.w) / scale,
-                            f64::from(size.h) / scale,
-                        )
-                    }))
-                }
+                Some(BufferAssignment::NewBuffer(buffer)) => Buffer::New(
+                    buffer_dimensions(buffer)
+                        .map(|size| logical(size, scale, current.buffer_transform)),
+                ),
                 Some(BufferAssignment::Removed) => Buffer::Removed,
                 None => Buffer::Unchanged,
             };
+            // How far the window reaches is measured from these, so they are
+            // remembered before the buffer is released below.
+            match buffer {
+                Buffer::New(size) => crate::geometry::record(states, size),
+                Buffer::Removed => crate::geometry::record(states, None),
+                Buffer::Unchanged => {}
+            }
             rects.extend(damaged(&named, buffer, at, whole));
             if surface == start {
                 own = buffer;
@@ -170,10 +172,10 @@ pub(crate) fn damaged(named: &[Rect], buffer: Buffer, at: Vec2, whole: Option<Re
         // the renderer clips it. A toolkit names its whole buffer with the
         // largest rectangle the protocol allows, and unclipped, on a
         // subsurface, that would claim everything below and to the right.
-        Buffer::New(Some(extent)) if named.is_empty() => vec![extent + at],
-        Buffer::New(Some(extent)) => named
+        Buffer::New(Some(size)) if named.is_empty() => vec![extent(size) + at],
+        Buffer::New(Some(size)) => named
             .iter()
-            .map(|region| region.intersect(extent))
+            .map(|region| region.intersect(extent(size)))
             .filter(|region| !region.is_empty())
             .map(|region| region + at)
             .collect(),
@@ -185,6 +187,22 @@ pub(crate) fn damaged(named: &[Rect], buffer: Buffer, at: Vec2, whole: Option<Re
         // that was went with the buffer, so the safe answer is all of it.
         Buffer::Removed => whole.into_iter().collect(),
     }
+}
+
+/// The size a buffer gives its surface: its own, divided by the scale and
+/// turned by the transform the client declared for it, as smithay's
+/// renderer sizes it.
+fn logical(
+    size: Size<i32, BufferCoords>,
+    scale: i32,
+    transform: wl_output::Transform,
+) -> Size<i32, Logical> {
+    size.to_logical(scale, transform.into())
+}
+
+/// The whole of a picture of `size`, in its surface's own coordinates.
+fn extent(size: Size<i32, Logical>) -> Rect {
+    Rect::new(0.0, 0.0, f64::from(size.w), f64::from(size.h))
 }
 
 /// A smithay rectangle as a [`Rect`], divided by `scale`. In floating point
@@ -222,19 +240,23 @@ fn offset_in_parent(states: &SurfaceData) -> Vec2 {
 
 #[cfg(test)]
 mod tests {
-    use smithay::utils::{Buffer as BufferCoords, Logical, Rectangle};
+    use smithay::utils::Rectangle;
 
     use super::*;
 
     const AT: Vec2 = Vec2::new(40.0, 30.0);
     const WHOLE: Option<Rect> = Some(Rect::new(0.0, 0.0, 400.0, 300.0));
-    const EXTENT: Rect = Rect::new(0.0, 0.0, 120.0, 80.0);
+
+    /// A new picture 120 by 80.
+    fn new() -> Buffer {
+        Buffer::New(Some(Size::new(120, 80)))
+    }
 
     #[test]
     fn damage_on_a_subsurface_moves_by_where_it_sits() {
         let named = [Rect::new(10.0, 10.0, 20.0, 20.0)];
         assert_eq!(
-            damaged(&named, Buffer::New(Some(EXTENT)), AT, WHOLE),
+            damaged(&named, new(), AT, WHOLE),
             [Rect::new(50.0, 40.0, 60.0, 50.0)]
         );
     }
@@ -245,7 +267,7 @@ mod tests {
         let named = [surface_local(&Damage::Buffer(rect), 2.0)];
         assert_eq!(named, [Rect::new(40.0, 30.0, 60.0, 50.0)]);
         assert_eq!(
-            damaged(&named, Buffer::New(Some(EXTENT)), AT, WHOLE),
+            damaged(&named, new(), AT, WHOLE),
             [Rect::new(80.0, 60.0, 100.0, 80.0)]
         );
     }
@@ -253,7 +275,7 @@ mod tests {
     #[test]
     fn a_new_buffer_naming_no_damage_changed_all_of_itself() {
         assert_eq!(
-            damaged(&[], Buffer::New(Some(EXTENT)), AT, WHOLE),
+            damaged(&[], new(), AT, WHOLE),
             [Rect::new(40.0, 30.0, 160.0, 110.0)]
         );
     }
@@ -271,8 +293,28 @@ mod tests {
             Rect::new(200.0, 200.0, 210.0, 210.0),
         ];
         assert_eq!(
-            damaged(&named, Buffer::New(Some(EXTENT)), AT, WHOLE),
+            damaged(&named, new(), AT, WHOLE),
             [Rect::new(40.0, 30.0, 160.0, 110.0)]
+        );
+    }
+
+    /// Sized as smithay's renderer sizes it: a buffer turned a quarter
+    /// gives its surface its height for a width, and a scale of 2 halves
+    /// both.
+    #[test]
+    fn a_buffer_turned_a_quarter_gives_its_surface_its_sides_swapped() {
+        let size = Size::new(200, 100);
+        assert_eq!(
+            logical(size, 1, wl_output::Transform::_90),
+            Size::new(100, 200)
+        );
+        assert_eq!(
+            logical(size, 2, wl_output::Transform::Flipped270),
+            Size::new(50, 100)
+        );
+        assert_eq!(
+            logical(size, 2, wl_output::Transform::Normal),
+            Size::new(100, 50)
         );
     }
 
@@ -293,7 +335,7 @@ mod tests {
     #[test]
     fn a_picture_taken_away_changed_the_whole_window() {
         assert_eq!(damaged(&[], Buffer::Removed, AT, WHOLE), WHOLE.as_slice());
-        // A layer has no declared geometry, and so no whole to name.
+        // A root that has never shown anything has no whole to name.
         assert!(damaged(&[], Buffer::Removed, AT, None).is_empty());
     }
 

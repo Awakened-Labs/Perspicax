@@ -26,7 +26,7 @@ use crate::{
     facts::Facts,
     focus::FocusTarget,
     framed::Framed,
-    origin,
+    geometry, origin,
     shell::{self, Fill},
 };
 
@@ -56,7 +56,7 @@ use smithay::{
         buffer::BufferHandler,
         compositor::{
             CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
-            TraversalAction, is_sync_subsurface, with_states, with_surface_tree_downward,
+            TraversalAction, is_sync_subsurface, with_surface_tree_downward,
         },
         cursor_shape::CursorShapeManagerState,
         idle_inhibit::IdleInhibitManagerState,
@@ -75,8 +75,7 @@ use smithay::{
         session_lock::SessionLockManagerState,
         shell::wlr_layer::WlrLayerShellState,
         shell::xdg::{
-            PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler,
-            XdgShellState,
+            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
         },
         shm::{ShmHandler, ShmState},
         tablet_manager::TabletSeatHandler,
@@ -788,8 +787,11 @@ impl CompositorHandler for Compositor {
         let (root, at) = damage::root_of(surface);
         let is_root = root == *surface;
         // Read before the renderer drains what it uses, and released here
-        // only when there is no renderer to want it.
-        let taken = damage::take(surface, at, declared_geometry(&root), !renders);
+        // only when there is no renderer to want it. The whole of the window
+        // is what it was before this commit: what a picture taken away
+        // uncovered.
+        let whole = geometry::window_geometry(&root).map(|whole| damage::to_rect(whole, 1.0));
+        let taken = damage::take(surface, at, whole, !renders);
         #[cfg(any(feature = "seat", feature = "capture"))]
         if renders {
             smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
@@ -800,6 +802,10 @@ impl CompositorHandler for Compositor {
             // in its own.
             damage::clear(surface);
         }
+        // How far the tree reaches now, which is the window's geometry if
+        // its client declared none. Measured whatever the backend, from
+        // what `take` just recorded.
+        geometry::measure(&root);
 
         self.popups.commit(surface);
         // A window or a layer surface: both are described to the index, so
@@ -811,6 +817,10 @@ impl CompositorHandler for Compositor {
                 // follows theirs too. A resize is settled only by the
                 // toplevel's own commit, the one that answers it.
                 window.on_commit();
+                #[cfg(any(feature = "seat", feature = "capture"))]
+                if renders {
+                    geometry::check_drawn_as_measured(&window);
+                }
                 if is_root {
                     self.settle_resize(&window);
                 }
@@ -821,7 +831,7 @@ impl CompositorHandler for Compositor {
         };
         #[cfg(feature = "xwayland")]
         if id.is_none() && is_root && matches!(taken.own, damage::Buffer::New(_)) {
-            with_states(surface, |states| {
+            smithay::wayland::compositor::with_states(surface, |states| {
                 states
                     .data_map
                     .insert_if_missing_threadsafe(|| crate::xwayland::PresentedUnclaimed);
@@ -1294,20 +1304,3 @@ delegate_cursor_shape!(Compositor);
 /// No tablets, so nothing to say about a tablet tool's pointer: required of
 /// any compositor offering `cursor-shape-v1`, which names a tool's too.
 impl TabletSeatHandler for Compositor {}
-
-/// The window geometry a client declared, in surface-local coordinates.
-///
-/// Used as the whole of a window, for a commit that changed it without saying
-/// where: a buffer whose size cannot be read, or a subsurface's picture taken
-/// away. A client that has not declared one yet has nothing on screen for
-/// damage to be about.
-pub(crate) fn declared_geometry(surface: &WlSurface) -> Option<Rect> {
-    with_states(surface, |states| {
-        states
-            .cached_state
-            .get::<SurfaceCachedState>()
-            .current()
-            .geometry
-            .map(|geometry| damage::to_rect(geometry, 1.0))
-    })
-}

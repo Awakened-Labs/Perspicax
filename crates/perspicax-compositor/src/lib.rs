@@ -43,6 +43,7 @@ mod decorations;
 pub mod facts;
 mod focus;
 mod framed;
+mod geometry;
 mod heads;
 pub mod host;
 mod keyboard;

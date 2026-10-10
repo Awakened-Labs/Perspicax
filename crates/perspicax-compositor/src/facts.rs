@@ -36,7 +36,7 @@ use smithay::{
     utils::IsAlive,
     wayland::{
         compositor::{RectangleKind, SurfaceAttributes, with_states},
-        shell::xdg::{SurfaceCachedState, XdgToplevelSurfaceData},
+        shell::xdg::XdgToplevelSurfaceData,
     },
 };
 
@@ -329,37 +329,33 @@ impl Compositor {
             None => crate::shell::placement(window, |placement| placement.parked)?,
         };
 
-        // How big it is, from the client's own `xdg_surface.set_window_geometry`
-        // rather than from `Window::geometry()`.
+        // Where the window is inside its surface, and how big: the geometry
+        // its client declared, clipped to what it draws, or the full bounds
+        // of what it draws if it declared none, as xdg-shell says
+        // (`crate::geometry`). Measured here rather than taken from
+        // `Window::geometry()`, which smithay derives from buffer sizes only
+        // a backend that keeps buffers records -- the seat, and headless
+        // built with `capture` -- so in a plain headless build it is always
+        // `0x0`, and every node would judge `Unmapped`. Measured the same
+        // way on every backend, the facts a seat publishes are the ones CI
+        // tested; measured as smithay measures, they are where the seat
+        // draws. Under client-side decoration it is the visible frame,
+        // without the shadow, which is what window space is measured from.
+        // Which origin each toolkit's own coordinates are measured from is a
+        // different question, and the index answers it from the toolkit's
+        // window node (`Index::window_origin`).
         //
-        // Smithay derives a window's bounding box from buffer dimensions
-        // recorded by `on_commit_buffer_handler`, which only a backend that
-        // keeps buffers calls -- the seat, and headless built with `capture`
-        // -- so in a plain headless build `Window::geometry()` is always
-        // `0x0`, and every node on it would judge `Unmapped`. Reading the
-        // declared geometry on every backend keeps a seat's facts the ones CI
-        // tested,
-        // and it is better information anyway: it is the
-        // visible frame excluding shadow, which is what window space is
-        // measured from. GTK, Qt and Firefox all set it under client-side
-        // decoration. Which origin each toolkit's own coordinates are
-        // measured from is a different question, and the index answers it
-        // from the toolkit's window node (`Index::window_origin`).
-        //
-        // A client that declares none is not described, and its nodes are
-        // refused. That is the fail-closed direction: the alternative is
-        // inventing a size and judging visibility against it.
-        let declared = with_states(surface, |states| {
-            states
-                .cached_state
-                .get::<SurfaceCachedState>()
-                .current()
-                .geometry
-        })?;
-        if declared.size.is_empty() {
-            return None;
-        }
+        // A window that has never drawn and declared nothing has none, and
+        // is not described: it is on nobody's screen. Until issue #44, one
+        // that drew without declaring was left out too, and so covered
+        // nothing, so a node under it was judged visible.
+        let geometry = crate::geometry::window_geometry(surface)?;
 
+        // What the client declared opaque, on its own surface. That says
+        // nothing about its subsurfaces, which are drawn over it, so where
+        // they are opaque is added; one that declared nothing covers all
+        // of itself. A surface that declared nothing proves nothing either,
+        // so with no region on the root the whole window covers.
         let opaque = with_states(surface, |states| {
             states
                 .cached_state
@@ -368,6 +364,10 @@ impl Compositor {
                 .opaque_region
                 .as_ref()
                 .map(regions)
+        })
+        .map(|mut opaque| {
+            opaque.extend(crate::geometry::covers(surface));
+            opaque
         });
         let hidden = if parked {
             self.hidden_why(window)
@@ -385,16 +385,16 @@ impl Compositor {
             geometry: Rect::new(
                 f64::from(location.x),
                 f64::from(location.y),
-                f64::from(location.x + declared.size.w),
-                f64::from(location.y + declared.size.h),
+                f64::from(location.x + geometry.size.w),
+                f64::from(location.y + geometry.size.h),
             ),
-            // Surface-local (0,0) sits at the declared geometry's own offset
-            // *back* from where we placed that geometry -- under CSD that is
-            // the shadow margin, and it is where opaque regions are measured
+            // Surface-local (0,0) sits at the geometry's own offset *back*
+            // from where we placed that geometry -- under CSD that is the
+            // shadow margin, and it is where opaque regions are measured
             // from.
             buffer_origin: Vec2::new(
-                f64::from(location.x - declared.loc.x),
-                f64::from(location.y - declared.loc.y),
+                f64::from(location.x - geometry.loc.x),
+                f64::from(location.y - geometry.loc.y),
             ),
             opaque,
             origin: self.origin_of(window),
@@ -410,7 +410,7 @@ impl Compositor {
             } else {
                 self.frame_facts(
                     window,
-                    smithay::utils::Rectangle::new(location, declared.size),
+                    smithay::utils::Rectangle::new(location, geometry.size),
                 )
             },
             // Filled by `publish_facts`, which asks once which window is in
@@ -564,7 +564,7 @@ pub(crate) fn title(
 /// believe a surface is opaque over more of itself than it really is, which
 /// refuses more nodes rather than fewer. The opposite rounding would report a
 /// covered node as visible.
-fn regions(region: &smithay::wayland::compositor::RegionAttributes) -> Vec<Rect> {
+pub(crate) fn regions(region: &smithay::wayland::compositor::RegionAttributes) -> Vec<Rect> {
     region
         .rects
         .iter()
