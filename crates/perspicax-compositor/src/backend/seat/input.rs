@@ -35,8 +35,8 @@
 use std::time::Duration;
 
 use perspicax_policy::{
-    Action, Button, Drag, FrameButton, Mods, Part, arrival, candidates, edge_at, edges_near,
-    is_double, is_logo,
+    Action, Button, Drag, FrameButton, Mods, Part, Resting, arrival, candidates, edge_at,
+    edges_near, is_double, is_logo,
 };
 use smithay::{
     backend::{
@@ -73,7 +73,7 @@ use super::{
 use crate::{
     framed::Framed,
     mouse::{Hit, Scrolled, cursor_for, policy, under},
-    shell::id_of,
+    shell::{covers_panels, id_of},
     state::Compositor,
 };
 
@@ -552,19 +552,15 @@ fn clock(state: &Compositor) -> u64 {
 /// the pointer goes instead, across the desk, when it flipped.
 ///
 /// Off while a button is held, unless that button is dragging a window and
-/// the config says a drag flips too; then the window goes with it.
+/// the config says a drag flips too; then the window goes with it. Off over
+/// the fullscreen window in use, and behind the lock screen.
 fn rest_at_edge(state: &mut Compositor, at: Point<f64, Logical>) -> Option<Point<f64, Logical>> {
     let Running::Seat(session) = &state.backend else {
         return None;
     };
     let flipping = session.settings.flipping;
-    let grabbed = state
-        .pointer
-        .as_ref()
-        .is_some_and(PointerHandle::is_grabbed);
     let carrying = state.dragging.clone();
-    let allowed = flipping.edge && (!grabbed || (carrying.is_some() && flipping.while_dragging));
-    let edge = if allowed {
+    let edge = if flipping.edge_flips(resting(state, at, carrying.is_some())) {
         edge_at((at.x, at.y), &state.output_rects())
     } else {
         None
@@ -594,6 +590,32 @@ fn rest_at_edge(state: &mut Compositor, at: Point<f64, Logical>) -> Option<Point
         }
     };
     Some(arrival((at.x, at.y), direction, &rects).into())
+}
+
+/// How the pointer at `at` is resting against an edge, for flipping;
+/// `carrying` when a window is being dragged.
+fn resting(state: &Compositor, at: Point<f64, Logical>, carrying: bool) -> Resting {
+    let grabbed = state
+        .pointer
+        .as_ref()
+        .is_some_and(PointerHandle::is_grabbed);
+    if state.lock.is_some() {
+        Resting::Locked
+    } else if state
+        .space
+        .element_under(at)
+        .is_some_and(|(window, _)| covers_panels(window))
+    {
+        // Windows alone: a notification on the overlay layer, over the
+        // game's edge, does not hand the edge back.
+        Resting::OverFullscreen
+    } else if !grabbed {
+        Resting::Free
+    } else if carrying {
+        Resting::Carrying
+    } else {
+        Resting::Held
+    }
 }
 
 /// Arm a timer for when the edge dwell is due, if it is due and no timer is

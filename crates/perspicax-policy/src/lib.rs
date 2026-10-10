@@ -54,7 +54,7 @@ mod workspace;
 pub use crate::{
     access::{Access, Program, Protocol, Rule},
     binds::{Action, Bindings, Chord, Drag, Mods, Towards, candidates},
-    flip::{EdgeDwell, Flipping, NOTCH_PIXELS, Notches, arrival, edge_at},
+    flip::{EdgeDwell, Flipping, NOTCH_PIXELS, Notches, Resting, arrival, edge_at},
     focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},
     frame::{
         Colour, DOUBLE_CLICK_MS, Decorations, FrameButton, GRIP, Insets, Look, Part, Press,

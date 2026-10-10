@@ -516,8 +516,11 @@ stops at the edge of the desk, so a window grabbed nearer than that to the
 side it is pushed towards, as a titlebar is to the top, stays on screen.
 It does not snap. In both, a fullscreen window
 covers the panels while it is the one in use, and goes back under them when
-another window or a menu takes the keyboard. Every key below is optional and
-overrides the profile one setting at a time. A misspelled key, or a key for a
+another window or a menu takes the keyboard. While it covers them, its edges
+are its own: resting the pointer against one does not flip, so a game turning
+its camera stays where it is. Nor does an edge flip behind the lock screen.
+Every key below is optional and overrides the profile one setting at a time.
+A misspelled key, or a key for a
 feature this build left out, is refused with its name rather than ignored.
 
 ```toml

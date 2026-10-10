@@ -7,6 +7,12 @@
 //! a shorter neighbour does not reach, because the pointer can be pushed
 //! against it just as hard.
 //!
+//! Not every rest flips, though ([`Flipping::edge_flips`]). The fullscreen
+//! window in use keeps its edges, as it keeps the panels' place: a game
+//! turning its camera pushes the pointer against them without asking to
+//! leave. Nothing flips behind the lock screen. And a button held down flips
+//! only while it drags a window, which then goes along.
+//!
 //! The pointer has to rest against an edge for a moment before anything
 //! happens, so that throwing it at a corner to reach a menu does not change
 //! workspace. [`EdgeDwell`] is that moment, written as a state machine fed
@@ -41,6 +47,35 @@ impl Default for Flipping {
             while_dragging: false,
             scroll: false,
         }
+    }
+}
+
+/// How the pointer is resting against an edge: what decides whether the
+/// rest may flip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resting {
+    /// Free, over nothing that keeps the edge.
+    Free,
+    /// Dragging a window, which a flip takes along.
+    Carrying,
+    /// Held by anything else: a button down on a client, a resize, a menu.
+    Held,
+    /// Over the fullscreen window in use, whose edges are its own.
+    OverFullscreen,
+    /// Behind the lock screen, where nothing changes workspace.
+    Locked,
+}
+
+impl Flipping {
+    /// Whether resting against an outer edge of the desk may flip.
+    #[must_use]
+    pub fn edge_flips(&self, resting: Resting) -> bool {
+        self.edge
+            && match resting {
+                Resting::Free => true,
+                Resting::Carrying => self.while_dragging,
+                Resting::Held | Resting::OverFullscreen | Resting::Locked => false,
+            }
     }
 }
 
@@ -360,6 +395,58 @@ mod tests {
         let mut dwell = EdgeDwell::new(0);
         assert_eq!(dwell.feed(Some(Direction::Up), 5), Some(Direction::Up));
         assert_eq!(dwell.feed(Some(Direction::Up), 6), None);
+    }
+
+    /// Every way of flipping on, so only the rule under test can say no.
+    fn all_on() -> Flipping {
+        Flipping {
+            edge: true,
+            delay_ms: 300,
+            while_dragging: true,
+            scroll: true,
+        }
+    }
+
+    #[test]
+    fn the_fullscreen_window_in_use_keeps_its_edges() {
+        assert!(!all_on().edge_flips(Resting::OverFullscreen));
+    }
+
+    #[test]
+    fn nothing_flips_behind_the_lock_screen() {
+        assert!(!all_on().edge_flips(Resting::Locked));
+    }
+
+    #[test]
+    fn a_free_pointer_flips_only_with_edge_flipping_on() {
+        assert!(all_on().edge_flips(Resting::Free));
+        let off = Flipping {
+            edge: false,
+            ..all_on()
+        };
+        for resting in [
+            Resting::Free,
+            Resting::Carrying,
+            Resting::Held,
+            Resting::OverFullscreen,
+            Resting::Locked,
+        ] {
+            assert!(!off.edge_flips(resting), "{resting:?} with edge off");
+        }
+    }
+
+    #[test]
+    fn a_drag_flips_only_when_it_may_carry_the_window() {
+        assert!(all_on().edge_flips(Resting::Carrying));
+        let without = Flipping {
+            while_dragging: false,
+            ..all_on()
+        };
+        assert!(!without.edge_flips(Resting::Carrying));
+        assert!(
+            !all_on().edge_flips(Resting::Held),
+            "a button held on a client, a resize, a menu"
+        );
     }
 
     #[test]
