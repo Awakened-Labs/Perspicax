@@ -90,9 +90,10 @@ capture = ["smithay/renderer_pixman", "dep:xcursor"]
 smithay-client-toolkit.workspace = true
 wayland-client.workspace = true
 # The client side of the protocols sctk has no helpers for: a taskbar's
-# window list and controls, and session lock, spoken raw. The same crate and version the
-# server side already uses through smithay; only the features differ.
-wayland-protocols = { workspace = true, features = ["client", "staging"] }
+# window list and controls, and session lock, spoken raw; and, unstable, the
+# ones a game holds the pointer with. The same crate and version the server
+# side already uses through smithay; only the features differ.
+wayland-protocols = { workspace = true, features = ["client", "staging", "unstable"] }
 wayland-protocols-wlr = { workspace = true, features = ["client"] }
 # The shell's side of perspicax's own protocol, spoken by the tests as the
 # shell will.

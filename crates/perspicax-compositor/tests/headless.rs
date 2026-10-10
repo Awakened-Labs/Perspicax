@@ -194,3 +194,18 @@ fn a_window_asking_to_be_maximized_is_left_as_it_was_with_nobody_at_the_seat() {
 
     session.stop((desk, queue));
 }
+
+/// What a game reaches for to turn its camera with the mouse: the mouse's
+/// own motion, wherever the pointer is. Xwayland looks for it too, before it
+/// will turn an X game's pointer warps into the same.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_game_finds_what_it_turns_its_camera_with() {
+    let session = Session::start("game-globals", Backend::headless((800, 600)));
+    let (desk, queue, _qh, globals) = session.client();
+    assert!(common::advertised(
+        &globals,
+        "zwp_relative_pointer_manager_v1"
+    ));
+    session.stop((desk, queue));
+}

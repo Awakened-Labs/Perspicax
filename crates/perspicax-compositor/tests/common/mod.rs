@@ -21,11 +21,13 @@ use perspicax_policy::Action;
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
-    delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
-    delegate_subcompositor, delegate_xdg_shell, delegate_xdg_window,
+    delegate_compositor, delegate_layer, delegate_output, delegate_registry,
+    delegate_relative_pointer, delegate_shm, delegate_subcompositor, delegate_xdg_shell,
+    delegate_xdg_window,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
+    seat::relative_pointer::{RelativeMotionEvent, RelativePointerHandler, RelativePointerState},
     shell::{
         WaylandSurface,
         wlr_layer::{
@@ -61,6 +63,7 @@ use wayland_protocols::ext::{
         ext_workspace_manager_v1::{self, ExtWorkspaceManagerV1},
     },
 };
+use wayland_protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1::ZwpRelativePointerV1;
 use wayland_protocols_wlr::{
     foreign_toplevel::v1::client::{
         zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
@@ -368,6 +371,14 @@ pub struct Desk {
     pub buttons: Vec<(u32, bool)>,
     /// How many scroll events the pointer brought one of our surfaces.
     pub scrolls: usize,
+    /// Where the pointer moved to on one of our surfaces, in its own
+    /// coordinates, each `wl_pointer.motion` in order. An arrival is not a
+    /// motion and is not here.
+    pub motions: Vec<(f64, f64)>,
+    /// The mouse's own motion, as `bind_relative` hears it: how far, and
+    /// how far before acceleration, each in order.
+    pub relative_motions: Vec<((f64, f64), (f64, f64))>,
+    relative: Option<(RelativePointerState, ZwpRelativePointerV1)>,
     /// How many times the compositor asked one of our windows to close.
     pub asked_to_close: usize,
     pub pager: Option<ExtWorkspaceManagerV1>,
@@ -435,6 +446,9 @@ impl Desk {
             entered: None,
             buttons: Vec::new(),
             scrolls: 0,
+            motions: Vec::new(),
+            relative_motions: Vec::new(),
+            relative: None,
             asked_to_close: 0,
             pager: None,
             pager_done: 0,
@@ -729,6 +743,18 @@ impl Desk {
                 .expect("wl_seat")
         });
         self.pointer = Some(seat.get_pointer(qh, ()));
+    }
+
+    /// The mouse's own motion, for our pointer, as a game asks for it.
+    /// Panics if `bind_pointer` has not been called, or the global is not
+    /// advertised.
+    pub fn bind_relative(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        let pointer = self.pointer.as_ref().expect("bind_pointer first");
+        let manager = RelativePointerState::bind(globals, qh);
+        let relative = manager
+            .get_relative_pointer(pointer, qh)
+            .expect("zwp_relative_pointer_manager_v1");
+        self.relative = Some((manager, relative));
     }
 
     /// Draw the pointer ourselves while it is over us, as a toolkit does: a
@@ -1354,8 +1380,27 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
                 state == WEnum::Value(wl_pointer::ButtonState::Pressed),
             )),
             wl_pointer::Event::Axis { .. } => desk.scrolls += 1,
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => desk.motions.push((surface_x, surface_y)),
             _ => {}
         }
+    }
+}
+
+impl RelativePointerHandler for Desk {
+    fn relative_pointer_motion(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpRelativePointerV1,
+        _: &wl_pointer::WlPointer,
+        event: RelativeMotionEvent,
+    ) {
+        self.relative_motions
+            .push((event.delta, event.delta_unaccel));
     }
 }
 
@@ -1566,3 +1611,4 @@ delegate_xdg_shell!(Desk);
 delegate_xdg_window!(Desk);
 delegate_layer!(Desk);
 delegate_registry!(Desk);
+delegate_relative_pointer!(Desk);

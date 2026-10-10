@@ -32,8 +32,8 @@ use crate::{
 
 use smithay::{
     delegate_compositor, delegate_cursor_shape, delegate_data_device, delegate_output,
-    delegate_primary_selection, delegate_seat, delegate_shm, delegate_xdg_activation,
-    delegate_xdg_shell,
+    delegate_primary_selection, delegate_relative_pointer, delegate_seat, delegate_shm,
+    delegate_xdg_activation, delegate_xdg_shell,
     desktop::{PopupKind, PopupManager, Space, Window, find_popup_root_surface},
     input::{
         Seat, SeatHandler, SeatState,
@@ -62,6 +62,7 @@ use smithay::{
         idle_inhibit::IdleInhibitManagerState,
         idle_notify::IdleNotifierState,
         output::{OutputHandler, OutputManagerState},
+        relative_pointer::RelativePointerManagerState,
         selection::{
             SelectionHandler,
             data_device::{
@@ -119,6 +120,12 @@ pub struct Compositor {
     /// pointer is the same one. Held for its global, as the one above is.
     #[expect(dead_code, reason = "RAII handle for the cursor-shape global")]
     pub(crate) cursor_shape: CursorShapeManagerState,
+    /// `zwp_relative_pointer_manager_v1`: the mouse's own motion, sent beside
+    /// the pointer's (see [`Compositor::travel`]), so a game turns its camera
+    /// by how far the mouse went, not by how far the pointer could. Held for
+    /// its global, as the ones above are.
+    #[expect(dead_code, reason = "RAII handle for the relative-pointer global")]
+    relative_pointer: RelativePointerManagerState,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) data_device: DataDeviceState,
     pub(crate) seat: Seat<Self>,
@@ -334,6 +341,7 @@ impl Compositor {
             shm: ShmState::new::<Self>(display, Vec::new()),
             output_manager: OutputManagerState::new_with_xdg_output::<Self>(display),
             cursor_shape: CursorShapeManagerState::new::<Self>(display),
+            relative_pointer: RelativePointerManagerState::new::<Self>(display),
             data_device: DataDeviceState::new::<Self>(display),
             seat_state,
             seat,
@@ -1300,6 +1308,7 @@ delegate_xdg_shell!(Compositor);
 delegate_primary_selection!(Compositor);
 delegate_xdg_activation!(Compositor);
 delegate_cursor_shape!(Compositor);
+delegate_relative_pointer!(Compositor);
 
 /// No tablets, so nothing to say about a tablet tool's pointer: required of
 /// any compositor offering `cursor-shape-v1`, which names a tool's too.

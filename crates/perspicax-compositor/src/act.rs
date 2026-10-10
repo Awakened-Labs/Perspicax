@@ -653,6 +653,11 @@ impl Compositor {
         u32::try_from(self.started_at().elapsed().as_millis() % u128::from(u32::MAX))
             .unwrap_or(u32::MAX)
     }
+
+    /// The same clock in microseconds, as relative motion is stamped.
+    pub(crate) fn now_us(&self) -> u64 {
+        u64::try_from(self.started_at().elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
 }
 
 /// A rect's centre. Aimed at rather than a corner: a corner is shared with

@@ -124,6 +124,12 @@ pub enum Command {
         v120: (i32, i32),
         mods: perspicax_policy::Mods,
     },
+    /// Move the mouse by `by`, in whole pixels, as [`Command::Click`]
+    /// presses a button: the pointer goes as far as the desk lets it, and
+    /// the client under it is told the motion as the mouse made it, which a
+    /// game reads for mouselook even where the pointer could not follow.
+    /// Like the others, it needs `capture` headless.
+    Motion { by: (i32, i32) },
 }
 
 /// A picture asked for, with somewhere to put it.

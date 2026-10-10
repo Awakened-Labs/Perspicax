@@ -19,8 +19,7 @@ mod connectors;
 pub(crate) mod cursor;
 #[cfg(any(feature = "seat", test))]
 mod hatch;
-#[cfg(any(feature = "seat", test))]
-mod pointer;
+pub(crate) mod pointer;
 #[cfg(feature = "seat")]
 pub(crate) mod seat;
 
@@ -563,6 +562,7 @@ impl Compositor {
             crate::Command::Scroll { at, v120, mods } => {
                 self.stand_in_scroll(*at, *v120, *mods);
             }
+            crate::Command::Motion { by } => self.stand_in_motion(*by),
         }
     }
 
