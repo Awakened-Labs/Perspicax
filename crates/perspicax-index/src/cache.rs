@@ -531,7 +531,7 @@ impl Index {
     /// corner has not touched the button across the window.
     #[must_use]
     pub fn under_damage(&self, facts: &HostFacts) -> Vec<NodeId> {
-        let unreconciled: HashMap<SurfaceId, Rect> = facts
+        let unreconciled: HashMap<SurfaceId, Vec<Rect>> = facts
             .surfaces()
             .iter()
             .filter_map(|surface| {
@@ -552,12 +552,13 @@ impl Index {
             let (Some(surface_id), Some(bounds)) = (node.surface, self.window_bounds(id)) else {
                 continue;
             };
-            let (Some(region), Some(surface)) =
+            let (Some(regions), Some(surface)) =
                 (unreconciled.get(&surface_id), facts.surface(surface_id))
             else {
                 continue;
             };
-            if overlaps(surface.to_global(bounds), *region) {
+            let global = surface.to_global(bounds);
+            if regions.iter().any(|region| overlaps(global, *region)) {
                 under.push(id);
             }
         }
@@ -1092,6 +1093,32 @@ mod tests {
             index.actable(NodeId(3)).is_ok(),
             "and being repainted is not by itself a reason to refuse: an \
              application that redraws itself has not necessarily changed"
+        );
+    }
+
+    /// Damage far apart is counted where each frame of it landed. A caret
+    /// blinking in the window's corner and a menu hanging below the window
+    /// leave Open and Cancel between them explained: neither was drawn on.
+    #[test]
+    fn damage_far_apart_leaves_what_lies_between_explained() {
+        let mut index = joined();
+        let facts = HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(SurfaceId(1), Rect::new(0.0, 0.0, 400.0, 300.0)).damaging([
+                    (1, Rect::new(2.0, 2.0, 6.0, 8.0)),
+                    (2, Rect::new(300.0, 320.0, 420.0, 400.0)),
+                ]),
+            ],
+            2,
+        )
+        .with_consent(Consent::Everyone);
+        index.judge(&facts);
+        index.reconcile(SurfaceId(1), 0);
+
+        assert_eq!(
+            index.under_damage(&facts),
+            vec![NodeId(1)],
+            "only the window root, under the caret"
         );
     }
 

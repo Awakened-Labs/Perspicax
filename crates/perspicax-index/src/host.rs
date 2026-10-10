@@ -440,13 +440,17 @@ impl SurfaceFacts {
     /// global space, or `None` if nothing has.
     ///
     /// Three answers, and the third is the one worth reading. Nothing newer
-    /// than `reconciled` is `None`. Damage this history still holds is the
-    /// union of those regions. And damage older than the history reaches is the
-    /// **whole surface**: a reader that has fallen further behind than the
-    /// compositor remembers cannot be told what changed, and the honest answer
-    /// to "what did I miss" is "possibly all of it".
+    /// than `reconciled` is `None`. Damage this history still holds is those
+    /// regions, each where it landed. And damage older than the history
+    /// reaches is the **whole surface**: a reader that has fallen further
+    /// behind than the compositor remembers cannot be told what changed, and
+    /// the honest answer to "what did I miss" is "possibly all of it".
+    ///
+    /// Regions, and not one box around them. A menu hanging below its window
+    /// is its window's damage, and a box around it and a caret blinking at
+    /// the window's top would claim every control between the two.
     #[must_use]
-    pub fn damage_since(&self, reconciled: u64) -> Option<Rect> {
+    pub fn damage_since(&self, reconciled: u64) -> Option<Vec<Rect>> {
         if self.damage_generation <= reconciled {
             return None;
         }
@@ -454,14 +458,15 @@ impl SurfaceFacts {
             // The first thing the history still holds is newer than the first
             // thing this reader has not seen, so something in between was
             // dropped.
-            Some((oldest, _)) if *oldest > reconciled + 1 => Some(self.geometry),
-            None => Some(self.geometry),
-            Some(_) => self
-                .damage
-                .iter()
-                .filter(|(generation, _)| *generation > reconciled)
-                .map(|(_, region)| self.surface_local_to_global(*region))
-                .reduce(|left, right| left.union(right)),
+            Some((oldest, _)) if *oldest > reconciled + 1 => Some(vec![self.geometry]),
+            None => Some(vec![self.geometry]),
+            Some(_) => Some(
+                self.damage
+                    .iter()
+                    .filter(|(generation, _)| *generation > reconciled)
+                    .map(|(_, region)| self.surface_local_to_global(*region))
+                    .collect(),
+            ),
         }
     }
 
@@ -491,8 +496,9 @@ impl SurfaceFacts {
     /// surface's idle rate makes it.
     #[must_use]
     pub fn damage_touches(&self, reconciled: u64, rect: Rect) -> bool {
+        let global = self.to_global(rect);
         self.damage_since(reconciled)
-            .is_some_and(|region| overlaps(self.to_global(rect), region))
+            .is_some_and(|regions| regions.iter().any(|region| overlaps(global, *region)))
     }
 
     /// Whether this surface proves that `global` shows through it.
@@ -1147,8 +1153,11 @@ mod tests {
         assert_eq!(surface.damage_since(3), None, "nothing newer than the read");
         assert_eq!(
             surface.damage_since(1),
-            Some(rect(300.0, 200.0, 330.0, 230.0)),
-            "the union of what is newer, and not a whole-window panic"
+            Some(vec![
+                rect(300.0, 200.0, 320.0, 220.0),
+                rect(310.0, 210.0, 330.0, 230.0)
+            ]),
+            "what is newer, each where it landed, and not a whole-window panic"
         );
 
         // A reader further behind than the history reaches cannot be told what
@@ -1156,14 +1165,29 @@ mod tests {
         let truncated = window().damaging([(9, rect(0.0, 0.0, 10.0, 10.0))]);
         assert_eq!(
             truncated.damage_since(3),
-            Some(truncated.geometry),
+            Some(vec![truncated.geometry]),
             "a gap in the history is answered with the whole surface"
         );
         assert_eq!(
             truncated.damage_since(8),
-            Some(rect(0.0, 0.0, 10.0, 10.0)),
+            Some(vec![rect(0.0, 0.0, 10.0, 10.0)]),
             "and an unbroken history is not"
         );
+    }
+
+    /// A menu hanging below its window, and a caret blinking at the top of
+    /// it: two frames of the window's damage, far apart. A control between
+    /// them was not drawn on, and a box around the two would say it was.
+    #[test]
+    fn damage_far_apart_does_not_touch_what_lies_between() {
+        let surface = window().damaging([
+            (1, rect(5.0, 5.0, 8.0, 8.0)),
+            (2, rect(300.0, 320.0, 420.0, 400.0)),
+        ]);
+        let between = rect(150.0, 150.0, 200.0, 180.0);
+        assert!(!surface.damage_touches(0, between));
+        assert!(surface.damage_touches(0, rect(0.0, 0.0, 10.0, 10.0)));
+        assert!(surface.damage_touches(0, rect(310.0, 330.0, 320.0, 340.0)));
     }
 
     /// Damage arrives in surface-local coordinates, so under decoration it is
@@ -1175,7 +1199,7 @@ mod tests {
             .damaging([(1, rect(0.0, 0.0, 10.0, 10.0))]);
         assert_eq!(
             decorated.damage_since(0),
-            Some(rect(80.0, 80.0, 90.0, 90.0))
+            Some(vec![rect(80.0, 80.0, 90.0, 90.0)])
         );
     }
 
