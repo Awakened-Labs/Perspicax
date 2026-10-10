@@ -192,7 +192,8 @@ impl Compositor {
     /// and not where it goes.
     ///
     /// Its own surface only, not its popups'. A popup has a tree of its own,
-    /// and damage in it is in the popup's coordinates, not the layer's.
+    /// and damage in it is in the popup's coordinates until
+    /// [`popup::hung`](crate::popup::hung) has placed it in the layer's.
     pub(crate) fn layer_id(&self, surface: &WlSurface) -> Option<SurfaceId> {
         self.space.outputs().find_map(|output| {
             layer_map_for_output(output)

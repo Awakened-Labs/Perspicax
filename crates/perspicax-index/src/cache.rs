@@ -365,10 +365,11 @@ impl Index {
     /// and say how many nodes were attributed.
     ///
     /// The natural unit: an accessibility bridge reports one tree per window,
-    /// and every node in it was drawn on that window's surface. The exception
-    /// is a menu or a combo popup, which is its own surface while its
-    /// accessible nodes hang off the toplevel -- so a caller that has resolved
-    /// a popup joins it separately rather than letting this walk cover it.
+    /// and every node in it was drawn on that window's surface. A menu or a
+    /// combo popup is a surface of its own, but its accessible nodes hang off
+    /// the window's, and the host counts what it draws as the window's,
+    /// where it is drawn on the window: so this walk covers it too, nodes and
+    /// pixels on the same surface.
     ///
     /// `root` becomes the surface's window node, the one its subtree's
     /// coordinates are measured from: see [`Index::window_origin`].

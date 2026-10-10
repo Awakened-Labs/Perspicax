@@ -21,7 +21,7 @@
 //! window geometry. [`hung`] is that sum, so damage lands where a seat draws
 //! the menu, including past the window's edge. A seat, and headless with
 //! `capture`, check the two agree at every commit in a debug build
-//! ([`check_hung_as_drawn`]).
+//! (`check_hung_as_drawn`).
 
 use std::sync::PoisonError;
 

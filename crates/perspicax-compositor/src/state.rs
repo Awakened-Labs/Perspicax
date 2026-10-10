@@ -801,6 +801,8 @@ impl CompositorHandler for Compositor {
     /// What it drew is recorded against the window or layer at the top of
     /// its tree, wherever in the tree it drew it, and a commit that brought
     /// no new buffer and named no damage drew nothing: see [`damage`]. A
+    /// menu's tree tops out at the menu, so what it draws is recorded against
+    /// the window or layer it hangs from, where it is drawn: see [`popup`]. A
     /// synchronized subsurface's state is applied just before its parent's,
     /// as part of the parent's commit, and is read there, so its own call
     /// is passed over.
