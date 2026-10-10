@@ -290,6 +290,14 @@ typing is done only while the node's window holds it, and otherwise refused as
 first. The compositor makes that check in the same turn it presses the keys, so
 focus cannot move between the two.
 
+While a game holds the pointer ([see Mouse](#a-game-holding-the-pointer)), an
+agent's `click` and `scroll`, on the game or anywhere else, are refused as
+`pointer_captured`, naming the game as `captured_by`: they would move a pointer
+that may not move. So are its `focus` and `tab_forward` on any other window,
+which would take the game's keyboard and the pointer with it. Only the person
+ends a hold, so waiting for them to pause does not help; the game itself can
+still be focused and typed into.
+
 **A titlebar is pixels no client drew.** The frame perspicax draws around a
 window goes into the facts beside the window, so a node of another window
 under a titlebar is refused as `occluded`, naming the window the titlebar
@@ -518,7 +526,9 @@ It does not snap. In both, a fullscreen window
 covers the panels while it is the one in use, and goes back under them when
 another window or a menu takes the keyboard. While it covers them, its edges
 are its own: resting the pointer against one does not flip, so a game turning
-its camera stays where it is. Nor does an edge flip behind the lock screen.
+its camera stays where it is. So are a window's that holds the pointer,
+fullscreen or not ([see Mouse](#a-game-holding-the-pointer)). Nor does an edge
+flip behind the lock screen.
 Every key below is optional and overrides the profile one setting at a time.
 A misspelled key, or a key for a
 feature this build left out, is refused with its name rather than ignored.
@@ -1233,6 +1243,33 @@ A workspace binding acts on the monitor under the pointer, and a window binding
 on the window clicked, which the click has focused. Nothing is bound at the
 lock screen. An agent's clicks and scrolls never set a binding off: they go
 straight to the window or surface the agent named.
+
+### A game holding the pointer
+
+A game turns its camera by how far the mouse moves, and keeps the pointer from
+running off while it does: locked where it is, or confined to its window.
+perspicax offers the two protocols it asks with: `zwp_relative_pointer_v1`,
+the mouse's own motion, which keeps coming while the pointer is pinned against
+the edge of the screen, and `zwp_pointer_constraints_v1`, the hold itself.
+SDL3 games, and SDL2 ones on Wayland, use them directly. An X game reaches
+them through Xwayland, which uses them only when both are offered: Wine's and
+Proton's `ClipCursor` becomes a confine, and the hidden pointer they warp back
+to the middle for mouselook becomes a lock, with the mouse's motion beside it.
+
+Only the window in use holds the pointer: the one with the keyboard, on
+screen, with the pointer over it and inside the part of it the game asked
+for. A window in the background cannot take it. Locked, the pointer stays
+where it is, and only the mouse's motion reaches the game; confined, it
+slides along the edge of the region. Either way it stays the game's: a
+notification popping up over the game does not take it, a click reaches the
+game, and no edge of the desk flips the workspace.
+
+The person takes it back the way they leave any window: Alt+Tab or any
+binding that moves the keyboard, a Logo tap or a pie or menu that takes the
+keyboard, the lock screen, another workspace, or the drag modifier, whose
+drag moves the window. Back in the game, a game that asked to keep the
+pointer has it again at once. Let go, the pointer is where the game last drew
+it. An agent cannot take it ([see acting](#what-acting-looks-like)).
 
 ## Test
 

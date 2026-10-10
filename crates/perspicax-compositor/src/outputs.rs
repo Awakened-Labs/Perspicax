@@ -93,6 +93,17 @@ impl Compositor {
         self.publish_facts();
     }
 
+    /// `point`, kept on the outputs: moved onto the nearest one if it is on
+    /// none, as the pointer is (see `backend::pointer`).
+    pub(crate) fn on_the_desk(&self, point: Point<f64, Logical>) -> Point<f64, Logical> {
+        let outputs: Vec<_> = self
+            .space
+            .outputs()
+            .filter_map(|output| self.space.output_geometry(output))
+            .collect();
+        crate::backend::pointer::confine(point, &outputs)
+    }
+
     /// Every mapped output's rect in the global space.
     pub(crate) fn output_rects(&self) -> Vec<Rect> {
         self.space

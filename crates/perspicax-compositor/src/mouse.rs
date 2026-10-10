@@ -10,6 +10,10 @@
 //! stand in for a person's hand as [`crate::Command::Perform`] stands in for
 //! their keys.
 //!
+//! Both move the pointer the same way, through [`Compositor::travel`]: kept
+//! on the outputs, given to what is under it, and the device's own motion
+//! passed on to the client there, as a game's mouselook reads it.
+//!
 //! An agent never comes here. Its clicks and scrolls go straight to the
 //! pointer (`crate::act`), so no binding can be set off by one. An agent
 //! that could flip a person's workspaces, or start a program, by clicking an
@@ -22,6 +26,7 @@ use smithay::{
     desktop::WindowSurfaceType,
     input::pointer::{
         AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, MotionEvent, PointerHandle,
+        RelativeMotionEvent,
     },
     output::Output,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
@@ -29,7 +34,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use crate::{framed::Framed, layers, shell::id_of, state::Compositor};
+use crate::{framed::Framed, hold::Hold, layers, shell::id_of, state::Compositor};
 
 /// What the pointer is over.
 pub(crate) struct Hit {
@@ -130,6 +135,19 @@ pub(crate) struct Scrolled {
 }
 
 impl Compositor {
+    /// What the pointer at `at` is over, as far as a press or a scroll goes:
+    /// the surface of the window holding it while one does ([`crate::hold`]),
+    /// whatever is drawn over it; otherwise what is drawn there.
+    #[cfg_attr(
+        not(feature = "seat"),
+        expect(dead_code, reason = "the seat's presses and scrolls")
+    )]
+    pub(crate) fn pointed(&self, at: Point<f64, Logical>) -> Option<Hit> {
+        self.hold()
+            .map(|hold| hold.hit())
+            .or_else(|| under(self, at))
+    }
+
     /// Whether the empty desktop is at `at`: no window, and no panel or menu
     /// over the wallpaper. A widget on the bottom layer is part of the
     /// desktop, as the wallpaper is.
@@ -285,6 +303,33 @@ impl Compositor {
         }
     }
 
+    /// A person's mouse moving by `by`, for a test: see
+    /// [`crate::Command::Motion`]. Unaccelerated, so both of the motions a
+    /// client may read are `by`.
+    pub(crate) fn stand_in_motion(&mut self, by: (i32, i32)) {
+        if !self.can_stand_in() {
+            return;
+        }
+        let Some(from) = self.pointer.as_ref().map(PointerHandle::current_location) else {
+            return;
+        };
+        let delta = Point::<i32, Logical>::from(by).to_f64();
+        let relative = RelativeMotionEvent {
+            delta,
+            delta_unaccel: delta,
+            utime: self.now_us(),
+        };
+        let time = self.now_ms();
+        if self
+            .travel(from + delta, Some(&relative), time, |_, _| None)
+            .is_some()
+        {
+            self.settle_hold();
+            #[cfg(feature = "capture")]
+            self.flush_screencopy_for_pointer();
+        }
+    }
+
     /// A person's scroll, for a test: see [`crate::Command::Scroll`].
     pub(crate) fn stand_in_scroll(&mut self, at: (i32, i32), v120: (i32, i32), mods: Mods) {
         let Some(Pointed { pointer, at, hit }) = self.stand_in_at(at) else {
@@ -321,13 +366,27 @@ impl Compositor {
     /// only with `capture`, and without it a stand-in is refused in the log
     /// rather than carried out against a desk that seems empty.
     fn stand_in_at(&mut self, at: (i32, i32)) -> Option<Pointed> {
-        if !self.backend.keeps_buffers() {
-            tracing::warn!("a stand-in for the mouse needs the `capture` feature headless");
+        if !self.can_stand_in() {
             return None;
         }
         let pointer = self.pointer.clone()?;
-        let at = Point::<i32, Logical>::from(at).to_f64();
-        let hit = under(self, at);
+        let from = pointer.current_location();
+        let to = Point::<i32, Logical>::from(at).to_f64();
+        // A hand goes where a window holding the pointer lets it, as a
+        // tablet's does on a seat: nowhere while it is locked, when the
+        // press lands where the pointer is.
+        let hold = self.hold();
+        let Some(at) = hold
+            .as_ref()
+            .map_or(Some(to), |hold| hold.moves_to(from, to))
+        else {
+            return Some(Pointed {
+                pointer,
+                at: from,
+                hit: hold.as_ref().map(Hold::hit),
+            });
+        };
+        let hit = hold.as_ref().map(Hold::hit).or_else(|| under(self, at));
         let focus = hit
             .as_ref()
             .and_then(|hit| Some((hit.surface.clone()?.into(), hit.origin)));
@@ -338,9 +397,119 @@ impl Compositor {
         };
         pointer.motion(self, focus, &event);
         pointer.frame(self);
+        self.settle_hold();
         #[cfg(feature = "capture")]
         self.flush_screencopy_for_pointer();
         Some(Pointed { pointer, at, hit })
+    }
+
+    /// Whether a stand-in can find what is under the pointer: only with the
+    /// clients' buffers (see `stand_in_at`). Refused in the log otherwise.
+    fn can_stand_in(&self) -> bool {
+        let can = self.backend.keeps_buffers();
+        if !can {
+            tracing::warn!("a stand-in for the mouse needs the `capture` feature headless");
+        }
+        can
+    }
+}
+
+/// What [`Compositor::travel`] found where it took the pointer.
+pub(crate) struct Travelled {
+    /// What the pointer is over now, for the seat's focus policy.
+    #[cfg_attr(
+        not(feature = "seat"),
+        expect(dead_code, reason = "the seat's focus policy")
+    )]
+    pub(crate) hit: Option<Hit>,
+}
+
+impl Compositor {
+    /// Take the pointer to `to`, as a hand moving the mouse does, on either
+    /// backend: kept on the outputs (see `backend::pointer`), given to what
+    /// is under it there, with the cursor that goes with that.
+    ///
+    /// `edge` is asked first where the pointer came to rest, and may send it
+    /// somewhere else instead: the seat's edge flip, which carries it round
+    /// the desk. `relative` is the motion as the device reported it, and
+    /// goes to the client under the pointer whether the pointer could follow
+    /// it or not: pinned against the edge of the screen, a game turning its
+    /// camera still turns. Smithay keeps one pointer focus for both, so they
+    /// are given the same one.
+    ///
+    /// A window holding the pointer ([`crate::hold`]) has its say first.
+    /// Locked, the pointer goes nowhere and no client may be told it moved:
+    /// only the mouse's own motion goes, to that window. Confined, it goes
+    /// as far inside the window's region as it can. Either way it stays the
+    /// window's, whatever is drawn over it.
+    ///
+    /// No focus policy is asked and nothing is drawn: what follows from the
+    /// motion is the caller's. `None` when the pointer did not move: there
+    /// is none, or a window holds it in place.
+    pub(crate) fn travel(
+        &mut self,
+        to: Point<f64, Logical>,
+        relative: Option<&RelativeMotionEvent>,
+        time: u32,
+        edge: impl FnOnce(&mut Self, Point<f64, Logical>) -> Option<Point<f64, Logical>>,
+    ) -> Option<Travelled> {
+        let pointer = self.pointer.clone()?;
+        let hold = self.hold();
+        let to = match &hold {
+            Some(hold) => match hold.moves_to(pointer.current_location(), to) {
+                Some(to) => to,
+                None => {
+                    if let Some(relative) = relative {
+                        let focus = Some((hold.surface.clone().into(), hold.origin));
+                        pointer.relative_motion(self, focus, relative);
+                        pointer.frame(self);
+                    }
+                    return None;
+                }
+            },
+            None => to,
+        };
+        let mut at = self.on_the_desk(to);
+        if let Some(arrived) = edge(self, at) {
+            at = arrived;
+        }
+        let hit = match &hold {
+            Some(hold) => Some(hold.hit()),
+            None => under(self, at),
+        };
+        // Over a frame no client has the pointer: the one it left is told so,
+        // and the compositor picks the cursor.
+        // Over nothing at all, no client is drawing the cursor either, and a
+        // resize arrow left over from a frame must not stay. While a grab
+        // holds the pointer, the cursor is the grab's: a resize keeps its
+        // arrow even when the window lags behind and the pointer runs out
+        // over something else.
+        if !pointer.is_grabbed() {
+            match hit.as_ref() {
+                Some(Hit {
+                    frame: Some(part), ..
+                }) => self.cursor = CursorImageStatus::Named(cursor_for(*part)),
+                None => self.cursor = CursorImageStatus::default_named(),
+                Some(_) => {}
+            }
+        }
+        let focus = hit
+            .as_ref()
+            .and_then(|hit| Some((hit.surface.clone()?.into(), hit.origin)));
+        pointer.motion(
+            self,
+            focus.clone(),
+            &MotionEvent {
+                location: at,
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        if let Some(relative) = relative {
+            pointer.relative_motion(self, focus, relative);
+        }
+        pointer.frame(self);
+        Some(Travelled { hit })
     }
 }
 
@@ -354,10 +523,12 @@ impl Compositor {
     ///
     /// Only when what is under the pointer changed, so a panel's clock
     /// committing each second moves nothing. Never under a grab, which
-    /// owns the pointer, and only with the clients' buffers: without them
-    /// every point looks like the empty desktop (see `stand_in_at`). The
-    /// focus policy is not asked, since the pointer went nowhere: the
-    /// keyboard stays where it is.
+    /// owns the pointer, nor while a window holds it ([`crate::hold`]): a
+    /// notification popping up over a game must not take its mouselook. And
+    /// only with the clients' buffers: without them every point looks like
+    /// the empty desktop (see `stand_in_at`). The focus policy is not
+    /// asked, since the pointer went nowhere: the keyboard stays where it
+    /// is.
     pub(crate) fn repoint(&mut self) {
         if !self.backend.keeps_buffers() {
             return;
@@ -365,7 +536,7 @@ impl Compositor {
         let Some(pointer) = self.pointer.clone() else {
             return;
         };
-        if pointer.is_grabbed() {
+        if pointer.is_grabbed() || self.hold().is_some() {
             return;
         }
         let at = pointer.current_location();

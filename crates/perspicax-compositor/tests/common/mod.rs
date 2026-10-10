@@ -21,15 +21,21 @@ use perspicax_policy::Action;
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
-    delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
-    delegate_subcompositor, delegate_xdg_shell, delegate_xdg_window,
+    delegate_compositor, delegate_layer, delegate_output, delegate_pointer_constraints,
+    delegate_registry, delegate_relative_pointer, delegate_shm, delegate_subcompositor,
+    delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
+    seat::{
+        pointer_constraints::{PointerConstraintsHandler, PointerConstraintsState},
+        relative_pointer::{RelativeMotionEvent, RelativePointerHandler, RelativePointerState},
+    },
     shell::{
         WaylandSurface,
         wlr_layer::{
-            Anchor, Layer, LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
+            Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
+            LayerSurfaceConfigure,
         },
         xdg::{
             XdgShell, XdgSurface as _,
@@ -60,6 +66,13 @@ use wayland_protocols::ext::{
         ext_workspace_handle_v1::{self, ExtWorkspaceHandleV1},
         ext_workspace_manager_v1::{self, ExtWorkspaceManagerV1},
     },
+};
+use wayland_protocols::wp::{
+    pointer_constraints::zv1::client::{
+        zwp_confined_pointer_v1::ZwpConfinedPointerV1, zwp_locked_pointer_v1::ZwpLockedPointerV1,
+        zwp_pointer_constraints_v1::Lifetime,
+    },
+    relative_pointer::zv1::client::zwp_relative_pointer_v1::ZwpRelativePointerV1,
 };
 use wayland_protocols_wlr::{
     foreign_toplevel::v1::client::{
@@ -313,6 +326,12 @@ pub struct ShownMode {
     pub finished: bool,
 }
 
+/// A hold on the pointer this client asked for.
+pub enum Held {
+    Locked(ZwpLockedPointerV1),
+    Confined(ZwpConfinedPointerV1),
+}
+
 /// What the shell channel told the client, in the order it was told.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Told {
@@ -363,11 +382,28 @@ pub struct Desk {
     /// The serial of the pointer's last arrival on one of our surfaces: what
     /// `set_cursor` has to name to be heard.
     pub entered: Option<u32>,
+    /// Which of our surfaces the pointer is over, from its last arrival
+    /// until it leaves.
+    pub pointed: Option<wl_surface::WlSurface>,
     /// Every button the pointer pressed (`true`) or let go (`false`) on one
     /// of our surfaces, by Linux code, in order.
     pub buttons: Vec<(u32, bool)>,
     /// How many scroll events the pointer brought one of our surfaces.
     pub scrolls: usize,
+    /// Where the pointer moved to on one of our surfaces, in its own
+    /// coordinates, each `wl_pointer.motion` in order. An arrival is not a
+    /// motion and is not here.
+    pub motions: Vec<(f64, f64)>,
+    /// The mouse's own motion, as `bind_relative` hears it: how far, and
+    /// how far before acceleration, each in order.
+    pub relative_motions: Vec<((f64, f64), (f64, f64))>,
+    relative: Option<(RelativePointerState, ZwpRelativePointerV1)>,
+    constraints: Option<PointerConstraintsState>,
+    /// The hold on the pointer asked for last, until `release`.
+    pub held: Option<Held>,
+    /// What the compositor said of it, in order: `locked`, `unlocked`,
+    /// `confined`, `unconfined`.
+    pub holds: Vec<&'static str>,
     /// How many times the compositor asked one of our windows to close.
     pub asked_to_close: usize,
     pub pager: Option<ExtWorkspaceManagerV1>,
@@ -433,8 +469,15 @@ impl Desk {
             seat: None,
             pointer: None,
             entered: None,
+            pointed: None,
             buttons: Vec::new(),
             scrolls: 0,
+            motions: Vec::new(),
+            relative_motions: Vec::new(),
+            relative: None,
+            constraints: None,
+            held: None,
+            holds: Vec::new(),
             asked_to_close: 0,
             pager: None,
             pager_done: 0,
@@ -480,6 +523,15 @@ impl Desk {
         strip.set_size(0, height);
         strip.commit();
         self.layers.push((strip, colour, height));
+    }
+
+    /// The same on `overlay`, asking for every key as a launcher does: the
+    /// compositor gives it the keyboard the moment it is up.
+    pub fn open_launcher(&mut self, qh: &QueueHandle<Self>, height: u32, colour: u32) {
+        self.open_strip(qh, Layer::Overlay, "launcher", height, colour);
+        let (launcher, ..) = self.layers.last().expect("just opened");
+        launcher.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        launcher.commit();
     }
 
     /// A panel `height` tall across the top of the screen on `top`, drawn
@@ -729,6 +781,89 @@ impl Desk {
                 .expect("wl_seat")
         });
         self.pointer = Some(seat.get_pointer(qh, ()));
+    }
+
+    /// The mouse's own motion, for our pointer, as a game asks for it.
+    /// Panics if `bind_pointer` has not been called, or the global is not
+    /// advertised.
+    pub fn bind_relative(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        let pointer = self.pointer.as_ref().expect("bind_pointer first");
+        let manager = RelativePointerState::bind(globals, qh);
+        let relative = manager
+            .get_relative_pointer(pointer, qh)
+            .expect("zwp_relative_pointer_manager_v1");
+        self.relative = Some((manager, relative));
+    }
+
+    /// Ask to hold the pointer, as a game does: locked in place over the
+    /// `nth` window, or confined to it, inside `region` (in the window
+    /// surface's coordinates) or anywhere on it. Binds
+    /// `zwp_pointer_constraints_v1` the first time; panics if it is not
+    /// advertised, or `bind_pointer` has not been called.
+    pub fn hold_pointer(
+        &mut self,
+        globals: &GlobalList,
+        qh: &QueueHandle<Self>,
+        nth: usize,
+        locked: bool,
+        region: Option<Geometry>,
+        lifetime: Lifetime,
+    ) {
+        let constraints = self
+            .constraints
+            .get_or_insert_with(|| PointerConstraintsState::bind(globals, qh));
+        let pointer = self.pointer.as_ref().expect("bind_pointer first");
+        let surface = self.windows[nth].wl_surface();
+        let region = region.map(|(x, y, w, h)| {
+            let region = Region::new(&self.compositor).expect("a region");
+            region.add(x, y, w, h);
+            region
+        });
+        let region = region.as_ref().map(Region::wl_region);
+        self.held = Some(if locked {
+            Held::Locked(
+                constraints
+                    .lock_pointer(surface, pointer, region, lifetime, qh)
+                    .expect("zwp_pointer_constraints_v1"),
+            )
+        } else {
+            Held::Confined(
+                constraints
+                    .confine_pointer(surface, pointer, region, lifetime, qh)
+                    .expect("zwp_pointer_constraints_v1"),
+            )
+        });
+    }
+
+    /// Give the confine asked for last a new region, applied with the
+    /// `nth` window's next commit, which this makes.
+    pub fn confine_to(&self, nth: usize, (x, y, w, h): Geometry) {
+        let Some(Held::Confined(confined)) = &self.held else {
+            panic!("confine the pointer first");
+        };
+        let region = Region::new(&self.compositor).expect("a region");
+        region.add(x, y, w, h);
+        confined.set_region(Some(region.wl_region()));
+        self.windows[nth].wl_surface().commit();
+    }
+
+    /// Say where the `nth` window draws the pointer it holds in place,
+    /// applied with the commit this makes.
+    pub fn hint(&self, nth: usize, x: f64, y: f64) {
+        let Some(Held::Locked(locked)) = &self.held else {
+            panic!("lock the pointer first");
+        };
+        locked.set_cursor_position_hint(x, y);
+        self.windows[nth].wl_surface().commit();
+    }
+
+    /// Let go of the hold asked for last, as a game leaving mouselook does.
+    pub fn release(&mut self) {
+        match self.held.take() {
+            Some(Held::Locked(locked)) => locked.destroy(),
+            Some(Held::Confined(confined)) => confined.destroy(),
+            None => {}
+        }
     }
 
     /// Draw the pointer ourselves while it is over us, as a toolkit does: a
@@ -1347,15 +1482,88 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            wl_pointer::Event::Enter { serial, .. } => desk.entered = Some(serial),
-            wl_pointer::Event::Leave { .. } => desk.entered = None,
+            wl_pointer::Event::Enter {
+                serial, surface, ..
+            } => {
+                desk.entered = Some(serial);
+                desk.pointed = Some(surface);
+            }
+            wl_pointer::Event::Leave { .. } => {
+                desk.entered = None;
+                desk.pointed = None;
+            }
             wl_pointer::Event::Button { button, state, .. } => desk.buttons.push((
                 button,
                 state == WEnum::Value(wl_pointer::ButtonState::Pressed),
             )),
             wl_pointer::Event::Axis { .. } => desk.scrolls += 1,
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => desk.motions.push((surface_x, surface_y)),
             _ => {}
         }
+    }
+}
+
+impl RelativePointerHandler for Desk {
+    fn relative_pointer_motion(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpRelativePointerV1,
+        _: &wl_pointer::WlPointer,
+        event: RelativeMotionEvent,
+    ) {
+        self.relative_motions
+            .push((event.delta, event.delta_unaccel));
+    }
+}
+
+impl PointerConstraintsHandler for Desk {
+    fn confined(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpConfinedPointerV1,
+        _: &wl_surface::WlSurface,
+        _: &wl_pointer::WlPointer,
+    ) {
+        self.holds.push("confined");
+    }
+
+    fn unconfined(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpConfinedPointerV1,
+        _: &wl_surface::WlSurface,
+        _: &wl_pointer::WlPointer,
+    ) {
+        self.holds.push("unconfined");
+    }
+
+    fn locked(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpLockedPointerV1,
+        _: &wl_surface::WlSurface,
+        _: &wl_pointer::WlPointer,
+    ) {
+        self.holds.push("locked");
+    }
+
+    fn unlocked(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpLockedPointerV1,
+        _: &wl_surface::WlSurface,
+        _: &wl_pointer::WlPointer,
+    ) {
+        self.holds.push("unlocked");
     }
 }
 
@@ -1566,3 +1774,5 @@ delegate_xdg_shell!(Desk);
 delegate_xdg_window!(Desk);
 delegate_layer!(Desk);
 delegate_registry!(Desk);
+delegate_relative_pointer!(Desk);
+delegate_pointer_constraints!(Desk);

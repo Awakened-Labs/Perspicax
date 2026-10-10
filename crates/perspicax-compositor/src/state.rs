@@ -32,8 +32,8 @@ use crate::{
 
 use smithay::{
     delegate_compositor, delegate_cursor_shape, delegate_data_device, delegate_output,
-    delegate_primary_selection, delegate_seat, delegate_shm, delegate_xdg_activation,
-    delegate_xdg_shell,
+    delegate_primary_selection, delegate_relative_pointer, delegate_seat, delegate_shm,
+    delegate_xdg_activation, delegate_xdg_shell,
     desktop::{PopupKind, PopupManager, Space, Window, find_popup_root_surface},
     input::{
         Seat, SeatHandler, SeatState,
@@ -62,6 +62,8 @@ use smithay::{
         idle_inhibit::IdleInhibitManagerState,
         idle_notify::IdleNotifierState,
         output::{OutputHandler, OutputManagerState},
+        pointer_constraints::PointerConstraintsState,
+        relative_pointer::RelativePointerManagerState,
         selection::{
             SelectionHandler,
             data_device::{
@@ -119,6 +121,16 @@ pub struct Compositor {
     /// pointer is the same one. Held for its global, as the one above is.
     #[expect(dead_code, reason = "RAII handle for the cursor-shape global")]
     pub(crate) cursor_shape: CursorShapeManagerState,
+    /// `zwp_relative_pointer_manager_v1`: the mouse's own motion, sent beside
+    /// the pointer's (see [`Compositor::travel`]), so a game turns its camera
+    /// by how far the mouse went, not by how far the pointer could. Held for
+    /// its global, as the ones above are.
+    #[expect(dead_code, reason = "RAII handle for the relative-pointer global")]
+    relative_pointer: RelativePointerManagerState,
+    /// `zwp_pointer_constraints_v1`: a game holding the pointer in place, or
+    /// inside its window. Which window may, and when, is [`crate::hold`]'s.
+    #[expect(dead_code, reason = "RAII handle for the pointer-constraints global")]
+    pointer_constraints: PointerConstraintsState,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) data_device: DataDeviceState,
     pub(crate) seat: Seat<Self>,
@@ -334,6 +346,8 @@ impl Compositor {
             shm: ShmState::new::<Self>(display, Vec::new()),
             output_manager: OutputManagerState::new_with_xdg_output::<Self>(display),
             cursor_shape: CursorShapeManagerState::new::<Self>(display),
+            relative_pointer: RelativePointerManagerState::new::<Self>(display),
+            pointer_constraints: PointerConstraintsState::new::<Self>(display),
             data_device: DataDeviceState::new::<Self>(display),
             seat_state,
             seat,
@@ -551,6 +565,8 @@ impl Compositor {
         // No window is lit or undimmed now. See `focus_changed`.
         self.backend.redraw();
         self.show_active(None);
+        // Nor in use, so none may hold the pointer.
+        self.settle_hold_later();
         #[cfg(feature = "xwayland")]
         self.tell_active_x11(None);
     }
@@ -1140,6 +1156,8 @@ impl SeatHandler for Compositor {
         // the next frame is drawn knowing. Only asked for here, which takes
         // no lock; what is in use is read when the frame is drawn.
         self.backend.redraw();
+        // So does which window may hold the pointer: a game left lets go.
+        self.settle_hold_later();
 
         self.show_active(focused);
     }
@@ -1300,6 +1318,7 @@ delegate_xdg_shell!(Compositor);
 delegate_primary_selection!(Compositor);
 delegate_xdg_activation!(Compositor);
 delegate_cursor_shape!(Compositor);
+delegate_relative_pointer!(Compositor);
 
 /// No tablets, so nothing to say about a tablet tool's pointer: required of
 /// any compositor offering `cursor-shape-v1`, which names a tool's too.

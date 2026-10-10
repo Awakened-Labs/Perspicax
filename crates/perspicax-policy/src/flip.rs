@@ -10,8 +10,10 @@
 //! Not every rest flips, though ([`Flipping::edge_flips`]). The fullscreen
 //! window in use keeps its edges, as it keeps the panels' place: a game
 //! turning its camera pushes the pointer against them without asking to
-//! leave. Nothing flips behind the lock screen. And a button held down flips
-//! only while it drags a window, which then goes along.
+//! leave. So does a window holding the pointer, locked in place or confined
+//! to it, fullscreen or not: the pointer is the game's until the person takes
+//! it back. Nothing flips behind the lock screen. And a button held down
+//! flips only while it drags a window, which then goes along.
 //!
 //! The pointer has to rest against an edge for a moment before anything
 //! happens, so that throwing it at a corner to reach a menu does not change
@@ -62,6 +64,9 @@ pub enum Resting {
     Held,
     /// Over the fullscreen window in use, whose edges are its own.
     OverFullscreen,
+    /// Held by the window under it, locked in place or confined to it: a
+    /// game's mouselook, whose edges are its own wherever it is.
+    Captured,
     /// Behind the lock screen, where nothing changes workspace.
     Locked,
 }
@@ -74,7 +79,9 @@ impl Flipping {
             && match resting {
                 Resting::Free => true,
                 Resting::Carrying => self.while_dragging,
-                Resting::Held | Resting::OverFullscreen | Resting::Locked => false,
+                Resting::Held | Resting::OverFullscreen | Resting::Captured | Resting::Locked => {
+                    false
+                }
             }
     }
 }
@@ -413,6 +420,11 @@ mod tests {
     }
 
     #[test]
+    fn a_window_holding_the_pointer_keeps_its_edges() {
+        assert!(!all_on().edge_flips(Resting::Captured));
+    }
+
+    #[test]
     fn nothing_flips_behind_the_lock_screen() {
         assert!(!all_on().edge_flips(Resting::Locked));
     }
@@ -429,6 +441,7 @@ mod tests {
             Resting::Carrying,
             Resting::Held,
             Resting::OverFullscreen,
+            Resting::Captured,
             Resting::Locked,
         ] {
             assert!(!off.edge_flips(resting), "{resting:?} with edge off");

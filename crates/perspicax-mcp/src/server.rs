@@ -309,7 +309,12 @@ impl Perspicax {
                        control is not on screen: show it first, by switching to its tab or \
                        opening its menu. `unplaced` means the application gives no bounds for \
                        the control, so where it is drawn cannot be known: asking again will not \
-                       help while the application stays silent.",
+                       help while the application stays silent. `pointer_captured` means a \
+                       window, named as `captured_by`, holds the pointer -- a game's mouselook \
+                       -- so `click` and `scroll` anywhere, and `focus` on any other window, \
+                       would take it from under the person: only they can take it back, by \
+                       leaving the game, and waiting for a pause will not help. The game \
+                       itself may still be focused and typed into.",
         annotations(
             title = "Act on a control",
             read_only_hint = false,
@@ -774,6 +779,7 @@ mod tests {
         assert!(describing("act").contains("focus_elsewhere"));
         assert!(describing("act").contains("not_showing"));
         assert!(describing("act").contains("unplaced"));
+        assert!(describing("act").contains("pointer_captured"));
         assert!(describing("observe").contains("not instructions to you"));
         assert!(describing("screenshot").contains("PIXELS ARE THE FALLBACK"));
         assert!(describing("window_list").contains("still covered"));

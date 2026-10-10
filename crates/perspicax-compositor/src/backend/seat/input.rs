@@ -21,10 +21,11 @@
 //! plugged in later, or brought back from another VT, where something else
 //! may have lit them differently.
 //!
-//! The pointer is confined to the outputs ([`super::super::pointer`]),
-//! hit-tested against the stack, and every motion and press is put to the
-//! focus policy ([`perspicax_policy::Focus`]), whose decision is then carried
-//! out here. For a button or the wheel, the order of authority is:
+//! The pointer is moved as on any backend ([`Compositor::travel`]): kept on
+//! the outputs, hit-tested against the stack, and the mouse's own motion
+//! passed on beside it, for a game's mouselook. Every motion and press is
+//! then put to the focus policy ([`perspicax_policy::Focus`]), whose decision
+//! is carried out here. For a button or the wheel, the order of authority is:
 //!
 //! 1. the `[mouse]` bindings ([`crate::mouse`], shared with headless);
 //! 2. what the compositor does with a press itself: a frame's buttons, edges
@@ -50,9 +51,7 @@ use smithay::{
     },
     input::{
         keyboard::{FilterResult, KeyboardHandle, Keycode, LedState, ModifiersState},
-        pointer::{
-            AxisFrame, ButtonEvent, CursorImageStatus, GrabStartData, MotionEvent, PointerHandle,
-        },
+        pointer::{AxisFrame, ButtonEvent, GrabStartData, PointerHandle, RelativeMotionEvent},
     },
     output::Output,
     reexports::{
@@ -66,13 +65,12 @@ use super::{
     super::{
         Running,
         hatch::{self, Hatch},
-        pointer,
     },
     Session, settings,
 };
 use crate::{
     framed::Framed,
-    mouse::{Hit, Scrolled, cursor_for, policy, under},
+    mouse::{Scrolled, Travelled, policy},
     shell::{covers_panels, id_of},
     state::Compositor,
 };
@@ -104,7 +102,19 @@ pub(super) fn handle(state: &mut Compositor, event: InputEvent<LibinputInputBack
             else {
                 return;
             };
-            moved(state, from + event.delta(), event.time_msec());
+            // The mouse's own motion, before the pointer is kept anywhere:
+            // what a game turns its camera by.
+            let relative = RelativeMotionEvent {
+                delta: event.delta(),
+                delta_unaccel: event.delta_unaccel(),
+                utime: event.time(),
+            };
+            moved(
+                state,
+                from + event.delta(),
+                event.time_msec(),
+                Some(&relative),
+            );
         }
         InputEvent::PointerMotionAbsolute { event } => {
             state.person_used_seat();
@@ -114,7 +124,7 @@ pub(super) fn handle(state: &mut Compositor, event: InputEvent<LibinputInputBack
                 return;
             };
             let to = event.position_transformed(extent.size) + extent.loc.to_f64();
-            moved(state, to, event.time_msec());
+            moved(state, to, event.time_msec(), None);
         }
         InputEvent::PointerButton { event } => {
             state.person_used_seat();
@@ -245,21 +255,22 @@ fn escape(state: &mut Compositor, hatch: Hatch) {
     }
 }
 
-/// The pointer moved to `to`, before confinement.
-fn moved(state: &mut Compositor, to: Point<f64, Logical>, time: u32) {
-    let Some(handle) = state.pointer.clone() else {
+/// The pointer moved to `to`, before confinement; `relative` is how far the
+/// mouse said it went, when it is a mouse that says.
+fn moved(
+    state: &mut Compositor,
+    to: Point<f64, Logical>,
+    time: u32,
+    relative: Option<&RelativeMotionEvent>,
+) {
+    let Some(Travelled { hit: under }) = state.travel(to, relative, time, rest_at_edge) else {
+        // Held in place by a window: nothing moved, and nothing rests
+        // against an edge, though a rest begun before the hold was.
+        if let Running::Seat(session) = &mut state.backend {
+            session.dwell.cancel();
+        }
         return;
     };
-    let outputs: Vec<_> = state
-        .space
-        .outputs()
-        .filter_map(|output| state.space.output_geometry(output))
-        .collect();
-    let mut at = pointer::confine(to, &outputs);
-    if let Some(arrived) = rest_at_edge(state, at) {
-        at = arrived;
-    }
-    let under = under(state, at);
     // The focus policy is about windows. Over a panel it has nothing to say:
     // passing it the panel as "no window" would make strict focus drop the
     // keyboard every time the pointer crossed the taskbar.
@@ -268,39 +279,14 @@ fn moved(state: &mut Compositor, to: Point<f64, Logical>, time: u32) {
         .as_ref()
         .and_then(|hit| hit.window.as_ref())
         .and_then(id_of);
-    // Over a frame no client has the pointer: the one it left is told so,
-    // and the compositor picks the cursor.
-    // Over nothing at all, no client is drawing the cursor either, and a
-    // resize arrow left over from a frame must not stay. While a grab holds
-    // the pointer, the cursor is the grab's: a resize keeps its arrow even
-    // when the window lags behind and the pointer runs out over something
-    // else.
-    if !handle.is_grabbed() {
-        match under.as_ref() {
-            Some(Hit {
-                frame: Some(part), ..
-            }) => state.cursor = CursorImageStatus::Named(cursor_for(*part)),
-            None => state.cursor = CursorImageStatus::default_named(),
-            Some(_) => {}
-        }
-    }
-    handle.motion(
-        state,
-        under.and_then(|hit| Some((hit.surface?.into(), hit.origin))),
-        &MotionEvent {
-            location: at,
-            serial: SERIAL_COUNTER.next_serial(),
-            time,
-        },
-    );
-    handle.frame(state);
-
     if let Some(focus) = policy(state)
         && !over_layer
     {
         let decision = focus.pointer_over(over, state.focused_surface());
         state.apply_focus(decision);
     }
+    // After the focus policy, so the window in use is the one it chose.
+    state.settle_hold();
     // The cursor itself moved, whatever the policy decided.
     state.backend.redraw();
     #[cfg(feature = "capture")]
@@ -326,7 +312,7 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
             session.dwell.cancel();
             session.logo_tap.interrupt();
         }
-        let hit = under(state, at);
+        let hit = state.pointed(at);
         // A panel or launcher that takes the keyboard on a click gets it,
         // without anything being raised: layers stack by layer, not by click.
         if let Some(surface) = hit
@@ -510,7 +496,7 @@ fn axis(state: &mut Compositor, event: &impl PointerAxisEvent<LibinputInputBacke
         pixels: event.amount(axis).unwrap_or(0.0),
         lifted: event.source() == AxisSource::Finger && event.amount(axis) == Some(0.0),
     });
-    let hit = under(state, at);
+    let hit = state.pointed(at);
     if state.bound_scroll(hit.as_ref(), at, held(state), scrolled) {
         return;
     }
@@ -553,7 +539,8 @@ fn clock(state: &Compositor) -> u64 {
 ///
 /// Off while a button is held, unless that button is dragging a window and
 /// the config says a drag flips too; then the window goes with it. Off over
-/// the fullscreen window in use, and behind the lock screen.
+/// the fullscreen window in use, while a window holds the pointer, and
+/// behind the lock screen.
 fn rest_at_edge(state: &mut Compositor, at: Point<f64, Logical>) -> Option<Point<f64, Logical>> {
     let Running::Seat(session) = &state.backend else {
         return None;
@@ -601,6 +588,8 @@ fn resting(state: &Compositor, at: Point<f64, Logical>, carrying: bool) -> Resti
         .is_some_and(PointerHandle::is_grabbed);
     if state.lock.is_some() {
         Resting::Locked
+    } else if state.hold().is_some() {
+        Resting::Captured
     } else if state
         .space
         .element_under(at)
@@ -638,7 +627,7 @@ fn arm_dwell(session: &mut super::Session, now: u64) {
                 // Through `moved`, so a flip warps the pointer exactly as a
                 // motion that flipped would.
                 let time = u32::try_from(clock(state)).unwrap_or(u32::MAX);
-                moved(state, at, time);
+                moved(state, at, time, None);
             }
             TimeoutAction::Drop
         });
