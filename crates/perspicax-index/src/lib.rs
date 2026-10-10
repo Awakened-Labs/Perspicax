@@ -125,6 +125,16 @@ pub enum Refusal {
     /// with the target in the same step that presses the keys, and anything
     /// earlier leaves a moment in which focus can move.
     FocusElsewhere { focused: Option<SurfaceId> },
+    /// A window holds the pointer -- a game's mouselook, locked in place or
+    /// confined to the window -- and the act would move the pointer, or give
+    /// the keyboard to another window and take the pointer with it. Only the
+    /// person ends a hold, so waiting for them to pause does not help: they
+    /// have to leave the game. `by` is the window holding it, which may
+    /// still be focused and typed into.
+    ///
+    /// The host decides this too, for the reason it decides
+    /// [`FocusElsewhere`](Refusal::FocusElsewhere).
+    PointerCaptured { by: SurfaceId },
 }
 
 impl core::fmt::Display for Refusal {
@@ -172,6 +182,11 @@ impl core::fmt::Display for Refusal {
                 focused.0
             ),
             Self::FocusElsewhere { focused: None } => write!(f, "no window holds keyboard focus"),
+            Self::PointerCaptured { by } => write!(
+                f,
+                "surface {} holds the pointer, and only the person can take it back",
+                by.0
+            ),
         }
     }
 }
@@ -608,6 +623,15 @@ mod tests {
         );
         let nowhere = Refusal::FocusElsewhere { focused: None };
         assert_eq!(nowhere.to_string(), "no window holds keyboard focus");
+    }
+
+    #[test]
+    fn a_pointer_a_game_holds_is_refused_naming_the_game() {
+        let held = Refusal::PointerCaptured { by: SurfaceId(4) };
+        assert_eq!(
+            held.to_string(),
+            "surface 4 holds the pointer, and only the person can take it back"
+        );
     }
 
     /// The two fail-closed cases, which are the ones that matter. A node

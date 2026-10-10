@@ -80,6 +80,10 @@ impl From<ActError> for Failure {
             ActError::FocusElsewhere { focused } => {
                 Self::Refused(Refusal::FocusElsewhere { focused })
             }
+            // The same: the loop alone knows what holds the pointer as it
+            // acts, and the agent has a remedy, if not a quick one: the
+            // person has to leave the game.
+            ActError::PointerCaptured { by } => Self::Refused(Refusal::PointerCaptured { by }),
             error => Self::Dispatch(error),
         }
     }
@@ -255,6 +259,15 @@ mod tests {
         assert_eq!(
             Failure::from(ActError::Unreachable),
             Failure::Dispatch(ActError::Unreachable)
+        );
+    }
+
+    #[test]
+    fn a_pointer_a_game_holds_is_a_refusal_not_a_dispatch_failure() {
+        let by = SurfaceId(4);
+        assert_eq!(
+            Failure::from(ActError::PointerCaptured { by }),
+            Failure::Refused(Refusal::PointerCaptured { by })
         );
     }
 

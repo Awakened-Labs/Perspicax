@@ -217,7 +217,8 @@ pub struct Refused {
     /// One of `occluded`, `clipped`, `unmapped`, `off_screen`,
     /// `other_workspace`, `inactive_tab`, `not_showing`, `unjudged`,
     /// `unplaced`, `unattributed`, `stale`, `no_capability`,
-    /// `ambiguous_selector`, `not_found`, `not_a_window`, `focus_elsewhere`.
+    /// `ambiguous_selector`, `not_found`, `not_a_window`, `focus_elsewhere`,
+    /// `pointer_captured`.
     pub kind: &'static str,
     /// The refusal in words.
     pub message: String,
@@ -243,6 +244,11 @@ pub struct Refused {
     /// node, then type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focused: Option<u64>,
+    /// `pointer_captured`: the window holding the pointer, a game's
+    /// mouselook. Only the person can take it back; it may still be focused
+    /// and typed into.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captured_by: Option<u64>,
 }
 
 impl From<&Refusal> for Refused {
@@ -265,6 +271,7 @@ impl From<&Refusal> for Refused {
                 Refusal::NotFound => "not_found",
                 Refusal::NotAWindow => "not_a_window",
                 Refusal::FocusElsewhere { .. } => "focus_elsewhere",
+                Refusal::PointerCaptured { .. } => "pointer_captured",
             },
             message: refusal.to_string(),
             occluded_by: None,
@@ -273,6 +280,7 @@ impl From<&Refusal> for Refused {
             workspace: None,
             shown_tab: None,
             focused: None,
+            captured_by: None,
         };
         match refusal {
             Refusal::Occluded { by } => refused.occluded_by = Some(by.0),
@@ -283,6 +291,7 @@ impl From<&Refusal> for Refused {
             Refusal::FocusElsewhere { focused } => {
                 refused.focused = focused.map(|surface| surface.0);
             }
+            Refusal::PointerCaptured { by } => refused.captured_by = Some(by.0),
             _ => {}
         }
         refused
@@ -1016,6 +1025,19 @@ mod tests {
             serde_json::to_value(Refused::from(&nowhere)).unwrap(),
             serde_json::json!({"kind": "focus_elsewhere",
             "message": "no window holds keyboard focus"})
+        );
+    }
+
+    /// A game holding the pointer is named, so the agent can see it in
+    /// `window_list` and say what it is waiting for.
+    #[test]
+    fn pointer_captured_names_the_window_holding_it() {
+        let held = Refusal::PointerCaptured { by: SurfaceId(4) };
+        assert_eq!(
+            serde_json::to_value(Refused::from(&held)).unwrap(),
+            serde_json::json!({"kind": "pointer_captured",
+            "message": "surface 4 holds the pointer, and only the person can take it back",
+            "captured_by": 4})
         );
     }
 
