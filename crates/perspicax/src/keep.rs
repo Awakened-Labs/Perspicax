@@ -29,6 +29,7 @@ use std::{
 use perspicax_atspi::Ids;
 use perspicax_compositor::{Facts, Stop};
 use perspicax_index::{Change, HostFacts};
+use perspicax_node::NodeId;
 
 use crate::{
     desk::Desk,
@@ -43,8 +44,9 @@ use crate::{
 /// already accepts from an act, which waits 200 ms for damage.
 pub const REFRESH: Duration = Duration::from_millis(250);
 
-/// How long after a miss a process is next asked about: doubled for each
-/// miss, up to [`LONGEST_RETRY_MS`].
+/// How long after a miss a process is next asked about, or an application a
+/// re-read left stale is read again: doubled for each miss, up to
+/// [`LONGEST_RETRY_MS`].
 const FIRST_RETRY_MS: u64 = 1_000;
 const LONGEST_RETRY_MS: u64 = 60_000;
 
@@ -311,9 +313,69 @@ impl Arrivals {
     /// later, and later each time.
     pub fn missed(&mut self, pid: u32, now: u64) {
         if let Some(wait) = self.waiting.get_mut(&pid) {
-            wait.due = now.saturating_add(wait.retry);
-            wait.retry = (wait.retry * 2).min(LONGEST_RETRY_MS);
+            wait.missed(now);
         }
+    }
+}
+
+impl Wait {
+    /// Missed at `now`: due again a retry from now, and the retry after that
+    /// is twice as long.
+    fn missed(&mut self, now: u64) {
+        self.due = now.saturating_add(self.retry);
+        self.retry = (self.retry * 2).min(LONGEST_RETRY_MS);
+    }
+}
+
+/// The applications a re-read left partly stale, by root, and when each is to
+/// be read again. Fed times like [`Arrivals`], and for the same reason.
+///
+/// A stale node is refused until a read reaches it, and a re-read can fall
+/// short: the application is busy and leaves the walk unanswered, or its
+/// read runs out of time. Until #41, nothing read it again but the next
+/// change the application happened to signal, so one slow moment could leave
+/// a window un-actable for the rest of the session. So a re-read that leaves
+/// nodes stale is owed another, as an unread newcomer is: later, and less
+/// often each time, until one reaches them all.
+///
+/// Not a poll. It asks only while a read owed is not done, and the first
+/// read that reaches everything ends it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Owed {
+    waiting: HashMap<NodeId, Wait>,
+}
+
+impl Owed {
+    /// Whether the application rooted at `root` is owed a re-read by `now`.
+    #[must_use]
+    pub fn due(&self, root: NodeId, now: u64) -> bool {
+        self.waiting.get(&root).is_some_and(|wait| wait.due <= now)
+    }
+
+    /// A re-read of `root`'s application that finished at `now` left part of
+    /// it stale: read it again later, and later each time. `true` if it owed
+    /// nothing until now.
+    pub fn left(&mut self, root: NodeId, now: u64) -> bool {
+        let newly = !self.waiting.contains_key(&root);
+        self.waiting
+            .entry(root)
+            .or_insert(Wait {
+                due: now,
+                retry: FIRST_RETRY_MS,
+            })
+            .missed(now);
+        newly
+    }
+
+    /// A re-read reached all of `root`'s application: nothing is owed.
+    /// `true` if something was.
+    pub fn paid(&mut self, root: NodeId) -> bool {
+        self.waiting.remove(&root).is_some()
+    }
+
+    /// `root`'s application has gone, and what it owed with it.
+    pub fn forget(&mut self, root: NodeId) {
+        self.waiting.remove(&root);
     }
 }
 
@@ -384,5 +446,55 @@ mod tests {
             "and back again is new again, with a settle of its own"
         );
         assert_eq!(arrivals.due(&shell, 8_000), [100]);
+    }
+
+    /// #41: a re-read that left part of an application stale used to be the
+    /// last word on it, until the application happened to change again.
+    #[test]
+    fn a_re_read_that_left_nodes_stale_is_owed_another_less_often_each_time() {
+        let zenity = NodeId(1);
+        let mut owed = Owed::default();
+        assert!(!owed.due(zenity, 0), "nothing is owed before a re-read");
+
+        assert!(owed.left(zenity, 10_000), "newly owed");
+        assert!(!owed.due(zenity, 10_999));
+        assert!(owed.due(zenity, 11_000), "a second after");
+        assert!(!owed.left(zenity, 11_500), "owed still, not newly");
+        assert!(!owed.due(zenity, 13_499));
+        assert!(owed.due(zenity, 13_500), "then two");
+        owed.left(zenity, 13_500);
+        assert!(owed.due(zenity, 17_500), "then four");
+
+        for _ in 0..10 {
+            owed.left(zenity, 20_000);
+        }
+        assert!(!owed.due(zenity, 79_999));
+        assert!(
+            owed.due(zenity, 80_000),
+            "and never more than a minute apart"
+        );
+
+        assert!(owed.paid(zenity), "a read that reached all of it");
+        assert!(!owed.due(zenity, u64::MAX), "pays what was owed");
+        assert!(!owed.paid(zenity), "once");
+        owed.left(zenity, 100_000);
+        assert!(
+            owed.due(zenity, 101_000),
+            "and the next debt starts again at a second"
+        );
+    }
+
+    #[test]
+    fn an_application_that_has_gone_is_owed_nothing() {
+        let (zenity, firefox) = (NodeId(1), NodeId(50));
+        let mut owed = Owed::default();
+        owed.left(zenity, 0);
+        owed.left(firefox, 0);
+        owed.forget(zenity);
+        assert!(!owed.due(zenity, 1_000));
+        assert!(
+            owed.due(firefox, 1_000),
+            "and each application owes its own"
+        );
     }
 }
