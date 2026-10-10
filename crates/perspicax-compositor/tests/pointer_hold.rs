@@ -15,7 +15,9 @@
 //!
 //! The person takes it back as they leave any window: moving the keyboard
 //! elsewhere, a launcher taking it, the lock screen, another workspace.
-//! What is merely drawn over the game -- a notification -- takes nothing.
+//! What is merely drawn over the game -- a notification -- takes nothing,
+//! and neither does an agent: its click, its scroll and its focus elsewhere
+//! are refused, naming the game.
 //!
 //! The person's mouse is [`Command::Motion`], which finds what is under the
 //! pointer from the clients' buffers, so this needs the `capture` feature.
@@ -27,7 +29,9 @@
 mod common;
 
 use common::{Desk, Session, until};
-use perspicax_compositor::{Backend, Command, Virtual};
+use perspicax_compositor::{ActError, Backend, Command, Host, Virtual};
+use perspicax_index::{Action as Verb, HostFacts, PointerButton};
+use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::{Access, Action, Grid, Mode, Shape};
 use smithay_client_toolkit::shell::{WaylandSurface, wlr_layer::Layer};
 use wayland_client::{EventQueue, QueueHandle, globals::GlobalList};
@@ -461,6 +465,69 @@ fn a_launcher_that_takes_the_keyboard_takes_the_pointer_too() {
     until(&mut queue, &mut desk, |desk| {
         !holding(desk) && desk.pointed.as_ref() == Some(&launcher)
     });
+
+    session.stop((desk, queue));
+}
+
+/// The surface id the facts give the window titled `title`.
+fn titled(facts: &HostFacts, title: &str) -> SurfaceId {
+    facts
+        .surfaces()
+        .iter()
+        .find(|surface| surface.title.as_deref() == Some(title))
+        .map(|surface| surface.id)
+        .unwrap_or_else(|| panic!("no window titled {title}"))
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_agent_cannot_take_a_pointer_a_game_holds() {
+    let session = session("hold-agent", (1280, 800));
+    let mut client = with_windows(&session, &["game", "other"]);
+    session.perform(Action::CycleFocus);
+    lock_over(&mut client, &session, 0, (10, 10), Lifetime::Persistent);
+    let (mut desk, mut queue, ..) = client;
+    let facts = session.facts.read();
+    let (game, other) = (titled(&facts, "game"), titled(&facts, "other"));
+    let host = Host::new(&session.facts, &session.requests);
+    let spot = Rect::new(10.0, 10.0, 20.0, 20.0);
+    let refused = Err(ActError::PointerCaptured { by: game });
+
+    // Anything that moves the pointer, on the game or off it.
+    for target in [game, other] {
+        let click = Verb::Click {
+            at: spot,
+            button: PointerButton::Left,
+        };
+        assert_eq!(host.act(target, &click).map(|_| ()), refused);
+        let scroll = Verb::Scroll {
+            at: spot,
+            dx: 0.0,
+            dy: 15.0,
+        };
+        assert_eq!(host.act(target, &scroll).map(|_| ()), refused);
+    }
+    // The keyboard elsewhere, and the pointer with it.
+    assert_eq!(host.act(other, &Verb::Focus).map(|_| ()), refused);
+    assert_eq!(host.act(other, &Verb::Forward).map(|_| ()), refused);
+    // The game itself may still be focused and typed into.
+    assert!(host.act(game, &Verb::Focus).is_ok());
+    assert!(
+        host.act(
+            game,
+            &Verb::Type {
+                text: "w".to_owned()
+            }
+        )
+        .is_ok()
+    );
+
+    settle(&session, &mut queue, &mut desk);
+    assert!(holding(&desk) && taken(&desk) == 1, "{:?}", desk.holds);
+    assert!(
+        desk.buttons.is_empty() && desk.scrolls == 0,
+        "nothing reached it"
+    );
 
     session.stop((desk, queue));
 }

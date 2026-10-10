@@ -39,7 +39,7 @@ use smithay::{
     utils::{Logical, Rectangle, SERIAL_COUNTER},
 };
 
-use crate::{Keymap, framed::Framed, state::Compositor};
+use crate::{Keymap, framed::Framed, shell, state::Compositor};
 
 /// What input lands on: an application's window, or a layer-shell surface
 /// (a panel, a wallpaper, a menu) where it sits in global space.
@@ -113,6 +113,17 @@ pub enum ActError {
     /// it to the agent as `Refusal::FocusElsewhere`.
     #[error("keyboard focus is elsewhere ({focused:?}): nothing was typed")]
     FocusElsewhere { focused: Option<SurfaceId> },
+    /// A window holds the pointer -- a game's mouselook, locked in place or
+    /// confined to the window -- and the act would move the pointer, or take
+    /// the keyboard from that window and the pointer with it. Nothing was
+    /// dispatched. Only the person ends a hold (see `crate::hold`); `by` is
+    /// the window holding it, which may still be focused and typed into.
+    ///
+    /// A refusal, like [`ActError::FocusElsewhere`], decided here because
+    /// only this loop knows what holds the pointer in the same turn as the
+    /// act. `perspicax` hands it to the agent as `Refusal::PointerCaptured`.
+    #[error("window {} holds the pointer: nothing was dispatched", by.0)]
+    PointerCaptured { by: SurfaceId },
 }
 
 /// What the compositor did, as it alone can report it.
@@ -307,6 +318,20 @@ impl Compositor {
         }
         if self.person_is_active() {
             return Err(ActError::PersonActive);
+        }
+        // A game holding the pointer has it until the person takes it back:
+        // a click or a scroll would move a pointer that may not move, and
+        // the keyboard given elsewhere would take the pointer with it.
+        if let Some(by) = self
+            .hold()
+            .as_ref()
+            .and_then(|hold| shell::id_of(&hold.window))
+        {
+            let moves_pointer = matches!(action, Action::Click { .. } | Action::Scroll { .. });
+            let moves_keyboard = matches!(action, Action::Focus | Action::Forward) && surface != by;
+            if moves_pointer || moves_keyboard {
+                return Err(ActError::PointerCaptured { by });
+            }
         }
         // A window verb addresses a window wherever it is: a tab behind
         // another is parked, and closing a window on a hidden workspace is
