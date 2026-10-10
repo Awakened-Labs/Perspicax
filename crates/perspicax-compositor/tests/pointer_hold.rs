@@ -13,6 +13,10 @@
 //! the window in use may, and only once the pointer is in the region it
 //! named. Let go, the pointer is where the game last said it drew it.
 //!
+//! The person takes it back as they leave any window: moving the keyboard
+//! elsewhere, a launcher taking it, the lock screen, another workspace.
+//! What is merely drawn over the game -- a notification -- takes nothing.
+//!
 //! The person's mouse is [`Command::Motion`], which finds what is under the
 //! pointer from the clients' buffers, so this needs the `capture` feature.
 //! Like the other live tests it binds a real Wayland socket, so it needs
@@ -23,8 +27,9 @@
 mod common;
 
 use common::{Desk, Session, until};
-use perspicax_compositor::{Backend, Command};
-use perspicax_policy::Action;
+use perspicax_compositor::{Backend, Command, Virtual};
+use perspicax_policy::{Access, Action, Grid, Mode, Shape};
+use smithay_client_toolkit::shell::{WaylandSurface, wlr_layer::Layer};
 use wayland_client::{EventQueue, QueueHandle, globals::GlobalList};
 use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_pointer_constraints_v1::Lifetime;
 
@@ -63,6 +68,39 @@ fn with_windows(session: &Session, titles: &[&str]) -> Client {
         })
     });
     (desk, queue, qh, globals)
+}
+
+/// Lock the pointer over the `nth` window, at `at` from the origin: it has
+/// to be the window in use.
+fn lock_over(
+    client: &mut Client,
+    session: &Session,
+    nth: usize,
+    at: (i32, i32),
+    lifetime: Lifetime,
+) {
+    let (desk, queue, qh, globals) = client;
+    nudge(session, at);
+    until(queue, desk, |desk| desk.entered.is_some());
+    desk.hold_pointer(globals, qh, nth, true, None, lifetime);
+    until(queue, desk, |desk| desk.holds == ["locked"]);
+}
+
+/// Whether the last the client heard is that it holds the pointer.
+///
+/// What it heard is counted rather than matched: smithay tells a client its
+/// hold let go once more when the pointer leaves its surface, whether it
+/// held or not, so an `unlocked` may come twice.
+fn holding(desk: &Desk) -> bool {
+    matches!(desk.holds.last(), Some(&("locked" | "confined")))
+}
+
+/// How many times the client was told its hold took.
+fn taken(desk: &Desk) -> usize {
+    desk.holds
+        .iter()
+        .filter(|heard| matches!(**heard, "locked" | "confined"))
+        .count()
 }
 
 /// A person's mouse moving by `by`.
@@ -286,6 +324,143 @@ fn let_go_the_pointer_is_where_the_game_last_drew_it() {
     nudge(&session, (1, 0));
     until(&mut queue, &mut desk, |desk| desk.motions.len() > moved);
     assert_eq!(desk.motions.last().copied(), Some((251.0, 150.0)));
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn leaving_the_game_lets_go_and_coming_back_takes_hold_again() {
+    let session = session("hold-leave", (1280, 800));
+    // "other" opens over "game" at (32, 32) with the keyboard. The person
+    // comes back to the game, which comes up over it, and the pointer rests
+    // where the two overlap.
+    let mut client = with_windows(&session, &["game", "other"]);
+    session.perform(Action::CycleFocus);
+    lock_over(&mut client, &session, 0, (100, 100), Lifetime::Persistent);
+    let (mut desk, mut queue, ..) = client;
+    let (game, other) = (
+        desk.windows[0].wl_surface().clone(),
+        desk.windows[1].wl_surface().clone(),
+    );
+
+    // Away: "other" comes up under the still pointer, and has it.
+    session.perform(Action::CycleFocus);
+    until(&mut queue, &mut desk, |desk| {
+        !holding(desk) && desk.pointed.as_ref() == Some(&other)
+    });
+    // Back, and the game has it and holds it again with no nudge: the
+    // camera turns at once.
+    session.perform(Action::CycleFocus);
+    until(&mut queue, &mut desk, |desk| {
+        holding(desk) && taken(desk) == 2 && desk.pointed.as_ref() == Some(&game)
+    });
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_oneshot_hold_is_gone_once_it_lets_go() {
+    let session = session("hold-oneshot", (1280, 800));
+    let mut client = with_windows(&session, &["game", "other"]);
+    session.perform(Action::CycleFocus);
+    lock_over(&mut client, &session, 0, (10, 10), Lifetime::Oneshot);
+    let (mut desk, mut queue, ..) = client;
+
+    session.perform(Action::CycleFocus);
+    until(&mut queue, &mut desk, |desk| !holding(desk));
+    session.perform(Action::CycleFocus);
+    nudge(&session, (1, 1));
+    settle(&session, &mut queue, &mut desk);
+    assert!(!holding(&desk) && taken(&desk) == 1, "{:?}", desk.holds);
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_lock_screen_takes_the_pointer_back() {
+    let session = session("hold-lock-screen", (1280, 800));
+    let mut client = with_window(&session);
+    lock_over(&mut client, &session, 0, (100, 80), Lifetime::Persistent);
+    let (mut desk, mut queue, qh, globals) = client;
+
+    desk.lock(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.locked && !holding(desk));
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn another_workspace_takes_the_pointer_back() {
+    let session = Session::start(
+        "hold-workspace",
+        Backend::Headless {
+            outputs: vec![Virtual::numbered(1, (1280, 800))],
+            workspaces: Shape {
+                mode: Mode::Spanning,
+                grid: Grid {
+                    columns: 2,
+                    rows: 1,
+                    wrap: false,
+                },
+            },
+            access: Access::open(),
+            person: true,
+            opacity: Default::default(),
+        },
+    );
+    let mut client = with_window(&session);
+    lock_over(&mut client, &session, 0, (100, 80), Lifetime::Persistent);
+    let (mut desk, mut queue, ..) = client;
+
+    session.perform(Action::GoToWorkspace(2));
+    until(&mut queue, &mut desk, |desk| {
+        !holding(desk) && desk.pointed.is_none()
+    });
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn something_drawn_over_a_held_pointer_does_not_take_it() {
+    let session = session("hold-overlay", (1280, 800));
+    let mut client = with_window(&session);
+    lock_over(&mut client, &session, 0, (100, 80), Lifetime::Persistent);
+    let (mut desk, mut queue, qh, _globals) = client;
+    let game = desk.windows[0].wl_surface().clone();
+
+    // A notification across the top, over the pointer, taking no keys.
+    desk.open_strip(&qh, Layer::Overlay, "toast", 150, 0xff_20_40_80);
+    until(&mut queue, &mut desk, |desk| desk.layers_drawn == 1);
+    nudge(&session, (5, 5));
+    settle(&session, &mut queue, &mut desk);
+    assert_eq!(desk.holds, ["locked"]);
+    assert_eq!(
+        desk.pointed.as_ref(),
+        Some(&game),
+        "the game still has the pointer"
+    );
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_launcher_that_takes_the_keyboard_takes_the_pointer_too() {
+    let session = session("hold-launcher", (1280, 800));
+    let mut client = with_window(&session);
+    lock_over(&mut client, &session, 0, (100, 80), Lifetime::Persistent);
+    let (mut desk, mut queue, qh, _globals) = client;
+
+    desk.open_launcher(&qh, 150, 0xff_80_40_20);
+    let launcher = desk.layers[0].0.wl_surface().clone();
+    until(&mut queue, &mut desk, |desk| {
+        !holding(desk) && desk.pointed.as_ref() == Some(&launcher)
+    });
 
     session.stop((desk, queue));
 }

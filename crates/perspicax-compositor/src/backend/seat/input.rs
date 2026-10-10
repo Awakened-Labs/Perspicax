@@ -70,7 +70,7 @@ use super::{
 };
 use crate::{
     framed::Framed,
-    mouse::{Scrolled, Travelled, policy, under},
+    mouse::{Scrolled, Travelled, policy},
     shell::{covers_panels, id_of},
     state::Compositor,
 };
@@ -312,7 +312,7 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
             session.dwell.cancel();
             session.logo_tap.interrupt();
         }
-        let hit = under(state, at);
+        let hit = state.pointed(at);
         // A panel or launcher that takes the keyboard on a click gets it,
         // without anything being raised: layers stack by layer, not by click.
         if let Some(surface) = hit
@@ -496,7 +496,7 @@ fn axis(state: &mut Compositor, event: &impl PointerAxisEvent<LibinputInputBacke
         pixels: event.amount(axis).unwrap_or(0.0),
         lifted: event.source() == AxisSource::Finger && event.amount(axis) == Some(0.0),
     });
-    let hit = under(state, at);
+    let hit = state.pointed(at);
     if state.bound_scroll(hit.as_ref(), at, held(state), scrolled) {
         return;
     }

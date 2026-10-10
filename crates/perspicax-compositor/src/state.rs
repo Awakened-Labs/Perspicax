@@ -565,6 +565,8 @@ impl Compositor {
         // No window is lit or undimmed now. See `focus_changed`.
         self.backend.redraw();
         self.show_active(None);
+        // Nor in use, so none may hold the pointer.
+        self.settle_hold_later();
         #[cfg(feature = "xwayland")]
         self.tell_active_x11(None);
     }
@@ -1154,6 +1156,8 @@ impl SeatHandler for Compositor {
         // the next frame is drawn knowing. Only asked for here, which takes
         // no lock; what is in use is read when the frame is drawn.
         self.backend.redraw();
+        // So does which window may hold the pointer: a game left lets go.
+        self.settle_hold_later();
 
         self.show_active(focused);
     }

@@ -135,6 +135,19 @@ pub(crate) struct Scrolled {
 }
 
 impl Compositor {
+    /// What the pointer at `at` is over, as far as a press or a scroll goes:
+    /// the surface of the window holding it while one does ([`crate::hold`]),
+    /// whatever is drawn over it; otherwise what is drawn there.
+    #[cfg_attr(
+        not(feature = "seat"),
+        expect(dead_code, reason = "the seat's presses and scrolls")
+    )]
+    pub(crate) fn pointed(&self, at: Point<f64, Logical>) -> Option<Hit> {
+        self.hold()
+            .map(|hold| hold.hit())
+            .or_else(|| under(self, at))
+    }
+
     /// Whether the empty desktop is at `at`: no window, and no panel or menu
     /// over the wallpaper. A widget on the bottom layer is part of the
     /// desktop, as the wallpaper is.
@@ -460,7 +473,10 @@ impl Compositor {
         if let Some(arrived) = edge(self, at) {
             at = arrived;
         }
-        let hit = hold.as_ref().map(Hold::hit).or_else(|| under(self, at));
+        let hit = match &hold {
+            Some(hold) => Some(hold.hit()),
+            None => under(self, at),
+        };
         // Over a frame no client has the pointer: the one it left is told so,
         // and the compositor picks the cursor.
         // Over nothing at all, no client is drawing the cursor either, and a
@@ -507,10 +523,12 @@ impl Compositor {
     ///
     /// Only when what is under the pointer changed, so a panel's clock
     /// committing each second moves nothing. Never under a grab, which
-    /// owns the pointer, and only with the clients' buffers: without them
-    /// every point looks like the empty desktop (see `stand_in_at`). The
-    /// focus policy is not asked, since the pointer went nowhere: the
-    /// keyboard stays where it is.
+    /// owns the pointer, nor while a window holds it ([`crate::hold`]): a
+    /// notification popping up over a game must not take its mouselook. And
+    /// only with the clients' buffers: without them every point looks like
+    /// the empty desktop (see `stand_in_at`). The focus policy is not
+    /// asked, since the pointer went nowhere: the keyboard stays where it
+    /// is.
     pub(crate) fn repoint(&mut self) {
         if !self.backend.keeps_buffers() {
             return;
@@ -518,7 +536,7 @@ impl Compositor {
         let Some(pointer) = self.pointer.clone() else {
             return;
         };
-        if pointer.is_grabbed() {
+        if pointer.is_grabbed() || self.hold().is_some() {
             return;
         }
         let at = pointer.current_location();

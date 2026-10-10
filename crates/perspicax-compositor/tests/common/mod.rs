@@ -34,7 +34,8 @@ use smithay_client_toolkit::{
     shell::{
         WaylandSurface,
         wlr_layer::{
-            Anchor, Layer, LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
+            Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
+            LayerSurfaceConfigure,
         },
         xdg::{
             XdgShell, XdgSurface as _,
@@ -381,6 +382,9 @@ pub struct Desk {
     /// The serial of the pointer's last arrival on one of our surfaces: what
     /// `set_cursor` has to name to be heard.
     pub entered: Option<u32>,
+    /// Which of our surfaces the pointer is over, from its last arrival
+    /// until it leaves.
+    pub pointed: Option<wl_surface::WlSurface>,
     /// Every button the pointer pressed (`true`) or let go (`false`) on one
     /// of our surfaces, by Linux code, in order.
     pub buttons: Vec<(u32, bool)>,
@@ -465,6 +469,7 @@ impl Desk {
             seat: None,
             pointer: None,
             entered: None,
+            pointed: None,
             buttons: Vec::new(),
             scrolls: 0,
             motions: Vec::new(),
@@ -518,6 +523,15 @@ impl Desk {
         strip.set_size(0, height);
         strip.commit();
         self.layers.push((strip, colour, height));
+    }
+
+    /// The same on `overlay`, asking for every key as a launcher does: the
+    /// compositor gives it the keyboard the moment it is up.
+    pub fn open_launcher(&mut self, qh: &QueueHandle<Self>, height: u32, colour: u32) {
+        self.open_strip(qh, Layer::Overlay, "launcher", height, colour);
+        let (launcher, ..) = self.layers.last().expect("just opened");
+        launcher.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        launcher.commit();
     }
 
     /// A panel `height` tall across the top of the screen on `top`, drawn
@@ -1468,8 +1482,16 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            wl_pointer::Event::Enter { serial, .. } => desk.entered = Some(serial),
-            wl_pointer::Event::Leave { .. } => desk.entered = None,
+            wl_pointer::Event::Enter {
+                serial, surface, ..
+            } => {
+                desk.entered = Some(serial);
+                desk.pointed = Some(surface);
+            }
+            wl_pointer::Event::Leave { .. } => {
+                desk.entered = None;
+                desk.pointed = None;
+            }
             wl_pointer::Event::Button { button, state, .. } => desk.buttons.push((
                 button,
                 state == WEnum::Value(wl_pointer::ButtonState::Pressed),

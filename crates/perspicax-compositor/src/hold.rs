@@ -19,7 +19,12 @@
 //! the window in use ([`Compositor::window_in_use`]): its surface has the
 //! pointer, and its window is on screen and has the keyboard. A window the
 //! person has left cannot reach out and take the pointer, and one they
-//! leave lets go of it.
+//! leave lets go of it. So the person always takes it back the way they
+//! leave any window -- Alt+Tab, any binding that moves the keyboard, a menu
+//! or launcher that takes it, the lock screen, another workspace, a drag
+//! with the drag modifier -- and none of those needs a rule of its own here.
+//! A constraint that lives on (`persistent`) takes hold again once all of
+//! that is true again, and a `oneshot` one is gone.
 //!
 //! It takes hold only where the client asked: with the pointer in the region
 //! it named, on the part of its surface that takes input, and on the surface
@@ -181,6 +186,26 @@ impl Compositor {
             _ => {}
         });
         tracing::debug!(held = may, "a window's hold on the pointer");
+        // Let go, the pointer is free to be what is under it: the launcher
+        // that took the keyboard over a game gets it without a nudge.
+        if !may {
+            self.repoint();
+        }
+    }
+
+    /// [`Self::settle_hold`], once the loop is idle: for what changes the
+    /// window in use, which is decided inside smithay's keyboard and pointer
+    /// callbacks, holding the locks a settle reads through. What is under
+    /// the pointer is looked at again first, since the same change may have
+    /// raised or parked what was there.
+    pub(crate) fn settle_hold_later(&self) {
+        if !self.backend.has_person() {
+            return;
+        }
+        self.loop_handle.insert_idle(|state| {
+            state.repoint();
+            state.settle_hold();
+        });
     }
 
     /// Whether the constraint on `surface` may hold the pointer: one that
