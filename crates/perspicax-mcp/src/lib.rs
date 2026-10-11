@@ -201,9 +201,10 @@ pub enum ServeError {
 /// The failure is silent, so it is worth being exact about how `perspicax`'s
 /// binary pays both: it logs to stderr in every mode, and under `--mcp` it
 /// moves the wire off fds 0 and 1, onto copies no program can inherit, before
-/// it starts anything, and serves it with [`serve_over`] (issue #43). This
-/// function, reading fds 0 and 1 themselves, suits a host that starts
-/// nothing.
+/// it starts anything, and serves it with [`serve_over`] (issue #43). A copy
+/// made before it ran is beyond that, so it refuses to serve when its stderr
+/// or the session bus's daemon holds the wire too (issue #52). This function,
+/// reading fds 0 and 1 themselves, suits a host that starts nothing.
 ///
 /// # Errors
 ///

@@ -148,6 +148,13 @@ struct Cli {
     /// replies, and no such program can read the agent's requests. A client
     /// that pipes stderr has to read it. Not with `--session`.
     ///
+    /// A wire something else was given first is refused before anything
+    /// starts: a stderr that is the wire too (`2>&1`), or a session bus
+    /// daemon holding it, as `dbus-run-session -- perspicax --mcp` leaves it,
+    /// to hand on to every service the bus starts. Pass perspicax the wire on
+    /// fds 3 and 4 inside `dbus-run-session` instead, as the README shows, or
+    /// use `--mcp-socket`.
+    ///
     /// Headless, the run ends when the client does: an agent-driven compositor
     /// with no agent left has nothing to host, and it exits non-zero if the
     /// agent interface failed rather than ended. On a seat the session is the
