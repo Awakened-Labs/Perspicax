@@ -96,8 +96,10 @@ pub enum Refusal {
     /// difference from [`Unjudged`](Refusal::Unjudged), and why it is its own
     /// refusal. Fails closed.
     ///
-    /// A Flutter application's every node is refused this way (#51): its
-    /// bridge answers what a node is and never where.
+    /// A Flutter application's every node is refused this way (#51): asking
+    /// its bridge where a node is freezes the application until libdbus gives
+    /// up, and the answer then has no geometry in it, so perspicax asks once
+    /// and never again (#80).
     Unplaced,
     /// No compositor has attributed this node to a process, so no capability
     /// decision can be made about it. Fails closed.
@@ -647,9 +649,9 @@ mod tests {
     }
 
     /// Issue #51. A node joined to its window whose application gives no
-    /// bounds for it -- a Flutter node never answers `GetExtents` -- cannot be
-    /// judged however long anyone waits, so it is not refused as `Unjudged`,
-    /// which reads as "not yet". Once it has bounds, it is.
+    /// bounds for it -- a Flutter node has none to give -- cannot be judged
+    /// however long anyone waits, so it is not refused as `Unjudged`, which
+    /// reads as "not yet". Once it has bounds, it is.
     #[test]
     fn a_joined_node_with_no_bounds_is_unplaced_rather_than_unjudged() {
         let mut node = node_with(attributed(), Visibility::Unknown);

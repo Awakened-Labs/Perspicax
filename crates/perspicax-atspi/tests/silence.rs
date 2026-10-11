@@ -31,7 +31,7 @@ use std::{
 use atspi::Role;
 use perspicax_atspi::{
     AppRef, ObjectKey,
-    read::{self, GaveUp, Patience, RawNode},
+    read::{self, GaveUp, Patience, Placed, RawNode, Spared},
 };
 use zbus::{Connection, Guid, connection::Builder, zvariant::OwnedObjectPath};
 
@@ -105,6 +105,12 @@ impl Fake {
 
     fn freezes(mut self) -> Self {
         self.extents = Some(Extents::Freezes);
+        self
+    }
+
+    /// Serve its `Component` without listing it in `GetInterfaces`.
+    fn unlisted(mut self) -> Self {
+        self.listed = false;
         self
     }
 
@@ -255,6 +261,16 @@ impl Served {
     async fn idle(&self) {
         drop(self.process.main.lock().await);
     }
+
+    /// Let the nodes made [`Fake::mute`] answer from now on.
+    fn unmute(&self) {
+        self.process.muted.store(false, Ordering::SeqCst);
+    }
+
+    /// The key of the node at `path`.
+    fn key(&self, path: &str) -> ObjectKey {
+        ObjectKey::new(BUS, path)
+    }
 }
 
 /// Serve `nodes` -- the first is the application root -- answering every
@@ -365,31 +381,38 @@ fn named<'a>(nodes: &'a [RawNode], label: &str) -> &'a RawNode {
         .unwrap_or_else(|| panic!("no node {label:?}"))
 }
 
-/// Read the way the ingest does: the tree, then every node's bounds.
-async fn read_with_geometry(
+/// Read the way the ingest does: the tree, then where each node is.
+async fn read_placing(
     served: &Served,
     walking: &mut Patience,
-    placing: &mut Patience,
-) -> Vec<RawNode> {
+    spared: &Spared,
+) -> (Vec<RawNode>, Placed) {
     walking.begin(None);
-    placing.begin(None);
     let (_, mut nodes) = read::cold_read(&served.reader, &served.app, walking)
         .await
         .unwrap();
-    read::geometry(&served.reader, &mut nodes, placing).await;
-    nodes
+    let placed = read::place(
+        &served.reader,
+        &mut nodes,
+        served.app.root(),
+        walking,
+        spared,
+        None,
+    )
+    .await;
+    (nodes, placed)
 }
 
-/// The issue's own case (#51). Every node comes back with its label and the
-/// nodes that answer are placed -- and every `GetExtents` the read sent into
-/// the frozen application froze it again once its turn came, the calls the
-/// read had stopped waiting for included (#80).
+/// The issue's own case. Every node comes back with its label, and the nodes
+/// that answer are placed. The plug is asked where it is once, which freezes
+/// the application once -- not three times, as three calls into a frozen
+/// application did when each froze it again in its turn.
 #[tokio::test]
-async fn a_flutter_application_is_read_whole() {
+async fn a_flutter_application_is_read_whole_and_frozen_once() {
     let served = serve(flutter(20), Duration::ZERO).await;
-    let (mut walking, mut placing) = (Patience::new(), Patience::new());
+    let (mut walking, spared) = (Patience::new(), Spared::default());
 
-    let nodes = read_with_geometry(&served, &mut walking, &mut placing).await;
+    let (nodes, placed) = read_placing(&served, &mut walking, &spared).await;
 
     assert_eq!(
         nodes.len(),
@@ -407,39 +430,113 @@ async fn a_flutter_application_is_read_whole() {
     assert!(named(&nodes, "plug").bounds.is_none());
     assert!(named(&nodes, "square 19").bounds.is_none());
 
-    assert_eq!(served.asked_freezing(), usize::from(read::STRIKES));
+    assert_eq!(placed, Placed::Spared(served.key("/plug")));
+    assert_eq!(served.asked_freezing(), 1);
     served.idle().await;
-    assert_eq!(served.freezes(), usize::from(read::STRIKES));
+    assert_eq!(served.freezes(), 1);
     assert_eq!(walking.gave_up(), None, "every walk call was answered");
-    assert_eq!(
-        placing.gave_up(),
-        Some(GaveUp::Unanswered {
-            calls: read::STRIKES
-        })
-    );
 }
 
-/// A re-read of an application that ran a read's patience out is given one
-/// unanswered call, not three -- and that one call freezes it again.
+/// The issue's deterministic reproduction. Each re-read stands for a signal
+/// the application sends when it wakes, which is what brought the next freeze
+/// every 25 s. Once the plug froze it straight after a walk it answered in
+/// full, neither the plug nor anything beneath it is asked again -- and what
+/// answers is still asked, and still placed.
 #[tokio::test]
-async fn a_later_read_of_an_application_that_went_silent_asks_once() {
+async fn a_node_that_froze_its_application_is_never_asked_again_nor_anything_beneath_it() {
     let served = serve(flutter(20), Duration::ZERO).await;
-    let (mut walking, mut placing) = (Patience::new(), Patience::new());
+    let (mut walking, spared) = (Patience::new(), Spared::default());
 
-    read_with_geometry(&served, &mut walking, &mut placing).await;
+    read_placing(&served, &mut walking, &spared).await;
     served.idle().await;
-    let (asked, froze) = (served.asked_freezing(), served.freezes());
-    let nodes = read_with_geometry(&served, &mut walking, &mut placing).await;
-    served.idle().await;
+    for _ in 0..5 {
+        let (nodes, placed) = read_placing(&served, &mut walking, &spared).await;
+        served.idle().await;
+        assert_eq!(placed, Placed::All);
+        assert!(named(&nodes, "Paradox Shift").bounds.is_some());
+        assert!(named(&nodes, "OK").bounds.is_some());
+        assert!(named(&nodes, "plug").bounds.is_none());
+    }
 
-    assert_eq!(served.asked_freezing() - asked, 1);
-    assert_eq!(served.freezes() - froze, 1);
-    assert_eq!(placing.gave_up(), Some(GaveUp::Unanswered { calls: 1 }));
-    assert!(
-        named(&nodes, "OK").bounds.is_some(),
-        "what answers is still placed"
-    );
-    assert_eq!(served.asked("/ok"), 2);
+    assert_eq!(served.asked_freezing(), 1, "the plug, once");
+    assert_eq!(served.freezes(), 1);
+    assert_eq!(served.asked("/ok"), 6, "and OK at every read");
+}
+
+/// A cache delivers a tree in whatever order it holds it. Asked bottom-up, a
+/// square would freeze the application first, and sparing it would spare
+/// nothing else -- so a read asks top-down, and the plug the squares' own
+/// extents climb to is the node that is spared.
+#[tokio::test]
+async fn nodes_are_asked_top_down_whatever_order_the_read_gave() {
+    let served = serve(flutter(20), Duration::ZERO).await;
+    let (mut walking, spared) = (Patience::new(), Spared::default());
+    walking.begin(None);
+    let (_, mut nodes) = read::cold_read(&served.reader, &served.app, &mut walking)
+        .await
+        .unwrap();
+    nodes.reverse();
+
+    let root = served.app.root();
+    let placed = read::place(&served.reader, &mut nodes, root, &walking, &spared, None).await;
+    served.idle().await;
+    assert_eq!(placed, Placed::Spared(served.key("/plug")));
+
+    let placed = read::place(&served.reader, &mut nodes, root, &walking, &spared, None).await;
+    served.idle().await;
+    assert_eq!(placed, Placed::All);
+    assert_eq!(served.freezes(), 1);
+}
+
+/// An application already silent during the walk is busy, or frozen by
+/// something else. A call it then leaves unanswered says nothing about the
+/// node it was asked of, so nothing is held against it -- and once a walk is
+/// answered in full, a silence that begins at `GetExtents` is.
+#[tokio::test]
+async fn silence_after_a_walk_that_went_unanswered_is_not_held_against_the_node() {
+    let mut nodes = flutter(2);
+    // A label beside OK that answers nothing, until it is unmuted.
+    nodes[1].children.insert(1, "/busy".to_owned());
+    nodes.push(Fake::new("/busy", Role::Label, "busy").mute());
+    let served = serve(nodes, Duration::ZERO).await;
+    let (mut walking, spared) = (Patience::new(), Spared::default());
+
+    let (_, placed) = read_placing(&served, &mut walking, &spared).await;
+    served.idle().await;
+    assert_eq!(placed, Placed::Unanswered(served.key("/plug")));
+    assert!(spared.lock().unwrap().is_empty());
+
+    served.unmute();
+    let (_, placed) = read_placing(&served, &mut walking, &spared).await;
+    served.idle().await;
+    assert_eq!(placed, Placed::Spared(served.key("/plug")));
+    assert_eq!(served.freezes(), 2);
+}
+
+/// An application root offers no `Component`, and atk-bridge prints a
+/// CRITICAL for every `GetExtents` it is sent anyway. A node is asked where
+/// it is only if it says it can answer -- here, one that would.
+#[tokio::test]
+async fn a_node_that_offers_no_component_is_never_asked_where_it_is() {
+    let served = serve(
+        vec![
+            Fake::new("/root", Role::Application, "app")
+                .holding(&["/frame"])
+                .at(0, 0, 1280, 767)
+                .unlisted(),
+            Fake::new("/frame", Role::Frame, "frame").at(0, 0, 1280, 767),
+        ],
+        Duration::ZERO,
+    )
+    .await;
+    let (mut walking, spared) = (Patience::new(), Spared::default());
+
+    let (nodes, placed) = read_placing(&served, &mut walking, &spared).await;
+
+    assert_eq!(placed, Placed::All);
+    assert_eq!(served.asked("/root"), 0);
+    assert!(named(&nodes, "app").bounds.is_none());
+    assert!(named(&nodes, "frame").bounds.is_some());
 }
 
 /// An application that answers, slowly, is read until the read's budget runs
