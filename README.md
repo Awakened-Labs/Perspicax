@@ -585,7 +585,10 @@ scrolling over the desktop. A window being moved stops at the edge of a
 screen or a panel until it is pushed 20 pixels further. The pointer itself
 stops at the edge of the desk, so a window grabbed nearer than that to the
 side it is pushed towards, as a titlebar is to the top, stays on screen.
-It does not snap. In both, a fullscreen window
+It does not snap. In both, a window being dragged stays in hand: switching
+workspace by a key, a number, a pager or an edge takes it along, sending it
+to another workspace takes the person with it, and one minimized while held
+stays minimized. In both, too, a fullscreen window
 covers the panels while it is the one in use, and goes back under them when
 another window, the start menu or a launcher takes the keyboard. A menu of
 its own, a video's right-click menu, leaves it over them, while it is open
