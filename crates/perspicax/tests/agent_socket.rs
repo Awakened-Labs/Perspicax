@@ -1,21 +1,27 @@
 //! `perspicax --mcp-socket`, the binary itself: what it refuses before it
 //! starts anything, `perspicax attach` carrying a conversation, and a headless
 //! session serving one conversation after another while it runs on (issue #30).
+//! And `--mcp`'s wire, which nothing but the agent interface reaches (#43).
 //!
 //! The refusals need nothing but a filesystem, because the socket is bound
 //! before the accessibility registry is touched, and `attach` is tested against
 //! a socket this test serves over a desk with no compositor behind it; all of
-//! them run wherever the tests do. The session needs a live accessibility bus, so it is `#[ignore]`d,
-//! and `ci/live-tests.sh` runs it with `--include-ignored`.
+//! them run wherever the tests do. The sessions need a live accessibility bus, so they are `#[ignore]`d,
+//! and `ci/live-tests.sh` runs them with `--include-ignored`.
 
 use std::{
     fs,
     io::{BufRead as _, BufReader, Write as _},
-    os::unix::{fs::PermissionsExt as _, net::UnixStream},
+    os::{
+        fd::AsRawFd as _,
+        unix::{fs::PermissionsExt as _, net::UnixStream},
+    },
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
     sync::Arc,
+    sync::Mutex,
     sync::atomic::{AtomicUsize, Ordering},
+    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -356,4 +362,105 @@ fn a_headless_session_serves_conversation_after_conversation_and_tidies_up() {
     let status = exited(&mut session, Duration::from_secs(40));
     assert!(status.success(), "{status}");
     assert!(!path.exists(), "the socket outlived its session");
+}
+
+/// Where `fd` of process `pid` points, as `/proc` says: `/dev/null`, or
+/// `pipe:[N]`. `None` for a process or descriptor that is not there (yet).
+fn link(pid: &str, fd: impl std::fmt::Display) -> Option<String> {
+    fs::read_link(format!("/proc/{pid}/fd/{fd}"))
+        .ok()?
+        .into_os_string()
+        .into_string()
+        .ok()
+}
+
+/// Under `--mcp`, nothing reaches the agent's wire but the agent interface
+/// (issue #43): not the programs the session starts, which read nothing and
+/// print to stderr, and not anything in perspicax itself, whose fds 0 and 1
+/// are `/dev/null` and stderr once it has taken the wire for its own.
+#[test]
+#[ignore = "needs a live accessibility bus"]
+fn the_agents_wire_carries_nothing_but_the_agent_interface() {
+    // Each says where its own fd 0 or 1 points, on what it was given for a
+    // stdout: whatever `--spawn` started could print to the wire before.
+    let mut session = perspicax()
+        .args(["--headless", "--mcp"])
+        .args(["--spawn", "readlink /proc/self/fd/0"])
+        .args(["--spawn", "readlink /proc/self/fd/1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("perspicax starts");
+    let pid = session.id().to_string();
+    let log = link(
+        "self",
+        session.stderr.as_ref().expect("its stderr").as_raw_fd(),
+    )
+    .expect("a pipe for its stderr");
+
+    // Read on threads, so a wire that never answers or never closes fails the
+    // test rather than hanging it.
+    let said = Arc::new(Mutex::new(Vec::<String>::new()));
+    let stderr = session.stderr.take().expect("its stderr");
+    std::thread::spawn({
+        let said = Arc::clone(&said);
+        move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                said.lock().expect("the lines said").push(line);
+            }
+        }
+    });
+    let (tell, answers) = mpsc::channel::<String>();
+    let stdout = session.stdout.take().expect("its stdout");
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tell.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    // perspicax's own: a `println!` reaches stderr, and a read reads nothing.
+    eventually("perspicax kept fds 0 and 1 for the wire", || {
+        link(&pid, 0).as_deref() == Some("/dev/null") && link(&pid, 1).as_ref() == Some(&log)
+    });
+    // What it started. Before stdin closes: the server answers before the
+    // programs are started, and the agent leaving ends the run.
+    eventually("the spawned programs never said where they print", || {
+        let said = said.lock().expect("the lines said");
+        said.iter().any(|line| line == "/dev/null") && said.contains(&log)
+    });
+
+    let mut asking = session.stdin.take().expect("its stdin");
+    for message in [
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "perspicax wire test", "version": "0" },
+        }}),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "window_list" } }),
+    ] {
+        writeln!(asking, "{message}").expect("perspicax is listening");
+    }
+    for id in [1, 2] {
+        let line = answers.recv_timeout(PATIENCE).expect("an answer");
+        let answer: Value = serde_json::from_str(&line)
+            .unwrap_or_else(|error| panic!("not JSON on the wire ({error}): {line}"));
+        assert_eq!(answer["jsonrpc"], "2.0", "{line}");
+        assert_eq!(answer["id"], id, "{line}");
+    }
+
+    // The agent leaves: the run ends, and the wire with it, having carried
+    // nothing more. Closed, too, which it would not be while a program the
+    // run started still held it.
+    drop(asking);
+    let status = exited(&mut session, PATIENCE);
+    assert!(status.success(), "{status}");
+    match answers.recv_timeout(PATIENCE) {
+        Err(mpsc::RecvTimeoutError::Disconnected) => {}
+        other => panic!("the wire carried more, or never closed: {other:?}"),
+    }
 }

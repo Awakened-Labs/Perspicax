@@ -75,8 +75,9 @@ pub use crate::{
 
 use std::{
     ffi::{OsStr, OsString},
+    io,
     path::{Path, PathBuf},
-    process::Child,
+    process::{Child, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -465,6 +466,15 @@ impl Launch {
 
     /// Start one program in `dir`, or where this process is if `None`: a
     /// desktop entry's `Path`.
+    ///
+    /// It reads nothing, and what it prints goes where this process's own log
+    /// goes, its stderr (issue #43). Under `--mcp` this process's stdin and
+    /// stdout are an agent's JSON-RPC wire, and a program that inherited them
+    /// could take the agent's requests, or print a line between the replies
+    /// -- one that, being valid JSON-RPC, would pass for perspicax's own. In
+    /// every mode rather than only that one, so what CI runs is what a seat
+    /// runs, and a program started from a key binding is started the same way
+    /// as one an agent asked for.
     pub(crate) fn spawn_in(
         &self,
         command: &[impl AsRef<OsStr>],
@@ -482,6 +492,8 @@ impl Launch {
         let mut command_line = std::process::Command::new(program);
         command_line
             .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(io::stderr())
             .envs(self.env.iter().map(|(key, value)| (key, value)))
             .envs(self.look.iter().map(|(key, value)| (key, value)))
             .env("WAYLAND_DISPLAY", &self.socket)
@@ -517,5 +529,74 @@ impl Launch {
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.clone())
             .or_else(|| std::env::var(name).ok())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
+    };
+
+    use super::Launch;
+
+    /// Set for the copy of this binary that [`launch_probe`] runs in.
+    const PROBE: &str = "PERSPICAX_LAUNCH_PROBE";
+
+    /// Where `fd` of process `pid` points: `/dev/null`, or `pipe:[N]`.
+    fn link(pid: &str, fd: u8) -> PathBuf {
+        fs::read_link(format!("/proc/{pid}/fd/{fd}")).expect("a /proc fd link")
+    }
+
+    /// Run in a copy of this binary whose stdin, stdout and stderr are three
+    /// different pipes. In this one they may not be: a runner whose stdin is
+    /// already `/dev/null`, or whose stdout and stderr are one terminal, would
+    /// pass with the program inheriting both, and prove nothing.
+    #[test]
+    fn a_program_started_reads_nothing_and_writes_where_the_log_goes() {
+        let probe = Command::new(std::env::current_exe().expect("this test's binary"))
+            .args(["--exact", "tests::launch_probe", "--ignored"])
+            .args(["--test-threads=1", "--nocapture"])
+            .env(PROBE, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("the probe runs");
+        let said = String::from_utf8_lossy(&probe.stdout);
+        // A filter that matched nothing passes too, having run nothing.
+        assert!(
+            probe.status.success() && said.contains("1 passed"),
+            "{said}{}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "run by a_program_started_reads_nothing_and_writes_where_the_log_goes"]
+    fn launch_probe() {
+        if std::env::var_os(PROBE).is_none() {
+            return;
+        }
+        assert_ne!(link("self", 0), Path::new("/dev/null"), "stdin is a pipe");
+        assert_ne!(link("self", 1), link("self", 2), "stdout is not stderr");
+
+        let launch = Launch {
+            socket: "wayland-probe".into(),
+            env: Vec::new(),
+            x11_display: None,
+            look: Vec::new(),
+        };
+        // `spawn` returns once the program is running, its fds settled.
+        let mut child = launch.spawn(&["sleep", "30"]).expect("sleep starts");
+        let pid = child.id().to_string();
+        let (stdin, stdout) = (link(&pid, 0), link(&pid, 1));
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(stdin, Path::new("/dev/null"), "it has nothing to read");
+        assert_eq!(stdout, link("self", 2), "it prints to this one's stderr");
     }
 }

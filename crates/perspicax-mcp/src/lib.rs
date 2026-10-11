@@ -188,17 +188,22 @@ pub enum ServeError {
 /// Whatever `deltas` had pending when it opens goes unsaid: the conversation's
 /// first call answers what has changed since it began.
 ///
-/// # stdout is the wire
+/// # stdin and stdout are the wire
 ///
 /// Every byte written to stdout by anything other than this transport corrupts
 /// a JSON-RPC frame, and the symptom arrives at the client as a parse error a
-/// long way from its cause -- so `tracing` must be initialised with
-/// `.with_writer(std::io::stderr)` before this is called.
+/// long way from its cause; a line that is itself valid JSON-RPC arrives as a
+/// reply this server never sent. Anything else reading stdin takes requests
+/// meant for it. So a host owes two things: `tracing` initialised with
+/// `.with_writer(std::io::stderr)` before this is called, and no program it
+/// starts inheriting stdin or stdout.
 ///
-/// It is worth being exact about the state of that, because the failure is
-/// silent: `perspicax`'s binary initialises `tracing` to **stdout**, which is
-/// right while nothing serves this over stdio and is the first thing a `--mcp`
-/// flag has to change. Any other host of this server owes the same line.
+/// The failure is silent, so it is worth being exact about how `perspicax`'s
+/// binary pays both: it logs to stderr in every mode, and under `--mcp` it
+/// moves the wire off fds 0 and 1, onto copies no program can inherit, before
+/// it starts anything, and serves it with [`serve_over`] (issue #43). This
+/// function, reading fds 0 and 1 themselves, suits a host that starts
+/// nothing.
 ///
 /// # Errors
 ///

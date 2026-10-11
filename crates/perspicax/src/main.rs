@@ -51,7 +51,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
-use perspicax::{attach, bus, desk::Desk, keep::keep_current, observe, session};
+use perspicax::{attach, bus, desk::Desk, keep::keep_current, observe, session, wire::Wire};
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop, Virtual};
 use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt::writer::BoxMakeWriter};
 
@@ -113,7 +113,8 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// A command to run against this compositor, repeatable. Split on spaces,
-    /// so quoting an argument containing one will not do what you want.
+    /// so quoting an argument containing one will not do what you want. It
+    /// reads nothing, and what it prints goes to this process's stderr.
     #[arg(long = "spawn", value_name = "COMMAND")]
     spawn: Vec<String>,
 
@@ -140,8 +141,12 @@ struct Cli {
     /// runtime rather than a peer reached over IPC -- a boundary there would
     /// cost a serialisation of every node and buy nothing.
     ///
-    /// **This takes over stdout**, which becomes the JSON-RPC wire. Logging
-    /// never goes there, in any mode; see the note in `main`.
+    /// **This takes over stdin and stdout**, which become the JSON-RPC wire,
+    /// and nothing else reaches them. They are moved before anything starts,
+    /// leaving `/dev/null` and stderr in their place, so neither perspicax's
+    /// log nor anything a program it starts prints can land between the
+    /// replies, and no such program can read the agent's requests. A client
+    /// that pipes stderr has to read it. Not with `--session`.
     ///
     /// Headless, the run ends when the client does: an agent-driven compositor
     /// with no agent left has nothing to host, and it exits non-zero if the
@@ -150,7 +155,9 @@ struct Cli {
     ///
     /// Its one client is whatever started this process. An agent running
     /// inside the session wants `--mcp-socket`.
-    #[arg(long)]
+    // Not `--session`: its `dbus-run-session` runs this process again before
+    // the wire can be kept from the bus and every service it starts (#43).
+    #[arg(long, conflicts_with = "session")]
     mcp: bool,
 
     /// Serve the agent interface on a Unix socket at PATH instead of on stdin
@@ -230,6 +237,15 @@ fn main() -> Result<()> {
         Ok(())
     };
 
+    // Before anything is started and before any thread runs, so that nothing
+    // inherits the agent's wire or is half-way through a line on it; and after
+    // the bus, whose `dbus-run-session` would run this again without it.
+    let wire = cli
+        .mcp
+        .then(Wire::take)
+        .transpose()
+        .context("could not keep stdin and stdout for the agent interface")?;
+
     // NEVER STDOUT. Under `--mcp` stdout is the JSON-RPC wire, and a single log
     // line written to it corrupts a frame -- which arrives at the client as a
     // parse error with nothing in it pointing back here. So stderr whatever the
@@ -237,6 +253,8 @@ fn main() -> Result<()> {
     // depends on a flag is one somebody adds a `println!` next to -- with one
     // exception, and that one a file: a display manager keeps a session's
     // stderr wherever it keeps such things, so `--session` has a log of its own.
+    // Under `--mcp` that `println!` would now miss the wire anyway, which has
+    // just left fd 1 (`wire`).
     //
     // With no `RUST_LOG`, a person's session says its warnings: one of them
     // is the only word anywhere on why a keyring lookup hangs (issue #27). One
@@ -275,7 +293,7 @@ fn main() -> Result<()> {
         tracing::warn!("{error:#}: logging to stderr instead");
     }
 
-    let ended = run(&cli);
+    let ended = run(&cli, wire);
     // Said on stderr too, as `main`'s error always is, but a session's is
     // looked for in its log, beside whatever led up to it.
     if to_file && let Err(error) = &ended {
@@ -297,7 +315,8 @@ fn open_log() -> Result<File> {
 }
 
 /// Everything once there is a log: the run, from its first child to its end.
-fn run(cli: &Cli) -> Result<()> {
+/// `wire` is the agent's, under `--mcp`.
+fn run(cli: &Cli, wire: Option<Wire>) -> Result<()> {
     let backend = if cli.on_seat() {
         Backend::Seat
     } else {
@@ -412,11 +431,9 @@ fn run(cli: &Cli) -> Result<()> {
     // and go and none of them ends anything: the interface itself ends only
     // when the socket can no longer be served.
     let agent_ends_session = cli.headless;
-    let interface = if cli.mcp {
-        Some(Interface::Stdio)
-    } else {
-        listener.map(Interface::Socket)
-    };
+    let interface = wire
+        .map(Interface::Stdio)
+        .or_else(|| listener.map(Interface::Socket));
     let agent = interface.map(|interface| {
         let desk = Arc::new(Desk::new(&facts, &Host::new(&facts, &requests)));
         let ended = serve(
@@ -447,8 +464,9 @@ fn run(cli: &Cli) -> Result<()> {
 
 /// Which way the agent interface is served.
 enum Interface {
-    /// On this process's stdin and stdout, to whatever started it: `--mcp`.
-    Stdio,
+    /// On the wire `main` took from this process's stdin and stdout, to
+    /// whatever started it: `--mcp`.
+    Stdio(Wire),
     /// On a Unix socket, to whoever connects: `--mcp-socket`.
     Socket(UnixListener),
 }
@@ -479,7 +497,9 @@ fn serve(
             .and_then(|runtime| {
                 Ok(runtime.block_on(async {
                     match interface {
-                        Interface::Stdio => perspicax_mcp::serve(desk).await,
+                        Interface::Stdio(wire) => {
+                            perspicax_mcp::serve_over(desk, wire.into_halves()).await
+                        }
                         Interface::Socket(listener) => perspicax_mcp::serve_socket(desk, listener)
                             .await
                             .map(|never| match never {}),
@@ -665,6 +685,14 @@ mod tests {
         assert!(
             parse(&["--headless", "--mcp-socket"]).is_err(),
             "a socket is somewhere"
+        );
+        for backend in ["--headless", "--seat"] {
+            assert!(parse(&[backend, "--mcp"]).expect(backend).mcp);
+        }
+        assert_eq!(
+            parse(&["--session", "--mcp"]).err(),
+            Some(ErrorKind::ArgumentConflict),
+            "a display manager's session has no agent on its stdin"
         );
     }
 

@@ -208,7 +208,8 @@ perspicax --headless --mcp --spawn gtk4-widget-factory
 That is an MCP server on stdin and stdout with a compositor behind it.
 Headless, it runs until the client goes away, and exits non-zero if the agent
 interface failed rather than ended; on `--seat` the session is the person's
-and outlives the client. A request sent before `initialize` is answered with
+and outlives the client. Not `--session`: a display manager's session has no
+agent on its stdin. A request sent before `initialize` is answered with
 an error naming what to send first, and the server waits on.
 `--mcp-socket PATH` serves the same on a Unix socket instead, for an agent
 running inside the session it drives: see [An agent inside the
@@ -217,6 +218,18 @@ session](#an-agent-inside-the-session). Eight tools: `window_list`, `observe`, `
 window by its surface: a close is a request the application may answer with a
 dialog, and a tab is brought forward only where the person can already see its
 group, never by switching what they are looking at.
+
+**Nothing else is on that wire.** perspicax moves it off its own stdin and
+stdout before it starts anything, onto copies no program can inherit, and
+leaves `/dev/null` and its stderr in their place, so no program it starts --
+Xwayland and what the shell launches included -- can take the agent's requests
+or print a reply perspicax did not send. A program it launches, `--mcp` or
+not, reads nothing and prints to perspicax's stderr: a `--spawn` program's
+chatter (GStreamer's `Setting pipeline to PAUSED ...`, say) lands beside
+perspicax's own log rather than between the replies. So a client that pipes
+perspicax's stderr has to read it: what those programs print can fill the
+pipe, and perspicax's logging waits on it. A client that makes stderr the wire
+too (`2>&1`) gets the log in its stream, as it always has.
 
 `window_list` lists the desk as well as the windows: a panel, a wallpaper or a
 menu is `kind: layer`, with the `layer` it stacks in and the
@@ -323,7 +336,9 @@ agent under `untrusted_text`, beside the credentials of the process that drew
 it — the marking is in the key, so it cannot be skimmed past, and the provenance
 is at the point of use rather than in a preamble a model has to have remembered.
 That is this project's injection defence, and it is a read-path property rather
-than an act-path gate.
+than an act-path gate. It holds because nothing but perspicax writes on the
+agent's wire: a program it started printing a line of JSON-RPC cannot pass it
+off as perspicax's own (see [What acting looks like](#what-acting-looks-like)).
 
 **Consent is about the person, not the node.** Headless, there is no capability
 gate: perspicax is one actuator among several, an agent refused a click runs the
@@ -461,8 +476,9 @@ full`.
 
 Run it from a text console (a TTY, not a terminal inside another desktop), with
 seatd or logind managing the seat. Log to a file: the console the session
-takes over shows nothing until it ends. With no `RUST_LOG`, a seat logs its
-warnings; `RUST_LOG=info` says what it is doing as well.
+takes over shows nothing until it ends, and what the programs it starts
+print goes to the same file. With no `RUST_LOG`, a seat logs its warnings;
+`RUST_LOG=info` says what it is doing as well.
 
 ```sh
 perspicax --seat --spawn foot 2>~/perspicax.log
@@ -724,7 +740,10 @@ Choose Perspicax at the greeter. The entry runs `perspicax --session`, which is
   `$XDG_STATE_HOME` when that is set), readable by you alone. The last
   session's is kept as `perspicax.log.old`: that is the one to read after a
   login that went straight back to the greeter. It says what the session did
-  as well as its warnings; `RUST_LOG` changes that, as ever.
+  as well as its warnings; `RUST_LOG` changes that, as ever. What the
+  programs the session starts print is not in it but in the session's
+  stderr, wherever the display manager keeps that:
+  `~/.local/share/sddm/wayland-session.log` for SDDM.
 
 For a keyring the login unlocks, the two `pam_gnome_keyring` lines under "The
 desktop" go in the display manager's PAM file: `/etc/pam.d/sddm` for SDDM.
@@ -739,8 +758,9 @@ which backends it chose, run it again from a terminal inside the session,
 **What starts with a session**, from a greeter or a text console alike: the
 desktop shell, then the config's `autostart` list, then the entries in the
 XDG autostart folders, `~/.config/autostart` and `/etc/xdg/autostart`, each
-once. An entry of yours replaces the system's of the same file name, and one
-of yours saying `Hidden=true` turns the system's off. An entry is skipped when
+once, with nothing to read and the session's stderr to print to. An entry of
+yours replaces the system's of the same file name, and one of yours saying
+`Hidden=true` turns the system's off. An entry is skipped when
 it is hidden or disabled (`X-GNOME-Autostart-enabled=false`), when its
 `OnlyShowIn` or `NotShowIn` rules out `perspicax`, or when its `TryExec`
 program is not installed; one that needs a terminal is skipped with a line in

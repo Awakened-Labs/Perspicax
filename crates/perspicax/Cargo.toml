@@ -39,17 +39,19 @@ clap.workspace = true
 # by `perspicax-mcp` to tell a refusal an agent can recover from apart from a
 # compositor fault it cannot, so it has to be a type and not a message.
 thiserror.workspace = true
-# `time` for the keyring's deadline, and `sync` to carry the session's facts
-# from a blocking read onto the bus thread's runtime.
-tokio = { workspace = true, features = ["sync", "time"] }
+# `time` for the keyring's deadline, `sync` to carry the session's facts
+# from a blocking read onto the bus thread's runtime, and `fs` for the agent's
+# wire, read and written off fds 0 and 1 (issue #43).
+tokio = { workspace = true, features = ["fs", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 # The session bus, told where this session's displays are (issue #27). zbus is
 # atspi's already; its tokio executor, as atspi has it for the whole workspace.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 # `kill` without `unsafe`, which this crate forbids: a session stopping the
-# accessibility bus its own bus started (H3). zbus's already.
-rustix = { version = "1", default-features = false, features = ["process", "std"] }
+# accessibility bus its own bus started (H3). zbus's already. `stdio` for
+# `dup2` onto fds 0 and 1, once the agent's wire is off them (issue #43).
+rustix = { version = "1", default-features = false, features = ["process", "std", "stdio"] }
 perspicax-atspi = { path = "../perspicax-atspi", version = "0.1.0" }
 perspicax-compositor = { path = "../perspicax-compositor", version = "0.1.0" }
 perspicax-config = { path = "../perspicax-config", version = "0.1.0" }
