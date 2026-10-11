@@ -331,7 +331,10 @@ impl Registry {
                 REGISTRY_FOLDERS.join(", ")
             )
         })?;
+        // Nothing to read and nowhere to print, as for every program this
+        // process starts: under `--mcp` its stdin is an agent's wire (#43).
         let child = Command::new(&registry)
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
