@@ -1417,7 +1417,27 @@ impl ClientState {
 
 impl ClientData for ClientState {
     fn initialized(&self, _id: ClientId) {}
-    fn disconnected(&self, _id: ClientId, _reason: DisconnectReason) {}
+
+    /// Say who went, and how, beside the line that said they came.
+    ///
+    /// A client that hung up and one wayland-backend cut off arrive alike, as
+    /// `ConnectionClosed`. wayland-backend cuts off a client whose outgoing
+    /// buffer is full, which is what input does to a client that has stopped
+    /// reading -- an application frozen for 25 s while an AT asked it where
+    /// something is, as #80's Flutter applications were. Nothing here can
+    /// tell the two apart; the origin's pid is what ties this line to the
+    /// application's own last words, and to the keeper's "forgotten".
+    fn disconnected(&self, id: ClientId, reason: DisconnectReason) {
+        let origin = self.origin();
+        match reason {
+            DisconnectReason::ConnectionClosed => {
+                tracing::info!(?id, ?origin, "client disconnected");
+            }
+            DisconnectReason::ProtocolError(error) => {
+                tracing::warn!(?id, ?origin, %error, "client disconnected for a protocol error");
+            }
+        }
+    }
 }
 
 delegate_compositor!(Compositor);
