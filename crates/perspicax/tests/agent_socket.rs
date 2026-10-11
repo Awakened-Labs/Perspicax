@@ -1,7 +1,9 @@
 //! `perspicax --mcp-socket`, the binary itself: what it refuses before it
 //! starts anything, `perspicax attach` carrying a conversation, and a headless
 //! session serving one conversation after another while it runs on (issue #30).
-//! And `--mcp`'s wire, which nothing but the agent interface reaches (#43).
+//! And `--mcp`'s wire, which nothing but the agent interface reaches (#43),
+//! and which perspicax refuses to serve on when the session bus holds it too
+//! (#52).
 //!
 //! The refusals need nothing but a filesystem, because the socket is bound
 //! before the accessibility registry is touched, and `attach` is tested against
@@ -11,7 +13,7 @@
 
 use std::{
     fs,
-    io::{BufRead as _, BufReader, Write as _},
+    io::{BufRead as _, BufReader, Read, Write as _},
     os::{
         fd::AsRawFd as _,
         unix::{fs::PermissionsExt as _, net::UnixStream},
@@ -141,6 +143,30 @@ fn a_file_that_is_not_a_socket_is_left_alone() {
         fs::read_to_string(&path).expect("still there"),
         "somebody's"
     );
+}
+
+/// Under `2>&1` stderr is the agent's wire too, and every program perspicax
+/// starts prints to stderr, so any of them could print a reply perspicax did
+/// not send (issue #52). Refused before anything starts, on the wire itself,
+/// where the client will read it.
+#[test]
+fn a_stderr_that_is_the_wire_too_is_refused_before_anything_starts() {
+    let (wire, end) = std::io::pipe().expect("a pipe for the wire");
+    let mut session = perspicax()
+        .args(["--headless", "--mcp", "--run-for", "5"])
+        .stdout(end.try_clone().expect("a second handle"))
+        .stderr(end)
+        .spawn()
+        .expect("perspicax starts");
+    let said = everything(wire);
+    let status = exited(&mut session, PATIENCE);
+    let said = said.recv_timeout(PATIENCE).expect("the wire closes");
+    // Not the exit alone: with no accessibility registry to start, a run that
+    // was not refused fails as well.
+    assert!(!status.success(), "{said}");
+    for named in ["stderr is the agent's wire too", "--mcp-socket"] {
+        assert!(said.contains(named), "the refusal says {named:?}: {said}");
+    }
 }
 
 /// Serve a socket at `path` over a desk with nothing on it and no compositor
@@ -456,6 +482,127 @@ fn the_agents_wire_carries_nothing_but_the_agent_interface() {
     // The agent leaves: the run ends, and the wire with it, having carried
     // nothing more. Closed, too, which it would not be while a program the
     // run started still held it.
+    drop(asking);
+    let status = exited(&mut session, PATIENCE);
+    assert!(status.success(), "{status}");
+    match answers.recv_timeout(PATIENCE) {
+        Err(mpsc::RecvTimeoutError::Disconnected) => {}
+        other => panic!("the wire carried more, or never closed: {other:?}"),
+    }
+}
+
+/// Everything `from` carries until it closes, read on a thread of its own so
+/// that a pipe something still holds fails the test rather than hanging it.
+fn everything(mut from: impl Read + Send + 'static) -> mpsc::Receiver<String> {
+    let (tell, said) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut all = String::new();
+        let _ = from.read_to_string(&mut all);
+        let _ = tell.send(all);
+    });
+    said
+}
+
+/// The agent's first word.
+fn initialize() -> Value {
+    json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "clientInfo": { "name": "perspicax wire test", "version": "0" },
+    }})
+}
+
+/// `dbus-run-session -- perspicax --mcp` gives the bus daemon the wire before
+/// perspicax runs, and the daemon gives it to every service it starts, where
+/// perspicax cannot take it back (issue #52). So the run is refused before
+/// anything could ask the bus to start something, saying how to keep the wire
+/// from the bus.
+#[test]
+#[ignore = "starts a session bus of its own"]
+fn a_wire_the_session_bus_holds_too_is_refused_before_anything_starts() {
+    let mut session = Command::new("dbus-run-session")
+        .arg("--")
+        .arg(env!("CARGO_BIN_EXE_perspicax"))
+        .args(["--headless", "--mcp", "--run-for", "5"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("dbus-run-session, which a session with a bus has");
+    let wire = everything(session.stdout.take().expect("its stdout"));
+    let said = everything(session.stderr.take().expect("its stderr"));
+    // Asked, as an agent would, though a refused run may be gone already.
+    let mut asking = session.stdin.take().expect("its stdin");
+    let _ = writeln!(asking, "{}", initialize());
+    drop(asking);
+
+    let status = exited(&mut session, PATIENCE);
+    let said = said.recv_timeout(PATIENCE).expect("its stderr closes");
+    assert!(!status.success(), "{said}");
+    for named in ["session bus", "pid ", "3<&0 4>&1", "--mcp-socket"] {
+        assert!(said.contains(named), "the refusal says {named:?}: {said}");
+    }
+    assert_eq!(
+        wire.recv_timeout(PATIENCE).expect("the wire closes"),
+        "",
+        "the wire carried something"
+    );
+}
+
+/// The way the refusal above says to keep the wire from the bus: given to
+/// perspicax alone, on fds 3 and 4, which `dbus-run-session` does not pass on
+/// to its daemon. Served, and closed once perspicax has gone, which it would
+/// not be while the bus or a service it started still held it.
+#[test]
+#[ignore = "needs a live accessibility bus"]
+fn a_wire_kept_from_the_session_bus_is_served() {
+    let mut session = Command::new("sh")
+        .args([
+            "-c",
+            r#"exec dbus-run-session -- sh -c 'exec "$0" --headless --mcp <&3 >&4 3<&- 4>&-' "$1" 3<&0 4>&1 </dev/null >&2"#,
+            "sh",
+            env!("CARGO_BIN_EXE_perspicax"),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("sh");
+    let said = everything(session.stderr.take().expect("its stderr"));
+    let said = move || {
+        said.recv_timeout(Duration::from_secs(1))
+            .unwrap_or_default()
+    };
+    let (tell, answers) = mpsc::channel::<String>();
+    let stdout = session.stdout.take().expect("its stdout");
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tell.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut asking = session.stdin.take().expect("its stdin");
+    writeln!(asking, "{}", initialize()).expect("perspicax is listening");
+    writeln!(
+        asking,
+        "{}",
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })
+    )
+    .expect("perspicax is listening");
+    let Ok(line) = answers.recv_timeout(PATIENCE) else {
+        let _ = session.kill();
+        panic!("no answer to initialize: {}", said());
+    };
+    let answer: Value = serde_json::from_str(&line)
+        .unwrap_or_else(|error| panic!("not JSON on the wire ({error}): {line}"));
+    assert_eq!(answer["id"], 1, "{line}");
+    assert_eq!(
+        answer["result"]["serverInfo"]["name"], "perspicax",
+        "{line}"
+    );
+
     drop(asking);
     let status = exited(&mut session, PATIENCE);
     assert!(status.success(), "{status}");

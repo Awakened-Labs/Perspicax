@@ -31,6 +31,10 @@
 //! ([`stop_accessibility_bus`]). And a log of its own ([`log_path`],
 //! [`open_log`]), since its stderr goes wherever the display manager keeps
 //! such things.
+//!
+//! Under `--mcp`, the bus is asked which process serves it ([`bus_daemon`]),
+//! since a daemon given the agent's wire would pass it on to every service it
+//! starts.
 
 use std::{
     env,
@@ -256,6 +260,25 @@ pub async fn stop_accessibility_bus(connection: &Connection) -> Result<Option<u3
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     Ok(Some(launcher))
+}
+
+/// The bus daemon's own name on the bus it serves.
+const BUS: &str = "org.freedesktop.DBus";
+
+/// The process serving `connection`'s bus, as the bus itself says: the daemon
+/// every service it starts on request is a child of, and inherits its
+/// descriptors from (issue #52).
+///
+/// # Errors
+///
+/// When the bus will not say.
+pub async fn bus_daemon(connection: &Connection) -> Result<u32> {
+    DBusProxy::new(connection)
+        .await
+        .context("no word from the session bus")?
+        .get_connection_unix_process_id(WellKnownName::from_static_str_unchecked(BUS).into())
+        .await
+        .context("the session bus would not say which process serves it")
 }
 
 /// Where a session keeps its log: `$XDG_STATE_HOME/perspicax/perspicax.log`,

@@ -1,6 +1,7 @@
 //! The session bus is told where the session's displays are (issue #27), what
-//! it started for the session ends with it (H3), and a portal the keyring would
-//! hold up is started before anything asks for it (issue #36).
+//! it started for the session ends with it (H3), a portal the keyring would
+//! hold up is started before anything asks for it (issue #36), and it names the
+//! daemon that serves it (issue #52).
 //!
 //! Each test starts a `dbus-daemon` of its own, with a service directory the
 //! test writes, so what D-Bus starts on request is a script the test can read
@@ -550,6 +551,19 @@ fn the_accessibility_bus_is_stopped_with_the_daemon_it_runs() {
         eventually(|| !running(daemon)),
         "its daemon, {daemon}, is still running"
     );
+}
+
+/// Issue #52: asked which process serves it, the bus names its daemon, the
+/// process whose descriptors every service it starts inherits -- and so the
+/// one `--mcp` looks into for the agent's wire.
+#[test]
+#[ignore = "starts a dbus-daemon of its own"]
+fn the_bus_names_its_own_daemon() {
+    let bus = Bus::start(&[]);
+    let runtime = runtime();
+    let connection = bus.connect(&runtime);
+    let daemon = runtime.block_on(session::bus_daemon(&connection));
+    assert_eq!(daemon.expect("an answer"), bus.daemon.id());
 }
 
 /// Whether `pid` is a process that has not ended: a zombie has, and waits only

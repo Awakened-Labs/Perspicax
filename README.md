@@ -222,14 +222,39 @@ group, never by switching what they are looking at.
 **Nothing else is on that wire.** perspicax moves it off its own stdin and
 stdout before it starts anything, onto copies no program can inherit, and
 leaves `/dev/null` and its stderr in their place, so no program it starts --
-Xwayland and what the shell launches included -- can take the agent's requests
-or print a reply perspicax did not send. A program it launches, `--mcp` or
-not, reads nothing and prints to perspicax's stderr: a `--spawn` program's
-chatter (GStreamer's `Setting pipeline to PAUSED ...`, say) lands beside
-perspicax's own log rather than between the replies. So a client that pipes
-perspicax's stderr has to read it: what those programs print can fill the
-pipe, and perspicax's logging waits on it. A client that makes stderr the wire
-too (`2>&1`) gets the log in its stream, as it always has.
+Xwayland and what the shell launches included -- is given the wire, to take
+the agent's requests from or to print a reply perspicax did not send on. A
+program it launches, `--mcp` or not, reads nothing and prints to perspicax's
+stderr: a `--spawn` program's chatter (GStreamer's `Setting pipeline to PAUSED
+...`, say) lands beside perspicax's own log rather than between the replies.
+So a client that pipes perspicax's stderr has to read it: what those programs
+print can fill the pipe, and perspicax's logging waits on it.
+
+What perspicax cannot move is a copy of the wire somebody else was given
+before it ran, so it refuses to serve on one, before it starts anything:
+- **A stderr that is the wire too** (`2>&1`, or one file for both), since
+  every program perspicax starts prints there.
+- **A session bus given the wire.** `dbus-run-session -- perspicax --mcp`
+  gives it to the bus daemon, which gives it to every service it starts,
+  including one a program asks for by name. To run under a bus of its own,
+  give perspicax the wire alone, on fds 3 and 4, which `dbus-run-session` does
+  not pass on to its daemon:
+
+  ```sh
+  dbus-run-session -- sh -c 'exec perspicax --headless --mcp <&3 >&4 3<&- 4>&-' \
+      3<&0 4>&1 </dev/null >&2
+  ```
+
+  With named files for the wire, the inner shell can open them itself
+  instead: `sh -c 'exec perspicax --seat --mcp < mcp.in >> mcp.out'`. Or serve
+  the agent on a socket ([An agent inside the
+  session](#an-agent-inside-the-session)).
+
+A terminal never counts, so `perspicax --headless --mcp` typed in one is
+served, and neither does `/dev/null`. A bus that will not say which process
+serves it, or whose daemon perspicax cannot look into, is served with a
+warning in the log: a daemon given the wire was started beside perspicax, as
+its user, and answers.
 
 `window_list` lists the desk as well as the windows: a panel, a wallpaper or a
 menu is `kind: layer`, with the `layer` it stacks in and the
@@ -337,8 +362,9 @@ it — the marking is in the key, so it cannot be skimmed past, and the provenan
 is at the point of use rather than in a preamble a model has to have remembered.
 That is this project's injection defence, and it is a read-path property rather
 than an act-path gate. It holds because nothing but perspicax writes on the
-agent's wire: a program it started printing a line of JSON-RPC cannot pass it
-off as perspicax's own (see [What acting looks like](#what-acting-looks-like)).
+agent's wire, and perspicax refuses a wire something else was given first: a
+program it started printing a line of JSON-RPC cannot pass it off as
+perspicax's own (see [What acting looks like](#what-acting-looks-like)).
 
 **Consent is about the person, not the node.** Headless, there is no capability
 gate: perspicax is one actuator among several, an agent refused a click runs the
@@ -789,7 +815,9 @@ again if it crashes; a shell that refuses its config waits for the file to be
 saved again. A save that changes `[shell]` reaches it in place, without a
 restart. The tray needs a D-Bus session bus, and a text-console login has
 none: start the session under one, `dbus-run-session -- perspicax --seat`, or
-as `perspicax --session`, which starts one itself.
+as `perspicax --session`, which starts one itself. With `--mcp`, keep the
+agent's wire from that bus, as [What acting looks
+like](#what-acting-looks-like) shows.
 
 The session tells its bus what it is and where its displays are, so that a
 program D-Bus starts on request -- a keyring's unlock prompt, a notification

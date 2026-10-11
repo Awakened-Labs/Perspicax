@@ -43,7 +43,7 @@
 use std::{
     fs::File,
     io,
-    os::unix::net::UnixListener,
+    os::{fd::AsFd as _, unix::net::UnixListener},
     path::PathBuf,
     sync::{Arc, Mutex, mpsc},
     time::Duration,
@@ -148,6 +148,13 @@ struct Cli {
     /// replies, and no such program can read the agent's requests. A client
     /// that pipes stderr has to read it. Not with `--session`.
     ///
+    /// A wire something else was given first is refused before anything
+    /// starts: a stderr that is the wire too (`2>&1`), or a session bus
+    /// daemon holding it, as `dbus-run-session -- perspicax --mcp` leaves it,
+    /// to hand on to every service the bus starts. Pass perspicax the wire on
+    /// fds 3 and 4 inside `dbus-run-session` instead, as the README shows, or
+    /// use `--mcp-socket`.
+    ///
     /// Headless, the run ends when the client does: an agent-driven compositor
     /// with no agent left has nothing to host, and it exits non-zero if the
     /// agent interface failed rather than ended. On a seat the session is the
@@ -245,6 +252,21 @@ fn main() -> Result<()> {
         .then(Wire::take)
         .transpose()
         .context("could not keep stdin and stdout for the agent interface")?;
+    // And before the log, which is written to stderr: a stderr that is the wire
+    // too -- `2>&1`, or one file for both -- is where every program this starts
+    // prints, so any of them could print a reply perspicax did not send (#52).
+    if let Some(wire) = &wire
+        && wire
+            .shares(io::stderr().as_fd())
+            .context("could not tell where stderr goes")?
+    {
+        bail!(
+            "stderr is the agent's wire too, and every program perspicax starts prints to \
+             stderr: any of them could print a reply perspicax did not send. Give stderr a \
+             file or a pipe of its own, or serve the agent on a socket, with `--mcp-socket \
+             PATH` and `perspicax attach PATH` as its MCP server"
+        );
+    }
 
     // NEVER STDOUT. Under `--mcp` stdout is the JSON-RPC wire, and a single log
     // line written to it corrupts a frame -- which arrives at the client as a
@@ -350,6 +372,13 @@ fn run(cli: &Cli, wire: Option<Wire>) -> Result<()> {
         .transpose()?
         .unzip();
     let agent_env = session::agent_env(socket.as_ref().map(perspicax_mcp::Socket::path))?;
+
+    // Third, and before the registry, whose start makes the bus start the
+    // accessibility bus: a session bus holding the agent's wire would hand it
+    // to that, and to everything else it starts (issue #52).
+    if let Some(wire) = &wire {
+        refuse_a_bus_holding(wire)?;
+    }
 
     // Before anything is spawned, and in this order. A registry that arrives
     // after its clients is a registry GTK has already given up on.
@@ -540,6 +569,65 @@ fn enable_accessibility() -> Result<()> {
         .context("no runtime to enable accessibility with")?
         .block_on(perspicax_atspi::enable())
         .context("could not turn accessibility on for this session")
+}
+
+/// Refuse to serve the agent on a wire the session bus's daemon holds too
+/// (issue #52).
+///
+/// `dbus-run-session -- perspicax --mcp` gives its bus daemon the wire before
+/// this process runs, where [`Wire::take`] cannot reach it, and the daemon
+/// gives it to every service it starts: one a hosted program asks for by name,
+/// or writes a `.service` file for, could print a reply perspicax did not send.
+///
+/// Served all the same when there is no bus, or it cannot be told whether the
+/// daemon holds the wire. A daemon that does was started beside this process,
+/// as its user, and answers; one that will not say, or that this process cannot
+/// look into, is a bus somebody else runs, and a systemd user manager's prints
+/// to the journal.
+fn refuse_a_bus_holding(wire: &Wire) -> Result<()> {
+    let (pid, fd) = match bus_holding(wire) {
+        Ok(Some(held)) => held,
+        Ok(None) => return Ok(()),
+        Err(error) => {
+            tracing::warn!(
+                "{error:#}; serving the agent's wire without knowing whether the \
+                 session bus holds it too"
+            );
+            return Ok(());
+        }
+    };
+    let held = ["stdin", "stdout", "stderr"][usize::from(fd)];
+    bail!(
+        "the session bus's daemon (pid {pid}) holds the agent's wire as its {held}, as \
+         `dbus-run-session -- perspicax --mcp` leaves it, and every service the bus starts \
+         would hold it too: any of them could print a reply perspicax did not send. Give the \
+         wire to perspicax alone, on fds 3 and 4,\n\n    \
+         dbus-run-session -- sh -c 'exec perspicax --mcp … <&3 >&4 3<&- 4>&-' 3<&0 4>&1 \
+         </dev/null >&2\n\n\
+         or serve the agent on a socket, with `--mcp-socket PATH` and `perspicax attach PATH` \
+         as its MCP server"
+    )
+}
+
+/// The session bus daemon's pid and which of its descriptors 0, 1 and 2 is
+/// open on `wire`; `None` when there is no bus, or the daemon holds none of
+/// it. Briefly borrows a runtime to ask, as [`enable_accessibility`] does.
+fn bus_holding(wire: &Wire) -> Result<Option<(u32, u8)>> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("no runtime to ask the session bus with")?
+        .block_on(async {
+            let Ok(connection) = zbus::Connection::session().await else {
+                tracing::debug!("no session bus to hold the agent's wire");
+                return Ok(None);
+            };
+            let pid = session::bus_daemon(&connection).await?;
+            let fd = wire.held_by(pid).with_context(|| {
+                format!("could not look at what the session bus's daemon (pid {pid}) holds")
+            })?;
+            Ok(fd.map(|fd| (pid, fd)))
+        })
 }
 
 /// Stop the accessibility bus this session's own bus started, briefly
