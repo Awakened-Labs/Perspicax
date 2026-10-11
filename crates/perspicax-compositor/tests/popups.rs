@@ -24,12 +24,13 @@
 
 mod common;
 
-use common::{Desk, Session, WINDOW, configured, landed, menu_with_the_keyboard, until};
+use common::{Desk, Session, WINDOW, configured, heard, landed, menu_with_the_keyboard, until};
 use perspicax_compositor::Backend;
 use perspicax_index::{HostFacts, Layer as Level, SurfaceFacts, SurfaceKind};
 use perspicax_node::{Rect, SurfaceId};
-use smithay_client_toolkit::shell::{wlr_layer::Layer, xdg::XdgSurface as _};
-use wayland_client::{EventQueue, QueueHandle};
+use smithay_client_toolkit::shell::{WaylandSurface as _, wlr_layer::Layer, xdg::XdgSurface as _};
+use wayland_client::{EventQueue, Proxy as _, QueueHandle};
+use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::State;
 
 const MENU: u32 = 0xff33_6699;
 const HIGHLIT: u32 = 0xff99_6633;
@@ -429,6 +430,120 @@ fn a_window_whose_own_menu_holds_the_keyboard_is_still_told_it_is_active() {
         told.iter().all(|&active| active),
         "told it was not active while its menu was open: {told:?}"
     );
+
+    session.stop((desk, queue));
+}
+
+/// Issue #97: a menu's client closes it, as it does when an item is chosen,
+/// and smithay leaves the keyboard on the menu that is gone until the next
+/// key or motion. No window was in use meanwhile: a fullscreen video went
+/// under the panel, its frame grey and its task out, until the mouse moved.
+/// The window has the keyboard back at once.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_its_client_closes_gives_its_window_the_keyboard_back_at_once() {
+    let session = seated("popup-closed-hands-back");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    let ear = desk.bind_keyboard(&globals, &qh);
+    let (page, _) = settle(&session, &mut desk, &mut queue, &qh, "page");
+    let menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, page);
+    let before = session
+        .facts
+        .read()
+        .surface(page)
+        .expect("the window")
+        .damage_generation;
+
+    // An item chosen, and nothing more: no key, no motion.
+    drop(menu);
+    let window = desk.windows[0].wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&window)
+    });
+    session.wait_for(|facts| {
+        facts
+            .surface(page)
+            .is_some_and(|window| window.damage_generation > before)
+    });
+    queue.roundtrip(&mut desk).expect("the taskbar told");
+    assert!(
+        desk.task("page")
+            .is_some_and(|task| task.is(State::Activated)),
+        "the window's task went out as its menu closed"
+    );
+    let told = desk.activations_of(0);
+    assert!(
+        told.iter().all(|&active| active),
+        "told it was not active as its menu closed: {told:?}"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// Issue #97: a submenu its client closes gives the keyboard back to the
+/// menu it opened from, which is still open, and not past it to the window.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_submenu_its_client_closes_gives_the_keyboard_back_to_its_menu() {
+    let session = seated("popup-submenu-hands-back");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    let (page, _) = settle(&session, &mut desk, &mut queue, &qh, "page");
+    let menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, page);
+
+    // A submenu opens on an event of its own, the hover over its item, and
+    // smithay tells nested grabs apart by their serials: not the menu's.
+    let serial = desk.popup_serial.expect("the menu was configured");
+    let submenu = desk.open_menu(&qh, menu.xdg_surface(), (100, 10), (80, 60), serial);
+    let sub = submenu.wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&sub)
+    });
+
+    drop(submenu);
+    let held = menu.wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&held)
+    });
+    let told = desk.activations_of(0);
+    assert!(
+        told.iter().all(|&active| active),
+        "told it was not active while its menus were open: {told:?}"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// Issue #97: a menu that grabs, opened from a popup that does not -- a
+/// list, say -- gives the keyboard back to the window when its client closes
+/// it, where smithay's grab would give it at the next input. A popup without
+/// the grab never had the keyboard.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_opened_from_a_popup_without_the_grab_gives_the_keyboard_back_to_its_window() {
+    let session = seated("popup-ungrabbed-parent-hands-back");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    settle(&session, &mut desk, &mut queue, &qh, "page");
+    let window = desk.windows[0].wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&window)
+    });
+
+    let list = desk.open_popup(&qh, desk.windows[0].xdg_surface(), (40, 30), (120, 80));
+    configured(&mut desk, &mut queue, 1);
+    let serial = desk.popup_serial.expect("the list was configured");
+    let menu = desk.open_menu(&qh, list.xdg_surface(), (100, 10), (80, 60), serial);
+    let held = menu.wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&held)
+    });
+
+    drop(menu);
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&window)
+    });
 
     session.stop((desk, queue));
 }

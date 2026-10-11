@@ -322,6 +322,44 @@ fn a_fullscreen_window_whose_own_menu_is_open_stays_over_the_panel() {
     session.stop((desk, queue));
 }
 
+/// Issue #97: a video's menu its client closes -- an item chosen, Pause
+/// say -- left the keyboard on the menu that was gone until the mouse
+/// moved, and the panel over the video meanwhile. The video has it back at
+/// once, and stays over the panel.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_fullscreen_window_stays_over_the_panel_as_its_own_menu_closes() {
+    let (session, mut desk, mut queue, qh, ear) =
+        seated_video_under_a_panel("fullscreen-own-menu-closed");
+    fullscreen(&desk, "video");
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| corner(facts, "video") == Visibility::Visible);
+    let video = window(&facts, "video");
+    let menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, video);
+    let before = session
+        .facts
+        .read()
+        .surface(video)
+        .expect("the video")
+        .damage_generation;
+
+    // An item chosen, and nothing more: no key, no motion.
+    drop(menu);
+    queue.roundtrip(&mut desk).expect("closed");
+    let facts = session.wait_for(|facts| {
+        facts
+            .surface(video)
+            .is_some_and(|surface| surface.damage_generation > before)
+    });
+    assert_eq!(
+        corner(&facts, "video"),
+        Visibility::Visible,
+        "the panel came over the video as its menu closed"
+    );
+
+    session.stop((desk, queue));
+}
+
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn an_overlay_surface_stays_over_a_fullscreen_window() {

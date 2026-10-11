@@ -583,6 +583,9 @@ pub struct Desk {
     /// How many configures the popups this client opened have had. Nothing
     /// is drawn in reply: a test paints a popup itself, once it may.
     pub popups_configured: usize,
+    /// The serial of the last of them: one of the compositor's own, newer
+    /// than any the client heard before it.
+    pub popup_serial: Option<u32>,
 }
 
 impl Desk {
@@ -653,6 +656,7 @@ impl Desk {
             layers: Vec::new(),
             layers_drawn: 0,
             popups_configured: 0,
+            popup_serial: None,
         }
     }
 
@@ -1946,8 +1950,15 @@ impl LayerShellHandler for Desk {
 }
 
 impl PopupHandler for Desk {
-    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Popup, _: PopupConfigure) {
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &Popup,
+        configure: PopupConfigure,
+    ) {
         self.popups_configured += 1;
+        self.popup_serial = Some(configure.serial);
     }
 
     fn done(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Popup) {}

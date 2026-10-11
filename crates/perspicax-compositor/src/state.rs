@@ -524,8 +524,9 @@ impl Compositor {
             .map(std::borrow::Cow::into_owned)
     }
 
-    /// Give the keyboard to a surface that is not a window: a launcher, a
-    /// lock screen.
+    /// Give the keyboard to a surface as it is: a launcher, a lock screen,
+    /// or the menu or window a closed menu hung from. A window focused for
+    /// itself goes through [`Self::focus_surface`].
     pub(crate) fn focus_plain(&mut self, surface: WlSurface) {
         if let Some(keyboard) = self.keyboard.clone() {
             keyboard.set_focus(self, Some(surface.into()), SERIAL_COUNTER.next_serial());
@@ -1032,7 +1033,8 @@ impl XdgShellHandler for Compositor {
         }
     }
 
-    /// A menu has gone, and what it covered shows again where it hung: its
+    /// A menu has gone. If it held the keyboard, its window or the menu
+    /// below has it back. And what it covered shows again where it hung: its
     /// window's or panel's damage, as a menu's commit is. Nothing for a menu
     /// that showed nothing by then, one that took its picture away having
     /// been counted when it did.
@@ -1040,6 +1042,9 @@ impl XdgShellHandler for Compositor {
     /// Choosing an item that changes nothing else -- Copy -- closes the menu
     /// and nothing more, and without this its receipt would read `quiet`.
     fn popup_destroyed(&mut self, surface: PopupSurface) {
+        // First, and whatever it showed: a menu with nothing in it may hold
+        // the keyboard too.
+        self.hand_back_keyboard(&surface);
         let popup = PopupKind::Xdg(surface);
         if geometry::shown(popup.wl_surface()).is_none() {
             return;

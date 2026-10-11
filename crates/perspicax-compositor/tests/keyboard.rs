@@ -13,7 +13,7 @@
 
 mod common;
 
-use common::{Desk, Ear, Session, heard, until};
+use common::{Desk, Ear, Session, heard, menu_with_the_keyboard, until};
 use perspicax_compositor::{ActError, Backend, Command, Host, Keymap};
 use perspicax_index::{Action as Verb, HostFacts};
 use perspicax_node::SurfaceId;
@@ -175,6 +175,47 @@ fn under_window_switching_each_window_keeps_its_own_layout() {
         .roundtrip(&mut desk)
         .expect("and again, past an idle turn");
     assert_eq!(heard(&ear).group(), 1);
+
+    session.stop((desk, queue));
+}
+
+/// Issue #97: under `switching = "window"`, a window's own menu taking the
+/// keyboard is not the keyboard leaving the window: its keys are the
+/// window's. A layout switched while the menu is open is the window's, and
+/// stays when the menu closes, rather than being undone.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_layout_switched_in_a_windows_own_menu_stays_that_windows() {
+    let session = Session::start(
+        "keyboard-own-menu",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    session.command(Command::Keymap(keymap("us,ru")));
+    session.command(Command::LayoutSwitching(Switching::Window));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    desk.open_window(&qh, "typist", "typist");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    let window = id(&session.wait_for(|facts| !facts.surfaces().is_empty()));
+    until(&mut queue, &mut desk, |_| heard(&ear).layouts == 2);
+
+    let menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, window);
+    session.perform(Action::Layout(2));
+    until(&mut queue, &mut desk, |_| heard(&ear).group() == 1);
+    drop(menu);
+    let typist = desk.windows[0].wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&typist)
+    });
+    queue.roundtrip(&mut desk).expect("flush");
+    queue
+        .roundtrip(&mut desk)
+        .expect("and again, past an idle turn");
+    assert_eq!(
+        heard(&ear).group(),
+        1,
+        "the layout switched in the menu, kept"
+    );
 
     session.stop((desk, queue));
 }

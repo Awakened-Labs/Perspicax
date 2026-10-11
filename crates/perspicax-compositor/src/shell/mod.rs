@@ -46,7 +46,10 @@ use smithay::{
     output::Output,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
-        wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface},
+        wayland_server::{
+            Resource as _,
+            protocol::{wl_output::WlOutput, wl_surface::WlSurface},
+        },
     },
     utils::{Logical, Point, Rectangle, Serial, Size},
     wayland::{seat::WaylandFocus as _, shell::xdg::PopupSurface},
@@ -623,6 +626,40 @@ impl Compositor {
                 return;
             }
             pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+        }
+    }
+
+    /// A window's menu its client closed -- an item chosen -- gives the
+    /// keyboard back at once, where smithay's grab would give it at the next
+    /// key or motion: to the menu below, if that holds the grab too, or else
+    /// to the window. Until then it is on a surface that is gone and no
+    /// window is in use: a fullscreen video sat under the panel, its titlebar
+    /// grey and its task unlit, until the mouse moved.
+    ///
+    /// Only for a window's menu holding the keyboard, the kind
+    /// [`Self::grab_popup`] gives it to. One the compositor dismissed, with
+    /// a click outside, has given it back already.
+    pub(crate) fn hand_back_keyboard(&mut self, popup: &PopupSurface) {
+        let closed = popup.wl_surface();
+        if self.keyboard_focus().as_ref() != Some(closed) {
+            return;
+        }
+        let Some(window) = find_popup_root_surface(&PopupKind::Xdg(popup.clone()))
+            .ok()
+            .filter(|root| self.window_for(root).is_some())
+        else {
+            return;
+        };
+        // The grab lets the keyboard go only where it would itself: the menu
+        // below when that is the one it holds, the window when it holds none
+        // still open.
+        for to in popup.get_parent_surface().into_iter().chain([window]) {
+            if self.keyboard_focus().as_ref() != Some(closed) {
+                return;
+            }
+            if to.is_alive() {
+                self.focus_plain(to);
+            }
         }
     }
 
