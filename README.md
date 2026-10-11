@@ -372,9 +372,12 @@ command instead, and every client is on a socket the agent set up. On `--seat`
 the question has two answers, because the person launched most of what is on
 screen. There an agent may act only on what perspicax itself spawned
 (`Refusal::NoCapability` otherwise), and not at all while the person is using the
-keyboard or pointer: an act in the middle of their typing would race it. Typing
-only into a window that holds the keyboard is what keeps an agent's keys out of
-the person's terminal while it acts on a window it spawned. A window with no
+keyboard or pointer, or has a mouse button down, however long they hold it
+still: an act in the middle of their typing would race it, and one in the middle
+of their drag would carry the window off to where the agent aimed and end the
+drag under their hand. Typing only into a window that holds the keyboard is
+what keeps an agent's keys out of the person's terminal while it acts on a
+window it spawned. A window with no
 accessibility tree has no node to name, so it cannot be typed into yet
 ([#38](https://github.com/Awakened-Labs/Perspicax/issues/38)).
 
@@ -1313,7 +1316,9 @@ Three things to know before binding one:
 A workspace binding acts on the monitor under the pointer, and a window binding
 on the window clicked, which the click has focused. Nothing is bound at the
 lock screen. An agent's clicks and scrolls never set a binding off: they go
-straight to the window or surface the agent named.
+straight to the window or surface the agent named. Nor does an agent act while
+a button is down: a move, a resize or a selection held still is still yours,
+and the agent waits until you let go.
 
 ### A game holding the pointer
 

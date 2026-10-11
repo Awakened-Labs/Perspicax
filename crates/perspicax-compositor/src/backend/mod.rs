@@ -559,6 +559,10 @@ impl Compositor {
             crate::Command::Click { at, button, mods } => {
                 self.stand_in_click(*at, *button, *mods);
             }
+            crate::Command::Press { at, button, mods } => {
+                self.stand_in_press(*at, *button, *mods);
+            }
+            crate::Command::Release { button } => self.stand_in_release(*button),
             crate::Command::Scroll { at, v120, mods } => {
                 self.stand_in_scroll(*at, *v120, *mods);
             }

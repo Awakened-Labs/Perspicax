@@ -75,11 +75,14 @@ pub enum ActError {
     /// reporting success is the failure an agent cannot detect.
     #[error("no layout of this keyboard produces {0:?}")]
     Untypeable(char),
-    /// The person at this seat used the keyboard or pointer moments ago.
+    /// The person at this seat used the keyboard or pointer moments ago, or
+    /// has a mouse button down, however long they have held it still.
     /// Synthetic input now would race theirs: a `Focus` would pull the
     /// keyboard out from under their typing, and a click would jump the
-    /// pointer they are holding. Try again once they pause. Never produced
-    /// headless, where nobody sits at the seat.
+    /// pointer they are holding -- in the middle of a drag, carry the window
+    /// off to where it aimed and end the drag under their hand (#73). Try
+    /// again once they pause and let go. Headless keeps no clock of the
+    /// person, so there only a test's [`crate::Command::Press`] produces it.
     #[error("the person at this seat is using it; try again when they pause")]
     PersonActive,
     /// The session is locked. The person has walked away, and nothing acts on

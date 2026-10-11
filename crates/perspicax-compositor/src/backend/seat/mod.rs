@@ -1029,6 +1029,11 @@ fn vblank(state: &mut Compositor, crtc: crtc::Handle) {
 
 /// Another VT took the seat. Touch no device until it comes back.
 fn pause(state: &mut Compositor) {
+    // The person's hand goes with them. libinput lets go of their buttons as
+    // it suspends, but nothing reads that until we are back, and an agent
+    // must not be refused for as long as they are away over a button they
+    // let go of there.
+    state.person_buttons.clear();
     let Running::Seat(session) = &mut state.backend else {
         return;
     };

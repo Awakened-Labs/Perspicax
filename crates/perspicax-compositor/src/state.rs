@@ -98,7 +98,8 @@ const DAMAGE_HISTORY: usize = 256;
 /// How long after the person's last key or pointer event an agent's act is
 /// refused as racing them. Long enough to cover the gap between keystrokes of
 /// someone typing steadily, short enough that an agent waiting for a pause is
-/// not waiting long.
+/// not waiting long. A button held down is not a pause, however still the
+/// hand holding it: see [`Compositor::person_is_active`].
 const PERSON_QUIET: Duration = Duration::from_millis(1500);
 
 /// Everything this compositor knows.
@@ -196,6 +197,12 @@ pub struct Compositor {
     /// `None` headless, where nobody is at the seat, and so never a reason to
     /// refuse an agent there.
     person_at: Option<Instant>,
+    /// The pointer buttons the person at the seat has down, by Linux code: a
+    /// drag, a resize or a selection under way. Written by the seat's
+    /// libinput and by a test's stand-ins for a hand, never by an agent,
+    /// whose presses go straight to the pointer and come up in the same
+    /// turn.
+    pub(crate) person_buttons: Vec<u32>,
     /// What the focused client asked the pointer to look like. Only the seat
     /// draws it; headless records it and nothing reads it.
     pub(crate) cursor: CursorImageStatus,
@@ -365,6 +372,7 @@ impl Compositor {
             facts,
             consent,
             person_at: None,
+            person_buttons: Vec::new(),
             cursor: CursorImageStatus::default_named(),
             generation: 0,
             next_surface: 0,
@@ -606,9 +614,24 @@ impl Compositor {
         }
     }
 
-    /// Whether an agent acting now would race the person at the seat.
+    /// Whether an agent acting now would race the person at the seat: they
+    /// used it moments ago, or they have a button down. A drag held still is
+    /// still a drag, and an agent's click in the middle of it would carry the
+    /// window off to where the agent aimed and end the drag under their hand
+    /// (#73).
     pub(crate) fn person_is_active(&self) -> bool {
-        self.person_at.is_some_and(|at| at.elapsed() < PERSON_QUIET)
+        !self.person_buttons.is_empty()
+            || self.person_at.is_some_and(|at| at.elapsed() < PERSON_QUIET)
+    }
+
+    /// A button of the person's went down or came up: `down` is whether it
+    /// is down now.
+    pub(crate) fn person_button(&mut self, code: u32, down: bool) {
+        if !down {
+            self.person_buttons.retain(|&button| button != code);
+        } else if !self.person_buttons.contains(&code) {
+            self.person_buttons.push(code);
+        }
     }
 
     /// Give a surface keyboard focus, and remember when.

@@ -535,6 +535,9 @@ pub struct Desk {
     /// Every button the pointer pressed (`true`) or let go (`false`) on one
     /// of our surfaces, by Linux code, in order.
     pub buttons: Vec<(u32, bool)>,
+    /// The serial of the last press on one of our surfaces: what a move or
+    /// a resize has to name to be honoured.
+    pub pressed: Option<u32>,
     /// How many scroll events the pointer brought one of our surfaces.
     pub scrolls: usize,
     /// Where the pointer moved to on one of our surfaces, in its own
@@ -625,6 +628,7 @@ impl Desk {
             entered: None,
             pointed: None,
             buttons: Vec::new(),
+            pressed: None,
             scrolls: 0,
             motions: Vec::new(),
             relative_motions: Vec::new(),
@@ -1740,10 +1744,18 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
                 desk.entered = None;
                 desk.pointed = None;
             }
-            wl_pointer::Event::Button { button, state, .. } => desk.buttons.push((
+            wl_pointer::Event::Button {
+                serial,
                 button,
-                state == WEnum::Value(wl_pointer::ButtonState::Pressed),
-            )),
+                state,
+                ..
+            } => {
+                let pressed = state == WEnum::Value(wl_pointer::ButtonState::Pressed);
+                if pressed {
+                    desk.pressed = Some(serial);
+                }
+                desk.buttons.push((button, pressed));
+            }
             wl_pointer::Event::Axis { .. } => desk.scrolls += 1,
             wl_pointer::Event::Motion {
                 surface_x,

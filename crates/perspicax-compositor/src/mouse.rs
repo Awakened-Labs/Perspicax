@@ -6,9 +6,10 @@
 //! keeps for itself what only a seat does with a press: the focus policy,
 //! the frame's own buttons and edges, dragging tabs and windows, and
 //! flipping workspaces with the wheel. Headless comes here from a test,
-//! through [`crate::Command::Click`] and [`crate::Command::Scroll`], which
-//! stand in for a person's hand as [`crate::Command::Perform`] stands in for
-//! their keys.
+//! through [`crate::Command::Click`] -- or a [`crate::Command::Press`] held
+//! down until its [`crate::Command::Release`] -- and
+//! [`crate::Command::Scroll`], which stand in for a person's hand as
+//! [`crate::Command::Perform`] stands in for their keys.
 //!
 //! Both move the pointer the same way, through [`Compositor::travel`]: kept
 //! on the outputs, given to what is under it, and the device's own motion
@@ -279,28 +280,61 @@ impl Compositor {
 
     /// A person's click, for a test: see [`crate::Command::Click`].
     pub(crate) fn stand_in_click(&mut self, at: (i32, i32), button: Button, mods: Mods) {
+        self.stand_in_press(at, button, mods);
+        self.stand_in_release(button);
+    }
+
+    /// A person's button going down and staying down, for a test: see
+    /// [`crate::Command::Press`].
+    pub(crate) fn stand_in_press(&mut self, at: (i32, i32), button: Button, mods: Mods) {
         let Some(Pointed { pointer, at, hit }) = self.stand_in_at(at) else {
             return;
         };
         let code = button.code();
-        for state in [ButtonState::Pressed, ButtonState::Released] {
-            let time = self.now_ms();
-            let taken = match state {
-                ButtonState::Pressed => self.bound_press(hit.as_ref(), at, code, mods, time),
-                ButtonState::Released => self.bound_release(code),
-            };
-            if !taken {
-                let serial = SERIAL_COUNTER.next_serial();
-                let event = ButtonEvent {
-                    serial,
-                    time,
-                    button: code,
-                    state,
-                };
-                pointer.button(self, &event);
-                pointer.frame(self);
-            }
+        // Down whoever takes it, as on a seat. Not `person_used_seat`:
+        // headless keeps no clock of the person, so a test's agent is never
+        // refused for a hand that has stopped.
+        self.person_button(code, true);
+        let time = self.now_ms();
+        if !self.bound_press(hit.as_ref(), at, code, mods, time) {
+            self.stand_in_button(&pointer, code, ButtonState::Pressed, time);
         }
+    }
+
+    /// A person's button coming back up where the pointer is, for a test:
+    /// see [`crate::Command::Release`].
+    pub(crate) fn stand_in_release(&mut self, button: Button) {
+        if !self.can_stand_in() {
+            return;
+        }
+        let Some(pointer) = self.pointer.clone() else {
+            return;
+        };
+        let code = button.code();
+        self.person_button(code, false);
+        let time = self.now_ms();
+        if !self.bound_release(code) {
+            self.stand_in_button(&pointer, code, ButtonState::Released, time);
+        }
+    }
+
+    /// A stand-in's button event no binding took, to whatever has the
+    /// pointer: a grab, or the client under it.
+    fn stand_in_button(
+        &mut self,
+        pointer: &PointerHandle<Self>,
+        code: u32,
+        state: ButtonState,
+        time: u32,
+    ) {
+        let event = ButtonEvent {
+            serial: SERIAL_COUNTER.next_serial(),
+            time,
+            button: code,
+            state,
+        };
+        pointer.button(self, &event);
+        pointer.frame(self);
     }
 
     /// A person's mouse moving by `by`, for a test: see
