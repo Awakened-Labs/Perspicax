@@ -331,9 +331,16 @@ impl<W: Copy + PartialEq, O: Clone + PartialEq> Workspaces<W, O> {
     /// the person who moved it. In spanning mode nothing changes: every
     /// monitor is showing the same workspace already.
     pub fn moved_to(&mut self, window: W, output: &O) {
-        if self.mode == Mode::PerOutput
-            && let Some(Home::On(_)) = self.home(window)
-        {
+        if self.mode == Mode::PerOutput {
+            self.hold(window, output);
+        }
+    }
+
+    /// A window is in the person's hand, over `output`: it is on whatever
+    /// workspace that monitor is showing, so it goes wherever they go. A
+    /// sticky window is on every workspace already, and stays so.
+    pub fn hold(&mut self, window: W, output: &O) {
+        if let Some(Home::On(_)) = self.home(window) {
             self.set(window, Home::On(self.current(output)));
         }
     }
@@ -559,6 +566,38 @@ mod tests {
         desk.add(1, &"DP-1");
         desk.moved_to(1, &"HDMI-A-1");
         assert_eq!(desk.home(1), Some(Home::On(Cell(0))));
+    }
+
+    #[test]
+    fn a_window_in_hand_is_on_whatever_its_monitor_shows() {
+        let mut desk = spanning();
+        desk.add(1, &"DP-1");
+        desk.add(2, &"DP-1");
+        desk.go_to(&"DP-1", Cell(3));
+        desk.hold(1, &"DP-1");
+        assert_eq!(desk.home(1), Some(Home::On(Cell(3))));
+        assert!(desk.shows(1, &"DP-1"));
+        assert_eq!(desk.home(2), Some(Home::On(Cell(0))), "left behind");
+    }
+
+    #[test]
+    fn per_output_a_window_in_hand_is_on_the_monitor_under_it() {
+        let mut desk = per_output();
+        desk.add(1, &"DP-1");
+        desk.switch(&"HDMI-A-1", Direction::Down);
+        desk.hold(1, &"HDMI-A-1");
+        assert_eq!(desk.home(1), Some(Home::On(Cell(2))));
+        assert_eq!(desk.current(&"DP-1"), Cell(0), "untouched");
+    }
+
+    #[test]
+    fn a_sticky_window_in_hand_stays_sticky() {
+        let mut desk = spanning();
+        desk.add(1, &"DP-1");
+        desk.toggle_sticky(1, &"DP-1");
+        desk.switch(&"DP-1", Direction::Right);
+        desk.hold(1, &"DP-1");
+        assert_eq!(desk.home(1), Some(Home::Sticky));
     }
 
     #[test]

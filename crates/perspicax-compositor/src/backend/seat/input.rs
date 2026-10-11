@@ -553,8 +553,8 @@ fn rest_at_edge(state: &mut Compositor, at: Point<f64, Logical>) -> Option<Point
         return None;
     };
     let flipping = session.settings.flipping;
-    let carrying = state.dragging.clone();
-    let edge = if flipping.edge_flips(resting(state, at, carrying.is_some())) {
+    let carrying = state.dragging.is_some();
+    let edge = if flipping.edge_flips(resting(state, at, carrying)) {
         edge_at((at.x, at.y), &state.output_rects())
     } else {
         None
@@ -568,7 +568,7 @@ fn rest_at_edge(state: &mut Compositor, at: Point<f64, Logical>) -> Option<Point
     let direction = flip?;
 
     let output = state.space.output_under(at).next()?.clone();
-    if !state.flip(&output.name(), direction, carrying.as_ref()) {
+    if !state.flip(&output.name(), direction) {
         return None;
     }
     // The pointer is about to come round to the far side of the desk: a
