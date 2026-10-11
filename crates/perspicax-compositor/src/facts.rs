@@ -200,8 +200,10 @@ impl Compositor {
     /// already moved.
     pub(crate) fn publish_facts(&mut self) {
         // Every change a window's fullscreen state can come from ends here,
-        // so this is where it is settled whether one covers the panels.
-        self.stack_fullscreen(self.focused_surface());
+        // so this is where it is settled whether one covers the panels: the
+        // window in use, through any menu of its own that has the keyboard.
+        let in_use = self.window_in_use();
+        self.stack_fullscreen(in_use);
         self.generation += 1;
         let generation = self.generation;
 
@@ -231,7 +233,6 @@ impl Compositor {
             .partition(|window| crate::shell::covers_panels(window));
         // How see-through each window on screen is drawn, for an agent
         // puzzled by a picture. Never judged by: see `drawn_opacity`.
-        let in_use = self.window_in_use();
         let window = |window: &crate::framed::Framed| {
             let mut facts = self.grouped(window, self.facts_for(window)?);
             if facts.mapped {

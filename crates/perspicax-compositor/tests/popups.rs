@@ -24,16 +24,12 @@
 
 mod common;
 
-use common::{Desk, Ear, Session, WINDOW, heard, until};
+use common::{Desk, Session, WINDOW, configured, landed, menu_with_the_keyboard, until};
 use perspicax_compositor::Backend;
 use perspicax_index::{HostFacts, Layer as Level, SurfaceFacts, SurfaceKind};
 use perspicax_node::{Rect, SurfaceId};
-use smithay_client_toolkit::shell::{
-    WaylandSurface as _,
-    wlr_layer::Layer,
-    xdg::{XdgSurface as _, popup::Popup},
-};
-use wayland_client::{EventQueue, Proxy as _, QueueHandle};
+use smithay_client_toolkit::shell::{wlr_layer::Layer, xdg::XdgSurface as _};
+use wayland_client::{EventQueue, QueueHandle};
 
 const MENU: u32 = 0xff33_6699;
 const HIGHLIT: u32 = 0xff99_6633;
@@ -52,17 +48,6 @@ fn titled<'a>(facts: &'a HostFacts, title: &str) -> Option<&'a SurfaceFacts> {
         .surfaces()
         .iter()
         .find(|surface| surface.title.as_deref() == Some(title))
-}
-
-/// The rectangles of the newest frame of damage, in the surface's own
-/// coordinates.
-fn newest(surface: &SurfaceFacts) -> Vec<Rect> {
-    surface
-        .damage
-        .iter()
-        .filter(|(generation, _)| *generation == surface.damage_generation)
-        .map(|(_, region)| *region)
-        .collect()
 }
 
 /// Wait until the window called `title` has drawn and the facts say so, and
@@ -91,73 +76,6 @@ fn settle(
 ) -> (SurfaceId, u64) {
     desk.open_window(qh, title, title);
     settled(session, desk, queue, title)
-}
-
-/// Once the compositor has taken in everything sent so far, wait until
-/// `id`'s newest frame of damage is exactly `regions`.
-fn landed(
-    session: &Session,
-    desk: &mut Desk,
-    queue: &mut EventQueue<Desk>,
-    id: SurfaceId,
-    regions: &[Rect],
-) -> SurfaceFacts {
-    queue.roundtrip(desk).expect("round trip");
-    let facts = session.wait_for(|facts| facts.surface(id).is_some_and(|s| newest(s) == regions));
-    facts.surface(id).expect("waited for").clone()
-}
-
-/// Wait until this client's popups have had `count` configures between
-/// them, so the newest may draw.
-fn configured(desk: &mut Desk, queue: &mut EventQueue<Desk>, count: usize) {
-    until(queue, desk, |desk| desk.popups_configured == count);
-}
-
-/// Where [`menu`] opens its menu, in its window: the window's damage once
-/// the menu has drawn.
-const MENU_AREA: Rect = Rect {
-    x0: 40.0,
-    y0: 30.0,
-    x1: 160.0,
-    y1: 110.0,
-};
-
-/// Once the first window, `page`, holds the keyboard, open a menu of it that
-/// takes the keyboard, as a right-click does, and draw it. Returns once the
-/// keyboard is in the menu and what the menu drew has been published: by
-/// then the window has been told whatever the menu taking the keyboard
-/// changed for it, and the facts say it too.
-fn menu(
-    session: &Session,
-    desk: &mut Desk,
-    queue: &mut EventQueue<Desk>,
-    qh: &QueueHandle<Desk>,
-    ear: &Ear,
-    page: SurfaceId,
-) -> Popup {
-    let window = desk.windows[0].wl_surface().id();
-    until(queue, desk, |_| {
-        heard(ear).entered.as_ref() == Some(&window)
-    });
-    let serial = heard(ear).enter_serial.expect("entered");
-    let menu = desk.open_menu(
-        qh,
-        desk.windows[0].xdg_surface(),
-        (40, 30),
-        (120, 80),
-        serial,
-    );
-    // In the menu: the grab took, and the window's configure, if any, was
-    // sent with it.
-    let grabbed = menu.wl_surface().id();
-    until(queue, desk, |_| {
-        heard(ear).entered.as_ref() == Some(&grabbed)
-    });
-    configured(desk, queue, 1);
-    desk.paint(menu.wl_surface(), (120, 80), MENU);
-    menu.wl_surface().commit();
-    landed(session, desk, queue, page, &[MENU_AREA]);
-    menu
 }
 
 #[test]
@@ -505,7 +423,7 @@ fn a_window_whose_own_menu_holds_the_keyboard_is_still_told_it_is_active() {
     let (page, _) = settle(&session, &mut desk, &mut queue, &qh, "page");
     assert_eq!(desk.activations_of(0), [true], "active from the start");
 
-    let _menu = menu(&session, &mut desk, &mut queue, &qh, &ear, page);
+    let _menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, page);
     let told = desk.activations_of(0);
     assert!(
         told.iter().all(|&active| active),

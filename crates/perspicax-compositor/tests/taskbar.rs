@@ -2,8 +2,8 @@
 //! `wlr-foreign-toplevel-management-unstable-v1`, as waybar's `wlr/taskbar`
 //! speaks it.
 //!
-//! The taskbar sees which window has the keyboard, follows it when it moves,
-//! and can move it: activating a window gives it the keyboard, restoring it
+//! The taskbar sees which window has the keyboard, or whose own menu has it,
+//! follows it when it moves, and can move it: activating a window gives it the keyboard, restoring it
 //! first if it was minimized, and activating a tab behind another brings it
 //! forward in its group's place. Closing asks the window's client. While the
 //! session is locked, the taskbar can do none of it.
@@ -13,7 +13,7 @@
 
 mod common;
 
-use common::{Session, until};
+use common::{Session, menu_with_the_keyboard, until};
 use perspicax_compositor::{Backend, Command, Virtual};
 use perspicax_index::{HostFacts, SurfaceFacts};
 use perspicax_policy::{Access, Action, Program, Protocol, Rule, Shape};
@@ -68,6 +68,38 @@ fn the_taskbar_follows_the_keyboard_and_activating_moves_it() {
                 .task("second")
                 .is_some_and(|task| !task.is(State::Activated))
     });
+
+    session.stop((desk, queue));
+}
+
+/// Issue #97: a window's own menu takes the keyboard, and the taskbar was
+/// told no window was active for as long as the menu was open. The menu's
+/// keys are the window's, so the window stays the active task.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_whose_own_menu_is_open_stays_the_active_task() {
+    let session = Session::start(
+        "taskbar-own-menu",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    let ear = desk.bind_keyboard(&globals, &qh);
+    desk.open_window(&qh, "page", "org.example.Page");
+    until(&mut queue, &mut desk, |desk| {
+        desk.task("page")
+            .is_some_and(|task| task.is(State::Activated))
+    });
+    let facts = session.wait_for(|facts| window(facts, "page").is_some());
+    let page = window(&facts, "page").expect("waited for").id;
+
+    let _menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, page);
+    queue.roundtrip(&mut desk).expect("the taskbar told");
+    assert!(
+        desk.task("page")
+            .is_some_and(|task| task.is(State::Activated)),
+        "the taskbar was told the window was not active while its menu was open"
+    );
 
     session.stop((desk, queue));
 }

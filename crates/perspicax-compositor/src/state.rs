@@ -734,7 +734,8 @@ impl Compositor {
     }
 
     /// The window the keys go to right now, through any menu it opened: the
-    /// one that looks in use, its frame lit and drawn undimmed.
+    /// one that looks in use, its frame lit and drawn undimmed, the taskbar's
+    /// active task, and over the panels if it is fullscreen.
     ///
     /// Wider than [`Self::focused_surface`], which a window answers `None`
     /// for while its own menu holds the keyboard. Narrower than

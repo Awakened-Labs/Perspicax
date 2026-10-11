@@ -4,9 +4,11 @@
 //! fullscreen video under a taskbar is the result. Plasma and Windows answer
 //! it the same way, and so does this: the fullscreen window the person is
 //! using covers the panels, and one they have left goes back under them, so
-//! the panel shows again while they work in another window or open a menu.
-//! `overlay` surfaces stay over everything, a fullscreen window included:
-//! a launcher or a menu opened over a video is still seen.
+//! the panel shows again while they work in another window or open the
+//! start menu. A menu of the window's own, a video's right-click menu, does
+//! not leave it: its keys are the window's, and the window stays over the
+//! panels. `overlay` surfaces stay over everything, a fullscreen window
+//! included: a launcher or a menu opened over a video is still seen.
 //!
 //! The rule is applied in one place, [`Compositor::stack_fullscreen`], which
 //! runs whenever the keyboard moves and before every publication of the
@@ -136,12 +138,13 @@ fn is_fullscreen(window: &Framed) -> bool {
 }
 
 impl Compositor {
-    /// Raise `focused`, the window with the keyboard, over the panels if it
-    /// is fullscreen, and put every other window back among the windows.
+    /// Raise `focused`, the window in use -- the one with the keyboard, or
+    /// whose own menu has it -- over the panels if it is fullscreen, and put
+    /// every other window back among the windows.
     ///
-    /// Told which window has the keyboard rather than asking: while the seat
-    /// is reporting a change of focus it holds the keyboard, and asking it
-    /// then would wait on itself.
+    /// Told which window is in use rather than asking: while the seat is
+    /// reporting a change of focus it holds the keyboard, and asking it then
+    /// would wait on itself.
     pub(crate) fn stack_fullscreen(&mut self, focused: Option<SurfaceId>) {
         let mut changed = false;
         for window in self.space.elements() {

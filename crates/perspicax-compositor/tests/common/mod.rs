@@ -18,7 +18,8 @@ use std::{
 };
 
 use perspicax_compositor::{Backend, Command, Config, Facts, Requests, Stop};
-use perspicax_index::HostFacts;
+use perspicax_index::{HostFacts, SurfaceFacts};
+use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::Action;
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 use smithay::input::keyboard::{Keycode, xkb};
@@ -224,6 +225,87 @@ pub fn wait_for(facts: &Facts, ready: impl Fn(&HostFacts) -> bool) -> HostFacts 
         assert!(Instant::now() < deadline, "never published: {published:?}");
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// The rectangles of the newest frame of damage, in the surface's own
+/// coordinates.
+pub fn newest(surface: &SurfaceFacts) -> Vec<Rect> {
+    surface
+        .damage
+        .iter()
+        .filter(|(generation, _)| *generation == surface.damage_generation)
+        .map(|(_, region)| *region)
+        .collect()
+}
+
+/// Once the compositor has taken in everything sent so far, wait until
+/// `id`'s newest frame of damage is exactly `regions`.
+pub fn landed(
+    session: &Session,
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    id: SurfaceId,
+    regions: &[Rect],
+) -> SurfaceFacts {
+    queue.roundtrip(desk).expect("round trip");
+    let facts = session.wait_for(|facts| facts.surface(id).is_some_and(|s| newest(s) == regions));
+    facts.surface(id).expect("waited for").clone()
+}
+
+/// Wait until this client's popups have had `count` configures between
+/// them, so the newest may draw.
+pub fn configured(desk: &mut Desk, queue: &mut EventQueue<Desk>, count: usize) {
+    until(queue, desk, |desk| desk.popups_configured == count);
+}
+
+/// Where [`menu_with_the_keyboard`] opens its menu, in its window: the
+/// window's damage once the menu has drawn.
+pub const MENU_AREA: Rect = Rect {
+    x0: 40.0,
+    y0: 30.0,
+    x1: 160.0,
+    y1: 110.0,
+};
+
+/// Once this client's first window, `page` to the facts, holds the keyboard
+/// `ear` hears, open a menu of it that takes the keyboard, as a right-click
+/// does, and draw it: the client's first popup, with a person at the seat,
+/// where alone a menu takes the keyboard. Returns once the keyboard is in
+/// the menu -- the grab took -- and what the menu drew has been published:
+/// by then the window and the taskbars have been told whatever the menu
+/// taking the keyboard changed, and the facts say it too.
+pub fn menu_with_the_keyboard(
+    session: &Session,
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    qh: &QueueHandle<Desk>,
+    ear: &Ear,
+    page: SurfaceId,
+) -> Popup {
+    const MENU: u32 = 0xff33_6699;
+    let window = desk.windows[0].wl_surface().id();
+    until(queue, desk, |_| {
+        heard(ear).entered.as_ref() == Some(&window)
+    });
+    let serial = heard(ear).enter_serial.expect("entered");
+    let menu = desk.open_menu(
+        qh,
+        desk.windows[0].xdg_surface(),
+        (40, 30),
+        (120, 80),
+        serial,
+    );
+    // In the menu: the grab took, and the window's configure, if any, was
+    // sent with it.
+    let grabbed = menu.wl_surface().id();
+    until(queue, desk, |_| {
+        heard(ear).entered.as_ref() == Some(&grabbed)
+    });
+    configured(desk, queue, 1);
+    desk.paint(menu.wl_surface(), (120, 80), MENU);
+    menu.wl_surface().commit();
+    landed(session, desk, queue, page, &[MENU_AREA]);
+    menu
 }
 
 /// Dispatch until `done`, or fail after five seconds, then one more round
