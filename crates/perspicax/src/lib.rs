@@ -17,3 +17,4 @@ pub mod keep;
 pub mod observe;
 pub mod portal;
 pub mod session;
+pub mod wire;
