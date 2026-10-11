@@ -5,9 +5,11 @@
 //! [`Switching::Global`], the default, the layout is the session's, and
 //! switching it switches it everywhere.
 //!
-//! Only windows keep a layout. A panel, a menu or the lock screen taking the
-//! keyboard changes nothing, and the window the keyboard comes back to is
-//! typed in its own layout again, whatever was used in between.
+//! Only windows keep a layout. A panel, the start menu or the lock screen
+//! taking the keyboard changes nothing, and the window the keyboard comes
+//! back to is typed in its own layout again, whatever was used in between. A
+//! window's own menu is the window's: the compositor names the window, not
+//! `None`, while the menu has the keyboard.
 
 /// Whose the layout in use is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -122,8 +124,8 @@ mod tests {
     fn a_panel_or_menu_taking_the_keyboard_changes_nothing() {
         let mut memory = per_window();
         memory.focus(Some(1), 0);
-        // Window 1 in the second layout; a menu takes the keyboard, and is
-        // typed in the first.
+        // Window 1 in the second layout; the start menu takes the keyboard,
+        // and is typed in the first.
         assert_eq!(memory.focus(None, 1), None);
         assert_eq!(
             memory.focus(Some(1), 0),
