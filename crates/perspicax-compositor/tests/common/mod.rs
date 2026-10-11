@@ -9,8 +9,10 @@
 
 use std::{
     collections::HashMap,
-    os::unix::net::UnixStream,
+    fs::File,
+    os::unix::{fs::FileExt as _, net::UnixStream},
     path::PathBuf,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     thread,
     time::{Duration, Instant},
 };
@@ -19,6 +21,7 @@ use perspicax_compositor::{Backend, Command, Config, Facts, Requests, Stop};
 use perspicax_index::HostFacts;
 use perspicax_policy::Action;
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
+use smithay::input::keyboard::{Keycode, xkb};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
     delegate_compositor, delegate_layer, delegate_output, delegate_pointer_constraints,
@@ -51,7 +54,7 @@ use wayland_client::{
     backend::ObjectId,
     event_created_child,
     globals::{GlobalList, registry_queue_init},
-    protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_subsurface, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_subsurface, wl_surface},
 };
 use wayland_protocols::ext::{
     foreign_toplevel_list::v1::client::{
@@ -347,6 +350,63 @@ pub enum Told {
     Reconfigure,
 }
 
+/// What the client's keyboard was told, kept as it arrived. xkb's own types
+/// stay on the test's side of the lock: they are not `Send`.
+#[derive(Default)]
+pub struct Heard {
+    /// The last keymap, as text.
+    pub keymap: Option<String>,
+    /// How many layouts it has.
+    pub layouts: u32,
+    /// The modifiers and group as last sent: depressed, latched, locked,
+    /// group.
+    pub modifiers: [u32; 4],
+    /// Each key pressed since the last keymap, with the modifiers in force.
+    pub keys: Vec<(u32, [u32; 4])>,
+    /// The surface the keyboard last entered, until it left.
+    pub entered: Option<ObjectId>,
+    /// The serial of the keyboard's last arrival: one a menu's grab can name.
+    pub enter_serial: Option<u32>,
+}
+
+/// A keyboard's [`Heard`], shared with the dispatch that fills it.
+pub type Ear = Arc<Mutex<Heard>>;
+
+pub fn heard(ear: &Ear) -> MutexGuard<'_, Heard> {
+    ear.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Heard {
+    pub fn group(&self) -> u32 {
+        self.modifiers[3]
+    }
+
+    /// The text the keys spell, read with the keymap and modifiers the
+    /// client was sent.
+    pub fn typed(&self) -> String {
+        let Some(text) = self.keymap.clone() else {
+            return String::new();
+        };
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let keymap = xkb::Keymap::new_from_string(
+            &context,
+            text,
+            xkb::KEYMAP_FORMAT_TEXT_V1,
+            xkb::COMPILE_NO_FLAGS,
+        )
+        .expect("the keymap the client was sent compiles");
+        let mut state = xkb::State::new(&keymap);
+        self.keys
+            .iter()
+            .map(|&(key, [depressed, latched, locked, group])| {
+                state.update_mask(depressed, latched, locked, 0, 0, group);
+                // Wayland's keycodes are evdev's; xkb's are 8 more.
+                state.key_get_utf8(Keycode::new(key + 8))
+            })
+            .collect()
+    }
+}
+
 /// The test's client: windows of its own, drawn once in a flat colour, and
 /// whichever of the watching protocols a test binds.
 pub struct Desk {
@@ -368,6 +428,9 @@ pub struct Desk {
     /// Each window's colour, ARGB, in the order they opened.
     pub colours: Vec<u32>,
     pub drawn: usize,
+    /// Each configure a window was sent, in order: which window, by its place
+    /// in `windows`, and whether it was told it is the active one.
+    pub activations: Vec<(usize, bool)>,
     /// The size the compositor last offered a window, where it named one.
     /// Windows are drawn at their own size whatever it offers.
     pub offered: Option<(u32, u32)>,
@@ -463,6 +526,7 @@ impl Desk {
             colours: Vec::new(),
             offered: None,
             drawn: 0,
+            activations: Vec::new(),
             list: None,
             list_finished: false,
             listed: HashMap::new(),
@@ -508,6 +572,16 @@ impl Desk {
             layers_drawn: 0,
             popups_configured: 0,
         }
+    }
+
+    /// Whether each configure the `nth` window was sent told it it is the
+    /// active one, in order.
+    pub fn activations_of(&self, nth: usize) -> Vec<bool> {
+        self.activations
+            .iter()
+            .filter(|(window, _)| *window == nth)
+            .map(|(_, active)| *active)
+            .collect()
     }
 
     /// A strip `height` tall across the top of the screen on `layer`, drawn
@@ -659,6 +733,28 @@ impl Desk {
     ) -> Popup {
         let positioner = self.positioner(at, size);
         Popup::new(parent, &positioner, qh, &self.compositor, &self.xdg).expect("xdg_popup")
+    }
+
+    /// A menu of `parent` that takes the keyboard and pointer until it is
+    /// dismissed, as a right-click opens one: placed as [`Self::open_popup`]
+    /// places one, and grabbing on `seat` before its first commit, the only
+    /// time xdg-shell allows. `serial` is the input event that opened it.
+    pub fn open_menu(
+        &self,
+        qh: &QueueHandle<Self>,
+        parent: &xdg_surface::XdgSurface,
+        at: (i32, i32),
+        size: (u32, u32),
+        serial: u32,
+    ) -> Popup {
+        let positioner = self.positioner(at, size);
+        let surface = self.compositor.create_surface(qh);
+        let popup = Popup::from_surface(Some(parent), &positioner, qh, surface, &self.xdg)
+            .expect("xdg_popup");
+        let seat = self.seat.as_ref().expect("bind_keyboard first");
+        popup.xdg_popup().grab(seat, serial);
+        popup.wl_surface().commit();
+        popup
     }
 
     /// A popup of `panel`, as [`Self::open_popup`] opens one of a window:
@@ -834,6 +930,19 @@ impl Desk {
                 .expect("wl_seat")
         });
         self.pointer = Some(seat.get_pointer(qh, ()));
+    }
+
+    /// A keyboard of our own, on the seat already bound or a new one, and
+    /// what it hears.
+    pub fn bind_keyboard(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) -> Ear {
+        let seat = self.seat.get_or_insert_with(|| {
+            globals
+                .bind::<wl_seat::WlSeat, _, _>(qh, 1..=7, ())
+                .expect("wl_seat")
+        });
+        let ear = Ear::default();
+        seat.get_keyboard(qh, ear.clone());
+        ear
     }
 
     /// The mouse's own motion, for our pointer, as a game asks for it.
@@ -1632,6 +1741,65 @@ impl Dispatch<wl_seat::WlSeat, ()> for Desk {
     }
 }
 
+impl Dispatch<wl_keyboard::WlKeyboard, Ear> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &wl_keyboard::WlKeyboard,
+        event: wl_keyboard::Event,
+        ear: &Ear,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let mut heard = heard(ear);
+        match event {
+            wl_keyboard::Event::Keymap { fd, size, .. } => {
+                let mut bytes = vec![0; usize::try_from(size).expect("a size")];
+                File::from(fd)
+                    .read_exact_at(&mut bytes, 0)
+                    .expect("the keymap reads");
+                let text = String::from_utf8(bytes)
+                    .expect("a keymap is text")
+                    .trim_end_matches('\0')
+                    .to_owned();
+                let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+                let keymap = xkb::Keymap::new_from_string(
+                    &context,
+                    text.clone(),
+                    xkb::KEYMAP_FORMAT_TEXT_V1,
+                    xkb::COMPILE_NO_FLAGS,
+                )
+                .expect("the keymap compiles");
+                heard.layouts = keymap.num_layouts();
+                heard.keymap = Some(text);
+                heard.keys.clear();
+            }
+            wl_keyboard::Event::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => heard.modifiers = [mods_depressed, mods_latched, mods_locked, group],
+            wl_keyboard::Event::Key {
+                key,
+                state: WEnum::Value(wl_keyboard::KeyState::Pressed),
+                ..
+            } => {
+                let modifiers = heard.modifiers;
+                heard.keys.push((key, modifiers));
+            }
+            wl_keyboard::Event::Enter {
+                serial, surface, ..
+            } => {
+                heard.entered = Some(surface.id());
+                heard.enter_serial = Some(serial);
+            }
+            wl_keyboard::Event::Leave { .. } => heard.entered = None,
+            _ => {}
+        }
+    }
+}
+
 impl Dispatch<ExtSessionLockManagerV1, ()> for Desk {
     fn event(
         _: &mut Self,
@@ -1720,6 +1888,9 @@ impl WindowHandler for Desk {
             window.commit();
             self.blank_configured += 1;
             return;
+        }
+        if let Some(nth) = self.windows.iter().position(|known| known == window) {
+            self.activations.push((nth, configure.is_activated()));
         }
         if let (Some(width), Some(height)) = configure.new_size {
             self.offered = Some((width.get(), height.get()));

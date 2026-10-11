@@ -571,16 +571,17 @@ impl Compositor {
         self.tell_active_x11(None);
     }
 
-    /// On a seat, make the window with the keyboard, `focused`, the one that
-    /// looks active, and no other -- parked windows too: one minimized or
-    /// left on another workspace while it had the keyboard would otherwise go
-    /// on saying it has it.
-    fn show_active(&self, focused: Option<&WlSurface>) {
+    /// On a seat, make the window in use, `in_use`, the one that looks
+    /// active, and no other -- parked windows too: one minimized or left on
+    /// another workspace while it had the keyboard would otherwise go on
+    /// saying it has it. A window whose own menu has the keyboard is still
+    /// in use, as on sway and Plasma.
+    fn show_active(&self, in_use: Option<SurfaceId>) {
         if !self.backend.has_person() {
             return;
         }
         for window in self.space.elements().chain(&self.parked) {
-            let active = shell::surface_of(window).as_ref() == focused;
+            let active = in_use.is_some_and(|id| shell::id_of(window) == Some(id));
             // An X11 window is told at once; an xdg toplevel needs the
             // configure that carries its new state.
             if window.set_activated(active) {
@@ -749,13 +750,20 @@ impl Compositor {
     /// The surface holding the keyboard, or the one a menu holding it was
     /// opened from.
     fn keyboard_root(&self) -> Option<WlSurface> {
-        let focus = self.keyboard_focus()?;
-        Some(
-            self.popups
-                .find_popup(&focus)
-                .and_then(|popup| find_popup_root_surface(&popup).ok())
-                .unwrap_or(focus),
-        )
+        Some(self.menu_root(self.keyboard_focus()?))
+    }
+
+    /// The surface a menu was opened from, through any menus it hangs from,
+    /// or `surface` itself when it is no menu.
+    ///
+    /// Takes the state locks of menus' surfaces, never the keyboard's, so it
+    /// may be asked while smithay holds the keyboard to report a change of
+    /// focus. Never from inside `with_states`.
+    fn menu_root(&self, surface: WlSurface) -> WlSurface {
+        self.popups
+            .find_popup(&surface)
+            .and_then(|popup| find_popup_root_surface(&popup).ok())
+            .unwrap_or(surface)
     }
 
     /// When this compositor started. The base of every event timestamp it
@@ -1187,8 +1195,9 @@ impl SeatHandler for Compositor {
         &mut self.seat_state
     }
 
-    /// On a seat, the window holding the keyboard is the one that looks
-    /// active, and no other (see `show_active`). Headless leaves every toplevel activated from the
+    /// On a seat, the window in use -- the one holding the keyboard, or
+    /// whose own menu holds it -- is the one that looks active, and no other
+    /// (see `show_active`). Headless leaves every toplevel activated from the
     /// start (see `new_toplevel`), because the toolkits it hosts for reading
     /// render differently when they believe they are in the background.
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&FocusTarget>) {
@@ -1209,10 +1218,13 @@ impl SeatHandler for Compositor {
         let client = focused.and_then(|surface| self.display.get_client(surface.id()).ok());
         set_data_device_focus(&self.display, seat, client.clone());
         set_primary_focus(&self.display, seat, client);
-        // A fullscreen window covers the panels only while it is in use.
+        // The window in use: the one with the keyboard, or the one whose own
+        // menu has it, since a menu's keys are its window's. Found from the
+        // surface smithay names, as the keyboard cannot be asked here.
         let window = focused
-            .and_then(|surface| self.window_for(surface))
+            .and_then(|surface| self.window_for(&self.menu_root(surface.clone())))
             .and_then(|window| shell::id_of(&window));
+        // A fullscreen window covers the panels only while it is in use.
         self.stack_fullscreen(window);
         // The window in use is typed in its own layout, when each has one.
         // Not here: smithay calls this from inside `set_focus`, holding the
@@ -1229,7 +1241,7 @@ impl SeatHandler for Compositor {
         // So does which window may hold the pointer: a game left lets go.
         self.settle_hold_later();
 
-        self.show_active(focused);
+        self.show_active(window);
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
