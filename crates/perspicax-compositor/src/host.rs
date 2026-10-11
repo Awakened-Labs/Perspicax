@@ -111,11 +111,25 @@ pub enum Command {
     /// seat's focus policy, and the presses a window's frame takes for
     /// itself, are not. A headless build without `capture` keeps no buffers
     /// to find a surface's size by, so it refuses this in the log.
+    ///
+    /// A [`Command::Press`] and its [`Command::Release`], in one turn.
     Click {
         at: (i32, i32),
         button: perspicax_policy::Button,
         mods: perspicax_policy::Mods,
     },
+    /// Press a button at a point on the desk and keep it down, as
+    /// [`Command::Click`] does and stops halfway: a person's hand in the
+    /// middle of a drag, a resize or a selection, until a
+    /// [`Command::Release`] lets go.
+    Press {
+        at: (i32, i32),
+        button: perspicax_policy::Button,
+        mods: perspicax_policy::Mods,
+    },
+    /// Let go of a button a [`Command::Press`] put down, wherever the
+    /// pointer is now.
+    Release { button: perspicax_policy::Button },
     /// Turn the wheel at a point on the desk, as [`Command::Click`] presses a
     /// button: `v120` horizontal then vertical, 120 to a notch, positive
     /// right and down.
