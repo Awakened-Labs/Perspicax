@@ -150,6 +150,14 @@ impl MoveGrab {
             jumps,
         }
     }
+
+    /// Whether the window is still on screen to be moved. One minimized, put
+    /// behind its group or closed mid-drag has left the person's hand, and
+    /// the drag goes on to the release with nothing in it: the grab never
+    /// puts back what something else took away.
+    fn holds(&self, data: &Compositor) -> bool {
+        data.space.element_location(&self.window).is_some()
+    }
 }
 
 /// Resizing a window: every motion asks the client for a new size, and the
@@ -325,6 +333,12 @@ impl PointerGrab<Compositor> for MoveGrab {
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
+        if !self.holds(data) {
+            if data.snap_preview.take().is_some() {
+                data.backend.redraw();
+            }
+            return;
+        }
         if self.filled {
             let (from, now) = (self.start.location, event.location);
             if !dragged((from.x, from.y), (now.x, now.y)) {
@@ -369,6 +383,10 @@ impl PointerGrab<Compositor> for MoveGrab {
     ) {
         handle.button(data, event);
         if handle.current_pressed().is_empty() {
+            if !self.holds(data) {
+                handle.unset_grab(self, data, event.serial, event.time, true);
+                return;
+            }
             // Before the grab is unset, which forgets the preview.
             data.finish_snap(&self.window);
             handle.unset_grab(self, data, event.serial, event.time, true);

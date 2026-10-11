@@ -227,7 +227,9 @@ impl Compositor {
         };
         placement(window, |placement| placement.parked = Some(at));
         self.space.unmap_elem(window);
-        self.parked.push(window.clone());
+        if !self.parked.contains(window) {
+            self.parked.push(window.clone());
+        }
     }
 
     /// Map a parked window back where it was, or onto the nearest monitor if

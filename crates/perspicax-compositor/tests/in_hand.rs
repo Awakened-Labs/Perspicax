@@ -233,6 +233,28 @@ fn per_output_a_window_in_hand_goes_with_the_monitor_under_it() {
     session.stop((desk, queue));
 }
 
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_minimized_in_hand_stays_where_it_was_put_away() {
+    let session = session("in-hand-minimized", Mode::Spanning);
+    let (mut desk, mut queue, _qh) = with_windows(&session);
+    let from = geometry(&session.facts.read(), "held");
+
+    take_held(&session, &mut desk, &mut queue);
+    session.perform(Action::Minimize);
+    session.wait_for(|facts| seen(facts, "held") == Seen::Hidden);
+    // The hand goes on with nothing in it, and lets go of nothing.
+    session.command(Command::Motion { by: (40, 30) });
+    release(&session);
+
+    // Brought back, it is where it was minimized, not where the hand went.
+    session.perform(Action::CycleFocus);
+    let back = session.wait_for(|facts| seen(facts, "held") == Seen::Shown);
+    assert_eq!(geometry(&back, "held"), from);
+
+    session.stop((desk, queue));
+}
+
 /// Where the window titled `title` is.
 fn seen(facts: &HostFacts, title: &str) -> Seen {
     let surface = facts
