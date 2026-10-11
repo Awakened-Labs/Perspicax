@@ -113,7 +113,8 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// A command to run against this compositor, repeatable. Split on spaces,
-    /// so quoting an argument containing one will not do what you want.
+    /// so quoting an argument containing one will not do what you want. It
+    /// reads nothing, and what it prints goes to this process's stderr.
     #[arg(long = "spawn", value_name = "COMMAND")]
     spawn: Vec<String>,
 
@@ -140,8 +141,12 @@ struct Cli {
     /// runtime rather than a peer reached over IPC -- a boundary there would
     /// cost a serialisation of every node and buy nothing.
     ///
-    /// **This takes over stdout**, which becomes the JSON-RPC wire. Logging
-    /// never goes there, in any mode; see the note in `main`.
+    /// **This takes over stdin and stdout**, which become the JSON-RPC wire,
+    /// and nothing else reaches them. They are moved before anything starts,
+    /// leaving `/dev/null` and stderr in their place, so neither perspicax's
+    /// log nor anything a program it starts prints can land between the
+    /// replies, and no such program can read the agent's requests. A client
+    /// that pipes stderr has to read it. Not with `--session`.
     ///
     /// Headless, the run ends when the client does: an agent-driven compositor
     /// with no agent left has nothing to host, and it exits non-zero if the
@@ -248,6 +253,8 @@ fn main() -> Result<()> {
     // depends on a flag is one somebody adds a `println!` next to -- with one
     // exception, and that one a file: a display manager keeps a session's
     // stderr wherever it keeps such things, so `--session` has a log of its own.
+    // Under `--mcp` that `println!` would now miss the wire anyway, which has
+    // just left fd 1 (`wire`).
     //
     // With no `RUST_LOG`, a person's session says its warnings: one of them
     // is the only word anywhere on why a keyring lookup hangs (issue #27). One
