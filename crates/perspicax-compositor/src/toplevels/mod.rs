@@ -197,9 +197,10 @@ impl Compositor {
     }
 
     /// Every window a taskbar shows, in the order they opened. Menus and
-    /// tooltips are not windows to a taskbar.
+    /// tooltips are not windows to a taskbar. The active one is the window
+    /// in use, still while a menu of its own has the keyboard.
     fn snapshots(&self) -> Vec<(SurfaceId, Snapshot)> {
-        let focused = self.focused_surface();
+        let in_use = self.window_in_use();
         let mut snapshots: Vec<_> = self
             .space
             .elements()
@@ -207,7 +208,7 @@ impl Compositor {
             .filter_map(|window| {
                 let id = id_of(window)?;
                 let mut snapshot = self.snapshot(window)?;
-                snapshot.activated = focused == Some(id);
+                snapshot.activated = in_use == Some(id);
                 Some((id, snapshot))
             })
             .collect();

@@ -13,79 +13,13 @@
 
 mod common;
 
-use std::{
-    fs::File,
-    os::unix::fs::FileExt as _,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
-};
-
-use common::{Desk, Session, until};
+use common::{Desk, Ear, Session, heard, menu_with_the_keyboard, until};
 use perspicax_compositor::{ActError, Backend, Command, Host, Keymap};
 use perspicax_index::{Action as Verb, HostFacts};
 use perspicax_node::SurfaceId;
 use perspicax_policy::{Action, Switching};
-use smithay::input::keyboard::{Keycode, xkb};
 use smithay_client_toolkit::shell::WaylandSurface as _;
-use wayland_client::{
-    Connection, Dispatch, EventQueue, Proxy as _, QueueHandle, WEnum,
-    backend::ObjectId,
-    globals::GlobalList,
-    protocol::{wl_keyboard, wl_seat},
-};
-
-/// What the client's keyboard was told, kept as it arrived. xkb's own types
-/// stay on the test's side of the lock: they are not `Send`.
-#[derive(Default)]
-struct Heard {
-    /// The last keymap, as text.
-    keymap: Option<String>,
-    /// How many layouts it has.
-    layouts: u32,
-    /// The modifiers and group as last sent: depressed, latched, locked,
-    /// group.
-    modifiers: [u32; 4],
-    /// Each key pressed since the last keymap, with the modifiers in force.
-    keys: Vec<(u32, [u32; 4])>,
-    /// The surface the keyboard last entered, until it left.
-    entered: Option<ObjectId>,
-}
-
-type Ear = Arc<Mutex<Heard>>;
-
-fn heard(ear: &Ear) -> MutexGuard<'_, Heard> {
-    ear.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-impl Heard {
-    fn group(&self) -> u32 {
-        self.modifiers[3]
-    }
-
-    /// The text the keys spell, read with the keymap and modifiers the
-    /// client was sent.
-    fn typed(&self) -> String {
-        let Some(text) = self.keymap.clone() else {
-            return String::new();
-        };
-        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-        let keymap = xkb::Keymap::new_from_string(
-            &context,
-            text,
-            xkb::KEYMAP_FORMAT_TEXT_V1,
-            xkb::COMPILE_NO_FLAGS,
-        )
-        .expect("the keymap the client was sent compiles");
-        let mut state = xkb::State::new(&keymap);
-        self.keys
-            .iter()
-            .map(|&(key, [depressed, latched, locked, group])| {
-                state.update_mask(depressed, latched, locked, 0, 0, group);
-                // Wayland's keycodes are evdev's; xkb's are 8 more.
-                state.key_get_utf8(Keycode::new(key + 8))
-            })
-            .collect()
-    }
-}
+use wayland_client::{EventQueue, Proxy as _};
 
 fn keymap(layout: &str) -> Keymap {
     Keymap {
@@ -100,7 +34,7 @@ fn typist(name: &str, layout: &str) -> (Session, Desk, EventQueue<Desk>, Ear, Su
     let session = Session::start(name, Backend::headless((1280, 1024)));
     session.command(Command::Keymap(keymap(layout)));
     let (mut desk, mut queue, qh, globals) = session.client();
-    let ear = listen(&globals, &qh);
+    let ear = desk.bind_keyboard(&globals, &qh);
     desk.open_window(&qh, "typist", "typist");
     until(&mut queue, &mut desk, |desk| desk.drawn == 1);
     let window = id(&session.wait_for(|facts| !facts.surfaces().is_empty()));
@@ -130,13 +64,6 @@ fn focus(session: &Session, window: SurfaceId) {
     Host::new(&session.facts, &session.requests)
         .act(window, &Verb::Focus)
         .expect("focused");
-}
-
-fn listen(globals: &GlobalList, qh: &QueueHandle<Desk>) -> Ear {
-    let seat: wl_seat::WlSeat = globals.bind(qh, 1..=7, ()).expect("wl_seat");
-    let ear = Ear::default();
-    seat.get_keyboard(qh, ear.clone());
-    ear
 }
 
 fn type_text(session: &Session, window: SurfaceId, text: &str) {
@@ -252,6 +179,47 @@ fn under_window_switching_each_window_keeps_its_own_layout() {
     session.stop((desk, queue));
 }
 
+/// Issue #97: under `switching = "window"`, a window's own menu taking the
+/// keyboard is not the keyboard leaving the window: its keys are the
+/// window's. A layout switched while the menu is open is the window's, and
+/// stays when the menu closes, rather than being undone.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_layout_switched_in_a_windows_own_menu_stays_that_windows() {
+    let session = Session::start(
+        "keyboard-own-menu",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    session.command(Command::Keymap(keymap("us,ru")));
+    session.command(Command::LayoutSwitching(Switching::Window));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    desk.open_window(&qh, "typist", "typist");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    let window = id(&session.wait_for(|facts| !facts.surfaces().is_empty()));
+    until(&mut queue, &mut desk, |_| heard(&ear).layouts == 2);
+
+    let menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, window);
+    session.perform(Action::Layout(2));
+    until(&mut queue, &mut desk, |_| heard(&ear).group() == 1);
+    drop(menu);
+    let typist = desk.windows[0].wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&typist)
+    });
+    queue.roundtrip(&mut desk).expect("flush");
+    queue
+        .roundtrip(&mut desk)
+        .expect("and again, past an idle turn");
+    assert_eq!(
+        heard(&ear).group(),
+        1,
+        "the layout switched in the menu, kept"
+    );
+
+    session.stop((desk, queue));
+}
+
 /// #35: an agent with consent for one window typed into whichever held the
 /// keyboard -- the person's terminal, say. Now the keys go only into the
 /// window the act names, while it holds the keyboard, and otherwise nothing is
@@ -291,58 +259,4 @@ fn a_window_without_the_keyboard_is_not_typed_into_and_the_refusal_names_the_one
     );
 
     session.stop((desk, queue));
-}
-
-impl Dispatch<wl_keyboard::WlKeyboard, Ear> for Desk {
-    fn event(
-        _: &mut Self,
-        _: &wl_keyboard::WlKeyboard,
-        event: wl_keyboard::Event,
-        ear: &Ear,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        let mut heard = heard(ear);
-        match event {
-            wl_keyboard::Event::Keymap { fd, size, .. } => {
-                let mut bytes = vec![0; usize::try_from(size).expect("a size")];
-                File::from(fd)
-                    .read_exact_at(&mut bytes, 0)
-                    .expect("the keymap reads");
-                let text = String::from_utf8(bytes)
-                    .expect("a keymap is text")
-                    .trim_end_matches('\0')
-                    .to_owned();
-                let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-                let keymap = xkb::Keymap::new_from_string(
-                    &context,
-                    text.clone(),
-                    xkb::KEYMAP_FORMAT_TEXT_V1,
-                    xkb::COMPILE_NO_FLAGS,
-                )
-                .expect("the keymap compiles");
-                heard.layouts = keymap.num_layouts();
-                heard.keymap = Some(text);
-                heard.keys.clear();
-            }
-            wl_keyboard::Event::Modifiers {
-                mods_depressed,
-                mods_latched,
-                mods_locked,
-                group,
-                ..
-            } => heard.modifiers = [mods_depressed, mods_latched, mods_locked, group],
-            wl_keyboard::Event::Key {
-                key,
-                state: WEnum::Value(wl_keyboard::KeyState::Pressed),
-                ..
-            } => {
-                let modifiers = heard.modifiers;
-                heard.keys.push((key, modifiers));
-            }
-            wl_keyboard::Event::Enter { surface, .. } => heard.entered = Some(surface.id()),
-            wl_keyboard::Event::Leave { .. } => heard.entered = None,
-            _ => {}
-        }
-    }
 }

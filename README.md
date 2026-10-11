@@ -542,7 +542,9 @@ stops at the edge of the desk, so a window grabbed nearer than that to the
 side it is pushed towards, as a titlebar is to the top, stays on screen.
 It does not snap. In both, a fullscreen window
 covers the panels while it is the one in use, and goes back under them when
-another window or a menu takes the keyboard. While it covers them, its edges
+another window, the start menu or a launcher takes the keyboard. A menu of
+its own, a video's right-click menu, leaves it over them, while it is open
+and as it closes. While it covers them, its edges
 are its own: resting the pointer against one does not flip, so a game turning
 its camera stays where it is. So are a window's that holds the pointer,
 fullscreen or not ([see Mouse](#a-game-holding-the-pointer)). Nor does an edge
@@ -1096,9 +1098,11 @@ any key or mouse binding can.
   changes every other window at once.
 - **A window without the keyboard** is drawn at `unfocused` of its own: foot
   at 90 with `unfocused = 85` shows at about 77. That can go below `floor`,
-  which is only how far the keys go. A window whose own menu is open still
-  has the keyboard. While the start menu or a launcher holds it, no window
-  does, and every one is dimmed, as every titlebar shows unfocused.
+  which is only how far the keys go. A window whose own menu is open, or
+  has just closed, still has the keyboard: its application is still told
+  it is the active window, and its task stays lit. While the start menu or
+  a launcher holds it, no window does, and every one is dimmed, as every
+  titlebar shows unfocused.
 - **A fullscreen window is drawn opaque,** so a video is never dimmed, and
   the keys leave it alone. Its own returns when it leaves fullscreen.
 - **A tab group shares** what the keys set; with nothing set, each tab
@@ -1144,8 +1148,9 @@ keeps the layout in use, and Caps Lock and Num Lock with it. The lock keys
 light their LEDs on every keyboard, one plugged in later included.
 
 Under `switching = "window"`, a window is typed in the layout it was last typed
-in, and a new one starts in the first. The panel, a menu or the lock screen
-taking the keyboard changes nothing.
+in, and a new one starts in the first. The panel, the start menu or the lock
+screen taking the keyboard changes nothing. A window's own menu is typed as
+the window, so a layout switched while it is open stays that window's.
 
 With two layouts or more, the panel's `layout` item shows the one in use, its
 name in capitals (`US`, `RU`), and a click moves to the next. An agent reads it
@@ -1274,13 +1279,13 @@ them through Xwayland, which uses them only when both are offered: Wine's and
 Proton's `ClipCursor` becomes a confine, and the hidden pointer they warp back
 to the middle for mouselook becomes a lock, with the mouse's motion beside it.
 
-Only the window in use holds the pointer: the one with the keyboard, on
-screen, with the pointer over it and inside the part of it the game asked
-for. A window in the background cannot take it. Locked, the pointer stays
-where it is, and only the mouse's motion reaches the game; confined, it
-slides along the edge of the region. Either way it stays the game's: a
-notification popping up over the game does not take it, a click reaches the
-game, and no edge of the desk flips the workspace.
+Only the window in use holds the pointer: the one with the keyboard, or
+whose own menu has it, on screen, with the pointer over it and inside the
+part of it the game asked for. A window in the background cannot take it.
+Locked, the pointer stays where it is, and only the mouse's motion reaches
+the game; confined, it slides along the edge of the region. Either way it
+stays the game's: a notification popping up over the game does not take it,
+a click reaches the game, and no edge of the desk flips the workspace.
 
 The person takes it back the way they leave any window: Alt+Tab or any
 binding that moves the keyboard, a Logo tap or a pie or menu that takes the

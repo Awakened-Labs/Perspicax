@@ -2,8 +2,8 @@
 //!
 //! A panel on the `top` layer sits over the windows, but not over the
 //! fullscreen window the person is using: that covers it, as on Plasma and
-//! Windows. Left for another window, or taken out of fullscreen, it goes
-//! back under the panel. A surface on `overlay` stays over everything. The
+//! Windows, its own menus open or not. Left for another window, or taken out
+//! of fullscreen, it goes back under the panel. A surface on `overlay` stays over everything. The
 //! facts say so, and so does a picture.
 //!
 //! Fullscreen is asked for through the taskbar protocol, which a headless
@@ -13,7 +13,7 @@
 
 mod common;
 
-use common::{Desk, Session, until};
+use common::{Desk, Ear, Session, menu_with_the_keyboard, until};
 use perspicax_compositor::Backend;
 use perspicax_index::{HostFacts, SurfaceKind, judge};
 use perspicax_node::{Rect, SurfaceId, Visibility};
@@ -62,9 +62,27 @@ fn corner(facts: &HostFacts, title: &str) -> Visibility {
 
 /// A window, "video", with the keyboard, under a panel across the top.
 fn video_under_a_panel(name: &str) -> (Session, Desk, EventQueue<Desk>, QueueHandle<Desk>) {
-    let session = Session::start(name, Backend::headless((1280, 1024)));
+    let (session, desk, queue, qh, _) =
+        video_under_a_panel_on(name, Backend::headless((1280, 1024)));
+    (session, desk, queue, qh)
+}
+
+/// As [`video_under_a_panel`], with a person at the seat, where alone a
+/// window's menu takes the keyboard, and the client's keyboard.
+fn seated_video_under_a_panel(
+    name: &str,
+) -> (Session, Desk, EventQueue<Desk>, QueueHandle<Desk>, Ear) {
+    video_under_a_panel_on(name, Backend::headless((1280, 1024)).with_person())
+}
+
+fn video_under_a_panel_on(
+    name: &str,
+    backend: Backend,
+) -> (Session, Desk, EventQueue<Desk>, QueueHandle<Desk>, Ear) {
+    let session = Session::start(name, backend);
     let (mut desk, mut queue, qh, globals) = session.client();
     desk.bind_taskbar(&globals, &qh);
+    let ear = desk.bind_keyboard(&globals, &qh);
     desk.open_coloured(&qh, "video", "video", VIDEO);
     until(&mut queue, &mut desk, |desk| desk.drawn == 1);
     desk.open_strip(&qh, Layer::Top, "panel", 40, PANEL);
@@ -83,7 +101,7 @@ fn video_under_a_panel(name: &str) -> (Session, Desk, EventQueue<Desk>, QueueHan
         },
         "a window is under the panel"
     );
-    (session, desk, queue, qh)
+    (session, desk, queue, qh, ear)
 }
 
 fn fullscreen(desk: &Desk, title: &str) {
@@ -276,6 +294,67 @@ fn leaving_fullscreen_puts_the_panel_back_on_top() {
         Visibility::Occluded {
             by: layer(&facts, "panel")
         }
+    );
+
+    session.stop((desk, queue));
+}
+
+/// Issue #97: a video's right-click menu takes the keyboard, and with no
+/// window holding it the video went back under the panel for as long as
+/// the menu was open. Its own menu leaves it the window in use, over the
+/// panel.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_fullscreen_window_whose_own_menu_is_open_stays_over_the_panel() {
+    let (session, mut desk, mut queue, qh, ear) = seated_video_under_a_panel("fullscreen-own-menu");
+    fullscreen(&desk, "video");
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| corner(facts, "video") == Visibility::Visible);
+    let video = window(&facts, "video");
+
+    let _menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, video);
+    assert_eq!(
+        corner(&session.facts.read(), "video"),
+        Visibility::Visible,
+        "the panel came over the video while its menu was open"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// Issue #97: a video's menu its client closes -- an item chosen, Pause
+/// say -- left the keyboard on the menu that was gone until the mouse
+/// moved, and the panel over the video meanwhile. The video has it back at
+/// once, and stays over the panel.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_fullscreen_window_stays_over_the_panel_as_its_own_menu_closes() {
+    let (session, mut desk, mut queue, qh, ear) =
+        seated_video_under_a_panel("fullscreen-own-menu-closed");
+    fullscreen(&desk, "video");
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| corner(facts, "video") == Visibility::Visible);
+    let video = window(&facts, "video");
+    let menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, video);
+    let before = session
+        .facts
+        .read()
+        .surface(video)
+        .expect("the video")
+        .damage_generation;
+
+    // An item chosen, and nothing more: no key, no motion.
+    drop(menu);
+    queue.roundtrip(&mut desk).expect("closed");
+    let facts = session.wait_for(|facts| {
+        facts
+            .surface(video)
+            .is_some_and(|surface| surface.damage_generation > before)
+    });
+    assert_eq!(
+        corner(&facts, "video"),
+        Visibility::Visible,
+        "the panel came over the video as its menu closed"
     );
 
     session.stop((desk, queue));
