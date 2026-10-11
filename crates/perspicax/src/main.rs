@@ -43,7 +43,7 @@
 use std::{
     fs::File,
     io,
-    os::unix::net::UnixListener,
+    os::{fd::AsFd as _, unix::net::UnixListener},
     path::PathBuf,
     sync::{Arc, Mutex, mpsc},
     time::Duration,
@@ -245,6 +245,21 @@ fn main() -> Result<()> {
         .then(Wire::take)
         .transpose()
         .context("could not keep stdin and stdout for the agent interface")?;
+    // And before the log, which is written to stderr: a stderr that is the wire
+    // too -- `2>&1`, or one file for both -- is where every program this starts
+    // prints, so any of them could print a reply perspicax did not send (#52).
+    if let Some(wire) = &wire
+        && wire
+            .shares(io::stderr().as_fd())
+            .context("could not tell where stderr goes")?
+    {
+        bail!(
+            "stderr is the agent's wire too, and every program perspicax starts prints to \
+             stderr: any of them could print a reply perspicax did not send. Give stderr a \
+             file or a pipe of its own, or serve the agent on a socket, with `--mcp-socket \
+             PATH` and `perspicax attach PATH` as its MCP server"
+        );
+    }
 
     // NEVER STDOUT. Under `--mcp` stdout is the JSON-RPC wire, and a single log
     // line written to it corrupts a frame -- which arrives at the client as a

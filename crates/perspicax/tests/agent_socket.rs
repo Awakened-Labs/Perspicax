@@ -145,6 +145,30 @@ fn a_file_that_is_not_a_socket_is_left_alone() {
     );
 }
 
+/// Under `2>&1` stderr is the agent's wire too, and every program perspicax
+/// starts prints to stderr, so any of them could print a reply perspicax did
+/// not send (issue #52). Refused before anything starts, on the wire itself,
+/// where the client will read it.
+#[test]
+fn a_stderr_that_is_the_wire_too_is_refused_before_anything_starts() {
+    let (wire, end) = std::io::pipe().expect("a pipe for the wire");
+    let mut session = perspicax()
+        .args(["--headless", "--mcp", "--run-for", "5"])
+        .stdout(end.try_clone().expect("a second handle"))
+        .stderr(end)
+        .spawn()
+        .expect("perspicax starts");
+    let said = everything(wire);
+    let status = exited(&mut session, PATIENCE);
+    let said = said.recv_timeout(PATIENCE).expect("the wire closes");
+    // Not the exit alone: with no accessibility registry to start, a run that
+    // was not refused fails as well.
+    assert!(!status.success(), "{said}");
+    for named in ["stderr is the agent's wire too", "--mcp-socket"] {
+        assert!(said.contains(named), "the refusal says {named:?}: {said}");
+    }
+}
+
 /// Serve a socket at `path` over a desk with nothing on it and no compositor
 /// behind it, on a thread of its own, for as long as the test runs.
 fn serve_an_empty_desk(path: &Path) -> perspicax_mcp::Socket {
