@@ -8,6 +8,9 @@
 //! unplugged) updates the bookkeeping and then runs the rule, so there is no
 //! second path that hides or shows a window and could disagree with it.
 //!
+//! The window in the person's hand is on whatever workspace its monitor is
+//! showing, however that changed: it goes where they go.
+//!
 //! A parked window keeps where it was in its [`super::Placement`], and that
 //! is also how its monitor is known while it is off screen: per output, a
 //! window's workspace is a cell of the grid of the monitor it sits on.
@@ -55,17 +58,27 @@ impl Compositor {
     /// back every parked one that should. Then, if the window with the
     /// keyboard was parked, focus moves to whatever is on top, as it does when
     /// a window closes.
+    ///
+    /// The window being dragged is put on whatever its monitor shows now
+    /// before it is judged: a switch with a window in hand takes it along, by
+    /// a key, a pager or an edge alike, rather than parking it under the
+    /// person's hand.
     pub(crate) fn show_what_belongs(&mut self) {
         let windows: Vec<Framed> = self.space.elements().chain(&self.parked).cloned().collect();
         for window in windows {
             let Some(id) = id_of(&window) else {
                 continue;
             };
-            let belongs = !Self::is_minimized(&window)
-                && self.tabs.is_front(id)
-                && self
-                    .monitor_of(&window)
-                    .is_none_or(|output| self.workspaces.shows(id, &output));
+            let monitor = self.monitor_of(&window);
+            let present = !Self::is_minimized(&window) && self.tabs.is_front(id);
+            if present
+                && self.dragging.as_ref() == Some(&window)
+                && let Some(output) = &monitor
+            {
+                self.workspaces.hold(id, output);
+            }
+            let belongs =
+                present && monitor.is_none_or(|output| self.workspaces.shows(id, &output));
             let shown = self.space.elements().any(|mapped| *mapped == window);
             if shown && !belongs {
                 self.park(&window);
@@ -87,33 +100,17 @@ impl Compositor {
     /// Switch the workspace showing on `monitor` (every monitor, when
     /// workspaces span them).
     pub(crate) fn switch_workspace(&mut self, monitor: Option<String>, direction: Direction) {
-        let Some(output) = monitor else {
-            return;
-        };
-        if self.workspaces.switch(&output, direction).is_some() {
-            self.workspace_changed();
+        if let Some(output) = monitor {
+            self.flip(&output, direction);
         }
     }
 
-    /// Flip the workspace on `output` one step, as the pointer resting on an
-    /// edge of the desk does, taking the window being dragged along if there
-    /// is one. Whether it flipped: not off the edge of a grid that does not
-    /// wrap.
-    #[cfg_attr(
-        not(feature = "seat"),
-        expect(dead_code, reason = "the seat's pointer")
-    )]
-    pub(crate) fn flip(
-        &mut self,
-        output: &str,
-        direction: Direction,
-        carrying: Option<&Framed>,
-    ) -> bool {
-        let output = output.to_owned();
-        let flipped = match carrying.and_then(id_of) {
-            Some(id) => self.workspaces.carry(id, &output, direction),
-            None => self.workspaces.switch(&output, direction),
-        };
+    /// Flip the workspace on `output` one step, as a key or the pointer
+    /// resting on an edge of the desk does. A window being dragged comes
+    /// along (see [`Self::show_what_belongs`]). Whether it flipped: not off
+    /// the edge of a grid that does not wrap.
+    pub(crate) fn flip(&mut self, output: &str, direction: Direction) -> bool {
+        let flipped = self.workspaces.switch(&output.to_owned(), direction);
         if flipped.is_some() {
             self.workspace_changed();
         }
@@ -145,7 +142,8 @@ impl Compositor {
     }
 
     /// Move the focused window a workspace across the grid, and go with it
-    /// (`follow`) or stay.
+    /// (`follow`) or stay. A window in the person's hand cannot be left
+    /// behind: sent away, it takes them along.
     pub(crate) fn send_to_workspace(&mut self, direction: Direction, follow: bool) {
         let Some(window) = self.focused_surface().and_then(|id| self.window_for_id(id)) else {
             return;
@@ -153,6 +151,7 @@ impl Compositor {
         let (Some(id), Some(output)) = (id_of(&window), self.monitor_of(&window)) else {
             return;
         };
+        let follow = follow || self.dragging.as_ref() == Some(&window);
         let moved = if follow {
             self.workspaces.carry(id, &output, direction)
         } else {
