@@ -291,6 +291,10 @@ impl Compositor {
             return;
         };
         let code = button.code();
+        // Down whoever takes it, as on a seat. Not `person_used_seat`:
+        // headless keeps no clock of the person, so a test's agent is never
+        // refused for a hand that has stopped.
+        self.person_button(code, true);
         let time = self.now_ms();
         if !self.bound_press(hit.as_ref(), at, code, mods, time) {
             self.stand_in_button(&pointer, code, ButtonState::Pressed, time);
@@ -307,6 +311,7 @@ impl Compositor {
             return;
         };
         let code = button.code();
+        self.person_button(code, false);
         let time = self.now_ms();
         if !self.bound_release(code) {
             self.stand_in_button(&pointer, code, ButtonState::Released, time);

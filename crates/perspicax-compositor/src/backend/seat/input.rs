@@ -2,7 +2,9 @@
 //!
 //! Everything here is real input, and all of it is marked as such
 //! ([`Compositor::person_used_seat`]) so an agent's act can see it would race
-//! the person. For a key, the order of authority is:
+//! the person, as is every button they still have down
+//! ([`Compositor::person_button`]), however long they hold it still. For a
+//! key, the order of authority is:
 //!
 //! 1. the escape hatches ([`super::super::hatch`]), which nothing can rebind;
 //! 2. the bindings ([`perspicax_policy::Bindings`]);
@@ -128,6 +130,11 @@ pub(super) fn handle(state: &mut Compositor, event: InputEvent<LibinputInputBack
         }
         InputEvent::PointerButton { event } => {
             state.person_used_seat();
+            // Down by libinput's count for the whole seat, not this event's
+            // state: a touchpad tapped while the mouse drags lets go of a
+            // button the mouse still holds. Before `button`, so a press a
+            // binding takes is counted too, and its release with it.
+            state.person_button(event.button_code(), event.seat_button_count() > 0);
             button(state, event.button_code(), event.state(), event.time_msec());
         }
         InputEvent::PointerAxis { event } => {
