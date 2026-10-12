@@ -22,7 +22,7 @@
 
 mod common;
 
-use common::{Desk, Session, advertised, until};
+use common::{Desk, Session, advertised, around, copy_all, rgba, until};
 use perspicax_compositor::{Backend, Host, Virtual};
 use perspicax_index::{Action as Verb, HostFacts};
 use perspicax_node::Rect;
@@ -31,11 +31,6 @@ use wayland_client::{EventQueue, QueueHandle, globals::GlobalList};
 
 const BLUE: u32 = 0xff33_6699;
 const RED: u32 = 0xffcc_2222;
-
-fn rgba(argb: u32) -> [u8; 4] {
-    let [b, g, r, a] = argb.to_le_bytes();
-    [r, g, b, a]
-}
 
 fn session(name: &str, access: Access) -> Session {
     Session::start(
@@ -109,31 +104,6 @@ fn move_pointer(
         )
         .expect("the pointer moved");
     ((area.x0 + x) as usize, (area.y0 + y) as usize)
-}
-
-/// Copy each grab, at once, once each has been offered its buffer.
-fn copy_all(desk: &mut Desk, queue: &mut EventQueue<Desk>, grabs: &[usize]) {
-    until(queue, desk, |desk| {
-        grabs.iter().all(|&grab| desk.grabs[grab].buffer_done)
-    });
-    for &grab in grabs {
-        desk.copy(grab, 0, false);
-    }
-    until(queue, desk, |desk| {
-        grabs.iter().all(|&grab| desk.grabs[grab].ready)
-    });
-}
-
-/// The pixels of a square around `at`, out to `reach` on every side.
-fn around(desk: &mut Desk, grab: usize, at: (usize, usize), reach: usize) -> Vec<[u8; 4]> {
-    let (x, y) = at;
-    let mut pixels = Vec::new();
-    for row in y - reach..=y + reach {
-        for column in x - reach..=x + reach {
-            pixels.push(desk.grabbed(grab, column, row));
-        }
-    }
-    pixels
 }
 
 #[test]

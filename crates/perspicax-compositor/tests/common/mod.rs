@@ -64,6 +64,7 @@ use wayland_protocols::ext::{
     },
     session_lock::v1::client::{
         ext_session_lock_manager_v1::ExtSessionLockManagerV1,
+        ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
         ext_session_lock_v1::{self, ExtSessionLockV1},
     },
     workspace::v1::client::{
@@ -322,6 +323,39 @@ pub fn until<D>(queue: &mut EventQueue<D>, state: &mut D, done: impl Fn(&D) -> b
     queue.roundtrip(state).expect("flush");
 }
 
+/// A colour as written, ARGB, as the pixel a screencopy reads back.
+pub fn rgba(argb: u32) -> [u8; 4] {
+    let [b, g, r, a] = argb.to_le_bytes();
+    [r, g, b, a]
+}
+
+/// Copy each screencopy grab, at once, once each has been offered its
+/// buffer.
+pub fn copy_all(desk: &mut Desk, queue: &mut EventQueue<Desk>, grabs: &[usize]) {
+    until(queue, desk, |desk| {
+        grabs.iter().all(|&grab| desk.grabs[grab].buffer_done)
+    });
+    for &grab in grabs {
+        desk.copy(grab, 0, false);
+    }
+    until(queue, desk, |desk| {
+        grabs.iter().all(|&grab| desk.grabs[grab].ready)
+    });
+}
+
+/// The pixels a grab copied in a square around `at`, out to `reach` on
+/// every side.
+pub fn around(desk: &mut Desk, grab: usize, at: (usize, usize), reach: usize) -> Vec<[u8; 4]> {
+    let (x, y) = at;
+    let mut pixels = Vec::new();
+    for row in y - reach..=y + reach {
+        for column in x - reach..=x + reach {
+            pixels.push(desk.grabbed(grab, column, row));
+        }
+    }
+    pixels
+}
+
 /// Whether the registry advertised `interface` to this client.
 pub fn advertised(globals: &GlobalList, interface: &str) -> bool {
     globals
@@ -521,6 +555,11 @@ pub struct Desk {
     pub listed: HashMap<ObjectId, Listed>,
     pub lock: Option<ExtSessionLockV1>,
     pub locked: bool,
+    /// The lock surfaces covering the monitors, as swaylock's do, each with
+    /// its surface.
+    pub covers: Vec<(ExtSessionLockSurfaceV1, wl_surface::WlSurface)>,
+    /// How many times one of them has been configured, and drawn.
+    pub covers_drawn: usize,
     pub taskbar: Option<ZwlrForeignToplevelManagerV1>,
     pub taskbar_finished: bool,
     pub tasked: Vec<Tasked>,
@@ -589,6 +628,8 @@ pub struct Desk {
     /// The serial of the last of them: one of the compositor's own, newer
     /// than any the client heard before it.
     pub popup_serial: Option<u32>,
+    /// How many of this client's popups the compositor dismissed.
+    pub popups_done: usize,
 }
 
 impl Desk {
@@ -620,6 +661,8 @@ impl Desk {
             listed: HashMap::new(),
             lock: None,
             locked: false,
+            covers: Vec::new(),
+            covers_drawn: 0,
             taskbar: None,
             taskbar_finished: false,
             tasked: Vec::new(),
@@ -661,6 +704,7 @@ impl Desk {
             layers_drawn: 0,
             popups_configured: 0,
             popup_serial: None,
+            popups_done: 0,
         }
     }
 
@@ -1293,9 +1337,52 @@ impl Desk {
         self.lock = Some(manager.lock(qh, ()));
     }
 
+    /// Cover the monitor called `monitor` with a lock surface drawn all in
+    /// `colour`, ARGB, as swaylock covers each one: drawn at the size the
+    /// compositor gives it, once it does. Returns its surface. Panics if the
+    /// session was not locked by this client, or no monitor has that name.
+    pub fn cover(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        monitor: &str,
+        colour: u32,
+    ) -> wl_surface::WlSurface {
+        let output = self
+            .outputs
+            .outputs()
+            .find(|output| self.output_name(output).as_deref() == Some(monitor))
+            .unwrap_or_else(|| panic!("no monitor called {monitor}"));
+        let surface = self.compositor.create_surface(qh);
+        let cover = self
+            .lock
+            .as_ref()
+            .expect("lock first")
+            .get_lock_surface(&surface, &output, qh, colour);
+        self.covers.push((cover, surface.clone()));
+        surface
+    }
+
+    /// Hide the pointer while it is over us, as swaylock does the moment it
+    /// arrives: a cursor of no surface at all.
+    pub fn hide_cursor(&self) {
+        let serial = self
+            .entered
+            .expect("the pointer is over one of our surfaces");
+        self.pointer
+            .as_ref()
+            .expect("bind_pointer first")
+            .set_cursor(serial, None, 0, 0);
+    }
+
+    /// Unlock, and take the lock surfaces down, as swaylock does once the
+    /// password is right.
     pub fn unlock(&mut self) {
         if let Some(lock) = self.lock.take() {
             lock.unlock_and_destroy();
+        }
+        for (cover, surface) in self.covers.drain(..) {
+            cover.destroy();
+            surface.destroy();
         }
         self.locked = false;
     }
@@ -1925,6 +2012,40 @@ impl Dispatch<ExtSessionLockV1, ()> for Desk {
     }
 }
 
+/// A lock surface, its colour its user data: drawn at whatever size it is
+/// configured to, as swaylock draws its own.
+impl Dispatch<ExtSessionLockSurfaceV1, u32> for Desk {
+    fn event(
+        desk: &mut Self,
+        cover: &ExtSessionLockSurfaceV1,
+        event: ext_session_lock_surface_v1::Event,
+        colour: &u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let ext_session_lock_surface_v1::Event::Configure {
+            serial,
+            width,
+            height,
+        } = event
+        else {
+            return;
+        };
+        let Some(surface) = desk
+            .covers
+            .iter()
+            .find(|(known, _)| known == cover)
+            .map(|(_, surface)| surface.clone())
+        else {
+            return;
+        };
+        cover.ack_configure(serial);
+        desk.paint(&surface, (width, height), *colour);
+        surface.commit();
+        desk.covers_drawn += 1;
+    }
+}
+
 impl LayerShellHandler for Desk {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {}
 
@@ -1973,7 +2094,9 @@ impl PopupHandler for Desk {
         self.popup_serial = Some(configure.serial);
     }
 
-    fn done(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Popup) {}
+    fn done(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Popup) {
+        self.popups_done += 1;
+    }
 }
 
 impl WindowHandler for Desk {
