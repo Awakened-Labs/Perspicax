@@ -627,6 +627,24 @@ impl Compositor {
             }
             pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
         }
+        self.menu = Some(grab);
+    }
+
+    /// Close the window's menu that holds the keyboard and pointer, and every
+    /// menu it opened, as a click outside it does: each is dismissed, and
+    /// smithay's grab of the keyboard ends. Nothing if no menu holds them.
+    ///
+    /// The keyboard's grab ends here, before the pointer's: a menu's pointer
+    /// grab, ended, gives the keyboard back to its window if the keyboard
+    /// grab is still the menu's, and the caller may be taking the keyboard
+    /// from every window. The pointer's is the caller's to end.
+    pub(crate) fn close_menu(&mut self) {
+        if let Some(mut menu) = self.menu.take() {
+            menu.ungrab(PopupUngrabStrategy::All);
+        }
+        if let Some(keyboard) = self.keyboard.clone() {
+            keyboard.unset_grab(self);
+        }
     }
 
     /// A window's menu its client closed -- an item chosen -- gives the

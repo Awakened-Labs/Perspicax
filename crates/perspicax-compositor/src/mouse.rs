@@ -606,6 +606,39 @@ impl Compositor {
     }
 }
 
+impl Compositor {
+    /// Let go of the keyboard and pointer, whatever holds them, as a hand
+    /// lifted from the mouse would: a window's menu closes as a click outside
+    /// it does ([`Self::close_menu`]), and a grab of the pointer ends: a
+    /// button held down in a client, a move or a resize, which finish as
+    /// they end (see `shell::grabs`), or a drag and drop.
+    ///
+    /// The pointer is first told nothing is under it, so a drag and drop is
+    /// cancelled rather than dropped wherever it was, and the grab, ended,
+    /// has no client to give the pointer back to: [`Self::repoint`] gives it
+    /// to whatever is under it now.
+    ///
+    /// Never from inside one of smithay's pointer or keyboard callbacks,
+    /// which hold the locks this goes through.
+    pub(crate) fn let_go(&mut self) {
+        self.close_menu();
+        let Some(pointer) = self.pointer.clone() else {
+            return;
+        };
+        if !pointer.is_grabbed() {
+            return;
+        }
+        let event = MotionEvent {
+            location: pointer.current_location(),
+            serial: SERIAL_COUNTER.next_serial(),
+            time: self.now_ms(),
+        };
+        pointer.motion(self, None, &event);
+        pointer.unset_grab(self, event.serial, event.time);
+        pointer.frame(self);
+    }
+}
+
 /// The cursor for a part of a frame: a resize arrow at an edge.
 pub(crate) fn cursor_for(part: Part) -> CursorIcon {
     match part {

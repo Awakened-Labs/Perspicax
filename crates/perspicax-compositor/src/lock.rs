@@ -64,6 +64,11 @@ impl SessionLockHandler for Compositor {
     /// at most one refresh, which is the gap between confirming and the
     /// first frame that could prove the screen is covered.
     ///
+    /// Whatever holds the keyboard or the pointer lets go first: a window's
+    /// open menu closes, and a drag ends where it is ([`Self::let_go`]).
+    /// Otherwise the menu kept the keys from the lock screen, and Enter
+    /// chose its item unseen.
+    ///
     /// The pointer leaves every window now, before any lock surface has come
     /// to take it, and the cursor is the compositor's arrow until the lock
     /// client asks for its own. Smithay puts the arrow back as a client loses
@@ -72,6 +77,7 @@ impl SessionLockHandler for Compositor {
     fn lock(&mut self, confirmation: SessionLocker) {
         tracing::info!("session locked");
         self.lock = Some(Locked::default());
+        self.let_go();
         self.clear_focus();
         self.cursor = CursorImageStatus::default_named();
         self.repoint();

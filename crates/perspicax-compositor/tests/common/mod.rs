@@ -547,6 +547,9 @@ pub struct Desk {
     /// Each configure a window was sent, in order: which window, by its place
     /// in `windows`, and whether it was told it is the active one.
     pub activations: Vec<(usize, bool)>,
+    /// Whether the last configure a window was sent said it is being
+    /// resized.
+    pub resizing: bool,
     /// The size the compositor last offered a window, where it named one.
     /// Windows are drawn at their own size whatever it offers.
     pub offered: Option<(u32, u32)>,
@@ -653,6 +656,7 @@ impl Desk {
             blank_configured: 0,
             declaring: Vec::new(),
             colours: Vec::new(),
+            resizing: false,
             offered: None,
             drawn: 0,
             activations: Vec::new(),
@@ -2120,6 +2124,7 @@ impl WindowHandler for Desk {
         if let Some(nth) = self.windows.iter().position(|known| known == window) {
             self.activations.push((nth, configure.is_activated()));
         }
+        self.resizing = configure.is_resizing();
         if let (Some(width), Some(height)) = configure.new_size {
             self.offered = Some((width.get(), height.get()));
         }
