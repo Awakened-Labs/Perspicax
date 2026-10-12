@@ -2,8 +2,9 @@
 //!
 //! perspicax runs this with `--config` naming the file it read itself, and
 //! reads the exit status: 78 says the config cannot be used, and perspicax
-//! waits for the file to change before trying again. Run by hand, it draws
-//! on whichever compositor `WAYLAND_DISPLAY` names.
+//! waits for the file to change before trying again; 69 says the connection
+//! to perspicax broke, and perspicax starts it again as after a crash. Run
+//! by hand, it draws on whichever compositor `WAYLAND_DISPLAY` names.
 
 use std::{path::PathBuf, process::ExitCode};
 

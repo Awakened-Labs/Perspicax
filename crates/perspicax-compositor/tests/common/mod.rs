@@ -205,11 +205,17 @@ impl Session {
 /// Connect by path rather than through `WAYLAND_DISPLAY`: setting an
 /// environment variable in a test process races every other test in it.
 pub fn connect(socket: &str) -> Connection {
+    Connection::from_socket(stream(socket)).expect("a Wayland connection")
+}
+
+/// The socket a [`connect`] speaks over, for a test that wants to hold on to
+/// it too.
+pub fn stream(socket: &str) -> UnixStream {
     let dir = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR"));
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match UnixStream::connect(dir.join(socket)) {
-            Ok(stream) => return Connection::from_socket(stream).expect("a Wayland connection"),
+            Ok(stream) => return stream,
             Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
             Err(error) => panic!("the compositor never opened {socket}: {error}"),
         }

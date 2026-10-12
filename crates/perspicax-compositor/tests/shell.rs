@@ -7,8 +7,10 @@
 //!
 //! It puts a wallpaper on every monitor, on a monitor plugged in after it
 //! started too, and each one is a surface on the `background` layer named
-//! for its monitor. Told its config changed, it repaints those surfaces
-//! rather than making new ones. A workspace with a wallpaper of its own
+//! for its monitor. Cut off from a compositor that runs on, it says it lost
+//! its connection, in the exit status perspicax starts it again on. Told its
+//! config changed, it repaints those surfaces rather than making new ones.
+//! A workspace with a wallpaper of its own
 //! shows it while it is the one showing, on whichever monitor shows it.
 //! A right-click on the wallpaper, or the root
 //! menu's key, opens a menu on the `overlay` layer where the pointer is, and
@@ -32,13 +34,14 @@
 
 mod common;
 
-use std::{path::PathBuf, thread};
+use std::{net::Shutdown, path::PathBuf, thread};
 
 use common::{Desk, Session, connect};
 use perspicax_compositor::{ActError, Backend, Command, Host, Keymap, Virtual};
 use perspicax_index::{Action as Verb, HostFacts, Layer, PointerButton, SurfaceKind};
 use perspicax_node::{Rect, SurfaceId};
-use perspicax_policy::{Access, Action, Place, Protocol, Rule, Shape, Side};
+use perspicax_policy::{Access, Action, Ended, Place, Protocol, Rule, Shape, Side};
+use wayland_client::Connection;
 use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::State;
 
 /// The shell, running on a thread against a session.
@@ -53,6 +56,11 @@ impl Shell {
     /// Start the shell on `session`, reading a config file that holds
     /// `config`.
     fn start(session: &Session, name: &str, config: &str) -> Self {
+        Self::start_on(connect(session.socket()), name, config)
+    }
+
+    /// The same, on a connection of the test's own.
+    fn start_on(connection: Connection, name: &str, config: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
             "perspicax-shell-{name}-{}.toml",
             std::process::id()
@@ -60,7 +68,7 @@ impl Shell {
         std::fs::write(&path, config).expect("a config file");
         let bus = Bus::start();
         let options = perspicax_shell::Options {
-            connection: Some(connect(session.socket())),
+            connection: Some(connection),
             config: Some(path.clone()),
             session_bus: Some(bus.address.clone()),
         };
@@ -77,14 +85,25 @@ impl Shell {
     }
 
     /// Stop the session, which stops the shell, as logging out does; and
-    /// check that it stopped cleanly rather than failing.
+    /// check that it stopped for its lost connection rather than failing
+    /// some other way. A shell cannot tell its compositor ending from being
+    /// cut off, so it says the same of both.
     fn stop_with(self, session: Session) {
         session.stop(());
+        let stopped = self.ended();
+        assert!(
+            matches!(stopped, Err(perspicax_shell::Error::Lost(_))),
+            "the shell stopped with its compositor: {stopped:?}"
+        );
+    }
+
+    /// Wait for the shell to stop, and say how it did.
+    fn ended(self) -> Result<(), perspicax_shell::Error> {
         let stopped = self.thread.join().expect("the shell thread panicked");
         std::fs::remove_file(&self.config).ok();
         // The bus outlives the shell, which leaves it as it stops.
         drop(self.bus);
-        stopped.expect("the shell stopped cleanly with its compositor");
+        stopped
     }
 }
 
@@ -505,6 +524,40 @@ fn a_monitor_plugged_in_later_gets_a_wallpaper() {
     );
 
     shell.stop_with(session);
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_shell_cut_off_while_perspicax_runs_says_it_lost_the_connection() {
+    let session = Session::start("shell-cut-off", two_monitors());
+    let socket = common::stream(session.socket());
+    let cut = socket.try_clone().expect("a second handle on the socket");
+    let shell = Shell::start_on(
+        Connection::from_socket(socket).expect("a Wayland connection"),
+        "cut-off",
+        "",
+    );
+    session.wait_for(|facts| desktops(facts).len() == 2);
+
+    // From the shell's side, wayland-backend cutting off a client that
+    // stopped reading looks like this: the connection just ends.
+    cut.shutdown(Shutdown::Both).expect("the connection cut");
+    let lost = shell
+        .ended()
+        .expect_err("a shell cut off does not stop cleanly");
+    assert!(
+        matches!(lost, perspicax_shell::Error::Lost(_)),
+        "it says it lost its connection: {lost:?}"
+    );
+    assert_eq!(
+        Ended::from_code(Some(i32::from(lost.exit_code()))),
+        Ended::Lost,
+        "with an exit status perspicax starts it again on"
+    );
+    session.wait_for(|facts| desktops(facts).is_empty());
+    assert!(!session.ended(), "perspicax runs on, to read it");
+
+    session.stop(());
 }
 
 #[cfg(feature = "capture")]
