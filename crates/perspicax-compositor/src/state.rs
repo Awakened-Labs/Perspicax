@@ -34,7 +34,7 @@ use smithay::{
     delegate_compositor, delegate_cursor_shape, delegate_data_device, delegate_output,
     delegate_primary_selection, delegate_relative_pointer, delegate_seat, delegate_shm,
     delegate_xdg_activation, delegate_xdg_shell,
-    desktop::{PopupKind, PopupManager, Space, Window, find_popup_root_surface},
+    desktop::{PopupGrab, PopupKind, PopupManager, Space, Window, find_popup_root_surface},
     input::{
         Seat, SeatHandler, SeatState,
         keyboard::{KeyboardHandle, LedState, XkbConfig},
@@ -209,6 +209,10 @@ pub struct Compositor {
     /// Popups (menus, tooltips), tracked so they render and hit-test with
     /// their window and so a grab can dismiss them.
     pub(crate) popups: PopupManager,
+    /// The last grab a window's menu took of the keyboard and pointer: what
+    /// [`Self::close_menu`] closes. Kept once the menu has gone, when
+    /// smithay has forgotten it and closing it again does nothing.
+    pub(crate) menu: Option<PopupGrab<Self>>,
     /// Windows that are open and not on screen: minimized, or on a
     /// workspace that is not showing. Unmapped from the space, kept here in
     /// the order they went, and described to the index as unmapped rather
@@ -377,6 +381,7 @@ impl Compositor {
             generation: 0,
             next_surface: 0,
             popups: PopupManager::default(),
+            menu: None,
             parked: Vec::new(),
             workspaces: Workspaces::new(workspace_shape),
             tabs: perspicax_policy::Groups::default(),
@@ -562,7 +567,6 @@ impl Compositor {
         }
     }
 
-    /// Give the keyboard back to the topmost window, or to nothing.
     /// Take the keyboard from whatever has it. Smithay 0.7 tells
     /// `focus_changed` of a new focus but not of none, so what has to follow
     /// is done here: no window looks active any more, nor is named so to X
@@ -602,6 +606,7 @@ impl Compositor {
         }
     }
 
+    /// Give the keyboard back to the topmost window, or to nothing.
     pub(crate) fn focus_top_window(&mut self) {
         let top = self
             .space
@@ -1088,7 +1093,15 @@ impl XdgShellHandler for Compositor {
     /// A menu wants the keyboard and pointer until it is dismissed. Only a
     /// person makes that request meaningful: headless, the act path addresses
     /// surfaces directly and a grab would only get in its way.
+    ///
+    /// Never while the session is locked, when the lock screen holds both: a
+    /// menu that took them would take the password typed next. Refused as
+    /// xdg-shell says, by dismissing the menu.
     fn grab(&mut self, surface: PopupSurface, seat: WlSeat, serial: Serial) {
+        if self.lock.is_some() {
+            surface.send_popup_done();
+            return;
+        }
         if !self.backend.has_person() {
             return;
         }

@@ -4,6 +4,13 @@
 //! being dragged must not see its own drag as ordinary motion, and nothing
 //! under the pointer should light up as it passes. Everything a grab does not
 //! care about (scrolling, gestures) is passed through unchanged.
+//!
+//! A grab is finished in `unset`, not on the button coming up, because
+//! whatever ends a grab goes through `unset`: the release, another grab
+//! taking the pointer, or the session locking (`Compositor::let_go`). There,
+//! a moved window's new place is told to the workspaces and the facts, and a
+//! resized one is told its resize is over. A tab dropped nowhere goes back
+//! to where it was picked up.
 
 use perspicax_policy::{Edges, Rect, dragged, resize};
 use smithay::{
@@ -299,9 +306,11 @@ impl PointerGrab<Compositor> for TabDragGrab {
         handle.button(data, event);
         if handle.current_pressed().is_empty() {
             let at = handle.current_location();
-            data.tab_drop = None;
+            // Taken before the grab is unset, which puts back a tab that
+            // was never dropped.
+            let home = self.home.take();
             handle.unset_grab(self, data, event.serial, event.time, true);
-            if let Some(home) = self.home {
+            if let Some(home) = home {
                 data.drop_tab(&self.tab, at, home);
             }
         }
@@ -313,8 +322,23 @@ impl PointerGrab<Compositor> for TabDragGrab {
         &self.start
     }
 
+    /// Ended with the tab still in hand, before its button came up: it is
+    /// dropped nowhere, and goes back to where it was picked up. Not if
+    /// something took it off screen meanwhile.
     fn unset(&mut self, data: &mut Compositor) {
         data.tab_drop = None;
+        let Some(home) = self.home.take() else {
+            return;
+        };
+        if data.space.element_location(&self.tab).is_none() {
+            return;
+        }
+        data.space.map_element(self.tab.clone(), home, false);
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = self.tab.x11_surface() {
+            let _ = x11.configure(smithay::utils::Rectangle::new(home, x11.geometry().size));
+        }
+        data.backend.redraw();
     }
 }
 
@@ -383,19 +407,12 @@ impl PointerGrab<Compositor> for MoveGrab {
     ) {
         handle.button(data, event);
         if handle.current_pressed().is_empty() {
-            if !self.holds(data) {
-                handle.unset_grab(self, data, event.serial, event.time, true);
-                return;
+            // Snapped only on the button coming up, and before the grab is
+            // unset, which forgets the preview.
+            if self.holds(data) {
+                data.finish_snap(&self.window);
             }
-            // Before the grab is unset, which forgets the preview.
-            data.finish_snap(&self.window);
             handle.unset_grab(self, data, event.serial, event.time, true);
-            // Per output, a window dragged onto another monitor joins the
-            // workspace that monitor is showing.
-            data.window_moved(&self.window);
-            // Once, where it landed, rather than on every motion: occlusion
-            // is judged against where a window is, not everywhere it passed.
-            data.publish_facts();
         }
     }
 
@@ -410,6 +427,15 @@ impl PointerGrab<Compositor> for MoveGrab {
         if data.snap_preview.take().is_some() {
             data.backend.redraw();
         }
+        if !self.holds(data) {
+            return;
+        }
+        // Per output, a window dragged onto another monitor joins the
+        // workspace that monitor is showing.
+        data.window_moved(&self.window);
+        // Once, where it landed, rather than on every motion: occlusion is
+        // judged against where a window is, not everywhere it passed.
+        data.publish_facts();
     }
 }
 
@@ -453,12 +479,6 @@ impl PointerGrab<Compositor> for ResizeGrab {
         handle.button(data, event);
         if handle.current_pressed().is_empty() {
             handle.unset_grab(self, data, event.serial, event.time, true);
-            self.configure(false);
-            placement(&self.window, |placement| {
-                if let Some(resize) = &mut placement.resize {
-                    resize.released = true;
-                }
-            });
         }
     }
 
@@ -468,5 +488,14 @@ impl PointerGrab<Compositor> for ResizeGrab {
         &self.start
     }
 
-    fn unset(&mut self, _data: &mut Compositor) {}
+    /// The resize is over: the client is told, and its next commit is the
+    /// last one anchored to the edge it was resized from.
+    fn unset(&mut self, _data: &mut Compositor) {
+        self.configure(false);
+        placement(&self.window, |placement| {
+            if let Some(resize) = &mut placement.resize {
+                resize.released = true;
+            }
+        });
+    }
 }

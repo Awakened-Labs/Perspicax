@@ -550,10 +550,12 @@ impl Compositor {
 impl Compositor {
     /// Give the pointer to whatever is under it now, though it has not
     /// moved: a layer surface came up under a still pointer, or went from
-    /// under it. Without this a hand had to nudge the mouse before a click
+    /// under it; the session locked, a lock surface came up, or the session
+    /// unlocked. Without this a hand had to nudge the mouse before a click
     /// reached the menu or pie it had just opened, and the click went to
-    /// the window beneath; and a closed menu left the window it uncovered
-    /// without the pointer until the mouse moved.
+    /// the window beneath; a closed menu left the window it uncovered
+    /// without the pointer until the mouse moved; and a click at rest on
+    /// the lock screen went to the window it hid (#82).
     ///
     /// Only when what is under the pointer changed, so a panel's clock
     /// committing each second moves nothing. Never under a grab, which
@@ -601,6 +603,39 @@ impl Compositor {
         );
         pointer.frame(self);
         self.backend.redraw();
+    }
+}
+
+impl Compositor {
+    /// Let go of the keyboard and pointer, whatever holds them, as a hand
+    /// lifted from the mouse would: a window's menu closes as a click outside
+    /// it does ([`Self::close_menu`]), and a grab of the pointer ends: a
+    /// button held down in a client, a move or a resize, which finish as
+    /// they end (see `shell::grabs`), or a drag and drop.
+    ///
+    /// The pointer is first told nothing is under it, so a drag and drop is
+    /// cancelled rather than dropped wherever it was, and the grab, ended,
+    /// has no client to give the pointer back to: [`Self::repoint`] gives it
+    /// to whatever is under it now.
+    ///
+    /// Never from inside one of smithay's pointer or keyboard callbacks,
+    /// which hold the locks this goes through.
+    pub(crate) fn let_go(&mut self) {
+        self.close_menu();
+        let Some(pointer) = self.pointer.clone() else {
+            return;
+        };
+        if !pointer.is_grabbed() {
+            return;
+        }
+        let event = MotionEvent {
+            location: pointer.current_location(),
+            serial: SERIAL_COUNTER.next_serial(),
+            time: self.now_ms(),
+        };
+        pointer.motion(self, None, &event);
+        pointer.unset_grab(self, event.serial, event.time);
+        pointer.frame(self);
     }
 }
 

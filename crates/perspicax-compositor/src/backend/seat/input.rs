@@ -448,14 +448,20 @@ fn pressed_frame(
 }
 
 /// The left button came up: if it went down on a frame's button and comes up
-/// on the same one, that button does its job.
+/// on the same one, that button does its job. Not behind the lock screen,
+/// where a button pressed before the session locked would close, maximize
+/// or minimize a window the person cannot see.
 fn released_frame(state: &mut Compositor, at: Point<f64, Logical>) {
+    let locked = state.lock.is_some();
     let Running::Seat(session) = &mut state.backend else {
         return;
     };
     let Some((window, button)) = session.button_press.take() else {
         return;
     };
+    if locked {
+        return;
+    }
     if state.frame_part(&window, at) != Some(Part::Button(button)) {
         return;
     }
