@@ -27,7 +27,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use perspicax_atspi::Ids;
+use perspicax_atspi::{Ids, Spared};
 use perspicax_compositor::{Facts, Stop};
 use perspicax_index::{Change, HostFacts};
 use perspicax_node::NodeId;
@@ -83,6 +83,9 @@ struct Keeper {
     facts: Facts,
     /// The desktop's one id map, shared by every application read into it.
     ids: Ids,
+    /// The nodes never asked where they are again, shared the same way, so
+    /// that an application forgotten and read afresh is not asked once more.
+    spared: Spared,
     apps: Vec<App>,
     arrivals: Arrivals,
     /// The applications a re-read left partly stale.
@@ -98,6 +101,7 @@ impl Keeper {
             desk,
             facts,
             ids: Ids::default(),
+            spared: Spared::default(),
             apps: Vec::new(),
             arrivals: Arrivals::new(millis(settle)),
             owed: Owed::default(),
@@ -153,7 +157,7 @@ impl Keeper {
         if due.is_empty() {
             return;
         }
-        let reads = match observe::read(&due, &self.ids, &self.facts).await {
+        let reads = match observe::read(&due, &self.ids, &self.spared, &self.facts).await {
             Ok(reads) => reads,
             Err(error) => {
                 tracing::warn!("{error:#}");

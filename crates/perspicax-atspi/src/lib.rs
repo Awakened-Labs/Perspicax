@@ -53,7 +53,7 @@ pub use crate::{
     app::{AppRef, ObjectKey},
     error::Error,
     events::Subscription,
-    read::{GaveUp, Patience, Strategy},
+    read::{GaveUp, Patience, Placed, Spared, Strategy},
 };
 
 /// The one id map for a desktop, shared by every ingest reading it.
@@ -122,8 +122,13 @@ pub struct AtspiIngest {
     /// How much silence the walk sits through, remembered from one read of
     /// this application to the next.
     walking: Patience,
-    /// The same for asking each node where it is.
-    placing: Patience,
+    /// The nodes never asked where they are again, because asking froze
+    /// their application.
+    ///
+    /// Private by default and shared by [`AtspiIngest::sparing`]. A reader
+    /// of a desktop shares one, so that what an application taught it outlasts
+    /// this ingest of it: [`Spared`] says why.
+    spared: Spared,
     /// The live signal subscription. Opened by [`AtspiIngest::connect`] before
     /// any tree is read, so that nothing can change in the gap between reading
     /// a tree and starting to listen.
@@ -194,7 +199,7 @@ impl AtspiIngest {
             with_geometry: false,
             budget: None,
             walking: Patience::new(),
-            placing: Patience::new(),
+            spared: Spared::default(),
             events,
         })
     }
@@ -263,6 +268,19 @@ impl AtspiIngest {
         self
     }
 
+    /// Remember what froze an application in `spared`, with every other
+    /// ingest sharing it: a node any of them found that asking froze is never
+    /// asked where it is again, nor anything beneath it.
+    ///
+    /// For anything reading a desktop, which forgets an application that
+    /// stops drawing and reads it afresh if it draws again: without it, the
+    /// fresh reading asks the node that froze the application once more.
+    #[must_use]
+    pub fn sparing(mut self, spared: &Spared) -> Self {
+        self.spared = Arc::clone(spared);
+        self
+    }
+
     /// The application this ingest is reading.
     #[must_use]
     pub fn app(&self) -> &AppRef {
@@ -304,7 +322,6 @@ impl AtspiIngest {
         // a node unplaced is refused, a node unread is not there at all.
         let until = self.budget.map(|budget| Instant::now() + budget);
         self.walking.begin(until);
-        self.placing.begin(until);
 
         let (strategy, nodes) = match self.forced {
             Some(forced) => (
@@ -320,35 +337,72 @@ impl AtspiIngest {
             nodes = nodes.len(),
             "cold read"
         );
-        settled(self.app.name(), "walking its tree", &self.walking);
+        walked(self.app.name(), &self.walking);
 
         let mut nodes = read::subtree(nodes, &key);
         if self.with_geometry {
-            read::geometry(&connection, &mut nodes, &mut self.placing).await;
-            settled(self.app.name(), "asking GetExtents", &self.placing);
+            let outcome = read::place(
+                &connection,
+                &mut nodes,
+                &key,
+                &self.walking,
+                &self.spared,
+                until,
+            )
+            .await;
+            placed(self.app.name(), &outcome);
         }
         Ok(read::to_observed(nodes, &mut lock(&self.interner)))
     }
 }
 
-/// Say, once per pass of a read, that it stopped asking and why.
+/// Say, once per walk, that it stopped asking and why.
 ///
 /// Once, not per call: the calls themselves are logged at debug, and an
 /// application that leaves sixty-four unanswered must not fill a log with
 /// sixty-four warnings about one fact.
-fn settled(app: &str, pass: &str, patience: &Patience) {
+fn walked(app: &str, patience: &Patience) {
     match patience.gave_up() {
         Some(GaveUp::Unanswered { calls }) => tracing::warn!(
             app,
             calls,
-            "stopped {pass}: the application left {calls} call(s) unanswered, \
+            "stopped walking its tree: the application left {calls} call(s) unanswered, \
              so the rest go unasked this read and what was read is kept"
         ),
         Some(GaveUp::OutOfTime) => tracing::warn!(
             app,
-            "stopped {pass}: the read ran out of time, and what was read is kept"
+            "stopped walking its tree: the read ran out of time, and what was read is kept"
         ),
         None => {}
+    }
+}
+
+/// Say that asking where nodes are stopped short, and why.
+///
+/// A node is spared on one read only, so that warning is given once for as
+/// long as the application runs, and the reads after it are quiet about it.
+fn placed(app: &str, outcome: &Placed) {
+    match outcome {
+        Placed::All => {}
+        Placed::OutOfTime => tracing::warn!(
+            app,
+            "stopped asking GetExtents: the read ran out of time, and what was read is kept"
+        ),
+        Placed::Spared(node) => tracing::warn!(
+            app,
+            node = node.path(),
+            "stopped asking GetExtents: the application went silent when asked where this \
+             node is, straight after answering its whole walk. Asking may be what silenced \
+             it -- a bridge that asks itself freezes until libdbus gives up (#80) -- so \
+             neither it nor anything beneath it is asked again while the application runs, \
+             and they are refused as unplaced"
+        ),
+        Placed::Unanswered(node) => tracing::warn!(
+            app,
+            node = node.path(),
+            "stopped asking GetExtents: the application, silent during the walk too, left \
+             a call unanswered, so the rest go unasked this read and what was read is kept"
+        ),
     }
 }
 
@@ -358,11 +412,11 @@ fn settled(app: &str, pass: &str, patience: &Patience) {
 ///
 /// Because it cannot be given one. It builds its connection itself, from the
 /// bus's address, with nothing to say how long a call may wait -- and a call
-/// that waits forever is how one Flutter application, which never answers
-/// `GetExtents`, used to cost its whole tree (#51). So this asks the session
-/// bus for the address the same way it does, and builds the connection with
-/// [`read::ANSWER`] as zbus's `method_timeout`. Every call a read makes goes
-/// over it, so none can be made without the deadline.
+/// that waits until it is answered is how one Flutter application, whose
+/// `GetExtents` takes 25 s, used to cost its whole tree (#51). So this asks
+/// the session bus for the address the same way it does, and builds the
+/// connection with [`read::ANSWER`] as zbus's `method_timeout`. Every call a
+/// read makes goes over it, so none can be made without the deadline.
 ///
 /// It also leaves out what `AccessibilityConnection` adds that a read never
 /// uses: a registry proxy, and peer-to-peer connections to applications.

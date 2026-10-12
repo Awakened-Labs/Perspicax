@@ -50,7 +50,7 @@
 use std::{collections::HashSet, time::Duration};
 
 use anyhow::{Context as _, Result};
-use perspicax_atspi::{AppRef, AtspiIngest, Ids};
+use perspicax_atspi::{AppRef, AtspiIngest, Ids, Spared};
 use perspicax_compositor::Facts;
 use perspicax_index::{
     Change, Finding, HostFacts, Index, Ingest as _, Join, SurfaceClaim, SurfaceFacts, Tally,
@@ -72,9 +72,9 @@ use perspicax_node::{NodeId, ObservedNode, Origin, Role, SurfaceId, Vec2};
 /// finishes has nothing in it. Reading is not: the read is given this as its
 /// budget ([`AtspiIngest::within`]) and stops asking when it is spent,
 /// keeping what it read. Until #51 it was cut off too, and a Flutter
-/// application -- which never answers `GetExtents` -- lost its whole tree to
-/// the one call it left unanswered, every read, for as long as it ran. Every
-/// call has a deadline of its own now, so the read ends when its budget does.
+/// application -- whose `GetExtents` takes 25 s -- lost its whole tree to the
+/// one call it left unanswered, every read, for as long as it ran. Every call
+/// has a deadline of its own now, so the read ends when its budget does.
 const PER_APP: Duration = Duration::from_secs(20);
 
 /// One application this compositor drew: what it turned out to be, and the
@@ -282,11 +282,12 @@ pub async fn observe(facts: &Facts) -> Result<Reading> {
     // compositor is hosting.
     let ours = drawing(&facts.read());
 
-    // One id map for the desktop, handed to every ingest below. See the module
-    // documentation for what an interner each costs.
-    let ids = Ids::default();
+    // One id map for the desktop, and one set of nodes never asked where they
+    // are, handed to every ingest below. See the module documentation for
+    // what an interner each costs.
+    let (ids, spared) = (Ids::default(), Spared::default());
     let mut index = Index::new();
-    let apps = read(&ours, &ids, facts)
+    let apps = read(&ours, &ids, &spared, facts)
         .await?
         .snapshots
         .into_iter()
@@ -331,14 +332,15 @@ pub struct Reads {
 }
 
 /// Read every application on the accessibility bus whose process is one of
-/// `pids`, minting ids from `ids`.
+/// `pids`, minting ids from `ids` and never asking where a node in `spared`
+/// is.
 ///
 /// # Errors
 ///
 /// Fails only if the accessibility bus itself cannot be reached. An
 /// individual application that cannot be read is reported and skipped: one
 /// misbehaving toolkit must not be able to hide the desktop.
-pub async fn read(pids: &HashSet<u32>, ids: &Ids, facts: &Facts) -> Result<Reads> {
+pub async fn read(pids: &HashSet<u32>, ids: &Ids, spared: &Spared, facts: &Facts) -> Result<Reads> {
     let bus = perspicax_atspi::on_the_bus()
         .await
         .context("the accessibility bus could not be reached")?;
@@ -354,7 +356,7 @@ pub async fn read(pids: &HashSet<u32>, ids: &Ids, facts: &Facts) -> Result<Reads
         // By reference, not by name. A desktop can be running two copies of one
         // program -- the test bed was, one of them a leftover -- and resolving
         // by name reads the first twice while never reaching the second.
-        match snapshot(app, pid, ids, facts).await {
+        match snapshot(app, pid, ids, spared, facts).await {
             Ok(snapshot) => reads.snapshots.push(snapshot),
             Err(error) => tracing::warn!(app = %name, "could not read application: {error:#}"),
         }
@@ -366,12 +368,19 @@ pub async fn read(pids: &HashSet<u32>, ids: &Ids, facts: &Facts) -> Result<Reads
 }
 
 /// Read one application's tree, with geometry, in about [`PER_APP`] at most.
-async fn snapshot(app: AppRef, pid: u32, ids: &Ids, facts: &Facts) -> Result<Snapshot> {
+async fn snapshot(
+    app: AppRef,
+    pid: u32,
+    ids: &Ids,
+    spared: &Spared,
+    facts: &Facts,
+) -> Result<Snapshot> {
     let (name, toolkit) = (app.name().to_owned(), app.toolkit().to_owned());
     let mut ingest = tokio::time::timeout(PER_APP, AtspiIngest::attach(app))
         .await
         .context("gave up connecting to it")??
         .sharing(ids)
+        .sparing(spared)
         .with_geometry(true)
         .within(PER_APP);
     let root = ingest.root_id();

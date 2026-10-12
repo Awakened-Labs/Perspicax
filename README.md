@@ -317,11 +317,22 @@ nothing.
 A control its application gives no bounds for is refused as `unplaced`.
 Without a rectangle there is nothing to judge, and unlike `unjudged`, waiting
 does not help while the application stays silent. A Flutter application is
-the case that prompted it: its bridge answers what every control is and never
-where, so its labels can be read and none of its controls acted on. A call an
-application leaves unanswered costs perspicax a deadline of one second, and a
-read stops asking after three, keeping what it has read: one silent call does
-not cost the rest of the tree.
+the case that prompted it: its labels can be read and none of its controls
+acted on. A call an application leaves unanswered costs perspicax a deadline
+of one second, and a walk of its tree stops asking after three, keeping what
+it has read: one silent call does not cost the rest of the tree.
+
+Asking where a control is can cost the application more than a second.
+Flutter's bridge answers by asking itself and waiting, so the question
+freezes the whole application for 25 seconds, and the answer then has no
+geometry in it. A client frozen while a person moves the pointer over it
+stops reading what the compositor sends, and is disconnected. So perspicax
+stops asking where controls are at the first call left unanswered. If the
+application had just answered the rest of the read in full, that control and
+everything beneath it are never asked again while the application runs, and
+are refused as `unplaced`. A Flutter application is frozen once, at its first
+read, rather than at every change it makes. One that was already silent,
+busy with something else, is asked again at its next read.
 
 A control its application has changed since it was read is refused as
 `stale` until it is read again, and perspicax reads it again itself, at once.

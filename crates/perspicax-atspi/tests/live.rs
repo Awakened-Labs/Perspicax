@@ -179,6 +179,52 @@ async fn geometry_is_opt_in_and_produces_boxes() {
     println!("GTK  {} of {} nodes had extents", boxed.len(), nodes.len());
 }
 
+/// What a node is asked is what it says it offers. perspicax asks
+/// `GetExtents` only of a node that lists `Component` (#80) -- an application
+/// root offers none, and atk-bridge prints a CRITICAL for every call it is sent
+/// anyway -- so a toolkit that said where a node is without listing
+/// `Component` would have that node refused as `unplaced` for nothing. Every
+/// node of both toolkits is asked here, listed or not.
+#[tokio::test]
+#[ignore = "needs a live accessibility bus, gtk4-widget-factory and the Qt widget gallery running"]
+async fn every_node_that_says_where_it_is_offers_component() {
+    use atspi::Interface;
+    use perspicax_atspi::read::{self, Patience};
+
+    let bus = atspi::AccessibilityConnection::new().await.unwrap();
+    let connection = bus.connection();
+    let apps = perspicax_atspi::on_the_bus().await.unwrap();
+    for name in [GTK, QT] {
+        let app = apps
+            .iter()
+            .find(|app| app.name() == name)
+            .unwrap_or_else(|| panic!("{name} is not on the bus"));
+        let mut patience = Patience::new();
+        patience.begin(None);
+        let nodes = read::walk(connection, app.root(), &mut patience)
+            .await
+            .unwrap();
+
+        let mut placed = 0;
+        for node in &nodes {
+            if let Ok(Some(_)) = read::extents(connection, &node.key).await {
+                placed += 1;
+                assert!(
+                    node.interfaces.contains(Interface::Component),
+                    "{name}: {} ({:?}) says where it is and does not list Component",
+                    node.key.path(),
+                    node.role
+                );
+            }
+        }
+        assert!(placed > 0, "{name}: no node said where it is");
+        println!(
+            "{name}  {placed} of {} nodes said where they are, every one listing Component",
+            nodes.len()
+        );
+    }
+}
+
 /// Reading a tree must not destroy it.
 ///
 /// zbus caches proxy properties by default, which issues

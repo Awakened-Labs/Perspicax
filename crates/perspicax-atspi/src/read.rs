@@ -9,19 +9,28 @@
 //!
 //! # An application that stops answering
 //!
-//! Every call made here has a deadline, [`ANSWER`], and every read has
-//! [`Patience`]. Neither is a precaution against something hypothetical. A
-//! Flutter application answers everything about its nodes except where they
-//! are, and before #51 one `GetExtents` it left unanswered cost perspicax the
-//! whole application, every time it was read, for as long as it ran.
+//! Every call made here has a deadline, [`ANSWER`], and every walk has
+//! [`Patience`]. Neither is a precaution against something hypothetical:
+//! before #51, one `GetExtents` an application left unanswered cost perspicax
+//! the whole application, every time it was read, for as long as it ran.
+//!
+//! # An application that asking freezes
+//!
+//! And a call can do worse than go unanswered. Asking a Flutter application
+//! where one of its nodes is freezes it for 25 s, because its bridge answers
+//! by asking itself (#80). So asking where nodes are is [`place`]'s, which
+//! remembers what froze an application and never asks it again: see
+//! [`Spared`].
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
 use atspi::{
-    CacheItem, CoordType, InterfaceSet, LegacyCacheItem, Role as AtspiRole, State, StateSet,
+    CacheItem, CoordType, Interface, InterfaceSet, LegacyCacheItem, Role as AtspiRole, State,
+    StateSet,
     proxy::{accessible::AccessibleProxy, cache::CacheProxy, component::ComponentProxy},
     zbus::{Connection, proxy::CacheProperties},
 };
@@ -118,7 +127,7 @@ pub struct RawNode {
     /// The accessible's longer description.
     pub description: String,
     /// Bounds in node space, present only when geometry was asked for -- it
-    /// costs a round trip per node on both toolkits. See [`extents`].
+    /// costs a round trip per node on both toolkits. See [`place`].
     pub bounds: Option<Rect>,
     /// How many children the application *says* this node has.
     ///
@@ -307,39 +316,42 @@ pub fn to_observed(raw: Vec<RawNode>, interner: &mut Interner<ObjectKey>) -> Vec
 /// five hundred times that, and still short against a read's own budget.
 pub const ANSWER: Duration = Duration::from_secs(1);
 
-/// How many unanswered calls one pass of a read sits through before it stops
-/// asking. See [`Patience`].
+/// How many unanswered calls a walk sits through before it stops asking. See
+/// [`Patience`].
 pub const STRIKES: u8 = 3;
 
-/// How much silence one pass of a read sits through -- the walk, or asking
-/// every node where it is -- and what the application's last read taught it.
+/// How much silence a walk sits through, and what the application's last walk
+/// taught it.
 ///
 /// # Why a deadline per call is not enough
 ///
-/// [`ANSWER`] bounds a call, not a read. A Flutter application leaves
-/// `GetExtents` unanswered for its view and for every node under it, so a game
-/// board of 64 squares costs 64 deadlines, and a read that waits out each one
-/// is a read that does not finish in any time worth having. So a pass counts
-/// the calls an application leaves unanswered, and after [`STRIKES`] of them
-/// it stops asking: the rest of the walk is not read, or the rest of the nodes
-/// are not placed, and what was read is kept.
+/// [`ANSWER`] bounds a call, not a read. An application that has stopped
+/// answering leaves every call after that unanswered, so a tree of 64 nodes
+/// costs 64 deadlines, and a walk that waits out each one is a walk that does
+/// not finish in any time worth having. So a walk counts the calls an
+/// application leaves unanswered, and after [`STRIKES`] of them it stops
+/// asking: the rest of the tree is not read, and what was read is kept.
 ///
 /// Stopping early costs actability and nothing worse. A node the walk never
-/// reached is not in the index, and a node never asked where it is has no
-/// bounds and is refused -- neither is guessed at.
+/// reached is not in the index -- it is not guessed at.
+///
+/// Asking where nodes are is not a walk, and sits through no silence at all:
+/// see [`place`].
 ///
 /// # Why it remembers
 ///
-/// An application that ran a pass out of patience is given **one** unanswered
-/// call on that pass in its next read, not [`STRIKES`]. Re-reads are the
-/// keeper's, inline, and every second one spends waiting is a second in which
-/// no other application's signals are drained -- while a pass that ran out
-/// last time will almost certainly run out again. One call is still asked, so
-/// an application that has started answering is believed at once, and a read
-/// in which it does not run out puts its patience back to full.
+/// An application that ran a walk out of patience is given **one** unanswered
+/// call in its next walk, not [`STRIKES`]. Re-reads are the keeper's, inline,
+/// and every second one spends waiting is a second in which no other
+/// application's signals are drained -- while a walk that ran out last time
+/// will almost certainly run out again. One call is still asked, so an
+/// application that has started answering is believed at once, and a walk in
+/// which it does not run out puts its patience back to full. A walk's calls
+/// ask what a node is, which an application answers without asking anyone
+/// else, so asking again costs it nothing.
 ///
-/// The memory is one application's, never a toolkit's. Nothing here knows what
-/// Flutter is, because any bridge can stop answering any call.
+/// The memory is one application's, never a toolkit's. Nothing here knows
+/// what any toolkit is, because any bridge can stop answering any call.
 ///
 /// # And a budget
 ///
@@ -360,10 +372,10 @@ pub struct Patience {
     gave_up: Option<GaveUp>,
 }
 
-/// Why a pass of a read stopped asking.
+/// Why a walk stopped asking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GaveUp {
-    /// The application left `calls` calls unanswered, which was all the pass
+    /// The application left `calls` calls unanswered, which was all the walk
     /// had.
     Unanswered {
         /// How many it was given: [`STRIKES`], or one after a read that ran
@@ -430,6 +442,12 @@ impl Patience {
     #[must_use]
     pub fn gave_up(&self) -> Option<GaveUp> {
         self.gave_up
+    }
+
+    /// Whether the application left any call of this read unanswered.
+    #[must_use]
+    pub fn heard_silence(&self) -> bool {
+        self.left < self.given
     }
 }
 
@@ -694,27 +712,133 @@ pub async fn accessible<'a>(
         .await?)
 }
 
-/// Ask each node where it is, in order, for as long as `patience` holds.
+/// The nodes a desktop's reads never ask where they are again, nor anything
+/// beneath them. Shared by every ingest reading a desktop, as
+/// [`Ids`](crate::Ids) is, so that it lasts as long as an application does and
+/// not only as long as one reading of it.
 ///
-/// A node with no bounds to give -- no `Component`, or an error -- is left
-/// without any, and so is one that never answers, at the cost of a strike.
-/// Once patience runs out, the nodes not yet asked are never asked, and keep
-/// no bounds either. That is the difference between 64 squares that will
-/// never answer costing three deadlines and costing sixty-four: see
-/// [`Patience`].
-pub async fn geometry(connection: &Connection, nodes: &mut [RawNode], patience: &mut Patience) {
-    for node in nodes {
-        if !patience.holds() {
-            break;
+/// # Why asking can be the harm
+///
+/// A Flutter Linux application embeds an `AtkPlug` in an `AtkSocket` of its
+/// own process. at-spi2-core's bridge answers `GetExtents` on that plug by
+/// asking the socket, over D-Bus and blocking -- which is asking itself, so its
+/// main thread waits on a call only it could answer until libdbus gives up,
+/// 25 s later, and the answer is `(-1, -1, -1, -1)`. Every Flutter node takes
+/// its extents from its parent's, up to the plug, so asking where any of them
+/// is freezes the whole application, and a frozen client is disconnected by
+/// the compositor once input fills its buffer (#80). A call sent while it is
+/// frozen waits in its queue and freezes it again when its turn comes,
+/// however long ago perspicax stopped waiting for it.
+///
+/// So the first `GetExtents` an application leaves unanswered ends the asking,
+/// and the node it was asked of is remembered here: it, and every node beneath
+/// it, keep no bounds and are refused as `unplaced` from then on, which fails
+/// closed. That is the plug, for Flutter: [`place`] asks top-down, so the plug
+/// is asked before anything its silence reaches.
+///
+/// # Why only after a walk answered in full
+///
+/// Then the silence began when the application was asked where something is,
+/// which is the only evidence there is that asking is what silenced it. An
+/// application already silent during the walk is busy, or frozen by something
+/// else, and its silence says nothing about the node it was asked of.
+///
+/// A unique bus name is never reused, so an [`ObjectKey`] here names one node
+/// of one process, and nothing here knows what a toolkit is.
+pub type Spared = Arc<Mutex<HashSet<ObjectKey>>>;
+
+/// What asking each node where it is came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Placed {
+    /// Every node that offers `Component`, and is not spared, was asked.
+    All,
+    /// The read's budget ran out first. Not held against anything: it says how
+    /// long a tree is, not whether its application answers.
+    OutOfTime,
+    /// The node went unanswered straight after a walk the application
+    /// answered in full, so it, and everything beneath it, are spared from
+    /// now on. See [`Spared`].
+    Spared(ObjectKey),
+    /// The node went unanswered in a read whose walk went unanswered too: the
+    /// application was silent already, and nothing is held against the node.
+    Unanswered(ObjectKey),
+}
+
+/// Ask each node where it is, top-down from `root`, until one goes unanswered
+/// or the read's budget runs out at `until`.
+///
+/// A node that offers no `Component` is not asked -- an application root
+/// offers none, and atk-bridge prints a CRITICAL for every `GetExtents` it is
+/// sent anyway -- and neither is a node in `spared`, or beneath one. A node
+/// with no usable size to give, or that fails, is left without bounds. The
+/// first node that does not answer ends the asking, and is spared if `walk`,
+/// the read's walk, was answered in full: see [`Spared`].
+pub async fn place(
+    connection: &Connection,
+    nodes: &mut [RawNode],
+    root: &ObjectKey,
+    walk: &Patience,
+    spared: &Spared,
+    until: Option<Instant>,
+) -> Placed {
+    let order = placing_order(nodes, root, &remembered(spared));
+    for index in order {
+        if until.is_some_and(|until| Instant::now() >= until) {
+            return Placed::OutOfTime;
         }
-        match patience.heard(extents(connection, &node.key).await) {
+        let node = &mut nodes[index];
+        match extents(connection, &node.key).await {
             Ok(bounds) => node.bounds = bounds,
             Err(error) if error.is_unanswered() => {
-                tracing::debug!(path = node.key.path(), "GetExtents went unanswered");
+                let key = node.key.clone();
+                if walk.heard_silence() {
+                    return Placed::Unanswered(key);
+                }
+                remembered(spared).insert(key.clone());
+                return Placed::Spared(key);
             }
             Err(_) => {}
         }
     }
+    Placed::All
+}
+
+/// The spared nodes, locked. A panic cannot leave a set half made, so a
+/// poisoned lock is still a set worth reading.
+fn remembered(spared: &Spared) -> std::sync::MutexGuard<'_, HashSet<ObjectKey>> {
+    spared.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The order to ask `nodes` where they are: top-down from `root`, a parent
+/// before its children, whatever order the read delivered them in -- a
+/// cache's is its own. Leaves out a spared node and everything beneath it,
+/// and a node that offers no `Component`, though not its children.
+///
+/// Breadth-first over a visited set, as [`walk`] is: a bridge is not a
+/// trusted source of structure.
+fn placing_order(nodes: &[RawNode], root: &ObjectKey, spared: &HashSet<ObjectKey>) -> Vec<usize> {
+    let at: HashMap<&ObjectKey, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (&node.key, index))
+        .collect();
+    let mut order = Vec::new();
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::from([root]);
+    while let Some(key) = queue.pop_front() {
+        if spared.contains(key) || !seen.insert(key) {
+            continue;
+        }
+        let Some(&index) = at.get(key) else {
+            continue;
+        };
+        let node = &nodes[index];
+        if node.interfaces.contains(Interface::Component) {
+            order.push(index);
+        }
+        queue.extend(&node.children);
+    }
+    order
 }
 
 /// One node's bounds in node space -- window-relative, from whichever origin
@@ -753,8 +877,9 @@ pub async fn geometry(connection: &Connection, nodes: &mut [RawNode], patience: 
 ///
 /// [`Error::Call`] if the node has no `Component`, has gone, or does not
 /// answer before [`ANSWER`] -- that last one is [`Error::is_unanswered`], and
-/// it is the one a caller must not simply shrug off, because it costs the
-/// whole deadline every time it is asked.
+/// it is the one a caller must not simply shrug off: it costs the whole
+/// deadline every time it is asked, and it may be what froze the application.
+/// See [`Spared`].
 pub async fn extents(connection: &Connection, key: &ObjectKey) -> Result<Option<Rect>, Error> {
     let proxy = ComponentProxy::builder(connection)
         .destination(key.bus().to_owned())?
@@ -1036,6 +1161,87 @@ mod tests {
         patience.begin(None);
         let _ = patience.heard(unanswered());
         assert!(patience.holds(), "and is given its full patience again");
+    }
+
+    #[test]
+    fn a_walk_that_heard_silence_says_so_until_the_next_begins() {
+        let mut patience = Patience::new();
+        patience.begin(None);
+        let _ = patience.heard(Ok(()));
+        assert!(!patience.heard_silence());
+        let _ = patience.heard(unanswered());
+        assert!(patience.heard_silence(), "one unanswered call is silence");
+        patience.begin(None);
+        assert!(!patience.heard_silence());
+    }
+
+    /// A node that can say where it is.
+    fn placeable(path: &str, children: &[&str]) -> RawNode {
+        RawNode {
+            interfaces: InterfaceSet::new(Interface::Component),
+            children: children
+                .iter()
+                .map(|child| ObjectKey::new(":1.2", child))
+                .collect(),
+            ..raw(path, None, 0)
+        }
+    }
+
+    fn ordered<'a>(nodes: &'a [RawNode], spared: &[&str]) -> Vec<&'a str> {
+        let spared = spared
+            .iter()
+            .map(|path| ObjectKey::new(":1.2", path))
+            .collect();
+        placing_order(nodes, &ObjectKey::new(":1.2", "/root"), &spared)
+            .into_iter()
+            .map(|index| nodes[index].key.path())
+            .collect()
+    }
+
+    /// A cache holds a tree in its own order. A parent is asked first
+    /// anyway, so the first node of a frozen branch to be asked is the one
+    /// nearest the root.
+    #[test]
+    fn a_parent_is_asked_where_it_is_before_its_children() {
+        let mut nodes = vec![
+            placeable("/root", &["/plug", "/ok"]),
+            placeable("/plug", &["/square"]),
+            placeable("/ok", &[]),
+            placeable("/square", &[]),
+        ];
+        nodes.reverse();
+        assert_eq!(ordered(&nodes, &[]), ["/root", "/plug", "/ok", "/square"]);
+    }
+
+    #[test]
+    fn a_spared_node_and_everything_beneath_it_are_not_asked() {
+        let nodes = vec![
+            placeable("/root", &["/plug", "/ok"]),
+            placeable("/plug", &["/square"]),
+            placeable("/square", &["/deeper"]),
+            placeable("/deeper", &[]),
+            placeable("/ok", &[]),
+        ];
+        assert_eq!(ordered(&nodes, &["/plug"]), ["/root", "/ok"]);
+    }
+
+    /// An application root offers no `Component`, and its windows do.
+    #[test]
+    fn a_node_that_offers_no_component_is_not_asked_and_its_children_are() {
+        let nodes = vec![
+            RawNode {
+                interfaces: InterfaceSet::empty(),
+                ..placeable("/root", &["/frame"])
+            },
+            placeable("/frame", &[]),
+        ];
+        assert_eq!(ordered(&nodes, &[]), ["/frame"]);
+    }
+
+    #[test]
+    fn a_cycle_in_the_reported_tree_is_asked_once_round() {
+        let nodes = vec![placeable("/root", &["/a"]), placeable("/a", &["/root"])];
+        assert_eq!(ordered(&nodes, &[]), ["/root", "/a"]);
     }
 
     /// Running out of time says how long a tree is, not whether its
