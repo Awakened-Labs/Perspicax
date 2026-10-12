@@ -71,7 +71,7 @@ pub use crate::{
     mouse::{Button, Clicks, Context, Gesture, MouseBindings, MouseChord, Wheel},
     opacity::{OPAQUE, Opacity},
     resist::{Resistance, resist},
-    restart::{EX_CONFIG, Ended, Restart, Restarts},
+    restart::{EX_CONFIG, EX_UNAVAILABLE, Ended, Restart, Restarts},
     snap::{Snapping, Zone, keyed, zone},
     tabs::Groups,
     tap::{LogoTap, is_logo},

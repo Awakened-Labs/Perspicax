@@ -6,9 +6,11 @@
 //! crash that comes soon after its start, so a shell that cannot stay up
 //! does not take the machine with it; after five of those in a row it is
 //! given up on, and the person keeps a desktop with no shell on it. A shell
-//! that refused its config would only refuse it again, so it waits until the
-//! file is read again. A shell that exited cleanly chose to, and stays
-//! stopped.
+//! that lost its connection to perspicax is a crash by another name: the
+//! perspicax reading its status is still running, so it did not end the
+//! session, and something cut the shell off. A shell that refused its config
+//! would only refuse it again, so it waits until the file is read again. A
+//! shell that exited cleanly chose to, and stays stopped.
 //!
 //! Fed times from outside, in milliseconds from any fixed origin, as
 //! [`crate::EdgeDwell`] is, so it is tested without a clock or a process.
@@ -31,6 +33,11 @@ const QUICK_CRASHES: u32 = 5;
 /// from sysexits.h.
 pub const EX_CONFIG: i32 = 78;
 
+/// The exit status of a program that lost a service it cannot do without:
+/// `EX_UNAVAILABLE`, from sysexits.h. The shell's, when its connection to
+/// the compositor breaks.
+pub const EX_UNAVAILABLE: i32 = 69;
+
 /// How the shell's process ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ended {
@@ -38,6 +45,9 @@ pub enum Ended {
     Clean,
     /// It exited with [`EX_CONFIG`]: it cannot use the config file.
     Refused,
+    /// It exited with [`EX_UNAVAILABLE`]: its connection to perspicax broke,
+    /// and perspicax, here to read the status, did not end.
+    Lost,
     /// Any other status, or a signal.
     Crashed,
 }
@@ -50,6 +60,7 @@ impl Ended {
         match code {
             Some(0) => Self::Clean,
             Some(EX_CONFIG) => Self::Refused,
+            Some(EX_UNAVAILABLE) => Self::Lost,
             _ => Self::Crashed,
         }
     }
@@ -101,7 +112,7 @@ impl Restarts {
                 self.waiting = true;
                 Restart::WhenConfigChanges
             }
-            Ended::Crashed => {
+            Ended::Lost | Ended::Crashed => {
                 // Quick crashes in a row, this one included.
                 self.quick = if quick { self.quick + 1 } else { 0 };
                 if self.quick >= QUICK_CRASHES {
@@ -195,6 +206,41 @@ mod tests {
         );
         assert!(restarts.config_changed(), "started once the file is read");
         assert!(!restarts.config_changed(), "and only once");
+    }
+
+    #[test]
+    fn a_shell_that_lost_its_connection_is_started_again_as_after_a_crash() {
+        assert_eq!(Ended::from_code(Some(EX_UNAVAILABLE)), Ended::Lost);
+        let mut restarts = Restarts::default();
+        restarts.started(0);
+        assert_eq!(
+            restarts.ended(Ended::Lost, 3_600_000),
+            Restart::After(FIRST_WAIT_MS),
+            "a shell cut off after an hour comes back at once"
+        );
+        let waits: Vec<_> = (0..QUICK_CRASHES)
+            .map(|nth| {
+                let at = 4_000_000 + u64::from(nth) * 5_000;
+                restarts.started(at);
+                let how = if nth % 2 == 0 {
+                    Ended::Lost
+                } else {
+                    Ended::Crashed
+                };
+                restarts.ended(how, at + 100)
+            })
+            .collect();
+        assert_eq!(
+            waits,
+            [
+                Restart::After(250),
+                Restart::After(500),
+                Restart::After(1_000),
+                Restart::After(2_000),
+                Restart::GiveUp,
+            ],
+            "and one cut off at once, again and again, is given up on as a crash is"
+        );
     }
 
     #[test]
