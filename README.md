@@ -1334,6 +1334,16 @@ straight to the window or surface the agent named. Nor does an agent act while
 a button is down: a move, a resize or a selection held still is still yours,
 and the agent waits until you let go.
 
+Locking the screen takes the pointer as well as the keyboard, at once and with
+the mouse at rest. A click, a scroll, or a tap of the touchpad to wake the
+screen lands on the lock screen, never in the window it hides, and swaylock
+hides the cursor without a nudge, on whichever monitor the pointer is. What
+your hand held lets go as the screen locks: an open menu closes, as a click
+outside it would, so it cannot take the password; a window being moved or
+resized stays where it got to; a tab being dragged goes back to its group. No
+window can open a menu over the lock screen. Unlocked, the window under the
+pointer has it back, and its own cursor with it.
+
 ### A game holding the pointer
 
 A game turns its camera by how far the mouse moves, and keeps the pointer from
