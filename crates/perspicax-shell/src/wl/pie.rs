@@ -233,12 +233,12 @@ impl Pies {
                 stale: false,
             });
         }
-        self.draw(canvas, kit, qh);
+        self.draw(canvas, kit);
     }
 
     /// Draw the pie on the surface, once the compositor has given it a
     /// size, and not before it has shown the last picture.
-    fn draw(&mut self, canvas: &mut Canvas, kit: &mut Kit, qh: &QueueHandle<App>) {
+    fn draw(&mut self, canvas: &mut Canvas, kit: &mut Kit) {
         let (Some(shown), Some(view)) = (self.shown.as_mut(), self.state.view()) else {
             return;
         };
@@ -258,9 +258,6 @@ impl Pies {
         let text = fonts.get();
         let scale = shown.scale;
         let started = std::time::Instant::now();
-        // Asked with the picture, so the compositor says when it shows it.
-        let surface = shown.layer.wl_surface();
-        surface.frame(qh, surface.clone());
         let shown_now = canvas.show_part(
             &shown.layer,
             &mut shown.frames,
@@ -283,7 +280,6 @@ impl Pies {
         &mut self,
         canvas: &mut Canvas,
         kit: &mut Kit,
-        qh: &QueueHandle<App>,
         surface: &wl_surface::WlSurface,
     ) {
         let Some(shown) = self
@@ -295,7 +291,7 @@ impl Pies {
         };
         shown.waiting = false;
         if shown.stale {
-            self.draw(canvas, kit, qh);
+            self.draw(canvas, kit);
         }
     }
 
@@ -304,7 +300,6 @@ impl Pies {
         &mut self,
         canvas: &mut Canvas,
         kit: &mut Kit,
-        qh: &QueueHandle<App>,
         layer: &LayerSurface,
         configure: &LayerSurfaceConfigure,
     ) {
@@ -316,7 +311,7 @@ impl Pies {
             return;
         }
         shown.size = Some((width, height));
-        self.draw(canvas, kit, qh);
+        self.draw(canvas, kit);
     }
 
     /// The compositor took the surface away: the monitor went.
