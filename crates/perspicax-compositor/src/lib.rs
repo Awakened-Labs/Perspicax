@@ -60,6 +60,7 @@ mod popup;
 mod screencopy;
 mod shell;
 mod shell_protocol;
+mod stall;
 pub mod state;
 mod toplevels;
 #[cfg(feature = "xwayland")]
@@ -388,6 +389,9 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
             .spawned
             .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
         state.backend.reap();
+        // Each client of ours on its own, to see which have stopped reading;
+        // then all of them, Xwayland included, as before.
+        state.flush_each();
         if let Err(error) = display.flush_clients() {
             break Err(Error::Io(error));
         }
