@@ -6,7 +6,10 @@
 //! `quiet`, and a canvas page read as fully explained (issue #33). These
 //! tests draw into subsurfaces, synchronized and not, nested, and under a
 //! panel, and check that the damage is counted for the window, where in it
-//! the pixels changed, once per frame.
+//! the pixels changed, once per frame. A video player on a rotated monitor
+//! may hand its subsurface a buffer turned a quarter, and what it names in
+//! that buffer's own pixels is counted where those pixels are drawn (issue
+//! #104).
 //!
 //! The rest is what a frame is. A commit that brings no new buffer and names
 //! no damage, which a client sends to ask for a frame callback (Firefox sent
@@ -23,7 +26,7 @@ use perspicax_compositor::Backend;
 use perspicax_index::{HostFacts, Layer as Level, SurfaceFacts, SurfaceKind};
 use perspicax_node::{Rect, SurfaceId};
 use smithay_client_toolkit::shell::{WaylandSurface, wlr_layer::Layer};
-use wayland_client::{EventQueue, QueueHandle};
+use wayland_client::{EventQueue, QueueHandle, protocol::wl_output};
 
 const PAGE: u32 = 0xff33_6699;
 const PAGE_AGAIN: u32 = 0xff99_6633;
@@ -239,6 +242,49 @@ fn nested_subsurfaces_land_at_the_sum_of_their_offsets() {
         &[Rect::new(50.0, 50.0, 80.0, 70.0)],
     );
     assert_eq!(window.damage_generation, before + 1);
+    assert_eq!(desk.drawn, 1, "no configure redrew the window meanwhile");
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn damage_named_in_a_turned_buffer_lands_where_the_buffer_is_drawn() {
+    let session = session("subsurface-turned");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let (page, before) = settle(&session, &mut desk, &mut queue, &qh, "page");
+    let root = desk.windows[0].wl_surface().clone();
+
+    // A picture 120 by 80 in its own pixels, turned a quarter, so the
+    // subsurface is 80 by 120. The corner at the top left of its pixels is
+    // drawn at the top right of the subsurface.
+    let (_placed, child) = desk.open_subsurface(&qh, &root, (40, 30), false);
+    root.commit();
+    let turned = wl_output::Transform::_90;
+    desk.paint_turned(&child, (120, 80), turned, PAGE, (20, 10), PAGE_AGAIN);
+    child.commit();
+    let window = landed(
+        &session,
+        &mut desk,
+        &mut queue,
+        page,
+        &[Rect::new(110.0, 30.0, 120.0, 50.0)],
+    );
+    assert_eq!(window.damage_generation, before + 1);
+
+    // Damage alone, at the bottom right of the pixels, with no new buffer
+    // to measure: turned back within the size the subsurface shows, to its
+    // bottom left.
+    child.damage_buffer(100, 70, 20, 10);
+    child.commit();
+    let window = landed(
+        &session,
+        &mut desk,
+        &mut queue,
+        page,
+        &[Rect::new(40.0, 130.0, 50.0, 150.0)],
+    );
+    assert_eq!(window.damage_generation, before + 2);
     assert_eq!(desk.drawn, 1, "no configure redrew the window meanwhile");
 
     session.stop((desk, queue));

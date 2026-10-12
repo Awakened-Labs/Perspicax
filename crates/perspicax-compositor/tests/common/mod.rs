@@ -1067,6 +1067,46 @@ impl Desk {
         surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
     }
 
+    /// Attach a buffer `size` in its own pixels to `surface`, turned by
+    /// `transform`, as a video player on a rotated monitor hands one over:
+    /// all in `colour` but for a `corner` of its pixels at the top left in
+    /// `marked`, and naming only that corner as damage, in the buffer's own
+    /// coordinates. Not committed.
+    pub fn paint_turned(
+        &mut self,
+        surface: &wl_surface::WlSurface,
+        size: (u32, u32),
+        transform: wl_output::Transform,
+        colour: u32,
+        corner: (u32, u32),
+        marked: u32,
+    ) {
+        let (width, height) = size;
+        let (buffer, canvas) = self
+            .pool
+            .create_buffer(
+                i32::try_from(width).unwrap(),
+                i32::try_from(height).unwrap(),
+                i32::try_from(width * 4).unwrap(),
+                wl_shm::Format::Argb8888,
+            )
+            .expect("a buffer");
+        for (at, pixel) in canvas.chunks_exact_mut(4).enumerate() {
+            let at = u32::try_from(at).unwrap();
+            let (x, y) = (at % width, at / width);
+            let inside = x < corner.0 && y < corner.1;
+            pixel.copy_from_slice(&if inside { marked } else { colour }.to_le_bytes());
+        }
+        buffer.attach_to(surface).expect("attach");
+        surface.set_buffer_transform(transform);
+        surface.damage_buffer(
+            0,
+            0,
+            i32::try_from(corner.0).unwrap(),
+            i32::try_from(corner.1).unwrap(),
+        );
+    }
+
     /// Bind the window list. Panics if it is not advertised.
     pub fn bind_list(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
         self.list = Some(
