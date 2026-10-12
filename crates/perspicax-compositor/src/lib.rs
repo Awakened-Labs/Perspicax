@@ -104,6 +104,15 @@ use crate::{backend::Running, host::Inbound, state::Compositor};
 /// measurement in this milestone a measurement of this constant instead.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
+/// How much may wait for a client that has stopped reading before it is cut
+/// off. wayland-backend's own is 4 KB, so a client was cut off once the
+/// kernel's buffer to it filled too: a few seconds of a pointer moving over
+/// it. That dropped #80's frozen Flutter applications, and the shell when
+/// something kept it from reading (#101). A megabyte is about half a minute
+/// of that, and costs only a client that falls behind: the buffer grows as
+/// it is needed.
+const MOST_UNREAD: usize = 1 << 20;
+
 /// What shows where no window is: a dark grey, so a working output is
 /// distinguishable from a dead one, on a monitor and in a picture of one. The
 /// wallpaper is the shell's job (W5).
@@ -244,6 +253,9 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
     let mut display: Display<Compositor> =
         Display::new().map_err(|error| Error::Display(error.to_string()))?;
     let handle = display.handle();
+    // Before any client is accepted, Xwayland included: each takes it as it
+    // connects.
+    handle.set_default_max_buffer_size(MOST_UNREAD);
     // Before the socket, so a seat that cannot come up -- no session, no GPU,
     // no monitor -- is refused before any client has been accepted by a
     // compositor that cannot show it anything.
