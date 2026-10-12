@@ -933,8 +933,7 @@ impl CompositorHandler for Compositor {
         // only when there is no renderer to want it. The whole of the window
         // -- or of the menu -- is what it was before this commit: what a
         // picture taken away uncovered.
-        let whole =
-            geometry::window_geometry(&root).map(|whole| damage::to_rect(whole, 1.0) + shift);
+        let whole = geometry::window_geometry(&root).map(|whole| damage::to_rect(whole) + shift);
         let taken = damage::take(surface, at + shift, whole, !renders);
         #[cfg(any(feature = "seat", feature = "capture"))]
         if renders {
@@ -1147,7 +1146,7 @@ impl XdgShellHandler for Compositor {
             return;
         };
         let whole = geometry::window_geometry(popup.wl_surface())
-            .map(|whole| damage::to_rect(whole, 1.0) + hung.at);
+            .map(|whole| damage::to_rect(whole) + hung.at);
         self.record_damage(id, whole.into_iter().collect());
         self.backend.redraw();
         self.publish_facts();
