@@ -824,8 +824,11 @@ Turn off what you do not want with a `Hidden=true` entry of your own.
 applications, other programs' tray icons and the desktop folder's icons. It
 is a program of its own and an ordinary Wayland client: its surfaces are
 layer-shell surfaces, and its taskbar and pager speak the protocols waybar
-speaks. A panel that crashes takes no window with it, and anything speaking
-layer-shell can stand in for any piece of it.
+speaks. A panel that crashes takes no window with it, nor leaves one frozen:
+a window shown again by a switch, a restore, a tab or a monitor coming or
+going draws at once, a panel running or not, and no window waits more than a
+second to be told it may draw. Anything speaking layer-shell can stand in for
+any piece of it.
 
 perspicax starts it as the session starts, before `autostart`, and starts it
 again if it crashes; a shell that refuses its config waits for the file to be
