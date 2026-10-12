@@ -3,10 +3,16 @@
 //!
 //! # While locked
 //!
-//! Nothing but the lock surfaces is drawn, hit-tested or given the keyboard,
-//! and no binding runs: a launcher binding that opened a terminal over the
-//! lock screen would be an unlock. Only the escape hatches still work, and
-//! both leave the session rather than bypass the lock.
+//! Nothing but the lock surfaces is drawn, hit-tested or given the keyboard
+//! or the pointer, and no binding runs: a launcher binding that opened a
+//! terminal over the lock screen would be an unlock. Only the escape hatches
+//! still work, and both leave the session rather than bypass the lock.
+//!
+//! The pointer is taken from the windows the moment the session locks, not
+//! at the next motion: a hand at rest, or a tap of the touchpad to wake the
+//! screen, would otherwise click in the window under it, unseen (#82). The
+//! lock surface under it has it as soon as it comes up, and the window under
+//! it has it back as soon as the session unlocks.
 //!
 //! Agents are locked out too. The lock surfaces are published at the top of
 //! the stack, so every node beneath is honestly judged occluded, and an act is
@@ -15,6 +21,7 @@
 
 use perspicax_node::SurfaceId;
 use smithay::{
+    input::pointer::CursorImageStatus,
     output::Output,
     reexports::wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface},
     wayland::{
@@ -56,25 +63,40 @@ impl SessionLockHandler for Compositor {
     /// surfaces is drawn. The frame already on the screen stays there for
     /// at most one refresh, which is the gap between confirming and the
     /// first frame that could prove the screen is covered.
+    ///
+    /// The pointer leaves every window now, before any lock surface has come
+    /// to take it, and the cursor is the compositor's arrow until the lock
+    /// client asks for its own. Smithay puts the arrow back as a client loses
+    /// the pointer, but a frame's resize arrow belongs to no client, and
+    /// would otherwise stay drawn over the lock.
     fn lock(&mut self, confirmation: SessionLocker) {
         tracing::info!("session locked");
         self.lock = Some(Locked::default());
         self.clear_focus();
+        self.cursor = CursorImageStatus::default_named();
+        self.repoint();
         confirmation.lock();
         self.backend.redraw();
         self.publish_facts();
     }
 
+    /// Unlock. The window under the pointer has it back at once. As the lock
+    /// surface loses it, smithay puts the compositor's arrow back, so the
+    /// cursor the lock client asked for, which for swaylock is none at all,
+    /// goes too, until the window sets its own.
     fn unlock(&mut self) {
         tracing::info!("session unlocked");
         self.lock = None;
         self.focus_top_window();
+        self.repoint();
         self.backend.redraw();
         self.publish_facts();
     }
 
-    /// A lock surface for one output: sized to cover it, and given the
-    /// keyboard if it is the first.
+    /// A lock surface for one output: sized to cover it, given the keyboard
+    /// if it is the first, and the pointer if the pointer is on its output,
+    /// whichever came first. swaylock hides the cursor as the pointer
+    /// arrives, so until it does the cursor is drawn over the lock.
     fn new_surface(&mut self, surface: LockSurface, output: WlOutput) {
         let Some(output) = Output::from_resource(&output) else {
             return;
@@ -106,6 +128,7 @@ impl SessionLockHandler for Compositor {
         if first {
             self.focus_plain(wl_surface);
         }
+        self.repoint();
         self.backend.redraw();
         self.publish_facts();
     }

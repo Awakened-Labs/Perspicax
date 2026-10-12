@@ -562,7 +562,6 @@ impl Compositor {
         }
     }
 
-    /// Give the keyboard back to the topmost window, or to nothing.
     /// Take the keyboard from whatever has it. Smithay 0.7 tells
     /// `focus_changed` of a new focus but not of none, so what has to follow
     /// is done here: no window looks active any more, nor is named so to X
@@ -602,6 +601,7 @@ impl Compositor {
         }
     }
 
+    /// Give the keyboard back to the topmost window, or to nothing.
     pub(crate) fn focus_top_window(&mut self) {
         let top = self
             .space

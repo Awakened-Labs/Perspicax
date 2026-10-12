@@ -550,10 +550,12 @@ impl Compositor {
 impl Compositor {
     /// Give the pointer to whatever is under it now, though it has not
     /// moved: a layer surface came up under a still pointer, or went from
-    /// under it. Without this a hand had to nudge the mouse before a click
+    /// under it; the session locked, a lock surface came up, or the session
+    /// unlocked. Without this a hand had to nudge the mouse before a click
     /// reached the menu or pie it had just opened, and the click went to
-    /// the window beneath; and a closed menu left the window it uncovered
-    /// without the pointer until the mouse moved.
+    /// the window beneath; a closed menu left the window it uncovered
+    /// without the pointer until the mouse moved; and a click at rest on
+    /// the lock screen went to the window it hid (#82).
     ///
     /// Only when what is under the pointer changed, so a panel's clock
     /// committing each second moves nothing. Never under a grab, which
