@@ -195,6 +195,55 @@ fn a_window_asking_to_be_maximized_is_left_as_it_was_with_nobody_at_the_seat() {
     session.stop((desk, queue));
 }
 
+/// #99: a window opening takes the keyboard from the window in use, which is
+/// told it no longer is. It used to go on believing it was: its state was
+/// unset unsaid as the new window was mapped, and then there was nothing
+/// left to tell it.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_opening_over_the_one_in_use_tells_that_one_it_no_longer_is() {
+    let session = Session::start(
+        "person-new-window",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_window(&qh, "first", "first");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+
+    desk.open_window(&qh, "second", "second");
+    until(&mut queue, &mut desk, |desk| {
+        desk.activations_of(0) == [true, false]
+    });
+    assert_eq!(desk.activations_of(1), [true], "the new window is in use");
+
+    session.stop((desk, queue));
+}
+
+/// With nobody at the seat every window is active for as long as it is
+/// open: a toolkit that believes it is unfocused draws differently, and an
+/// agent reads what is drawn. A window opening used to unset the others'
+/// state unsaid, so the next configure any of them was sent told it it was
+/// not active. Here that is the one a request to be maximized is answered
+/// with, which with nobody at the seat changes nothing else.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn with_nobody_at_the_seat_a_window_opening_leaves_the_others_active() {
+    let session = Session::start("nobody-new-window", Backend::headless((1280, 1024)));
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_window(&qh, "first", "first");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    desk.open_window(&qh, "second", "second");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 2);
+
+    desk.windows[0].set_maximized();
+    until(&mut queue, &mut desk, |desk| {
+        desk.activations_of(0).len() == 2
+    });
+    assert_eq!(desk.activations_of(0), [true, true]);
+
+    session.stop((desk, queue));
+}
+
 /// What a game reaches for to turn its camera with the mouse: the mouse's
 /// own motion, wherever the pointer is, and a hold on the pointer while it
 /// turns. Xwayland looks for both before it turns an X game's pointer warps

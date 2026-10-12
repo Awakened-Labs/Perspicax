@@ -59,7 +59,7 @@ fn with_windows(session: &Session, titles: &[&str]) -> Client {
     desk.bind_relative(&globals, &qh);
     for (n, title) in titles.iter().enumerate() {
         desk.open_window(&qh, title, title);
-        until(&mut queue, &mut desk, |desk| desk.drawn == n + 1);
+        until(&mut queue, &mut desk, |desk| desk.has_drawn(n));
     }
     // Drawn is not yet described: a motion before a window is in the
     // space would find nothing under the pointer.

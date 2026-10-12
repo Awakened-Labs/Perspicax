@@ -776,6 +776,13 @@ impl Desk {
         }
     }
 
+    /// Whether the `nth` window has drawn: it draws its first configure as it
+    /// comes. Not a count of everything drawn, which with a person at the
+    /// seat includes the window in use redrawn as a new one takes over.
+    pub fn has_drawn(&self, nth: usize) -> bool {
+        self.activations.iter().any(|(window, _)| *window == nth)
+    }
+
     /// Whether each configure the `nth` window was sent told it it is the
     /// active one, in order.
     pub fn activations_of(&self, nth: usize) -> Vec<bool> {

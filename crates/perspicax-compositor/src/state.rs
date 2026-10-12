@@ -1016,7 +1016,12 @@ impl XdgShellHandler for Compositor {
         window.user_data().insert_if_missing(|| id);
 
         let at = self.place_new();
-        self.space.map_element(window.clone(), at, true);
+        // Not activated by the map: smithay would unset every other window's
+        // state unsaid, and the window in use would never be told it no
+        // longer is. It is already active, above, and on a seat focusing it
+        // tells the others (`show_active`); with nobody at the seat they all
+        // stay active.
+        self.space.map_element(window.clone(), at, false);
         self.adopt(&window);
         tracing::info!(surface = id.0, at = ?at, "toplevel mapped");
 
