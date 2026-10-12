@@ -1215,16 +1215,20 @@ impl Compositor {
     }
 
     /// A toplevel asking to stop filling its monitor: only with a person at
-    /// the seat.
+    /// the seat, and only one that fills it, whose configure then carries the
+    /// change. Otherwise -- nobody at the seat, a window that does not fill
+    /// it, one snapped to a half, or before it is a window -- it is answered
+    /// with the plain configure it would have had anyway: xdg-shell says
+    /// every such request is answered.
     fn unfill_request(&mut self, surface: &ToplevelSurface, fill: Fill) {
-        if !self.backend.has_person() {
-            return;
-        }
-        if let Some(window) = self.window_for(surface.wl_surface()) {
-            self.unfill(&window, fill, None);
-        } else {
-            surface.with_pending_state(|pending| pending.states.unset(fill.state()));
-            surface.send_pending_configure();
+        let filling = surface.with_pending_state(|pending| pending.states.contains(fill.state()));
+        match self.window_for(surface.wl_surface()) {
+            Some(window) if filling && self.backend.has_person() => {
+                self.unfill(&window, fill, None);
+            }
+            _ => {
+                surface.send_configure();
+            }
         }
     }
 

@@ -11,9 +11,11 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{Session, until};
+use common::{Configured, Desk, Said, Session, until};
 use perspicax_compositor::{Backend, Config, Error, Facts, Requests, Stop};
 use perspicax_index::Consent;
+use perspicax_policy::{Action, Direction};
+use smithay_client_toolkit::shell::WaylandSurface as _;
 
 /// The smallest claim worth making automatically: it binds a socket, runs an
 /// event loop, and stops when it is told to. Everything else in this milestone
@@ -242,6 +244,71 @@ fn with_nobody_at_the_seat_a_window_opening_leaves_the_others_active() {
     assert_eq!(desk.activations_of(0), [true, true]);
 
     session.stop((desk, queue));
+}
+
+/// xdg-shell says a request to be unmaximized, or to leave fullscreen, is
+/// answered with a configure, whatever it changes. With nobody at the seat
+/// it changes nothing, and it used to be answered with nothing at all.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_asking_to_stop_filling_is_answered_with_nobody_at_the_seat() {
+    let session = Session::start("nobody-unmaximize", Backend::headless((1280, 1024)));
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_window(&qh, "asking", "asking");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+
+    desk.windows[0].unset_maximized();
+    until(&mut queue, &mut desk, |desk| configures(desk).len() == 2);
+    desk.windows[0].unset_fullscreen();
+    until(&mut queue, &mut desk, |desk| configures(desk).len() == 3);
+
+    session.stop((desk, queue));
+}
+
+/// #99: a window snapped to a half, which is not maximized, asks to be
+/// unmaximized, as a toolkit may. It is answered, and stays as it is. It
+/// used to be sent back to the size it had before it was snapped, still
+/// tiled, and moved there.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_snapped_window_asking_to_be_unmaximized_keeps_its_half_and_its_tiling() {
+    let session = Session::start(
+        "person-unmaximize-snapped",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_window(&qh, "snapped", "snapped");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    session.perform(Action::Snap(Direction::Left));
+    until(&mut queue, &mut desk, |desk| {
+        configures(desk)
+            .last()
+            .is_some_and(|last| last.tiled && last.size == Some((640, 1024)))
+    });
+    let snapped = configures(&desk).len();
+
+    desk.windows[0].unset_maximized();
+    until(&mut queue, &mut desk, |desk| {
+        configures(desk).len() > snapped
+    });
+    let answer = *configures(&desk).last().expect("answered");
+    assert!(
+        answer.tiled && !answer.maximized && answer.size == Some((640, 1024)),
+        "no longer as it was snapped: {answer:?}"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// Every configure the client's first window was sent, in order.
+fn configures(desk: &Desk) -> Vec<Configured> {
+    desk.said_to(desk.windows[0].wl_surface())
+        .into_iter()
+        .filter_map(|said| match said {
+            Said::Configure(configured) => Some(configured),
+            _ => None,
+        })
+        .collect()
 }
 
 /// What a game reaches for to turn its camera with the mouse: the mouse's
