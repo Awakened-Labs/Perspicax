@@ -9,7 +9,10 @@
 use std::{
     collections::{HashMap, HashSet},
     os::unix::net::UnixStream,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -28,6 +31,7 @@ use crate::{
     framed::Framed,
     geometry, origin, popup,
     shell::{self, Fill},
+    stall::{Change, Stall},
 };
 
 use smithay::{
@@ -311,6 +315,10 @@ pub struct Compositor {
     /// How many windows have been placed, for the cascade.
     pub(crate) placed: u32,
     started: Instant,
+    /// The clients this compositor accepted, each with its state, until
+    /// they go: flushed one by one, to see which have stopped reading
+    /// (see [`Compositor::flush_each`]). Xwayland is smithay's, and not here.
+    clients: Vec<(ClientId, Arc<ClientState>)>,
 }
 
 impl Compositor {
@@ -423,6 +431,7 @@ impl Compositor {
             spawn_failed: None,
             placed: 0,
             started: Instant::now(),
+            clients: Vec::new(),
         }
     }
 
@@ -437,10 +446,8 @@ impl Compositor {
     /// therefore costs the client its ability to be acted on, and never
     /// silently grants it somebody else's identity.
     pub(crate) fn insert_client(&mut self, stream: UnixStream) {
-        let client = match self
-            .display
-            .insert_client(stream, Arc::new(ClientState::default()))
-        {
+        let state = Arc::new(ClientState::default());
+        let client = match self.display.insert_client(stream, state.clone()) {
             Ok(client) => client,
             Err(error) => {
                 tracing::warn!(%error, "could not insert client");
@@ -453,10 +460,39 @@ impl Compositor {
             .map_or(Origin::Unattributed, |credentials| {
                 origin::of_pid(credentials.pid)
             });
-        if let Some(state) = client.get_data::<ClientState>() {
-            state.attribute(origin.clone());
-        }
+        state.attribute(origin.clone());
         tracing::info!(id = ?client.id(), ?origin, "client connected");
+        self.clients.push((client.id(), state));
+    }
+
+    /// Flush what waits for each client this compositor accepted, and say
+    /// when one has stopped reading it, and when it reads again: the line
+    /// before the one saying it was cut off, if it is (see [`crate::stall`]).
+    /// A client that has gone is forgotten. It cannot be told by its flush,
+    /// which for a client cleaned up is `Ok`, and for one cut off but not yet
+    /// cleaned up still tries its socket.
+    pub(crate) fn flush_each(&mut self) {
+        let mut backend = self.display.backend_handle();
+        let now = Instant::now();
+        self.clients.retain(|(id, client)| {
+            if client.gone.load(Ordering::Relaxed) {
+                return false;
+            }
+            let flushed = backend.flush(Some(id.clone()));
+            match client.stall.flushed(&flushed, now) {
+                Some(Change::Stopped(waited)) => tracing::warn!(
+                    ?id,
+                    origin = ?client.origin(),
+                    ?waited,
+                    "a client has stopped reading; what is sent to it is held, until too much is"
+                ),
+                Some(Change::Reading(waited)) => {
+                    tracing::info!(?id, origin = ?client.origin(), ?waited, "a client reads again");
+                }
+                None => {}
+            }
+            true
+        });
     }
 
     /// The next surface id. Monotonic, and never handed out twice.
@@ -1444,6 +1480,10 @@ impl XdgActivationHandler for Compositor {
 pub(crate) struct ClientState {
     compositor: CompositorClientState,
     origin: OnceLock<Origin>,
+    /// Whether it has stopped reading what is sent to it.
+    stall: Stall,
+    /// Whether it has gone, so that it is flushed no more.
+    gone: AtomicBool,
 }
 
 impl ClientState {
@@ -1468,15 +1508,28 @@ impl ClientData for ClientState {
     /// `ConnectionClosed`. wayland-backend cuts off a client whose outgoing
     /// buffer is full, which is what input does to a client that has stopped
     /// reading -- an application frozen for 25 s while an AT asked it where
-    /// something is, as #80's Flutter applications were. Nothing here can
-    /// tell the two apart; the origin's pid is what ties this line to the
-    /// application's own last words, and to the keeper's "forgotten".
+    /// something is, as #80's Flutter applications were, or the shell when
+    /// something kept it from reading (#101). Nothing here can tell the two
+    /// apart, but a client that went while it read nothing is said to have,
+    /// and for how long: cut off for it, or ended frozen. The origin's pid is
+    /// what ties this line to the application's own last words, and to the
+    /// keeper's "forgotten".
+    ///
+    /// Called with wayland-backend's state locked, so it touches only its
+    /// own.
     fn disconnected(&self, id: ClientId, reason: DisconnectReason) {
+        self.gone.store(true, Ordering::Relaxed);
         let origin = self.origin();
         match reason {
-            DisconnectReason::ConnectionClosed => {
-                tracing::info!(?id, ?origin, "client disconnected");
-            }
+            DisconnectReason::ConnectionClosed => match self.stall.behind(Instant::now()) {
+                Some(behind) => tracing::warn!(
+                    ?id,
+                    ?origin,
+                    ?behind,
+                    "client disconnected while it read nothing: cut off for it, or ended frozen"
+                ),
+                None => tracing::info!(?id, ?origin, "client disconnected"),
+            },
             DisconnectReason::ProtocolError(error) => {
                 tracing::warn!(?id, ?origin, %error, "client disconnected for a protocol error");
             }

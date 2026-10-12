@@ -24,6 +24,12 @@ unsafe_code = "deny"
 
 [dependencies]
 smithay.workspace = true
+# Only for a feature smithay leaves off: `libwayland_1_23` gives the display
+# `set_default_max_buffer_size`, which wayland-backend's own implementation
+# honours by letting what waits for a client grow to it (#101). It names a
+# libwayland release and links nothing. Code goes on naming the crate
+# through smithay's re-export, which this unifies with.
+wayland-server = { version = "0.31", features = ["libwayland_1_23"] }
 thiserror.workspace = true
 tracing.workspace = true
 perspicax-index = { path = "../perspicax-index", version = "0.1.0" }

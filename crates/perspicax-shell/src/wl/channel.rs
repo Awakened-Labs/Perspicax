@@ -10,7 +10,7 @@
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 use wayland_client::{Connection, Dispatch, QueueHandle, globals::GlobalList, protocol::wl_output};
 
-use super::App;
+use super::{App, watch};
 
 /// Bind the channel, if this compositor offers it to us. One that does not
 /// is not perspicax, or is a perspicax whose `[protocols] shell` rule leaves
@@ -135,16 +135,22 @@ impl Dispatch<PerspicaxShellV1, ()> for App {
     ) {
         use perspicax_shell_v1::Event;
         match event {
-            Event::StartMenu { output } => app.start_menu_on(output),
-            Event::RootMenu { output, x, y } => app.root_menu(output, x, y),
-            Event::PieMenu { output, x, y, name } => app.pie_menu(output, x, y, &name),
-            Event::Reconfigure => {
+            Event::StartMenu { output } => {
+                watch::timed("opening the start menu", || app.start_menu_on(output));
+            }
+            Event::RootMenu { output, x, y } => {
+                watch::timed("opening the root menu", || app.root_menu(output, x, y));
+            }
+            Event::PieMenu { output, x, y, name } => {
+                watch::timed("opening a pie", || app.pie_menu(output, x, y, &name));
+            }
+            Event::Reconfigure => watch::timed("taking up a changed config", || {
                 app.reconfigure(qh);
                 #[cfg(any(feature = "panel", feature = "wallpaper"))]
                 app.take_back(connection);
                 #[cfg(not(any(feature = "panel", feature = "wallpaper")))]
                 let _ = connection;
-            }
+            }),
             Event::Finished => {
                 tracing::info!("perspicax withdrew the shell channel");
                 channel.destroy();

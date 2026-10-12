@@ -326,7 +326,8 @@ Asking where a control is can cost the application more than a second.
 Flutter's bridge answers by asking itself and waiting, so the question
 freezes the whole application for 25 seconds, and the answer then has no
 geometry in it. A client frozen while a person moves the pointer over it
-stops reading what the compositor sends, and is disconnected. So perspicax
+stops reading what the compositor sends, and is disconnected once a megabyte
+waits for it: half a minute or more of an ordinary mouse moving. So perspicax
 stops asking where controls are at the first call left unanswered. If the
 application had just answered the rest of the read in full, that control and
 everything beneath it are never asked again while the application runs, and
@@ -517,8 +518,8 @@ full`.
 Run it from a text console (a TTY, not a terminal inside another desktop), with
 seatd or logind managing the seat. Log to a file: the console the session
 takes over shows nothing until it ends, and what the programs it starts
-print goes to the same file. With no `RUST_LOG`, a seat logs its warnings;
-`RUST_LOG=info` says what it is doing as well.
+print goes to the same file. With no `RUST_LOG`, a seat and its shell log
+their warnings; `RUST_LOG=info` says what they are doing as well.
 
 ```sh
 perspicax --seat --spawn foot 2>~/perspicax.log
@@ -784,9 +785,9 @@ Choose Perspicax at the greeter. The entry runs `perspicax --session`, which is
   session's is kept as `perspicax.log.old`: that is the one to read after a
   login that went straight back to the greeter. It says what the session did
   as well as its warnings; `RUST_LOG` changes that, as ever. What the
-  programs the session starts print is not in it but in the session's
-  stderr, wherever the display manager keeps that:
-  `~/.local/share/sddm/wayland-session.log` for SDDM.
+  programs the session starts print, the shell's warnings among it, is not
+  in it but in the session's stderr, wherever the display manager keeps
+  that: `~/.local/share/sddm/wayland-session.log` for SDDM.
 
 For a keyring the login unlocks, the two `pam_gnome_keyring` lines under "The
 desktop" go in the display manager's PAM file: `/etc/pam.d/sddm` for SDDM.
@@ -831,13 +832,16 @@ second to be told it may draw. Anything speaking layer-shell can stand in for
 any piece of it.
 
 perspicax starts it as the session starts, before `autostart`, and starts it
-again if it crashes, or if it loses its connection to perspicax, as a shell
-that stops reading while input is sent to it does; the log says which. A shell
-that refuses its config waits for the file to be saved again. A save that
-changes `[shell]` reaches it in place, without a restart. The tray needs a
-D-Bus session bus, and a text-console login has none: start the session under
-one, `dbus-run-session -- perspicax --seat`, or as `perspicax --session`,
-which starts one itself. With `--mcp`, keep the agent's wire from that bus, as
+again if it crashes, or if it loses its connection to perspicax; the log says
+which. A client that stops reading while input is sent to it is cut off once
+a megabyte waits for it, half a minute or more of an ordinary mouse moving
+over it, and the log says when it stopped. The shell warns of anything that
+kept it from reading for a quarter of a second or more. A shell that refuses
+its config waits for the file to be saved again. A save that changes
+`[shell]` reaches it in place, without a restart. The tray needs a D-Bus
+session bus, and a text-console login has none: start the session under one,
+`dbus-run-session -- perspicax --seat`, or as `perspicax --session`, which
+starts one itself. With `--mcp`, keep the agent's wire from that bus, as
 [What acting looks like](#what-acting-looks-like) shows.
 
 The session tells its bus what it is and where its displays are, so that a

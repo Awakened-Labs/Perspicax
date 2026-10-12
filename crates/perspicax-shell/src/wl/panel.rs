@@ -53,6 +53,7 @@ use super::{
     App, Asked,
     canvas::{Canvas, whole},
     pager::Model,
+    watch,
 };
 #[cfg(feature = "menus")]
 use crate::layout::Rect;
@@ -602,6 +603,7 @@ impl Panels {
             open,
             layout,
         ));
+        watch::slow("drawing a panel", started.elapsed());
     }
 }
 
@@ -640,12 +642,14 @@ impl App {
             return;
         }
         self.handle.insert_idle(|app| {
-            if app.panels.icon_unknown() {
-                let read = app.installed.refresh();
-                app.panels.find_icons(read, app.installed.apps());
-            }
-            app.panels
-                .draw_if_stale(&mut app.canvas, &mut app.kit, &app.workspaces.model);
+            watch::timed("showing the panels' news", || {
+                if app.panels.icon_unknown() {
+                    let read = app.installed.refresh();
+                    app.panels.find_icons(read, app.installed.apps());
+                }
+                app.panels
+                    .draw_if_stale(&mut app.canvas, &mut app.kit, &app.workspaces.model);
+            });
         });
     }
 

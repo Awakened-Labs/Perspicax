@@ -42,6 +42,7 @@ use super::{
     App, Asked,
     canvas::{Area, Canvas, whole},
     installed::Installed,
+    watch,
 };
 use crate::{
     a11y::{self, adapter::Served},
@@ -331,6 +332,7 @@ impl Menus {
         shown
             .a11y
             .show(a11y::menu(&shown.namespace, Some(size), Some(&view)));
+        watch::slow("drawing the menus", started.elapsed());
     }
 
     /// The compositor sized the surface: lay the menus out on it and draw

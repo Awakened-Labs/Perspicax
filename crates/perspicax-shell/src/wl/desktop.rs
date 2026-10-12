@@ -736,7 +736,9 @@ impl App {
                     app.watching = false;
                     return TimeoutAction::Drop;
                 }
-                app.desktops.refresh(&mut app.canvas, &mut app.kit);
+                super::watch::timed("looking at the desktop folder", || {
+                    app.desktops.refresh(&mut app.canvas, &mut app.kit);
+                });
                 TimeoutAction::ToDuration(EVERY)
             });
         match watching {

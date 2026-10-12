@@ -39,6 +39,9 @@ pub(super) struct Canvas {
     layers: LayerShell,
     shm: Shm,
     pool: SlotPool,
+    /// Where what the compositor says of a picture arrives.
+    #[cfg(feature = "pie")]
+    qh: QueueHandle<App>,
 }
 
 impl Canvas {
@@ -56,6 +59,8 @@ impl Canvas {
             layers,
             shm,
             pool,
+            #[cfg(feature = "pie")]
+            qh: qh.clone(),
         })
     }
 
@@ -204,6 +209,12 @@ impl Canvas {
     /// picture costs its square and not the monitor, and the compositor
     /// takes in only the square. `false` when every buffer is still the
     /// compositor's, and nothing was shown.
+    ///
+    /// A picture shown asks the compositor to say when it showed it, so the
+    /// next waits for that; one not shown asks nothing. Asked any earlier, a
+    /// picture never committed would leave its question waiting on the
+    /// surface, to go with the next one: one per move of the pointer for as
+    /// long as every buffer is held, all answered at once.
     #[cfg(feature = "pie")]
     pub(super) fn show_part(
         &mut self,
@@ -273,6 +284,7 @@ impl Canvas {
         }
         let damage = |n: u32| i32::try_from(n).unwrap_or(i32::MAX);
         surface.damage_buffer(damage(left), damage(top), damage(across), damage(down));
+        surface.frame(&self.qh, surface.clone());
         layer.commit();
         true
     }
@@ -318,13 +330,11 @@ impl LayerShellHandler for App {
     fn configure(
         &mut self,
         _: &Connection,
-        qh: &QueueHandle<Self>,
+        _: &QueueHandle<Self>,
         layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _: u32,
     ) {
-        #[cfg(not(feature = "pie"))]
-        let _ = qh;
         #[cfg(feature = "wallpaper")]
         self.desktops
             .configure(&mut self.canvas, &mut self.kit, layer, &configure);
@@ -341,7 +351,7 @@ impl LayerShellHandler for App {
             .configure(&mut self.canvas, &mut self.kit, layer, &configure);
         #[cfg(feature = "pie")]
         self.pies
-            .configure(&mut self.canvas, &mut self.kit, qh, layer, &configure);
+            .configure(&mut self.canvas, &mut self.kit, layer, &configure);
     }
 }
 
@@ -369,15 +379,14 @@ impl CompositorHandler for App {
     fn frame(
         &mut self,
         _: &Connection,
-        qh: &QueueHandle<Self>,
+        _: &QueueHandle<Self>,
         surface: &wl_surface::WlSurface,
         _: u32,
     ) {
         #[cfg(feature = "pie")]
-        self.pies
-            .frame(&mut self.canvas, &mut self.kit, qh, surface);
+        self.pies.frame(&mut self.canvas, &mut self.kit, surface);
         #[cfg(not(feature = "pie"))]
-        let _ = (qh, surface);
+        let _ = surface;
     }
 
     fn surface_enter(

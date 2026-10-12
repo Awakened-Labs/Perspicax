@@ -9,13 +9,17 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::{
+    io::ErrorKind,
+    time::{Duration, Instant},
+};
 
 use common::{Configured, Desk, Said, Session, until};
 use perspicax_compositor::{Backend, Config, Error, Facts, Requests, Stop};
 use perspicax_index::Consent;
 use perspicax_policy::{Action, Direction};
 use smithay_client_toolkit::shell::WaylandSurface as _;
+use wayland_client::backend::WaylandError;
 
 /// The smallest claim worth making automatically: it binds a socket, runs an
 /// event loop, and stops when it is told to. Everything else in this milestone
@@ -327,4 +331,69 @@ fn a_game_finds_what_it_turns_its_camera_with() {
         assert!(common::advertised(&globals, global), "{global}");
     }
     session.stop((desk, queue));
+}
+
+/// #101: a client that falls behind is held for, not cut off at once. This
+/// one asks for 30 000 frame callbacks in one commit, as the shell's pie
+/// could have, then reads nothing for a moment: the answers, a `done` and a
+/// `delete_id` for each, are some 720 KB, far past what the kernel holds for
+/// it. wayland-backend's buffer of 4 KB cut it off; a megabyte holds them
+/// until it reads, and it is sent every one.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_client_that_reads_late_is_sent_every_frame_callback_it_asked_for() {
+    const ASKED: usize = 30_000;
+    let read = read_late("reads-late", ASKED);
+    assert_eq!(read, Ok(ASKED), "cut off for reading late");
+}
+
+/// The other half: what waits for a client is held to a megabyte, so one
+/// that has fallen further behind is still cut off, and costs no more. These
+/// 80 000 answers are some 1.9 MB.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_client_further_behind_than_a_megabyte_is_cut_off() {
+    let read = read_late("reads-too-late", 80_000);
+    assert!(read.is_err(), "held past a megabyte: {read:?}");
+}
+
+/// Open a window, ask for `asked` frame callbacks on it in one commit, read
+/// nothing for a moment while the compositor answers, then read: how many
+/// were answered, or what the connection said instead.
+fn read_late(name: &str, asked: usize) -> Result<usize, String> {
+    let session = Session::start(name, Backend::headless((800, 600)));
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_window(&qh, "late", "late");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    let surface = desk.windows[0].wl_surface().clone();
+    let done = |desk: &Desk| {
+        desk.said_to(&surface)
+            .iter()
+            .filter(|said| **said == Said::Done)
+            .count()
+    };
+    let before = done(&desk);
+
+    for _ in 0..asked {
+        surface.frame(&qh, surface.clone());
+    }
+    surface.commit();
+    // The asking is 12 bytes a callback, more than the socket takes at once.
+    loop {
+        match queue.flush() {
+            Ok(()) => break,
+            Err(WaylandError::Io(error)) if error.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("could not ask: {error}"),
+        }
+    }
+    std::thread::sleep(Duration::from_millis(200));
+
+    let read = queue
+        .roundtrip(&mut desk)
+        .map(|_| done(&desk) - before)
+        .map_err(|error| error.to_string());
+    session.stop((desk, queue));
+    read
 }

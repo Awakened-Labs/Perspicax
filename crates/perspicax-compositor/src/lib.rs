@@ -60,6 +60,7 @@ mod popup;
 mod screencopy;
 mod shell;
 mod shell_protocol;
+mod stall;
 pub mod state;
 mod toplevels;
 #[cfg(feature = "xwayland")]
@@ -103,6 +104,15 @@ use crate::{backend::Running, host::Inbound, state::Compositor};
 /// what a toolkit expects and a slower tick would make every damage
 /// measurement in this milestone a measurement of this constant instead.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// How much may wait for a client that has stopped reading before it is cut
+/// off. wayland-backend's own is 4 KB, so a client was cut off once the
+/// kernel's buffer to it filled too: a few seconds of a pointer moving over
+/// it. That dropped #80's frozen Flutter applications, and the shell when
+/// something kept it from reading (#101). A megabyte is about half a minute
+/// of that, and costs only a client that falls behind: the buffer grows as
+/// it is needed.
+const MOST_UNREAD: usize = 1 << 20;
 
 /// What shows where no window is: a dark grey, so a working output is
 /// distinguishable from a dead one, on a monitor and in a picture of one. The
@@ -244,6 +254,9 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
     let mut display: Display<Compositor> =
         Display::new().map_err(|error| Error::Display(error.to_string()))?;
     let handle = display.handle();
+    // Before any client is accepted, Xwayland included: each takes it as it
+    // connects.
+    handle.set_default_max_buffer_size(MOST_UNREAD);
     // Before the socket, so a seat that cannot come up -- no session, no GPU,
     // no monitor -- is refused before any client has been accepted by a
     // compositor that cannot show it anything.
@@ -376,6 +389,9 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
             .spawned
             .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
         state.backend.reap();
+        // Each client of ours on its own, to see which have stopped reading;
+        // then all of them, Xwayland included, as before.
+        state.flush_each();
         if let Err(error) = display.flush_clients() {
             break Err(Error::Io(error));
         }
