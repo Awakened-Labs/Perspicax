@@ -223,7 +223,9 @@ impl SeatHandler for App {
                     &seat,
                     None,
                     self.handle.clone(),
-                    Box::new(|app, _, event| app.key(&event)),
+                    Box::new(|app, _, event| {
+                        super::watch::timed("repeating a held key", || app.key(&event));
+                    }),
                 ) {
                     Ok(keyboard) => self.seat.keyboard = Some(keyboard),
                     Err(error) => tracing::warn!("no keyboard: {error}"),

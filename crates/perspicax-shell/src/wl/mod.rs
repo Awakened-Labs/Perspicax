@@ -28,6 +28,7 @@ mod seat;
 mod taskbar;
 #[cfg(feature = "tray")]
 mod tray;
+mod watch;
 
 use std::path::PathBuf;
 
@@ -61,8 +62,17 @@ pub(crate) fn run(
         registry_queue_init::<App>(&connection).map_err(|error| wayland(&error))?;
     let qh = queue.handle();
     let mut event_loop = EventLoop::<'static, App>::try_new().map_err(|error| wayland(&error))?;
-    WaylandSource::new(connection.clone(), queue)
-        .insert(event_loop.handle())
+    // As `WaylandSource::insert` does, with the handling timed.
+    event_loop
+        .handle()
+        .insert_source(
+            WaylandSource::new(connection.clone(), queue),
+            |_, queue, app| {
+                watch::timed("handling what the compositor sent", || {
+                    queue.dispatch_pending(app)
+                })
+            },
+        )
         .map_err(|error| wayland(&error.error))?;
     let channel = channel::bind(&globals, &qh);
     #[cfg(any(feature = "menus", feature = "panel"))]
@@ -75,7 +85,9 @@ pub(crate) fn run(
             .handle()
             .insert_source(receiver, |event, (), app: &mut App| {
                 if let calloop::channel::Event::Msg(asked) = event {
-                    app.asked(asked);
+                    watch::timed("doing what an assistive technology asked", || {
+                        app.asked(asked);
+                    });
                 }
             })
             .map_err(|error| wayland(&error.error))?;
@@ -89,7 +101,7 @@ pub(crate) fn run(
             .handle()
             .insert_source(receiver, |event, (), app: &mut App| {
                 if let calloop::channel::Event::Msg((started, news)) = event {
-                    app.tray_news(started, news);
+                    watch::timed("showing the tray's news", || app.tray_news(started, news));
                 }
             })
             .map_err(|error| wayland(&error.error))?;
@@ -429,11 +441,10 @@ impl App {
         let ticking = self
             .handle
             .insert_source(Timer::from_duration(next), |_, (), app| {
-                TimeoutAction::ToDuration(app.panels.tick(
-                    &mut app.canvas,
-                    &mut app.kit,
-                    &app.workspaces.model,
-                ))
+                TimeoutAction::ToDuration(watch::timed("showing the time", || {
+                    app.panels
+                        .tick(&mut app.canvas, &mut app.kit, &app.workspaces.model)
+                }))
             });
         match ticking {
             Ok(ticking) => self.ticking = Some(ticking),
@@ -598,7 +609,7 @@ impl App {
         let reaping = self
             .handle
             .insert_source(Timer::from_duration(EVERY), |_, (), app| {
-                if app.menus.launcher.reap() {
+                if watch::timed("collecting ended programs", || app.menus.launcher.reap()) {
                     TimeoutAction::ToDuration(EVERY)
                 } else {
                     app.reaping = false;

@@ -35,6 +35,7 @@ use super::{
     App, Asked,
     canvas::{Canvas, Frames, whole},
     installed::Installed,
+    watch,
 };
 use crate::{
     a11y::{self, adapter::Served},
@@ -272,6 +273,7 @@ impl Pies {
         shown
             .a11y
             .show(a11y::pie(&shown.namespace, Some(size), Some(&view)));
+        watch::slow("drawing the pie", started.elapsed());
     }
 
     /// The compositor showed the last picture on `surface`: draw what
