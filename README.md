@@ -831,13 +831,14 @@ second to be told it may draw. Anything speaking layer-shell can stand in for
 any piece of it.
 
 perspicax starts it as the session starts, before `autostart`, and starts it
-again if it crashes; a shell that refuses its config waits for the file to be
-saved again. A save that changes `[shell]` reaches it in place, without a
-restart. The tray needs a D-Bus session bus, and a text-console login has
-none: start the session under one, `dbus-run-session -- perspicax --seat`, or
-as `perspicax --session`, which starts one itself. With `--mcp`, keep the
-agent's wire from that bus, as [What acting looks
-like](#what-acting-looks-like) shows.
+again if it crashes, or if it loses its connection to perspicax, as a shell
+that stops reading while input is sent to it does; the log says which. A shell
+that refuses its config waits for the file to be saved again. A save that
+changes `[shell]` reaches it in place, without a restart. The tray needs a
+D-Bus session bus, and a text-console login has none: start the session under
+one, `dbus-run-session -- perspicax --seat`, or as `perspicax --session`,
+which starts one itself. With `--mcp`, keep the agent's wire from that bus, as
+[What acting looks like](#what-acting-looks-like) shows.
 
 The session tells its bus what it is and where its displays are, so that a
 program D-Bus starts on request -- a keyring's unlock prompt, a notification
