@@ -465,6 +465,23 @@ impl Compositor {
         SurfaceId(self.next_surface)
     }
 
+    /// Count every window on the monitors it is on now, before any is told
+    /// it may draw again.
+    ///
+    /// The screen is drawn from where each window is (`shell::stack`), but a
+    /// seat tells only the windows smithay counts on the monitor it drew, and
+    /// smithay counts only when asked
+    /// ([`Space::refresh`](smithay::desktop::Space::refresh)). Asked only
+    /// after a commit, a window brought back onto the screen -- by a switch,
+    /// a restore, a tab, a monitor that went -- was drawn at once but not
+    /// counted, so not told it may draw, nor which monitor it is on, until
+    /// some client drew. Once none did, GTK and Chromium, which wait for that
+    /// word with no limit, never drew again (#99). Counting before telling
+    /// keeps the two in step, whatever put the window there.
+    pub(crate) fn settle_outputs(&mut self) {
+        self.space.refresh();
+    }
+
     /// Tell every surface it may draw again.
     ///
     /// A compositor that renders sends these after presenting a frame. This one
@@ -475,7 +492,12 @@ impl Compositor {
     /// straight line at zero. The clock is deliberately the compositor's own
     /// monotonic clock rather than the wall, because that is what the protocol
     /// says the argument means.
-    pub(crate) fn send_frames(&self) {
+    ///
+    /// Every window in the space is told, counted on a monitor or not, but
+    /// each is counted first, as the seat counts before it tells: so a window
+    /// is told which monitor it is on as soon as it is told it may draw.
+    pub(crate) fn send_frames(&mut self) {
+        self.settle_outputs();
         let elapsed = u32::try_from(self.started.elapsed().as_millis() % u128::from(u32::MAX))
             .unwrap_or(u32::MAX);
         let windows = self.space.elements().filter_map(shell::surface_of);

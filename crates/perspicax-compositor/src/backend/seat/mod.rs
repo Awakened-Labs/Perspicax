@@ -18,7 +18,11 @@
 //! was committed meanwhile. A quiet desktop therefore costs nothing -- no
 //! wakeups at the refresh rate -- and a busy one is paced by the monitor.
 //! Clients get their frame callbacks when their output is rendered, which is
-//! what makes them draw at the monitor's rate rather than the loop's.
+//! what makes them draw at the monitor's rate rather than the loop's. Which
+//! windows are on it is counted afresh at every render
+//! ([`Compositor::settle_outputs`]), so a window brought back onto a monitor
+//! is told it may draw as soon as it is drawn, whether or not another client
+//! has drawn since (#99).
 //!
 //! # What is not here yet
 //!
@@ -810,6 +814,10 @@ fn light(
 /// clients on it draw again.
 fn render(state: &mut Compositor, crtc: crtc::Handle) {
     state.dress_frames();
+    // Which windows are on this monitor, counted now: its titles are
+    // written for them and they are told they may draw again, below. After
+    // the frames are dressed, whose insets reach into each window's bounds.
+    state.settle_outputs();
     // Every titlebar's labels, while the compositor can still be asked: a
     // window's tabs name its whole group.
     let labels: Vec<_> = state
