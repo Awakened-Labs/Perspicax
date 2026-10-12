@@ -49,8 +49,8 @@ use wayland_client::{
 
 use crate::Error;
 
-/// Run the shell on `connection` until the compositor goes away, with its
-/// tray on the bus at address `bus`, or the session's.
+/// Run the shell on `connection` until the connection ends, with its tray
+/// on the bus at address `bus`, or the session's.
 pub(crate) fn run(
     connection: Connection,
     shell: Shell,
@@ -163,22 +163,25 @@ pub(crate) fn run(
     let _ = shell;
     loop {
         if let Err(error) = event_loop.dispatch(None, &mut app) {
-            return ended(&connection, &error);
+            return Err(ended(&connection, &error));
         }
     }
 }
 
-/// The loop stopped. The compositor going away is how a session ends, so a
-/// connection that broke is no error; one the compositor closed over a
-/// request it refused is, and so is anything else.
-fn ended(connection: &Connection, error: &calloop::Error) -> Result<(), Error> {
+/// The loop stopped, and why.
+///
+/// A connection that broke is [`Error::Lost`]. It may be the session ending,
+/// or the compositor cutting the shell off and running on, as
+/// wayland-backend does to a client that stops reading while input is sent
+/// to it. The two look alike from here, and only in the second is anyone
+/// left to act on the exit status, so a broken connection is never a clean
+/// end. One the compositor closed over a request it refused is
+/// [`Error::Protocol`], and anything else is an error of its own.
+fn ended(connection: &Connection, error: &calloop::Error) -> Error {
     match connection.flush() {
-        Err(WaylandError::Protocol(refused)) => Err(Error::Protocol(refused)),
-        Err(WaylandError::Io(gone)) => {
-            tracing::info!("the compositor went away ({gone}); stopping");
-            Ok(())
-        }
-        Ok(()) => Err(wayland(error)),
+        Err(WaylandError::Protocol(refused)) => Error::Protocol(refused),
+        Err(WaylandError::Io(gone)) => Error::Lost(gone),
+        Ok(()) => wayland(error),
     }
 }
 
@@ -702,3 +705,35 @@ impl ProvidesRegistryState for App {
 
 delegate_output!(App);
 delegate_registry!(App);
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::net::UnixStream;
+
+    use perspicax_policy::Ended;
+
+    use super::*;
+
+    #[test]
+    fn a_broken_connection_is_lost_whoever_broke_it() {
+        let (ours, theirs) = UnixStream::pair().expect("a socket pair");
+        let connection = Connection::from_socket(ours).expect("a connection");
+        drop(theirs);
+        let read = connection.prepare_read().expect("nothing queued").read();
+        assert!(
+            matches!(read, Err(WaylandError::Io(_))),
+            "the read finds the other end gone: {read:?}"
+        );
+
+        let error = ended(
+            &connection,
+            &calloop::Error::IoError(std::io::ErrorKind::BrokenPipe.into()),
+        );
+        assert!(matches!(error, Error::Lost(_)), "it is lost: {error:?}");
+        assert_eq!(
+            Ended::from_code(Some(i32::from(error.exit_code()))),
+            Ended::Lost,
+            "and perspicax, reading the status, starts the shell again"
+        );
+    }
+}

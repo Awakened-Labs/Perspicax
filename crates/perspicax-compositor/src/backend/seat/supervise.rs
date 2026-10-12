@@ -8,8 +8,9 @@
 //! It is started with `--config` naming the file perspicax read, once the
 //! agent's programs are up and before autostart. When it stops,
 //! [`Restarts`] decides what happens: a crash is started again after a
-//! short wait, a shell that refused its config waits for the file to be
-//! read again, and a clean exit is left alone.
+//! short wait, and so is a shell that lost its connection to perspicax,
+//! which perspicax, running on, did not end; a shell that refused its config
+//! waits for the file to be read again, and a clean exit is left alone.
 //!
 //! A save that changes `[shell]` reaches the shell as `reconfigure`, and so
 //! does one that changes `[protocols]`, whose rules decide which of the
@@ -172,7 +173,14 @@ impl Session {
             }
         };
         self.shell.child = None;
-        self.shell_stopped(Ended::from_code(status.code()), &status);
+        match Ended::from_code(status.code()) {
+            // The status alone would say only "exit status: 69".
+            Ended::Lost => self.shell_stopped(
+                Ended::Lost,
+                &format_args!("it lost its connection to perspicax, {status}"),
+            ),
+            ended => self.shell_stopped(ended, &status),
+        }
     }
 
     /// The shell stopped, as `ended` and `why` say: start it again, or wait.

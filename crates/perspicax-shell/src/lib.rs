@@ -92,6 +92,10 @@ pub enum Error {
     /// The compositor ended the connection over a request it refused.
     #[error("the compositor refused a request: {0}")]
     Protocol(wayland_client::backend::protocol::ProtocolError),
+    /// The connection to the compositor broke. Either the compositor ended,
+    /// or it cut the shell off and runs on; from here the two look alike.
+    #[error("lost the connection to the compositor: {0}")]
+    Lost(std::io::Error),
     /// Talking to the compositor failed for another reason.
     #[error("the connection to the compositor failed: {0}")]
     Wayland(String),
@@ -101,22 +105,28 @@ impl Error {
     /// The exit status for this error. 78 is `EX_CONFIG` from sysexits.h:
     /// a config the shell cannot use, which perspicax answers by waiting
     /// for the file to change rather than starting the shell again at once.
+    /// 69 is `EX_UNAVAILABLE`: a lost connection, which perspicax, if it is
+    /// still there to read the status, answers as it does a crash.
     #[must_use]
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::Config(_) => 78,
+            Self::Lost(_) => 69,
             _ => 1,
         }
     }
 }
 
-/// Run the shell until the compositor goes away.
+/// Run the shell until its connection to the compositor ends.
 ///
 /// # Errors
 ///
 /// [`Error::Config`] for a config file the shell cannot use, which it reads
-/// before connecting to anything; otherwise whatever stopped it short of the
-/// compositor ending the session.
+/// before connecting to anything. [`Error::Lost`] when the connection
+/// breaks, whether the compositor ended or cut the shell off: the shell
+/// cannot tell which, and leaves that to whoever reads its exit status.
+/// Otherwise whatever else stopped it. Nothing asks the shell to stop yet,
+/// and `Ok` is kept for a stop that was asked for.
 pub fn run(options: Options) -> Result<(), Error> {
     let path = options.config.or_else(perspicax_config::default_path);
     let shell = read(path.as_deref())?;
