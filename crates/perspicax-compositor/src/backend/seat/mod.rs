@@ -15,10 +15,18 @@
 //! with a render *scheduled* for the next idle turn of the loop, or with a
 //! frame *queued* on the CRTC awaiting its vblank. A commit marks every output
 //! dirty and schedules the idle ones; a vblank renders again only if something
-//! was committed meanwhile. A quiet desktop therefore costs nothing -- no
-//! wakeups at the refresh rate -- and a busy one is paced by the monitor.
+//! was committed meanwhile. A quiet desktop therefore costs almost nothing --
+//! no wakeups at the refresh rate -- and a busy one is paced by the monitor.
 //! Clients get their frame callbacks when their output is rendered, which is
-//! what makes them draw at the monitor's rate rather than the loop's.
+//! what makes them draw at the monitor's rate rather than the loop's. Which
+//! windows are on it is counted afresh at every render
+//! ([`Compositor::settle_outputs`]), so a window brought back onto a monitor
+//! is told it may draw as soon as it is drawn, whether or not another client
+//! has drawn since (#99).
+//!
+//! The one timer is a safety net, once a second ([`overdue`]): a window no
+//! render told -- parked, or on a monitor whose frame never came back -- is
+//! told anyway once it has waited that long, so no client waits forever.
 //!
 //! # What is not here yet
 //!
@@ -77,6 +85,7 @@ use super::{Running, connectors, cursor::Cursor};
 use crate::{Error, state::Compositor};
 
 mod input;
+mod overdue;
 mod settings;
 mod supervise;
 mod titles;
@@ -414,6 +423,7 @@ pub(crate) fn attach(state: &mut Compositor) -> Result<(), Error> {
     state
         .dmabuf
         .create_global_with_default_feedback::<Compositor>(&state.display, &feedback);
+    overdue::arm(&session.handle)?;
 
     arm_panic_hook();
     let numlock = session.settings.keyboard.numlock;
@@ -810,6 +820,10 @@ fn light(
 /// clients on it draw again.
 fn render(state: &mut Compositor, crtc: crtc::Handle) {
     state.dress_frames();
+    // Which windows are on this monitor, counted now: its titles are
+    // written for them and they are told they may draw again, below. After
+    // the frames are dressed, whose insets reach into each window's bounds.
+    state.settle_outputs();
     // Every titlebar's labels, while the compositor can still be asked: a
     // window's tabs name its whole group.
     let labels: Vec<_> = state
@@ -942,7 +956,9 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     // animated client cursor is a client drawing too.
     let output = head.output.clone();
     for window in space.elements_for_output(&output) {
-        window.send_frame(&output, now, None, |_, _| Some(output.clone()));
+        window.send_frame(&output, now, Some(overdue::OVERDUE), |_, _| {
+            Some(output.clone())
+        });
     }
     for layer in smithay::desktop::layer_map_for_output(&output).layers() {
         layer.send_frame(&output, now, None, |_, _| Some(output.clone()));

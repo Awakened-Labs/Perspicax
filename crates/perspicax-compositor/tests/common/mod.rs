@@ -466,6 +466,63 @@ pub enum Told {
     Reconfigure,
 }
 
+/// What the compositor said to one of the client's surfaces, in the order
+/// it said it: which monitor it is on, when it may draw again, and, to a
+/// window, how to look.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Said {
+    /// It is on the monitor of this name now (`wl_surface.enter`).
+    Enter(String),
+    /// It is no longer on the monitor of this name (`wl_surface.leave`).
+    Leave(String),
+    /// It may draw again: a frame callback it asked for came back.
+    Done,
+    /// A window's configure.
+    Configure(Configured),
+}
+
+/// One configure a window was sent, as the window read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Configured {
+    pub serial: u32,
+    /// The size it was offered, where it was offered one.
+    pub size: Option<(u32, u32)>,
+    pub activated: bool,
+    pub maximized: bool,
+    pub fullscreen: bool,
+    /// Tiled against any edge: snapped to a half or a quarter.
+    pub tiled: bool,
+}
+
+impl Configured {
+    fn read(serial: u32, configure: &WindowConfigure) -> Self {
+        Self {
+            serial,
+            size: match configure.new_size {
+                (Some(width), Some(height)) => Some((width.get(), height.get())),
+                _ => None,
+            },
+            activated: configure.is_activated(),
+            maximized: configure.is_maximized(),
+            fullscreen: configure.is_fullscreen(),
+            tiled: configure.is_tiled_left()
+                || configure.is_tiled_right()
+                || configure.is_tiled_top()
+                || configure.is_tiled_bottom(),
+        }
+    }
+}
+
+/// A window that draws as GTK's do: every picture asks for a frame
+/// callback, and no other is drawn until it comes back. A configure that
+/// arrives while it waits is drawn when the callback comes.
+struct Patience {
+    window: Window,
+    waiting: bool,
+    /// A configure came while it waited, and is owed a picture.
+    owed: bool,
+}
+
 /// What the client's keyboard was told, kept as it arrived. xkb's own types
 /// stay on the test's side of the lock: they are not `Send`.
 #[derive(Default)]
@@ -553,6 +610,11 @@ pub struct Desk {
     /// The size the compositor last offered a window, where it named one.
     /// Windows are drawn at their own size whatever it offers.
     pub offered: Option<(u32, u32)>,
+    /// Everything the compositor said to one of our surfaces, with which,
+    /// in order. See [`Desk::said_to`].
+    pub said: Vec<(ObjectId, Said)>,
+    /// The windows opened with [`Desk::open_patient`].
+    patient: Vec<Patience>,
     pub list: Option<ExtForeignToplevelListV1>,
     pub list_finished: bool,
     pub listed: HashMap<ObjectId, Listed>,
@@ -658,6 +720,8 @@ impl Desk {
             colours: Vec::new(),
             resizing: false,
             offered: None,
+            said: Vec::new(),
+            patient: Vec::new(),
             drawn: 0,
             activations: Vec::new(),
             list: None,
@@ -710,6 +774,13 @@ impl Desk {
             popup_serial: None,
             popups_done: 0,
         }
+    }
+
+    /// Whether the `nth` window has drawn: it draws its first configure as it
+    /// comes. Not a count of everything drawn, which with a person at the
+    /// seat includes the window in use redrawn as a new one takes over.
+    pub fn has_drawn(&self, nth: usize) -> bool {
+        self.activations.iter().any(|(window, _)| *window == nth)
     }
 
     /// Whether each configure the `nth` window was sent told it it is the
@@ -792,6 +863,46 @@ impl Desk {
         window.set_app_id(app_id);
         window.commit();
         self.windows.push(window);
+    }
+
+    /// Open a window that draws as GTK's do: it asks for a frame callback
+    /// with every picture, and draws nothing more, a configure included,
+    /// until that callback comes back. Left waiting, it stays as it was, which
+    /// is how a window looks frozen.
+    pub fn open_patient(&mut self, qh: &QueueHandle<Self>, title: &str, app_id: &str) {
+        self.open_window(qh, title, app_id);
+        let window = self.windows.last().expect("just opened").clone();
+        self.patient.push(Patience {
+            window,
+            waiting: false,
+            owed: false,
+        });
+    }
+
+    /// Ask for a frame callback on `surface` and commit, drawing nothing
+    /// new: a client that has drawn and now waits to be told it may draw
+    /// again.
+    pub fn ask_frame(&mut self, qh: &QueueHandle<Self>, surface: &wl_surface::WlSurface) {
+        surface.frame(qh, surface.clone());
+        surface.commit();
+        if let Some(patience) = self.patience(surface) {
+            patience.waiting = true;
+        }
+    }
+
+    /// What the compositor said to `surface`, in order.
+    pub fn said_to(&self, surface: &wl_surface::WlSurface) -> Vec<Said> {
+        self.said
+            .iter()
+            .filter(|(to, _)| *to == surface.id())
+            .map(|(_, said)| said.clone())
+            .collect()
+    }
+
+    fn patience(&mut self, surface: &wl_surface::WlSurface) -> Option<&mut Patience> {
+        self.patient
+            .iter_mut()
+            .find(|patience| patience.window.wl_surface() == surface)
     }
 
     /// Open a window that declares its geometry and never draws.
@@ -2111,10 +2222,10 @@ impl WindowHandler for Desk {
     fn configure(
         &mut self,
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         window: &Window,
         configure: WindowConfigure,
-        _: u32,
+        serial: u32,
     ) {
         if self.blank.contains(window) {
             window.commit();
@@ -2128,6 +2239,29 @@ impl WindowHandler for Desk {
         if let (Some(width), Some(height)) = configure.new_size {
             self.offered = Some((width.get(), height.get()));
         }
+        let surface = window.wl_surface();
+        self.said.push((
+            surface.id(),
+            Said::Configure(Configured::read(serial, &configure)),
+        ));
+        // Already acknowledged, by SCTK. A patient window draws it when it
+        // may, as GTK does, and asks to be told when it may draw again.
+        if let Some(patience) = self.patience(surface) {
+            if patience.waiting {
+                patience.owed = true;
+                return;
+            }
+            patience.waiting = true;
+            surface.frame(qh, surface.clone());
+        }
+        self.draw(window);
+    }
+}
+
+impl Desk {
+    /// Draw `window` in its colour at its own size, declare its geometry,
+    /// and commit.
+    fn draw(&mut self, window: &Window) {
         let (width, height) = WINDOW;
         let (buffer, canvas) = self
             .pool
@@ -2190,22 +2324,44 @@ impl CompositorHandler for Desk {
         _: wl_output::Transform,
     ) {
     }
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
+    fn frame(
+        &mut self,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+        _: u32,
+    ) {
+        self.said.push((surface.id(), Said::Done));
+        let Some(patience) = self.patience(surface) else {
+            return;
+        };
+        patience.waiting = false;
+        if std::mem::take(&mut patience.owed) {
+            patience.waiting = true;
+            let window = patience.window.clone();
+            surface.frame(qh, surface.clone());
+            self.draw(&window);
+        }
+    }
     fn surface_enter(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: &wl_output::WlOutput,
+        surface: &wl_surface::WlSurface,
+        output: &wl_output::WlOutput,
     ) {
+        let name = self.output_name(output).unwrap_or_default();
+        self.said.push((surface.id(), Said::Enter(name)));
     }
     fn surface_leave(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: &wl_output::WlOutput,
+        surface: &wl_surface::WlSurface,
+        output: &wl_output::WlOutput,
     ) {
+        let name = self.output_name(output).unwrap_or_default();
+        self.said.push((surface.id(), Said::Leave(name)));
     }
 }
 

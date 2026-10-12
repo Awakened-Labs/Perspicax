@@ -78,7 +78,7 @@ fn with_windows(session: &Session) -> (Desk, EventQueue<Desk>, QueueHandle<Desk>
     desk.bind_pager(&globals, &qh);
     for (n, title) in ["stays", "held"].into_iter().enumerate() {
         desk.open_window(&qh, title, title);
-        until(&mut queue, &mut desk, |desk| desk.drawn == n + 1);
+        until(&mut queue, &mut desk, |desk| desk.has_drawn(n));
     }
     until(&mut queue, &mut desk, |desk| desk.pager_done > 0);
     session.wait_for(|facts| {

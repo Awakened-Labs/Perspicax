@@ -235,7 +235,9 @@ impl Compositor {
     /// Map a parked window back where it was, or onto the nearest monitor if
     /// that one is gone, then fit it to the room it has now: one that fills
     /// its monitor or a zone fills it again, as the panels now leave it, and
-    /// one made fullscreen while it was parked becomes it.
+    /// one made fullscreen while it was parked becomes it. Mapped, it is not
+    /// yet counted on its monitor; the next frame counts it, and tells it it
+    /// may draw ([`Compositor::settle_outputs`]).
     fn unpark_window(&mut self, window: &Framed) {
         self.parked.retain(|parked| parked != window);
         let parked = placement(window, |placement| placement.parked.take());

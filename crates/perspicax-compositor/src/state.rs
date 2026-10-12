@@ -465,6 +465,23 @@ impl Compositor {
         SurfaceId(self.next_surface)
     }
 
+    /// Count every window on the monitors it is on now, before any is told
+    /// it may draw again.
+    ///
+    /// The screen is drawn from where each window is (`shell::stack`), but a
+    /// seat tells only the windows smithay counts on the monitor it drew, and
+    /// smithay counts only when asked
+    /// ([`Space::refresh`](smithay::desktop::Space::refresh)). Asked only
+    /// after a commit, a window brought back onto the screen -- by a switch,
+    /// a restore, a tab, a monitor that went -- was drawn at once but not
+    /// counted, so not told it may draw, nor which monitor it is on, until
+    /// some client drew. Once none did, GTK and Chromium, which wait for that
+    /// word with no limit, never drew again (#99). Counting before telling
+    /// keeps the two in step, whatever put the window there.
+    pub(crate) fn settle_outputs(&mut self) {
+        self.space.refresh();
+    }
+
     /// Tell every surface it may draw again.
     ///
     /// A compositor that renders sends these after presenting a frame. This one
@@ -475,7 +492,12 @@ impl Compositor {
     /// straight line at zero. The clock is deliberately the compositor's own
     /// monotonic clock rather than the wall, because that is what the protocol
     /// says the argument means.
-    pub(crate) fn send_frames(&self) {
+    ///
+    /// Every window in the space is told, counted on a monitor or not, but
+    /// each is counted first, as the seat counts before it tells: so a window
+    /// is told which monitor it is on as soon as it is told it may draw.
+    pub(crate) fn send_frames(&mut self) {
+        self.settle_outputs();
         let elapsed = u32::try_from(self.started.elapsed().as_millis() % u128::from(u32::MAX))
             .unwrap_or(u32::MAX);
         let windows = self.space.elements().filter_map(shell::surface_of);
@@ -994,7 +1016,12 @@ impl XdgShellHandler for Compositor {
         window.user_data().insert_if_missing(|| id);
 
         let at = self.place_new();
-        self.space.map_element(window.clone(), at, true);
+        // Not activated by the map: smithay would unset every other window's
+        // state unsaid, and the window in use would never be told it no
+        // longer is. It is already active, above, and on a seat focusing it
+        // tells the others (`show_active`); with nobody at the seat they all
+        // stay active.
+        self.space.map_element(window.clone(), at, false);
         self.adopt(&window);
         tracing::info!(surface = id.0, at = ?at, "toplevel mapped");
 
@@ -1188,16 +1215,20 @@ impl Compositor {
     }
 
     /// A toplevel asking to stop filling its monitor: only with a person at
-    /// the seat.
+    /// the seat, and only one that fills it, whose configure then carries the
+    /// change. Otherwise -- nobody at the seat, a window that does not fill
+    /// it, one snapped to a half, or before it is a window -- it is answered
+    /// with the plain configure it would have had anyway: xdg-shell says
+    /// every such request is answered.
     fn unfill_request(&mut self, surface: &ToplevelSurface, fill: Fill) {
-        if !self.backend.has_person() {
-            return;
-        }
-        if let Some(window) = self.window_for(surface.wl_surface()) {
-            self.unfill(&window, fill, None);
-        } else {
-            surface.with_pending_state(|pending| pending.states.unset(fill.state()));
-            surface.send_pending_configure();
+        let filling = surface.with_pending_state(|pending| pending.states.contains(fill.state()));
+        match self.window_for(surface.wl_surface()) {
+            Some(window) if filling && self.backend.has_person() => {
+                self.unfill(&window, fill, None);
+            }
+            _ => {
+                surface.send_configure();
+            }
         }
     }
 
