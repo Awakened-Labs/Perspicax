@@ -567,6 +567,18 @@ minimizes or brings back, as Openbox takes it. And the root's
 `_NET_ACTIVE_WINDOW` names the X11 window with the keyboard, or none while a
 Wayland window has it, which Wine goes by for the window in front.
 
+A Wayland client may take its window off the screen without closing it, by
+attaching no buffer to it, as xdg-shell allows, and ask for it again later.
+To everyone else the window has closed. It leaves the screen, the taskbar
+and `window_list`, its menus are dismissed, and a move or resize of it ends
+with nothing in hand. With a person at the seat, the keyboard goes to the
+window now on top. Asked for again, it is configured as a new window is,
+with what it was told before (maximized, fullscreen) forgotten, as
+xdg-shell says. It is back from the first picture it draws, and not before.
+It returns as a new window: placed, given the keyboard, announced to the
+taskbar, and with a new id. An X11 window its client withdraws and maps
+again goes and comes back the same way.
+
 The session reads `$XDG_CONFIG_HOME/perspicax/config.toml` (or `--config PATH`),
 and reads it again whenever it is saved. Without one it runs the `classic`
 profile, which is Plasma's and Windows' habits:

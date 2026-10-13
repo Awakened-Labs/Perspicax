@@ -26,6 +26,7 @@ mod resist;
 mod snap;
 mod stacking;
 mod tabs;
+mod withdrawn;
 mod workspaces;
 
 use std::cell::RefCell;
@@ -64,6 +65,7 @@ pub(crate) use snap::SnapPreview;
 pub(crate) use stacking::covers_panels;
 #[cfg(any(feature = "seat", feature = "capture"))]
 pub(crate) use stacking::{Stack, stack};
+pub(crate) use withdrawn::Withdrawn;
 
 /// What the compositor remembers about one window's placement, kept in the
 /// window's own user data so it lives and dies with the window.

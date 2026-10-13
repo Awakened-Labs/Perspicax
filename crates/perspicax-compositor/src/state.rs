@@ -234,6 +234,10 @@ pub struct Compositor {
     /// [`shell::Placement`]; see `shell::workspaces` for the one rule that
     /// decides what is in the space and what is here.
     pub(crate) parked: Vec<Framed>,
+    /// Windows their clients unmapped, by attaching no buffer: closed to
+    /// everyone but their clients, which still hold them and may ask for
+    /// them again. Kept in the order they went. See `shell::withdrawn`.
+    pub(crate) withdrawn: Vec<shell::Withdrawn>,
     /// Which workspace every window is on and which each monitor shows.
     pub(crate) workspaces: Workspaces<SurfaceId, String>,
     /// Which windows are tabs of one another, and which tab of each group is
@@ -405,6 +409,7 @@ impl Compositor {
             popups: PopupManager::default(),
             menu: None,
             parked: Vec::new(),
+            withdrawn: Vec::new(),
             workspaces: Workspaces::new(workspace_shape),
             tabs: perspicax_policy::Groups::default(),
             layout_memory: perspicax_policy::LayoutMemory::default(),
@@ -566,7 +571,18 @@ impl Compositor {
             .iter()
             .flat_map(|locked| &locked.surfaces)
             .map(|cover| cover.surface.wl_surface().clone());
-        for surface in windows.chain(layers).chain(covers).collect::<Vec<_>>() {
+        // And a window its client unmapped: it may be waiting for the word
+        // before it asks for its window again, as GTK waits for every frame.
+        let withdrawn = self
+            .withdrawn
+            .iter()
+            .map(|withdrawn| withdrawn.toplevel.wl_surface().clone());
+        for surface in windows
+            .chain(layers)
+            .chain(covers)
+            .chain(withdrawn)
+            .collect::<Vec<_>>()
+        {
             with_surface_tree_downward(
                 &surface,
                 (),
@@ -800,6 +816,32 @@ impl Compositor {
         self.presented.contains(&id)
     }
 
+    /// A window or panel committed with its picture taken away. An xdg
+    /// window that had drawn has been unmapped by its client, and is
+    /// withdrawn; anything else just shows nothing now, which the commit
+    /// records as it does any picture.
+    ///
+    /// An X11 window's surface is Xwayland's to empty, and the X server says
+    /// when the window is withdrawn. One that never drew was never mapped,
+    /// and has nothing to unmap: smithay counts it so too. Whether it was
+    /// withdrawn.
+    fn unmapped(&mut self, surface: &WlSurface) -> bool {
+        let Some(window) = self
+            .window_for(surface)
+            .filter(|window| window.toplevel().is_some())
+        else {
+            return false;
+        };
+        let Some(id) = shell::id_of(&window) else {
+            return false;
+        };
+        let presented = self.presented.remove(&id);
+        if presented {
+            self.withdraw(&window, id);
+        }
+        presented
+    }
+
     /// The window carrying this id, if it is still mapped.
     ///
     /// The id lives in the window's user data, put there by `new_toplevel`, so
@@ -965,12 +1007,26 @@ impl CompositorHandler for Compositor {
             // in its own.
             damage::clear(surface);
         }
+        // A window whose client took its picture away has been unmapped:
+        // closed to everyone but its client, which may ask for it again (see
+        // `shell::withdrawn`). Before it is measured, so a tab coming forward
+        // in its place takes the size it had.
+        let withdrew = is_root
+            && popup.is_none()
+            && matches!(taken.own, damage::Buffer::Removed)
+            && self.unmapped(&root);
         // How far the tree reaches now, which is the window's geometry if
         // its client declared none. Measured whatever the backend, from
         // what `take` just recorded.
         geometry::measure(&root);
 
         self.popups.commit(surface);
+        // A window its client unmapped, asked for again: answered as a new
+        // window is, and on screen again from its first picture (see
+        // `shell::withdrawn`). Never in the commit that unmapped it.
+        if is_root && popup.is_none() && !withdrew {
+            self.map_again(&root, taken.own);
+        }
         // A window or a layer surface: both are described to the index, so
         // both keep the same presentation and damage records. A subsurface's
         // are its root's, and a menu's are its window's or panel's.
@@ -1057,35 +1113,8 @@ impl XdgShellHandler for Compositor {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        // Activated from the start: a toolkit that believes it is unfocused
-        // renders differently, and M2 is about reading what is on screen.
-        surface.with_pending_state(|state| {
-            state.states.set(xdg_toplevel::State::Activated);
-        });
-        surface.send_configure();
-
-        // Taken before the toplevel is moved into the window.
-        let wl_surface = surface.wl_surface().clone();
-        let window = Framed::from(Window::new_wayland_window(surface));
-        let id = self.mint_surface_id();
-        window.user_data().insert_if_missing(|| id);
-
-        let at = self.place_new();
-        // Not activated by the map: smithay would unset every other window's
-        // state unsaid, and the window in use would never be told it no
-        // longer is. It is already active, above, and on a seat focusing it
-        // tells the others (`show_active`); with nobody at the seat they all
-        // stay active.
-        self.space.map_element(window.clone(), at, false);
-        self.adopt(&window);
-        tracing::info!(surface = id.0, at = ?at, "toplevel mapped");
-
-        // Focus what just appeared. A newly mapped window taking focus is what
-        // every desktop does, and here it does double duty: it is the host half
-        // of the focus correlation, and it makes the toolkit's own idea of
-        // which window is active agree with ours -- which is the pair of
-        // observations the join weighs.
-        self.focus_surface(wl_surface, id);
+        Self::configure_new(&surface);
+        self.open_toplevel(surface);
         self.publish_facts();
     }
 
@@ -1117,6 +1146,9 @@ impl XdgShellHandler for Compositor {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        // One its client unmapped first was forgotten then.
+        self.withdrawn
+            .retain(|withdrawn| withdrawn.toplevel != surface);
         if let Some(window) = self.window_for(surface.wl_surface()) {
             self.forget_window(&window);
         }
@@ -1132,6 +1164,15 @@ impl XdgShellHandler for Compositor {
     /// toplevel, and where it belongs is a question M2 measured rather than
     /// guessed at.
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
+        // A popup needs its window on screen: one opened from a window its
+        // client unmapped is dismissed at once, rather than kept to come back
+        // with it.
+        if find_popup_root_surface(&PopupKind::Xdg(surface.clone()))
+            .is_ok_and(|root| self.is_withdrawn(&root))
+        {
+            surface.send_popup_done();
+            return;
+        }
         if self.backend.has_person() {
             self.constrain(&surface);
         }
@@ -1257,10 +1298,63 @@ impl XdgShellHandler for Compositor {
 }
 
 impl Compositor {
+    /// Tell a toplevel how to look before it draws anything: what a new
+    /// window is told at `get_toplevel`, and one its client unmapped when it
+    /// is asked for again (see `shell::withdrawn`).
+    ///
+    /// Activated from the start: a toolkit that believes it is unfocused
+    /// renders differently, and M2 is about reading what is on screen.
+    pub(crate) fn configure_new(toplevel: &ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.states.set(xdg_toplevel::State::Activated);
+        });
+        toplevel.send_configure();
+    }
+
+    /// Put a toplevel on screen as a new window: with an id nothing has
+    /// seen, placed, on the workspace its monitor shows, and with the
+    /// keyboard. What a new window gets, and one its client unmapped when it
+    /// maps it again.
+    pub(crate) fn open_toplevel(&mut self, toplevel: ToplevelSurface) -> Framed {
+        // Taken before the toplevel is moved into the window.
+        let wl_surface = toplevel.wl_surface().clone();
+        let window = Framed::from(Window::new_wayland_window(toplevel));
+        let id = self.mint_surface_id();
+        window.user_data().insert_if_missing(|| id);
+
+        let at = self.place_new();
+        // Not activated by the map: smithay would unset every other window's
+        // state unsaid, and the window in use would never be told it no
+        // longer is. It is already active (`configure_new`), and on a seat
+        // focusing it tells the others (`show_active`); with nobody at the
+        // seat they all stay active.
+        self.space.map_element(window.clone(), at, false);
+        // A frame already settled is fitted now: a window mapped again keeps
+        // who draws its frame, and no change of that is coming to fit it. A
+        // new window has none yet, and is fitted when it gets one.
+        self.fit_frame(&window);
+        self.adopt(&window);
+        tracing::info!(surface = id.0, at = ?at, "toplevel mapped");
+
+        // Focus what just appeared. A newly mapped window taking focus is what
+        // every desktop does, and here it does double duty: it is the host half
+        // of the focus correlation, and it makes the toolkit's own idea of
+        // which window is active agree with ours -- which is the pair of
+        // observations the join weighs.
+        self.focus_surface(wl_surface, id);
+        window
+    }
+
     /// A toplevel asking to fill its monitor: only with a person at the
     /// seat. Otherwise, or before it is a window, it is answered with the
-    /// plain configure it would have had anyway.
+    /// plain configure it would have had anyway. One its client unmapped is
+    /// filled once it is on screen again, and answered by the configure
+    /// that maps it.
     fn fill_request(&mut self, surface: &ToplevelSurface, fill: Fill, on: Option<&WlOutput>) {
+        if let Some(withdrawn) = self.withdrawn_mut(surface.wl_surface()) {
+            withdrawn.wants = Some(fill);
+            return;
+        }
         match self.window_for(surface.wl_surface()) {
             Some(window) if self.backend.has_person() => self.fill(&window, fill, on),
             _ => {
@@ -1276,6 +1370,12 @@ impl Compositor {
     /// with the plain configure it would have had anyway: xdg-shell says
     /// every such request is answered.
     fn unfill_request(&mut self, surface: &ToplevelSurface, fill: Fill) {
+        if let Some(withdrawn) = self.withdrawn_mut(surface.wl_surface()) {
+            if withdrawn.wants == Some(fill) {
+                withdrawn.wants = None;
+            }
+            return;
+        }
         let filling = surface.with_pending_state(|pending| pending.states.contains(fill.state()));
         match self.window_for(surface.wl_surface()) {
             Some(window) if filling && self.backend.has_person() => {

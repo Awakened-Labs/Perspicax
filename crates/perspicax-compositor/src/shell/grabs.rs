@@ -11,6 +11,10 @@
 //! a moved window's new place is told to the workspaces and the facts, and a
 //! resized one is told its resize is over. A tab dropped nowhere goes back
 //! to where it was picked up.
+//!
+//! A window can go while a grab still holds it: closed, or unmapped by its
+//! client. The grab then goes on to the release with nothing in it: the
+//! window is not moved, not told, and not put back.
 
 use perspicax_policy::{Edges, Rect, dragged, resize};
 use smithay::{
@@ -200,6 +204,14 @@ impl ResizeGrab {
         }
     }
 
+    /// Whether the window is still one of the person's to resize: on screen,
+    /// or parked. One that went mid-resize is told nothing more, since to a
+    /// client that unmapped its window a configure is the answer it waits
+    /// for to map it again.
+    fn holds(&self, data: &Compositor) -> bool {
+        data.has_window(&self.window)
+    }
+
     /// Ask the client for a size, marked as mid-resize or not.
     fn configure(&self, resizing: bool) {
         let Some(toplevel) = self.window.toplevel() else {
@@ -260,6 +272,12 @@ impl TabDragGrab {
             home: None,
         }
     }
+
+    /// Whether the tab is still one of the person's: on screen, or parked.
+    /// One that went mid-drag is never mapped again by it, nor dropped.
+    fn holds(&self, data: &Compositor) -> bool {
+        data.has_window(&self.tab)
+    }
 }
 
 #[cfg(feature = "seat")]
@@ -272,6 +290,12 @@ impl PointerGrab<Compositor> for TabDragGrab {
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
+        if !self.holds(data) {
+            if data.tab_drop.take().is_some() {
+                data.backend.redraw();
+            }
+            return;
+        }
         let (from, now) = (self.start.location, event.location);
         let home = match self.home {
             Some(home) => home,
@@ -310,7 +334,9 @@ impl PointerGrab<Compositor> for TabDragGrab {
             // was never dropped.
             let home = self.home.take();
             handle.unset_grab(self, data, event.serial, event.time, true);
-            if let Some(home) = home {
+            if let Some(home) = home
+                && self.holds(data)
+            {
                 data.drop_tab(&self.tab, at, home);
             }
         }
@@ -448,6 +474,9 @@ impl PointerGrab<Compositor> for ResizeGrab {
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
+        if !self.holds(data) {
+            return;
+        }
         let Some((min, max)) = limits(&self.window) else {
             return;
         };
@@ -490,7 +519,10 @@ impl PointerGrab<Compositor> for ResizeGrab {
 
     /// The resize is over: the client is told, and its next commit is the
     /// last one anchored to the edge it was resized from.
-    fn unset(&mut self, _data: &mut Compositor) {
+    fn unset(&mut self, data: &mut Compositor) {
+        if !self.holds(data) {
+            return;
+        }
         self.configure(false);
         placement(&self.window, |placement| {
             if let Some(resize) = &mut placement.resize {
