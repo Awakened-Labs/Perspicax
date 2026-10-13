@@ -234,6 +234,10 @@ pub struct Compositor {
     /// [`shell::Placement`]; see `shell::workspaces` for the one rule that
     /// decides what is in the space and what is here.
     pub(crate) parked: Vec<Framed>,
+    /// Windows their clients unmapped, by attaching no buffer: closed to
+    /// everyone but their clients, which still hold them and may ask for
+    /// them again. Kept in the order they went. See `shell::withdrawn`.
+    pub(crate) withdrawn: Vec<shell::Withdrawn>,
     /// Which workspace every window is on and which each monitor shows.
     pub(crate) workspaces: Workspaces<SurfaceId, String>,
     /// Which windows are tabs of one another, and which tab of each group is
@@ -405,6 +409,7 @@ impl Compositor {
             popups: PopupManager::default(),
             menu: None,
             parked: Vec::new(),
+            withdrawn: Vec::new(),
             workspaces: Workspaces::new(workspace_shape),
             tabs: perspicax_policy::Groups::default(),
             layout_memory: perspicax_policy::LayoutMemory::default(),
@@ -800,6 +805,29 @@ impl Compositor {
         self.presented.contains(&id)
     }
 
+    /// A window or panel committed with its picture taken away. An xdg
+    /// window that had drawn has been unmapped by its client, and is
+    /// withdrawn; anything else just shows nothing now, which the commit
+    /// records as it does any picture.
+    ///
+    /// An X11 window's surface is Xwayland's to empty, and the X server says
+    /// when the window is withdrawn. One that never drew was never mapped,
+    /// and has nothing to unmap: smithay counts it so too.
+    fn unmapped(&mut self, surface: &WlSurface) {
+        let Some(window) = self
+            .window_for(surface)
+            .filter(|window| window.toplevel().is_some())
+        else {
+            return;
+        };
+        let Some(id) = shell::id_of(&window) else {
+            return;
+        };
+        if self.presented.remove(&id) {
+            self.withdraw(&window, id);
+        }
+    }
+
     /// The window carrying this id, if it is still mapped.
     ///
     /// The id lives in the window's user data, put there by `new_toplevel`, so
@@ -965,6 +993,13 @@ impl CompositorHandler for Compositor {
             // in its own.
             damage::clear(surface);
         }
+        // A window whose client took its picture away has been unmapped:
+        // closed to everyone but its client, which may ask for it again (see
+        // `shell::withdrawn`). Before it is measured, so a tab coming forward
+        // in its place takes the size it had.
+        if is_root && popup.is_none() && matches!(taken.own, damage::Buffer::Removed) {
+            self.unmapped(&root);
+        }
         // How far the tree reaches now, which is the window's geometry if
         // its client declared none. Measured whatever the backend, from
         // what `take` just recorded.
@@ -1117,6 +1152,9 @@ impl XdgShellHandler for Compositor {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        // One its client unmapped first was forgotten then.
+        self.withdrawn
+            .retain(|withdrawn| withdrawn.toplevel != surface);
         if let Some(window) = self.window_for(surface.wl_surface()) {
             self.forget_window(&window);
         }
@@ -1132,6 +1170,15 @@ impl XdgShellHandler for Compositor {
     /// toplevel, and where it belongs is a question M2 measured rather than
     /// guessed at.
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
+        // A popup needs its window on screen: one opened from a window its
+        // client unmapped is dismissed at once, rather than kept to come back
+        // with it.
+        if find_popup_root_surface(&PopupKind::Xdg(surface.clone()))
+            .is_ok_and(|root| self.is_withdrawn(&root))
+        {
+            surface.send_popup_done();
+            return;
+        }
         if self.backend.has_person() {
             self.constrain(&surface);
         }
