@@ -530,6 +530,23 @@ desktop shell with every component beside it:
 cargo build --release --features perspicax/desktop,perspicax-shell/full
 ```
 
+Leaving the flag out does not fail the build. It quietly makes a compositor
+that runs headless only and a shell that draws nothing. Export the features
+once instead, and `scripts/build.sh`, which is `cargo build` reading them,
+builds with them every time:
+
+```sh
+export PERSPICAX_BUILD_FEATURES=perspicax/desktop,perspicax-shell/full
+scripts/build.sh --release                 # builds with them ...
+scripts/build.sh --release --features ''   # ... and this one without
+```
+
+Every argument goes to `cargo build` as it is, and features on the command
+line win over the variable. The variable is spelled as `--features` is:
+comma-separated, with a crate's feature written `crate/feature`. The script
+reads it, not cargo, which takes features only from its command line, so a
+bare `cargo build` still builds without them.
+
 perspicax starts `perspicax-shell` from beside its own binary, and from `PATH`
 if there is none there. A workspace build without `perspicax-shell/full`
 leaves a shell of no components in `target/`, which draws nothing; to install
@@ -807,13 +824,19 @@ windows can be sent there and back, and unplugging it rescues them.
 ## Log in to it
 
 A display manager (SDDM, GDM, LightDM, greetd) can offer Perspicax at its
-greeter beside every other session. Build as yourself, as above, and install
-as root:
+greeter beside every other session. Install it as yourself. The script builds
+first if it has to, and uses sudo only for the copy:
 
 ```sh
-cargo build --release --features perspicax/desktop,perspicax-shell/full
-sudo scripts/install.sh
+scripts/install.sh --features perspicax/desktop,perspicax-shell/full
 ```
+
+It builds when there is no build in `target/release`, or when the run names
+features, by `--features` or `PERSPICAX_BUILD_FEATURES`. With the variable
+exported, `scripts/install.sh` alone is enough, and with no build and nothing
+named it builds the features above. A run that names none installs the build
+that is there, so one made by hand is installed as it is. As root it builds
+nothing: `sudo scripts/install.sh` installs what you built.
 
 That puts `perspicax` and `perspicax-shell` side by side in `/usr/local/bin`,
 the session entry in `/usr/local/share/wayland-sessions`, and the settings
@@ -821,9 +844,9 @@ portal's two files under `/usr/local/share/xdg-desktop-portal`. Some programs
 read only from `/usr`: LightDM, greetd's greeters and older SDDM look for
 sessions only in `/usr/share/wayland-sessions`, and xdg-desktop-portal for
 portal files only in `/usr/share/xdg-desktop-portal/portals`. The script says
-when either applies; `sudo PREFIX=/usr scripts/install.sh` installs under
-`/usr`, and `PORTALDIR` moves the portal file alone. It builds nothing, and
-`DESTDIR` and the other variables at its top are for a package.
+when either applies; `PREFIX=/usr scripts/install.sh` installs under `/usr`,
+and `PORTALDIR` moves the portal file alone. `DESTDIR` and the other variables
+`scripts/install.sh --help` lists are for a package.
 
 Choose Perspicax at the greeter. The entry runs `perspicax --session`, which is
 `--seat` with two differences, for a session nobody watches start:
