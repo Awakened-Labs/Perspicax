@@ -15,7 +15,7 @@
 
 mod common;
 
-use common::{Session, until};
+use common::{Session, drawn_in, until};
 use perspicax_compositor::{ActError, Backend, Host};
 use perspicax_index::{HostFacts, Shot, ShotTarget};
 use perspicax_node::{Rect, SurfaceId};
@@ -170,22 +170,6 @@ const TURNS: [wl_output::Transform; 8] = [
     wl_output::Transform::Flipped180,
     wl_output::Transform::Flipped270,
 ];
-
-/// Where `shot` shows `colour`: the smallest rectangle around all of it, or
-/// nothing.
-fn drawn_in(shot: &Shot, colour: u32) -> Vec<Rect> {
-    let mut around: Option<Rect> = None;
-    for y in 0..shot.height {
-        for x in 0..shot.width {
-            let (x, y) = (f64::from(x), f64::from(y));
-            if pixel(shot, x, y) == rgba(colour) {
-                let here = Rect::new(x, y, x + 1.0, y + 1.0);
-                around = Some(around.map_or(here, |around| around.union(here)));
-            }
-        }
-    }
-    around.into_iter().collect()
-}
 
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]

@@ -18,7 +18,7 @@ use std::{
 };
 
 use perspicax_compositor::{Backend, Command, Config, Facts, Requests, Stop};
-use perspicax_index::{HostFacts, SurfaceFacts};
+use perspicax_index::{HostFacts, Shot, SurfaceFacts};
 use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::Action;
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
@@ -74,11 +74,16 @@ use wayland_protocols::ext::{
     },
 };
 use wayland_protocols::wp::{
+    fractional_scale::v1::client::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
     pointer_constraints::zv1::client::{
         zwp_confined_pointer_v1::ZwpConfinedPointerV1, zwp_locked_pointer_v1::ZwpLockedPointerV1,
         zwp_pointer_constraints_v1::Lifetime,
     },
     relative_pointer::zv1::client::zwp_relative_pointer_v1::ZwpRelativePointerV1,
+    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 use wayland_protocols::xdg::shell::client::{xdg_positioner, xdg_surface};
 use wayland_protocols_wlr::{
@@ -335,6 +340,70 @@ pub fn rgba(argb: u32) -> [u8; 4] {
     [r, g, b, a]
 }
 
+/// Where `shot` shows `colour`: the smallest rectangle around all of it, in
+/// the picture's logical coordinates, or nothing. Read pixel by pixel in
+/// the picture's own, so at any scale.
+pub fn drawn_in(shot: &Shot, colour: u32) -> Vec<Rect> {
+    let colour = rgba(colour);
+    let width = usize::try_from(shot.width).expect("a width");
+    let mut around: Option<Rect> = None;
+    for (at, pixel) in shot.rgba.chunks_exact(4).enumerate() {
+        if pixel == colour {
+            let (x, y) = ((at % width) as f64, (at / width) as f64);
+            let here = Rect::new(x, y, x + 1.0, y + 1.0);
+            around = Some(around.map_or(here, |around| around.union(here)));
+        }
+    }
+    around
+        .map(|around| {
+            Rect::new(
+                around.x0 / shot.scale,
+                around.y0 / shot.scale,
+                around.x1 / shot.scale,
+                around.y1 / shot.scale,
+            )
+        })
+        .into_iter()
+        .collect()
+}
+
+/// Give the monitor `name` the scale `scale` as a display tool does,
+/// leaving every other monitor on as it is.
+///
+/// The protocol carries a scale in 256ths, so 0.9 arrives as 230/256.
+pub fn rescale(
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    qh: &QueueHandle<Desk>,
+    globals: &GlobalList,
+    name: &str,
+    scale: f64,
+) {
+    if desk.displays.is_none() {
+        desk.bind_displays(globals, qh);
+    }
+    until(queue, desk, |desk| desk.display_serial.is_some());
+    let configuration = desk.configuration(qh, None);
+    let on: Vec<String> = desk
+        .shown
+        .iter()
+        .filter(|shown| shown.enabled && !shown.finished)
+        .map(|shown| shown.name.clone())
+        .collect();
+    for head in &on {
+        let enabled = desk.enable(&configuration, head, qh);
+        if head == name {
+            enabled.set_scale(scale);
+        }
+    }
+    configuration.apply();
+    until(queue, desk, |desk| desk.configured.is_some());
+    assert_eq!(desk.configured, Some("succeeded"));
+    until(queue, desk, |desk| {
+        (desk.head_named(name).scale - scale).abs() < 1.0 / 256.0
+    });
+}
+
 /// Copy each screencopy grab, at once, once each has been offered its
 /// buffer.
 pub fn copy_all(desk: &mut Desk, queue: &mut EventQueue<Desk>, grabs: &[usize]) {
@@ -483,8 +552,22 @@ pub enum Said {
     Leave(String),
     /// It may draw again: a frame callback it asked for came back.
     Done,
+    /// It should draw at this scale, in 120ths
+    /// (`wp_fractional_scale_v1.preferred_scale`).
+    PreferredScale(u32),
     /// A window's configure.
     Configure(Configured),
+}
+
+/// A window drawn at a size of its own and shown at another: see
+/// [`Desk::open_viewed`].
+pub struct Viewed {
+    pub window: Window,
+    pub viewport: WpViewport,
+    /// Its buffer's size, in its pixels.
+    pub pixels: (u32, u32),
+    /// The size it is shown at, which is its window's.
+    pub shown: (i32, i32),
 }
 
 /// One configure a window was sent, as the window read it.
@@ -604,6 +687,11 @@ pub struct Desk {
     /// Windows that declare a geometry of their own when they draw, or
     /// none at all, in place of their whole buffer.
     pub declaring: Vec<(Window, Option<Geometry>)>,
+    pub viewporter: Option<WpViewporter>,
+    pub fractional_scales: Option<WpFractionalScaleManagerV1>,
+    /// Windows drawn at a size of their own and shown at another through a
+    /// viewport, as a client drawing at a fractional scale draws.
+    pub viewed: Vec<Viewed>,
     /// Each window's colour, ARGB, in the order they opened.
     pub colours: Vec<u32>,
     pub drawn: usize,
@@ -723,6 +811,9 @@ impl Desk {
             blank: Vec::new(),
             blank_configured: 0,
             declaring: Vec::new(),
+            viewporter: None,
+            fractional_scales: None,
+            viewed: Vec::new(),
             colours: Vec::new(),
             resizing: false,
             offered: None,
@@ -941,6 +1032,86 @@ impl Desk {
         self.declaring.push((window, geometry));
     }
 
+    /// Bind the viewporter. Panics if it is not advertised.
+    pub fn bind_viewporter(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.viewporter = Some(
+            globals
+                .bind::<WpViewporter, _, _>(qh, 1..=1, ())
+                .expect("wp_viewporter"),
+        );
+    }
+
+    /// `surface`'s viewport, through which it says what part of its buffer
+    /// is shown and at what size.
+    pub fn viewport(&self, qh: &QueueHandle<Self>, surface: &wl_surface::WlSurface) -> WpViewport {
+        self.viewporter
+            .as_ref()
+            .expect("bind_viewporter first")
+            .get_viewport(surface, qh, ())
+    }
+
+    /// Bind the fractional-scale manager. Panics if it is not advertised.
+    pub fn bind_fractional_scale(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.fractional_scales = Some(
+            globals
+                .bind::<WpFractionalScaleManagerV1, _, _>(qh, 1..=1, ())
+                .expect("wp_fractional_scale_manager_v1"),
+        );
+    }
+
+    /// Ask what scale `surface` should draw at. Each answer is said to it:
+    /// [`Said::PreferredScale`], and [`Desk::scales_told`].
+    pub fn fractional(
+        &self,
+        qh: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+    ) -> WpFractionalScaleV1 {
+        self.fractional_scales
+            .as_ref()
+            .expect("bind_fractional_scale first")
+            .get_fractional_scale(surface, qh, surface.id())
+    }
+
+    /// The scales `surface` was told to draw at, in 120ths, in order.
+    pub fn scales_told(&self, surface: &wl_surface::WlSurface) -> Vec<u32> {
+        self.said_to(surface)
+            .into_iter()
+            .filter_map(|said| match said {
+                Said::PreferredScale(scale) => Some(scale),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A surface with no role yet: what GTK asks its scale for, before the
+    /// surface is a window.
+    pub fn surface(&self, qh: &QueueHandle<Self>) -> wl_surface::WlSurface {
+        self.compositor.create_surface(qh)
+    }
+
+    /// Open a window that draws a buffer `pixels` big, all in `colour`,
+    /// ARGB, and says it is shown at `shown`, which is its window's size:
+    /// what Firefox draws on a monitor at a fractional scale. It draws so
+    /// at every configure, as a toolkit does.
+    pub fn open_viewed(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        title: &str,
+        colour: u32,
+        pixels: (u32, u32),
+        shown: (i32, i32),
+    ) {
+        self.open_coloured(qh, title, title, colour);
+        let window = self.windows.last().expect("just opened").clone();
+        let viewport = self.viewport(qh, window.wl_surface());
+        self.viewed.push(Viewed {
+            window,
+            viewport,
+            pixels,
+            shown,
+        });
+    }
+
     /// Open a window that declares no geometry and never draws.
     pub fn open_bare(&mut self, qh: &QueueHandle<Self>, title: &str) {
         let surface = self.compositor.create_surface(qh);
@@ -1081,6 +1252,44 @@ impl Desk {
         corner: (u32, u32),
         marked: u32,
     ) {
+        self.attach_marked(surface, size, colour, corner, marked);
+        surface.set_buffer_transform(transform);
+        surface.damage_buffer(
+            0,
+            0,
+            i32::try_from(corner.0).unwrap(),
+            i32::try_from(corner.1).unwrap(),
+        );
+    }
+
+    /// Attach the picture [`Self::paint_turned`] attaches, unturned, naming
+    /// only `named` as damage, `(x, y, width, height)` in the buffer's own
+    /// coordinates: the same picture drawn again, with a change claimed
+    /// where there is none to see. Not committed.
+    pub fn paint_naming(
+        &mut self,
+        surface: &wl_surface::WlSurface,
+        size: (u32, u32),
+        colour: u32,
+        corner: (u32, u32),
+        marked: u32,
+        named: Geometry,
+    ) {
+        self.attach_marked(surface, size, colour, corner, marked);
+        surface.damage_buffer(named.0, named.1, named.2, named.3);
+    }
+
+    /// Attach a buffer `size` in its own pixels to `surface`, all in
+    /// `colour` but for a `corner` of its pixels at the top left in
+    /// `marked`, naming no damage.
+    fn attach_marked(
+        &mut self,
+        surface: &wl_surface::WlSurface,
+        size: (u32, u32),
+        colour: u32,
+        corner: (u32, u32),
+        marked: u32,
+    ) {
         let (width, height) = size;
         let (buffer, canvas) = self
             .pool
@@ -1098,13 +1307,6 @@ impl Desk {
             pixel.copy_from_slice(&if inside { marked } else { colour }.to_le_bytes());
         }
         buffer.attach_to(surface).expect("attach");
-        surface.set_buffer_transform(transform);
-        surface.damage_buffer(
-            0,
-            0,
-            i32::try_from(corner.0).unwrap(),
-            i32::try_from(corner.1).unwrap(),
-        );
     }
 
     /// Bind the window list. Panics if it is not advertised.
@@ -1804,6 +2006,59 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for Desk {
     }
 }
 
+impl Dispatch<WpViewporter, ()> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &WpViewporter,
+        _: <WpViewporter as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpViewport, ()> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &WpViewport,
+        _: <WpViewport as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpFractionalScaleManagerV1, ()> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &WpFractionalScaleManagerV1,
+        _: <WpFractionalScaleManagerV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+/// Keyed by the surface it is of.
+impl Dispatch<WpFractionalScaleV1, ObjectId> for Desk {
+    fn event(
+        desk: &mut Self,
+        _: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        surface: &ObjectId,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            desk.said
+                .push((surface.clone(), Said::PreferredScale(scale)));
+        }
+    }
+}
+
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for Desk {
     fn event(
         _: &mut Self,
@@ -2306,9 +2561,17 @@ impl WindowHandler for Desk {
 
 impl Desk {
     /// Draw `window` in its colour at its own size, declare its geometry,
-    /// and commit.
+    /// and commit. A window viewed draws at the size of its buffer and is
+    /// shown at its own.
     fn draw(&mut self, window: &Window) {
-        let (width, height) = WINDOW;
+        let viewed = self.viewed.iter().find(|viewed| viewed.window == *window);
+        let (width, height) = viewed.map_or(WINDOW, |viewed| viewed.pixels);
+        let shown = viewed.map(|viewed| {
+            viewed
+                .viewport
+                .set_destination(viewed.shown.0, viewed.shown.1);
+            viewed.shown
+        });
         let (buffer, canvas) = self
             .pool
             .create_buffer(
@@ -2335,11 +2598,14 @@ impl Desk {
             .iter()
             .find(|(known, _)| known == window)
             .map_or(
-                Some((
-                    0,
-                    0,
-                    i32::try_from(width).unwrap(),
-                    i32::try_from(height).unwrap(),
+                Some(shown.map_or(
+                    (
+                        0,
+                        0,
+                        i32::try_from(width).unwrap(),
+                        i32::try_from(height).unwrap(),
+                    ),
+                    |(width, height)| (0, 0, width, height),
                 )),
                 |(_, geometry)| *geometry,
             );

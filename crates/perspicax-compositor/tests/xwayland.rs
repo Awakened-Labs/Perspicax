@@ -37,6 +37,7 @@ use x11rb::{
     properties::{WmHints, WmHintsState},
     protocol::{
         Event,
+        randr::ConnectionExt as _,
         xproto::{
             AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConfigureWindowAux,
             ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, GrabStatus, MapState,
@@ -2060,5 +2061,35 @@ fn an_x11_pointer_grab_confined_to_its_window_keeps_the_mouse_in_it() {
     );
 
     drop((desk, queue));
+    x11.stop();
+}
+
+/// Xwayland is not offered `wp_viewporter`, through which it would fake for
+/// an X game a resolution the monitor does not have and scale the game's
+/// window up to fill it. Where an X window is and how big comes from the X
+/// server, here and in smithay's search for what is under the pointer, so
+/// neither would follow (issue #135). Offered one, Xwayland lists nine
+/// resolutions more than the monitor's own.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_game_is_offered_only_the_monitors_own_resolution() {
+    let x11 = X11::start("x11-modes", Backend::headless((800, 600)));
+    x11.x
+        .randr_query_version(1, 3)
+        .expect("RandR")
+        .reply()
+        .expect("RandR's version");
+    let resources = x11
+        .x
+        .randr_get_screen_resources(x11.root)
+        .expect("RandR")
+        .reply()
+        .expect("the screen's resources");
+    let modes: Vec<(u16, u16)> = resources
+        .modes
+        .iter()
+        .map(|mode| (mode.width, mode.height))
+        .collect();
+    assert_eq!(modes, [(800, 600)]);
     x11.stop();
 }

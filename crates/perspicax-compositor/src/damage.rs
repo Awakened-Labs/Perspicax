@@ -29,21 +29,37 @@
 //!
 //! # What a frame is
 //!
-//! A new buffer, or damage named. A commit that brings neither, which a
-//! client sends to ask for a frame callback, changed nothing on screen and is
-//! not counted. Loading a page, Firefox committed its subsurface 252 times
-//! and drew in 79 of them.
+//! A new buffer, damage named, or a change to how the picture is viewed. A
+//! commit that brings none of them, which a client sends to ask for a frame
+//! callback, changed nothing on screen and is not counted. Loading a page,
+//! Firefox committed its subsurface 252 times and drew in 79 of them.
+//!
+//! # Through a viewport
+//!
+//! A surface with a viewport shows a part of its buffer at a size of its
+//! choosing ([`geometry`](crate::geometry) says why). Damage named in the
+//! surface's own coordinates is already where it is shown. Damage named in
+//! the buffer's pixels is turned back and divided by the scale, as without
+//! one, and then cropped to the part shown and scaled to the size it is
+//! shown at, as smithay's renderer draws it. A viewport changed with no new
+//! buffer moves or resizes the whole picture, so all of where it was shown
+//! and all of where it is now are damaged.
 
 use perspicax_node::{Rect, Vec2};
 use smithay::{
     backend::renderer::buffer_dimensions,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::{Buffer as BufferCoords, Logical, Rectangle, Size, Transform},
-    wayland::compositor::{
-        BufferAssignment, Damage, SubsurfaceCachedState, SurfaceAttributes, SurfaceData,
-        TraversalAction, get_parent, with_states, with_surface_tree_downward,
+    utils::{Logical, Rectangle, Size, Transform},
+    wayland::{
+        compositor::{
+            BufferAssignment, Damage, SubsurfaceCachedState, SurfaceAttributes, SurfaceData,
+            TraversalAction, get_parent, with_states, with_surface_tree_downward,
+        },
+        viewporter::{ViewportCachedState, ensure_viewport_valid},
     },
 };
+
+use crate::geometry::Picture;
 
 /// What a commit did to a surface's picture.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,7 +101,9 @@ pub(crate) fn root_of(surface: &WlSurface) -> (WlSurface, Vec2) {
 /// `whole` is the root's whole extent: the answer for a change that cannot
 /// say where it landed. When `releases`, each surface's damage is consumed
 /// and its new buffer released, which is what a compositor that never reads
-/// a pixel does with them; otherwise both are left for the renderer.
+/// a pixel does with them, and each viewport is checked against its buffer,
+/// as the renderer checks it where there is one; otherwise all three are
+/// left for the renderer.
 pub(crate) fn take(start: &WlSurface, at: Vec2, whole: Option<Rect>, releases: bool) -> Taken {
     let mut rects = Vec::new();
     let mut own = Buffer::Unchanged;
@@ -105,37 +123,47 @@ pub(crate) fn take(start: &WlSurface, at: Vec2, whole: Option<Rect>, releases: b
             };
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
             let current = attributes.current();
-            let scale = current.buffer_scale.max(1);
-            let transform = Transform::from(current.buffer_transform);
-            // What the commit did to the picture, and the picture's size in
-            // its own pixels, which damage named in them is turned back
-            // within: a new buffer's own, or, without one, the size the
-            // surface already shows, as it was recorded, turned back.
-            let (buffer, pixels) = match &current.buffer {
+            let was = crate::geometry::picture(states);
+            // What the commit did to the picture, and the picture it shows
+            // now, which damage named in it is placed through: a new
+            // buffer's, or, without one, the one the surface already shows,
+            // seen through the viewport as it is now.
+            let (buffer, picture) = match &current.buffer {
                 Some(BufferAssignment::NewBuffer(buffer)) => {
-                    let pixels = buffer_dimensions(buffer);
-                    let size = pixels.map(|pixels| logical(pixels, scale, transform));
-                    (Buffer::New(size), pixels)
+                    let picture = buffer_dimensions(buffer).map(|pixels| {
+                        let (scale, transform) = (
+                            current.buffer_scale.max(1),
+                            Transform::from(current.buffer_transform),
+                        );
+                        let own = pixels.to_logical(scale, transform);
+                        Picture::viewed(pixels, scale, transform, &viewport(states, own, releases))
+                    });
+                    (Buffer::New(picture.map(|picture| picture.size)), picture)
                 }
                 Some(BufferAssignment::Removed) => (Buffer::Removed, None),
                 None => (
                     Buffer::Unchanged,
-                    crate::geometry::recorded(states).map(|size| size.to_buffer(scale, transform)),
+                    was.map(|was| was.seen_through(&viewport(states, was.own(), releases))),
                 ),
             };
-            let named: Vec<Rect> = current
-                .damage
-                .iter()
-                .filter_map(|damage| surface_local(damage, scale, transform, pixels))
-                .collect();
-            // How far the window reaches is measured from these, so they are
+            // None when the client named none, which is not the same as
+            // naming some that lands nowhere on its picture.
+            let named: Option<Vec<Rect>> = (!current.damage.is_empty()).then(|| {
+                current
+                    .damage
+                    .iter()
+                    .filter_map(|damage| surface_local(damage, picture.as_ref()))
+                    .collect()
+            });
+            // How far the window reaches is measured from this, so it is
             // remembered before the buffer is released below.
-            match buffer {
-                Buffer::New(size) => crate::geometry::record(states, size),
-                Buffer::Removed => crate::geometry::record(states, None),
-                Buffer::Unchanged => {}
+            if picture != was {
+                crate::geometry::record(states, picture);
             }
-            rects.extend(damaged(&named, buffer, at, whole));
+            rects.extend(damaged(named.as_deref(), buffer, at, whole));
+            if buffer == Buffer::Unchanged {
+                rects.extend(reviewed(was, picture, at));
+            }
             if surface == start {
                 own = buffer;
             }
@@ -177,37 +205,71 @@ pub(crate) fn clear(start: &WlSurface) {
 
 /// What one surface's commit damaged, in its root's coordinates.
 ///
-/// `named` is the damage it named, in its own coordinates, and `at` is where
-/// it sits in the root. `whole` is the root's whole extent.
-pub(crate) fn damaged(named: &[Rect], buffer: Buffer, at: Vec2, whole: Option<Rect>) -> Vec<Rect> {
-    match buffer {
+/// `named` is the damage it named, in its own coordinates, where it named
+/// any: what of it lands on the picture, which may be none of it. `at` is
+/// where it sits in the root. `whole` is the root's whole extent.
+pub(crate) fn damaged(
+    named: Option<&[Rect]>,
+    buffer: Buffer,
+    at: Vec2,
+    whole: Option<Rect>,
+) -> Vec<Rect> {
+    match (buffer, named) {
         // A new picture changed all of itself, if it named nothing, and at
         // most all of itself if it did: what it names is clipped to it, as
         // the renderer clips it. A toolkit names its whole buffer with the
         // largest rectangle the protocol allows, and unclipped, on a
         // subsurface, that would claim everything below and to the right.
-        Buffer::New(Some(size)) if named.is_empty() => vec![extent(size) + at],
-        Buffer::New(Some(size)) => named
+        // Named, but all of it off the picture, it changed nothing shown.
+        (Buffer::New(Some(size)), None) => vec![extent(size) + at],
+        (Buffer::New(Some(size)), Some(named)) => named
             .iter()
             .map(|region| region.intersect(extent(size)))
             .filter(|region| !region.is_empty())
             .map(|region| region + at)
             .collect(),
-        // A buffer of a kind whose size cannot be read, naming nothing: all
-        // of the window, as far as anyone here can tell.
-        Buffer::New(None) if named.is_empty() => whole.into_iter().collect(),
-        Buffer::New(None) | Buffer::Unchanged => named.iter().map(|region| *region + at).collect(),
+        // A buffer of a kind whose size cannot be read, naming nothing that
+        // can be placed: all of the window, as far as anyone here can tell.
+        (Buffer::New(None), named) if named.is_none_or(<[Rect]>::is_empty) => {
+            whole.into_iter().collect()
+        }
+        (Buffer::New(None) | Buffer::Unchanged, named) => named
+            .unwrap_or_default()
+            .iter()
+            .map(|region| *region + at)
+            .collect(),
         // What the picture covered shows what is beneath it now, and where
         // that was went with the buffer, so the safe answer is all of it.
-        Buffer::Removed => whole.into_iter().collect(),
+        (Buffer::Removed, _) => whole.into_iter().collect(),
     }
 }
 
-/// The size a buffer gives its surface: its own, divided by the scale and
-/// turned by the transform the client declared for it, as smithay's
-/// renderer sizes it.
-fn logical(size: Size<i32, BufferCoords>, scale: i32, transform: Transform) -> Size<i32, Logical> {
-    size.to_logical(scale, transform)
+/// What a viewport changed with no new buffer damaged: all of where the
+/// picture was shown and all of where it is shown now. Smithay's damage
+/// tracker redraws both when a surface's size or source changes. Nothing,
+/// if the commit left it as it was.
+fn reviewed(was: Option<Picture>, now: Option<Picture>, at: Vec2) -> Vec<Rect> {
+    match (was, now) {
+        (Some(was), Some(now)) if was != now => {
+            vec![extent(was.size) + at, extent(now.size) + at]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// How the viewport of the surface whose states these are says its
+/// picture is shown: none set is all of it, at its own size.
+///
+/// When `checks`, it is first held to the picture's `own` size, which
+/// disconnects a client whose source reaches outside its buffer. Smithay's
+/// renderer checks the same as it reads it, so only a compositor without
+/// one asks. Before the viewport is read, not while it is: the check takes
+/// the same lock.
+fn viewport(states: &SurfaceData, own: Size<i32, Logical>, checks: bool) -> ViewportCachedState {
+    if checks {
+        ensure_viewport_valid(states, own);
+    }
+    *states.cached_state.get::<ViewportCachedState>().current()
 }
 
 /// The whole of a picture of `size`, in its surface's own coordinates.
@@ -230,35 +292,37 @@ pub(crate) fn to_rect<N: smithay::utils::Coordinate, Kind>(rect: Rectangle<N, Ki
 /// A damage rectangle in its surface's own coordinates, or none, if it
 /// cannot be placed there.
 ///
-/// Damage named in buffer coordinates is in the picture's own `pixels`,
-/// which the client scaled by `scale` and turned by `transform` before
+/// Damage named in buffer coordinates is in the picture's own pixels,
+/// which the client scaled by its scale and turned by its transform before
 /// handing them over. Its two corners are turned back as smithay's
 /// renderers turn the picture where they draw it, which is how
 /// `Transform::transform_point_in` turns a point, and the rectangle between
 /// them is divided by the scale: in floating point throughout, so damage
-/// lands where the change is drawn.
+/// lands where the change is drawn. What the viewport shows of that is
+/// where it lands on the surface ([`Picture::place`]).
 ///
 /// Not smithay's own `Rectangle::to_logical`, which turns a quarter turn
 /// (`_90`, `_270`) the other way from how both of its renderers draw it.
 /// Its `Transform::transform_rect_in` misplaces the flipped quarter turns
 /// instead. Measured for all eight against GLES and pixman (issue #104).
 ///
-/// A surface whose picture has no size to turn within has no pixels to
-/// name: it shows nothing, or a buffer of a kind whose size cannot be read,
-/// which smithay draws as nothing too.
-fn surface_local(
-    damage: &Damage,
-    scale: i32,
-    transform: Transform,
-    pixels: Option<Size<i32, BufferCoords>>,
-) -> Option<Rect> {
+/// A surface with no picture has no pixels to name: it shows nothing, or a
+/// buffer of a kind whose size cannot be read, which smithay draws as
+/// nothing too. Nor does a part of the picture its viewport crops away.
+fn surface_local(damage: &Damage, picture: Option<&Picture>) -> Option<Rect> {
     match *damage {
         Damage::Surface(rect) => Some(to_rect(rect)),
-        Damage::Buffer(rect) => pixels.map(|pixels| {
-            let (rect, pixels) = (rect.to_f64(), pixels.to_f64());
+        Damage::Buffer(rect) => picture.and_then(|picture| {
+            let (rect, pixels) = (rect.to_f64(), picture.pixels.to_f64());
             let corners = [rect.loc, rect.loc + rect.size.to_point()]
-                .map(|corner| transform.transform_point_in(corner, &pixels));
-            to_rect(Rectangle::bounding_box(corners).downscale(f64::from(scale)))
+                .map(|corner| picture.transform.transform_point_in(corner, &pixels));
+            let turned = Rectangle::bounding_box(corners).downscale(f64::from(picture.scale));
+            // Now in the picture's own logical size, which is what its
+            // viewport's source is measured in.
+            picture.place(Rectangle::new(
+                (turned.loc.x, turned.loc.y).into(),
+                (turned.size.w, turned.size.h).into(),
+            ))
         }),
     }
 }
@@ -285,11 +349,36 @@ mod tests {
         Buffer::New(Some(Size::new(120, 80)))
     }
 
+    /// A buffer of `pixels`, drawn at `scale` and turned by `transform`,
+    /// with no viewport.
+    fn plain(pixels: (i32, i32), scale: i32, transform: Transform) -> Picture {
+        Picture::viewed(
+            pixels.into(),
+            scale,
+            transform,
+            &ViewportCachedState::default(),
+        )
+    }
+
+    /// A buffer of `pixels` at a scale of 1, cropped to `src` if given and
+    /// shown at `dst` if given.
+    fn through(
+        pixels: (i32, i32),
+        src: Option<(f64, f64, f64, f64)>,
+        dst: Option<(i32, i32)>,
+    ) -> Picture {
+        let viewport = ViewportCachedState {
+            src: src.map(|(x, y, w, h)| Rectangle::new((x, y).into(), (w, h).into())),
+            dst: dst.map(Size::from),
+        };
+        Picture::viewed(pixels.into(), 1, Transform::Normal, &viewport)
+    }
+
     #[test]
     fn damage_on_a_subsurface_moves_by_where_it_sits() {
         let named = [Rect::new(10.0, 10.0, 20.0, 20.0)];
         assert_eq!(
-            damaged(&named, new(), AT, WHOLE),
+            damaged(Some(&named), new(), AT, WHOLE),
             [Rect::new(50.0, 40.0, 60.0, 50.0)]
         );
     }
@@ -302,14 +391,12 @@ mod tests {
 
     #[test]
     fn buffer_damage_is_divided_by_its_own_surfaces_scale_before_it_moves() {
-        let pixels = Some(Size::new(240, 160));
-        let named = [
-            surface_local(&in_buffer((80, 60), (40, 40)), 2, Transform::Normal, pixels)
-                .expect("placed"),
-        ];
+        let picture = plain((240, 160), 2, Transform::Normal);
+        let named =
+            [surface_local(&in_buffer((80, 60), (40, 40)), Some(&picture)).expect("placed")];
         assert_eq!(named, [Rect::new(40.0, 30.0, 60.0, 50.0)]);
         assert_eq!(
-            damaged(&named, new(), AT, WHOLE),
+            damaged(Some(&named), new(), AT, WHOLE),
             [Rect::new(80.0, 60.0, 100.0, 80.0)]
         );
     }
@@ -320,7 +407,6 @@ mod tests {
     /// `Rectangle::to_logical` puts `_90` and `_270` each where the other is.
     #[test]
     fn buffer_damage_in_a_turned_buffer_lands_where_that_corner_is_drawn() {
-        let pixels = Some(Size::new(120, 80));
         let corner = in_buffer((0, 0), (20, 10));
         let drawn = [
             (Transform::Normal, Rect::new(0.0, 0.0, 20.0, 10.0)),
@@ -334,7 +420,7 @@ mod tests {
         ];
         for (transform, drawn) in drawn {
             assert_eq!(
-                surface_local(&corner, 1, transform, pixels),
+                surface_local(&corner, Some(&plain((120, 80), 1, transform))),
                 Some(drawn),
                 "{transform:?}"
             );
@@ -346,10 +432,9 @@ mod tests {
     /// the two apart.
     #[test]
     fn buffer_damage_in_a_turned_buffer_is_turned_before_it_is_scaled() {
-        let pixels = Some(Size::new(200, 100));
         let corner = in_buffer((0, 0), (20, 10));
         assert_eq!(
-            surface_local(&corner, 2, Transform::Flipped, pixels),
+            surface_local(&corner, Some(&plain((200, 100), 2, Transform::Flipped))),
             Some(Rect::new(90.0, 0.0, 100.0, 5.0))
         );
     }
@@ -359,12 +444,11 @@ mod tests {
     /// once clipped to the picture turned the same way.
     #[test]
     fn a_whole_turned_buffer_named_as_toolkits_name_it_is_all_of_the_picture() {
-        let pixels = Some(Size::new(200, 100));
-        let size = logical(Size::new(200, 100), 1, Transform::_90);
+        let picture = plain((200, 100), 1, Transform::_90);
         let all = in_buffer((0, 0), (i32::MAX, i32::MAX));
-        let named = [surface_local(&all, 1, Transform::_90, pixels).expect("placed")];
+        let named = [surface_local(&all, Some(&picture)).expect("placed")];
         assert_eq!(
-            damaged(&named, Buffer::New(Some(size)), AT, WHOLE),
+            damaged(Some(&named), Buffer::New(Some(picture.size)), AT, WHOLE),
             [Rect::new(40.0, 30.0, 140.0, 230.0)]
         );
     }
@@ -372,12 +456,11 @@ mod tests {
     #[test]
     fn buffer_damage_in_a_picture_of_no_known_size_lands_nowhere() {
         let corner = in_buffer((0, 0), (20, 10));
-        assert_eq!(surface_local(&corner, 1, Transform::_90, None), None);
-        assert_eq!(surface_local(&corner, 1, Transform::Normal, None), None);
+        assert_eq!(surface_local(&corner, None), None);
         // Surface coordinates need no picture to be placed in.
         let rect: Rectangle<i32, Logical> = Rectangle::new((5, 5).into(), (10, 10).into());
         assert_eq!(
-            surface_local(&Damage::Surface(rect), 1, Transform::_90, None),
+            surface_local(&Damage::Surface(rect), None),
             Some(Rect::new(5.0, 5.0, 15.0, 15.0))
         );
     }
@@ -385,14 +468,27 @@ mod tests {
     #[test]
     fn a_new_buffer_naming_no_damage_changed_all_of_itself() {
         assert_eq!(
-            damaged(&[], new(), AT, WHOLE),
+            damaged(None, new(), AT, WHOLE),
             [Rect::new(40.0, 30.0, 160.0, 110.0)]
         );
     }
 
     #[test]
     fn a_new_buffer_of_unknown_size_naming_no_damage_changed_the_whole_window() {
-        assert_eq!(damaged(&[], Buffer::New(None), AT, WHOLE), WHOLE.as_slice());
+        assert_eq!(
+            damaged(None, Buffer::New(None), AT, WHOLE),
+            WHOLE.as_slice()
+        );
+    }
+
+    /// Named, and all of it off the picture, as a viewport's crop leaves
+    /// damage outside its source: a change nowhere on screen, not the
+    /// whole of a picture that named nothing.
+    #[test]
+    fn damage_named_only_off_a_new_picture_changed_nothing() {
+        assert!(damaged(Some(&[]), new(), AT, WHOLE).is_empty());
+        let outside = [Rect::new(200.0, 200.0, 210.0, 210.0)];
+        assert!(damaged(Some(&outside), new(), AT, WHOLE).is_empty());
     }
 
     #[test]
@@ -403,7 +499,7 @@ mod tests {
             Rect::new(200.0, 200.0, 210.0, 210.0),
         ];
         assert_eq!(
-            damaged(&named, new(), AT, WHOLE),
+            damaged(Some(&named), new(), AT, WHOLE),
             [Rect::new(40.0, 30.0, 160.0, 110.0)]
         );
     }
@@ -413,31 +509,125 @@ mod tests {
     /// both.
     #[test]
     fn a_buffer_turned_a_quarter_gives_its_surface_its_sides_swapped() {
-        let size = Size::new(200, 100);
-        assert_eq!(logical(size, 1, Transform::_90), Size::new(100, 200));
-        assert_eq!(logical(size, 2, Transform::Flipped270), Size::new(50, 100));
-        assert_eq!(logical(size, 2, Transform::Normal), Size::new(100, 50));
+        let size = |scale, transform| plain((200, 100), scale, transform).size;
+        assert_eq!(size(1, Transform::_90), Size::new(100, 200));
+        assert_eq!(size(2, Transform::Flipped270), Size::new(50, 100));
+        assert_eq!(size(2, Transform::Normal), Size::new(100, 50));
+    }
+
+    /// Firefox at 0.9, halved for round numbers: a buffer drawn at half
+    /// the window's size and shown at all of it (issue #135).
+    #[test]
+    fn a_buffer_shown_at_twice_its_size_doubles_the_damage_named_in_it() {
+        let picture = through((200, 150), None, Some((400, 300)));
+        assert_eq!(picture.size, Size::new(400, 300));
+        assert_eq!(
+            surface_local(&in_buffer((20, 10), (10, 10)), Some(&picture)),
+            Some(Rect::new(40.0, 20.0, 60.0, 40.0))
+        );
+    }
+
+    #[test]
+    fn damage_is_cropped_to_a_viewports_source_and_scaled_to_its_destination() {
+        let picture = through(
+            (400, 300),
+            Some((50.0, 50.0, 100.0, 75.0)),
+            Some((400, 300)),
+        );
+        assert_eq!(
+            surface_local(&in_buffer((50, 50), (10, 10)), Some(&picture)),
+            Some(Rect::new(0.0, 0.0, 40.0, 40.0))
+        );
+        // Half in the source: only that half is shown.
+        assert_eq!(
+            surface_local(&in_buffer((140, 115), (20, 20)), Some(&picture)),
+            Some(Rect::new(360.0, 260.0, 400.0, 300.0))
+        );
+        // Outside it: nothing of it is shown at all.
+        assert_eq!(
+            surface_local(&in_buffer((0, 0), (10, 10)), Some(&picture)),
+            None
+        );
+    }
+
+    /// A toolkit names its whole buffer with the largest rectangle the
+    /// protocol allows: through a crop, that is all of the surface.
+    #[test]
+    fn a_whole_buffer_named_through_a_crop_is_all_of_the_surface() {
+        let picture = through(
+            (400, 300),
+            Some((50.0, 50.0, 100.0, 75.0)),
+            Some((400, 300)),
+        );
+        let all = in_buffer((0, 0), (i32::MAX, i32::MAX));
+        assert_eq!(
+            surface_local(&all, Some(&picture)),
+            Some(Rect::new(0.0, 0.0, 400.0, 300.0))
+        );
+    }
+
+    /// A source with no destination is shown at the source's own size.
+    #[test]
+    fn a_source_alone_is_shown_at_its_own_size() {
+        let picture = through((400, 300), Some((100.0, 100.0, 200.0, 100.0)), None);
+        assert_eq!(picture.size, Size::new(200, 100));
+        assert_eq!(
+            surface_local(&in_buffer((100, 100), (10, 10)), Some(&picture)),
+            Some(Rect::new(0.0, 0.0, 10.0, 10.0))
+        );
+    }
+
+    /// Turned and divided by its scale first, then viewed: the picture's
+    /// own logical size is what a viewport is measured in.
+    #[test]
+    fn a_turned_scaled_buffer_is_turned_and_scaled_before_it_is_viewed() {
+        let viewport = ViewportCachedState {
+            src: None,
+            dst: Some(Size::new(200, 100)),
+        };
+        let picture = Picture::viewed((200, 100).into(), 2, Transform::Flipped, &viewport);
+        assert_eq!(
+            surface_local(&in_buffer((0, 0), (20, 10)), Some(&picture)),
+            Some(Rect::new(180.0, 0.0, 200.0, 10.0))
+        );
+    }
+
+    #[test]
+    fn a_viewport_changed_without_a_new_buffer_damages_where_the_picture_was_and_is() {
+        let large = through((200, 150), None, Some((400, 300)));
+        let small = through((200, 150), None, Some((200, 150)));
+        assert_eq!(
+            reviewed(Some(large), Some(small), AT),
+            [
+                Rect::new(40.0, 30.0, 440.0, 330.0),
+                Rect::new(40.0, 30.0, 240.0, 180.0)
+            ]
+        );
+        // As it was: nothing moved.
+        assert!(reviewed(Some(large), Some(large), AT).is_empty());
+        // No picture before or after: there is nothing to view.
+        assert!(reviewed(None, Some(small), AT).is_empty());
     }
 
     #[test]
     fn a_commit_with_no_new_buffer_and_no_damage_changed_nothing() {
-        assert!(damaged(&[], Buffer::Unchanged, AT, WHOLE).is_empty());
+        assert!(damaged(None, Buffer::Unchanged, AT, WHOLE).is_empty());
     }
 
     #[test]
     fn damage_named_without_a_new_buffer_is_still_counted() {
         let named = [Rect::new(0.0, 0.0, 10.0, 10.0)];
         assert_eq!(
-            damaged(&named, Buffer::Unchanged, AT, WHOLE),
+            damaged(Some(&named), Buffer::Unchanged, AT, WHOLE),
             [Rect::new(40.0, 30.0, 50.0, 40.0)]
         );
     }
 
     #[test]
     fn a_picture_taken_away_changed_the_whole_window() {
-        assert_eq!(damaged(&[], Buffer::Removed, AT, WHOLE), WHOLE.as_slice());
+        assert_eq!(damaged(None, Buffer::Removed, AT, WHOLE), WHOLE.as_slice());
         // A root that has never shown anything has no whole to name.
-        assert!(damaged(&[], Buffer::Removed, AT, None).is_empty());
+        assert!(damaged(None, Buffer::Removed, AT, None).is_empty());
     }
 
     #[test]
