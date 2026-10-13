@@ -45,6 +45,7 @@ use super::{Session, relight, supervise};
 use crate::{
     Error, Keymap, Launch,
     backend::{Running, cursor::Cursor},
+    grants::Why,
     state::Compositor,
 };
 
@@ -397,31 +398,36 @@ fn look(state: &mut Compositor) {
     }
 }
 
+/// Start the config's autostart programs, in order, then the XDG autostart
+/// entries unless the config turns them off. An entry marked `agent = true`
+/// is started for an agent, and granted; the rest are the person's. A
+/// program that will not start is reported and skipped: one missing panel
+/// must not keep the person out of their session.
 fn autostart(state: &mut Compositor) {
-    let launch = state.launch.clone();
-    if let Running::Seat(session) = &mut state.backend {
-        session.autostart(launch.as_ref());
+    let Some(launch) = state.launch.clone() else {
+        return;
+    };
+    let Running::Seat(session) = &state.backend else {
+        return;
+    };
+    let starts = session.settings.autostart.clone();
+    for start in &starts {
+        if start.agent {
+            if let Err(error) = state.start_for_agent(&start.command, None, Why::Autostart) {
+                tracing::warn!(%error, "could not start");
+            }
+        } else if let Running::Seat(session) = &mut state.backend {
+            session.spawn_in(&launch, &start.command, None);
+        }
+    }
+    if let Running::Seat(session) = &mut state.backend
+        && session.settings.xdg_autostart
+    {
+        session.xdg_autostart(&launch);
     }
 }
 
 impl Session {
-    /// Start the config's autostart programs, then the XDG autostart
-    /// entries unless the config turns them off. A program that will not
-    /// start is reported and skipped: one missing panel must not keep the
-    /// person out of their session.
-    pub(crate) fn autostart(&mut self, launch: Option<&Launch>) {
-        let Some(launch) = launch else {
-            return;
-        };
-        let commands = self.settings.autostart.clone();
-        for command in &commands {
-            self.spawn_in(launch, command, None);
-        }
-        if self.settings.xdg_autostart {
-            self.xdg_autostart(launch);
-        }
-    }
-
     /// Start what the system and the person installed to start with every
     /// desktop (see [`autostart`](mod@autostart)). The folders, the
     /// desktop's names and `PATH` are read as the programs started are given

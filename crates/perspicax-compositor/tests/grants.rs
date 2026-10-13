@@ -138,6 +138,46 @@ fn a_window_in_a_process_of_its_own_loses_its_grant_when_the_process_exits() {
     session.stop(());
 }
 
+/// A binding the person marked `agent = true`: what it starts is granted,
+/// until it exits. Anywhere, as `--spawn`'s programs are.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_binding_that_spawns_for_the_agent_grants_what_it_starts_until_it_exits() {
+    let session = granting("grant-binding");
+    session.perform(Action::Spawn {
+        command: vec!["sleep".to_owned(), "1".to_owned()],
+        agent: true,
+    });
+    session.wait_for(|facts| granted(facts).is_some_and(|pids| pids.len() == 1));
+    session.wait_for(|facts| granted(facts).is_some_and(<[u32]>::is_empty));
+    session.stop(());
+}
+
+/// Without `agent`, a binding's program is the person's. Headless starts
+/// none at all, having no person; what is checked is that one marked for
+/// the agent after it is the only thing granted.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_binding_spawn_without_agent_grants_nothing() {
+    let session = granting("grant-binding-person");
+    let sleep = vec!["sleep".to_owned(), "30".to_owned()];
+    session.perform(Action::Spawn {
+        command: sleep.clone(),
+        agent: false,
+    });
+    session.perform(Action::Spawn {
+        command: sleep,
+        agent: true,
+    });
+    let facts = session.wait_for(|facts| granted(facts).is_some_and(|pids| !pids.is_empty()));
+    assert_eq!(
+        granted(&facts).map(<[u32]>::len),
+        Some(1),
+        "the agent's alone"
+    );
+    session.stop(());
+}
+
 /// Not a test: the window [`probe`] puts up, in a process of its own.
 #[test]
 #[ignore = "a window in a process of its own, for the tests that need one"]

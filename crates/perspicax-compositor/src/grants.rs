@@ -24,7 +24,7 @@
 //!   process nothing could be vouched for is never granted: its grant could
 //!   not be made to end.
 
-use std::os::fd::OwnedFd;
+use std::{ffi::OsStr, os::fd::OwnedFd, path::Path};
 
 use perspicax_index::Consent;
 use perspicax_node::Origin;
@@ -52,6 +52,14 @@ pub(crate) enum Why {
     Spawn,
     /// The person granted its window, with a key.
     Key,
+    /// A binding the person marked `agent = true` started it.
+    Binding,
+    /// An `autostart` entry the person marked `agent = true` started it.
+    #[cfg_attr(
+        not(feature = "seat"),
+        expect(dead_code, reason = "a seat's autostart")
+    )]
+    Autostart,
 }
 
 /// One process granted.
@@ -127,6 +135,29 @@ fn watch<D: 'static>(
 }
 
 impl Compositor {
+    /// Start a program an agent may act on, in `dir` if one is named: as
+    /// every program is started (see [`crate::Launch`]), kept in `spawned`
+    /// to be reaped as it exits and killed with the session, and granted
+    /// until it is reaped. Its pid, or why it would not start.
+    pub(crate) fn start_for_agent(
+        &mut self,
+        command: &[impl AsRef<OsStr>],
+        dir: Option<&Path>,
+        why: Why,
+    ) -> Result<u32, crate::Error> {
+        let Some(launch) = self.launch.clone() else {
+            return Err(crate::Error::Spawn {
+                command: String::new(),
+                source: std::io::Error::other("no socket to start it against yet"),
+            });
+        };
+        let child = launch.spawn_in(command, dir)?;
+        let pid = child.id();
+        self.grant(pid, why);
+        self.spawned.push(child);
+        Ok(pid)
+    }
+
     /// Grant `pid`, a child of this compositor, to the agent: until it is
     /// reaped (see [`Self::reap_spawned`]). Nothing, where consent is not by
     /// grant. A process already granted keeps its first grant.

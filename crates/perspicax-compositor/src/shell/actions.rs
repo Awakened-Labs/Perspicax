@@ -4,7 +4,8 @@
 //!
 //! Two actions need the seat, and say so in the log rather than pretending:
 //! starting a program for the person, and re-reading the person's config.
-//! Headless has neither a person nor a config.
+//! Headless has neither a person nor a config. A program a binding starts
+//! for an agent starts anywhere, as `--spawn`'s do.
 
 use perspicax_node::SurfaceId;
 use perspicax_policy::{Action, Change, Decision, cycle};
@@ -44,7 +45,19 @@ impl Compositor {
                     self.minimize(&window);
                 }
             }
-            Action::Spawn(command) => self.spawn_for_person(command),
+            Action::Spawn {
+                command,
+                agent: false,
+            } => self.spawn_for_person(command),
+            Action::Spawn {
+                command,
+                agent: true,
+            } => {
+                if let Err(error) = self.start_for_agent(command, None, crate::grants::Why::Binding)
+                {
+                    tracing::warn!(%error, "could not start");
+                }
+            }
             Action::MoveToOutput(towards) => {
                 if let Some(window) = focused {
                     self.move_to_output(&window, *towards);

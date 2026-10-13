@@ -67,6 +67,17 @@ pub struct Built {
     pub capture: bool,
 }
 
+/// A program to start once the session is up: an `autostart` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Start {
+    /// The program and its arguments.
+    pub command: Vec<String>,
+    /// Whether an agent may act on it, as `{ spawn = [...], agent = true }`
+    /// says: its process is then granted until it exits. Otherwise it is the
+    /// person's, as anything they start is.
+    pub agent: bool,
+}
+
 /// The starting point a config file layers onto.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -98,9 +109,9 @@ pub struct Config {
     /// the others. Where each one goes is resolved by
     /// [`perspicax_policy::arrange`] once every monitor's size is known.
     pub outputs: Vec<OutputRule>,
-    /// Programs to start once the session is up, each a program and its
-    /// arguments. The person's programs: none is granted agent consent.
-    pub autostart: Vec<Vec<String>>,
+    /// Programs to start once the session is up, in order. Each is the
+    /// person's, unless the entry says an agent may act on it.
+    pub autostart: Vec<Start>,
     /// Whether the session also starts the XDG autostart entries, as every
     /// desktop does: see [`autostart`](mod@autostart). On wherever there is a
     /// seat; saying `true` in a build without one is an error.
@@ -646,7 +657,7 @@ struct Raw {
     #[serde(default, rename = "output")]
     outputs: Vec<RawOutput>,
     #[serde(default)]
-    autostart: Vec<Vec<String>>,
+    autostart: Vec<RawStart>,
     xdg_autostart: Option<bool>,
     xwayland: Option<bool>,
     workspaces: Option<RawWorkspaces>,
@@ -896,6 +907,33 @@ enum RawAction {
 #[serde(deny_unknown_fields)]
 struct RawSpawn {
     spawn: Vec<String>,
+    /// Whether an agent may act on what it starts.
+    #[serde(default)]
+    agent: bool,
+}
+
+/// An `autostart` entry: a program and its arguments, or the same as
+/// `{ spawn = [...] }`, which may say `agent = true`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawStart {
+    Command(Vec<String>),
+    Spawn(RawSpawn),
+}
+
+impl From<RawStart> for Start {
+    fn from(start: RawStart) -> Self {
+        match start {
+            RawStart::Command(command) => Self {
+                command,
+                agent: false,
+            },
+            RawStart::Spawn(RawSpawn { spawn, agent }) => Self {
+                command: spawn,
+                agent,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1189,13 +1227,14 @@ impl Raw {
         config.shell.palette = config.theme.palette;
         config.shell.font = config.theme.font.clone();
 
-        if let Some(empty) = self.autostart.iter().position(Vec::is_empty) {
+        let starts: Vec<Start> = self.autostart.into_iter().map(Start::from).collect();
+        if let Some(empty) = starts.iter().position(|start| start.command.is_empty()) {
             return Err(invalid(
                 format!("autostart[{empty}]"),
                 "an empty command".to_owned(),
             ));
         }
-        config.autostart = self.autostart;
+        config.autostart = starts;
         Ok(config)
     }
 }
@@ -1627,10 +1666,13 @@ fn cycle(outputs: &[OutputRule]) -> Option<&str> {
 /// `[shell.pie.menus]` names, which a `{ pie = "..." }` must be one of.
 fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Action>, String> {
     Ok(Some(match action {
-        RawAction::Spawn(RawSpawn { spawn }) if spawn.is_empty() => {
+        RawAction::Spawn(RawSpawn { spawn, .. }) if spawn.is_empty() => {
             return Err("`spawn` needs a program".to_owned());
         }
-        RawAction::Spawn(RawSpawn { spawn }) => Action::Spawn(spawn),
+        RawAction::Spawn(RawSpawn { spawn, agent }) => Action::Spawn {
+            command: spawn,
+            agent,
+        },
         RawAction::Pie(RawOpenPie { pie }) if pies.contains(&pie) => Action::Pie(pie),
         RawAction::Pie(RawOpenPie { pie }) if pies.is_empty() => {
             return Err(format!(
@@ -1845,7 +1887,10 @@ mod tests {
         };
         assert_eq!(
             config.bindings.resolve(logo, &[Keysym::Return]),
-            Some(&Action::Spawn(vec!["foot".to_owned()]))
+            Some(&Action::Spawn {
+                command: vec!["foot".to_owned()],
+                agent: false
+            })
         );
         let (mods, f4) = alt(Keysym::F4);
         assert_eq!(config.bindings.resolve(mods, &f4), None);
@@ -1921,7 +1966,10 @@ mod tests {
         );
         assert_eq!(
             mouse.resolve(Context::Window, logo, SIDE),
-            Some(&Action::Spawn(vec!["foot".to_owned()]))
+            Some(&Action::Spawn {
+                command: vec!["foot".to_owned()],
+                agent: false
+            })
         );
     }
 
@@ -2274,8 +2322,59 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_autostart_command_is_refused() {
-        assert!(parse("autostart = [[]]", SEAT).is_err());
+    fn an_autostart_entry_may_be_a_command_or_a_table_marked_agent() {
+        let config = parse(
+            r#"autostart = [["waybar"], { spawn = ["foot", "-e", "htop"], agent = true }, { spawn = ["mako"] }]"#,
+            SEAT,
+        )
+        .expect("a valid config");
+        let start = |command: &[&str], agent| Start {
+            command: command.iter().map(|word| (*word).to_owned()).collect(),
+            agent,
+        };
+        assert_eq!(
+            config.autostart,
+            [
+                start(&["waybar"], false),
+                start(&["foot", "-e", "htop"], true),
+                start(&["mako"], false),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_command_in_either_form_is_refused() {
+        for text in [
+            "autostart = [[]]",
+            "autostart = [{ spawn = [], agent = true }]",
+        ] {
+            let error = parse(text, SEAT).unwrap_err();
+            assert!(
+                error.to_string().contains("autostart[0]"),
+                "{text}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_binding_may_spawn_for_the_agent() {
+        let config = parse(
+            "[keys]\n\"Logo+Shift+Return\" = { spawn = [\"foot\"], agent = true }",
+            SEAT,
+        )
+        .expect("a valid config");
+        let logo_shift = Mods {
+            logo: true,
+            shift: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(logo_shift, &[Keysym::Return]),
+            Some(&Action::Spawn {
+                command: vec!["foot".to_owned()],
+                agent: true
+            })
+        );
     }
 
     #[test]

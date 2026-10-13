@@ -67,8 +67,10 @@ pub enum Action {
     /// stepping as Windows does. See [`crate::keyed`].
     Snap(Direction),
     /// Start a program, as a program and its arguments. The person's own
-    /// program: it is never granted agent consent.
-    Spawn(Vec<String>),
+    /// program, unless `agent`: then the person has said, in their own
+    /// config, that an agent may act on it, and its process is granted until
+    /// it exits. What it starts in turn is not.
+    Spawn { command: Vec<String>, agent: bool },
     /// Maximize the focused window, or put a maximized one back.
     ToggleMaximize,
     /// Take the focused window off the screen until it is cycled back to.
@@ -548,7 +550,13 @@ mod tests {
     fn only_switching_layout_works_at_the_lock_screen() {
         assert!(Action::CycleLayout { forward: true }.while_locked());
         assert!(Action::Layout(2).while_locked());
-        assert!(!Action::Spawn(vec!["foot".to_owned()]).while_locked());
+        assert!(
+            !Action::Spawn {
+                command: vec!["foot".to_owned()],
+                agent: false
+            }
+            .while_locked()
+        );
         assert!(!Action::Reload.while_locked());
     }
 

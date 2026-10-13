@@ -436,19 +436,13 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
 /// this compositor cannot see -- which looks exactly like a client that failed
 /// to start.
 fn spawn_all(state: &mut Compositor, commands: &[Vec<String>]) {
-    let Some(launch) = state.launch.clone() else {
+    if state.launch.is_none() {
         return;
-    };
+    }
     for command in commands.iter().filter(|command| !command.is_empty()) {
-        match launch.spawn(command) {
-            Ok(child) => {
-                state.grant(child.id(), grants::Why::Spawn);
-                state.spawned.push(child);
-            }
-            Err(error) => {
-                state.spawn_failed = Some(error);
-                break;
-            }
+        if let Err(error) = state.start_for_agent(command, None, grants::Why::Spawn) {
+            state.spawn_failed = Some(error);
+            break;
         }
     }
 }
@@ -472,6 +466,10 @@ pub(crate) struct Launch {
 
 impl Launch {
     /// Start one program, as a program and its arguments.
+    #[cfg_attr(
+        not(any(feature = "seat", test)),
+        expect(dead_code, reason = "the seat's shell supervisor")
+    )]
     pub(crate) fn spawn(&self, command: &[impl AsRef<OsStr>]) -> Result<Child, Error> {
         self.spawn_in(command, None)
     }
