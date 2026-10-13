@@ -36,7 +36,6 @@ use smithay::{
     utils::Transform,
 };
 
-use perspicax_index::Consent;
 use perspicax_policy::{Access, MouseBindings, Opacity, Place, Shape};
 
 use crate::{Config, Error, FRAME_INTERVAL, state::Compositor};
@@ -72,11 +71,25 @@ pub enum Backend {
         /// would say. The default draws nothing see-through; what an agent
         /// is told a window covers is the same either way.
         opacity: Opacity,
+        /// What an agent may do here, as a seat and its person would decide
+        /// it. The default is everything, on every client: headless hosts
+        /// only what an agent set up. See [`Backend::granting`].
+        agent: Agent,
     },
     /// A real session: the outputs the GPU has connected, the keyboards and
     /// pointers libinput finds, device access negotiated through libseat.
     /// Needs the `seat` feature.
     Seat,
+}
+
+/// What an agent may do on a headless desk, where a seat would have its
+/// person and its `[agent]` table decide.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Agent {
+    /// Whether an agent may act only on the processes granted to it, as on a
+    /// seat, rather than on every client. Off by default; for the tests of
+    /// what a seat grants and takes back.
+    pub by_grant: bool,
 }
 
 /// One virtual monitor of a headless compositor.
@@ -120,6 +133,7 @@ impl Backend {
             access: Access::open(),
             person: false,
             opacity: Opacity::default(),
+            agent: Agent::default(),
         }
     }
 
@@ -129,6 +143,17 @@ impl Backend {
     pub fn with_person(mut self) -> Self {
         if let Self::Headless { person, .. } = &mut self {
             *person = true;
+        }
+        self
+    }
+
+    /// The same, consenting as a seat does: an agent may act only on what
+    /// was granted to it, each process until it exits, so a test can see
+    /// what a seat grants. A seat consents so already.
+    #[must_use]
+    pub fn granting(mut self) -> Self {
+        if let Self::Headless { agent, .. } = &mut self {
+            agent.by_grant = true;
         }
         self
     }
@@ -175,6 +200,7 @@ pub(crate) enum Running {
         /// Whether a person sits at it. See [`Running::has_person`].
         person: bool,
         opacity: Opacity,
+        agent: Agent,
         /// Virtual monitors a display tool turned off, kept so it can turn
         /// them on again.
         dark: Vec<Virtual>,
@@ -211,12 +237,14 @@ impl Running {
                 access,
                 person,
                 opacity,
+                agent,
             } => Ok(Self::Headless {
                 outputs: outputs.iter().map(|out| plug(display, out)).collect(),
                 workspaces: *workspaces,
                 access: Box::new(access.clone()),
                 person: *person,
                 opacity: opacity.clone(),
+                agent: agent.clone(),
                 dark: Vec::new(),
                 #[cfg(feature = "capture")]
                 pictures: None,
@@ -403,17 +431,18 @@ impl Running {
         }
     }
 
-    /// Whose applications an agent may act on, before anything is spawned.
+    /// Whether an agent may act only on what was granted to it.
     ///
-    /// Headless: everyone. Nobody sits at a headless compositor, and its
-    /// socket exists for the agent that started it. On a seat, only what
-    /// perspicax itself spawns for an agent. The person launched everything
-    /// else, and nobody has asked them.
-    pub(crate) fn consent(&self) -> Consent {
+    /// Headless, no: it may act on everyone. Nobody sits at a headless
+    /// compositor, and its socket exists for the agent that started it --
+    /// unless a test asked for a desk that consents as a seat does. On a
+    /// seat, yes. The person launched almost everything on screen, and
+    /// nobody has asked them.
+    pub(crate) fn by_grant(&self) -> bool {
         match self {
-            Self::Headless { .. } => Consent::Everyone,
+            Self::Headless { agent, .. } => agent.by_grant,
             #[cfg(feature = "seat")]
-            Self::Seat(_) => Consent::Spawned(Vec::new()),
+            Self::Seat(_) => true,
         }
     }
 

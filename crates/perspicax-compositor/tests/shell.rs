@@ -158,6 +158,7 @@ fn two_monitors() -> Backend {
         access: Access::open(),
         person: false,
         opacity: Default::default(),
+        agent: Default::default(),
     }
 }
 
@@ -402,6 +403,7 @@ fn four_workspaces() -> Backend {
         access: Access::open(),
         person: false,
         opacity: Default::default(),
+        agent: Default::default(),
     }
 }
 
@@ -428,6 +430,7 @@ fn two_monitors_each_its_own() -> Backend {
         access,
         person: false,
         opacity: Default::default(),
+        agent: Default::default(),
     }
 }
 

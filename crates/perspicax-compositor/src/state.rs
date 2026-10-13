@@ -16,7 +16,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use perspicax_index::Consent;
 use perspicax_node::{Origin, Rect, SurfaceId, Vec2};
 use perspicax_policy::Workspaces;
 
@@ -204,9 +203,9 @@ pub struct Compositor {
     #[cfg(feature = "seat")]
     pub(crate) dmabuf: smithay::wayland::dmabuf::DmabufState,
     /// Whose applications an agent may act on, published with every
-    /// snapshot. Starts as the backend's policy; [`Compositor::grant`] adds
-    /// what `run` spawns.
-    pub(crate) consent: Consent,
+    /// snapshot: everyone headless, and on a seat only what was granted,
+    /// each for as long as its process lives. See [`crate::grants`].
+    pub(crate) grants: crate::grants::Grants,
     /// When the person at the seat last pressed a key or moved the pointer.
     /// `None` headless, where nobody is at the seat, and so never a reason to
     /// refuse an agent there.
@@ -357,7 +356,7 @@ impl Compositor {
         // cannot fail, because there is no keymap to compile.
         let pointer = Some(seat.add_pointer());
 
-        let consent = backend.consent();
+        let grants = crate::grants::Grants::new(backend.by_grant());
         let workspace_shape = backend.workspace_shape();
         let gate = crate::access::Gate::new(backend.access());
         let mouse = backend.mouse();
@@ -400,7 +399,7 @@ impl Compositor {
             presented: HashSet::new(),
             focused_at: HashMap::new(),
             facts,
-            consent,
+            grants,
             person_at: None,
             person_buttons: Vec::new(),
             cursor: CursorImageStatus::default_named(),
@@ -600,15 +599,6 @@ impl Compositor {
                 },
                 |_, _, &()| true,
             );
-        }
-    }
-
-    /// Extend consent to processes this compositor started. Meaningful only
-    /// under [`Consent::Spawned`]: headless already consents to everyone.
-    pub(crate) fn grant(&mut self, pids: impl IntoIterator<Item = u32>) {
-        if let Consent::Spawned(granted) = &mut self.consent {
-            granted.extend(pids);
-            self.publish_facts();
         }
     }
 

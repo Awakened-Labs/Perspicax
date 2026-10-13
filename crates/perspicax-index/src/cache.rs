@@ -1159,13 +1159,13 @@ mod tests {
     #[test]
     fn consent_to_spawned_processes_covers_those_pids_and_no_others() {
         let mut index = joined();
-        index.judge(&desktop(None).with_consent(Consent::Spawned(vec![9182])));
+        index.judge(&desktop(None).with_consent(Consent::Granted(vec![9182])));
         assert!(
             index.actable(NodeId(2)).is_ok(),
             "9182 is the one we spawned"
         );
 
-        index.judge(&desktop(None).with_consent(Consent::Spawned(vec![1])));
+        index.judge(&desktop(None).with_consent(Consent::Granted(vec![1])));
         assert!(matches!(
             index.actable(NodeId(2)),
             Err(Refusal::NoCapability { .. })

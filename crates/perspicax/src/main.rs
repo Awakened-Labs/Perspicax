@@ -355,6 +355,8 @@ fn run(cli: &Cli, wire: Option<Wire>) -> Result<()> {
             // Nobody sits at it, so no window rearranges itself.
             person: false,
             opacity: Default::default(),
+            // Every client: nobody sits at it to be asked.
+            agent: Default::default(),
         }
     };
     // First, before the accessibility bus is touched: a backend this binary

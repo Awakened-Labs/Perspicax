@@ -52,6 +52,7 @@ fn two_workspaces(person: bool) -> Backend {
         access: Access::open(),
         person,
         opacity: Default::default(),
+        agent: Default::default(),
     }
 }
 
@@ -73,6 +74,7 @@ fn two_monitors() -> Backend {
         access: Access::open(),
         person: false,
         opacity: Default::default(),
+        agent: Default::default(),
     }
 }
 

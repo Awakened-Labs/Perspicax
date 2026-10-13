@@ -273,7 +273,7 @@ impl Compositor {
 
         self.facts.publish(
             HostFacts::bottom_to_top(surfaces, generation)
-                .with_consent(self.consent.clone())
+                .with_consent(self.grants.consent().clone())
                 .with_outputs(self.output_rects().into_iter().map(|area| {
                     Rect::new(
                         f64::from(area.x),

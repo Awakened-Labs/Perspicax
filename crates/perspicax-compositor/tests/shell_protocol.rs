@@ -48,6 +48,7 @@ fn backend(access: Access) -> Backend {
         access,
         person: false,
         opacity: Default::default(),
+        agent: Default::default(),
     }
 }
 

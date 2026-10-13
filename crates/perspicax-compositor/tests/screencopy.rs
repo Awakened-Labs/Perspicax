@@ -41,6 +41,7 @@ fn session(name: &str, access: Access) -> Session {
             access,
             person: false,
             opacity: Default::default(),
+            agent: Default::default(),
         },
     )
 }

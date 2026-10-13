@@ -44,6 +44,7 @@ fn session(name: &str, mode: Mode) -> Session {
             access: Access::open(),
             person: false,
             opacity: Default::default(),
+            agent: Default::default(),
         },
     )
 }

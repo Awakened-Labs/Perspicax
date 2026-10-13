@@ -121,16 +121,22 @@ pub struct Session {
 impl Session {
     /// A headless compositor on `backend`, on a socket named for `name`.
     pub fn start(name: &str, backend: Backend) -> Self {
-        Self::start_with(name, backend, false)
+        Self::start_with(name, backend, Vec::new(), false)
     }
 
     /// The same, with Xwayland: its display is in the facts once it is
     /// ready.
     pub fn start_with_xwayland(name: &str, backend: Backend) -> Self {
-        Self::start_with(name, backend, true)
+        Self::start_with(name, backend, Vec::new(), true)
     }
 
-    fn start_with(name: &str, backend: Backend, xwayland: bool) -> Self {
+    /// The same, starting `spawn` as `--spawn` would: each a program and
+    /// its arguments.
+    pub fn start_spawning(name: &str, backend: Backend, spawn: Vec<Vec<String>>) -> Self {
+        Self::start_with(name, backend, spawn, false)
+    }
+
+    fn start_with(name: &str, backend: Backend, spawn: Vec<Vec<String>>, xwayland: bool) -> Self {
         let socket = format!("perspicax-{name}-{}", std::process::id());
         let facts = Facts::new();
         let requests = Requests::new();
@@ -145,7 +151,7 @@ impl Session {
             thread::spawn(move || {
                 let config = Config {
                     backend,
-                    spawn: Vec::new(),
+                    spawn,
                     env: Vec::new(),
                     run_for: Some(Duration::from_secs(30)),
                     config: None,

@@ -191,7 +191,7 @@ mod taking {
             .surface(id)
             .map(|facts| facts.origin.clone())
             .unwrap_or_default();
-        let permitted = state.consent.permits(&origin);
+        let permitted = state.grants.consent().permits(&origin);
         (origin, permitted)
     }
 

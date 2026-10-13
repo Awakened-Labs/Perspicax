@@ -53,6 +53,7 @@ fn session(name: &str) -> Session {
             access: Access::open(),
             person: false,
             opacity: Default::default(),
+            agent: Default::default(),
         },
     )
 }
@@ -323,6 +324,7 @@ fn per_output_a_binding_switches_the_monitor_under_the_pointer() {
             access: Access::open(),
             person: false,
             opacity: Default::default(),
+            agent: Default::default(),
         },
     );
     let (mut desk, mut queue, _qh) = with_window(&session);

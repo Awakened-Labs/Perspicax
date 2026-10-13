@@ -363,7 +363,7 @@ mod tests {
     /// picture that reached it would come back `Unreachable`, not refused.
     #[test]
     fn a_picture_of_a_window_the_agent_may_not_read_is_refused_before_it_is_taken() {
-        let desk = desk(&clear().with_consent(Consent::Spawned(vec![1])));
+        let desk = desk(&clear().with_consent(Consent::Granted(vec![1])));
         assert!(matches!(
             desk.capture(ShotTarget::Window(WINDOW)),
             Err(Denied::Refused(Refusal::NoCapability { .. }))

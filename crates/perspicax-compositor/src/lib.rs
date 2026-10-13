@@ -44,6 +44,7 @@ pub mod facts;
 mod focus;
 mod framed;
 mod geometry;
+mod grants;
 mod heads;
 mod hold;
 pub mod host;
@@ -69,7 +70,7 @@ mod xwayland;
 
 pub use crate::{
     act::{ActError, Dispatched},
-    backend::{Backend, Virtual},
+    backend::{Agent, Backend, Virtual},
     facts::{Facts, SessionFacts},
     host::{Command, Host, Request, Requests},
     keyboard::Keymap,
@@ -383,12 +384,8 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         }
         state.popups.cleanup();
         state.announce_layout();
-        // Collect children that have exited, so they do not sit as zombies
-        // until the session ends. A spawned program that finished is gone
-        // from this list, and nothing is left to kill for it at the end.
-        state
-            .spawned
-            .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+        // Before the next dispatch can accept a client: see `reap_spawned`.
+        state.reap_spawned();
         state.backend.reap();
         // Each client of ours on its own, to see which have stopped reading;
         // then all of them, Xwayland included, as before.
@@ -426,12 +423,12 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
 /// binding would: `DISPLAY` included, once there is an Xwayland to name.
 ///
 /// What starts is what an agent may act on, on a seat, so consent is granted
-/// here, the moment each pid exists. Headless, that changes nothing: consent
-/// there is already everyone.
+/// here, the moment each pid exists, until the process exits. Headless, that
+/// changes nothing: consent there is already everyone.
 ///
 /// The first command that will not start stops the rest, and is left for
 /// `run` to return. What did start is kept in `state.spawned`, so it is
-/// killed with the session rather than left behind.
+/// reaped as it exits, and killed with the session rather than left behind.
 ///
 /// The two toolkit variables are set because the default is not "whatever is
 /// running": a GTK or Qt client with `DISPLAY` set and no instruction will pick
@@ -442,11 +439,10 @@ fn spawn_all(state: &mut Compositor, commands: &[Vec<String>]) {
     let Some(launch) = state.launch.clone() else {
         return;
     };
-    let mut started = Vec::new();
     for command in commands.iter().filter(|command| !command.is_empty()) {
         match launch.spawn(command) {
             Ok(child) => {
-                started.push(child.id());
+                state.grant(child.id(), grants::Why::Spawn);
                 state.spawned.push(child);
             }
             Err(error) => {
@@ -455,7 +451,6 @@ fn spawn_all(state: &mut Compositor, commands: &[Vec<String>]) {
             }
         }
     }
-    state.grant(started);
 }
 
 /// What a program started by this compositor needs to find it: the socket,
