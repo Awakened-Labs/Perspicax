@@ -209,9 +209,9 @@ impl From<Rect> for Bounds {
 /// `kind` is the machine-readable discriminant and `message` is
 /// [`Refusal`]'s own `Display`, so a model gets both without either being a
 /// paraphrase of the other. The remaining fields are what that particular
-/// refusal carries -- the occluding surface so the agent can raise it, the match
-/// count so it can narrow a selector. A refusal that only said "no" would turn a
-/// recoverable situation into a retry loop.
+/// refusal carries -- the surface in front of the node, so the agent knows what
+/// has to move, the match count so it can narrow a selector. A refusal that
+/// only said "no" would turn a recoverable situation into a retry loop.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Refused {
     /// One of `occluded`, `clipped`, `unmapped`, `off_screen`,
@@ -222,7 +222,9 @@ pub struct Refused {
     pub kind: &'static str,
     /// The refusal in words.
     pub message: String,
-    /// `occluded`: raise this surface and try again.
+    /// `occluded`: the surface in front of the node, its shadow included. Try
+    /// again once it has moved off the node, or once the person has brought
+    /// the node's window in front of it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occluded_by: Option<u64>,
     /// `stale`: how many frames of damage the node owes. Zero is a real value --
@@ -484,7 +486,8 @@ pub struct Window {
     /// Whether it is on screen at all.
     pub mapped: bool,
     /// Where it is, in the output's coordinate space. The only global geometry
-    /// this system reports.
+    /// this system reports. The window, inside any shadow it draws: what it
+    /// covers can reach past this.
     pub bounds: Bounds,
     /// Who drew it. Present here at the top level rather than only beside the
     /// title, because a surface with no title and no accessible nodes is

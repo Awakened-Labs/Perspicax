@@ -368,6 +368,27 @@ One cost of drawing the frame: a toolkit that would have drawn close and
 maximize buttons no longer does, so they are not in its accessibility tree;
 `window_close` and `tab_forward` are the agent's way to do what they did.
 
+**A window covers everything it draws.** A client says where its window is
+inside the picture it draws, and that is where perspicax places it and
+measures its nodes from. It is not how far the window reaches. The shadow a
+toolkit draws around its window, and a subsurface hanging past it, are drawn
+over whatever is under them and take the person's clicks there. And a
+client can declare its window as small as it likes. So a node of another
+window under any of it is refused as `occluded`, naming the window, and
+`window_list`'s `bounds` (the window inside its shadow) can stop short of
+what covers a node. Where the client says it is opaque, the verdict is
+proof. Anywhere else it draws, a shadow, a part drawn see-through or a
+window from a client that says nothing, it is policy, and `--dump-tree`
+counts it as `unproven`. An opaque region is believed in that one direction
+only: a client that leaves part of itself out of it has not said that part
+is see-through, and gains nothing by saying less than it paints. A node
+just beside a window can therefore be refused under its shadow, though a
+person can make it out and click it. The person can bring its window
+forward; an agent can't yet
+([#147](https://github.com/Awakened-Labs/Perspicax/issues/147)). Menus are
+not windows here yet, and a menu over another window covers nothing
+([#112](https://github.com/Awakened-Labs/Perspicax/issues/112)).
+
 **Text an application rendered is marked as such.** Every string reaches an
 agent under `untrusted_text`, beside the credentials of the process that drew
 it — the marking is in the key, so it cannot be skimmed past, and the provenance
@@ -916,8 +937,14 @@ them; none is on by default. The profiles turn on what the build has:
 
 An agent reads the shell as it reads any application. On a seat it cannot
 click it: like everything else the person's session starts, the shell gets no
-agent consent. A key for a component the shell was built without is refused
-with the feature that would provide it. Every key is optional:
+agent consent. While a menu or a pie is open, its surface covers the whole
+monitor, clear but for the menu, so to an agent everything under it is
+covered until it closes. That includes the shell's own panel, which a person
+can still click
+([#146](https://github.com/Awakened-Labs/Perspicax/issues/146)). A narrow
+panel's clear strip takes no clicks and still covers what is under it. A key
+for a component the shell was built without is refused with the feature that
+would provide it. Every key is optional:
 
 ```toml
 [shell]
@@ -1117,7 +1144,8 @@ selection colours from Plasma's Breeze schemes.
 The palette is a set of roles, not of widgets, so one colour written recolours
 everything that has that job. A colour is `"#rrggbb"`. Only `selected` and
 `label-shadow` may be see-through, as `"#rrggbbaa"`: an opaque panel or menu
-is what lets the compositor prove to an agent what it covers. Writing one
+is what lets the compositor prove to an agent what it covers (a see-through
+one covers all the same, on policy). Writing one
 colour does not mean writing six. A role you leave out follows from the ones
 you wrote, as the third column says, and otherwise keeps the theme's own. An
 ink is black or white, whichever reads on its colour; a mix is that far from
@@ -1228,6 +1256,9 @@ is not expected to read what shows there. A picture of the monitor shows what
 you see, the text faintly behind the window included, and `window_list` gives
 such a window an `opacity`, so an agent shown that text and told it is
 covered has the reason. A picture of the window by itself shows it whole.
+What an application draws see-through itself, such as a terminal's
+translucent background, rounded corners, or the shadow around its window,
+covers what is behind it in the same way.
 
 ## Keyboards
 
