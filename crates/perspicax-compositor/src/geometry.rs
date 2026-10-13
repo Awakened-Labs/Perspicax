@@ -89,12 +89,16 @@ pub(crate) fn record(states: &SurfaceData, size: Option<Size<i32, Logical>>) {
 /// The size of the picture `surface` shows, as its last commit left it:
 /// `None` while it shows nothing.
 pub(crate) fn shown(surface: &WlSurface) -> Option<Size<i32, Logical>> {
-    with_states(surface, |states| {
-        states
-            .data_map
-            .get::<Shows>()
-            .and_then(|shows| *shows.0.lock().unwrap_or_else(PoisonError::into_inner))
-    })
+    with_states(surface, recorded)
+}
+
+/// What [`record`] last kept for the surface whose states these are, for a
+/// walk that already holds them.
+pub(crate) fn recorded(states: &SurfaceData) -> Option<Size<i32, Logical>> {
+    states
+        .data_map
+        .get::<Shows>()
+        .and_then(|shows| *shows.0.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
 /// Measure the tree under `root` again, after a commit changed something in
@@ -126,11 +130,7 @@ pub(crate) fn measure(root: &WlSurface) {
                         .current()
                         .location
             };
-            let Some(size) = states
-                .data_map
-                .get::<Shows>()
-                .and_then(|shows| *shows.0.lock().unwrap_or_else(PoisonError::into_inner))
-            else {
+            let Some(size) = recorded(states) else {
                 return TraversalAction::SkipChildren;
             };
             let placed = Rectangle::new(at, size);
@@ -162,7 +162,7 @@ pub(crate) fn measure(root: &WlSurface) {
 /// it declared, clipped to it, or all of it. A surface that declared nothing
 /// proves nothing, so it is taken to cover everything it shows.
 fn opaque_in_root(states: &SurfaceData, placed: Rectangle<i32, Logical>) -> Vec<Rect> {
-    let whole = crate::damage::to_rect(placed, 1.0);
+    let whole = crate::damage::to_rect(placed);
     let declared = states
         .cached_state
         .get::<SurfaceAttributes>()

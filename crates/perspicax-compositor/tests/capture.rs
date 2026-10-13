@@ -3,8 +3,9 @@
 //!
 //! A picture of a monitor shows a window's colour where the window is and
 //! the backdrop where nothing is, and accounts for every surface in it. A
-//! picture of one window shows it whole, even under another. And while the
-//! session is locked there are no pictures.
+//! picture of one window shows it whole, even under another. Damage a
+//! client names in a buffer it turned is where the picture shows its pixels
+//! changed. And while the session is locked there are no pictures.
 //!
 //! Only with the `capture` feature. Like the other live tests it binds a
 //! real Wayland socket, so it needs `XDG_RUNTIME_DIR`, and is `#[ignore]`d for
@@ -18,10 +19,13 @@ use common::{Session, until};
 use perspicax_compositor::{ActError, Backend, Host};
 use perspicax_index::{HostFacts, Shot, ShotTarget};
 use perspicax_node::{Rect, SurfaceId};
+use smithay_client_toolkit::shell::WaylandSurface;
+use wayland_client::protocol::wl_output;
 
 /// ARGB, as the client writes it.
 const BLUE: u32 = 0xff33_6699;
 const ORANGE: u32 = 0xffee_8822;
+const MARKED: u32 = 0xff22_cc44;
 
 fn rgba(argb: u32) -> [u8; 4] {
     let [b, g, r, a] = argb.to_le_bytes();
@@ -104,6 +108,83 @@ fn a_picture_of_a_window_shows_it_whole_under_another() {
     assert_eq!(shot.drawn.len(), 1);
 
     session.stop((desk, queue));
+}
+
+/// What a receipt reads, against what is drawn: damage a client names in the
+/// pixels of a buffer it turned, each of the eight ways a buffer turns, is
+/// where those pixels changed on the monitor (issue #104).
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn damage_named_in_a_turned_buffer_is_where_its_pixels_changed() {
+    let session = Session::start("capture-turned", Backend::headless((800, 600)));
+    let host = Host::new(&session.facts, &session.requests);
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_coloured(&qh, "blue", "blue", BLUE);
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    let facts = session.wait_for(|facts| {
+        facts
+            .surfaces()
+            .iter()
+            .any(|surface| surface.mapped && surface.damage_generation >= 1)
+    });
+    let (id, _) = geometry(&facts, "blue");
+    let root = desk.windows[0].wl_surface().clone();
+    let (_placed, child) = desk.open_subsurface(&qh, &root, (40, 30), false);
+    root.commit();
+
+    // In the subsurface, a picture 120 by 80 in its own pixels: orange, but
+    // for a corner of its pixels, which is all it names.
+    let mut seen = facts.surface(id).expect("the window").damage_generation;
+    let mut misplaced = Vec::new();
+    for turned in TURNS {
+        desk.paint_turned(&child, (120, 80), turned, ORANGE, (20, 10), MARKED);
+        child.commit();
+        queue.roundtrip(&mut desk).expect("round trip");
+        let facts = session.wait_for(|facts| {
+            facts
+                .surface(id)
+                .is_some_and(|window| window.damage_generation > seen)
+        });
+        let window = facts.surface(id).expect("the window");
+        let changed = window.damage_since(seen);
+        seen = window.damage_generation;
+        let shot = host.capture(ShotTarget::Output(None)).expect("a picture");
+        let drawn = drawn_in(&shot, MARKED);
+        if changed.as_deref() != Some(drawn.as_slice()) {
+            misplaced.push((turned, changed, drawn));
+        }
+    }
+    assert!(misplaced.is_empty(), "named, then drawn: {misplaced:#?}");
+
+    session.stop((desk, queue));
+}
+
+/// The eight ways a client may turn a buffer.
+const TURNS: [wl_output::Transform; 8] = [
+    wl_output::Transform::Normal,
+    wl_output::Transform::_90,
+    wl_output::Transform::_180,
+    wl_output::Transform::_270,
+    wl_output::Transform::Flipped,
+    wl_output::Transform::Flipped90,
+    wl_output::Transform::Flipped180,
+    wl_output::Transform::Flipped270,
+];
+
+/// Where `shot` shows `colour`: the smallest rectangle around all of it, or
+/// nothing.
+fn drawn_in(shot: &Shot, colour: u32) -> Vec<Rect> {
+    let mut around: Option<Rect> = None;
+    for y in 0..shot.height {
+        for x in 0..shot.width {
+            let (x, y) = (f64::from(x), f64::from(y));
+            if pixel(shot, x, y) == rgba(colour) {
+                let here = Rect::new(x, y, x + 1.0, y + 1.0);
+                around = Some(around.map_or(here, |around| around.union(here)));
+            }
+        }
+    }
+    around.into_iter().collect()
 }
 
 #[test]
