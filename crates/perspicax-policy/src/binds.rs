@@ -108,6 +108,13 @@ pub enum Action {
     /// Put the focused window back to its application's rule in
     /// `[opacity]`, or opaque, forgetting what the keys set.
     OpacityReset,
+    /// Let an agent act on the focused window's program, or stop letting it:
+    /// a grant to its process, which also ends when the process exits. Not
+    /// an X11 window's, whose consent is Xwayland's and every X11 program's
+    /// at once.
+    ToggleAgent,
+    /// Take back everything an agent was granted, whoever granted it.
+    RevokeAgents,
 }
 
 impl Action {

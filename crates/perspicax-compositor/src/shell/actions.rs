@@ -77,6 +77,12 @@ impl Compositor {
                     self.reset_opacity(&window);
                 }
             }
+            Action::ToggleAgent => {
+                if let Some(window) = focused {
+                    self.toggle_agent(&window);
+                }
+            }
+            Action::RevokeAgents => self.revoke_all(),
             Action::CycleFocus => {
                 // Minimized windows on this workspace count as below the
                 // bottom of the stack, so cycling reaches them first and

@@ -899,6 +899,32 @@ fn an_x11_window_that_iconifies_itself_is_minimized_and_told_it_is_iconic() {
     x11.stop();
 }
 
+/// #78: consent for X11 is Xwayland's, so the person's key does not grant an
+/// X11 window: every X client shares the one server and may read and drive
+/// the others, and granting one would grant them all. What the key asked is
+/// known to be done once the minimize after it is.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_is_not_granted_by_a_key() {
+    let x11 = X11::start("x11-grant", Backend::headless((1280, 1024)).granting());
+    let window = x11.open("x11");
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == window).then_some(())
+    })
+    .expect("the window never took the keyboard");
+
+    x11.perform(Action::ToggleAgent);
+    x11.perform(Action::Minimize);
+    x11.surface_where("x11", |surface| !surface.mapped)
+        .expect("the minimize after the key was done");
+    assert_eq!(
+        x11.facts().consent(),
+        &perspicax_index::Consent::Granted(Vec::new()),
+        "nothing granted"
+    );
+    x11.stop();
+}
+
 /// Issue #90: a window minimized by the person, then brought back, is told
 /// both: iconic, then normal, which is the change Wine restores a window on.
 /// Brought back, it takes the keyboard -- the surface Xwayland gave it is

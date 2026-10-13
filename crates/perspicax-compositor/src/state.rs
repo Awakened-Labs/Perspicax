@@ -8,7 +8,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    os::unix::net::UnixStream,
+    os::{fd::OwnedFd, unix::net::UnixStream},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -473,12 +473,12 @@ impl Compositor {
             }
         };
 
-        let origin = client
+        let (origin, pidfd) = client
             .get_credentials(&self.display)
-            .map_or(Origin::Unattributed, |credentials| {
-                origin::of_pid(credentials.pid)
+            .map_or((Origin::Unattributed, None), |credentials| {
+                origin::attest(credentials.pid)
             });
-        state.attribute(origin.clone());
+        state.attribute(origin.clone(), pidfd);
         tracing::info!(id = ?client.id(), ?origin, "client connected");
         self.clients.push((client.id(), state));
     }
@@ -1589,6 +1589,9 @@ impl XdgActivationHandler for Compositor {
 pub(crate) struct ClientState {
     compositor: CompositorClientState,
     origin: OnceLock<Origin>,
+    /// A pidfd on the origin's process, when one could be vouched for: what
+    /// a grant to it is held by. See [`crate::origin::attest`].
+    pidfd: OnceLock<OwnedFd>,
     /// Whether it has stopped reading what is sent to it.
     stall: Stall,
     /// Whether it has gone, so that it is flushed no more.
@@ -1598,13 +1601,21 @@ pub(crate) struct ClientState {
 impl ClientState {
     /// Record who this client is. Once, and only the first time: an identity
     /// that could be overwritten is not an attestation.
-    fn attribute(&self, origin: Origin) {
+    fn attribute(&self, origin: Origin, pidfd: Option<OwnedFd>) {
         let _ = self.origin.set(origin);
+        if let Some(pidfd) = pidfd {
+            let _ = self.pidfd.set(pidfd);
+        }
     }
 
     /// Who this client is, or `Unattributed` if it was never established.
     pub(crate) fn origin(&self) -> Origin {
         self.origin.get().cloned().unwrap_or_default()
+    }
+
+    /// A pidfd of its own on this client's process, if one was vouched for.
+    pub(crate) fn pidfd(&self) -> Option<OwnedFd> {
+        self.pidfd.get()?.try_clone().ok()
     }
 }
 

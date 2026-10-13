@@ -339,6 +339,13 @@ impl Config {
             .bind(logo(Keysym::g), Action::TabWithPrevious)
             .bind(logo_shift(Keysym::g), Action::DetachTab);
 
+        // An agent, in both profiles: Logo+A lets one act on the focused
+        // window's program, or stops it, and Logo+Shift+A takes back
+        // everything it was let act on.
+        bindings = bindings
+            .bind(logo(Keysym::a), Action::ToggleAgent)
+            .bind(logo_shift(Keysym::a), Action::RevokeAgents);
+
         // Workspaces. Ctrl+Logo+arrows switches and, with Shift, takes the
         // focused window along, in both profiles: Plasma's keys, and Windows'
         // for left and right. Classic adds Plasma's Ctrl+F1..F4; minimal adds
@@ -1660,6 +1667,8 @@ fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Actio
             "opacity-up" => Action::OpacityUp,
             "opacity-down" => Action::OpacityDown,
             "opacity-reset" => Action::OpacityReset,
+            "toggle-agent" => Action::ToggleAgent,
+            "revoke-agent-all" => Action::RevokeAgents,
             other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
                 format!(
                     "`{other}` is not an action; use close, cycle-focus, reload, \
@@ -1668,6 +1677,7 @@ fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Actio
                          next-layout, previous-layout, layout-<1-4>, \
                          next-workspace, previous-workspace, \
                          opacity-up, opacity-down, opacity-reset, \
+                         toggle-agent, revoke-agent-all, \
                          move-to-next-output, move-to-previous-output, \
                          move-to-output-<side>, workspace-<side>, workspace-<number>, \
                          send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
@@ -2815,6 +2825,44 @@ mod tests {
             config.bindings.resolve(logo, &[Keysym::s]),
             Some(&Action::ToggleSticky)
         );
+    }
+
+    #[test]
+    fn the_agent_actions_are_named_and_bound_to_logo_a_in_both_profiles() {
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        let shift = Mods {
+            shift: true,
+            ..logo
+        };
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let bindings = Config::profile(profile, SEAT).bindings;
+            assert_eq!(
+                bindings.resolve(logo, &[Keysym::a]),
+                Some(&Action::ToggleAgent)
+            );
+            assert_eq!(
+                bindings.resolve(shift, &[Keysym::a]),
+                Some(&Action::RevokeAgents)
+            );
+        }
+        let config = parse(
+            "[keys]\n\"Logo+Y\" = \"toggle-agent\"\n\"Logo+Shift+Y\" = \"revoke-agent-all\"\n\
+             \"Logo+A\" = \"none\"",
+            SEAT,
+        )
+        .expect("a valid config");
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::y]),
+            Some(&Action::ToggleAgent)
+        );
+        assert_eq!(
+            config.bindings.resolve(shift, &[Keysym::y]),
+            Some(&Action::RevokeAgents)
+        );
+        assert_eq!(config.bindings.resolve(logo, &[Keysym::a]), None, "unbound");
     }
 
     #[test]

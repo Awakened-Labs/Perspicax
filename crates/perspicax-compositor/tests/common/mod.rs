@@ -172,10 +172,7 @@ impl Session {
 
     /// A client, its registry read.
     pub fn client(&self) -> (Desk, EventQueue<Desk>, QueueHandle<Desk>, GlobalList) {
-        let client = connect(&self.socket);
-        let (globals, queue) = registry_queue_init(&client).expect("the registry");
-        let qh = queue.handle();
-        (Desk::new(&globals, &qh), queue, qh, globals)
+        client_on(&self.socket)
     }
 
     /// The socket's name in `XDG_RUNTIME_DIR`, for a client of the test's
@@ -211,6 +208,15 @@ impl Session {
             .expect("the compositor thread panicked")
             .expect("the compositor failed");
     }
+}
+
+/// A client of the compositor on `socket`, its registry read: for a client
+/// in a process of its own, which has a socket's name and no [`Session`].
+pub fn client_on(socket: &str) -> (Desk, EventQueue<Desk>, QueueHandle<Desk>, GlobalList) {
+    let client = connect(socket);
+    let (globals, queue) = registry_queue_init(&client).expect("the registry");
+    let qh = queue.handle();
+    (Desk::new(&globals, &qh), queue, qh, globals)
 }
 
 /// Connect by path rather than through `WAYLAND_DISPLAY`: setting an
