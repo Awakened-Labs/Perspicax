@@ -7,13 +7,17 @@
 //! asking before it is a window, as GTK's does, is told the scale of the
 //! monitor a new window opens on. A panel is told its own monitor's.
 //!
-//! And the issue it was offered for (#135). Firefox on a monitor at 0.75 is
-//! told 0.75, draws its buffer at that, and says through a viewport that the
-//! buffer is shown at its window's size. Its pixels then fill its window on
-//! the monitor, one for one, where they used to fill 0.75 of it.
+//! Below 1, nothing is told (#140): Chromium told 0.9 draws at it but reads
+//! the pointer as though it had not. A surface told a scale before is told
+//! 1 instead, as the protocol cannot take one back.
 //!
-//! A scale is told in 120ths, and a display tool sets one in 256ths: 0.9
-//! arrives as 230/256, which is 107.8 120ths, told as 108.
+//! And the issue it was offered for (#135). Firefox on a monitor at 0.75,
+//! told nothing, takes 0.75 from the monitor's logical size, draws its
+//! buffer at that, and says through a viewport that the buffer is shown at
+//! its window's size. Its pixels then fill its window on the monitor, one
+//! for one, where they used to fill 0.75 of it.
+//!
+//! A scale is told in 120ths: 1.25 is told as 150.
 //!
 //! The picture needs the `capture` feature. Like the other live tests it
 //! binds a real Wayland socket, so it needs `XDG_RUNTIME_DIR`, and is
@@ -21,7 +25,7 @@
 
 mod common;
 
-use common::{Session, advertised, rescale, until};
+use common::{Said, Session, advertised, rescale, until};
 use perspicax_compositor::{Backend, Virtual};
 use perspicax_policy::{Access, Action, Direction, Place, Shape, Side, Towards};
 use smithay_client_toolkit::shell::WaylandSurface;
@@ -71,7 +75,7 @@ fn a_window_is_told_its_monitors_scale_and_told_again_when_it_changes() {
     });
     assert_eq!(desk.scales_told(&page), [120]);
 
-    rescale(&mut desk, &mut queue, &qh, &globals, "HEADLESS-1", 0.9);
+    rescale(&mut desk, &mut queue, &qh, &globals, "HEADLESS-1", 1.25);
     until(&mut queue, &mut desk, |desk| {
         desk.scales_told(&page).len() == 2
     });
@@ -79,7 +83,64 @@ fn a_window_is_told_its_monitors_scale_and_told_again_when_it_changes() {
     until(&mut queue, &mut desk, |desk| {
         desk.scales_told(&page).len() == 3
     });
-    assert_eq!(desk.scales_told(&page), [120, 108, 180]);
+    assert_eq!(desk.scales_told(&page), [120, 150, 180]);
+
+    session.stop((desk, queue));
+}
+
+/// On a monitor below 1, neither a surface asking before it is a window nor
+/// a window that has drawn, and been through a frame since it asked, is told
+/// a scale: each draws at 1, or at what it guesses, and is scaled down.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_surface_on_a_monitor_below_1_is_told_no_scale() {
+    let session = Session::start("scales-below-one", Backend::headless((800, 600)));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    rescale(&mut desk, &mut queue, &qh, &globals, "HEADLESS-1", 0.9);
+    desk.bind_fractional_scale(&globals, &qh);
+
+    let early = desk.surface(&qh);
+    let _early_scale = desk.fractional(&qh, &early);
+    desk.open_window(&qh, "page", "page");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    let page = desk.windows[0].wl_surface().clone();
+    let _scale = desk.fractional(&qh, &page);
+    // The frame that answers this settles every surface's scale first.
+    desk.ask_frame(&qh, &page);
+    until(&mut queue, &mut desk, |desk| {
+        desk.said_to(&page).contains(&Said::Done)
+    });
+    let told = desk.scales_told(&early);
+    assert!(told.is_empty(), "the early surface was told {told:?}");
+    let told = desk.scales_told(&page);
+    assert!(told.is_empty(), "the window was told {told:?}");
+
+    session.stop((desk, queue));
+}
+
+/// A window told a scale, whose monitor then goes below 1, is told 1: it
+/// cannot be told nothing any more.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_told_a_scale_is_told_1_when_its_monitor_goes_below_1() {
+    let session = Session::start("scales-down-to-one", Backend::headless((800, 600)));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    rescale(&mut desk, &mut queue, &qh, &globals, "HEADLESS-1", 1.5);
+    desk.bind_fractional_scale(&globals, &qh);
+    desk.open_window(&qh, "page", "page");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    let page = desk.windows[0].wl_surface().clone();
+    let _scale = desk.fractional(&qh, &page);
+    until(&mut queue, &mut desk, |desk| {
+        !desk.scales_told(&page).is_empty()
+    });
+    assert_eq!(desk.scales_told(&page), [180]);
+
+    rescale(&mut desk, &mut queue, &qh, &globals, "HEADLESS-1", 0.9);
+    until(&mut queue, &mut desk, |desk| {
+        desk.scales_told(&page).len() == 2
+    });
+    assert_eq!(desk.scales_told(&page), [180, 120]);
 
     session.stop((desk, queue));
 }
@@ -173,14 +234,18 @@ mod firefox {
         desk.bind_viewporter(&globals, &qh);
         desk.bind_fractional_scale(&globals, &qh);
 
-        // Told 90 120ths, it draws its 400 by 300 window in 300 by 225.
+        // Told nothing below 1, it takes 0.75 from the monitor's logical
+        // size, and draws its 400 by 300 window in 300 by 225.
         desk.open_viewed(&qh, "firefox", BLUE, (300, 225), (400, 300));
         let firefox = desk.windows[0].wl_surface().clone();
         let _scale = desk.fractional(&qh, &firefox);
+        until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+        desk.ask_frame(&qh, &firefox);
         until(&mut queue, &mut desk, |desk| {
-            desk.drawn == 1 && !desk.scales_told(&firefox).is_empty()
+            desk.said_to(&firefox).contains(&Said::Done)
         });
-        assert_eq!(desk.scales_told(&firefox), [90]);
+        let told = desk.scales_told(&firefox);
+        assert!(told.is_empty(), "told {told:?}");
 
         let facts = session.wait_for(|facts| {
             facts

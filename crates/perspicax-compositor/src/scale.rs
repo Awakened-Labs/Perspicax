@@ -25,7 +25,25 @@
 //! the window moved, or the monitor was given another scale. Asked of
 //! every surface at each frame, as smithay is asked which monitors each is
 //! on, so it follows whatever moved them; smithay sends a scale only when
-//! it changed.
+//! it changed. A scale below 1 is not told (below).
+//!
+//! # Not below 1
+//!
+//! Chromium told a scale below 1 draws at it, but takes 1 for the size it
+//! shows its picture at and the scale for where the pointer is (issue
+//! #140). Told 0.9, Discord drew its window at 0.9 of its size, and read
+//! each click 1.11 times further from the window's top left than where the
+//! person pointed. In Chromium 138 (`ui/ozone/platform/wayland/host`):
+//! `WaylandSurface::GetWaylandScale` clamps the scale to at least 1 for the
+//! viewport's destination, and `WaylandWindow::DispatchEvent` multiplies
+//! the pointer by the scale unclamped. Fixed upstream (crbug 438038776),
+//! after every Electron then in use.
+//!
+//! So below 1 a surface is told nothing. Chromium, GTK and Qt draw at 1 and
+//! are scaled down, as with no protocol at all; Firefox guesses the scale
+//! from the logical size and draws sharp through its viewport. A surface
+//! already told a scale is told 1 instead, as the nearest it can safely be
+//! told: the protocol cannot take a scale back.
 //!
 //! # Not Xwayland
 //!
@@ -141,8 +159,16 @@ delegate_fractional_scale!(Compositor);
 
 /// Tell the surface whose states these are to draw at `scale`. Said only if
 /// it changed, and kept for an object the client has yet to ask for.
+///
+/// Below 1, nothing is said, unless a scale was said before: then 1 is.
 fn ask(states: &SurfaceData, scale: f64) {
-    with_fractional_scale(states, |fractional| fractional.set_preferred_scale(scale));
+    with_fractional_scale(states, |fractional| {
+        if scale >= 1.0 {
+            fractional.set_preferred_scale(scale);
+        } else if fractional.preferred_scale().is_some() {
+            fractional.set_preferred_scale(1.0);
+        }
+    });
 }
 
 /// Whether `client` is the Xwayland this compositor started: the one client
