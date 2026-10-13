@@ -3,7 +3,9 @@
 //! is, so that windows are kept out of the strip it takes. A fullscreen
 //! window in use still covers it, as perspicax arranges. The surface is the
 //! whole strip even when the bar drawn on it is narrower: the rest is clear
-//! and takes no clicks, so a click there reaches the desktop under it.
+//! and takes no clicks, so a click there reaches the desktop under it. To an
+//! agent it still covers the desktop there: a surface covers everything it
+//! draws, clear or not.
 //! Anchored to a corner instead, the surface would have smithay keep
 //! windows out of a column down the monitor's side, not the strip.
 //!
@@ -590,7 +592,8 @@ impl Panels {
         canvas.take_clicks_in(&bar.layer, area);
         let started = Instant::now();
         // The bar wholly opaque, which lets the compositor skip what is under
-        // it, and the rest of the strip clear.
+        // it, and the rest of the strip clear. Clear is not uncovered: to an
+        // agent the whole strip covers what is under it.
         canvas.show(&bar.layer, size, bar.scale, &[area], |picture| {
             paint::panel::paint(&shown, picture, bar.scale, text, images, palette);
         });

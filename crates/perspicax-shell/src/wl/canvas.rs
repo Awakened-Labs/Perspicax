@@ -90,6 +90,7 @@ impl Canvas {
 
     /// A clear surface over the whole of `output`, over everything, that
     /// takes the keyboard while it is up: what a menu or a pie is drawn on.
+    /// Clear or not, all of it covers what is under it, to an agent.
     /// Committed, for the compositor to size.
     #[cfg(feature = "menus")]
     pub(super) fn overlay(
@@ -108,7 +109,9 @@ impl Canvas {
     }
 
     /// Have `layer`, `size` big, take clicks everywhere but `cut`: where a
-    /// panel of the shell's is, which takes its own. From its next picture.
+    /// panel of the shell's is, which takes its own. That keeps the panel in
+    /// reach of a person's click, not an agent's, since `layer` is still
+    /// drawn over it. From its next picture.
     #[cfg(feature = "menus")]
     pub(super) fn take_clicks(
         &self,
@@ -182,7 +185,8 @@ impl Canvas {
         let surface = layer.wl_surface();
         surface.set_buffer_scale(scale as i32);
         // What is opaque lets the compositor skip drawing what is under it,
-        // and tells an agent what covers what.
+        // and lets perspicax prove to an agent that a node under it is
+        // covered. The clear rest covers what is under it too, on policy.
         if let Ok(region) = Region::new(&self.compositor) {
             for &(x, y, w, h) in opaque {
                 region.add(x, y, w, h);
@@ -200,8 +204,8 @@ impl Canvas {
     /// Show on `layer` a picture `size` logical pixels at `scale`, of which
     /// `draw` paints only `painted`, and the rest is clear; opaque nowhere:
     /// a pie, round and see-through, drawn again on every move of the
-    /// pointer. What is under it shows through, and an agent is told it
-    /// covers nothing.
+    /// pointer. What is under it shows through to a person, and is still
+    /// covered to an agent: a surface covers everything it draws.
     ///
     /// The picture goes in one of `frames`' buffers that the compositor
     /// has let go of, or a new one, cleared once when it is made: only

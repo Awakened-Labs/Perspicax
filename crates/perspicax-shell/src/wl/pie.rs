@@ -5,9 +5,12 @@
 //! everywhere on it: a pie is pointed at by direction, out to the screen's
 //! edge, so there is no "off the pie" to click. It is clear but for the
 //! pie's square, and says it is opaque nowhere, since what is under a pie
-//! shows through it. It takes the keyboard while it is up, so opening a
-//! pie closes the menus and opening a menu closes the pie, each losing the
-//! keyboard to the other. Its namespace is `perspicax-pie-<connector>`.
+//! shows through it. That does not uncover it: to an agent, everything on
+//! the monitor is covered while a pie is open, as a surface covers
+//! everything it draws (issue #103). It takes the keyboard while it is up,
+//! so opening a pie closes the menus and opening a menu closes the pie,
+//! each losing the keyboard to the other. Its namespace is
+//! `perspicax-pie-<connector>`.
 //!
 //! A pie is built from the config each time it opens: what it lists is
 //! never older than the installed applications and the folder of icons.
