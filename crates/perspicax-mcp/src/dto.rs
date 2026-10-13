@@ -31,7 +31,7 @@
 //! imposes is not a ceiling anything can reach.
 
 use perspicax_index::{
-    DamageWitness, Delta, Drawn, HostFacts, Index, Receipt, Refusal, Shot, SurfaceFacts,
+    Consent, DamageWitness, Delta, Drawn, HostFacts, Index, Receipt, Refusal, Shot, SurfaceFacts,
     SurfaceKind, WindowReceipt, WindowWitness,
 };
 use perspicax_node::{
@@ -494,6 +494,12 @@ pub struct Window {
     /// exactly the surface whose provenance matters most.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rendered_by: Option<Provenance>,
+    /// Whether an agent may act on it at all: whether the person at the seat
+    /// has consented to its process being driven. Always, headless. On a
+    /// seat, only what was granted: by the person, with a key, or by
+    /// starting it for the agent. A node on a surface without it is refused
+    /// as `no_capability`, however visible it is.
+    pub agent: bool,
     /// The title the client set, under a key that says who set it. A window
     /// title is a string an untrusted process chose; `rendered_by` above names
     /// the process that chose it.
@@ -548,13 +554,13 @@ impl Window {
         let mut windows: Vec<Self> = facts
             .surfaces()
             .iter()
-            .map(|surface| Self::one(index, surface, &order))
+            .map(|surface| Self::one(index, surface, &order, facts.consent()))
             .collect();
         windows.sort_by_key(|window| window.surface);
         windows
     }
 
-    fn one(index: &Index, facts: &SurfaceFacts, order: &[NodeId]) -> Self {
+    fn one(index: &Index, facts: &SurfaceFacts, order: &[NodeId], consent: &Consent) -> Self {
         let on_this_surface = |id: &&NodeId| {
             index
                 .get(**id)
@@ -580,6 +586,7 @@ impl Window {
             mapped: facts.mapped,
             bounds: facts.geometry.into(),
             rendered_by: Provenance::of(&facts.origin),
+            agent: consent.permits(&facts.origin),
             untrusted_title: facts.title.clone(),
             damage_frames: facts.damage_generation,
             untrusted_app_id: facts.app_id.clone(),
@@ -835,35 +842,50 @@ pub fn png(shot: &Shot) -> Result<Vec<u8>, String> {
     Ok(encoded)
 }
 
-/// Something that changed since the last time anyone asked.
+/// Something that changed since the last time anyone asked: to a node, or
+/// to whether a window may be acted on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Changed {
-    /// `added`, `updated`, `removed`, or `invalidated`.
+    /// `added`, `updated`, `removed` or `invalidated`, to a node; `granted`
+    /// or `revoked`, to a surface.
     pub change: &'static str,
     /// The node it happened to. For `invalidated` this is the root of a subtree
     /// that must be re-read before anything in it is trusted.
-    pub node: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<u64>,
+    /// The surface it happened to: one an agent may now act on, or may no
+    /// longer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub surface: Option<u64>,
+}
+
+impl Changed {
+    const fn node(change: &'static str, id: NodeId) -> Self {
+        Self {
+            change,
+            node: Some(id.0),
+            surface: None,
+        }
+    }
+
+    const fn surface(change: &'static str, id: SurfaceId) -> Self {
+        Self {
+            change,
+            node: None,
+            surface: Some(id.0),
+        }
+    }
 }
 
 impl From<&Delta> for Changed {
     fn from(delta: &Delta) -> Self {
-        match delta {
-            Delta::Added { id } => Self {
-                change: "added",
-                node: id.0,
-            },
-            Delta::Updated { id } => Self {
-                change: "updated",
-                node: id.0,
-            },
-            Delta::Removed { id } => Self {
-                change: "removed",
-                node: id.0,
-            },
-            Delta::Invalidated { root } => Self {
-                change: "invalidated",
-                node: root.0,
-            },
+        match *delta {
+            Delta::Added { id } => Self::node("added", id),
+            Delta::Updated { id } => Self::node("updated", id),
+            Delta::Removed { id } => Self::node("removed", id),
+            Delta::Invalidated { root } => Self::node("invalidated", root),
+            Delta::Granted { surface } => Self::surface("granted", surface),
+            Delta::Revoked { surface } => Self::surface("revoked", surface),
         }
     }
 }
@@ -1076,6 +1098,24 @@ mod tests {
         );
     }
 
+    /// `agent` is the host's consent, asked of each surface's process: so an
+    /// agent can tell what it may act on before it spends a call finding out.
+    #[test]
+    fn window_list_says_which_windows_an_agent_may_act_on() {
+        let windows = Window::all(&index(), &facts());
+        assert!(
+            windows.iter().all(|window| window.agent),
+            "everyone, headless"
+        );
+
+        let granted = facts().with_consent(Consent::Granted(vec![4242]));
+        let windows = Window::all(&index(), &granted);
+        assert!(windows[0].agent, "4242 drew the window");
+        assert!(!windows[1].agent, "nobody granted the panel's 5150");
+        let wire = serde_json::to_value(&windows).unwrap();
+        assert_eq!(wire[1]["agent"], false, "said, not left out: {}", wire[1]);
+    }
+
     /// A window the person made see-through says how opaque it is drawn, and
     /// one that is opaque says nothing: no `opacity: 100` on every window.
     #[test]
@@ -1171,9 +1211,31 @@ mod tests {
             Changed::from(&Delta::Invalidated { root: FRAME }),
             Changed {
                 change: "invalidated",
-                node: FRAME.0
+                node: Some(FRAME.0),
+                surface: None,
             }
         );
         assert_eq!(Changed::from(&Delta::Added { id: CANCEL }).change, "added");
+    }
+
+    /// A change of consent is to a surface, and says only that: the wire
+    /// carries no `node` for it, rather than a node id of nothing.
+    #[test]
+    fn a_change_of_consent_names_the_surface_and_no_node() {
+        let json = serde_json::to_value(Changed::from(&Delta::Granted {
+            surface: SurfaceId(7),
+        }))
+        .unwrap();
+        assert_eq!(json, serde_json::json!({"change": "granted", "surface": 7}));
+        let json = serde_json::to_value(Changed::from(&Delta::Revoked {
+            surface: SurfaceId(7),
+        }))
+        .unwrap();
+        assert_eq!(json, serde_json::json!({"change": "revoked", "surface": 7}));
+        let json = serde_json::to_value(Changed::from(&Delta::Added { id: CANCEL })).unwrap();
+        assert!(
+            json.get("surface").is_none(),
+            "a node's change names no surface"
+        );
     }
 }

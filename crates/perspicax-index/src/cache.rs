@@ -30,6 +30,12 @@ pub enum Delta {
     Removed { id: NodeId },
     /// A subtree that can no longer be trusted and has not yet been re-read.
     Invalidated { root: NodeId },
+    /// A surface an agent may now act on, which it could not before: its
+    /// process was granted, or a granted process put a window up.
+    Granted { surface: SurfaceId },
+    /// A surface an agent may no longer act on: its grant was taken back, or
+    /// its process exited.
+    Revoked { surface: SurfaceId },
 }
 
 /// The semantic index's cache of what is on screen.
@@ -57,6 +63,9 @@ pub struct Index {
     /// The host's consent policy as of the last [`Index::judge`]. Taken with
     /// the visibility verdicts, so the two describe the same instant.
     consent: Consent,
+    /// Whether an agent might act on each surface, as of the last
+    /// [`Index::judge`]: what a change in consent is a change from.
+    permitted: HashMap<SurfaceId, bool>,
 }
 
 impl Index {
@@ -459,6 +468,7 @@ impl Index {
     /// on a description it distrusts.
     pub fn judge(&mut self, facts: &HostFacts) -> Tally {
         self.consent = facts.consent().clone();
+        self.note_consent(facts);
         // Decided first and written after: a node's window bounds are read
         // from its window node, which is one of the nodes being written.
         let verdicts: Vec<(NodeId, Judgement)> = self
@@ -487,6 +497,38 @@ impl Index {
             }
         }
         tally
+    }
+
+    /// Announce each surface whose consent changed since the last judge.
+    ///
+    /// A surface not seen before is news only where consent is by grant:
+    /// there a window a granted process puts up is something new the agent
+    /// may act on, and is announced as granted. Under any other policy a
+    /// surface's first sighting only sets what later changes are measured
+    /// from, so a desk that consents to everyone does not announce a grant
+    /// for every window that maps.
+    fn note_consent(&mut self, facts: &HostFacts) {
+        let by_grant = matches!(self.consent, Consent::Granted(_));
+        let mut permitted = HashMap::with_capacity(facts.surfaces().len());
+        for surface in facts.surfaces() {
+            let now = self.consent.permits(&surface.origin);
+            let before = self
+                .permitted
+                .get(&surface.id)
+                .copied()
+                .unwrap_or(!by_grant && now);
+            match (before, now) {
+                (false, true) => self.pending.push(Delta::Granted {
+                    surface: surface.id,
+                }),
+                (true, false) => self.pending.push(Delta::Revoked {
+                    surface: surface.id,
+                }),
+                _ => {}
+            }
+            permitted.insert(surface.id, now);
+        }
+        self.permitted = permitted;
     }
 
     /// Record that this surface's nodes were read as of `generation`.
@@ -1142,6 +1184,65 @@ mod tests {
 
         assert!(index.under_damage(&facts).is_empty());
         assert!(index.actable(NodeId(3)).is_ok());
+    }
+
+    /// One window, drawn by the process `origin` names.
+    fn one_window(consent: Consent) -> HostFacts {
+        HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(SurfaceId(1), Rect::new(0.0, 0.0, 400.0, 300.0))
+                    .owned_by(origin()),
+            ],
+            1,
+        )
+        .with_consent(consent)
+    }
+
+    #[test]
+    fn a_window_whose_consent_changes_is_announced_once_each_way() {
+        let mut index = Index::new();
+        index.judge(&one_window(Consent::Granted(Vec::new())));
+        assert!(index.take_deltas().is_empty(), "not granted, and never was");
+
+        index.judge(&one_window(Consent::Granted(vec![9182])));
+        index.judge(&one_window(Consent::Granted(vec![9182])));
+        assert_eq!(
+            index.take_deltas(),
+            vec![Delta::Granted {
+                surface: SurfaceId(1)
+            }],
+            "once, however often it is judged"
+        );
+
+        index.judge(&one_window(Consent::Granted(Vec::new())));
+        index.judge(&one_window(Consent::Granted(Vec::new())));
+        assert_eq!(
+            index.take_deltas(),
+            vec![Delta::Revoked {
+                surface: SurfaceId(1)
+            }]
+        );
+    }
+
+    #[test]
+    fn a_new_window_under_everyone_is_not_announced() {
+        let mut index = Index::new();
+        index.judge(&one_window(Consent::Everyone));
+        assert!(index.take_deltas().is_empty());
+    }
+
+    #[test]
+    fn a_new_window_under_a_grant_is_announced_granted() {
+        let mut index = Index::new();
+        index.judge(&HostFacts::bottom_to_top([], 0).with_consent(Consent::Granted(vec![9182])));
+        index.judge(&one_window(Consent::Granted(vec![9182])));
+        assert_eq!(
+            index.take_deltas(),
+            vec![Delta::Granted {
+                surface: SurfaceId(1)
+            }],
+            "a granted process's new window is something new to act on"
+        );
     }
 
     #[test]

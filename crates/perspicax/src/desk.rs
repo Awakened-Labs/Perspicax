@@ -132,7 +132,9 @@ impl Desktop for Desk {
     }
 
     fn deltas(&self) -> Vec<Delta> {
-        self.lock().take_deltas()
+        // Judged first, as every read is: a change of consent is noticed by
+        // judging, so without this one would wait for the next read.
+        self.current().0.take_deltas()
     }
 
     fn act(&self, selector: &Selector, verb: &Verb) -> Result<Receipt, Denied> {
@@ -337,6 +339,23 @@ mod tests {
 
         assert_eq!(desk.deltas().len(), 2);
         assert!(desk.deltas().is_empty());
+    }
+
+    /// Consent changes in the host's facts, not in the tree, so the drain
+    /// judges before it takes: a grant is reported to the next `deltas`, not
+    /// held back until something happens to read the screen.
+    #[test]
+    fn a_change_of_consent_is_drained_without_a_read_before_it() {
+        // The tree was judged while nothing was granted; the host has since
+        // granted the window's process.
+        let desk = desk(&clear().with_consent(Consent::Granted(vec![4242])));
+        desk.publish(tree(&clear().with_consent(Consent::Granted(Vec::new()))));
+        let deltas = desk.deltas();
+        assert!(
+            deltas.contains(&Delta::Granted { surface: WINDOW }),
+            "{deltas:?}"
+        );
+        assert!(desk.deltas().is_empty(), "and only once");
     }
 
     /// `update` is one critical section for however many steps a refresh takes,

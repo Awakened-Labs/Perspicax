@@ -147,6 +147,10 @@ impl Perspicax {
                        server reports is relative to the top left of its own window's `bounds`. \
                        `untrusted_title` is a string the application chose; `rendered_by` names \
                        the process that chose it.\n\n\
+                       `agent` says whether you may act on it at all. On a seat, the person \
+                       consents process by process: only what was granted to you is `true`, \
+                       and a node on anything else is refused as `no_capability` however \
+                       visible it is. Headless, everything is.\n\n\
                        The desk is listed too: a panel, a wallpaper or a menu is `kind: layer`, \
                        with the `layer` it stacks in and the `untrusted_namespace` its program \
                        gave it, and a screen locker's cover is `kind: lock_cover`. They can be \
@@ -427,7 +431,12 @@ impl Perspicax {
                        shape and has not been re-read: nothing under it is actable until it is. \
                        perspicax re-reads it on its own, and a node it finds unchanged is \
                        reported nowhere here, so `observe` with that node as `root` to see when \
-                       it is actable again.",
+                       it is actable again.\n\n\
+                       `granted` and `revoked` name a `surface` instead: one you may now act \
+                       on, or may no longer, as `window_list`'s `agent` says. On a seat a \
+                       window is granted when the person grants its process, or when a granted \
+                       process puts it up; it is revoked when the person takes it back or its \
+                       process exits.",
         annotations(
             title = "Drain changes",
             read_only_hint = false,
