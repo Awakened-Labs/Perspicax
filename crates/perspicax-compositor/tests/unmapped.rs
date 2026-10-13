@@ -16,11 +16,17 @@ mod common;
 
 use common::{Desk, Said, Session, WINDOW, configured, heard, until};
 use perspicax_compositor::Backend;
+#[cfg(feature = "capture")]
+use perspicax_compositor::Command;
 use perspicax_index::{HostFacts, SurfaceFacts};
 use perspicax_node::SurfaceId;
 use perspicax_policy::Action;
+#[cfg(feature = "capture")]
+use perspicax_policy::{Button, Mods};
 use smithay_client_toolkit::shell::{WaylandSurface as _, xdg::XdgSurface as _};
 use wayland_client::{EventQueue, Proxy as _, QueueHandle};
+#[cfg(feature = "capture")]
+use wayland_protocols::xdg::shell::client::xdg_toplevel::ResizeEdge;
 use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::State;
 
 const MENU: u32 = 0xff33_6699;
@@ -338,6 +344,71 @@ fn a_window_destroyed_after_its_client_unmapped_it_is_forgotten_quietly() {
     let facts = session.facts.read();
     assert_eq!(facts.surfaces().len(), 1, "only the new window");
     assert!(facts.surface(next).is_some());
+
+    session.stop((desk, queue));
+}
+
+/// #102: a window unmapped by its client in the middle of a resize is told
+/// nothing more of it: not as the pointer goes on moving, nor as the button
+/// comes up. Every operation on an unmapped window is cancelled, and a
+/// configure now is what its client waits for to map it again: the resize
+/// would have handed it one, with a size, before it asked.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_resize_under_way_tells_a_window_its_client_unmapped_nothing_more() {
+    let session = seated("unmap-resize");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_pointer(&globals, &qh);
+    opened(&session, &mut desk, &mut queue, &qh, "below");
+    let page = opened(&session, &mut desk, &mut queue, &qh, "page");
+    let at = session
+        .facts
+        .read()
+        .surface(page)
+        .expect("waited for")
+        .geometry;
+    let middle = (
+        ((at.x0 + at.x1) / 2.0).round() as i32,
+        ((at.y0 + at.y1) / 2.0).round() as i32,
+    );
+    // The person presses on the page, which asks to be resized from its
+    // corner, as a toolkit drawing its own frame does, and drags.
+    session.command(Command::Press {
+        at: middle,
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    until(&mut queue, &mut desk, |desk| desk.pressed.is_some());
+    let seat = desk.seat.clone().expect("our pointer's seat");
+    desk.windows[1].resize(
+        &seat,
+        desk.pressed.expect("waited for"),
+        ResizeEdge::BottomRight,
+    );
+    until(&mut queue, &mut desk, |desk| desk.pointed.is_none());
+    session.command(Command::Motion { by: (20, 20) });
+    until(&mut queue, &mut desk, |desk| desk.resizing);
+
+    unmap(&mut desk, &mut queue, 1);
+    session.wait_for(|facts| facts.surface(page).is_none());
+    let told = configures(&desk, 1);
+    session.command(Command::Motion { by: (20, 20) });
+    session.command(Command::Release {
+        button: Button::Left,
+    });
+    // The resize over, the pointer is the window's beneath it once it moves.
+    session.command(Command::Motion { by: (-1, -1) });
+    let below = desk.windows[0].wl_surface().clone();
+    until(&mut queue, &mut desk, |desk| {
+        desk.pointed.as_ref() == Some(&below)
+    });
+    assert_eq!(
+        configures(&desk, 1),
+        told,
+        "the resize went on configuring the window its client unmapped: {:?}",
+        desk.said_to(desk.windows[1].wl_surface())
+    );
 
     session.stop((desk, queue));
 }

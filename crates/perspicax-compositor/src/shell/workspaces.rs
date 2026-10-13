@@ -44,6 +44,15 @@ impl Compositor {
         }
     }
 
+    /// Whether `window` is still one of the person's: on screen, or parked.
+    /// Not one that closed, nor one its client unmapped.
+    pub(crate) fn has_window(&self, window: &Framed) -> bool {
+        self.space
+            .elements()
+            .chain(&self.parked)
+            .any(|kept| kept == window)
+    }
+
     /// A window was put somewhere new: dragged, sent to another monitor, or
     /// rescued from one that was unplugged. Per output, it joins the
     /// workspace its new monitor shows, so it stays in front of the person
