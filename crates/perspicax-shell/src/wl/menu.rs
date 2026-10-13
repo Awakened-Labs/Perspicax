@@ -4,17 +4,23 @@
 //! It covers the whole monitor and is clear but for the menus, so a click
 //! anywhere off them lands on it and closes them, as a click away from a
 //! menu does on any desktop. It takes the keyboard while it is up, and says
-//! it is opaque only where a menu is, so an agent knows what it covers. Its
-//! namespace is `perspicax-menu-<connector>`, and its accessibility window
-//! carries the same name, which is how perspicax joins the two.
+//! it is opaque where a menu is, so that perspicax can tell an agent a node
+//! under a menu is covered on the shell's word. Under the clear rest it is
+//! covered too, on perspicax's policy: a surface covers everything it draws,
+//! clear or not (issue #103). Its namespace is `perspicax-menu-<connector>`,
+//! and its accessibility window carries the same name, which is how
+//! perspicax joins the two.
 //!
 //! It covers the whole monitor, panels included, rather than only the room
 //! panels leave: a point perspicax gives, or a click on the wallpaper, is
 //! from the monitor's corner, and a surface placed in what panels leave
 //! cannot know where that corner is. The shell's own panel is cut out of
 //! where it takes clicks, and no menu is drawn over it, so the panel stays
-//! in reach while a menu is open; another program's panel is covered, and a
-//! click on it closes the menus (issue #24 would change that).
+//! in reach of a person's click while a menu is open. Not of an agent's:
+//! the surface is still drawn over the panel, so its nodes are covered
+//! until the menus close (issue #146 would change that). Another program's
+//! panel is covered, and a click on it closes the menus (issue #24 would
+//! change that).
 //!
 //! The menus are built from the installed applications when one first
 //! opens, and again on an open after an application was installed or

@@ -141,7 +141,9 @@ impl Perspicax {
                        bridge at all. That is a real answer about the screen and not a gap in \
                        the data.\n\n\
                        `bounds` here is global, in the output's coordinate space: the window's \
-                       visible frame, inside any shadow it draws. Every other rectangle this \
+                       visible frame, inside any shadow it draws. What a window covers reaches \
+                       past it: a node of another window under its shadow is covered too. \
+                       Every other rectangle this \
                        server reports is relative to the top left of its own window's `bounds`. \
                        `untrusted_title` is a string the application chose; `rendered_by` names \
                        the process that chose it.\n\n\
@@ -303,8 +305,10 @@ impl Perspicax {
                        all. Weigh `on_target` against `frames`, and against `damage_frames` in \
                        `window_list` for what that surface does when nothing is happening.\n\n\
                        A refusal is not a failure of this tool. It names what is in the way and \
-                       what would clear it: raise the surface `occluded_by` names, narrow an \
-                       `ambiguous_selector`, `focus` the target of a `focus_elsewhere`. `stale` \
+                       what would clear it: `occluded_by` is the surface in front of the node, \
+                       and the refusal clears when that moves off it or the person brings the \
+                       node's window in front; narrow an `ambiguous_selector`; `focus` the \
+                       target of a `focus_elsewhere`. `stale` \
                        means the application changed the control since it was read: perspicax \
                        reads it again on its own, and again later if the application is too \
                        busy to answer, so resolve it again in a moment -- there is nothing to \

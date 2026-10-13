@@ -341,8 +341,10 @@ impl Compositor {
         // way on every backend, the facts a seat publishes are the ones CI
         // tested; measured as smithay measures, they are where the seat
         // draws. Under client-side decoration it is the visible frame,
-        // without the shadow, which is what window space is measured from.
-        // Which origin each toolkit's own coordinates are measured from is a
+        // without the shadow, which is what window space is measured from;
+        // what the window covers is everything it draws, the shadow too
+        // (`drawn`, below). Which origin each toolkit's own coordinates are
+        // measured from is a
         // different question, and the index answers it from the toolkit's
         // window node (`Index::window_origin`).
         //
@@ -351,30 +353,24 @@ impl Compositor {
         // that drew without declaring was left out too, and so covered
         // nothing, so a node under it was judged visible.
         let geometry = crate::geometry::window_geometry(surface)?;
-
-        // What the client declared opaque, on its own surface. That says
-        // nothing about its subsurfaces, which are drawn over it, so where
-        // they are opaque is added; one that declared nothing covers all
-        // of itself. A surface that declared nothing proves nothing either,
-        // so with no region on the root the whole window covers.
-        let opaque = with_states(surface, |states| {
-            states
-                .cached_state
-                .get::<SurfaceAttributes>()
-                .current()
-                .opaque_region
-                .as_ref()
-                .map(regions)
-        })
-        .map(|mut opaque| {
-            opaque.extend(crate::geometry::covers(surface));
-            opaque
-        });
         let hidden = if parked {
             self.hidden_why(window)
         } else {
             (None, None)
         };
+        let placed = Rect::new(
+            f64::from(location.x),
+            f64::from(location.y),
+            f64::from(location.x + geometry.size.w),
+            f64::from(location.y + geometry.size.h),
+        );
+        // Surface-local (0,0) sits at the geometry's own offset *back* from
+        // where we placed that geometry -- under CSD that is the shadow
+        // margin, and it is where opaque regions are measured from.
+        let buffer_origin = Vec2::new(
+            f64::from(location.x - geometry.loc.x),
+            f64::from(location.y - geometry.loc.y),
+        );
 
         Some(SurfaceFacts {
             id,
@@ -383,21 +379,12 @@ impl Compositor {
             // and reporting it as mapped would let a node be judged visible on
             // a surface with nothing on it.
             mapped: window.alive() && self.has_presented(id) && !parked,
-            geometry: Rect::new(
-                f64::from(location.x),
-                f64::from(location.y),
-                f64::from(location.x + geometry.size.w),
-                f64::from(location.y + geometry.size.h),
-            ),
-            // Surface-local (0,0) sits at the geometry's own offset *back*
-            // from where we placed that geometry -- under CSD that is the
-            // shadow margin, and it is where opaque regions are measured
-            // from.
-            buffer_origin: Vec2::new(
-                f64::from(location.x - geometry.loc.x),
-                f64::from(location.y - geometry.loc.y),
-            ),
-            opaque,
+            geometry: placed,
+            buffer_origin,
+            // The shadow too, and every subsurface, however small a window
+            // its client said it was.
+            drawn: drawn(surface, buffer_origin, placed),
+            opaque: opaque_of(surface),
             origin: self.origin_of(window),
             title: title(surface),
             focused_at: self.focused_at(id),
@@ -434,26 +421,18 @@ impl Compositor {
         surface: &WlSurface,
         placed: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
     ) -> SurfaceFacts {
-        let opaque = with_states(surface, |states| {
-            states
-                .cached_state
-                .get::<SurfaceAttributes>()
-                .current()
-                .opaque_region
-                .as_ref()
-                .map(regions)
-        });
+        let geometry = crate::damage::to_rect(placed);
+        let buffer_origin = Vec2::new(f64::from(placed.loc.x), f64::from(placed.loc.y));
         SurfaceFacts {
             id,
             mapped: surface.is_alive() && self.has_presented(id) && !placed.size.is_empty(),
-            geometry: Rect::new(
-                f64::from(placed.loc.x),
-                f64::from(placed.loc.y),
-                f64::from(placed.loc.x + placed.size.w),
-                f64::from(placed.loc.y + placed.size.h),
-            ),
-            buffer_origin: Vec2::new(f64::from(placed.loc.x), f64::from(placed.loc.y)),
-            opaque,
+            geometry,
+            buffer_origin,
+            // As measured, not as placed: a layer's subsurfaces are not in
+            // the size a plain headless build gives it, and an X11 window's
+            // new buffer can outgrow the size it was just configured to.
+            drawn: drawn(surface, buffer_origin, geometry),
+            opaque: opaque_of(surface),
             origin: self.origin_of_surface(surface),
             // A layer's namespace is not a title: it goes in `kind`, set by
             // the caller, which the join reads in a title's place.
@@ -558,13 +537,42 @@ pub(crate) fn title(
     })
 }
 
+/// Everything the tree under `surface` draws, in global space, its
+/// surface-local `(0, 0)` being at `buffer_origin`: what it covers. Where it
+/// was `placed` while it has drawn nothing to measure.
+fn drawn(surface: &WlSurface, buffer_origin: Vec2, placed: Rect) -> Rect {
+    crate::geometry::drawn(surface).map_or(placed, |bounds| {
+        crate::damage::to_rect(bounds) + buffer_origin
+    })
+}
+
+/// Where the tree under `surface` says it is opaque, in its surface's own
+/// coordinates: what the surface itself declared, and what each of its
+/// subsurfaces did, placed where it is. Empty for a tree that declared
+/// nothing, which covers all the same: an opaque region is proof only of
+/// where a surface is opaque, never of where it is not.
+fn opaque_of(surface: &WlSurface) -> Vec<Rect> {
+    let mut opaque = with_states(surface, |states| {
+        states
+            .cached_state
+            .get::<SurfaceAttributes>()
+            .current()
+            .opaque_region
+            .as_ref()
+            .map(regions)
+            .unwrap_or_default()
+    });
+    opaque.extend(crate::geometry::declared_opaque(surface));
+    opaque
+}
+
 /// The `Add` rectangles of a region, in surface-local coordinates.
 ///
 /// `Subtract` rectangles are dropped, and the direction of that error is the
 /// reason it is acceptable: ignoring a subtraction can only make this compositor
 /// believe a surface is opaque over more of itself than it really is, which
-/// refuses more nodes rather than fewer. The opposite rounding would report a
-/// covered node as visible.
+/// makes a refusal under it look proven where it rests on policy. No region,
+/// whatever it says, makes a node visible.
 pub(crate) fn regions(region: &smithay::wayland::compositor::RegionAttributes) -> Vec<Rect> {
     region
         .rects

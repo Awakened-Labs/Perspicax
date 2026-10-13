@@ -10,10 +10,9 @@
 //! visible, and any client could hide a control that way on purpose.
 //!
 //! The rest is the same question asked from the other side: a geometry
-//! declared without area is no geometry, one declared larger than what is
-//! drawn is clipped to it, as smithay draws it, and what a window's
-//! subsurfaces draw covers what is under them even where its own surface
-//! said it was see-through.
+//! declared without area is no geometry, and one declared larger than what
+//! is drawn is clipped to it, as smithay draws it. What a window covers past
+//! its geometry is `covers.rs`'s.
 //!
 //! Like the other live tests these bind a real Wayland socket, so they need
 //! `XDG_RUNTIME_DIR`, and are `#[ignore]`d for `ci/live-tests.sh` to run.
@@ -31,7 +30,6 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use wayland_client::{EventQueue, QueueHandle};
 
 const VIDEO: u32 = 0xff22_3344;
-const PICTURE: u32 = 0xff99_6633;
 
 fn session(name: &str) -> Session {
     Session::start(name, Backend::headless((1280, 1024)))
@@ -207,50 +205,6 @@ fn a_subsurface_above_and_left_of_a_window_moves_where_its_surface_begins() {
     // of its own surface -- which is where smithay draws that surface from.
     assert_eq!(origin(&grown), origin(&video));
     assert_eq!(grown.buffer_origin - origin(&grown), Vec2::new(20.0, 10.0));
-
-    session.stop((desk, queue));
-}
-
-#[test]
-#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
-fn a_subsurface_covers_what_its_window_said_was_see_through() {
-    let session = session("undeclared-opaque");
-    let (mut desk, mut queue, qh, _) = session.client();
-    let under = settle(
-        &session,
-        &mut desk,
-        &mut queue,
-        &qh,
-        "under",
-        Some((0, 0, 400, 300)),
-    );
-    settle(&session, &mut desk, &mut queue, &qh, "over", None);
-    let root = desk.windows[1].wl_surface().clone();
-
-    // Its own surface says only a 10 px corner of it is opaque, and a
-    // subsurface that says nothing is drawn over the rest.
-    desk.set_opaque(&root, (0, 0, 10, 10));
-    let (_placed, child) = desk.open_subsurface(&qh, &root, (100, 100), false);
-    root.commit();
-    desk.paint(&child, (100, 100), PICTURE);
-    child.commit();
-    let over = becomes(&session, &mut desk, &mut queue, "over", |over| {
-        over.opaque.as_ref().is_some_and(|opaque| opaque.len() == 2)
-    });
-    let facts = session.wait_for(|_| true);
-
-    let under_picture = beneath(&under, &over, Rect::new(120.0, 120.0, 140.0, 140.0));
-    assert_eq!(
-        judge(&facts, under.id, under_picture).visibility,
-        Visibility::Occluded { by: over.id },
-        "under the subsurface's picture"
-    );
-    let see_through = beneath(&under, &over, Rect::new(250.0, 20.0, 270.0, 40.0));
-    assert_eq!(
-        judge(&facts, under.id, see_through).visibility,
-        Visibility::Visible,
-        "under the part of the window it said was see-through, with nothing drawn over it"
-    );
 
     session.stop((desk, queue));
 }

@@ -58,12 +58,14 @@ pub use crate::{
 /// Why an agent was not allowed to act.
 ///
 /// Refusals are a feature and not an error path. Each variant carries what the
-/// agent would need to recover on its own -- the occluding surface so it can
-/// raise it, the match count so it can narrow a selector -- because a refusal
+/// agent would need to recover -- the surface in front, so it knows what has
+/// to move, the match count so it can narrow a selector -- because a refusal
 /// that only says "no" converts a recoverable situation into a retry loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// The node is real but covered. Raise `by` and try again.
+    /// The node is real but covered, and `by` is in front of it. It clears
+    /// when `by` moves off it, or when the node's own window is brought in
+    /// front, which a person can do and an agent cannot yet (issue #147).
     Occluded { by: SurfaceId },
     /// Inside its window but scrolled out of view. Scroll it in and try again.
     Clipped,
@@ -454,8 +456,8 @@ pub trait HostView {
     fn origin(&self, surface: SurfaceId) -> Origin;
 
     /// Whether a window-space rect on this surface can actually be seen,
-    /// accounting for z-order, the opaque regions of everything above it, and
-    /// whether the surface is mapped at all.
+    /// accounting for z-order, everything drawn above it (shadows and
+    /// see-through parts included), and whether the surface is mapped at all.
     fn visibility(&self, surface: SurfaceId, rect: Rect) -> Visibility;
 
     /// How many frames of damage this surface has taken, ever. Monotonic.

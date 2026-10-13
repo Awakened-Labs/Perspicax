@@ -38,6 +38,16 @@
 //! smithay takes without complaint (a debug build asserts against it as it
 //! reads the request).
 //!
+//! # What a window draws
+//!
+//! The same bounds are published on their own too ([`drawn`]), because a
+//! window covers all of them. A shadow drawn past its geometry is still
+//! drawn over whatever is under it, and a client may declare a geometry as
+//! small as it likes (issue #103). Beside them is kept where each
+//! subsurface said it is opaque. That tells a node covered on a client's
+//! word from one covered on policy. A subsurface that said nothing covers
+//! too, and proves nothing.
+//!
 //! # A viewport
 //!
 //! A surface is not always the size of its buffer. With `wp_viewporter` a
@@ -154,16 +164,15 @@ impl Picture {
 /// size cannot be read, which smithay's renderer draws as nothing too.
 struct Shows(Mutex<Option<Picture>>);
 
-/// What a tree of surfaces covered when it was last measured.
+/// What a tree of surfaces drew when it was last measured.
 #[derive(Debug, Clone, Default)]
 struct Tree {
     /// The full bounds of the surfaces that show something, in the root's
     /// coordinates. `None` while the root shows nothing.
     bounds: Option<Rectangle<i32, Logical>>,
-    /// Where each subsurface showing something is opaque, in the root's
-    /// coordinates: the region it declared, or all of it if it declared
-    /// none.
-    covers: Vec<Rect>,
+    /// Where each subsurface showing something said it is opaque, in the
+    /// root's coordinates, clipped to it.
+    opaque: Vec<Rect>,
 }
 
 /// A root's [`Tree`], kept on it.
@@ -213,7 +222,7 @@ pub(crate) fn picture(states: &SurfaceData) -> Option<Picture> {
 pub(crate) fn measure(root: &WlSurface) {
     let mut bounds = Rectangle::default();
     let mut shown = false;
-    let mut covers = Vec::new();
+    let mut opaque = Vec::new();
     with_surface_tree_downward(
         root,
         Point::default(),
@@ -237,7 +246,7 @@ pub(crate) fn measure(root: &WlSurface) {
             bounds = bounds.merge(placed);
             shown = true;
             if surface != root {
-                covers.extend(opaque_in_root(states, placed));
+                opaque.extend(opaque_in_root(states, placed));
             }
             TraversalAction::DoChildren(at)
         },
@@ -246,7 +255,7 @@ pub(crate) fn measure(root: &WlSurface) {
     );
     let tree = Tree {
         bounds: shown.then_some(bounds),
-        covers,
+        opaque,
     };
     with_states(root, |states| {
         states
@@ -258,34 +267,31 @@ pub(crate) fn measure(root: &WlSurface) {
     });
 }
 
-/// Where a subsurface placed at `placed` in its root is opaque: the region
-/// it declared, clipped to it, or all of it. A surface that declared nothing
-/// proves nothing, so it is taken to cover everything it shows.
+/// Where a subsurface placed at `placed` in its root said it is opaque,
+/// clipped to it. One that said nothing still covers everything it shows,
+/// as part of its root's bounds; it just proves nothing about it.
 fn opaque_in_root(states: &SurfaceData, placed: Rectangle<i32, Logical>) -> Vec<Rect> {
     let whole = crate::damage::to_rect(placed);
-    let declared = states
+    states
         .cached_state
         .get::<SurfaceAttributes>()
         .current()
         .opaque_region
         .as_ref()
-        .map(crate::facts::regions);
-    match declared {
-        Some(regions) => regions
-            .into_iter()
-            .map(|region| {
-                Rect::new(
-                    region.x0 + whole.x0,
-                    region.y0 + whole.y0,
-                    region.x1 + whole.x0,
-                    region.y1 + whole.y0,
-                )
-                .intersect(whole)
-            })
-            .filter(|region| !region.is_empty())
-            .collect(),
-        None => vec![whole],
-    }
+        .map(crate::facts::regions)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|region| {
+            Rect::new(
+                region.x0 + whole.x0,
+                region.y0 + whole.y0,
+                region.x1 + whole.x0,
+                region.y1 + whole.y0,
+            )
+            .intersect(whole)
+        })
+        .filter(|region| !region.is_empty())
+        .collect()
 }
 
 /// A window's geometry, in its surface's own coordinates: where the window
@@ -303,14 +309,7 @@ pub(crate) fn window_geometry(surface: &WlSurface) -> Option<Rectangle<i32, Logi
             .get::<SurfaceCachedState>()
             .current()
             .geometry;
-        let bounds = states.data_map.get::<Measured>().and_then(|measured| {
-            measured
-                .0
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .bounds
-        });
-        (declared, bounds)
+        (declared, bounds(states))
     });
     // Not `Rectangle::is_empty`, which only asks whether a side is zero: a
     // release build of smithay takes a negative size without complaint, and
@@ -326,10 +325,32 @@ pub(crate) fn window_geometry(surface: &WlSurface) -> Option<Rectangle<i32, Logi
     }
 }
 
-/// Where the subsurfaces of the window whose surface is `surface` are
-/// opaque, in its coordinates. Added to the region its own surface
-/// declared, which says nothing about what is drawn over it.
-pub(crate) fn covers(surface: &WlSurface) -> Vec<Rect> {
+/// Everything the tree under `surface` draws, in its surface's own
+/// coordinates: the full bounds of every surface in it that shows
+/// something, as the last commit left them. `None` while it shows nothing.
+///
+/// Where a window is inside what it draws is its client's to say, and
+/// [`window_geometry`] says it. How far the drawing reaches is not, and
+/// this is what covers whatever is under it (issue #103).
+pub(crate) fn drawn(surface: &WlSurface) -> Option<Rectangle<i32, Logical>> {
+    with_states(surface, bounds)
+}
+
+/// The bounds [`measure`] last kept on the root whose states these are.
+fn bounds(states: &SurfaceData) -> Option<Rectangle<i32, Logical>> {
+    states.data_map.get::<Measured>().and_then(|measured| {
+        measured
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bounds
+    })
+}
+
+/// Where the subsurfaces of the tree under `surface` said they are opaque,
+/// in its coordinates. Added to the region its own surface declared, which
+/// says nothing about what is drawn over it.
+pub(crate) fn declared_opaque(surface: &WlSurface) -> Vec<Rect> {
     with_states(surface, |states| {
         states
             .data_map
@@ -339,7 +360,7 @@ pub(crate) fn covers(surface: &WlSurface) -> Vec<Rect> {
                     .0
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .covers
+                    .opaque
                     .clone()
             })
             .unwrap_or_default()
@@ -355,15 +376,7 @@ pub(crate) fn check_drawn_as_measured(window: &smithay::desktop::Window) {
     let Some(toplevel) = window.toplevel() else {
         return;
     };
-    let measured = with_states(toplevel.wl_surface(), |states| {
-        states.data_map.get::<Measured>().and_then(|measured| {
-            measured
-                .0
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .bounds
-        })
-    });
+    let measured = drawn(toplevel.wl_surface());
     debug_assert_eq!(
         measured.unwrap_or_default(),
         window.bbox(),

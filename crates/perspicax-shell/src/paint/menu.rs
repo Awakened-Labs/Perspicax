@@ -1,8 +1,8 @@
 //! The open menus, drawn over a clear surface the size of the monitor.
 //!
 //! Each menu is a panel in the theme's colours with a thin border,
-//! square-cornered so that all of it is opaque and the compositor can say so
-//! to an agent. A line is
+//! square-cornered so that all of it is opaque and the compositor can prove
+//! to an agent that a node under it is covered. A line is
 //! an icon, a label cut short if it must be, and an arrow for a submenu.
 //! The line the keyboard is on is drawn in the accent, and each line whose
 //! submenu is open in a paler one. What a person typed sits on a

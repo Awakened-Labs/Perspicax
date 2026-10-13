@@ -212,7 +212,7 @@ fn menu(facts: &HostFacts) -> Option<(SurfaceId, String, Rect, Vec<Rect>)> {
                 surface.id,
                 namespace.clone(),
                 surface.geometry,
-                surface.opaque.clone().filter(|opaque| !opaque.is_empty())?,
+                Some(surface.opaque.clone()).filter(|opaque| !opaque.is_empty())?,
             )),
             _ => None,
         })
@@ -973,8 +973,8 @@ fn menu_over_a_window(
 
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
-fn a_window_under_an_open_menu_is_covered_only_where_the_menu_is() {
-    use perspicax_index::judge;
+fn an_open_menu_covers_the_window_under_it_everywhere_and_proves_it_under_the_menu() {
+    use perspicax_index::{Judgement, judge};
     use perspicax_node::Visibility;
 
     let session = Session::start("shell-menu-covers", Backend::headless((1280, 800)));
@@ -996,20 +996,26 @@ fn a_window_under_an_open_menu_is_covered_only_where_the_menu_is() {
             &facts,
             window,
             Rect::new(x + 5.0, y + 5.0, x + 15.0, y + 15.0)
-        )
-        .visibility,
-        Visibility::Occluded { by: menu_surface },
-        "an agent's click under the menu is refused, naming the menu"
+        ),
+        Judgement {
+            visibility: Visibility::Occluded { by: menu_surface },
+            unproven: false,
+        },
+        "an agent's click under the menu is refused, naming the menu, on the \
+         shell's word that the menu is opaque"
     );
     assert_eq!(
         judge(
             &facts,
             window,
             Rect::new(x - 40.0, y - 40.0, x - 30.0, y - 30.0)
-        )
-        .visibility,
-        Visibility::Visible,
-        "and one beside it is not: the clear rest of the surface covers nothing"
+        ),
+        Judgement {
+            visibility: Visibility::Occluded { by: menu_surface },
+            unproven: true,
+        },
+        "and one beside it too, on policy: the clear rest of the surface is \
+         drawn over it, and a click there lands on it and only closes the menu"
     );
     drop(facts);
 
@@ -1151,8 +1157,8 @@ fn bar(facts: &HostFacts) -> Option<(SurfaceId, Rect, Rect)> {
         .find_map(|surface| match &surface.kind {
             SurfaceKind::Layer {
                 layer: Layer::Top, ..
-            } if surface.mapped => match surface.opaque.as_deref() {
-                Some([bar]) => Some((surface.id, surface.geometry, *bar)),
+            } if surface.mapped => match surface.opaque.as_slice() {
+                [bar] => Some((surface.id, surface.geometry, *bar)),
                 _ => None,
             },
             _ => None,
@@ -1379,6 +1385,50 @@ fn an_agents_click_on_the_start_button_opens_it() {
 
     // The panel is still in reach with the menu open, and a second click
     // on the button closes it.
+    click(&session, panel, start, PointerButton::Left);
+    session.wait_for(|facts| menu(facts).is_none());
+
+    shell.stop_with(session);
+}
+
+/// The menus' surface is drawn over the whole monitor, the shell's panel
+/// included, though it leaves the panel out of where it takes clicks. A
+/// click there still reaches the panel; to an agent the panel is covered
+/// while a menu is open, on policy, because a surface covers everything it
+/// draws (#103). #146 would leave the panel undrawn over, and this would
+/// change with it.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn while_a_menu_is_open_its_panel_is_covered_to_an_agent_though_a_click_reaches_it() {
+    use perspicax_index::{Judgement, judge};
+    use perspicax_node::Visibility;
+
+    let session = Session::start("shell-panel-covered", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "panel-covered", CLASSIC);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let start = (PANEL_HEIGHT / 2.0, PANEL_HEIGHT / 2.0);
+    let button = Rect::new(10.0, 10.0, PANEL_HEIGHT - 10.0, PANEL_HEIGHT - 10.0);
+    assert_eq!(
+        judge(&session.facts.read(), panel, button).visibility,
+        Visibility::Visible,
+        "the start button, with no menu open"
+    );
+
+    click(&session, panel, start, PointerButton::Left);
+    let facts = session.wait_for(|facts| menu(facts).is_some());
+    let (menus, ..) = menu(&facts).expect("waited for");
+    assert_eq!(
+        judge(&facts, panel, button),
+        Judgement {
+            visibility: Visibility::Occluded { by: menus },
+            unproven: true,
+        },
+        "covered by the clear part of the menus' surface, which says nothing about it"
+    );
+
+    // A click there is not the menus' surface's: it reaches the button, and
+    // closes the menu.
     click(&session, panel, start, PointerButton::Left);
     session.wait_for(|facts| menu(facts).is_none());
 

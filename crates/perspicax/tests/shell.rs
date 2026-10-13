@@ -27,8 +27,10 @@ use std::{
 
 use perspicax::{desk::Desk, keep::keep_current, session};
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop};
-use perspicax_index::{HostFacts, Index, Layer, PointerButton, Selector, SurfaceKind, Verb};
-use perspicax_mcp::Desktop;
+use perspicax_index::{
+    HostFacts, Index, Layer, PointerButton, Refusal, Selector, SurfaceKind, Verb,
+};
+use perspicax_mcp::{Denied, Desktop};
 use perspicax_node::{NodeId, Origin, Role, SurfaceId};
 
 /// The one monitor's desktop: the surface's namespace and its window's name.
@@ -214,17 +216,40 @@ fn an_agent_finds_the_start_button_by_name_and_it_opens_the_start_menu() {
             )
         });
 
-        // The button is in reach with the menu open, and closes it.
-        hosted.click("button:Start", PointerButton::Left);
-        hosted.wait_until("the start menu gone", |index, facts| {
-            on_layer(
-                index,
-                facts,
-                (Role::Menu, "Start menu"),
-                (Layer::Overlay, MENUS),
-            )
-            .is_none()
-            .then_some(())
+        // With the menu open, the button is covered to an agent: the menus'
+        // surface is drawn over the whole monitor, the panel included, and a
+        // surface covers everything it draws (#103). A person's click still
+        // reaches it, because the shell leaves its panel out of where that
+        // surface takes clicks; #146 would leave the panel undrawn over, and
+        // in reach of both.
+        let selector = Selector::parse("button:Start").expect("a selector");
+        let deadline = Instant::now() + PATIENCE;
+        let by = loop {
+            match hosted
+                .desk
+                .act(&selector, &Verb::Click(PointerButton::Left))
+            {
+                Err(Denied::Refused(Refusal::Occluded { by })) => break by,
+                // Stale while the panel is read again after the menu opened.
+                outcome => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the start button with the menu open: {outcome:?}"
+                    );
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+        };
+        hosted.wait_until("the menus' surface named as covering it", |_, facts| {
+            facts
+                .surface(by)
+                .is_some_and(|surface| {
+                    matches!(
+                        &surface.kind,
+                        SurfaceKind::Layer { layer: Layer::Overlay, namespace } if namespace == MENUS
+                    )
+                })
+                .then_some(())
         });
     });
 }

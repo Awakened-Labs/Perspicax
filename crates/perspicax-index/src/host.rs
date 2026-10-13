@@ -50,37 +50,59 @@
 //!
 //! # The occlusion policy, stated once
 //!
-//! `wl_surface.set_opaque_region` is a client *hint*, and an optional one. A
-//! client may declare where it is opaque, may declare nothing, or may declare
-//! something stale. So the policy is:
+//! **A surface covers everything it draws. What it declares opaque can prove
+//! that; nothing it declares, or leaves out, can prove the opposite.**
 //!
-//! **A surface that declares an opaque region is believed about where it is
-//! opaque. A surface that declares nothing is not guessed at, and occludes.**
+//! Everything it draws is [`SurfaceFacts::drawn`]: its own picture and every
+//! subsurface's, a client-side shadow included, measured by the host. Where
+//! its window is inside that, [`SurfaceFacts::geometry`], is its client's to
+//! say, and nothing makes the client say it truthfully. One that declares a
+//! window 1x1 inside a picture 400x300 still draws all of the picture over
+//! whatever is under it, and still takes the person's clicks there (issue
+//! #103). So the geometry is where a window's own nodes are measured from,
+//! and what it draws is what it covers.
 //!
-//! Overlap without proof of transparency is [`Visibility::Occluded`], naming
-//! the surface in the way so an agent can raise it and retry. The alternative --
-//! assume anything undeclared is see-through -- restores exactly the failure
-//! this project exists to remove: a covered node reported as visible. Because
-//! that policy can also refuse too much, every verdict reached this way is
-//! counted ([`Judgement::unproven`], [`Tally::unproven`]), so a toolkit that
-//! declares nothing shows up as a number rather than as a mystery.
+//! `wl_surface.set_opaque_region` is a client *hint*, and an optional one:
+//! "Setting an opaque region is not required for correct behaviour." A
+//! client that declares less than it paints loses nothing, so a region is
+//! believed in the one direction a client can only be wrong in at its own
+//! cost: where it says it is opaque, it is. Where it says nothing -- outside
+//! its region, or anywhere, for one that declared none -- it is not guessed
+//! at, and covers. One opaque pixel declared far off the screen once proved
+//! a whole window see-through. Now it proves nothing.
 //!
-//! What a client declared and the frame the host drew are judged; how
-//! see-through the host *draws* them is not. A person may have a window, its
-//! frame included, drawn see-through for their own eyes, and it still covers
-//! what is behind it: they chose to look through it, and an agent is not
-//! expected to read what shows there. A picture can show that text faintly
-//! while the verdict calls it covered, and
-//! [`SurfaceFacts::drawn_opacity`] says why. Nothing here reads it.
+//! Overlap is therefore [`Visibility::Occluded`], naming the surface in
+//! front. Whether it rests on proof -- the host's own frame, or a region the
+//! client declared opaque, over the node -- or on this policy is counted
+//! ([`Judgement::unproven`], [`Tally::unproven`]). The alternative -- assume
+//! that what is not declared opaque is see-through -- restores exactly the
+//! failure this project exists to remove: a covered node reported as
+//! visible. The policy refuses some nodes a person can make out, under the
+//! soft edge of another window's shadow or behind a part a client drew
+//! see-through, and those refusals show up as a number rather than as a
+//! mystery.
+//!
+//! How see-through anything is drawn is not judged. A person may have a
+//! window, its frame included, drawn see-through for their own eyes, and it
+//! still covers what is behind it: they chose to look through it, and an
+//! agent is not expected to read what shows there. A picture can show that
+//! text faintly while the verdict calls it covered, and
+//! [`SurfaceFacts::drawn_opacity`] says why. Nothing here reads it. What
+//! shows through a shadow, or a terminal a client draws see-through, is the
+//! same: something to read through a window, not something to act on behind
+//! it.
 //!
 //! # What this module deliberately does not know
 //!
-//! Input regions. "Can a human see this" and "would a click at this point land
-//! on this surface" are different questions, and a click-through overlay
-//! answers them differently: it is visible *and* it does not take the click.
-//! [`Visibility`] answers the first. The second belongs to the act path in M3,
-//! where the host can be asked which surface a point resolves to -- and where
-//! being wrong is refused rather than reported.
+//! Input regions. "Is anything drawn over this" and "would a click at this
+//! point land on this surface" are different questions, and a click-through
+//! overlay answers them differently: it is drawn over a node *and* it does
+//! not take the click. [`Visibility`] answers the first. The second belongs
+//! to the act path in M3, where the host can be asked which surface a point
+//! resolves to -- and where being wrong is refused rather than reported. A
+//! client says where it takes clicks just as it says where it is opaque, so
+//! a region that lets clicks through proves nothing about what is drawn
+//! there either.
 
 use std::time::Instant;
 
@@ -159,7 +181,8 @@ pub struct SurfaceFacts {
     /// a hidden window, and nothing on it can be seen or acted on.
     pub mapped: bool,
     /// Where the surface sits in global space, as the host places it: the
-    /// window geometry, which is window space's origin.
+    /// window geometry, which is window space's origin. Where the window is,
+    /// and not how far it reaches: that is `drawn`.
     pub geometry: Rect,
     /// Where surface-local `(0, 0)` sits in global space.
     ///
@@ -170,13 +193,31 @@ pub struct SurfaceFacts {
     /// test by the shadow margin -- which is precisely the size of error that
     /// produces a confident wrong answer rather than an obvious one.
     pub buffer_origin: Vec2,
-    /// Where the client says it is opaque, in surface-local coordinates.
+    /// Everything this surface draws, in global space: its own picture and
+    /// every subsurface's, as far as they reach, a client-side shadow
+    /// included. Usually more than `geometry`, which stops at the visible
+    /// frame.
     ///
-    /// `None` is materially different from `Some(vec![])`: the first is a
-    /// client that never declared anything, the second is one that declared
-    /// itself entirely transparent. The policy treats them differently, which
-    /// is the whole reason this is an `Option` rather than an empty `Vec`.
-    pub opaque: Option<Vec<Rect>>,
+    /// Measured, not declared. A client says where its window is inside
+    /// what it draws, and nothing makes it say so truthfully: one that
+    /// declares a window 1x1 inside a picture 400x300 still draws all of
+    /// the picture, and still takes clicks on it (issue #103). So this, and
+    /// never less than `geometry`, is what it covers: see
+    /// [`SurfaceFacts::covers`]. Not the frame the host drew around it,
+    /// which is `frame`, and not its menus, which are trees of their own.
+    pub drawn: Rect,
+    /// Where the client says it is opaque, in surface-local coordinates: its
+    /// own surface's region, and each of its subsurfaces', placed where the
+    /// subsurface is.
+    ///
+    /// Proof in one direction only. Where a client says it is opaque, it is,
+    /// and a node under there is covered on its word. Where it says nothing,
+    /// it is not therefore see-through: the protocol calls the region "an
+    /// optimization hint" and "not required for correct behaviour", and a
+    /// client gains nothing by declaring less than it paints. Empty for a
+    /// client that declared nothing, which is also what declaring a null
+    /// region means, as the protocol has it.
+    pub opaque: Vec<Rect>,
     /// Who owns the client that drew this surface, from its credentials.
     pub origin: Origin,
     /// The title the client set on this toplevel, if it set one.
@@ -268,9 +309,10 @@ pub struct SurfaceFacts {
 }
 
 impl SurfaceFacts {
-    /// A mapped surface at `geometry`, with nothing else claimed about it: no
-    /// declared opacity, no shadow, no attributed origin, and no damage. Every
-    /// builder below moves one of those away from its default.
+    /// A mapped surface at `geometry`, drawing exactly that, with nothing
+    /// else claimed about it: no declared opacity, no shadow, no attributed
+    /// origin, and no damage. Every builder below moves one of those away
+    /// from its default.
     #[must_use]
     pub fn new(id: SurfaceId, geometry: Rect) -> Self {
         Self {
@@ -278,7 +320,8 @@ impl SurfaceFacts {
             mapped: true,
             geometry,
             buffer_origin: Vec2::new(geometry.x0, geometry.y0),
-            opaque: None,
+            drawn: geometry,
+            opaque: Vec::new(),
             origin: Origin::Unattributed,
             title: None,
             focused_at: None,
@@ -373,7 +416,7 @@ impl SurfaceFacts {
     /// coordinates.
     #[must_use]
     pub fn declaring_opaque(mut self, regions: impl IntoIterator<Item = Rect>) -> Self {
-        self.opaque = Some(regions.into_iter().collect());
+        self.opaque = regions.into_iter().collect();
         self
     }
 
@@ -421,6 +464,14 @@ impl SurfaceFacts {
     #[must_use]
     pub fn with_buffer_origin(mut self, origin: Vec2) -> Self {
         self.buffer_origin = origin;
+        self
+    }
+
+    /// The same surface, drawing over `drawn` in global space: a shadow
+    /// around its window, or a subsurface hanging past it.
+    #[must_use]
+    pub fn drawing_over(mut self, drawn: Rect) -> Self {
+        self.drawn = drawn;
         self
     }
 
@@ -504,16 +555,21 @@ impl SurfaceFacts {
             .is_some_and(|regions| regions.iter().any(|region| overlaps(global, *region)))
     }
 
-    /// Whether this surface proves that `global` shows through it.
-    ///
-    /// Proof, not likelihood -- see the module's policy. A surface that
-    /// declared nothing proves nothing.
-    fn proves_transparent(&self, global: Rect) -> bool {
-        let Some(regions) = &self.opaque else {
-            return false;
-        };
-        let covered = global.intersect(self.geometry);
-        !regions
+    /// What this surface covers, in global space: everything it draws, and
+    /// never less than its window, so that a host that measured less than
+    /// it placed cannot uncover a node by leaving something out.
+    #[must_use]
+    pub fn covers(&self) -> Rect {
+        self.drawn.union(self.geometry)
+    }
+
+    /// Whether a region this surface declared opaque is over `global`: what
+    /// makes its covering a node proof rather than policy. Only where it
+    /// draws, as the protocol has it: "the compositor ignores the parts of
+    /// the opaque region that fall outside of the surface".
+    fn declares_opaque_over(&self, global: Rect) -> bool {
+        let covered = global.intersect(self.covers());
+        self.opaque
             .iter()
             .any(|region| overlaps(self.surface_local_to_global(*region), covered))
     }
@@ -623,13 +679,15 @@ pub struct Judgement {
     /// What the node's visibility is.
     pub visibility: Visibility,
     /// Whether an `Occluded` verdict rests on policy rather than proof: the
-    /// occluding surface overlapped the node and never declared an opaque
-    /// region, so nothing established that the node shows through it.
+    /// occluding surface draws over the node, and neither the host's frame
+    /// nor anything its client declared opaque is over it. A shadow, a part
+    /// drawn see-through, or a client that declared nothing at all.
     ///
     /// Counted rather than resolved. A high rate means real toolkits are not
-    /// declaring opacity and the policy is refusing too much -- a finding that
-    /// should arrive as a number in a log, not as a person reporting that
-    /// everything is occluded.
+    /// declaring opacity, or draw wide shadows, and the policy is refusing
+    /// nodes a person can make out -- a finding that should arrive as a
+    /// number in a log, not as a person reporting that everything is
+    /// occluded.
     pub unproven: bool,
 }
 
@@ -669,12 +727,13 @@ impl Judgement {
 ///    Before occlusion, because raising a window over it would still leave it
 ///    where nobody can see it.
 /// 6. Only then, occlusion, from the top down, so the surface named is the one
-///    an agent has to deal with first. A surface's frame is part of it: a
+///    in front: what the person sees over the node. Everything a surface
+///    draws is part of it, its shadow included, and so is its frame: a
 ///    titlebar over the node occludes it, and proves it, because the host
 ///    drew the titlebar and stands behind it as solid, however see-through
-///    the person has it drawn. A window's own frame never covers its own
-///    nodes, because it is outside the window and test 4 has already said
-///    `Clipped` of anything out there.
+///    the person has it drawn. A window's own frame and shadow never cover
+///    its own nodes, because they are outside the window and test 4 has
+///    already said `Clipped` of anything out there.
 #[must_use]
 pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
     let Some(target) = facts.surface(surface) else {
@@ -699,8 +758,8 @@ pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
         return Judgement::proven(Visibility::OffScreen);
     }
 
-    // Top down: with two surfaces over one node, raising the topmost is what
-    // makes it visible, so that is the one worth naming.
+    // Top down, so the surface named is the one in front: what the person
+    // sees over the node, and what has to move first if nothing else does.
     let position = facts
         .surfaces()
         .iter()
@@ -713,15 +772,12 @@ pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
         if candidate.frame.iter().any(|strip| overlaps(*strip, global)) {
             return Judgement::proven(Visibility::Occluded { by: candidate.id });
         }
-        if !overlaps(candidate.geometry, global) {
-            continue;
-        }
-        if candidate.proves_transparent(global) {
+        if !overlaps(candidate.covers(), global) {
             continue;
         }
         return Judgement {
             visibility: Visibility::Occluded { by: candidate.id },
-            unproven: candidate.opaque.is_none(),
+            unproven: !candidate.declares_opaque_over(global),
         };
     }
 
@@ -753,10 +809,11 @@ fn contains(outer: Rect, inner: Rect) -> bool {
 /// What a pass of judgement decided, in aggregate.
 ///
 /// Exists so that a policy can be *watched*. Two ratios carry the information:
-/// `unproven` against `occluded`, which is the share of refusals resting on a
-/// client having declared nothing, and `unjudged`, which should be zero once a
-/// host is joined. When it is not, either the join has a bug or a bridge left
-/// a window with no extents to measure from.
+/// `unproven` against `occluded`, which is the share of refusals resting on
+/// policy rather than on a client's word or the host's frame -- a shadow, a
+/// part drawn see-through, a client that declared nothing -- and `unjudged`,
+/// which should be zero once a host is joined. When it is not, either the
+/// join has a bug or a bridge left a window with no extents to measure from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Tally {
     /// Nodes judged in this pass.
@@ -935,15 +992,13 @@ mod tests {
     }
 
     /// A titlebar is pixels no client drew. One over a node covers it, and
-    /// proves it, even when the window it belongs to declared its own
-    /// surface fully transparent: the frame is not the surface.
+    /// proves it, though the window it belongs to declared nothing opaque at
+    /// all: the frame is not the surface.
     #[test]
     fn a_titlebar_over_a_node_occludes_it_as_a_matter_of_proof() {
         let below = rect(0.0, 150.0, 400.0, 400.0);
         let titlebar = rect(0.0, 124.0, 400.0, 150.0);
-        let cover = SurfaceFacts::new(SurfaceId(2), below)
-            .declaring_opaque([])
-            .framed([titlebar]);
+        let cover = SurfaceFacts::new(SurfaceId(2), below).framed([titlebar]);
         let facts = HostFacts::bottom_to_top([window(), cover], 1);
         assert_eq!(
             verdict(&facts),
@@ -966,9 +1021,7 @@ mod tests {
         for cover in [
             SurfaceFacts::new(SurfaceId(2), over),
             SurfaceFacts::new(SurfaceId(2), over).declaring_opaque([rect(0.0, 0.0, 150.0, 80.0)]),
-            SurfaceFacts::new(SurfaceId(2), rect(0.0, 150.0, 400.0, 400.0))
-                .declaring_opaque([])
-                .framed([titlebar]),
+            SurfaceFacts::new(SurfaceId(2), rect(0.0, 150.0, 400.0, 400.0)).framed([titlebar]),
         ] {
             let opaque = verdict(&HostFacts::bottom_to_top([window(), cover.clone()], 1));
             let faint = verdict(&HostFacts::bottom_to_top([window(), cover.drawn_at(20)], 1));
@@ -986,11 +1039,11 @@ mod tests {
     }
 
     /// And the other half: a client that *did* declare where it is opaque is
-    /// believed, both when the node falls inside that region and when it does
-    /// not. Neither verdict is `unproven`, because both rest on something the
-    /// client said rather than on our default.
+    /// believed where it said so, and the verdict there rests on its word.
+    /// Everywhere else it still covers, on policy: a client that says
+    /// nothing about a part of itself has not said that part is see-through.
     #[test]
-    fn a_declared_opaque_region_is_believed_in_both_directions() {
+    fn a_declared_opaque_region_proves_what_is_under_it_and_nothing_else() {
         let over = rect(150.0, 120.0, 300.0, 200.0);
 
         let opaque_there =
@@ -1005,22 +1058,139 @@ mod tests {
         );
 
         // Opaque only in its own bottom-right corner, which is nowhere near
-        // the button. The button shows through.
+        // the button. Until #103 that proved the button showed through.
         let opaque_elsewhere = SurfaceFacts::new(SurfaceId(2), over)
             .declaring_opaque([rect(100.0, 60.0, 150.0, 80.0)]);
         let facts = HostFacts::bottom_to_top([window(), opaque_elsewhere], 1);
+        assert_eq!(
+            verdict(&facts),
+            Judgement {
+                visibility: Visibility::Occluded { by: SurfaceId(2) },
+                unproven: true,
+            }
+        );
+    }
+
+    /// Declaring an empty region and declaring none are one claim, as the
+    /// protocol has it: a null region "causes the pending opaque region to be
+    /// set to empty", which is also where every surface starts. Until #103
+    /// the first proved a surface see-through and the second did not.
+    #[test]
+    fn declaring_an_empty_opaque_region_is_declaring_none() {
+        let over = rect(150.0, 120.0, 300.0, 200.0);
+        let ghost = SurfaceFacts::new(SurfaceId(2), over).declaring_opaque([]);
+        assert_eq!(ghost, SurfaceFacts::new(SurfaceId(2), over));
+        let facts = HostFacts::bottom_to_top([window(), ghost], 1);
+        assert_eq!(
+            verdict(&facts),
+            Judgement {
+                visibility: Visibility::Occluded { by: SurfaceId(2) },
+                unproven: true,
+            }
+        );
+    }
+
+    /// The first way past the gate in #103: a window declared 1x1 inside the
+    /// 400x300 picture it draws over the button. Where its client said the
+    /// window is changes nothing about where it draws.
+    #[test]
+    fn a_window_that_declares_a_one_pixel_geometry_covers_everything_it_draws() {
+        let tiny = SurfaceFacts::new(SurfaceId(2), rect(32.0, 32.0, 33.0, 33.0))
+            .drawing_over(rect(32.0, 32.0, 432.0, 332.0));
+        let facts = HostFacts::bottom_to_top([window(), tiny], 1);
+        assert_eq!(
+            verdict(&facts),
+            Judgement {
+                visibility: Visibility::Occluded { by: SurfaceId(2) },
+                unproven: true,
+            }
+        );
+    }
+
+    /// The second way past it: one opaque pixel, declared somewhere far off
+    /// the screen, once proved the rest of the window see-through. It proves
+    /// only itself, and it is nowhere near.
+    #[test]
+    fn an_opaque_pixel_declared_far_away_proves_nothing_is_see_through() {
+        let cover = SurfaceFacts::new(SurfaceId(2), rect(150.0, 120.0, 300.0, 200.0))
+            .declaring_opaque([rect(10000.0, 10000.0, 10001.0, 10001.0)]);
+        let facts = HostFacts::bottom_to_top([window(), cover], 1);
+        assert_eq!(
+            verdict(&facts),
+            Judgement {
+                visibility: Visibility::Occluded { by: SurfaceId(2) },
+                unproven: true,
+            }
+        );
+    }
+
+    /// Firefox's shape, set down beside the button: a frame 300x200 with a
+    /// shadow drawn 26 px left of it and 23 above, and the frame declared
+    /// opaque. The shadow reaches over the button, and covers it on policy;
+    /// a node under the frame itself is covered on the client's word.
+    #[test]
+    fn a_shadow_covers_what_is_under_it_on_policy() {
+        let shadowed = SurfaceFacts::new(SurfaceId(2), rect(210.0, 130.0, 510.0, 330.0))
+            .with_buffer_origin(Vec2::new(184.0, 107.0))
+            .drawing_over(rect(184.0, 107.0, 536.0, 353.0))
+            .declaring_opaque([rect(26.0, 23.0, 326.0, 223.0)]);
+        let facts = HostFacts::bottom_to_top([window(), shadowed], 1);
+        assert_eq!(
+            verdict(&facts),
+            Judgement {
+                visibility: Visibility::Occluded { by: SurfaceId(2) },
+                unproven: true,
+            },
+            "under the shadow"
+        );
+        assert_eq!(
+            judge(&facts, SurfaceId(1), rect(220.0, 140.0, 260.0, 160.0)),
+            Judgement::proven(Visibility::Occluded { by: SurfaceId(2) }),
+            "under the frame"
+        );
+    }
+
+    /// A shadow ending exactly where the button begins covers none of it,
+    /// as a window's edge does not.
+    #[test]
+    fn a_shadow_that_ends_where_a_node_begins_does_not_cover_it() {
+        let beside = SurfaceFacts::new(SurfaceId(2), rect(226.0, 100.0, 400.0, 300.0))
+            .drawing_over(rect(200.0, 77.0, 426.0, 330.0));
+        let facts = HostFacts::bottom_to_top([window(), beside], 1);
         assert_eq!(verdict(&facts), Judgement::proven(Visibility::Visible));
     }
 
-    /// `None` and `Some(vec![])` are different claims, which is the reason the
-    /// field is an `Option`: nothing declared, versus declared entirely
-    /// transparent.
+    /// A region declared past the edge of what a surface draws is ignored
+    /// there, as the protocol says the compositor ignores it: it proves
+    /// nothing about a node it does not reach.
     #[test]
-    fn declaring_no_opaque_region_at_all_is_a_claim_of_transparency() {
-        let ghost =
-            SurfaceFacts::new(SurfaceId(2), rect(150.0, 120.0, 300.0, 200.0)).declaring_opaque([]);
-        let facts = HostFacts::bottom_to_top([window(), ghost], 1);
-        assert_eq!(verdict(&facts), Judgement::proven(Visibility::Visible));
+    fn an_opaque_region_declared_where_nothing_is_drawn_proves_nothing() {
+        // Its region reaches over the button's left end, from outside the
+        // surface; the surface itself covers only the button's right end.
+        let cover = SurfaceFacts::new(SurfaceId(2), rect(150.0, 120.0, 300.0, 200.0))
+            .declaring_opaque([rect(-100.0, -100.0, -10.0, -10.0)]);
+        let facts = HostFacts::bottom_to_top([window(), cover], 1);
+        assert_eq!(
+            verdict(&facts),
+            Judgement {
+                visibility: Visibility::Occluded { by: SurfaceId(2) },
+                unproven: true,
+            }
+        );
+    }
+
+    /// A host that measured a surface drawing less than the window it placed
+    /// has measured wrong, and the window still covers.
+    #[test]
+    fn a_surface_covers_its_window_even_where_its_host_says_it_draws_less() {
+        // Drawing one pixel, nowhere near the button, of a window over it.
+        let cover = SurfaceFacts::new(SurfaceId(2), rect(150.0, 120.0, 300.0, 200.0))
+            .drawing_over(rect(250.0, 150.0, 251.0, 151.0));
+        let facts = HostFacts::bottom_to_top([window(), cover], 1);
+        assert_eq!(
+            verdict(&facts).visibility,
+            Visibility::Occluded { by: SurfaceId(2) }
+        );
     }
 
     #[test]
@@ -1124,6 +1294,21 @@ mod tests {
             decorated.to_global(rect(0.0, 0.0, 10.0, 10.0)),
             rect(100.0, 100.0, 110.0, 110.0),
             "a window-space rect is placed from the window geometry's origin"
+        );
+    }
+
+    /// A surface a producer said nothing more about draws its window and
+    /// nothing past it, so no fact a host forgot can make it reach less
+    /// far, or further, than the window it placed.
+    #[test]
+    fn a_new_surface_draws_exactly_its_window() {
+        assert_eq!(window().drawn, window().geometry);
+        let shadowed = window().drawing_over(rect(-26.0, -23.0, 426.0, 329.0));
+        assert_eq!(shadowed.drawn, rect(-26.0, -23.0, 426.0, 329.0));
+        assert_eq!(
+            shadowed.geometry,
+            window().geometry,
+            "and its window is where it was"
         );
     }
 
