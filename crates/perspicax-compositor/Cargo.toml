@@ -101,6 +101,10 @@ wayland-client.workspace = true
 # side already uses through smithay; only the features differ.
 wayland-protocols = { workspace = true, features = ["client", "staging", "unstable"] }
 wayland-protocols-wlr = { workspace = true, features = ["client"] }
+# The X client the Xwayland tests are, asking RandR too: which resolutions
+# the X server offers a game. The same crate the `xwayland` feature already
+# brings, with one more extension, for the tests alone.
+x11rb = { version = "0.13", default-features = false, features = ["randr", "res"] }
 # The shell's side of perspicax's own protocol, spoken by the tests as the
 # shell will.
 perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", features = ["client"] }

@@ -136,6 +136,11 @@ pub struct Compositor {
     /// inside its window. Which window may, and when, is [`crate::hold`]'s.
     #[expect(dead_code, reason = "RAII handle for the pointer-constraints global")]
     pointer_constraints: PointerConstraintsState,
+    /// `wp_viewporter`: what size a surface's buffer is shown at, which a
+    /// client drawing at a fractional scale says ([`crate::scale`]). Held
+    /// for its global, as the ones above are.
+    #[expect(dead_code, reason = "the viewporter global's id")]
+    viewporter: smithay::reexports::wayland_server::backend::GlobalId,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) data_device: DataDeviceState,
     pub(crate) seat: Seat<Self>,
@@ -367,6 +372,7 @@ impl Compositor {
             cursor_shape: CursorShapeManagerState::new::<Self>(display),
             relative_pointer: RelativePointerManagerState::new::<Self>(display),
             pointer_constraints: PointerConstraintsState::new::<Self>(display),
+            viewporter: crate::scale::offer_viewporter(display),
             data_device: DataDeviceState::new::<Self>(display),
             seat_state,
             seat,

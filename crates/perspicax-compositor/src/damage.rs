@@ -146,17 +146,21 @@ pub(crate) fn take(start: &WlSurface, at: Vec2, whole: Option<Rect>, releases: b
                     was.map(|was| was.seen_through(&viewport(states, was.own(), releases))),
                 ),
             };
-            let named: Vec<Rect> = current
-                .damage
-                .iter()
-                .filter_map(|damage| surface_local(damage, picture.as_ref()))
-                .collect();
+            // None when the client named none, which is not the same as
+            // naming some that lands nowhere on its picture.
+            let named: Option<Vec<Rect>> = (!current.damage.is_empty()).then(|| {
+                current
+                    .damage
+                    .iter()
+                    .filter_map(|damage| surface_local(damage, picture.as_ref()))
+                    .collect()
+            });
             // How far the window reaches is measured from this, so it is
             // remembered before the buffer is released below.
             if picture != was {
                 crate::geometry::record(states, picture);
             }
-            rects.extend(damaged(&named, buffer, at, whole));
+            rects.extend(damaged(named.as_deref(), buffer, at, whole));
             if buffer == Buffer::Unchanged {
                 rects.extend(reviewed(was, picture, at));
             }
@@ -201,29 +205,42 @@ pub(crate) fn clear(start: &WlSurface) {
 
 /// What one surface's commit damaged, in its root's coordinates.
 ///
-/// `named` is the damage it named, in its own coordinates, and `at` is where
-/// it sits in the root. `whole` is the root's whole extent.
-pub(crate) fn damaged(named: &[Rect], buffer: Buffer, at: Vec2, whole: Option<Rect>) -> Vec<Rect> {
-    match buffer {
+/// `named` is the damage it named, in its own coordinates, where it named
+/// any: what of it lands on the picture, which may be none of it. `at` is
+/// where it sits in the root. `whole` is the root's whole extent.
+pub(crate) fn damaged(
+    named: Option<&[Rect]>,
+    buffer: Buffer,
+    at: Vec2,
+    whole: Option<Rect>,
+) -> Vec<Rect> {
+    match (buffer, named) {
         // A new picture changed all of itself, if it named nothing, and at
         // most all of itself if it did: what it names is clipped to it, as
         // the renderer clips it. A toolkit names its whole buffer with the
         // largest rectangle the protocol allows, and unclipped, on a
         // subsurface, that would claim everything below and to the right.
-        Buffer::New(Some(size)) if named.is_empty() => vec![extent(size) + at],
-        Buffer::New(Some(size)) => named
+        // Named, but all of it off the picture, it changed nothing shown.
+        (Buffer::New(Some(size)), None) => vec![extent(size) + at],
+        (Buffer::New(Some(size)), Some(named)) => named
             .iter()
             .map(|region| region.intersect(extent(size)))
             .filter(|region| !region.is_empty())
             .map(|region| region + at)
             .collect(),
-        // A buffer of a kind whose size cannot be read, naming nothing: all
-        // of the window, as far as anyone here can tell.
-        Buffer::New(None) if named.is_empty() => whole.into_iter().collect(),
-        Buffer::New(None) | Buffer::Unchanged => named.iter().map(|region| *region + at).collect(),
+        // A buffer of a kind whose size cannot be read, naming nothing that
+        // can be placed: all of the window, as far as anyone here can tell.
+        (Buffer::New(None), named) if named.is_none_or(<[Rect]>::is_empty) => {
+            whole.into_iter().collect()
+        }
+        (Buffer::New(None) | Buffer::Unchanged, named) => named
+            .unwrap_or_default()
+            .iter()
+            .map(|region| *region + at)
+            .collect(),
         // What the picture covered shows what is beneath it now, and where
         // that was went with the buffer, so the safe answer is all of it.
-        Buffer::Removed => whole.into_iter().collect(),
+        (Buffer::Removed, _) => whole.into_iter().collect(),
     }
 }
 
@@ -361,7 +378,7 @@ mod tests {
     fn damage_on_a_subsurface_moves_by_where_it_sits() {
         let named = [Rect::new(10.0, 10.0, 20.0, 20.0)];
         assert_eq!(
-            damaged(&named, new(), AT, WHOLE),
+            damaged(Some(&named), new(), AT, WHOLE),
             [Rect::new(50.0, 40.0, 60.0, 50.0)]
         );
     }
@@ -379,7 +396,7 @@ mod tests {
             [surface_local(&in_buffer((80, 60), (40, 40)), Some(&picture)).expect("placed")];
         assert_eq!(named, [Rect::new(40.0, 30.0, 60.0, 50.0)]);
         assert_eq!(
-            damaged(&named, new(), AT, WHOLE),
+            damaged(Some(&named), new(), AT, WHOLE),
             [Rect::new(80.0, 60.0, 100.0, 80.0)]
         );
     }
@@ -431,7 +448,7 @@ mod tests {
         let all = in_buffer((0, 0), (i32::MAX, i32::MAX));
         let named = [surface_local(&all, Some(&picture)).expect("placed")];
         assert_eq!(
-            damaged(&named, Buffer::New(Some(picture.size)), AT, WHOLE),
+            damaged(Some(&named), Buffer::New(Some(picture.size)), AT, WHOLE),
             [Rect::new(40.0, 30.0, 140.0, 230.0)]
         );
     }
@@ -451,14 +468,27 @@ mod tests {
     #[test]
     fn a_new_buffer_naming_no_damage_changed_all_of_itself() {
         assert_eq!(
-            damaged(&[], new(), AT, WHOLE),
+            damaged(None, new(), AT, WHOLE),
             [Rect::new(40.0, 30.0, 160.0, 110.0)]
         );
     }
 
     #[test]
     fn a_new_buffer_of_unknown_size_naming_no_damage_changed_the_whole_window() {
-        assert_eq!(damaged(&[], Buffer::New(None), AT, WHOLE), WHOLE.as_slice());
+        assert_eq!(
+            damaged(None, Buffer::New(None), AT, WHOLE),
+            WHOLE.as_slice()
+        );
+    }
+
+    /// Named, and all of it off the picture, as a viewport's crop leaves
+    /// damage outside its source: a change nowhere on screen, not the
+    /// whole of a picture that named nothing.
+    #[test]
+    fn damage_named_only_off_a_new_picture_changed_nothing() {
+        assert!(damaged(Some(&[]), new(), AT, WHOLE).is_empty());
+        let outside = [Rect::new(200.0, 200.0, 210.0, 210.0)];
+        assert!(damaged(Some(&outside), new(), AT, WHOLE).is_empty());
     }
 
     #[test]
@@ -469,7 +499,7 @@ mod tests {
             Rect::new(200.0, 200.0, 210.0, 210.0),
         ];
         assert_eq!(
-            damaged(&named, new(), AT, WHOLE),
+            damaged(Some(&named), new(), AT, WHOLE),
             [Rect::new(40.0, 30.0, 160.0, 110.0)]
         );
     }
@@ -581,23 +611,23 @@ mod tests {
 
     #[test]
     fn a_commit_with_no_new_buffer_and_no_damage_changed_nothing() {
-        assert!(damaged(&[], Buffer::Unchanged, AT, WHOLE).is_empty());
+        assert!(damaged(None, Buffer::Unchanged, AT, WHOLE).is_empty());
     }
 
     #[test]
     fn damage_named_without_a_new_buffer_is_still_counted() {
         let named = [Rect::new(0.0, 0.0, 10.0, 10.0)];
         assert_eq!(
-            damaged(&named, Buffer::Unchanged, AT, WHOLE),
+            damaged(Some(&named), Buffer::Unchanged, AT, WHOLE),
             [Rect::new(40.0, 30.0, 50.0, 40.0)]
         );
     }
 
     #[test]
     fn a_picture_taken_away_changed_the_whole_window() {
-        assert_eq!(damaged(&[], Buffer::Removed, AT, WHOLE), WHOLE.as_slice());
+        assert_eq!(damaged(None, Buffer::Removed, AT, WHOLE), WHOLE.as_slice());
         // A root that has never shown anything has no whole to name.
-        assert!(damaged(&[], Buffer::Removed, AT, None).is_empty());
+        assert!(damaged(None, Buffer::Removed, AT, None).is_empty());
     }
 
     #[test]
