@@ -741,6 +741,20 @@ that remains. Only the outer edges of the desk flip and snap; between two
 monitors the pointer passes through, and so does a window being moved unless
 `[resistance] seams` holds it there.
 
+A monitor's `scale` need not be a whole number: at 0.9 or 1.25 an
+application lays itself out for the monitor's logical size. Each window is
+told the scale of the monitor it is mostly on (`wp_fractional_scale_v1`), a
+panel the scale of its own, and each is told again when the window moves or
+the scale changes. A window draws its picture at that scale and says what
+size it is shown at (`wp_viewporter`). So Firefox, GTK 4, Qt 6 and Chromium
+are sharp and exactly the size of their windows, and the pointer lands on
+what they drew. An application that speaks neither draws at the next whole
+scale up and is scaled to fit: the right size, a little soft. Xwayland alone
+is offered no viewporter. With one, it would offer X games resolutions the
+monitor does not have, scaled up to fill it, and neither where perspicax
+says an X window is nor what the pointer finds would follow. X games keep
+the monitor's own resolution.
+
 None of that needs a second monitor to try. `--headless --size 2560x1440
 --size 1920x1080` runs two virtual ones, which is what the live tests in
 `crates/perspicax-compositor/tests/` do. On a seat, the kernel will light a
