@@ -141,6 +141,11 @@ pub struct Compositor {
     /// for its global, as the ones above are.
     #[expect(dead_code, reason = "the viewporter global's id")]
     viewporter: smithay::reexports::wayland_server::backend::GlobalId,
+    /// `wp_fractional_scale_manager_v1`: which scale each surface should
+    /// draw at ([`crate::scale`]). Held for its global, as the ones above
+    /// are.
+    #[expect(dead_code, reason = "RAII handle for the fractional-scale global")]
+    fractional_scale: smithay::wayland::fractional_scale::FractionalScaleManagerState,
     pub(crate) seat_state: SeatState<Self>,
     pub(crate) data_device: DataDeviceState,
     pub(crate) seat: Seat<Self>,
@@ -373,6 +378,9 @@ impl Compositor {
             relative_pointer: RelativePointerManagerState::new::<Self>(display),
             pointer_constraints: PointerConstraintsState::new::<Self>(display),
             viewporter: crate::scale::offer_viewporter(display),
+            fractional_scale: smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<
+                Self,
+            >(display),
             data_device: DataDeviceState::new::<Self>(display),
             seat_state,
             seat,
@@ -520,8 +528,14 @@ impl Compositor {
     /// some client drew. Once none did, GTK and Chromium, which wait for that
     /// word with no limit, never drew again (#99). Counting before telling
     /// keeps the two in step, whatever put the window there.
+    ///
+    /// Which scale each surface should draw at is settled with it
+    /// ([`Compositor::settle_scales`]), for the same reason: whatever moved
+    /// a window, or changed its monitor's scale, it is told before it next
+    /// draws.
     pub(crate) fn settle_outputs(&mut self) {
         self.space.refresh();
+        self.settle_scales();
     }
 
     /// Tell every surface it may draw again.

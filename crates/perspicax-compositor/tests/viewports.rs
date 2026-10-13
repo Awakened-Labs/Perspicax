@@ -118,40 +118,13 @@ fn a_viewport_changed_with_no_new_buffer_is_a_frame_where_the_window_was_and_is(
 #[cfg(feature = "capture")]
 mod pictures {
     use super::*;
-    use crate::common::{Desk, drawn_in};
+    use crate::common::{drawn_in, rescale};
     use perspicax_compositor::{Command, Host};
     use perspicax_index::ShotTarget;
-    use wayland_client::{EventQueue, QueueHandle, globals::GlobalList, protocol::wl_output};
+    use wayland_client::protocol::wl_output;
 
     const ORANGE: u32 = 0xffee_8822;
     const MARKED: u32 = 0xff22_cc44;
-
-    /// Put the monitor at `scale`, as a display tool does, and wait until
-    /// the desk is laid out at it: 800x600 at 0.5 is 1600x1200 logical.
-    fn rescale(
-        session: &Session,
-        desk: &mut Desk,
-        queue: &mut EventQueue<Desk>,
-        qh: &QueueHandle<Desk>,
-        globals: &GlobalList,
-        scale: f64,
-    ) {
-        desk.bind_displays(globals, qh);
-        until(queue, desk, |desk| desk.display_serial.is_some());
-        let configuration = desk.configuration(qh, None);
-        desk.enable(&configuration, "HEADLESS-1", qh)
-            .set_scale(scale);
-        configuration.apply();
-        until(queue, desk, |desk| desk.configured.is_some());
-        assert_eq!(desk.configured, Some("succeeded"));
-        let logical = (800.0 / scale).ceil();
-        session.wait_for(|facts| {
-            facts
-                .outputs()
-                .first()
-                .is_some_and(|o| o.width() == logical)
-        });
-    }
 
     /// The window fills its frame on the monitor, the band beyond its buffer
     /// that Firefox left see-through gone, and a picture says so.
@@ -161,7 +134,7 @@ mod pictures {
         let session = Session::start("viewports-filled", Backend::headless((800, 600)));
         let host = Host::new(&session.facts, &session.requests);
         let (mut desk, mut queue, qh, globals) = session.client();
-        rescale(&session, &mut desk, &mut queue, &qh, &globals, 0.5);
+        rescale(&mut desk, &mut queue, &qh, &globals, "HEADLESS-1", 0.5);
         desk.bind_viewporter(&globals, &qh);
         desk.open_viewed(&qh, "viewed", BLUE, (200, 150), (400, 300));
         until(&mut queue, &mut desk, |desk| desk.drawn == 1);
@@ -191,7 +164,7 @@ mod pictures {
         let session = Session::start("viewports-damage", Backend::headless((800, 600)));
         let host = Host::new(&session.facts, &session.requests);
         let (mut desk, mut queue, qh, globals) = session.client();
-        rescale(&session, &mut desk, &mut queue, &qh, &globals, 0.5);
+        rescale(&mut desk, &mut queue, &qh, &globals, "HEADLESS-1", 0.5);
         desk.bind_viewporter(&globals, &qh);
         desk.open_coloured(&qh, "page", "page", BLUE);
         until(&mut queue, &mut desk, |desk| desk.drawn == 1);

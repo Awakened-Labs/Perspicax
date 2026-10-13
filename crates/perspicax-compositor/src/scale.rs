@@ -14,6 +14,19 @@
 //! ([`geometry`](crate::geometry)), as smithay's renderer reads it to draw
 //! the surface and to find what is under the pointer.
 //!
+//! # Which scale
+//!
+//! Firefox guesses its scale from the monitor's logical size. GTK 4, Qt 6
+//! and Chromium do not guess: they draw at a scale that is not a whole
+//! number only when told it with `wp_fractional_scale_v1`, and otherwise
+//! draw at 1 and are scaled down, the right size but soft. Each surface is
+//! told the scale of the monitor its window is mostly on, a panel or a lock
+//! screen that of its own monitor, and told again whenever that changes:
+//! the window moved, or the monitor was given another scale. Asked of
+//! every surface at each frame, as smithay is asked which monitors each is
+//! on, so it follows whatever moved them; smithay sends a scale only when
+//! it changed.
+//!
 //! # Not Xwayland
 //!
 //! Xwayland shows an X game that changed the screen's resolution through a
@@ -24,16 +37,22 @@
 //! the resolution they have.
 
 use smithay::{
+    delegate_fractional_scale,
+    desktop::{layer_map_for_output, utils::with_surfaces_surface_tree},
     reexports::{
         wayland_protocols::wp::viewporter::server::{
             wp_viewport::WpViewport, wp_viewporter::WpViewporter,
         },
         wayland_server::{
             Client, DataInit, DisplayHandle, GlobalDispatch, New, backend::GlobalId,
-            delegate_dispatch,
+            delegate_dispatch, protocol::wl_surface::WlSurface,
         },
     },
-    wayland::viewporter::{ViewportState, ViewporterState},
+    wayland::{
+        compositor::{SurfaceData, with_states},
+        fractional_scale::{FractionalScaleHandler, with_fractional_scale},
+        viewporter::{ViewportState, ViewporterState},
+    },
 };
 
 use crate::state::Compositor;
@@ -65,6 +84,66 @@ impl GlobalDispatch<WpViewporter, ()> for Compositor {
 
 delegate_dispatch!(Compositor: [WpViewporter: ()] => ViewporterState);
 delegate_dispatch!(Compositor: [WpViewport: ViewportState] => ViewportState);
+
+impl Compositor {
+    /// Tell every surface the scale of the monitor it is on: a window's,
+    /// with its subsurfaces and menus, that of the monitor it is mostly on;
+    /// a panel's and a lock screen's, that of their own.
+    pub(crate) fn settle_scales(&self) {
+        for window in self.space.elements() {
+            if let Some(output) = self.output_of(window) {
+                let scale = output.current_scale().fractional_scale();
+                window.with_surfaces(|_, states| ask(states, scale));
+            }
+        }
+        // Gathered first, so no layer map is held while a surface is.
+        let layers: Vec<_> = self
+            .space
+            .outputs()
+            .flat_map(|output| {
+                let scale = output.current_scale().fractional_scale();
+                layer_map_for_output(output)
+                    .layers()
+                    .map(|layer| (layer.clone(), scale))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (layer, scale) in layers {
+            layer.with_surfaces(|_, states| ask(states, scale));
+        }
+        for cover in self.lock.iter().flat_map(|locked| &locked.surfaces) {
+            let scale = cover.output.current_scale().fractional_scale();
+            with_surfaces_surface_tree(cover.surface.wl_surface(), |_, states| {
+                ask(states, scale);
+            });
+        }
+    }
+}
+
+impl FractionalScaleHandler for Compositor {
+    /// A surface on a monitor already is told its scale as it asks, by
+    /// smithay. One on none yet -- a window asking before it has drawn, as
+    /// toolkits do -- is told the scale of the monitor a new window opens
+    /// on, which is the pointer's.
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        self.settle_scales();
+        let told = with_states(&surface, |states| {
+            with_fractional_scale(states, |fractional| fractional.preferred_scale().is_some())
+        });
+        if !told && let Some(output) = self.output_under_pointer() {
+            let scale = output.current_scale().fractional_scale();
+            with_states(&surface, |states| ask(states, scale));
+        }
+    }
+}
+
+delegate_fractional_scale!(Compositor);
+
+/// Tell the surface whose states these are to draw at `scale`. Said only if
+/// it changed, and kept for an object the client has yet to ask for.
+fn ask(states: &SurfaceData, scale: f64) {
+    with_fractional_scale(states, |fractional| fractional.set_preferred_scale(scale));
+}
 
 /// Whether `client` is the Xwayland this compositor started: the one client
 /// carrying smithay's data rather than ours.

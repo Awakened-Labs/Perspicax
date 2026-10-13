@@ -74,6 +74,10 @@ use wayland_protocols::ext::{
     },
 };
 use wayland_protocols::wp::{
+    fractional_scale::v1::client::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
     pointer_constraints::zv1::client::{
         zwp_confined_pointer_v1::ZwpConfinedPointerV1, zwp_locked_pointer_v1::ZwpLockedPointerV1,
         zwp_pointer_constraints_v1::Lifetime,
@@ -363,6 +367,43 @@ pub fn drawn_in(shot: &Shot, colour: u32) -> Vec<Rect> {
         .collect()
 }
 
+/// Give the monitor `name` the scale `scale` as a display tool does,
+/// leaving every other monitor on as it is.
+///
+/// The protocol carries a scale in 256ths, so 0.9 arrives as 230/256.
+pub fn rescale(
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    qh: &QueueHandle<Desk>,
+    globals: &GlobalList,
+    name: &str,
+    scale: f64,
+) {
+    if desk.displays.is_none() {
+        desk.bind_displays(globals, qh);
+    }
+    until(queue, desk, |desk| desk.display_serial.is_some());
+    let configuration = desk.configuration(qh, None);
+    let on: Vec<String> = desk
+        .shown
+        .iter()
+        .filter(|shown| shown.enabled && !shown.finished)
+        .map(|shown| shown.name.clone())
+        .collect();
+    for head in &on {
+        let enabled = desk.enable(&configuration, head, qh);
+        if head == name {
+            enabled.set_scale(scale);
+        }
+    }
+    configuration.apply();
+    until(queue, desk, |desk| desk.configured.is_some());
+    assert_eq!(desk.configured, Some("succeeded"));
+    until(queue, desk, |desk| {
+        (desk.head_named(name).scale - scale).abs() < 1.0 / 256.0
+    });
+}
+
 /// Copy each screencopy grab, at once, once each has been offered its
 /// buffer.
 pub fn copy_all(desk: &mut Desk, queue: &mut EventQueue<Desk>, grabs: &[usize]) {
@@ -511,6 +552,9 @@ pub enum Said {
     Leave(String),
     /// It may draw again: a frame callback it asked for came back.
     Done,
+    /// It should draw at this scale, in 120ths
+    /// (`wp_fractional_scale_v1.preferred_scale`).
+    PreferredScale(u32),
     /// A window's configure.
     Configure(Configured),
 }
@@ -644,6 +688,7 @@ pub struct Desk {
     /// none at all, in place of their whole buffer.
     pub declaring: Vec<(Window, Option<Geometry>)>,
     pub viewporter: Option<WpViewporter>,
+    pub fractional_scales: Option<WpFractionalScaleManagerV1>,
     /// Windows drawn at a size of their own and shown at another through a
     /// viewport, as a client drawing at a fractional scale draws.
     pub viewed: Vec<Viewed>,
@@ -767,6 +812,7 @@ impl Desk {
             blank_configured: 0,
             declaring: Vec::new(),
             viewporter: None,
+            fractional_scales: None,
             viewed: Vec::new(),
             colours: Vec::new(),
             resizing: false,
@@ -1002,6 +1048,45 @@ impl Desk {
             .as_ref()
             .expect("bind_viewporter first")
             .get_viewport(surface, qh, ())
+    }
+
+    /// Bind the fractional-scale manager. Panics if it is not advertised.
+    pub fn bind_fractional_scale(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.fractional_scales = Some(
+            globals
+                .bind::<WpFractionalScaleManagerV1, _, _>(qh, 1..=1, ())
+                .expect("wp_fractional_scale_manager_v1"),
+        );
+    }
+
+    /// Ask what scale `surface` should draw at. Each answer is said to it:
+    /// [`Said::PreferredScale`], and [`Desk::scales_told`].
+    pub fn fractional(
+        &self,
+        qh: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+    ) -> WpFractionalScaleV1 {
+        self.fractional_scales
+            .as_ref()
+            .expect("bind_fractional_scale first")
+            .get_fractional_scale(surface, qh, surface.id())
+    }
+
+    /// The scales `surface` was told to draw at, in 120ths, in order.
+    pub fn scales_told(&self, surface: &wl_surface::WlSurface) -> Vec<u32> {
+        self.said_to(surface)
+            .into_iter()
+            .filter_map(|said| match said {
+                Said::PreferredScale(scale) => Some(scale),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A surface with no role yet: what GTK asks its scale for, before the
+    /// surface is a window.
+    pub fn surface(&self, qh: &QueueHandle<Self>) -> wl_surface::WlSurface {
+        self.compositor.create_surface(qh)
     }
 
     /// Open a window that draws a buffer `pixels` big, all in `colour`,
@@ -1942,6 +2027,35 @@ impl Dispatch<WpViewport, ()> for Desk {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<WpFractionalScaleManagerV1, ()> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &WpFractionalScaleManagerV1,
+        _: <WpFractionalScaleManagerV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+/// Keyed by the surface it is of.
+impl Dispatch<WpFractionalScaleV1, ObjectId> for Desk {
+    fn event(
+        desk: &mut Self,
+        _: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        surface: &ObjectId,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            desk.said
+                .push((surface.clone(), Said::PreferredScale(scale)));
+        }
     }
 }
 
