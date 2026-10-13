@@ -375,6 +375,19 @@ impl Compositor {
         } else {
             (None, None)
         };
+        let placed = Rect::new(
+            f64::from(location.x),
+            f64::from(location.y),
+            f64::from(location.x + geometry.size.w),
+            f64::from(location.y + geometry.size.h),
+        );
+        // Surface-local (0,0) sits at the geometry's own offset *back* from
+        // where we placed that geometry -- under CSD that is the shadow
+        // margin, and it is where opaque regions are measured from.
+        let buffer_origin = Vec2::new(
+            f64::from(location.x - geometry.loc.x),
+            f64::from(location.y - geometry.loc.y),
+        );
 
         Some(SurfaceFacts {
             id,
@@ -383,20 +396,11 @@ impl Compositor {
             // and reporting it as mapped would let a node be judged visible on
             // a surface with nothing on it.
             mapped: window.alive() && self.has_presented(id) && !parked,
-            geometry: Rect::new(
-                f64::from(location.x),
-                f64::from(location.y),
-                f64::from(location.x + geometry.size.w),
-                f64::from(location.y + geometry.size.h),
-            ),
-            // Surface-local (0,0) sits at the geometry's own offset *back*
-            // from where we placed that geometry -- under CSD that is the
-            // shadow margin, and it is where opaque regions are measured
-            // from.
-            buffer_origin: Vec2::new(
-                f64::from(location.x - geometry.loc.x),
-                f64::from(location.y - geometry.loc.y),
-            ),
+            geometry: placed,
+            buffer_origin,
+            // The shadow too, and every subsurface, however small a window
+            // its client said it was.
+            drawn: drawn(surface, buffer_origin, placed),
             opaque,
             origin: self.origin_of(window),
             title: title(surface),
@@ -443,16 +447,17 @@ impl Compositor {
                 .as_ref()
                 .map(regions)
         });
+        let geometry = crate::damage::to_rect(placed);
+        let buffer_origin = Vec2::new(f64::from(placed.loc.x), f64::from(placed.loc.y));
         SurfaceFacts {
             id,
             mapped: surface.is_alive() && self.has_presented(id) && !placed.size.is_empty(),
-            geometry: Rect::new(
-                f64::from(placed.loc.x),
-                f64::from(placed.loc.y),
-                f64::from(placed.loc.x + placed.size.w),
-                f64::from(placed.loc.y + placed.size.h),
-            ),
-            buffer_origin: Vec2::new(f64::from(placed.loc.x), f64::from(placed.loc.y)),
+            geometry,
+            buffer_origin,
+            // As measured, not as placed: a layer's subsurfaces are not in
+            // the size a plain headless build gives it, and an X11 window's
+            // new buffer can outgrow the size it was just configured to.
+            drawn: drawn(surface, buffer_origin, geometry),
             opaque,
             origin: self.origin_of_surface(surface),
             // A layer's namespace is not a title: it goes in `kind`, set by
@@ -555,6 +560,15 @@ pub(crate) fn title(
                     .ok()
                     .and_then(|attributes| attributes.title.clone())
             })
+    })
+}
+
+/// Everything the tree under `surface` draws, in global space, its
+/// surface-local `(0, 0)` being at `buffer_origin`: what it covers. Where it
+/// was `placed` while it has drawn nothing to measure.
+fn drawn(surface: &WlSurface, buffer_origin: Vec2, placed: Rect) -> Rect {
+    crate::geometry::drawn(surface).map_or(placed, |bounds| {
+        crate::damage::to_rect(bounds) + buffer_origin
     })
 }
 

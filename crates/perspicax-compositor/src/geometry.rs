@@ -303,14 +303,7 @@ pub(crate) fn window_geometry(surface: &WlSurface) -> Option<Rectangle<i32, Logi
             .get::<SurfaceCachedState>()
             .current()
             .geometry;
-        let bounds = states.data_map.get::<Measured>().and_then(|measured| {
-            measured
-                .0
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .bounds
-        });
-        (declared, bounds)
+        (declared, bounds(states))
     });
     // Not `Rectangle::is_empty`, which only asks whether a side is zero: a
     // release build of smithay takes a negative size without complaint, and
@@ -324,6 +317,28 @@ pub(crate) fn window_geometry(surface: &WlSurface) -> Option<Rectangle<i32, Logi
         ),
         None => declared,
     }
+}
+
+/// Everything the tree under `surface` draws, in its surface's own
+/// coordinates: the full bounds of every surface in it that shows
+/// something, as the last commit left them. `None` while it shows nothing.
+///
+/// Where a window is inside what it draws is its client's to say, and
+/// [`window_geometry`] says it. How far the drawing reaches is not, and
+/// this is what covers whatever is under it (issue #103).
+pub(crate) fn drawn(surface: &WlSurface) -> Option<Rectangle<i32, Logical>> {
+    with_states(surface, bounds)
+}
+
+/// The bounds [`measure`] last kept on the root whose states these are.
+fn bounds(states: &SurfaceData) -> Option<Rectangle<i32, Logical>> {
+    states.data_map.get::<Measured>().and_then(|measured| {
+        measured
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bounds
+    })
 }
 
 /// Where the subsurfaces of the window whose surface is `surface` are
@@ -355,15 +370,7 @@ pub(crate) fn check_drawn_as_measured(window: &smithay::desktop::Window) {
     let Some(toplevel) = window.toplevel() else {
         return;
     };
-    let measured = with_states(toplevel.wl_surface(), |states| {
-        states.data_map.get::<Measured>().and_then(|measured| {
-            measured
-                .0
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .bounds
-        })
-    });
+    let measured = drawn(toplevel.wl_surface());
     debug_assert_eq!(
         measured.unwrap_or_default(),
         window.bbox(),

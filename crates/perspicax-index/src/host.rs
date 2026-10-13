@@ -170,6 +170,18 @@ pub struct SurfaceFacts {
     /// test by the shadow margin -- which is precisely the size of error that
     /// produces a confident wrong answer rather than an obvious one.
     pub buffer_origin: Vec2,
+    /// Everything this surface draws, in global space: its own picture and
+    /// every subsurface's, as far as they reach, a client-side shadow
+    /// included. Usually more than `geometry`, which stops at the visible
+    /// frame.
+    ///
+    /// Measured, not declared. A client says where its window is inside
+    /// what it draws, and nothing makes it say so truthfully: one that
+    /// declares a window 1x1 inside a picture 400x300 still draws all of
+    /// the picture, and still takes clicks on it (issue #103). Not the
+    /// frame the host drew around it, which is `frame`, and not its menus,
+    /// which are trees of their own.
+    pub drawn: Rect,
     /// Where the client says it is opaque, in surface-local coordinates.
     ///
     /// `None` is materially different from `Some(vec![])`: the first is a
@@ -268,9 +280,10 @@ pub struct SurfaceFacts {
 }
 
 impl SurfaceFacts {
-    /// A mapped surface at `geometry`, with nothing else claimed about it: no
-    /// declared opacity, no shadow, no attributed origin, and no damage. Every
-    /// builder below moves one of those away from its default.
+    /// A mapped surface at `geometry`, drawing exactly that, with nothing
+    /// else claimed about it: no declared opacity, no shadow, no attributed
+    /// origin, and no damage. Every builder below moves one of those away
+    /// from its default.
     #[must_use]
     pub fn new(id: SurfaceId, geometry: Rect) -> Self {
         Self {
@@ -278,6 +291,7 @@ impl SurfaceFacts {
             mapped: true,
             geometry,
             buffer_origin: Vec2::new(geometry.x0, geometry.y0),
+            drawn: geometry,
             opaque: None,
             origin: Origin::Unattributed,
             title: None,
@@ -421,6 +435,14 @@ impl SurfaceFacts {
     #[must_use]
     pub fn with_buffer_origin(mut self, origin: Vec2) -> Self {
         self.buffer_origin = origin;
+        self
+    }
+
+    /// The same surface, drawing over `drawn` in global space: a shadow
+    /// around its window, or a subsurface hanging past it.
+    #[must_use]
+    pub fn drawing_over(mut self, drawn: Rect) -> Self {
+        self.drawn = drawn;
         self
     }
 
@@ -1124,6 +1146,21 @@ mod tests {
             decorated.to_global(rect(0.0, 0.0, 10.0, 10.0)),
             rect(100.0, 100.0, 110.0, 110.0),
             "a window-space rect is placed from the window geometry's origin"
+        );
+    }
+
+    /// A surface a producer said nothing more about draws its window and
+    /// nothing past it, so no fact a host forgot can make it reach less
+    /// far, or further, than the window it placed.
+    #[test]
+    fn a_new_surface_draws_exactly_its_window() {
+        assert_eq!(window().drawn, window().geometry);
+        let shadowed = window().drawing_over(rect(-26.0, -23.0, 426.0, 329.0));
+        assert_eq!(shadowed.drawn, rect(-26.0, -23.0, 426.0, 329.0));
+        assert_eq!(
+            shadowed.geometry,
+            window().geometry,
+            "and its window is where it was"
         );
     }
 
