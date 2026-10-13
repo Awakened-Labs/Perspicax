@@ -14,12 +14,12 @@
 
 mod common;
 
-use common::{Desk, Said, Session, WINDOW, configured, heard, until};
+use common::{Configured, Desk, Said, Session, WINDOW, configured, heard, until};
 use perspicax_compositor::Backend;
 #[cfg(feature = "capture")]
 use perspicax_compositor::Command;
 use perspicax_index::{HostFacts, SurfaceFacts};
-use perspicax_node::SurfaceId;
+use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::Action;
 #[cfg(feature = "capture")]
 use perspicax_policy::{Button, Mods};
@@ -344,6 +344,333 @@ fn a_window_destroyed_after_its_client_unmapped_it_is_forgotten_quietly() {
     let facts = session.facts.read();
     assert_eq!(facts.surfaces().len(), 1, "only the new window");
     assert!(facts.surface(next).is_some());
+
+    session.stop((desk, queue));
+}
+
+/// The configures the `nth` window has been sent, as it read them.
+fn configured_as(desk: &Desk, nth: usize) -> Vec<Configured> {
+    desk.said_to(desk.windows[nth].wl_surface())
+        .into_iter()
+        .filter_map(|said| match said {
+            Said::Configure(configured) => Some(configured),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Unmap the `nth` window, and wait until the window with id `gone` has
+/// left the facts. How many configures it had been sent by then.
+fn unmapped(
+    session: &Session,
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    nth: usize,
+    gone: SurfaceId,
+) -> usize {
+    unmap(desk, queue, nth);
+    session.wait_for(|facts| facts.surface(gone).is_none());
+    configures(desk, nth)
+}
+
+/// #102: a client asks for a window it unmapped as it asks for a new one:
+/// it commits with nothing in it, and waits for a configure. None ever
+/// came: perspicax configured a toplevel only at `get_toplevel`. It is
+/// answered as a new window is, active and with nothing else, its last
+/// state forgotten. Drawn, it is back as a new window: an id nothing has
+/// seen, and a new handle in the taskbar.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_asked_for_again_is_configured_and_back_as_new_when_it_draws() {
+    let session = session("unmap-again");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    let gone = opened(&session, &mut desk, &mut queue, &qh, "again");
+    until(&mut queue, &mut desk, |desk| {
+        desk.task_titles() == ["again"]
+    });
+    let handle = desk.task("again").expect("announced").handle.clone();
+    let told = unmapped(&session, &mut desk, &mut queue, 0, gone);
+
+    desk.windows[0].commit();
+    until(&mut queue, &mut desk, |desk| configures(desk, 0) > told);
+    let answer = configured_as(&desk, 0)[told];
+    assert!(
+        answer.activated
+            && !answer.maximized
+            && !answer.fullscreen
+            && !answer.tiled
+            && answer.size.is_none(),
+        "not answered as a new window: {answer:?}"
+    );
+
+    // The client drew its answer: back.
+    until(&mut queue, &mut desk, |_| {
+        titled(&session.facts.read(), "again").is_some_and(|window| window.mapped)
+    });
+    let back = titled(&session.facts.read(), "again")
+        .expect("waited for")
+        .id;
+    assert_ne!(back, gone, "back with the id it had");
+    until(&mut queue, &mut desk, |desk| {
+        desk.task_titles() == ["again"]
+    });
+    assert_ne!(
+        desk.task("again").expect("announced").handle,
+        handle,
+        "announced on the handle that was closed"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// #102: with a person at the seat, a window mapped again takes the
+/// keyboard, as a new window does, and the window that had it is told it no
+/// longer is in use.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_mapped_again_takes_the_keyboard_as_a_new_window_does() {
+    let session = seated("unmap-again-keyboard");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    let ear = desk.bind_keyboard(&globals, &qh);
+    opened(&session, &mut desk, &mut queue, &qh, "below");
+    let gone = opened(&session, &mut desk, &mut queue, &qh, "again");
+    let (below, again) = (
+        desk.windows[0].wl_surface().id(),
+        desk.windows[1].wl_surface().id(),
+    );
+    unmapped(&session, &mut desk, &mut queue, 1, gone);
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&below)
+    });
+
+    desk.windows[1].commit();
+    until(&mut queue, &mut desk, |desk| {
+        heard(&ear).entered.as_ref() == Some(&again)
+            && desk
+                .task("again")
+                .is_some_and(|task| task.is(State::Activated))
+    });
+    assert_eq!(desk.activations_of(1).last(), Some(&true));
+    assert_eq!(
+        desk.activations_of(0).last(),
+        Some(&false),
+        "the window below was not told it is no longer in use"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// #102: the window is back from its first picture and not before. A
+/// client may commit with nothing in it for reasons of its own, as this one
+/// does, answering its configure with nothing drawn: on screen then, the
+/// window would again be a frame around nothing, in the taskbar.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_asked_for_again_is_not_back_until_it_draws() {
+    const BLANK: u32 = 0xff20_2020;
+    let session = session("unmap-again-blank");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.open_blank(&qh, "blank");
+    until(&mut queue, &mut desk, |desk| desk.blank_configured >= 1);
+    let surface = desk.blank[0].wl_surface().clone();
+    desk.paint(&surface, WINDOW, BLANK);
+    surface.commit();
+    until(&mut queue, &mut desk, |_| {
+        titled(&session.facts.read(), "blank").is_some_and(|window| window.mapped)
+    });
+    let gone = titled(&session.facts.read(), "blank")
+        .expect("waited for")
+        .id;
+    surface.attach(None, 0, 0);
+    surface.commit();
+    queue.roundtrip(&mut desk).expect("the commit taken in");
+    session.wait_for(|facts| facts.surface(gone).is_none());
+    let answered = desk.blank_configured;
+
+    desk.blank[0].commit();
+    until(&mut queue, &mut desk, |desk| {
+        desk.blank_configured > answered
+    });
+    queue
+        .roundtrip(&mut desk)
+        .expect("the empty answer taken in");
+    queue.roundtrip(&mut desk).expect("the taskbar told");
+    assert!(
+        titled(&session.facts.read(), "blank").is_none(),
+        "back before it drew"
+    );
+    assert!(
+        desk.task_titles().is_empty(),
+        "in the taskbar before it drew"
+    );
+
+    desk.paint(&surface, WINDOW, BLANK);
+    surface.commit();
+    until(&mut queue, &mut desk, |desk| {
+        titled(&session.facts.read(), "blank").is_some_and(|window| window.mapped)
+            && desk.task_titles() == ["blank"]
+    });
+
+    session.stop((desk, queue));
+}
+
+/// #102: a window maximized when its client unmapped it comes back as a new
+/// window does, at the size it draws: whatever perspicax told it before is
+/// discarded with the unmapping.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_maximized_when_its_client_unmapped_it_comes_back_unmaximized() {
+    let session = seated("unmap-maximized");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let gone = opened(&session, &mut desk, &mut queue, &qh, "max");
+    session.perform(Action::ToggleMaximize);
+    until(&mut queue, &mut desk, |desk| {
+        configured_as(desk, 0)
+            .last()
+            .is_some_and(|configured| configured.maximized)
+    });
+    let told = unmapped(&session, &mut desk, &mut queue, 0, gone);
+
+    desk.windows[0].commit();
+    until(&mut queue, &mut desk, |desk| configures(desk, 0) > told);
+    let answer = configured_as(&desk, 0)[told];
+    assert!(
+        !answer.maximized && answer.size.is_none(),
+        "told to be maximized again: {answer:?}"
+    );
+    until(&mut queue, &mut desk, |_| {
+        titled(&session.facts.read(), "max").is_some_and(|window| window.mapped)
+    });
+    let facts = session.facts.read();
+    let back = titled(&facts, "max").expect("waited for");
+    assert_eq!(
+        back.geometry.size(),
+        Rect::new(0.0, 0.0, f64::from(WINDOW.0), f64::from(WINDOW.1)).size(),
+        "not at the size it drew"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// #102: a client may ask for its window to be maximized before it maps
+/// it, and a window it unmapped is no different. Asked while the window is
+/// away, it is maximized once it is back, with a person at the seat; the
+/// configure that maps it again is what answers the asking.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_asked_to_be_maximized_while_unmapped_is_maximized_once_back() {
+    let session = seated("unmap-asks-maximized");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let gone = opened(&session, &mut desk, &mut queue, &qh, "max");
+    let told = unmapped(&session, &mut desk, &mut queue, 0, gone);
+
+    desk.windows[0].set_maximized();
+    queue.roundtrip(&mut desk).expect("asked");
+    assert_eq!(
+        configures(&desk, 0),
+        told,
+        "answered before it was asked for"
+    );
+    desk.windows[0].commit();
+    until(&mut queue, &mut desk, |desk| {
+        configured_as(desk, 0)[told..]
+            .iter()
+            .any(|configured| configured.maximized && configured.size.is_some())
+    });
+    assert!(
+        !configured_as(&desk, 0)[told].maximized,
+        "maximized before it was back"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// #102: a client that draws in a window it unmapped without asking for it
+/// first is answered all the same: the window is back, and configured.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_drawn_again_without_asking_is_back_and_configured() {
+    let session = session("unmap-draws-again");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let gone = opened(&session, &mut desk, &mut queue, &qh, "eager");
+    let told = unmapped(&session, &mut desk, &mut queue, 0, gone);
+
+    let surface = desk.windows[0].wl_surface().clone();
+    desk.paint(&surface, WINDOW, 0xffff_ffff);
+    surface.commit();
+    until(&mut queue, &mut desk, |desk| {
+        configures(desk, 0) > told
+            && titled(&session.facts.read(), "eager")
+                .is_some_and(|window| window.mapped && window.id != gone)
+    });
+
+    session.stop((desk, queue));
+}
+
+/// #102: a window that asked to be told when it may draw, as GTK does with
+/// every picture, and was unmapped before it was told. It is told all the
+/// same, so the configure that answers its asking again is drawn, and the
+/// window comes back: perspicax told only the windows in the space.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_waiting_to_draw_when_unmapped_is_told_it_may_and_comes_back() {
+    let session = session("unmap-patient");
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_patient(&qh, "patient", "patient");
+    until(&mut queue, &mut desk, |_| {
+        titled(&session.facts.read(), "patient").is_some_and(|window| window.mapped)
+    });
+    let gone = titled(&session.facts.read(), "patient")
+        .expect("waited for")
+        .id;
+    let surface = desk.windows[0].wl_surface().clone();
+    surface.attach(None, 0, 0);
+    desk.ask_frame(&qh, &surface);
+    queue.roundtrip(&mut desk).expect("the commit taken in");
+    session.wait_for(|facts| facts.surface(gone).is_none());
+
+    desk.windows[0].commit();
+    until(&mut queue, &mut desk, |_| {
+        titled(&session.facts.read(), "patient").is_some_and(|window| window.mapped)
+    });
+
+    session.stop((desk, queue));
+}
+
+/// #102: a window whose frame perspicax draws comes back with its titlebar
+/// on screen. Placed at the corner of a monitor too small to cascade on, a
+/// new window has it fitted when it says who draws its frame. One mapped
+/// again said so long before, and is fitted as it is mapped.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_framed_window_mapped_again_has_its_titlebar_on_screen() {
+    let session = Session::start("unmap-framed", Backend::headless((100, 100)));
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_framed(&qh, "framed");
+    let framed = |facts: &HostFacts| {
+        titled(facts, "framed")
+            .filter(|window| window.mapped && !window.frame.is_empty())
+            .map(|window| (window.id, window.frame.clone()))
+    };
+    until(&mut queue, &mut desk, |_| {
+        framed(&session.facts.read()).is_some()
+    });
+    let (gone, frame) = framed(&session.facts.read()).expect("waited for");
+    assert!(frame.iter().all(|strip| strip.y0 >= 0.0), "{frame:?}");
+    unmapped(&session, &mut desk, &mut queue, 0, gone);
+
+    desk.windows[0].commit();
+    until(&mut queue, &mut desk, |_| {
+        framed(&session.facts.read()).is_some_and(|(id, _)| id != gone)
+    });
+    let (_, frame) = framed(&session.facts.read()).expect("waited for");
+    assert!(
+        frame.iter().all(|strip| strip.y0 >= 0.0),
+        "its titlebar above the screen: {frame:?}"
+    );
 
     session.stop((desk, queue));
 }

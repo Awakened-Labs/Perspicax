@@ -8,9 +8,18 @@
 //!
 //! So to everyone but its client, an unmapped window has closed: it is off
 //! the screen, out of the taskbars and the facts, its menus are dismissed,
-//! and the keyboard moves on from it. Its toplevel waits here, told nothing,
-//! until its client asks for it again. An X11 window its client withdraws is
-//! forgotten the same way (`crate::xwayland`).
+//! and the keyboard moves on from it. Its toplevel waits here, told nothing
+//! but that it may draw, until its client asks for it again.
+//!
+//! The asking is a new window's: a commit with nothing in it, the configure
+//! a new window is sent in answer, then a picture. The window is on screen
+//! again from that first picture, and not before, as a new window: placed,
+//! given the keyboard, announced to the taskbars, and with an id nothing has
+//! seen, so nothing an agent learned of it before is taken for what it is
+//! now. A hidden client may commit for reasons of its own, and on screen
+//! before it drew, the window would again be a frame around nothing. An X11
+//! window its client withdraws and maps again goes and comes back the same
+//! way (`crate::xwayland`).
 
 use perspicax_node::SurfaceId;
 use smithay::{
@@ -19,11 +28,16 @@ use smithay::{
     wayland::{seat::WaylandFocus as _, shell::xdg::ToplevelSurface},
 };
 
-use crate::{framed::Framed, state::Compositor};
+use super::Fill;
+use crate::{damage::Buffer, framed::Framed, state::Compositor};
 
 /// A window its client unmapped, waiting to be asked for again.
 pub(crate) struct Withdrawn {
     pub(crate) toplevel: ToplevelSurface,
+    /// Maximized or fullscreen, if its client asked for that while it
+    /// waited, as a client may ask before it maps: done once it is on screen
+    /// again, with a person at the seat.
+    pub(crate) wants: Option<Fill>,
 }
 
 impl Compositor {
@@ -69,7 +83,10 @@ impl Compositor {
             pending.fullscreen_output = None;
         });
         toplevel.reset_initial_configure_sent();
-        self.withdrawn.push(Withdrawn { toplevel });
+        self.withdrawn.push(Withdrawn {
+            toplevel,
+            wants: None,
+        });
         // The keyboard moves on, if it was this window's, as it does when one
         // closes. Headless it stays where it is, as it does when an X11
         // window is withdrawn: nothing asked for it to move.
@@ -81,11 +98,48 @@ impl Compositor {
         tracing::info!(surface = id.0, "toplevel unmapped by its client");
     }
 
+    /// A commit from a window its client unmapped: its client asking for it
+    /// again, or drawing in it. Each commit before the first picture is
+    /// answered, if it is still owed, with the configure a new window is
+    /// sent, and the first picture puts the window back on screen as a new
+    /// one, filled as it asked to be while it waited. A client that draws
+    /// without asking first is configured all the same.
+    pub(crate) fn map_again(&mut self, surface: &WlSurface, own: Buffer) {
+        let Some(at) = self
+            .withdrawn
+            .iter()
+            .position(|withdrawn| withdrawn.toplevel.wl_surface() == surface)
+        else {
+            return;
+        };
+        let toplevel = &self.withdrawn[at].toplevel;
+        if !toplevel.is_initial_configure_sent() {
+            Self::configure_new(toplevel);
+        }
+        if !matches!(own, Buffer::New(_)) {
+            return;
+        }
+        let Withdrawn { toplevel, wants } = self.withdrawn.remove(at);
+        let window = self.open_toplevel(toplevel);
+        if let Some(fill) = wants
+            && self.backend.has_person()
+        {
+            self.fill(&window, fill, None);
+        }
+    }
+
     /// Whether `surface` is that of a window its client unmapped.
     pub(crate) fn is_withdrawn(&self, surface: &WlSurface) -> bool {
         self.withdrawn
             .iter()
             .any(|withdrawn| withdrawn.toplevel.wl_surface() == surface)
+    }
+
+    /// The window its client unmapped whose surface is `surface`.
+    pub(crate) fn withdrawn_mut(&mut self, surface: &WlSurface) -> Option<&mut Withdrawn> {
+        self.withdrawn
+            .iter_mut()
+            .find(|withdrawn| withdrawn.toplevel.wl_surface() == surface)
     }
 
     /// Whether the menu that holds the keyboard and pointer, if one does,

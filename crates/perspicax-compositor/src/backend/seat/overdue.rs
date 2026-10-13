@@ -7,7 +7,8 @@
 //! Chromium and games wait for the word with no limit. So once a second,
 //! every window that has waited that long is told anyway, as niri,
 //! cosmic-comp and anvil do: a parked window draws a frame a second, and no
-//! window waits forever, whatever kept it waiting.
+//! window waits forever, whatever kept it waiting. Nor does one its client
+//! unmapped (see `shell::withdrawn`).
 //!
 //! A window on screen should never need this, since its monitor tells it as
 //! it is drawn. One that did is named in the log, at debug: something kept
@@ -16,6 +17,7 @@
 use std::time::Duration;
 
 use smithay::{
+    desktop::utils::send_frames_surface_tree,
     reexports::calloop::{
         LoopHandle,
         timer::{TimeoutAction, Timer},
@@ -70,6 +72,17 @@ fn release(state: &mut Compositor) {
     }
     for window in &state.parked {
         window.send_frame(&output, now, Some(OVERDUE), |_, _| None);
+    }
+    // And one its client unmapped, which may wait for the word before it
+    // asks for its window again.
+    for withdrawn in &state.withdrawn {
+        send_frames_surface_tree(
+            withdrawn.toplevel.wl_surface(),
+            &output,
+            now,
+            Some(OVERDUE),
+            |_, _| None,
+        );
     }
 }
 

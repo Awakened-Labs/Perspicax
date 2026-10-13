@@ -962,6 +962,20 @@ impl Desk {
         self.windows.push(window);
     }
 
+    /// Open a window, drawn white, that asks for its frame to be drawn for
+    /// it, as Qt and foot do.
+    pub fn open_framed(&mut self, qh: &QueueHandle<Self>, title: &str) {
+        self.colours.push(0xffff_ffff);
+        let surface = self.compositor.create_surface(qh);
+        let window = self
+            .xdg
+            .create_window(surface, WindowDecorations::RequestServer, qh);
+        window.set_title(title);
+        window.set_app_id(title);
+        window.commit();
+        self.windows.push(window);
+    }
+
     /// Open a window that draws as GTK's do: it asks for a frame callback
     /// with every picture, and draws nothing more, a configure included,
     /// until that callback comes back. Left waiting, it stays as it was, which
