@@ -261,6 +261,12 @@ impl Compositor {
         let area = self.space.output_geometry(output)?;
         let mut zone = layer_map_for_output(output).non_exclusive_zone();
         zone.loc += area.loc;
+        // Smithay takes each panel's room and margin from the zone by plain
+        // subtraction, so panels asking for more than the monitor has leave
+        // it with a negative side, which a `Size` built from it asserts
+        // against in a debug build (#106). Nothing is left instead.
+        zone.size.w = zone.size.w.max(0);
+        zone.size.h = zone.size.h.max(0);
         Some(zone)
     }
 

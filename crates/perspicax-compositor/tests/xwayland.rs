@@ -31,10 +31,10 @@ use common::{Session, until};
 use perspicax_compositor::{Backend, Command, Config, Error, Facts, Requests, Stop};
 use perspicax_index::{HostFacts, SurfaceFacts, judge};
 use perspicax_node::{Origin, Rect, Visibility, X11Basis};
-use perspicax_policy::Action;
+use perspicax_policy::{Action, Button, Mods};
 use x11rb::{
     connection::Connection as _,
-    properties::{WmHints, WmHintsState},
+    properties::{WmHints, WmHintsState, WmSizeHints},
     protocol::{
         Event,
         randr::ConnectionExt as _,
@@ -463,6 +463,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE_HIDDEN,
         _NET_WM_STATE_FOCUSED,
         _NET_ACTIVE_WINDOW,
+        _NET_WM_MOVERESIZE,
     }
 }
 
@@ -1963,6 +1964,87 @@ fn an_x11_window_on_a_workspace_not_showing_asking_to_be_normal_waits_there() {
 }
 
 /// One 1280 by 1024 monitor with two workspaces side by side.
+/// Issue #106: an X client's `WM_NORMAL_HINTS` may say its window is at
+/// least, or at most, a negative size, and smithay builds a `Size` of the
+/// hints as they are, which a debug build asserts against. A person resizing
+/// such a window resizes it as one that gave no limits.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_whose_size_hints_are_negative_resizes_as_one_with_none() {
+    let x11 = X11::start(
+        "x11-negative-hints",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let window = x11.create("hinted", &[]);
+    let mut hints = WmSizeHints::new();
+    hints.min_size = Some((-1, -1));
+    hints.max_size = Some((-5, -5));
+    hints
+        .set_normal_hints(&x11.x, window)
+        .expect("WM_NORMAL_HINTS")
+        .check()
+        .expect("WM_NORMAL_HINTS set");
+    x11.x
+        .change_window_attributes(
+            window,
+            &ChangeWindowAttributesAux::new()
+                .event_mask(EventMask::PROPERTY_CHANGE | EventMask::BUTTON_PRESS),
+        )
+        .expect("change_window_attributes")
+        .check()
+        .expect("the window's presses");
+    x11.x.map_window(window).expect("map_window");
+    x11.x.flush().expect("flush");
+    let hinted = x11
+        .surface_where("hinted", |surface| surface.mapped)
+        .expect("mapped");
+    let (x0, y0, x1, _) = rect_of(&hinted);
+
+    // The person's button down on the window, and once the X client has
+    // seen it, a request to be resized from its bottom right corner, as a
+    // client drawing its own frame asks.
+    x11.drain();
+    x11.session.command(Command::Press {
+        at: (x0 as i32 + 20, y0 as i32 + 20),
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    assert!(
+        eventually(Duration::from_secs(5), || {
+            matches!(x11.x.poll_for_event(), Ok(Some(Event::ButtonPress(_)))).then_some(())
+        })
+        .is_some(),
+        "the X client never saw the press"
+    );
+    let bottom_right = 4;
+    x11.ask(
+        window,
+        x11.atoms._NET_WM_MOVERESIZE,
+        [x0 as u32 + 20, y0 as u32 + 20, bottom_right, 1, 1],
+    );
+
+    // Pulled out a little at a time until the resize has begun: the window
+    // grows, with no limit to stop it.
+    let grown = eventually(Duration::from_secs(10), || {
+        x11.session.command(Command::Motion { by: (8, 6) });
+        thread::sleep(Duration::from_millis(50));
+        let facts = x11.facts();
+        let hinted = facts
+            .surfaces()
+            .iter()
+            .find(|surface| surface.title.as_deref() == Some("hinted"))?;
+        (rect_of(hinted).2 > x1 + 30.0).then_some(())
+    });
+    x11.session.command(Command::Release {
+        button: Button::Left,
+    });
+    assert!(grown.is_some(), "the window never grew: {:?}", x11.facts());
+    assert!(!x11.session.ended(), "the compositor is still running");
+
+    x11.stop();
+}
+
 fn two_workspaces() -> Backend {
     Backend::Headless {
         outputs: vec![perspicax_compositor::Virtual::numbered(1, (1280, 1024))],

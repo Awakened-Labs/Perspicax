@@ -34,7 +34,8 @@
 //! # When to delete this
 //!
 //! Each check goes once a smithay release carries its own, and the
-//! `delegate_*!` macro its section stands in for comes back in its place.
+//! `delegate_*!` macro its section stands in for comes back in its place
+//! (#155).
 //! Smithay master has the region, geometry and min/max checks. The damage
 //! and parent size checks are in a pull request (Smithay/smithay#2200), and
 //! so are the pool's and the dmabuf's (#2197); the layer's is in none.
