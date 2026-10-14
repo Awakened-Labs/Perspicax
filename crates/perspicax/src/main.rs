@@ -158,6 +158,11 @@ struct Cli {
     /// fds 3 and 4 inside `dbus-run-session` instead, as the README shows, or
     /// use `--mcp-socket`.
     ///
+    /// Nor may another process running as you take the wire: perspicax keeps
+    /// them all out of itself, so none can reopen the wire through `/proc`,
+    /// take it with `pidfd_getfd`, or attach to perspicax with ptrace. So it
+    /// leaves no core dump, and looking at its descriptors takes root.
+    ///
     /// Headless, the run ends when the client does: an agent-driven compositor
     /// with no agent left has nothing to host, and it exits non-zero if the
     /// agent interface failed rather than ended. On a seat the session is the
@@ -218,6 +223,10 @@ enum Command {
     /// Ends when the session closes the connection. The client closing stdin
     /// is passed on as the end of what it will say, so its conversation ends
     /// and the next agent may connect.
+    ///
+    /// Like `--mcp`, it keeps every other process running as you out of
+    /// itself, so none can reopen or take the wire through it, or attach to
+    /// it with ptrace.
     Attach {
         /// The socket, instead of the session's own in `$PERSPICAX_MCP_SOCKET`.
         #[arg(value_name = "PATH")]

@@ -13,6 +13,11 @@
 //! its conversation ends and the desktop is free for the next one; answers to
 //! what it had already asked still come back. The session closing the
 //! connection ends this process, so the client sees its server go.
+//!
+//! It keeps every other process running as the user out of itself, as `--mcp`
+//! does (issue #118): the agent's wire is on its stdin and stdout as much as
+//! on `--mcp`'s, and under `ssh host perspicax attach` they are the only ends
+//! of it a program on this machine could reach.
 
 use std::{
     io::{self, Read, Write},
@@ -24,7 +29,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::session::AGENT_SOCKET;
+use crate::{session::AGENT_SOCKET, wire};
 
 /// The socket to attach to: the one named, or else the session's own.
 ///
@@ -61,8 +66,10 @@ pub fn socket_path(
 ///
 /// # Errors
 ///
-/// When the socket will not answer, or the wire breaks on this side.
+/// When other processes cannot be kept out of this one, the socket will not
+/// answer, or the wire breaks on this side.
 pub fn attach(path: &Path) -> Result<()> {
+    wire::keep_others_out().context("could not keep other processes out of this one")?;
     let stream = UnixStream::connect(path)
         .with_context(|| format!("could not attach to {}", path.display()))?;
     bridge(stream, io::stdin(), io::stdout())
