@@ -757,12 +757,14 @@ mod tests {
             .spawn_in(&["sleep", "30"], Some(&scratch.0))
             .expect("sleep starts");
         let pid = child.id();
-        // Read once it is there: spawning returns as the exec takes, a moment
-        // before the new program's arguments can be read.
+        let asked = b"sleep\x0030\x00";
+        // Read once the new program is there. Spawning can return before the
+        // exec is done: for a moment the child's command line is still this
+        // process's, then it is empty until the new arguments are copied in.
         let deadline = Instant::now() + Duration::from_secs(5);
         let said = loop {
             let said = fs::read(format!("/proc/{pid}/cmdline")).expect("its command line");
-            if !said.is_empty() || Instant::now() >= deadline {
+            if said == asked || Instant::now() >= deadline {
                 break said;
             }
             thread::sleep(Duration::from_millis(10));
@@ -771,7 +773,7 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
 
-        assert_eq!(said, b"sleep\x0030\x00", "as a shell would name it");
+        assert_eq!(said, asked, "as a shell would name it");
         assert_eq!(folder, scratch.0);
     }
 }
