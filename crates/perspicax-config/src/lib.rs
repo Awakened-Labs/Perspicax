@@ -38,9 +38,9 @@ use std::{
 };
 
 use perspicax_policy::{
-    Access, Action, Bindings, Chord, Context, Decorations, Direction, Drag, Flipping, Focus,
-    FocusModel, Gesture, Grid, Keysym, Mods, MouseBindings, MouseChord, OPAQUE, Opacity, Place,
-    Program, Protocol, Resistance, Rule, Shape, Side, Snapping, Switching, Towards,
+    Access, Action, Bindings, Chord, Colour, Context, Decorations, Direction, Drag, Flipping,
+    Focus, FocusModel, Gesture, Grid, Keysym, Mods, MouseBindings, MouseChord, OPAQUE, Opacity,
+    Place, Program, Protocol, Resistance, Rule, Shape, Side, Snapping, Switching, Towards,
 };
 use serde::Deserialize;
 
@@ -834,6 +834,17 @@ struct RawDecorations {
     border: Option<i32>,
     focused: Option<String>,
     unfocused: Option<String>,
+    agent: Option<RawAgentLook>,
+}
+
+/// The `[decorations.agent]` table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawAgentLook {
+    focused: Option<String>,
+    unfocused: Option<String>,
+    outline: Option<i32>,
+    outline_colour: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -1432,6 +1443,26 @@ impl RawDecorations {
             decorations.border = pixels("border", border, 0..=32)?;
         }
         // Its colours are the theme's: see `theme`.
+        if let Some(agent) = self.agent {
+            let look = &mut decorations.agent;
+            if let Some(outline) = agent.outline {
+                look.outline = pixels("agent.outline", outline, 0..=8)?;
+            }
+            let written = [
+                ("focused", agent.focused, &mut look.focused),
+                ("unfocused", agent.unfocused, &mut look.unfocused),
+                (
+                    "outline-colour",
+                    agent.outline_colour,
+                    &mut look.outline_colour,
+                ),
+            ];
+            for (key, text, colour) in written {
+                if let Some(text) = text {
+                    *colour = opaque_colour(&format!("decorations.agent.{key}"), &text)?;
+                }
+            }
+        }
         Ok(decorations)
     }
 }
@@ -1555,6 +1586,25 @@ fn theme(written: Option<RawTheme>, decorations: Option<&RawDecorations>) -> Res
 
 /// A colour written for `role` at `at`: opaque, unless the role is one of the
 /// few drawn see-through.
+/// A colour that is drawn opaque, at `at`: one of the agent's marks, which
+/// the compositor says cover what is under them.
+fn opaque_colour(at: &str, text: &str) -> Result<Colour, Error> {
+    match Rgba::parse(text) {
+        Some(colour) if colour.is_opaque() => Ok(colour.colour()),
+        Some(_) => Err(invalid(
+            at.to_owned(),
+            format!(
+                "{text:?} is see-through, and this is drawn opaque so the compositor can say \
+                 what it covers; write it as \"#rrggbb\""
+            ),
+        )),
+        None => Err(invalid(
+            at.to_owned(),
+            format!("{text:?} is not a colour; write one as \"#rrggbb\""),
+        )),
+    }
+}
+
 fn palette_colour(at: &str, role: Role, text: &str) -> Result<Rgba, Error> {
     let colour = Rgba::parse(text).ok_or_else(|| {
         let forms = if role.takes_alpha() {
@@ -1902,7 +1952,7 @@ fn invalid(key: String, reason: String) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use perspicax_policy::{Colour, Palette};
+    use perspicax_policy::{AgentLook, Palette};
 
     use super::*;
 
@@ -2793,6 +2843,43 @@ mod tests {
         assert_eq!((decorations.title, decorations.border), (30, 0));
         assert_eq!(decorations.focused, Colour::rgb(0xff, 0x88, 0x00));
         assert_eq!(decorations.unfocused, Decorations::default().unfocused);
+    }
+
+    #[test]
+    fn the_agents_marks_are_configured_under_decorations() {
+        let look = Config::profile(Profile::Classic, SEAT).decorations.agent;
+        assert_eq!(look, AgentLook::default());
+        assert_eq!(look.outline, 3, "on by default, for the windows it marks");
+        let config = parse(
+            "[decorations.agent]\nfocused = \"#102030\"\noutline = 0\n\
+             outline-colour = \"#ff0000\"",
+            SEAT,
+        )
+        .unwrap();
+        let look = config.decorations.agent;
+        assert_eq!(look.focused, Colour::rgb(0x10, 0x20, 0x30));
+        assert_eq!(look.unfocused, AgentLook::default().unfocused);
+        assert_eq!(look.outline, 0, "0 is none");
+        assert_eq!(look.outline_colour, Colour::rgb(0xff, 0, 0));
+    }
+
+    #[test]
+    fn an_agent_mark_that_cannot_be_drawn_is_refused_by_name() {
+        for (text, key) in [
+            ("outline = 9", "decorations.agent.outline"),
+            ("outline = -1", "decorations.agent.outline"),
+            ("focused = \"purple\"", "decorations.agent.focused"),
+            (
+                "outline-colour = \"#b37feb80\"",
+                "decorations.agent.outline-colour",
+            ),
+        ] {
+            match parse(&format!("[decorations.agent]\n{text}"), SEAT).unwrap_err() {
+                Error::Invalid { key: at, .. } => assert_eq!(at, key, "{text}"),
+                other => panic!("{text}: {other}"),
+            }
+        }
+        assert!(parse("[decorations.agent]\nglow = 1", SEAT).is_err());
     }
 
     #[test]

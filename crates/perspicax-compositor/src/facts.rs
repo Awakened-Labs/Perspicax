@@ -507,6 +507,16 @@ impl Compositor {
         self.origin_of_surface(toplevel.wl_surface())
     }
 
+    /// Who owns the client that drew this window, X11's or not: what its
+    /// facts say.
+    pub(crate) fn window_origin(&self, window: &Framed) -> Origin {
+        #[cfg(feature = "xwayland")]
+        if window.x11_surface().is_some() {
+            return Self::x11_origin(window);
+        }
+        self.origin_of(window)
+    }
+
     /// Who owns the client that drew this surface.
     fn origin_of_surface(&self, surface: &WlSurface) -> Origin {
         self.display

@@ -19,6 +19,7 @@ use common::{Session, drawn_in, until};
 use perspicax_compositor::{ActError, Backend, Host};
 use perspicax_index::{HostFacts, Shot, ShotTarget};
 use perspicax_node::{Rect, SurfaceId};
+use perspicax_policy::Action;
 use smithay_client_toolkit::shell::WaylandSurface;
 use wayland_client::protocol::wl_output;
 
@@ -26,6 +27,8 @@ use wayland_client::protocol::wl_output;
 const BLUE: u32 = 0xff33_6699;
 const ORANGE: u32 = 0xffee_8822;
 const MARKED: u32 = 0xff22_cc44;
+/// `[decorations.agent] outline-colour`, by default, as a picture has it.
+const OUTLINE: [u8; 4] = [0xb3, 0x7f, 0xeb, 0xff];
 
 fn rgba(argb: u32) -> [u8; 4] {
     let [b, g, r, a] = argb.to_le_bytes();
@@ -45,6 +48,92 @@ fn geometry(facts: &HostFacts, title: &str) -> (SurfaceId, Rect) {
         .find(|surface| surface.title.as_deref() == Some(title))
         .map(|surface| (surface.id, surface.geometry))
         .expect("a window of that title")
+}
+
+/// The line round a window an agent may act on is drawn in front of all
+/// the window draws, for its shadow is drawn just where the line goes. In
+/// a picture as on a monitor: what the agent is shown is what the person
+/// sees.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_granted_window_is_outlined_over_its_own_shadow() {
+    let session = Session::start("capture-outline", Backend::headless((800, 600)).granting());
+    let host = Host::new(&session.facts, &session.requests);
+    let (mut desk, mut queue, qh, _) = session.client();
+    // White to the edge of its buffer, inside a shadow 10 deep.
+    desk.open_declaring(&qh, "shadowed", Some((10, 10, 380, 280)));
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    session.wait_for(|facts| facts.surfaces().iter().any(|surface| surface.mapped));
+
+    session.perform(Action::ToggleAgent);
+    let facts = session.wait_for(|facts| {
+        facts
+            .surfaces()
+            .iter()
+            .any(|surface| surface.frame.len() == 4)
+    });
+    let (_, area) = geometry(&facts, "shadowed");
+    let shot = host.capture(ShotTarget::Output(None)).expect("a picture");
+    assert!(shot.redacted.is_empty(), "granted, so shown");
+    let (right, middle) = (area.x1, (area.y0 + area.y1) / 2.0);
+    let white = rgba(0xffff_ffff);
+    assert_eq!(pixel(&shot, right - 1.0, middle), white, "the window");
+    for over in [0.0, 1.0, 2.0] {
+        assert_eq!(
+            pixel(&shot, right + over, middle),
+            OUTLINE,
+            "the line, {over} past the window's edge, over its shadow"
+        );
+    }
+    assert_eq!(
+        pixel(&shot, right + 3.0, middle),
+        white,
+        "the shadow past it"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// Round the frame this compositor draws, where it draws one, and not
+/// through it: on the facts' word and in the picture alike.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_framed_windows_outline_goes_round_its_frame() {
+    let session = Session::start(
+        "capture-outline-framed",
+        Backend::headless((800, 600)).granting(),
+    );
+    let host = Host::new(&session.facts, &session.requests);
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_framed(&qh, "framed");
+    // Drawn again once it is told who draws its frame.
+    until(&mut queue, &mut desk, |_| {
+        session.facts.read().surfaces().iter().any(|surface| {
+            surface.title.as_deref() == Some("framed") && surface.mapped && surface.frame.len() == 4
+        })
+    });
+
+    session.perform(Action::ToggleAgent);
+    let facts = session.wait_for(|facts| {
+        facts
+            .surfaces()
+            .iter()
+            .any(|surface| surface.frame.len() == 8)
+    });
+    let (_, area) = geometry(&facts, "framed");
+    let middle = (area.x0 + area.x1) / 2.0;
+    let shot = host.capture(ShotTarget::Output(None)).expect("a picture");
+    // The default border is 2 deep below the client, and the line 3 below
+    // that.
+    for (below, outline) in [(1.0, false), (2.0, true), (4.0, true), (5.0, false)] {
+        assert_eq!(
+            pixel(&shot, middle, area.y1 + below) == OUTLINE,
+            outline,
+            "{below} below the client"
+        );
+    }
+
+    session.stop((desk, queue));
 }
 
 #[test]

@@ -272,7 +272,8 @@ pub struct SurfaceFacts {
     /// workspace, saying which tab is in front tells an agent where it went.
     pub behind_tab: Option<SurfaceId>,
     /// What the host drew around this surface, in global space: a titlebar
-    /// and a border, outside `geometry`.
+    /// and a border, outside `geometry`, and, round a window an agent may act
+    /// on where consent is by grant, the line marking it out.
     ///
     /// No client drew these pixels, so no client's opaque region can speak
     /// for them, and they are solid by construction and by decision: the
@@ -280,7 +281,7 @@ pub struct SurfaceFacts {
     /// however see-through it has them drawn (see [`Self::drawn_opacity`]).
     /// A node of another window under a titlebar is therefore covered on the
     /// host's own word, not on policy. Empty for a surface that draws its own
-    /// frame, or has none.
+    /// frame, or has none, and is not marked out.
     pub frame: Vec<Rect>,
     /// How opaque the host draws this window, in percent, when the person
     /// made it less than wholly so (`[opacity]`); `None` when it is opaque.

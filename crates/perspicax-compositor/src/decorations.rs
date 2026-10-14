@@ -18,11 +18,17 @@
 //! Where a frame goes is pure policy (`perspicax_policy::frame`). Its pixels
 //! are drawn by [`crate::framed::Framed`] on the seat. Its facts go out with
 //! each window's, so the index can see that a titlebar covers what is under it.
+//!
+//! Where a person has to agree to what an agent acts on, a window it may act
+//! on is marked out ([`Compositor::marked`]): its titlebar in the agent's
+//! colours, and a line round it, outside its frame, whoever draws the frame.
+//! The line is drawn wherever the window is, in a picture too, and goes out
+//! with the frame's facts, for it covers what is under it as a titlebar does.
 
 use std::cell::Cell;
 
 use perspicax_node::Rect as NodeRect;
-use perspicax_policy::{Decorations, Insets, Look, fit, frame_rects};
+use perspicax_policy::{Decorations, Insets, Look, fit, frame_rects, outline_rects, outset};
 use smithay::{
     reexports::{
         wayland_protocols::xdg::{
@@ -181,9 +187,40 @@ impl Compositor {
         crate::facts::title(window.toplevel()?.wl_surface())
     }
 
+    /// Whether `window` is marked out as one an agent may act on: where
+    /// consent is by grant, and a grant covers the process that drew it.
+    pub(crate) fn marked(&self, window: &Framed) -> bool {
+        self.grants.marks(&self.window_origin(window))
+    }
+
+    /// How wide the line round `window` is: `[decorations.agent] outline`
+    /// for a window [`marked`](Self::marked), and none for any other, or for
+    /// one that is fullscreen, which nothing is drawn round.
+    ///
+    /// What the line is drawn from and what its facts say both ask here,
+    /// so a window covers no more and no less than it is drawn with.
+    pub(crate) fn outline_of(&self, window: &Framed) -> i32 {
+        if Self::look(window) == Look::Fullscreen || !self.marked(window) {
+            0
+        } else {
+            self.backend.decorations().agent.outline
+        }
+    }
+
+    /// Tell every window whether it is marked out as one an agent may act
+    /// on, for drawing it: on a monitor, by [`Self::dress_frames`], and in a
+    /// picture, which headless is the only drawing there is.
+    #[cfg(any(feature = "seat", feature = "capture"))]
+    pub(crate) fn dress_marks(&self) {
+        let colour = self.backend.decorations().agent.outline_colour;
+        for window in self.space.elements() {
+            window.mark(self.insets(window), self.outline_of(window), colour);
+        }
+    }
+
     /// Tell every window on screen how it and its frame look, for drawing
-    /// them: how far the frame reaches, whether it is the window in use, and
-    /// how opaque the window is.
+    /// them: how far the frame reaches, whether it is the window in use,
+    /// whether an agent may act on it, and how opaque the window is.
     ///
     /// In use is where the keys go, through any menu the window opened: a
     /// window whose own menu is open still looks in use, lit and undimmed.
@@ -192,11 +229,11 @@ impl Compositor {
         let decorations = self.backend.decorations();
         let in_use = self.window_in_use();
         for window in self.space.elements() {
-            let (colour, ink) = if in_use.is_some() && crate::shell::id_of(window) == in_use {
-                (decorations.focused, decorations.focused_ink)
-            } else {
-                (decorations.unfocused, decorations.unfocused_ink)
-            };
+            let (colour, ink) = perspicax_policy::frame_colours(
+                &decorations,
+                in_use.is_some() && crate::shell::id_of(window) == in_use,
+                self.marked(window),
+            );
             let insets = self.insets(window);
             let size = crate::shell::extent_size(window);
             let client = perspicax_policy::Rect::new(0, 0, size.w, size.h);
@@ -209,6 +246,7 @@ impl Compositor {
             window.wear(insets, grip, colour, ink, title_at);
             window.fade(crate::shell::alpha(self.opacity_of(window, in_use)));
         }
+        self.dress_marks();
     }
 
     /// What part of `window`'s frame the pointer at `at` is on, if any.
@@ -230,15 +268,21 @@ impl Compositor {
         )
     }
 
-    /// The frame's strips in global space, for the facts: nothing for a
-    /// window that is not on screen, or not framed by us.
+    /// What this compositor draws round `window`, in global space, for the
+    /// facts: its frame's strips, if it frames it, and the line round it, if
+    /// an agent may act on it.
     pub(crate) fn frame_facts(
         &self,
         window: &Framed,
         client: Rectangle<i32, Logical>,
     ) -> Vec<NodeRect> {
-        frame_rects(rect(client), self.insets(window))
+        let (client, insets) = (rect(client), self.insets(window));
+        frame_rects(client, insets)
             .into_iter()
+            .chain(outline_rects(
+                outset(client, insets),
+                self.outline_of(window),
+            ))
             .map(|strip| {
                 NodeRect::new(
                     f64::from(strip.x),

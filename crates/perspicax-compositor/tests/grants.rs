@@ -20,7 +20,8 @@ use std::{
 
 use common::{Session, until};
 use perspicax_compositor::{Backend, Host, LaunchError};
-use perspicax_index::{Consent, HostFacts, SurfaceFacts};
+use perspicax_index::{Consent, HostFacts, SurfaceFacts, judge};
+use perspicax_node::{Rect, Visibility};
 use perspicax_policy::{Action, Program, Rule};
 
 /// Set, to the compositor's socket, for the copy of this binary that
@@ -442,4 +443,129 @@ fn a_desk_that_does_not_consent_by_grant_consents_to_everyone_whatever_it_spawns
     let facts = session.wait_for(|facts| facts.consent() != &Consent::Nobody);
     assert_eq!(facts.consent(), &Consent::Everyone);
     session.stop(());
+}
+
+/// Whether the window titled `title` is marked out, as its facts say: a
+/// window that draws its own frame has strips round it only then.
+fn outlined(facts: &HostFacts, title: &str) -> bool {
+    titled(facts, title).is_some_and(|window| window.mapped && window.frame.len() == 4)
+}
+
+/// One window of this process's, `title`, on `session`, mapped.
+fn one_window(
+    session: &Session,
+    title: &str,
+) -> (
+    common::Desk,
+    wayland_client::EventQueue<common::Desk>,
+    HostFacts,
+) {
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_window(&qh, title, title);
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    let facts = session.wait_for(|facts| titled(facts, title).is_some_and(|window| window.mapped));
+    (desk, queue, facts)
+}
+
+/// The line round a granted window is the compositor's own drawing, so it
+/// covers what is under it on the compositor's word, as a titlebar does:
+/// the edge of the window behind, which a person can no longer see.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_granted_windows_outline_covers_its_neighbour_on_the_hosts_word() {
+    let session = granting("mark-covers");
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_window(&qh, "below", "below");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    desk.open_window(&qh, "above", "above");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 2);
+    let facts = session.wait_for(|facts| {
+        ["below", "above"]
+            .iter()
+            .all(|title| titled(facts, title).is_some_and(|window| window.mapped))
+    });
+    let below = titled(&facts, "below").expect("mapped").clone();
+    let above = titled(&facts, "above").expect("mapped").clone();
+
+    // A node of the window behind, a pixel wide, two to the left of the
+    // one in front: where the default line, three wide, is drawn.
+    let (x, y) = (above.geometry.x0 - 2.0, above.geometry.y0 + 10.0);
+    assert!(
+        below.geometry.x0 < x - 1.0 && y + 10.0 < below.geometry.y1,
+        "the cascade leaves the window behind there: {:?}, {:?}",
+        below.geometry,
+        above.geometry
+    );
+    let (left, top) = (below.geometry.x0, below.geometry.y0);
+    let node = Rect::new(x - left, y - top, x + 1.0 - left, y + 10.0 - top);
+    assert_eq!(
+        judge(&facts, below.id, node).visibility,
+        Visibility::Visible,
+        "nothing is drawn there yet"
+    );
+
+    session.perform(Action::ToggleAgent);
+    let facts = session.wait_for(|facts| outlined(facts, "above") && outlined(facts, "below"));
+    let verdict = judge(&facts, below.id, node);
+    assert_eq!(verdict.visibility, Visibility::Occluded { by: above.id });
+    assert!(!verdict.unproven, "on the host's word");
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_revoked_window_loses_its_outline() {
+    let session = granting("mark-revoked");
+    let (desk, queue, facts) = one_window(&session, "mine");
+    assert!(!outlined(&facts, "mine"), "not granted yet");
+
+    session.perform(Action::ToggleAgent);
+    session.wait_for(|facts| outlined(facts, "mine"));
+    session.perform(Action::ToggleAgent);
+    session.wait_for(|facts| titled(facts, "mine").is_some_and(|window| window.frame.is_empty()));
+    session.stop((desk, queue));
+}
+
+/// A fullscreen window fills its monitor, and has no outside to draw a
+/// line on but the next monitor.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_fullscreen_window_is_not_outlined() {
+    // With a person at it: a desk nobody sits at fills no monitor.
+    let session = Session::start(
+        "mark-fullscreen",
+        Backend::headless((1280, 1024)).with_person().granting(),
+    );
+    let (mut desk, mut queue, _) = one_window(&session, "mine");
+    session.perform(Action::ToggleAgent);
+    session.wait_for(|facts| outlined(facts, "mine"));
+
+    desk.windows[0].set_fullscreen(None);
+    until(&mut queue, &mut desk, |desk| {
+        desk.offered == Some((1280, 1024))
+    });
+    // The client draws at the size it drew before, and is placed in the
+    // corner of the monitor it was offered.
+    let facts = session
+        .wait_for(|facts| titled(facts, "mine").is_some_and(|window| window.frame.is_empty()));
+    let mine = titled(&facts, "mine").expect("mapped");
+    assert_eq!((mine.geometry.x0, mine.geometry.y0), (0.0, 0.0));
+    assert_eq!(
+        granted(&facts),
+        Some(&[std::process::id()][..]),
+        "still granted"
+    );
+    session.stop((desk, queue));
+}
+
+/// Where consent is everyone's, every window is one an agent may act on,
+/// and a mark on every window would mark nothing out.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn nothing_is_outlined_where_consent_is_everyone() {
+    let session = Session::start("mark-everyone", Backend::headless((1280, 1024)));
+    let (desk, queue, facts) = one_window(&session, "mine");
+    assert_eq!(facts.consent(), &Consent::Everyone);
+    assert!(titled(&facts, "mine").expect("mapped").frame.is_empty());
+    session.stop((desk, queue));
 }

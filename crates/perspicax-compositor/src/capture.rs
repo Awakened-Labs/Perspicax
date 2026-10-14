@@ -138,6 +138,9 @@ mod taking {
     }
 
     pub(super) fn take(state: &mut Compositor, target: &ShotTarget) -> Result<Shot, ActError> {
+        // Headless dresses no frames, but a window an agent may act on is
+        // marked out in its picture as on a monitor.
+        state.dress_marks();
         let plan = match target {
             ShotTarget::Output(name) => plan_output(state, name.as_deref())?,
             ShotTarget::Window(id) => plan_window(state, *id)?,
@@ -163,6 +166,7 @@ mod taking {
         output: &str,
         pointer: bool,
     ) -> Result<Pixels, ActError> {
+        state.dress_marks();
         let mut plan = plan_output(state, Some(output))?;
         for placed in &mut plan.windows {
             placed.redacted = false;

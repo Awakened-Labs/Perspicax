@@ -71,6 +71,8 @@ pub struct Decorations {
     pub unfocused: Colour,
     /// Their titles and buttons.
     pub unfocused_ink: Colour,
+    /// How a window an agent may act on is marked out.
+    pub agent: AgentLook,
 }
 
 impl Default for Decorations {
@@ -83,7 +85,49 @@ impl Default for Decorations {
             focused_ink: Colour::rgb(0xff, 0xff, 0xff),
             unfocused: Colour::rgb(0x47, 0x50, 0x57),
             unfocused_ink: Colour::rgb(0xff, 0xff, 0xff),
+            agent: AgentLook::default(),
         }
+    }
+}
+
+/// How a window an agent may act on is marked out, where a person has to
+/// agree to that: the `[decorations.agent]` table. Never where consent is
+/// everyone's, which would mark every window there is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentLook {
+    /// Its titlebar with the keyboard, where this compositor draws one.
+    pub focused: Colour,
+    /// Its titlebar without it.
+    pub unfocused: Colour,
+    /// How wide a line is drawn round it, just outside its frame, or its
+    /// edge for a window that draws its own: 0 for none. Every such window
+    /// has one, for most draw their own frame.
+    pub outline: i32,
+    pub outline_colour: Colour,
+}
+
+impl Default for AgentLook {
+    fn default() -> Self {
+        Self {
+            focused: Colour::rgb(0x5a, 0x2d, 0x82),
+            unfocused: Colour::rgb(0x3b, 0x24, 0x54),
+            outline: 3,
+            outline_colour: Colour::rgb(0xb3, 0x7f, 0xeb),
+        }
+    }
+}
+
+/// What a frame is drawn in: its bar, and the title and buttons on it. A
+/// window an agent may act on (`marked`) wears the agent's colours, written
+/// in whichever of black or white reads on them.
+#[must_use]
+pub fn frame_colours(decorations: &Decorations, in_use: bool, marked: bool) -> (Colour, Colour) {
+    let agent = &decorations.agent;
+    match (marked, in_use) {
+        (true, true) => (agent.focused, agent.focused.ink()),
+        (true, false) => (agent.unfocused, agent.unfocused.ink()),
+        (false, true) => (decorations.focused, decorations.focused_ink),
+        (false, false) => (decorations.unfocused, decorations.unfocused_ink),
     }
 }
 
@@ -184,6 +228,21 @@ pub fn frame_rects(client: Rect, insets: Insets) -> Vec<Rect> {
     .into_iter()
     .filter(|strip| strip.w > 0 && strip.h > 0)
     .collect()
+}
+
+/// The rectangles a line `width` wide round `around` is drawn as, just
+/// outside it: [`frame_rects`] of a frame as wide on every side. No
+/// rectangles for a width of 0.
+#[must_use]
+pub fn outline_rects(around: Rect, width: i32) -> Vec<Rect> {
+    let width = width.max(0);
+    let even = Insets {
+        top: width,
+        left: width,
+        right: width,
+        bottom: width,
+    };
+    frame_rects(around, even)
 }
 
 /// A button on the titlebar.
@@ -624,5 +683,52 @@ mod tests {
         assert_eq!(Colour::parse("#3daee"), None);
         assert_eq!(Colour::parse("#3daeeg"), None);
         assert_eq!(Colour::parse("#ééé"), None);
+    }
+
+    #[test]
+    fn an_outline_rings_what_it_goes_round_and_covers_none_of_it() {
+        let around = Rect::new(10, 20, 100, 50);
+        let strips = outline_rects(around, 3);
+        assert_eq!(strips.len(), 4);
+        assert_eq!(
+            strips[0],
+            Rect::new(7, 17, 106, 3),
+            "the top, over both corners"
+        );
+        let area: i32 = strips.iter().map(|strip| strip.w * strip.h).sum();
+        assert_eq!(area, 106 * 56 - 100 * 50, "every pixel of the ring, once");
+        for strip in &strips {
+            assert!(!crate::intersects(*strip, around), "{strip:?}");
+        }
+        assert!(outline_rects(around, 0).is_empty(), "0 is none");
+    }
+
+    #[test]
+    fn a_marked_frame_wears_the_agents_colours_with_ink_that_reads() {
+        let decorations = Decorations {
+            agent: AgentLook {
+                unfocused: Colour::rgb(0xee, 0xee, 0xee),
+                ..AgentLook::default()
+            },
+            ..Decorations::default()
+        };
+        let agent = decorations.agent;
+        assert_eq!(
+            frame_colours(&decorations, true, true),
+            (agent.focused, Colour::rgb(0xff, 0xff, 0xff))
+        );
+        assert_eq!(
+            frame_colours(&decorations, false, true),
+            (agent.unfocused, Colour::rgb(0, 0, 0)),
+            "a light bar is written on in black"
+        );
+        assert_eq!(
+            frame_colours(&decorations, true, false),
+            (decorations.focused, decorations.focused_ink)
+        );
+        assert_eq!(
+            frame_colours(&decorations, false, false),
+            (decorations.unfocused, decorations.unfocused_ink)
+        );
     }
 }

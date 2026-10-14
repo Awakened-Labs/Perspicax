@@ -115,6 +115,13 @@ impl Grants {
         self.held.iter().any(|held| held.pid == pid)
     }
 
+    /// Whether a window `origin` drew is marked out as one an agent may act
+    /// on: where consent is by grant, and a grant covers it. Never where
+    /// consent is everyone's, which would mark every window there is.
+    pub(crate) fn marks(&self, origin: &Origin) -> bool {
+        self.by_grant && self.consent.permits(origin)
+    }
+
     /// Whether `pid` is a program an agent launched, granted yet.
     fn launched(&self, pid: u32) -> bool {
         self.held
@@ -270,8 +277,15 @@ impl Compositor {
             watch,
             under,
         });
+        self.regranted();
+    }
+
+    /// The grants changed: publish the consent they now add up to, and draw
+    /// the windows again, whose marks follow it.
+    fn regranted(&mut self) {
         self.grants.recount();
         self.publish_facts();
+        self.backend.redraw();
     }
 
     /// A watched process exited. Its watch removes itself.
@@ -298,8 +312,7 @@ impl Compositor {
             }
             tracing::info!(pid = held.pid, why = ?held.why, "no longer granted to the agent");
         }
-        self.grants.recount();
-        self.publish_facts();
+        self.regranted();
     }
 
     /// End every grant: what the person's `revoke-agent-all` does. What
@@ -314,8 +327,7 @@ impl Compositor {
             }
         }
         tracing::info!("nothing is granted to the agent any more");
-        self.grants.recount();
-        self.publish_facts();
+        self.regranted();
     }
 
     /// Grant the process that drew `window`, or take its grant back: what
@@ -444,6 +456,25 @@ mod tests {
         grants.recount();
         assert!(grants.consent().permits(&process(7)));
         assert!(!grants.consent().permits(&process(8)));
+    }
+
+    /// Everyone's consent permits every window, and marking every window
+    /// would say nothing: only a grant marks one out.
+    #[test]
+    fn a_window_is_marked_out_only_where_consent_is_by_grant() {
+        assert!(!Grants::new(false).marks(&process(7)));
+
+        let mut grants = Grants::new(true);
+        grants.held.push(Held {
+            pid: 7,
+            why: Why::Key,
+            watch: None,
+            under: None,
+        });
+        grants.recount();
+        assert!(grants.marks(&process(7)));
+        assert!(!grants.marks(&process(8)));
+        assert!(!grants.marks(&Origin::Unattributed));
     }
 
     /// The watch every grant to someone else's process is held by: told once
