@@ -2,11 +2,11 @@
 //! `wlr-screencopy-unstable-v1`, as grim speaks it.
 //!
 //! A frame of the monitor, copied into the tool's own shared memory, shows a
-//! window's colour where the window is; a region shows just that part. A
-//! buffer that is not what the frame described is a protocol error. A copy
-//! that waits for damage waits for a commit. While the session is locked
-//! every copy fails, and with `[protocols] screencopy = "off"` there is no
-//! global to ask.
+//! window's colour where the window is; a region shows just that part, and
+//! one without area fails. A buffer that is not what the frame described is
+//! a protocol error. A copy that waits for damage waits for a commit. While
+//! the session is locked every copy fails, and with `[protocols] screencopy
+//! = "off"` there is no global to ask.
 //!
 //! The pointer is in a frame that asks for it, as `grim -c` and a recorder
 //! with its cursor on do, and in no other: the client's own cursor where it
@@ -178,6 +178,26 @@ fn a_buffer_of_the_wrong_size_is_a_protocol_error() {
         queue.roundtrip(&mut desk).is_err(),
         "the compositor ends the connection"
     );
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_region_without_area_fails() {
+    let session = session("screencopy-no-area", Access::open());
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_screencopy(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| !desk.outputs_empty());
+
+    // A region turned inside out is no region, as one with a side of 0 is
+    // (#106): each fails, as one off the monitor does.
+    for region in [(10, 10, -5, -5), (10, 10, 0, 20)] {
+        let grab = desk.grab(&qh, Some(region), false);
+        until(&mut queue, &mut desk, |desk| desk.grabs[grab].failed);
+        assert!(desk.grabs[grab].offered.is_empty(), "{region:?}: no buffer");
+    }
+    assert!(!session.ended(), "the compositor is still running");
 
     session.stop((desk, queue));
 }
