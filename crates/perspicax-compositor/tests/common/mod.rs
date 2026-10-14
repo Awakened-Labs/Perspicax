@@ -1208,8 +1208,18 @@ impl Desk {
         at: (i32, i32),
         size: (u32, u32),
     ) -> Popup {
-        let positioner = self.positioner(at, size);
-        Popup::new(parent, &positioner, qh, &self.compositor, &self.xdg).expect("xdg_popup")
+        self.open_popup_by(qh, parent, &self.positioner(at, size))
+    }
+
+    /// A popup of `parent`, placed by `positioner`: [`Self::open_popup`],
+    /// with a positioner the test has shaped itself.
+    pub fn open_popup_by(
+        &self,
+        qh: &QueueHandle<Self>,
+        parent: &xdg_surface::XdgSurface,
+        positioner: &XdgPositioner,
+    ) -> Popup {
+        Popup::new(parent, positioner, qh, &self.compositor, &self.xdg).expect("xdg_popup")
     }
 
     /// A menu of `parent` that takes the keyboard and pointer until it is
@@ -1255,7 +1265,7 @@ impl Desk {
 
     /// Place a popup of `size` with its corner exactly at `at`: hung from a
     /// one-pixel anchor there, growing down and to the right.
-    fn positioner(&self, at: (i32, i32), size: (u32, u32)) -> XdgPositioner {
+    pub fn positioner(&self, at: (i32, i32), size: (u32, u32)) -> XdgPositioner {
         let positioner = XdgPositioner::new(&self.xdg).expect("xdg_positioner");
         positioner.set_size(
             i32::try_from(size.0).unwrap(),

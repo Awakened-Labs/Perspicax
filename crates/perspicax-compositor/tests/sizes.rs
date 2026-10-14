@@ -20,7 +20,7 @@ use common::{Desk, Session, refused, until};
 use perspicax_compositor::Backend;
 use perspicax_index::{HostFacts, SurfaceFacts};
 use perspicax_node::Rect;
-use smithay_client_toolkit::shell::{WaylandSurface, xdg::XdgSurface};
+use smithay_client_toolkit::shell::{WaylandSurface, wlr_layer::Layer, xdg::XdgSurface};
 use wayland_client::{EventQueue, QueueHandle};
 
 fn session(name: &str) -> Session {
@@ -182,6 +182,64 @@ fn a_negative_min_or_max_size_is_a_protocol_error() {
         assert!(!session.ended(), "the compositor is still running");
     }
 
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_negative_parent_size_is_a_protocol_error() {
+    let session = session("sizes-parent");
+
+    // A parent size of the window's own places a menu as ever.
+    let (mut desk, mut queue, qh, _) = session.client();
+    settle(&session, &mut desk, &mut queue, &qh, "w");
+    let positioner = desk.positioner((10, 10), (100, 50));
+    positioner.set_parent_size(400, 300);
+    let menu = desk.open_popup_by(&qh, desk.windows[0].xdg_surface(), &positioner);
+    until(&mut queue, &mut desk, |desk| desk.popups_configured == 1);
+
+    // One turned inside out describes no parent: `invalid_input`, as the
+    // positioner's other sizes get.
+    for (width, height) in [(-1, -1), (400, -1)] {
+        let title = format!("{width}x{height}");
+        let (mut desk, mut queue, qh, _) = session.client();
+        settle(&session, &mut desk, &mut queue, &qh, &title);
+        let positioner = desk.positioner((10, 10), (100, 50));
+        positioner.set_parent_size(width, height);
+        assert_eq!(
+            refused(&mut queue, &mut desk),
+            ("xdg_positioner".to_owned(), 0),
+            "{title}: invalid_input"
+        );
+        assert!(!session.ended(), "the compositor is still running");
+    }
+
+    session.stop((menu, desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_layer_size_past_i32_is_a_protocol_error() {
+    let session = session("sizes-layer");
+    // layer-shell's sizes are `u32`s; smithay casts them to `i32`s, so one
+    // past `i32::MAX` would come out negative.
+    let past = u32::try_from(i32::MAX).unwrap() + 1;
+    for (width, height) in [(past, 1), (0, u32::MAX)] {
+        let (mut desk, mut queue, qh, _) = session.client();
+        desk.open_strip(&qh, Layer::Top, "strip", 30, 0xff33_6699);
+        until(&mut queue, &mut desk, |desk| desk.layers_drawn == 1);
+        let (strip, ..) = &desk.layers[0];
+        strip.set_size(width, height);
+        strip.commit();
+        assert_eq!(
+            refused(&mut queue, &mut desk),
+            ("zwlr_layer_surface_v1".to_owned(), 1),
+            "{width}x{height}: invalid_size"
+        );
+        assert!(!session.ended(), "the compositor is still running");
+    }
+
+    let (desk, queue, ..) = session.client();
     session.stop((desk, queue));
 }
 

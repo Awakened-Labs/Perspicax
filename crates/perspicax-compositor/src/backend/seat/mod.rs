@@ -64,7 +64,6 @@ use smithay::{
         session::{Event as SessionEvent, Session as _, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu},
     },
-    delegate_dmabuf,
     desktop::{space::SpaceRenderElements, utils::send_frames_surface_tree},
     input::{keyboard::Keycode, pointer::CursorImageStatus},
     output::{Mode as WlMode, Output, PhysicalProperties, Scale},
@@ -1119,5 +1118,3 @@ impl DmabufHandler for Compositor {
         }
     }
 }
-
-delegate_dmabuf!(Compositor);

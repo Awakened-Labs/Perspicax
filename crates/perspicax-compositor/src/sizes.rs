@@ -6,7 +6,9 @@
 //! real one with a bug, or a hostile one -- panicked a debug build, which
 //! every `cargo run` and every test run is, and ended the session (issue
 //! #106). A release build took the values without complaint, as rectangles
-//! turned inside out. One more panicked a release build too: smithay posts
+//! turned inside out. A layer's size, a `u32` on the wire, is cast to an
+//! `i32`, and one past `i32::MAX` comes out negative. One more panicked a
+//! release build too: smithay posts
 //! `invalid_fd` for `wl_shm_pool.resize(0)`, then goes on to unwrap a
 //! `NonZeroUsize` of the 0 it refused (#153).
 //!
@@ -20,7 +22,10 @@
 //! | `wl_region.add`, `subtract` | a side is not above 0 | dropped, as master drops it |
 //! | `xdg_surface.set_window_geometry` | a side is not above 0 | xdg-shell's `invalid_size` |
 //! | `xdg_toplevel.set_min_size`, `set_max_size` | a side is negative | xdg-shell's `invalid_size` |
+//! | `xdg_positioner.set_parent_size` | a side is negative | xdg-shell's `invalid_input` |
+//! | `zwlr_layer_surface_v1.set_size` | a side is past `i32::MAX` | layer-shell's `invalid_size` |
 //! | `wl_shm_pool.resize` | the size is not above 0 | `invalid_fd`, as smithay posts it |
+//! | `zwp_linux_buffer_params_v1.create`, `create_immed` | a side is not above 0 | `invalid_dimensions`, as smithay posts it |
 //!
 //! A refusal with a protocol error ends the client, which is what the
 //! protocol asks; a geometry without area, accepted until #106, is refused
@@ -30,23 +35,25 @@
 //!
 //! Each check goes once a smithay release carries its own, and the
 //! `delegate_*!` macro its section stands in for comes back in its place.
-//! Smithay master has the region, geometry and min/max checks; the damage
-//! check is in a pull request (Smithay/smithay#2200), and so is the pool's
-//! (#2197).
+//! Smithay master has the region, geometry and min/max checks. The damage
+//! and parent size checks are in a pull request (Smithay/smithay#2200), and
+//! so are the pool's and the dmabuf's (#2197); the layer's is in none.
 
 use smithay::{
     reexports::{
         wayland_protocols::xdg::shell::server::{
             xdg_popup::XdgPopup,
-            xdg_positioner::XdgPositioner,
+            xdg_positioner::{self, XdgPositioner},
             xdg_surface::{self, XdgSurface},
             xdg_toplevel::{self, XdgToplevel},
             xdg_wm_base::XdgWmBase,
         },
+        wayland_protocols_wlr::layer_shell::v1::server::{
+            zwlr_layer_shell_v1::ZwlrLayerShellV1,
+            zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
+        },
         wayland_server::{
-            Client, DataInit, Dispatch, DisplayHandle, Resource,
-            backend::ClientId,
-            delegate_dispatch, delegate_global_dispatch,
+            Resource, delegate_dispatch, delegate_global_dispatch,
             protocol::{
                 wl_buffer::WlBuffer,
                 wl_callback::WlCallback,
@@ -62,9 +69,12 @@ use smithay::{
     },
     wayland::{
         compositor::{CompositorState, RegionUserData, SubsurfaceUserData, SurfaceUserData},
-        shell::xdg::{
-            XdgPositionerUserData, XdgShellState, XdgShellSurfaceUserData, XdgSurfaceUserData,
-            XdgWmBaseUserData,
+        shell::{
+            wlr_layer::{WlrLayerShellGlobalData, WlrLayerShellState, WlrLayerSurfaceUserData},
+            xdg::{
+                XdgPositionerUserData, XdgShellState, XdgShellSurfaceUserData, XdgSurfaceUserData,
+                XdgWmBaseUserData,
+            },
         },
         shm::{ShmBufferUserData, ShmPoolUserData, ShmState},
     },
@@ -78,29 +88,41 @@ use crate::state::Compositor;
 /// the protocol's error, where the protocol names one.
 macro_rules! checked {
     ($interface:ty: $data:ty => $smithay:ty, $refused:path) => {
-        impl Dispatch<$interface, $data> for Compositor {
-            fn request(
-                state: &mut Self,
-                client: &Client,
-                resource: &$interface,
-                request: <$interface as Resource>::Request,
-                data: &$data,
-                display: &DisplayHandle,
-                data_init: &mut DataInit<'_, Self>,
-            ) {
-                if !$refused(resource, &request) {
-                    <$smithay as Dispatch<$interface, $data, Self>>::request(
-                        state, client, resource, request, data, display, data_init,
+        const _: () = {
+            use smithay::reexports::wayland_server::{
+                Client, DataInit, Dispatch, DisplayHandle, Resource, backend::ClientId,
+            };
+            use $crate::state::Compositor;
+
+            impl Dispatch<$interface, $data> for Compositor {
+                fn request(
+                    state: &mut Self,
+                    client: &Client,
+                    resource: &$interface,
+                    request: <$interface as Resource>::Request,
+                    data: &$data,
+                    display: &DisplayHandle,
+                    data_init: &mut DataInit<'_, Self>,
+                ) {
+                    if !$refused(resource, &request) {
+                        <$smithay as Dispatch<$interface, $data, Self>>::request(
+                            state, client, resource, request, data, display, data_init,
+                        );
+                    }
+                }
+
+                fn destroyed(
+                    state: &mut Self,
+                    client: ClientId,
+                    resource: &$interface,
+                    data: &$data,
+                ) {
+                    <$smithay as Dispatch<$interface, $data, Self>>::destroyed(
+                        state, client, resource, data,
                     );
                 }
             }
-
-            fn destroyed(state: &mut Self, client: ClientId, resource: &$interface, data: &$data) {
-                <$smithay as Dispatch<$interface, $data, Self>>::destroyed(
-                    state, client, resource, data,
-                );
-            }
-        }
+        };
     };
 }
 
@@ -139,14 +161,36 @@ fn region(_: &WlRegion, request: &wl_region::Request) -> bool {
     }
 }
 
-// `delegate_xdg_shell!`, but for `xdg_surface` and `xdg_toplevel`.
+// `delegate_xdg_shell!`, but for `xdg_positioner`, `xdg_surface` and
+// `xdg_toplevel`.
 
 delegate_global_dispatch!(Compositor: [XdgWmBase: ()] => XdgShellState);
 delegate_dispatch!(Compositor: [XdgWmBase: XdgWmBaseUserData] => XdgShellState);
-delegate_dispatch!(Compositor: [XdgPositioner: XdgPositionerUserData] => XdgShellState);
+checked!(XdgPositioner: XdgPositionerUserData => XdgShellState, parent_size);
 delegate_dispatch!(Compositor: [XdgPopup: XdgShellSurfaceUserData] => XdgShellState);
 checked!(XdgSurface: XdgSurfaceUserData => XdgShellState, window_geometry);
 checked!(XdgToplevel: XdgShellSurfaceUserData => XdgShellState, limits);
+
+/// A parent size turned inside out describes no parent. xdg-shell names no
+/// error for it, so the one the positioner's other sizes get, as smithay's
+/// own pull request for it posts (Smithay/smithay#2200).
+fn parent_size(positioner: &XdgPositioner, request: &xdg_positioner::Request) -> bool {
+    let xdg_positioner::Request::SetParentSize {
+        parent_width,
+        parent_height,
+    } = *request
+    else {
+        return false;
+    };
+    if parent_width >= 0 && parent_height >= 0 {
+        return false;
+    }
+    positioner.post_error(
+        xdg_positioner::Error::InvalidInput,
+        format!("a parent size of {parent_width}x{parent_height}: neither side may be negative"),
+    );
+    true
+}
 
 /// xdg-shell: "The width and height of the effective window geometry must
 /// be greater than zero. Setting an invalid size will raise an invalid_size
@@ -183,6 +227,29 @@ fn limits(toplevel: &XdgToplevel, request: &xdg_toplevel::Request) -> bool {
     true
 }
 
+// `delegate_layer_shell!`, but for `zwlr_layer_surface_v1`.
+
+delegate_global_dispatch!(Compositor: [ZwlrLayerShellV1: WlrLayerShellGlobalData] => WlrLayerShellState);
+delegate_dispatch!(Compositor: [ZwlrLayerShellV1: ()] => WlrLayerShellState);
+checked!(ZwlrLayerSurfaceV1: WlrLayerSurfaceUserData => WlrLayerShellState, layer_size);
+
+/// A layer's size is a `u32` on the wire and an `i32` in smithay, which
+/// casts one to the other: past `i32::MAX`, a side comes out negative. No
+/// monitor is that big, so layer-shell's `invalid_size`.
+fn layer_size(layer: &ZwlrLayerSurfaceV1, request: &zwlr_layer_surface_v1::Request) -> bool {
+    let zwlr_layer_surface_v1::Request::SetSize { width, height } = *request else {
+        return false;
+    };
+    if i32::try_from(width).is_ok() && i32::try_from(height).is_ok() {
+        return false;
+    }
+    layer.post_error(
+        zwlr_layer_surface_v1::Error::InvalidSize,
+        format!("a layer size of {width}x{height}: past the largest a size can be"),
+    );
+    true
+}
+
 // `delegate_shm!`, but for `wl_shm_pool`.
 
 delegate_global_dispatch!(Compositor: [WlShm: ()] => ShmState);
@@ -205,4 +272,58 @@ fn pool_size(pool: &WlShmPool, request: &wl_shm_pool::Request) -> bool {
         format!("a pool resized to {size}: its size must be above 0"),
     );
     true
+}
+
+/// `delegate_dmabuf!`, but for `zwp_linux_buffer_params_v1`: on a seat only,
+/// the one backend that takes buffers from the GPU.
+#[cfg(feature = "seat")]
+mod dmabuf {
+    use smithay::{
+        backend::allocator::dmabuf::Dmabuf,
+        reexports::{
+            wayland_protocols::wp::linux_dmabuf::zv1::server::{
+                zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
+                zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1,
+                zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+            },
+            wayland_server::{
+                Resource, delegate_dispatch, delegate_global_dispatch,
+                protocol::wl_buffer::WlBuffer,
+            },
+        },
+        wayland::dmabuf::{
+            DmabufData, DmabufFeedbackData, DmabufGlobalData, DmabufParamsData, DmabufState,
+        },
+    };
+
+    use super::has_area;
+    use crate::state::Compositor;
+
+    delegate_global_dispatch!(Compositor: [ZwpLinuxDmabufV1: DmabufGlobalData] => DmabufState);
+    delegate_dispatch!(Compositor: [ZwpLinuxDmabufV1: DmabufData] => DmabufState);
+    checked!(ZwpLinuxBufferParamsV1: DmabufParamsData => DmabufState, buffer_size);
+    delegate_dispatch!(Compositor: [WlBuffer: Dmabuf] => DmabufState);
+    delegate_dispatch!(Compositor: [ZwpLinuxDmabufFeedbackV1: DmabufFeedbackData] => DmabufState);
+
+    /// A buffer has a size above 0. Smithay posts the error itself, but then
+    /// builds the buffer anyway, with a `Size` of the width and height it
+    /// refused.
+    fn buffer_size(
+        params: &ZwpLinuxBufferParamsV1,
+        request: &zwp_linux_buffer_params_v1::Request,
+    ) -> bool {
+        let (zwp_linux_buffer_params_v1::Request::Create { width, height, .. }
+        | zwp_linux_buffer_params_v1::Request::CreateImmed { width, height, .. }) = *request
+        else {
+            return false;
+        };
+        if has_area(width, height) {
+            return false;
+        }
+        params.post_error(
+            zwp_linux_buffer_params_v1::Error::InvalidDimensions,
+            format!("a buffer of {width}x{height}: both sides must be above 0"),
+        );
+        true
+    }
 }
