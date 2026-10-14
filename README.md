@@ -260,6 +260,25 @@ serves it, or whose daemon perspicax cannot look into, is served with a
 warning in the log: a daemon given the wire was started beside perspicax, as
 its user, and answers.
 
+**Nor can a program take the wire.** By default any process running as you
+may reach into any other of yours. It can reopen a pipe or a file another
+holds, through `/proc/<pid>/fd/<n>`, and write a reply on it. It can take a
+descriptor whole with `pidfd_getfd`, a socket's as much as a pipe's. Or it can
+attach with ptrace and rewrite what the other says. Yama, on a kernel that
+has it, keeps the last two to a process's ancestors, and lets the first
+through. So under `--mcp` perspicax keeps every other process out of itself:
+it makes itself non-dumpable, and the kernel then allows none of the three
+without `CAP_SYS_PTRACE`. `perspicax attach` does the same. The cost is the
+core dump, and looking at perspicax's descriptors (`ls -l /proc/<pid>/fd`)
+takes root. A program it starts is not kept out with it, since an `exec`
+undoes it.
+
+The client's end of the wire is the client's to keep. A pipe the client holds
+can be reopened through its own `/proc/<pid>/fd` just the same, and a socket
+end cannot be. So give perspicax a socketpair, as Node's clients do, Claude
+Code among them, rather than the pipe Python's `subprocess.PIPE` or Rust's
+`Stdio::piped()` gives.
+
 `window_list` lists the desk as well as the windows: a panel, a wallpaper or a
 menu is `kind: layer`, with the `layer` it stacks in and the
 `untrusted_namespace` its program gave it, and a screen locker's cover is
@@ -426,9 +445,10 @@ it — the marking is in the key, so it cannot be skimmed past, and the provenan
 is at the point of use rather than in a preamble a model has to have remembered.
 That is this project's injection defence, and it is a read-path property rather
 than an act-path gate. It holds because nothing but perspicax writes on the
-agent's wire, and perspicax refuses a wire something else was given first: a
-program it started printing a line of JSON-RPC cannot pass it off as
-perspicax's own (see [What acting looks like](#what-acting-looks-like)).
+agent's wire: perspicax refuses a wire something else was given first, and
+keeps any other program from taking it, so a program it started printing a
+line of JSON-RPC cannot pass it off as perspicax's own (see [What acting looks
+like](#what-acting-looks-like)).
 
 **Consent is about the person, not the node.** Headless, there is no capability
 gate: perspicax is one actuator among several, an agent refused a click runs the
@@ -525,8 +545,9 @@ claude mcp add perspicax -- perspicax attach
 ```
 
 It passes the client closing its stdin on as the end of the conversation, and
-ends when the session closes the connection. `perspicax attach PATH` names a
-socket instead. Anything else that joins stdio to a Unix socket will do, with
+ends when the session closes the connection. Like `--mcp`, it keeps every
+other process out of itself, so no program can take the wire through it.
+`perspicax attach PATH` names a socket instead. Anything else that joins stdio to a Unix socket will do, with
 OpenBSD netcat's `-N` for the first of those: `nc -N -U "$PERSPICAX_MCP_SOCKET"`,
 or `socat STDIO "UNIX-CONNECT:$PERSPICAX_MCP_SOCKET"`.
 
