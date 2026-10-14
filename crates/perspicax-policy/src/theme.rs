@@ -165,6 +165,14 @@ roles! {
     LabelInk = "label-ink",
     /// The shadow a desktop icon's name casts, so it reads on any wallpaper.
     LabelShadow = "label-shadow",
+    /// The lock screen, behind the ring a password is typed into.
+    Lock = "lock",
+    /// The lock screen's text.
+    LockInk = "lock-ink",
+    /// The lock screen's ring, at rest.
+    LockRing = "lock-ring",
+    /// A refusal: a wrong password, and a key taken back while typing one.
+    Alert = "alert",
 }
 
 impl Role {
@@ -274,8 +282,10 @@ pub fn follows(role: Role) -> Option<Rule> {
             a: 0x66,
             ..p[Accent]
         }),
+        LockInk => (&[Lock], |p| ink(p, Lock)),
+        LockRing => (&[Lock, LockInk], |p| mix(p, Lock, LockInk, 250)),
         Accent | TitleFocused | TitleUnfocused | SnapPreview | Panel | Menu | LabelInk
-        | LabelShadow => return None,
+        | LabelShadow | Lock | Alert => return None,
     };
     Some(rule)
 }
@@ -317,7 +327,7 @@ impl Builtin {
     /// The two Breezes write their window, view, header and selection
     /// colours, from Plasma's colour schemes, over this theme's and let the
     /// rest follow; the desktop's labels and the snap preview are the same in
-    /// all three.
+    /// all three. The lock screen is dark in all but Breeze Light.
     #[must_use]
     pub fn palette(self) -> Palette {
         use Role::*;
@@ -339,6 +349,7 @@ impl Builtin {
                 (PanelInk, 0x232629),
                 (Menu, 0xffffff),
                 (MenuInk, 0x232629),
+                (Lock, 0xcbd8df),
             ])),
             Self::BreezeDark => Palette::from_fn(perspicax).written_over(&written(&[
                 (Accent, 0x3daee9),
@@ -386,6 +397,10 @@ const fn perspicax(role: Role) -> Rgba {
         MenuHint => opaque(0x7f8c8d),
         Selected => Rgba::new(0x3d, 0xae, 0xe9, 0x66),
         LabelShadow => Rgba::new(0, 0, 0, 0xc0),
+        Lock => opaque(0x0c2440),
+        LockInk => opaque(0xffffff),
+        LockRing => opaque(0x495b70),
+        Alert => opaque(0xda4453),
     }
 }
 
@@ -582,6 +597,8 @@ mod tests {
             Role::PanelInk,
             Role::Menu,
             Role::MenuInk,
+            Role::Lock,
+            Role::LockInk,
         ]
         .into_iter()
         .map(|role| (role, default[role]))
@@ -661,6 +678,36 @@ mod tests {
                     "{role:?} is see-through"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_lock_screen_is_dark_but_under_breeze_light() {
+        let lock = |palette: Palette| {
+            (
+                palette[Role::Lock].colour(),
+                palette[Role::LockInk].colour(),
+            )
+        };
+        let (white, black) = (Colour::rgb(0xff, 0xff, 0xff), Colour::rgb(0, 0, 0));
+        let dark = (Colour::rgb(0x0c, 0x24, 0x40), white);
+        assert_eq!(lock(Builtin::Perspicax.palette()), dark);
+        assert_eq!(lock(Builtin::BreezeDark.palette()), dark);
+        assert_eq!(
+            lock(Builtin::BreezeLight.palette()),
+            (Colour::rgb(0xcb, 0xd8, 0xdf), black)
+        );
+        assert_ne!(
+            Builtin::BreezeLight.palette()[Role::LockRing],
+            Palette::default()[Role::LockRing],
+            "the ring follows the screen"
+        );
+        for theme in Builtin::ALL {
+            assert_eq!(
+                theme.palette()[Role::Alert].colour(),
+                Colour::rgb(0xda, 0x44, 0x53),
+                "{theme:?}"
+            );
         }
     }
 
