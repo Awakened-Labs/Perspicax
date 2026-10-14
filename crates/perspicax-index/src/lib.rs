@@ -210,7 +210,11 @@ impl core::error::Error for Refusal {}
 /// client is on a private socket an agent set up, so the answer is
 /// [`Consent::Everyone`]. On a seat the person launched most of what is on
 /// screen, and the answer is [`Consent::Granted`]: only the processes the
-/// host holds a grant for, each until it exits.
+/// host holds a grant for, each until it exits. perspicax grants what its
+/// `--spawn` starts, a window's process the person hands over with a key,
+/// what a binding or autostart entry they marked for an agent starts, and
+/// what an agent launches as their list admits, with what that launch
+/// starts while it runs.
 ///
 /// The default is [`Consent::Nobody`], so a host that forgets to publish
 /// consent produces no actable node. This is the same fail-closed rule the
@@ -235,13 +239,13 @@ impl Consent {
     /// Whether an agent may act on something drawn by `origin`. Never for an
     /// unattributed origin, whatever the policy: a policy about processes
     /// cannot say yes to a process nobody has identified.
-    #[must_use]
     ///
     /// An X11 origin is judged by its server, never by its client: every X
     /// client shares one Xwayland, and X11 lets any of them read and inject
     /// into the others, so consenting to one X client is consenting to all of
     /// them. The Xwayland perspicax starts for a person is never granted,
     /// so on a seat X11 applications are refused unless consent is everyone.
+    #[must_use]
     pub fn permits(&self, origin: &Origin) -> bool {
         let pid = match origin {
             Origin::Unattributed => return false,

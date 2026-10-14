@@ -46,7 +46,7 @@ compositor:
 
 ```
 perspicax              the composition root — one binary, `perspicax --headless`
-perspicax-mcp          MCP server (rmcp, stdio or a Unix socket) — eight tools, DTOs, receipts  [portable]
+perspicax-mcp          MCP server (rmcp, stdio or a Unix socket) — nine tools, DTOs, receipts  [portable]
 perspicax-index        node cache, stable ids, selectors, deltas, refusals  [portable]
 perspicax-node         node schema — AccessKit types plus Origin and Visibility
 perspicax-policy       WM decisions as data — focus, bindings, placement, monitors, workspaces, snapping  [portable]
@@ -213,11 +213,15 @@ agent on its stdin. A request sent before `initialize` is answered with
 an error naming what to send first, and the server waits on.
 `--mcp-socket PATH` serves the same on a Unix socket instead, for an agent
 running inside the session it drives: see [An agent inside the
-session](#an-agent-inside-the-session). Eight tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
-`tab_forward`, `deltas`, `screenshot`. The two window verbs act on a whole
-window by its surface: a close is a request the application may answer with a
-dialog, and a tab is brought forward only where the person can already see its
-group, never by switching what they are looking at.
+session](#an-agent-inside-the-session). Nine tools: `window_list`, `observe`,
+`resolve`, `act`, `window_close`, `tab_forward`, `deltas`, `screenshot` and
+`launch`. The two window verbs act on a whole window by its surface: a close
+is a request the application may answer with a dialog, and a tab is brought
+forward only where the person can already see its group, never by switching
+what they are looking at. `launch` starts a program for the agent, no shell
+between, and answers its pid; on a seat, only one the person's
+`[agent] launch` names (see [An agent inside the
+session](#an-agent-inside-the-session)).
 
 **Nothing else is on that wire.** perspicax moves it off its own stdin and
 stdout before it starts anything, onto copies no program can inherit, and
@@ -403,16 +407,42 @@ perspicax's own (see [What acting looks like](#what-acting-looks-like)).
 gate: perspicax is one actuator among several, an agent refused a click runs the
 command instead, and every client is on a socket the agent set up. On `--seat`
 the question has two answers, because the person launched most of what is on
-screen. There an agent may act only on what perspicax itself spawned
+screen. There an agent may act only on what it was granted
 (`Refusal::NoCapability` otherwise), and not at all while the person is using the
 keyboard or pointer, or has a mouse button down, however long they hold it
 still: an act in the middle of their typing would race it, and one in the middle
 of their drag would carry the window off to where the agent aimed and end the
 drag under their hand. Typing only into a window that holds the keyboard is
 what keeps an agent's keys out of the person's terminal while it acts on a
-window it spawned. A window with no
+window it was granted. A window with no
 accessibility tree has no node to name, so it cannot be typed into yet
 ([#38](https://github.com/Awakened-Labs/Perspicax/issues/38)).
+
+**What is granted, and for how long.** A grant is to a process, and lasts
+until that process exits: its pid is the kernel's to give to the next program
+once it has gone, so a grant that outlived it could pass to anything. Four
+things grant one:
+
+- **`--spawn`**, for what it starts;
+- **Logo+A**, the person handing the focused window's program over; Logo+A
+  again takes it back, and Logo+Shift+A takes back every grant there is,
+  `--spawn`'s included;
+- **`agent = true`** on a binding or an `autostart` entry, for what it
+  starts;
+- **`launch`**, the agent starting a program for itself, which the person's
+  `[agent] launch` must name. A launch covers what that program starts as
+  well, while it runs, so `flutter run` covers the application it builds. It
+  covers what descends from it and nothing else: a program that forks twice
+  to leave its parent, one D-Bus starts, or one that hands its window to a
+  copy of itself already running is not covered.
+
+Everything else is exactly the one process. An X11 window is never granted
+by a key: every X client shares one Xwayland, and may read and drive the
+others, so granting one would grant them all. `window_list` says which windows
+an agent may act on (`agent`), and `deltas` says when that changes. On screen,
+each is marked out: a line round it, in front of its shadow, and its titlebar,
+where perspicax draws one, in the agent's colours (`[decorations.agent]`).
+Headless, where every window is an agent's, nothing is marked.
 
 **`screenshot` is the fallback, and says so.** Occlusion needs geometry,
 z-order, regions and damage, none of which need pixels, so nothing is drawn
@@ -431,12 +461,32 @@ reading applies to it.
 `--mcp` has one client, whatever started perspicax, and on a seat that is the
 login. So the agent a person most wants beside them, one they can see and talk
 to in a terminal inside the session, cannot reach it: it would have to start
-the very session it is running in. `--mcp-socket` serves the same eight tools
+the very session it is running in. `--mcp-socket` serves the same nine tools
 on a Unix socket instead:
 
 ```sh
 perspicax --seat --mcp-socket "$XDG_RUNTIME_DIR/perspicax-mcp" --spawn foot
 ```
+
+A session the display manager starts is given no flags, so the config says
+it instead: `[agent] socket = true` serves the socket at
+`$XDG_RUNTIME_DIR/perspicax-mcp`, a path serves it there, and `false` serves
+none, whatever `--mcp-socket` says. The config goes over the flag, and is read
+once, as the session starts: a change waits for the next login.
+
+**What it may start.** `[agent] launch` names the programs an agent may start
+for itself with the `launch` tool, and then act on: `"off"`, which is the
+default, `"any"`, or a list. A bare name admits that word as the program and
+nothing else, and is found in the session's `PATH`, in the folders there that
+are whole paths; a path admits that file alone, so `flutter` does not admit
+`/tmp/x/flutter`. **What a launched program starts is the agent's too**, while
+it runs, so listing a terminal, a shell or an interpreter -- `foot`, `sh`,
+`python3` -- admits everything it can start: list the programs themselves. A
+list a reload narrows applies to the next launch, and what was launched before
+stays granted until it exits or Logo+Shift+A takes it back. A launch refused
+says why: `not_admitted`, naming what the list admits, or `not_started`.
+Headless reads no config, and an agent there may launch any program, as every
+protocol there is open.
 
 Every program the session starts is told where the socket is, in
 `PERSPICAX_MCP_SOCKET` (empty in a session that serves none), so an agent
@@ -467,8 +517,8 @@ reconnecting in that time is told the one before still has it.
 **Who may connect.** The socket is the owner's alone: mode 0600, and a
 connection from a process running as anybody else is closed unanswered. That
 is the same user as the programs the agent could drive, but any process
-running as you can then drive whatever the agent may -- on a seat, what
-`--spawn` started. `$XDG_RUNTIME_DIR`, which only you can enter, is the place
+running as you can then drive whatever the agent may -- on a seat, what is
+granted to it. `$XDG_RUNTIME_DIR`, which only you can enter, is the place
 for it. The socket is removed when the session ends. One a killed session left
 behind is replaced; one another session is still serving is refused, naming
 the process that serves it.
@@ -629,6 +679,8 @@ profile, which is Plasma's and Windows' habits:
   corner to a quarter, the top to maximized, with Logo+arrows to do the same
   from the keyboard;
 - Logo+Shift+Left/Right moves a window between screens, Logo+Shift+R reloads;
+- Logo+A hands the focused window's program to an agent, or takes it back, and
+  Logo+Shift+A takes back everything an agent was granted;
 - a tap of Logo on its own asks the desktop shell for its start menu;
 - a titlebar drawn by the compositor for a client that asks for one (Qt, foot,
   GTK 3 without a headerbar, and X11 applications): drag it to move,
@@ -666,7 +718,8 @@ feature this build left out, is refused with its name rather than ignored.
 ```toml
 profile = "minimal"            # or "classic"; minimal focuses under the pointer
 drag = "Logo"                  # the drag modifier; "none" turns drags off
-autostart = [["mako"], ["nm-applet", "--indicator"]]
+autostart = [["mako"], ["nm-applet", "--indicator"],
+             { spawn = ["foot"], agent = true }]   # an agent may act on it
 xdg-autostart = true           # and the autostart folders' entries; see below
                                # (every key outside a table goes up here)
 
@@ -677,6 +730,7 @@ autoraise = false
 [keys]
 "Logo+Return" = { spawn = ["foot"] }
 "Logo+d" = { spawn = ["fuzzel"] }
+"Logo+Shift+Return" = { spawn = ["foot"], agent = true }   # granted till it exits
 "Alt+F4" = "none"              # hand a profile's chord back to the client
 "Alt+F1" = "root-menu"         # or "start-menu": the desktop shell's menus;
                                # { pie = "<name>" } opens a pie, see Pies
@@ -731,6 +785,12 @@ border = 2
 focused = "#2d6fa3"            # the title is written in black or white,
 unfocused = "#475057"          # whichever reads on the colour
 
+[decorations.agent]            # a window an agent may act on, on a seat
+focused = "#5a2d82"            # its titlebar, where perspicax draws one
+unfocused = "#3b2454"
+outline = 3                    # a line round it, 0 to 8 pixels; 0 is none
+outline-colour = "#b37feb"
+
 [[output]]
 name = "DP-1"
 mode = "2560x1440@144"
@@ -751,6 +811,12 @@ workspace = "any"
 screencopy = ["grim", "/usr/bin/wf-recorder"]   # a name, or a full path
 output-management = ["kanshi", "wlr-randr"]
 shell = ["/usr/local/bin/perspicax-shell"]
+
+[agent]                        # what an agent may do on the seat; see below
+socket = true                  # serve it at $XDG_RUNTIME_DIR/perspicax-mcp;
+                               # or a path, or false for none
+launch = ["flutter", "zenity"] # what it may start for itself: a list, "any",
+                               # or "off", the default
 ```
 
 `[protocols]` names the programs that may use the protocols reaching past
@@ -783,6 +849,12 @@ change to the monitors lasts for the session: it is put in force as the output
 rules, exactly as if `[[output]]` had said it, and a reload that changes
 `[[output]]` puts the file back in charge. Moving a monitor just moves it; a
 new mode, scale, or a monitor turned on or off lights the monitors again.
+
+`[agent]` says what an agent may do on the seat beyond what the person grants
+it: the programs it may start for itself (`launch`), and whether the session
+serves it a socket (`socket`). Both are under [An agent inside the
+session](#an-agent-inside-the-session). `[decorations.agent]` is how a window
+it may act on is marked out.
 
 Monitors are placed relative to each other, so the layout survives one being
 unplugged: a monitor beside one that is missing goes to the right of the
@@ -889,7 +961,10 @@ program is not installed; one that needs a terminal is skipped with a line in
 the log, and `RUST_LOG=info,perspicax_compositor=debug` names every entry
 skipped and why. `xdg-autostart = false`, at the top of the config, turns the
 folders off and keeps the list. A program both of them name starts twice:
-take it out of one.
+take it out of one. An entry in the list written
+`{ spawn = [...], agent = true }`, as a binding may be, starts a program an
+agent may act on, until it exits; every other program the session starts is
+the person's.
 
 Another desktop on the same machine may never have started what those
 folders hold -- Enlightenment starts only what its own startup list names --
