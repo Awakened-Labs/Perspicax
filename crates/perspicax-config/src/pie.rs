@@ -4,6 +4,8 @@
 //! ```toml
 //! [shell.pie]
 //! size = 512                     # across, in logical pixels
+//! grow = 2.0                     # the icon pointed at, times its size
+//! grow-falloff = 90              # degrees round from the pointer an icon grows
 //! icons = "~/.piedock/icons"     # <name>.png, looked in before the icon theme
 //! aliases = [{ app-id = "com.mitchellh.ghostty", as = "ghostty" }]
 //! ignore = [{ title = "Picture-in-Picture" }]
@@ -40,12 +42,28 @@ use crate::{
 pub const SIZE: u32 = 512;
 const SIZE_MIN: u32 = 128;
 const SIZE_MAX: u32 = 1024;
+/// How many times its size at rest the icon pointed straight at is drawn,
+/// when `grow` is not written.
+pub const GROW: f64 = 2.0;
+const GROW_MIN: f64 = 1.0;
+const GROW_MAX: f64 = 3.0;
+/// How far round from the pointer's direction, in degrees, an icon still
+/// grows, when `grow-falloff` is not written.
+pub const GROW_FALLOFF: u32 = 90;
+const GROW_FALLOFF_MIN: u32 = 1;
+const GROW_FALLOFF_MAX: u32 = 180;
 
 /// Every pie, and how running windows are named in them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Pie {
     /// Across, in logical pixels: the ring and its icons are fitted in.
     pub size: u32,
+    /// How many times its size at rest the icon pointed straight at is
+    /// drawn: the ring is fitted to it at that size.
+    pub grow: f64,
+    /// How far round from the pointer's direction, in degrees, an icon
+    /// grows: less the further round, and not at all from here on.
+    pub grow_falloff: u32,
     /// A folder of the person's own icons, named for what they stand for
     /// (`firefox.png`), looked in before the icon theme. As written: `~`
     /// and a path beside config.toml are the shell's to resolve.
@@ -87,6 +105,8 @@ impl Match {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub(crate) struct RawPie {
     size: Option<u32>,
+    grow: Option<f64>,
+    grow_falloff: Option<u32>,
     icons: Option<PathBuf>,
     #[serde(default)]
     aliases: Vec<RawAlias>,
@@ -125,6 +145,22 @@ impl RawPie {
             return Err(invalid(
                 "shell.pie.size".to_owned(),
                 format!("{size} is outside {SIZE_MIN} to {SIZE_MAX} pixels"),
+            ));
+        }
+        let grow = self.grow.unwrap_or(GROW);
+        if !(GROW_MIN..=GROW_MAX).contains(&grow) {
+            return Err(invalid(
+                "shell.pie.grow".to_owned(),
+                format!("{grow} is outside {GROW_MIN} to {GROW_MAX} times"),
+            ));
+        }
+        let grow_falloff = self.grow_falloff.unwrap_or(GROW_FALLOFF);
+        if !(GROW_FALLOFF_MIN..=GROW_FALLOFF_MAX).contains(&grow_falloff) {
+            return Err(invalid(
+                "shell.pie.grow-falloff".to_owned(),
+                format!(
+                    "{grow_falloff} is outside {GROW_FALLOFF_MIN} to {GROW_FALLOFF_MAX} degrees"
+                ),
             ));
         }
         if self
@@ -187,6 +223,8 @@ impl RawPie {
             .collect::<Result<_, Error>>()?;
         Ok(Pie {
             size,
+            grow,
+            grow_falloff,
             icons: self.icons,
             aliases,
             ignore,
@@ -230,6 +268,8 @@ mod tests {
         let text = r#"
             [shell.pie]
             size = 400
+            grow = 2.5
+            grow-falloff = 60
             icons = "~/.piedock/icons"
             aliases = [
                 { app-id = "com.mitchellh.ghostty", as = "ghostty" },
@@ -247,6 +287,8 @@ mod tests {
         "#;
         let read = pie(text).expect("a pie");
         assert_eq!(read.size, 400);
+        assert!((read.grow - 2.5).abs() < f64::EPSILON);
+        assert_eq!(read.grow_falloff, 60);
         assert_eq!(read.icons, Some(PathBuf::from("~/.piedock/icons")));
         assert_eq!(
             read.aliases,
@@ -282,8 +324,16 @@ mod tests {
     fn an_unwritten_size_is_piedocks_and_no_pie_is_written_by_default() {
         let read = pie("[shell.pie.menus]\nx = [{ running = true }]").unwrap();
         assert_eq!(read.size, SIZE);
+        assert!((read.grow - GROW).abs() < f64::EPSILON);
+        assert_eq!(read.grow_falloff, GROW_FALLOFF);
         assert_eq!(read.icons, None);
         assert!(shell("", ShellBuilt::FULL).unwrap().pie.is_none());
+    }
+
+    #[test]
+    fn a_whole_number_grows_as_a_fraction_does() {
+        let read = pie("[shell.pie]\ngrow = 3\n[shell.pie.menus]\nx = [{ running = true }]");
+        assert!((read.expect("a pie").grow - 3.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -307,6 +357,25 @@ mod tests {
                 "64 is outside 128 to 1024 pixels".to_owned()
             )
         );
+        for (table, reason) in [
+            ("grow = 0.5", "0.5 is outside 1 to 3 times"),
+            ("grow = 4", "4 is outside 1 to 3 times"),
+            ("grow = nan", "NaN is outside 1 to 3 times"),
+        ] {
+            assert_eq!(
+                refused(&with(table)),
+                ("shell.pie.grow".to_owned(), reason.to_owned())
+            );
+        }
+        for (table, reason) in [
+            ("grow-falloff = 0", "0 is outside 1 to 180 degrees"),
+            ("grow-falloff = 181", "181 is outside 1 to 180 degrees"),
+        ] {
+            assert_eq!(
+                refused(&with(table)),
+                ("shell.pie.grow-falloff".to_owned(), reason.to_owned())
+            );
+        }
         assert_eq!(
             refused(&with("icons = \"\"")),
             ("shell.pie.icons".to_owned(), "an empty path".to_owned())
