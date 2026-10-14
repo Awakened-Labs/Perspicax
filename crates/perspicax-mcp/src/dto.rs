@@ -241,9 +241,10 @@ pub struct Refused {
     /// `inactive_tab`: the tab in front, which has the group's place.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shown_tab: Option<u64>,
-    /// `focus_elsewhere`: the window or layer surface holding the keyboard,
-    /// where the keys would have gone. Absent when none holds it. `focus` the
-    /// node, then type.
+    /// `focus_elsewhere`: the window, layer surface or menu holding the
+    /// keyboard, where the keys would have gone. Absent when none holds it.
+    /// `focus` the node, then type; or, for an open menu of the node's own
+    /// window, close it first, or type at the menu.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focused: Option<u64>,
     /// `pointer_captured`: the window holding the pointer, a game's

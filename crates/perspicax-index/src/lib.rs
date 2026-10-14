@@ -139,6 +139,10 @@ pub enum Refusal {
     /// -- possibly a window the agent holds no consent for. `focus` the node
     /// and try again. `None` when no window or layer holds the keyboard.
     ///
+    /// A menu of the node's own window holding the keyboard is `focused`
+    /// too: the keys would go to the menu, where a letter can choose an
+    /// item. Typed at the menu, they go ahead.
+    ///
     /// The host decides this, not the gate: only the host can compare focus
     /// with the target in the same step that presses the keys, and anything
     /// earlier leaves a moment in which focus can move.
