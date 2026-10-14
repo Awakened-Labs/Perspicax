@@ -1058,7 +1058,7 @@ untrusted-launchers = "hidden" # an application's entry on the desktop that is
                                # it as the file it is
 icon-theme = "Adwaita"
 terminal = ["foot"]            # for applications that ask for one
-lock = ["swaylock", "-f"]      # the start menu's Lock,
+lock = ["swaylock", "-f"]      # the start menu's Lock and `perspicax lock`,
 suspend = ["loginctl", "suspend"]   # Suspend, Restart and Shut Down:
 reboot = ["loginctl", "reboot"]     # logind's, which elogind has too
 power-off = ["loginctl", "poweroff"]
@@ -1146,7 +1146,28 @@ and Shut Down, as `leave` chooses and orders them (`leave = []` shows none).
 Each runs its program, and shows only when that program is on `PATH`; Log Out
 asks the compositor instead. Typing "sleep", "reboot" or "power off" in the
 search line finds the last three. Suspend does not lock the screen first;
-`["swayidle", "-w", "before-sleep", "swaylock -f"]` in `autostart` does.
+`["swayidle", "-w", "before-sleep", "perspicax lock -f"]` in `autostart` does.
+
+Lock wears the theme. swaylock, which `lock` runs unless it names another
+program, is given `-C /dev/null`, so it reads no config file of its own, and
+then the theme as flags: the screen in `lock`, its text in `lock-ink`, its ring
+in `lock-ring`, the accent as keys are typed and `alert` for a wrong password
+(see [Themes](#themes)), in `[theme] font`. Flags written in `lock` come
+after, so they win: `lock = ["swaylock", "-f", "--ring-color", "00ff00"]` rings
+it green. To have swaylock read a file of its own, name it, whole, since `~` is
+not expanded: `lock = ["swaylock", "-C", "/home/me/.config/swaylock/config"]`
+runs as written, and so does any other program.
+
+`perspicax lock` locks as Lock does, from a key or from swayidle: it runs
+`lock` with its own arguments after `lock`'s, and becomes it. It reads the
+config of the session it was started in, which the session tells every program
+it starts in `PERSPICAX_CONFIG`; a config it cannot read still locks, in the
+default theme.
+
+```toml
+[keys]
+"Logo+l" = { spawn = ["perspicax", "lock"] }
+```
 
 A tray icon is any program's that registers one the StatusNotifierItem way,
 as Qt, Electron and libappindicator programs do. The shell serves the
@@ -1237,7 +1258,8 @@ panel = "#102030"
 
 `perspicax` is what was drawn before there were themes: blue titlebars, a dark
 panel, light menus. The two Breezes take their window, view, header and
-selection colours from Plasma's Breeze schemes.
+selection colours from Plasma's Breeze schemes. The lock screen is dark,
+`#0c2440`, but under `breeze-light`, which locks on `#cbd8df`.
 
 The palette is a set of roles, not of widgets, so one colour written recolours
 everything that has that job. A colour is `"#rrggbb"`. Only `selected` and
@@ -1274,6 +1296,10 @@ the first colour toward the second. The last column is the `perspicax` theme.
 | `selected` | the desktop icon chosen, over the wallpaper | `accent`, 40% opaque | `#3daee966` |
 | `label-ink` | a desktop icon's name | — | `#ffffff` |
 | `label-shadow` | the shadow that name casts, so it reads on any wallpaper | — | `#000000c0` |
+| `lock` | the lock screen, behind the ring a password is typed into | — | `#0c2440` |
+| `lock-ink` | the lock screen's text | its ink | `#ffffff` |
+| `lock-ring` | the lock screen's ring, at rest | `lock` 25% toward `lock-ink` | `#495b70` |
+| `alert` | a refusal: a wrong password, and a key taken back while typing one | — | `#da4453` |
 
 `[decorations] focused` and `unfocused` are `title-focused` and
 `title-unfocused` written in their older place, and still win over any theme;
