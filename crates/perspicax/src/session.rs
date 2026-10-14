@@ -52,6 +52,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
+use perspicax_config::AgentSocket;
 use rustix::process::{Pid, Signal, kill_process};
 use zbus::{Connection, fdo::DBusProxy, names::WellKnownName};
 
@@ -113,6 +114,47 @@ pub fn desktop_env(inherited: impl Fn(&str) -> Option<String>) -> Vec<(String, S
 /// Where a program inside the session finds the agent interface: the socket
 /// `--mcp-socket` serves, which `perspicax attach` connects to (issue #30).
 pub const AGENT_SOCKET: &str = "PERSPICAX_MCP_SOCKET";
+
+/// The agent socket's name in `$XDG_RUNTIME_DIR`, where `[agent] socket =
+/// true` serves it when `--mcp-socket` names no other place.
+pub const SOCKET_NAME: &str = "perspicax-mcp";
+
+/// Where a person's session serves the agent interface, if anywhere: where
+/// `--mcp-socket` says, which `flag` is, unless the config's `[agent] socket`
+/// says otherwise. The file goes over the flag, because a session a display
+/// manager starts is given no flags, and a person who wrote `false` should not
+/// have it undone by a script that passes one.
+///
+/// `var` reads the environment, as [`has_bus`]'s does.
+///
+/// # Errors
+///
+/// `true` with no `--mcp-socket` and no runtime folder to serve it in.
+pub fn agent_socket(
+    flag: Option<&Path>,
+    said: &AgentSocket,
+    var: impl Fn(&str) -> Option<String>,
+) -> Result<Option<PathBuf>> {
+    Ok(match said {
+        AgentSocket::Unsaid => flag.map(Path::to_owned),
+        AgentSocket::Off => None,
+        AgentSocket::At(path) => Some(path.clone()),
+        AgentSocket::On => match flag {
+            Some(flag) => Some(flag.to_owned()),
+            None => {
+                // The XDG spec's rule: a relative folder is no folder at all.
+                let runtime = var("XDG_RUNTIME_DIR")
+                    .map(PathBuf::from)
+                    .filter(|dir| dir.is_absolute())
+                    .context(
+                        "[agent] socket = true serves the agent in XDG_RUNTIME_DIR, which is \
+                         unset or not a whole path; set it, or write the socket's whole path",
+                    )?;
+                Some(runtime.join(SOCKET_NAME))
+            }
+        },
+    })
+}
 
 /// What every program the session starts is told about the agent interface:
 /// where its socket is, or, by an empty value, that this session serves none.
@@ -661,5 +703,76 @@ mod tests {
             PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/\xff"))
         };
         assert!(agent_env(Some(&unreadable)).is_err());
+    }
+
+    /// The runtime folder as a person's session has it, or as one started
+    /// from somewhere without one has it.
+    fn runtime(dir: Option<&str>) -> impl Fn(&str) -> Option<String> {
+        let dir = dir.map(str::to_owned);
+        move |name| dir.clone().filter(|_| name == "XDG_RUNTIME_DIR")
+    }
+
+    const FLAG: &str = "/tmp/agent";
+
+    #[test]
+    fn the_command_line_decides_when_the_config_is_silent() {
+        let served = |flag: Option<&str>| {
+            agent_socket(
+                flag.map(Path::new),
+                &AgentSocket::Unsaid,
+                runtime(Some("/run/user/1000")),
+            )
+            .expect("no folder needed")
+        };
+        assert_eq!(served(Some(FLAG)), Some(PathBuf::from(FLAG)));
+        assert_eq!(served(None), None, "none asked for, none served");
+    }
+
+    #[test]
+    fn socket_false_closes_it_though_the_command_line_names_one() {
+        for flag in [Some(Path::new(FLAG)), None] {
+            assert_eq!(
+                agent_socket(flag, &AgentSocket::Off, runtime(Some("/run/user/1000")))
+                    .expect("nothing to find"),
+                None,
+                "--mcp-socket {flag:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn socket_true_serves_where_the_command_line_says_or_in_the_runtime_dir() {
+        let on = |flag: Option<&str>, dir: Option<&str>| {
+            agent_socket(flag.map(Path::new), &AgentSocket::On, runtime(dir))
+        };
+        assert_eq!(
+            on(None, Some("/run/user/1000")).expect("a folder"),
+            Some(PathBuf::from("/run/user/1000/perspicax-mcp"))
+        );
+        assert_eq!(
+            on(Some(FLAG), Some("/run/user/1000")).expect("a place"),
+            Some(PathBuf::from(FLAG)),
+            "the flag says where, and the file only that there is one"
+        );
+        assert_eq!(
+            on(Some(FLAG), None).expect("no folder needed"),
+            Some(PathBuf::from(FLAG))
+        );
+        for dir in [None, Some("run/user/1000")] {
+            let error = on(None, dir).expect_err("nowhere to serve it");
+            assert!(error.to_string().contains("XDG_RUNTIME_DIR"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_socket_path_in_the_config_goes_over_the_command_lines() {
+        let at = AgentSocket::At(PathBuf::from("/run/user/1000/agent"));
+        for flag in [Some(Path::new(FLAG)), None] {
+            assert_eq!(
+                agent_socket(flag, &at, runtime(None)).expect("no folder needed"),
+                Some(PathBuf::from("/run/user/1000/agent")),
+                "--mcp-socket {flag:?}"
+            );
+        }
     }
 }

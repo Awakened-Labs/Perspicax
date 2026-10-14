@@ -79,12 +79,36 @@ pub struct Agent {
     /// Off in both profiles: the first thing an agent can put on the
     /// person's screen, so the person names it.
     pub launch: Rule,
+    /// Where the session serves the agent interface, for an agent inside it.
+    /// Read once, before anything starts: a change waits for the next login.
+    pub socket: AgentSocket,
 }
 
 impl Default for Agent {
     fn default() -> Self {
-        Self { launch: Rule::Off }
+        Self {
+            launch: Rule::Off,
+            socket: AgentSocket::Unsaid,
+        }
     }
+}
+
+/// `[agent] socket`: whether the session serves the agent interface on a
+/// socket, and where. What it says goes over `--mcp-socket`, so a session a
+/// display manager starts, which no flag reaches, can have one, and a person
+/// can be sure theirs has none.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AgentSocket {
+    /// Not written: `--mcp-socket` decides.
+    #[default]
+    Unsaid,
+    /// `false`: none, though `--mcp-socket` names one.
+    Off,
+    /// `true`: where `--mcp-socket` says, or else `perspicax-mcp` in
+    /// `$XDG_RUNTIME_DIR`.
+    On,
+    /// A whole path: there, wherever `--mcp-socket` says.
+    At(PathBuf),
 }
 
 /// A program to start once the session is up: an `autostart` entry.
@@ -699,6 +723,15 @@ struct Raw {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct RawAgent {
     launch: Option<RawRule>,
+    socket: Option<RawSocket>,
+}
+
+/// `true`, `false`, or a path.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawSocket {
+    Switch(bool),
+    At(String),
 }
 
 impl RawAgent {
@@ -717,6 +750,28 @@ impl RawAgent {
                 }
             }
             agent.launch = rule;
+        }
+        if let Some(socket) = self.socket {
+            agent.socket = match socket {
+                RawSocket::Switch(true) => AgentSocket::On,
+                RawSocket::Switch(false) => AgentSocket::Off,
+                RawSocket::At(path) if path.starts_with('/') => AgentSocket::At(path.into()),
+                RawSocket::At(path) if path.is_empty() => {
+                    return Err(invalid(
+                        "agent.socket".to_owned(),
+                        "an empty path; write true, false, or a whole path".to_owned(),
+                    ));
+                }
+                RawSocket::At(path) => {
+                    return Err(invalid(
+                        "agent.socket".to_owned(),
+                        format!(
+                            "`{path}` is a path from nowhere in particular; write the whole \
+                             path, from /, or true for $XDG_RUNTIME_DIR/perspicax-mcp"
+                        ),
+                    ));
+                }
+            };
         }
         Ok(agent)
     }
@@ -3382,5 +3437,33 @@ mod tests {
             ),
             "{error}"
         );
+    }
+
+    #[test]
+    fn the_agent_socket_is_a_switch_or_a_whole_path_and_unsaid_by_default() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            assert_eq!(
+                Config::profile(profile, SEAT).agent.socket,
+                AgentSocket::Unsaid,
+                "so --mcp-socket decides, as before the file could say"
+            );
+        }
+        let socket = |toml: &str| parse(toml, SEAT).map(|config| config.agent.socket);
+        assert_eq!(socket("[agent]\nsocket = true").unwrap(), AgentSocket::On);
+        assert_eq!(socket("[agent]\nsocket = false").unwrap(), AgentSocket::Off);
+        assert_eq!(
+            socket("[agent]\nsocket = \"/run/user/1000/agent\"").unwrap(),
+            AgentSocket::At("/run/user/1000/agent".into())
+        );
+        for path in ["run/agent", ""] {
+            match socket(&format!("[agent]\nsocket = \"{path}\"")).unwrap_err() {
+                Error::Invalid { key, .. } => assert_eq!(key, "agent.socket"),
+                other => panic!("{path:?}: {other}"),
+            }
+        }
+        assert!(matches!(
+            socket("[agent]\nsocket = 1").unwrap_err(),
+            Error::Parse(_)
+        ));
     }
 }

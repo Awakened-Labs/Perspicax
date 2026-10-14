@@ -7,9 +7,11 @@
 //! locks (see [`crate::keyboard`]). Pointer settings go to every device.
 //! Outputs are relit only if their rules changed, because relighting is a
 //! modeset and the screens blink. Autostart, the config's and XDG's, is not
-//! re-run: those programs are already running. The shell is told when its
-//! own table changed, and is started or stopped when `enabled` was turned on
-//! or off (see [`supervise`]).
+//! re-run: those programs are already running. Nor is the agent socket
+//! moved: it is bound before the seat is taken, so a change to it waits for
+//! the next login. The shell is told when its own table changed, and is
+//! started or stopped when `enabled` was turned on or off (see
+//! [`supervise`]).
 //!
 //! Saving is watched with inotify on the file's *directory*, not the file:
 //! most editors save by writing a new file and renaming it over the old one,
@@ -259,6 +261,12 @@ pub(crate) fn reload(state: &mut Compositor) {
     let shell_changed = fresh.shell != session.settings.shell;
     let shell = session.settings.shell.clone();
     let workspaces = fresh.workspaces;
+    if fresh.agent.socket != session.settings.agent.socket {
+        tracing::info!(
+            "[agent] socket is read once, before the seat is taken: the change applies at \
+             the next login"
+        );
+    }
     if fresh.flipping.delay_ms != session.settings.flipping.delay_ms {
         session.dwell = perspicax_policy::EdgeDwell::new(fresh.flipping.delay_ms);
     }
