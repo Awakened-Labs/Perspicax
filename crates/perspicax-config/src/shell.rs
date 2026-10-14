@@ -20,6 +20,7 @@ use crate::{
     Error, Profile, invalid,
     pie::{Pie, RawPie},
     start_menu::{RawStartMenu, StartMenu},
+    swaylock,
 };
 
 /// Which of perspicax-shell's components it was built with: its cargo
@@ -86,7 +87,8 @@ pub struct Shell {
     /// What an application that asks for a terminal is run in, as a program
     /// and its arguments. `None` takes the first terminal installed.
     pub terminal: Option<Vec<String>>,
-    /// What the menus' Lock runs.
+    /// What the menus' Lock runs, as written: [`Self::lock_command`] is
+    /// what it runs, swaylock dressed in the theme.
     pub lock: Vec<String>,
     /// What the menus' Suspend runs.
     pub suspend: Vec<String>,
@@ -361,17 +363,27 @@ impl Shell {
 }
 
 impl Shell {
-    /// The program `leave` runs, as its key says: `None` for Log Out, which
-    /// asks the compositor instead.
+    /// The program `leave` runs, as its key says, and Lock's dressed in the
+    /// theme: `None` for Log Out, which asks the compositor instead.
     #[must_use]
-    pub fn runs(&self, leave: Leave) -> Option<&[String]> {
+    pub fn runs(&self, leave: Leave) -> Option<Vec<String>> {
         match leave {
-            Leave::Lock => Some(&self.lock),
+            Leave::Lock => Some(self.lock_command(&[])),
             Leave::LogOut => None,
-            Leave::Suspend => Some(&self.suspend),
-            Leave::Reboot => Some(&self.reboot),
-            Leave::PowerOff => Some(&self.power_off),
+            Leave::Suspend => Some(self.suspend.clone()),
+            Leave::Reboot => Some(self.reboot.clone()),
+            Leave::PowerOff => Some(self.power_off.clone()),
         }
+    }
+
+    /// What locking the screen runs: `lock`, then `more`. swaylock is given
+    /// no config file of its own and the theme as flags, before the ones
+    /// written, unless they name a file for it with `-C`; any other program
+    /// runs as written.
+    #[must_use]
+    pub fn lock_command(&self, more: &[String]) -> Vec<String> {
+        let command = self.lock.iter().chain(more).cloned().collect();
+        swaylock::dressed(command, &self.palette, &self.font)
     }
 }
 
@@ -1288,18 +1300,14 @@ mod tests {
         for profile in [Profile::Classic, Profile::Minimal] {
             let shell = Shell::profile(profile, ShellBuilt::FULL);
             assert_eq!(shell.leave, Leave::ALL, "{profile:?}");
-            assert_eq!(shell.runs(Leave::Lock), Some(&["swaylock".to_owned()][..]));
+            assert_eq!(shell.lock, ["swaylock"]);
+            let lock = shell.runs(Leave::Lock).unwrap();
+            assert_eq!(lock[..3], ["swaylock", "-C", "/dev/null"], "in the theme");
+            assert_eq!(shell.runs(Leave::Suspend).unwrap(), ["loginctl", "suspend"]);
+            assert_eq!(shell.runs(Leave::Reboot).unwrap(), ["loginctl", "reboot"]);
             assert_eq!(
-                shell.runs(Leave::Suspend),
-                Some(&["loginctl".to_owned(), "suspend".to_owned()][..])
-            );
-            assert_eq!(
-                shell.runs(Leave::Reboot),
-                Some(&["loginctl".to_owned(), "reboot".to_owned()][..])
-            );
-            assert_eq!(
-                shell.runs(Leave::PowerOff),
-                Some(&["loginctl".to_owned(), "poweroff".to_owned()][..])
+                shell.runs(Leave::PowerOff).unwrap(),
+                ["loginctl", "poweroff"]
             );
             assert_eq!(shell.runs(Leave::LogOut), None, "the compositor is asked");
         }
@@ -1330,6 +1338,36 @@ mod tests {
                 .leave
                 .is_empty(),
             "no way to leave from the menus"
+        );
+    }
+
+    #[test]
+    fn lock_runs_swaylock_in_the_theme_with_what_was_written_after() {
+        let written = |text: &str| shell(text, ShellBuilt::FULL).unwrap();
+        let light =
+            written("[theme]\nname = \"breeze-light\"\n[shell]\nlock = [\"swaylock\", \"-f\"]");
+        let lock = light.lock_command(&["--ring-color".to_owned(), "00ff00".to_owned()]);
+        assert_eq!(
+            lock[..5],
+            ["swaylock", "-C", "/dev/null", "--color", "cbd8dfff"]
+        );
+        assert_eq!(
+            lock[lock.len() - 3..],
+            ["-f", "--ring-color", "00ff00"],
+            "lock's, then the caller's, after the theme"
+        );
+
+        let own = written("[shell]\nlock = [\"swaylock\", \"-C\", \"/home/me/swaylock\"]");
+        assert_eq!(
+            own.runs(Leave::Lock).unwrap(),
+            own.lock,
+            "a file of its own"
+        );
+        let other = written("[shell]\nlock = [\"gtklock\"]");
+        assert_eq!(
+            other.lock_command(&["-d".to_owned()]),
+            ["gtklock", "-d"],
+            "not swaylock"
         );
     }
 

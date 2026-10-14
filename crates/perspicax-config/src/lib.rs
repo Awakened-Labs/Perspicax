@@ -31,6 +31,7 @@ pub mod menu;
 pub mod pie;
 mod shell;
 pub mod start_menu;
+mod swaylock;
 
 use std::{
     collections::{BTreeMap, BTreeSet},

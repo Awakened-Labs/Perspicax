@@ -179,6 +179,17 @@ pub fn agent_env(socket: Option<&Path>) -> Result<Vec<(String, String)>> {
     Ok(vec![(AGENT_SOCKET.to_owned(), value)])
 }
 
+/// What every program the session starts is told about its config: the file
+/// it read, which `perspicax lock` reads too, so a key or swayidle locks in
+/// the session's own theme. Empty, as the agent's socket is, when it read
+/// none, and for a path that is not UTF-8, which the launch environment
+/// cannot carry: `perspicax lock` then reads the default.
+#[must_use]
+pub fn config_env(config: Option<&Path>) -> Vec<(String, String)> {
+    let value = config.and_then(Path::to_str).unwrap_or_default();
+    vec![(crate::lock::CONFIG.to_owned(), value.to_owned())]
+}
+
 /// Set in the environment of the process `dbus-run-session` starts in this
 /// one's place, so that it cannot start another if it still finds no bus.
 pub const BUS_STARTED: &str = "PERSPICAX_BUS_STARTED";
@@ -703,6 +714,23 @@ mod tests {
             PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/\xff"))
         };
         assert!(agent_env(Some(&unreadable)).is_err());
+    }
+
+    #[test]
+    fn programs_are_told_the_config_the_session_read() {
+        let name = crate::lock::CONFIG.to_owned();
+        assert_eq!(
+            config_env(Some(Path::new("/home/me/.config/perspicax/config.toml"))),
+            [(
+                name.clone(),
+                "/home/me/.config/perspicax/config.toml".to_owned()
+            )]
+        );
+        assert_eq!(
+            config_env(None),
+            [(name, String::new())],
+            "said, and empty, so an outer session's is not inherited"
+        );
     }
 
     /// The runtime folder as a person's session has it, or as one started
