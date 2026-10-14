@@ -47,12 +47,12 @@ use smithay_client_toolkit::{
             window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
         },
     },
-    shm::{Shm, ShmHandler, slot::SlotPool},
+    shm::{Shm, ShmHandler, raw::RawPool, slot::SlotPool},
     subcompositor::SubcompositorState,
 };
 use wayland_client::{
-    Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
-    backend::ObjectId,
+    Connection, Dispatch, DispatchError, EventQueue, Proxy, QueueHandle, WEnum,
+    backend::{ObjectId, WaylandError},
     event_created_child,
     globals::{GlobalList, registry_queue_init},
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_subsurface, wl_surface},
@@ -441,6 +441,19 @@ pub fn around(desk: &mut Desk, grab: usize, at: (usize, usize), reach: usize) ->
         }
     }
     pixels
+}
+
+/// The protocol error the compositor ended this client's connection with:
+/// the interface of the object it named, and the error's code. Fails if
+/// the connection is still up, or ended any other way -- the compositor
+/// gone, as one that panicked is.
+pub fn refused<D>(queue: &mut EventQueue<D>, state: &mut D) -> (String, u32) {
+    match queue.roundtrip(state) {
+        Err(DispatchError::Backend(WaylandError::Protocol(error))) => {
+            (error.object_interface, error.code)
+        }
+        other => panic!("expected a protocol error, got {other:?}"),
+    }
 }
 
 /// Whether the registry advertised `interface` to this client.
@@ -1155,6 +1168,18 @@ impl Desk {
         surface.set_opaque_region(Some(region.wl_region()));
     }
 
+    /// An empty region, for a test to add rectangles to and take them away
+    /// from as it likes.
+    pub fn region(&self) -> Region {
+        Region::new(&self.compositor).expect("a region")
+    }
+
+    /// A pool of shared memory `len` bytes long, for a test to ask of as it
+    /// likes.
+    pub fn raw_pool(&self, len: usize) -> RawPool {
+        RawPool::new(len, &self.shm).expect("a pool")
+    }
+
     /// A subsurface of `parent`, at `at` in the parent's coordinates, with
     /// nothing in it yet. Synchronized, as every subsurface starts, unless
     /// `sync` is false.
@@ -1183,8 +1208,18 @@ impl Desk {
         at: (i32, i32),
         size: (u32, u32),
     ) -> Popup {
-        let positioner = self.positioner(at, size);
-        Popup::new(parent, &positioner, qh, &self.compositor, &self.xdg).expect("xdg_popup")
+        self.open_popup_by(qh, parent, &self.positioner(at, size))
+    }
+
+    /// A popup of `parent`, placed by `positioner`: [`Self::open_popup`],
+    /// with a positioner the test has shaped itself.
+    pub fn open_popup_by(
+        &self,
+        qh: &QueueHandle<Self>,
+        parent: &xdg_surface::XdgSurface,
+        positioner: &XdgPositioner,
+    ) -> Popup {
+        Popup::new(parent, positioner, qh, &self.compositor, &self.xdg).expect("xdg_popup")
     }
 
     /// A menu of `parent` that takes the keyboard and pointer until it is
@@ -1230,7 +1265,7 @@ impl Desk {
 
     /// Place a popup of `size` with its corner exactly at `at`: hung from a
     /// one-pixel anchor there, growing down and to the right.
-    fn positioner(&self, at: (i32, i32), size: (u32, u32)) -> XdgPositioner {
+    pub fn positioner(&self, at: (i32, i32), size: (u32, u32)) -> XdgPositioner {
         let positioner = XdgPositioner::new(&self.xdg).expect("xdg_positioner");
         positioner.set_size(
             i32::try_from(size.0).unwrap(),

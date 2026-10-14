@@ -192,4 +192,3 @@ impl Compositor {
 smithay::delegate_session_lock!(Compositor);
 smithay::delegate_idle_notify!(Compositor);
 smithay::delegate_idle_inhibit!(Compositor);
-smithay::delegate_layer_shell!(Compositor);

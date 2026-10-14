@@ -295,9 +295,12 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
             } => (
                 frame,
                 output,
+                // A side below 0 is taken as 0: a region without area, which
+                // fails below as one off the monitor does. `Size` asserts
+                // against a negative side in a debug build (#106).
                 Some(Rectangle::<i32, smithay::utils::Logical>::new(
                     (x, y).into(),
-                    (width, height).into(),
+                    (width.max(0), height.max(0)).into(),
                 )),
                 overlay_cursor,
             ),

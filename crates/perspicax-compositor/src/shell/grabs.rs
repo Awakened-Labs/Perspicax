@@ -241,9 +241,16 @@ fn limits(window: &Framed) -> Option<(Size<i32, Logical>, Size<i32, Logical>)> {
     }
     #[cfg(feature = "xwayland")]
     if let Some(x11) = window.x11_surface() {
+        // Smithay builds a `Size` of an X client's hints as they are, which
+        // a debug build asserts against for a negative side (#106): read
+        // them first, and take a limit with one as no limit.
+        let hints = x11.size_hints();
+        let stated = |limit: Option<(i32, i32)>| limit.is_some_and(|(w, h)| w >= 0 && h >= 0);
+        let min = stated(hints.and_then(|hints| hints.min_size)).then(|| x11.min_size());
+        let max = stated(hints.and_then(|hints| hints.max_size)).then(|| x11.max_size());
         return Some((
-            x11.min_size().unwrap_or_default(),
-            x11.max_size().unwrap_or_default(),
+            min.flatten().unwrap_or_default(),
+            max.flatten().unwrap_or_default(),
         ));
     }
     None

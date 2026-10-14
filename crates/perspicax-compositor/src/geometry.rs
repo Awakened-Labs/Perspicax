@@ -34,9 +34,9 @@
 //! keeps the geometry it declared, so it is still described, unmapped,
 //! rather than at smithay's `0x0`. And a declared geometry without area is
 //! no geometry at all, where smithay would clip it into a rectangle that
-//! covers nothing: `0x0`, or a negative size, which a release build of
-//! smithay takes without complaint (a debug build asserts against it as it
-//! reads the request).
+//! covers nothing. None reaches it now -- [`sizes`](crate::sizes) refuses
+//! one with xdg-shell's `invalid_size` before smithay reads it -- but the
+//! rule stays, to hold once that check is smithay's own.
 //!
 //! # What a window draws
 //!
@@ -312,8 +312,8 @@ pub(crate) fn window_geometry(surface: &WlSurface) -> Option<Rectangle<i32, Logi
         (declared, bounds(states))
     });
     // Not `Rectangle::is_empty`, which only asks whether a side is zero: a
-    // release build of smithay takes a negative size without complaint, and
-    // a rectangle turned inside out covers nothing.
+    // rectangle turned inside out covers nothing too. `sizes` refuses both
+    // before smithay takes them; this holds whoever checks.
     let declared = declared.filter(|declared| declared.size.w > 0 && declared.size.h > 0);
     match bounds {
         Some(bounds) => Some(
