@@ -25,26 +25,98 @@
 
 use std::{
     fs::{self, File},
-    os::fd::AsRawFd,
+    os::fd::{AsRawFd, OwnedFd},
     path::PathBuf,
 };
 
 use perspicax_node::{Origin, ProcessOrigin};
+use smithay::reexports::rustix::process::{Pid, PidfdFlags, pidfd_open};
 
-/// The origin of a process, by pid.
+/// The origin of a process, by pid: an X client's, which nothing will hold a
+/// grant by, since X11 consent is Xwayland's.
+#[cfg_attr(
+    not(any(feature = "xwayland", test)),
+    expect(dead_code, reason = "Xwayland's X clients")
+)]
 pub(crate) fn of_pid(pid: i32) -> Origin {
     let Ok(pid) = u32::try_from(pid) else {
         return Origin::Unattributed;
     };
+    describe(pid, Pinned::open(pid).as_ref())
+}
+
+/// The origin of a process, by pid, and a pidfd on that same process when one
+/// can be had: what a grant to it is held by, and learns its exit from. See
+/// [`crate::grants`].
+///
+/// A pidfd is opened by number, so it names the process the pin holds only if
+/// that process had not been reaped when it was opened: until then the
+/// number is the pinned process's and nobody else's. Reading through the pin
+/// after the pidfd is open is what shows that, since a pin reads nothing
+/// once its process is reaped; a pidfd the pin cannot vouch for is dropped.
+pub(crate) fn attest(pid: i32) -> (Origin, Option<OwnedFd>) {
+    let Ok(number) = u32::try_from(pid) else {
+        return (Origin::Unattributed, None);
+    };
+    let pinned = Pinned::open(number);
+    let origin = describe(number, pinned.as_ref());
+    let pidfd = pinned.as_ref().and_then(|pinned| {
+        let pidfd = pidfd_open(Pid::from_raw(pid)?, PidfdFlags::empty()).ok()?;
+        pinned.unreaped().then_some(pidfd)
+    });
+    (origin, pidfd)
+}
+
+/// The longest chain of parents [`ancestors`] follows. Far past any real
+/// one, and a bound on what a client can make this compositor read.
+const FARTHEST: usize = 64;
+
+/// The processes `pid` descends from, its parent first, up to but not
+/// including the init process. Empty for a process that has gone.
+///
+/// Each parent is pinned, then the child is asked again who its parent is.
+/// A parent that exits hands its children to another before its own pid can
+/// be given to anyone else, so a child still naming it after the pin means
+/// the pin holds that parent, not a process given its pid since.
+pub(crate) fn ancestors(pid: u32) -> Vec<u32> {
+    let mut chain = Vec::new();
+    let Some(mut child) = Pinned::open(pid) else {
+        return chain;
+    };
+    while chain.len() < FARTHEST {
+        let Some(parent) = child.parent().filter(|&parent| parent > 1) else {
+            break;
+        };
+        let Some(pinned) = Pinned::open(parent) else {
+            break;
+        };
+        if child.parent() != Some(parent) {
+            break;
+        }
+        chain.push(parent);
+        child = pinned;
+    }
+    chain
+}
+
+/// The parent's pid in a `stat` line. Read past the last `)`, since what
+/// comes before it is the program's name in brackets, and a name may hold a
+/// bracket or a space of its own.
+fn parent_in(stat: &str) -> Option<u32> {
+    let after_name = &stat[stat.rfind(')')? + 1..];
+    after_name.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Everything a pin can say about its process.
+fn describe(pid: u32, pinned: Option<&Pinned>) -> Origin {
     // Pin first, then derive everything from the one handle. Opening the
     // directory per field would reopen it by path each time, which is the race
     // this exists to close, once per field.
-    let pinned = Pinned::open(pid);
     Origin::Process(Box::new(ProcessOrigin {
         pid,
-        exe: pinned.as_ref().and_then(Pinned::exe),
-        cgroup: pinned.as_ref().and_then(Pinned::cgroup),
-        sandbox: pinned.as_ref().and_then(Pinned::sandbox),
+        exe: pinned.and_then(Pinned::exe),
+        cgroup: pinned.and_then(Pinned::cgroup),
+        sandbox: pinned.and_then(Pinned::sandbox),
     }))
 }
 
@@ -80,6 +152,17 @@ impl Pinned {
     /// The path that reaches the pinned directory, and only it.
     fn path(&self) -> PathBuf {
         PathBuf::from(format!("/proc/self/fd/{}", self.0.as_raw_fd()))
+    }
+
+    /// Whether the process has not been reaped: running, or exited with its
+    /// parent yet to collect it. Either way its pid is still its own.
+    fn unreaped(&self) -> bool {
+        fs::read(self.path().join("stat")).is_ok()
+    }
+
+    /// The pid of its parent, while it has one.
+    fn parent(&self) -> Option<u32> {
+        parent_in(&fs::read_to_string(self.path().join("stat")).ok()?)
     }
 
     /// The executable behind the pid.
@@ -174,6 +257,53 @@ mod tests {
         assert!(origin.exe.is_none());
     }
 
+    /// A live process is attested with a pidfd to hold a grant by.
+    #[test]
+    fn a_live_process_is_attested_with_a_pidfd() {
+        let (origin, pidfd) = attest(i32::try_from(std::process::id()).unwrap());
+        assert!(matches!(origin, Origin::Process(_)));
+        assert!(
+            pidfd.is_some(),
+            "this process is alive, and pidfds are Linux 5.3+"
+        );
+    }
+
+    /// A pid with nothing behind it is attributed, as [`of_pid`] says, and
+    /// yields nothing to hold a grant by: nothing could ever say it ended.
+    #[test]
+    fn a_pid_with_no_process_cannot_be_held() {
+        let (origin, pidfd) = attest(0x7FFF_FFFE);
+        assert!(matches!(origin, Origin::Process(_)));
+        assert!(pidfd.is_none());
+    }
+
+    #[test]
+    fn a_parent_is_read_past_a_name_with_a_parenthesis() {
+        assert_eq!(parent_in("4242 (a) b (c) S 17 4242 4242 0 -1"), Some(17));
+        assert_eq!(parent_in("1 (init) S 0 1 1 0 -1"), Some(0));
+        assert_eq!(parent_in("4242 (truncated"), None);
+    }
+
+    /// A child of this process descends from it, and the chain ends before
+    /// the init process.
+    #[test]
+    fn a_child_descends_from_this_process() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep is in coreutils");
+        let chain = ancestors(child.id());
+        child.kill().expect("the child is ours to kill");
+        child.wait().expect("and ours to reap");
+
+        assert_eq!(chain.first(), Some(&std::process::id()), "{chain:?}");
+        assert!(!chain.contains(&1), "{chain:?}");
+        assert!(
+            ancestors(0x7FFF_FFFE).is_empty(),
+            "a pid with nothing behind it"
+        );
+    }
+
     /// Negative pids are what a failed lookup looks like in C, and they are not
     /// process identifiers. Refuse rather than cast.
     #[test]
@@ -202,6 +332,7 @@ mod tests {
         child.kill().expect("the child is ours to kill");
         child.wait().expect("and ours to reap");
 
+        assert!(!pinned.unreaped(), "it is reaped, and says so");
         assert_eq!(pinned.exe(), None, "a reaped process has no executable");
         assert_eq!(pinned.cgroup(), None, "nor a cgroup");
         assert_eq!(pinned.sandbox(), None, "nor a sandbox identity");

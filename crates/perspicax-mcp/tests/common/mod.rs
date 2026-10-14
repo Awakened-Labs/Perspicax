@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use perspicax_index::{Delta, HostFacts, Index, Receipt, Refusal, Selector, Verb};
-use perspicax_mcp::{Denied, Desktop};
+use perspicax_mcp::{Denied, Desktop, Launched, Unlaunched};
 use perspicax_node::NodeId;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader};
@@ -75,6 +75,16 @@ impl Desktop for Nothing {
         _target: perspicax_index::ShotTarget,
     ) -> Result<perspicax_index::Shot, Denied> {
         Err(Denied::NotBuilt("capture".to_owned()))
+    }
+
+    fn launch(
+        &self,
+        _command: &[String],
+        _cwd: Option<&std::path::Path>,
+    ) -> Result<Launched, Unlaunched> {
+        Err(Unlaunched::NotStarted(
+            "nothing here starts programs".to_owned(),
+        ))
     }
 }
 

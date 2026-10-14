@@ -1,9 +1,9 @@
 //! The desktop, as the agent interface sees it.
 //!
-//! `perspicax-mcp` describes what it needs as a trait with three methods and
+//! `perspicax-mcp` describes what it needs as a trait with six methods and
 //! never implements it, so that the agent-facing surface stays portable -- a
-//! GNOME extension or a KWin plugin satisfies the same three and gets the same
-//! six tools. This is that trait satisfied, here in the composition root,
+//! GNOME extension or a KWin plugin satisfies the same six and gets the same
+//! nine tools. This is that trait satisfied, here in the composition root,
 //! because this is the only place that holds the index, the host's facts and
 //! the compositor's inbound channel at once.
 //!
@@ -29,14 +29,17 @@
 //! never existed, and an agent cannot meaningfully observe a desktop mid-click.
 //! Acts serialise against reads because acts serialise against reality.
 
-use std::sync::{Mutex, MutexGuard};
+use std::{
+    path::Path,
+    sync::{Mutex, MutexGuard},
+};
 
-use perspicax_compositor::{ActError, Facts, Host};
+use perspicax_compositor::{ActError, Facts, Host, LaunchError};
 use perspicax_index::{
     Delta, HostFacts, Index, Receipt, Selector, Shot, ShotTarget, Verb, WindowReceipt, WindowVerb,
     check_readable,
 };
-use perspicax_mcp::{Denied, Desktop};
+use perspicax_mcp::{Denied, Desktop, Launched, Unlaunched};
 use perspicax_node::SurfaceId;
 
 use crate::act;
@@ -132,7 +135,9 @@ impl Desktop for Desk {
     }
 
     fn deltas(&self) -> Vec<Delta> {
-        self.lock().take_deltas()
+        // Judged first, as every read is: a change of consent is noticed by
+        // judging, so without this one would wait for the next read.
+        self.current().0.take_deltas()
     }
 
     fn act(&self, selector: &Selector, verb: &Verb) -> Result<Receipt, Denied> {
@@ -163,6 +168,25 @@ impl Desktop for Desk {
             ActError::NotBuilt(feature) => Denied::NotBuilt(feature.to_owned()),
             error => Denied::Undispatched(error.to_string()),
         })
+    }
+
+    fn launch(&self, command: &[String], cwd: Option<&Path>) -> Result<Launched, Unlaunched> {
+        self.host
+            .launch(command, cwd)
+            .map(|pid| Launched { pid })
+            .map_err(unlaunched)
+    }
+}
+
+/// A program not started, as the MCP server reports it: one the rule does
+/// not admit, which only the person can change, or one that did not start.
+fn unlaunched(error: LaunchError) -> Unlaunched {
+    let message = error.to_string();
+    match error {
+        LaunchError::Off | LaunchError::NotAdmitted { .. } => Unlaunched::NotAdmitted(message),
+        LaunchError::Locked | LaunchError::NotStarted(_) | LaunchError::Unreachable => {
+            Unlaunched::NotStarted(message)
+        }
     }
 }
 
@@ -339,6 +363,23 @@ mod tests {
         assert!(desk.deltas().is_empty());
     }
 
+    /// Consent changes in the host's facts, not in the tree, so the drain
+    /// judges before it takes: a grant is reported to the next `deltas`, not
+    /// held back until something happens to read the screen.
+    #[test]
+    fn a_change_of_consent_is_drained_without_a_read_before_it() {
+        // The tree was judged while nothing was granted; the host has since
+        // granted the window's process.
+        let desk = desk(&clear().with_consent(Consent::Granted(vec![4242])));
+        desk.publish(tree(&clear().with_consent(Consent::Granted(Vec::new()))));
+        let deltas = desk.deltas();
+        assert!(
+            deltas.contains(&Delta::Granted { surface: WINDOW }),
+            "{deltas:?}"
+        );
+        assert!(desk.deltas().is_empty(), "and only once");
+    }
+
     /// `update` is one critical section for however many steps a refresh takes,
     /// and it hands over the host's facts so that re-attribution does not need
     /// a second lock to find an origin.
@@ -361,9 +402,35 @@ mod tests {
     /// A window's picture is gated like reading it, here, before the
     /// compositor is asked: the host below has nobody listening, so a
     /// picture that reached it would come back `Unreachable`, not refused.
+    /// What the person's rule refuses is `not_admitted`, saying what it does
+    /// admit; the rest did not start, and says why.
+    #[test]
+    fn a_launch_the_rule_refuses_is_not_admitted_and_the_rest_not_started() {
+        let refused = unlaunched(LaunchError::NotAdmitted {
+            program: "/tmp/x/flutter".to_owned(),
+            admitted: vec!["flutter".to_owned()],
+        });
+        assert!(
+            matches!(&refused, Unlaunched::NotAdmitted(message) if message.contains("only flutter")),
+            "{refused}"
+        );
+        assert!(matches!(
+            unlaunched(LaunchError::Off),
+            Unlaunched::NotAdmitted(_)
+        ));
+        assert_eq!(
+            unlaunched(LaunchError::Locked),
+            Unlaunched::NotStarted("the session is locked".to_owned())
+        );
+        assert!(matches!(
+            desk(&HostFacts::default()).launch(&["foot".to_owned()], None),
+            Err(Unlaunched::NotStarted(_))
+        ));
+    }
+
     #[test]
     fn a_picture_of_a_window_the_agent_may_not_read_is_refused_before_it_is_taken() {
-        let desk = desk(&clear().with_consent(Consent::Spawned(vec![1])));
+        let desk = desk(&clear().with_consent(Consent::Granted(vec![1])));
         assert!(matches!(
             desk.capture(ShotTarget::Window(WINDOW)),
             Err(Denied::Refused(Refusal::NoCapability { .. }))

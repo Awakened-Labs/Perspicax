@@ -38,9 +38,9 @@ use std::{
 };
 
 use perspicax_policy::{
-    Access, Action, Bindings, Chord, Context, Decorations, Direction, Drag, Flipping, Focus,
-    FocusModel, Gesture, Grid, Keysym, Mods, MouseBindings, MouseChord, OPAQUE, Opacity, Place,
-    Program, Protocol, Resistance, Rule, Shape, Side, Snapping, Switching, Towards,
+    Access, Action, Bindings, Chord, Colour, Context, Decorations, Direction, Drag, Flipping,
+    Focus, FocusModel, Gesture, Grid, Keysym, Mods, MouseBindings, MouseChord, OPAQUE, Opacity,
+    Place, Program, Protocol, Resistance, Rule, Shape, Side, Snapping, Switching, Towards,
 };
 use serde::Deserialize;
 
@@ -65,6 +65,61 @@ pub struct Built {
     pub xwayland: bool,
     /// Rendering on demand for a screenshot, which `screencopy` needs.
     pub capture: bool,
+}
+
+/// What an agent may do on the seat, beyond acting on what it was granted:
+/// the `[agent]` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Agent {
+    /// Which programs an agent may start for itself, with the `launch`
+    /// tool, and act on: `"off"`, `"any"`, or a list of programs, each a
+    /// bare name the session's `PATH` finds or a whole path (see
+    /// [`Rule::launches`]). What a listed program starts is the agent's too,
+    /// so a terminal, a shell or an interpreter listed here admits anything.
+    /// Off in both profiles: the first thing an agent can put on the
+    /// person's screen, so the person names it.
+    pub launch: Rule,
+    /// Where the session serves the agent interface, for an agent inside it.
+    /// Read once, before anything starts: a change waits for the next login.
+    pub socket: AgentSocket,
+}
+
+impl Default for Agent {
+    fn default() -> Self {
+        Self {
+            launch: Rule::Off,
+            socket: AgentSocket::Unsaid,
+        }
+    }
+}
+
+/// `[agent] socket`: whether the session serves the agent interface on a
+/// socket, and where. What it says goes over `--mcp-socket`, so a session a
+/// display manager starts, which no flag reaches, can have one, and a person
+/// can be sure theirs has none.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AgentSocket {
+    /// Not written: `--mcp-socket` decides.
+    #[default]
+    Unsaid,
+    /// `false`: none, though `--mcp-socket` names one.
+    Off,
+    /// `true`: where `--mcp-socket` says, or else `perspicax-mcp` in
+    /// `$XDG_RUNTIME_DIR`.
+    On,
+    /// A whole path: there, wherever `--mcp-socket` says.
+    At(PathBuf),
+}
+
+/// A program to start once the session is up: an `autostart` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Start {
+    /// The program and its arguments.
+    pub command: Vec<String>,
+    /// Whether an agent may act on it, as `{ spawn = [...], agent = true }`
+    /// says: its process is then granted until it exits. Otherwise it is the
+    /// person's, as anything they start is.
+    pub agent: bool,
 }
 
 /// The starting point a config file layers onto.
@@ -98,9 +153,9 @@ pub struct Config {
     /// the others. Where each one goes is resolved by
     /// [`perspicax_policy::arrange`] once every monitor's size is known.
     pub outputs: Vec<OutputRule>,
-    /// Programs to start once the session is up, each a program and its
-    /// arguments. The person's programs: none is granted agent consent.
-    pub autostart: Vec<Vec<String>>,
+    /// Programs to start once the session is up, in order. Each is the
+    /// person's, unless the entry says an agent may act on it.
+    pub autostart: Vec<Start>,
     /// Whether the session also starts the XDG autostart entries, as every
     /// desktop does: see [`autostart`](mod@autostart). On wherever there is a
     /// seat; saying `true` in a build without one is an error.
@@ -134,6 +189,8 @@ pub struct Config {
     /// Which programs may use the protocols that reach past their own
     /// windows: taskbars, pagers, screenshot and display tools.
     pub protocols: Access,
+    /// What an agent may do on the seat: the `[agent]` table.
+    pub agent: Agent,
     /// What perspicax-shell puts on the desktop, read as if the shell had
     /// every component: which it was built with is for it to check, through
     /// [`shell`].
@@ -339,6 +396,13 @@ impl Config {
             .bind(logo(Keysym::g), Action::TabWithPrevious)
             .bind(logo_shift(Keysym::g), Action::DetachTab);
 
+        // An agent, in both profiles: Logo+A lets one act on the focused
+        // window's program, or stops it, and Logo+Shift+A takes back
+        // everything it was let act on.
+        bindings = bindings
+            .bind(logo(Keysym::a), Action::ToggleAgent)
+            .bind(logo_shift(Keysym::a), Action::RevokeAgents);
+
         // Workspaces. Ctrl+Logo+arrows switches and, with Shift, takes the
         // focused window along, in both profiles: Plasma's keys, and Windows'
         // for left and right. Classic adds Plasma's Ctrl+F1..F4; minimal adds
@@ -460,6 +524,7 @@ impl Config {
             theme: Theme::default(),
             xwayland: built.xwayland,
             protocols: protocols(built),
+            agent: Agent::default(),
             shell: Shell::profile(profile, ShellBuilt::FULL),
         }
     }
@@ -639,7 +704,7 @@ struct Raw {
     #[serde(default, rename = "output")]
     outputs: Vec<RawOutput>,
     #[serde(default)]
-    autostart: Vec<Vec<String>>,
+    autostart: Vec<RawStart>,
     xdg_autostart: Option<bool>,
     xwayland: Option<bool>,
     workspaces: Option<RawWorkspaces>,
@@ -649,7 +714,67 @@ struct Raw {
     decorations: Option<RawDecorations>,
     theme: Option<RawTheme>,
     protocols: Option<RawProtocols>,
+    agent: Option<RawAgent>,
     shell: Option<RawShell>,
+}
+
+/// The `[agent]` table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawAgent {
+    launch: Option<RawRule>,
+    socket: Option<RawSocket>,
+}
+
+/// `true`, `false`, or a path.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawSocket {
+    Switch(bool),
+    At(String),
+}
+
+impl RawAgent {
+    fn apply(self, mut agent: Agent) -> Result<Agent, Error> {
+        if let Some(launch) = self.launch {
+            let rule = launch.rule("agent.launch")?;
+            for (at, program) in rule.named().into_iter().enumerate() {
+                if program.contains('/') && !program.starts_with('/') {
+                    return Err(invalid(
+                        format!("agent.launch[{at}]"),
+                        format!(
+                            "`{program}` is a path from nowhere in particular; write the whole \
+                             path, from /, or a bare name for the session's PATH to find"
+                        ),
+                    ));
+                }
+            }
+            agent.launch = rule;
+        }
+        if let Some(socket) = self.socket {
+            agent.socket = match socket {
+                RawSocket::Switch(true) => AgentSocket::On,
+                RawSocket::Switch(false) => AgentSocket::Off,
+                RawSocket::At(path) if path.starts_with('/') => AgentSocket::At(path.into()),
+                RawSocket::At(path) if path.is_empty() => {
+                    return Err(invalid(
+                        "agent.socket".to_owned(),
+                        "an empty path; write true, false, or a whole path".to_owned(),
+                    ));
+                }
+                RawSocket::At(path) => {
+                    return Err(invalid(
+                        "agent.socket".to_owned(),
+                        format!(
+                            "`{path}` is a path from nowhere in particular; write the whole \
+                             path, from /, or true for $XDG_RUNTIME_DIR/perspicax-mcp"
+                        ),
+                    ));
+                }
+            };
+        }
+        Ok(agent)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -709,6 +834,17 @@ struct RawDecorations {
     border: Option<i32>,
     focused: Option<String>,
     unfocused: Option<String>,
+    agent: Option<RawAgentLook>,
+}
+
+/// The `[decorations.agent]` table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawAgentLook {
+    focused: Option<String>,
+    unfocused: Option<String>,
+    outline: Option<i32>,
+    outline_colour: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -889,6 +1025,33 @@ enum RawAction {
 #[serde(deny_unknown_fields)]
 struct RawSpawn {
     spawn: Vec<String>,
+    /// Whether an agent may act on what it starts.
+    #[serde(default)]
+    agent: bool,
+}
+
+/// An `autostart` entry: a program and its arguments, or the same as
+/// `{ spawn = [...] }`, which may say `agent = true`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawStart {
+    Command(Vec<String>),
+    Spawn(RawSpawn),
+}
+
+impl From<RawStart> for Start {
+    fn from(start: RawStart) -> Self {
+        match start {
+            RawStart::Command(command) => Self {
+                command,
+                agent: false,
+            },
+            RawStart::Spawn(RawSpawn { spawn, agent }) => Self {
+                command: spawn,
+                agent,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -965,6 +1128,12 @@ impl Raw {
             if !self.outputs.is_empty() {
                 return Err(Error::NotBuilt {
                     key: "output",
+                    feature: "seat",
+                });
+            }
+            if self.agent.is_some() {
+                return Err(Error::NotBuilt {
+                    key: "agent",
                     feature: "seat",
                 });
             }
@@ -1169,6 +1338,9 @@ impl Raw {
         if let Some(protocols) = self.protocols {
             config.protocols = protocols.apply(config.protocols, built)?;
         }
+        if let Some(agent) = self.agent {
+            config.agent = agent.apply(config.agent)?;
+        }
 
         // Whatever the shell was built with: see `shell`.
         if let Some(shell) = self.shell {
@@ -1182,13 +1354,14 @@ impl Raw {
         config.shell.palette = config.theme.palette;
         config.shell.font = config.theme.font.clone();
 
-        if let Some(empty) = self.autostart.iter().position(Vec::is_empty) {
+        let starts: Vec<Start> = self.autostart.into_iter().map(Start::from).collect();
+        if let Some(empty) = starts.iter().position(|start| start.command.is_empty()) {
             return Err(invalid(
                 format!("autostart[{empty}]"),
                 "an empty command".to_owned(),
             ));
         }
-        config.autostart = self.autostart;
+        config.autostart = starts;
         Ok(config)
     }
 }
@@ -1270,6 +1443,26 @@ impl RawDecorations {
             decorations.border = pixels("border", border, 0..=32)?;
         }
         // Its colours are the theme's: see `theme`.
+        if let Some(agent) = self.agent {
+            let look = &mut decorations.agent;
+            if let Some(outline) = agent.outline {
+                look.outline = pixels("agent.outline", outline, 0..=8)?;
+            }
+            let written = [
+                ("focused", agent.focused, &mut look.focused),
+                ("unfocused", agent.unfocused, &mut look.unfocused),
+                (
+                    "outline-colour",
+                    agent.outline_colour,
+                    &mut look.outline_colour,
+                ),
+            ];
+            for (key, text, colour) in written {
+                if let Some(text) = text {
+                    *colour = opaque_colour(&format!("decorations.agent.{key}"), &text)?;
+                }
+            }
+        }
         Ok(decorations)
     }
 }
@@ -1393,6 +1586,25 @@ fn theme(written: Option<RawTheme>, decorations: Option<&RawDecorations>) -> Res
 
 /// A colour written for `role` at `at`: opaque, unless the role is one of the
 /// few drawn see-through.
+/// A colour that is drawn opaque, at `at`: one of the agent's marks, which
+/// the compositor says cover what is under them.
+fn opaque_colour(at: &str, text: &str) -> Result<Colour, Error> {
+    match Rgba::parse(text) {
+        Some(colour) if colour.is_opaque() => Ok(colour.colour()),
+        Some(_) => Err(invalid(
+            at.to_owned(),
+            format!(
+                "{text:?} is see-through, and this is drawn opaque so the compositor can say \
+                 what it covers; write it as \"#rrggbb\""
+            ),
+        )),
+        None => Err(invalid(
+            at.to_owned(),
+            format!("{text:?} is not a colour; write one as \"#rrggbb\""),
+        )),
+    }
+}
+
 fn palette_colour(at: &str, role: Role, text: &str) -> Result<Rgba, Error> {
     let colour = Rgba::parse(text).ok_or_else(|| {
         let forms = if role.takes_alpha() {
@@ -1432,7 +1644,7 @@ impl RawProtocols {
         ];
         for (protocol, raw) in written {
             let Some(raw) = raw else { continue };
-            let rule = raw.rule(protocol)?;
+            let rule = raw.rule(&format!("protocols.{}", protocol.key()))?;
             if protocol == Protocol::Screencopy && rule != Rule::Off && !built.capture {
                 return Err(Error::NotBuilt {
                     key: "protocols.screencopy",
@@ -1446,8 +1658,9 @@ impl RawProtocols {
 }
 
 impl RawRule {
-    fn rule(self, protocol: Protocol) -> Result<Rule, Error> {
-        let key = || format!("protocols.{}", protocol.key());
+    /// The rule this is, at `key`: a protocol's, or `agent.launch`.
+    fn rule(self, key: &str) -> Result<Rule, Error> {
+        let key = || key.to_owned();
         match self {
             Self::Word(word) => match word.as_str() {
                 "any" => Ok(Rule::Any),
@@ -1620,10 +1833,13 @@ fn cycle(outputs: &[OutputRule]) -> Option<&str> {
 /// `[shell.pie.menus]` names, which a `{ pie = "..." }` must be one of.
 fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Action>, String> {
     Ok(Some(match action {
-        RawAction::Spawn(RawSpawn { spawn }) if spawn.is_empty() => {
+        RawAction::Spawn(RawSpawn { spawn, .. }) if spawn.is_empty() => {
             return Err("`spawn` needs a program".to_owned());
         }
-        RawAction::Spawn(RawSpawn { spawn }) => Action::Spawn(spawn),
+        RawAction::Spawn(RawSpawn { spawn, agent }) => Action::Spawn {
+            command: spawn,
+            agent,
+        },
         RawAction::Pie(RawOpenPie { pie }) if pies.contains(&pie) => Action::Pie(pie),
         RawAction::Pie(RawOpenPie { pie }) if pies.is_empty() => {
             return Err(format!(
@@ -1660,6 +1876,8 @@ fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Actio
             "opacity-up" => Action::OpacityUp,
             "opacity-down" => Action::OpacityDown,
             "opacity-reset" => Action::OpacityReset,
+            "toggle-agent" => Action::ToggleAgent,
+            "revoke-agent-all" => Action::RevokeAgents,
             other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
                 format!(
                     "`{other}` is not an action; use close, cycle-focus, reload, \
@@ -1668,6 +1886,7 @@ fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Actio
                          next-layout, previous-layout, layout-<1-4>, \
                          next-workspace, previous-workspace, \
                          opacity-up, opacity-down, opacity-reset, \
+                         toggle-agent, revoke-agent-all, \
                          move-to-next-output, move-to-previous-output, \
                          move-to-output-<side>, workspace-<side>, workspace-<number>, \
                          send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
@@ -1733,7 +1952,7 @@ fn invalid(key: String, reason: String) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use perspicax_policy::{Colour, Palette};
+    use perspicax_policy::{AgentLook, Palette};
 
     use super::*;
 
@@ -1835,7 +2054,10 @@ mod tests {
         };
         assert_eq!(
             config.bindings.resolve(logo, &[Keysym::Return]),
-            Some(&Action::Spawn(vec!["foot".to_owned()]))
+            Some(&Action::Spawn {
+                command: vec!["foot".to_owned()],
+                agent: false
+            })
         );
         let (mods, f4) = alt(Keysym::F4);
         assert_eq!(config.bindings.resolve(mods, &f4), None);
@@ -1911,7 +2133,10 @@ mod tests {
         );
         assert_eq!(
             mouse.resolve(Context::Window, logo, SIDE),
-            Some(&Action::Spawn(vec!["foot".to_owned()]))
+            Some(&Action::Spawn {
+                command: vec!["foot".to_owned()],
+                agent: false
+            })
         );
     }
 
@@ -2264,8 +2489,59 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_autostart_command_is_refused() {
-        assert!(parse("autostart = [[]]", SEAT).is_err());
+    fn an_autostart_entry_may_be_a_command_or_a_table_marked_agent() {
+        let config = parse(
+            r#"autostart = [["waybar"], { spawn = ["foot", "-e", "htop"], agent = true }, { spawn = ["mako"] }]"#,
+            SEAT,
+        )
+        .expect("a valid config");
+        let start = |command: &[&str], agent| Start {
+            command: command.iter().map(|word| (*word).to_owned()).collect(),
+            agent,
+        };
+        assert_eq!(
+            config.autostart,
+            [
+                start(&["waybar"], false),
+                start(&["foot", "-e", "htop"], true),
+                start(&["mako"], false),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_command_in_either_form_is_refused() {
+        for text in [
+            "autostart = [[]]",
+            "autostart = [{ spawn = [], agent = true }]",
+        ] {
+            let error = parse(text, SEAT).unwrap_err();
+            assert!(
+                error.to_string().contains("autostart[0]"),
+                "{text}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_binding_may_spawn_for_the_agent() {
+        let config = parse(
+            "[keys]\n\"Logo+Shift+Return\" = { spawn = [\"foot\"], agent = true }",
+            SEAT,
+        )
+        .expect("a valid config");
+        let logo_shift = Mods {
+            logo: true,
+            shift: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(logo_shift, &[Keysym::Return]),
+            Some(&Action::Spawn {
+                command: vec!["foot".to_owned()],
+                agent: true
+            })
+        );
     }
 
     #[test]
@@ -2570,6 +2846,43 @@ mod tests {
     }
 
     #[test]
+    fn the_agents_marks_are_configured_under_decorations() {
+        let look = Config::profile(Profile::Classic, SEAT).decorations.agent;
+        assert_eq!(look, AgentLook::default());
+        assert_eq!(look.outline, 3, "on by default, for the windows it marks");
+        let config = parse(
+            "[decorations.agent]\nfocused = \"#102030\"\noutline = 0\n\
+             outline-colour = \"#ff0000\"",
+            SEAT,
+        )
+        .unwrap();
+        let look = config.decorations.agent;
+        assert_eq!(look.focused, Colour::rgb(0x10, 0x20, 0x30));
+        assert_eq!(look.unfocused, AgentLook::default().unfocused);
+        assert_eq!(look.outline, 0, "0 is none");
+        assert_eq!(look.outline_colour, Colour::rgb(0xff, 0, 0));
+    }
+
+    #[test]
+    fn an_agent_mark_that_cannot_be_drawn_is_refused_by_name() {
+        for (text, key) in [
+            ("outline = 9", "decorations.agent.outline"),
+            ("outline = -1", "decorations.agent.outline"),
+            ("focused = \"purple\"", "decorations.agent.focused"),
+            (
+                "outline-colour = \"#b37feb80\"",
+                "decorations.agent.outline-colour",
+            ),
+        ] {
+            match parse(&format!("[decorations.agent]\n{text}"), SEAT).unwrap_err() {
+                Error::Invalid { key: at, .. } => assert_eq!(at, key, "{text}"),
+                other => panic!("{text}: {other}"),
+            }
+        }
+        assert!(parse("[decorations.agent]\nglow = 1", SEAT).is_err());
+    }
+
+    #[test]
     fn a_decoration_that_cannot_be_drawn_is_refused_by_name() {
         for (text, key) in [
             ("title-height = 2", "decorations.title-height"),
@@ -2815,6 +3128,44 @@ mod tests {
             config.bindings.resolve(logo, &[Keysym::s]),
             Some(&Action::ToggleSticky)
         );
+    }
+
+    #[test]
+    fn the_agent_actions_are_named_and_bound_to_logo_a_in_both_profiles() {
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        let shift = Mods {
+            shift: true,
+            ..logo
+        };
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let bindings = Config::profile(profile, SEAT).bindings;
+            assert_eq!(
+                bindings.resolve(logo, &[Keysym::a]),
+                Some(&Action::ToggleAgent)
+            );
+            assert_eq!(
+                bindings.resolve(shift, &[Keysym::a]),
+                Some(&Action::RevokeAgents)
+            );
+        }
+        let config = parse(
+            "[keys]\n\"Logo+Y\" = \"toggle-agent\"\n\"Logo+Shift+Y\" = \"revoke-agent-all\"\n\
+             \"Logo+A\" = \"none\"",
+            SEAT,
+        )
+        .expect("a valid config");
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::y]),
+            Some(&Action::ToggleAgent)
+        );
+        assert_eq!(
+            config.bindings.resolve(shift, &[Keysym::y]),
+            Some(&Action::RevokeAgents)
+        );
+        assert_eq!(config.bindings.resolve(logo, &[Keysym::a]), None, "unbound");
     }
 
     #[test]
@@ -3134,5 +3485,72 @@ mod tests {
     fn a_word_other_than_any_or_off_is_refused() {
         let error = parse("[protocols]\nworkspace = \"all\"", SEAT).unwrap_err();
         assert!(error.to_string().contains("`all` is not a rule"), "{error}");
+    }
+
+    #[test]
+    fn agent_launch_is_off_in_both_profiles() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            assert_eq!(Config::profile(profile, SEAT).agent.launch, Rule::Off);
+        }
+        let config = parse("[agent]\nlaunch = [\"flutter\", \"/usr/bin/zenity\"]", SEAT);
+        assert_eq!(
+            config.unwrap().agent.launch.named(),
+            ["flutter", "/usr/bin/zenity"]
+        );
+    }
+
+    #[test]
+    fn a_bad_launch_rule_is_named_by_its_key() {
+        let key = |toml: &str| match parse(toml, SEAT).unwrap_err() {
+            Error::Invalid { key, .. } => key,
+            other => panic!("{other}"),
+        };
+        assert_eq!(key("[agent]\nlaunch = \"sometimes\""), "agent.launch");
+        assert_eq!(key("[agent]\nlaunch = []"), "agent.launch");
+        assert_eq!(key("[agent]\nlaunch = [\"foot\", \"\"]"), "agent.launch[1]");
+        assert_eq!(
+            key("[agent]\nlaunch = [\"foot\", \"bin/x\"]"),
+            "agent.launch[1]",
+            "a path from wherever the compositor stands"
+        );
+        let error = parse("[agent]\nlaunch = \"any\"", Built::default()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::NotBuilt {
+                    key: "agent",
+                    feature: "seat"
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_agent_socket_is_a_switch_or_a_whole_path_and_unsaid_by_default() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            assert_eq!(
+                Config::profile(profile, SEAT).agent.socket,
+                AgentSocket::Unsaid,
+                "so --mcp-socket decides, as before the file could say"
+            );
+        }
+        let socket = |toml: &str| parse(toml, SEAT).map(|config| config.agent.socket);
+        assert_eq!(socket("[agent]\nsocket = true").unwrap(), AgentSocket::On);
+        assert_eq!(socket("[agent]\nsocket = false").unwrap(), AgentSocket::Off);
+        assert_eq!(
+            socket("[agent]\nsocket = \"/run/user/1000/agent\"").unwrap(),
+            AgentSocket::At("/run/user/1000/agent".into())
+        );
+        for path in ["run/agent", ""] {
+            match socket(&format!("[agent]\nsocket = \"{path}\"")).unwrap_err() {
+                Error::Invalid { key, .. } => assert_eq!(key, "agent.socket"),
+                other => panic!("{path:?}: {other}"),
+            }
+        }
+        assert!(matches!(
+            socket("[agent]\nsocket = 1").unwrap_err(),
+            Error::Parse(_)
+        ));
     }
 }

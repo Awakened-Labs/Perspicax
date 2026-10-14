@@ -89,6 +89,14 @@ impl Program {
         }
     }
 
+    /// The entry as it was written: a path, or a bare name.
+    #[must_use]
+    pub fn spelled(&self) -> &str {
+        match self {
+            Self::Path(written) | Self::Name(written) => written,
+        }
+    }
+
     fn matches(&self, exe: &str) -> bool {
         match self {
             Self::Path(path) => exe == path,
@@ -121,6 +129,35 @@ impl Rule {
             Self::Only(programs) => exe
                 .filter(|exe| !exe.ends_with(" (deleted)"))
                 .is_some_and(|exe| programs.iter().any(|program| program.matches(exe))),
+        }
+    }
+
+    /// Whether an agent may start `program`, the first word of a command as
+    /// the agent wrote it: `[agent] launch`.
+    ///
+    /// Stricter than [`Rule::admits`], which knows a client's executable
+    /// and matches a name wherever the file is. Here the program has not
+    /// started, and its name is the agent's to choose: a name admits only
+    /// that same bare word, which the session's `PATH` then finds, and a path
+    /// only itself. So `flutter` does not admit `/tmp/x/flutter`. The person
+    /// named the program their `PATH` finds, not every file an agent can give
+    /// that name.
+    #[must_use]
+    pub fn launches(&self, program: &str) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Any => true,
+            Self::Only(programs) => programs.iter().any(|entry| entry.spelled() == program),
+        }
+    }
+
+    /// The programs it names, as written, for a refusal to say what is
+    /// admitted. None for `Off` or `Any`.
+    #[must_use]
+    pub fn named(&self) -> Vec<&str> {
+        match self {
+            Self::Off | Self::Any => Vec::new(),
+            Self::Only(programs) => programs.iter().map(Program::spelled).collect(),
         }
     }
 }
@@ -184,6 +221,47 @@ impl Default for Access {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bare_name_launches_only_that_word_and_never_a_path_ending_in_it() {
+        let rule = Rule::Only(vec![Program::parse("flutter")]);
+        assert!(rule.launches("flutter"));
+        assert!(
+            !rule.launches("/tmp/x/flutter"),
+            "a file the agent named so"
+        );
+        assert!(
+            !rule.launches("/usr/bin/flutter"),
+            "not even where PATH finds it"
+        );
+        assert!(!rule.launches("flutter2"));
+    }
+
+    #[test]
+    fn a_path_launches_only_itself() {
+        let rule = Rule::Only(vec![Program::parse("/opt/paradox/bin/paradoxshift")]);
+        assert!(rule.launches("/opt/paradox/bin/paradoxshift"));
+        assert!(
+            !rule.launches("paradoxshift"),
+            "a bare word is PATH's to find"
+        );
+        assert!(!rule.launches("/opt/paradox/bin/../bin/paradoxshift"));
+    }
+
+    #[test]
+    fn launching_off_admits_nothing_and_any_admits_everything() {
+        assert!(!Rule::Off.launches("foot"));
+        assert!(Rule::Any.launches("/tmp/x/anything"));
+        assert!(Rule::Any.named().is_empty());
+        assert_eq!(
+            Rule::Only(vec![
+                Program::parse("foot"),
+                Program::parse("/usr/bin/zenity")
+            ])
+            .named(),
+            ["foot", "/usr/bin/zenity"]
+        );
+    }
 
     fn only(entries: &[&str]) -> Rule {
         Rule::Only(entries.iter().map(|entry| Program::parse(entry)).collect())

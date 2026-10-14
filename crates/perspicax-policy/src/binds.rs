@@ -67,8 +67,10 @@ pub enum Action {
     /// stepping as Windows does. See [`crate::keyed`].
     Snap(Direction),
     /// Start a program, as a program and its arguments. The person's own
-    /// program: it is never granted agent consent.
-    Spawn(Vec<String>),
+    /// program, unless `agent`: then the person has said, in their own
+    /// config, that an agent may act on it, and its process is granted until
+    /// it exits. What it starts in turn is not.
+    Spawn { command: Vec<String>, agent: bool },
     /// Maximize the focused window, or put a maximized one back.
     ToggleMaximize,
     /// Take the focused window off the screen until it is cycled back to.
@@ -108,6 +110,13 @@ pub enum Action {
     /// Put the focused window back to its application's rule in
     /// `[opacity]`, or opaque, forgetting what the keys set.
     OpacityReset,
+    /// Let an agent act on the focused window's program, or stop letting it:
+    /// a grant to its process, which also ends when the process exits. Not
+    /// an X11 window's, whose consent is Xwayland's and every X11 program's
+    /// at once.
+    ToggleAgent,
+    /// Take back everything an agent was granted, whoever granted it.
+    RevokeAgents,
 }
 
 impl Action {
@@ -541,7 +550,13 @@ mod tests {
     fn only_switching_layout_works_at_the_lock_screen() {
         assert!(Action::CycleLayout { forward: true }.while_locked());
         assert!(Action::Layout(2).while_locked());
-        assert!(!Action::Spawn(vec!["foot".to_owned()]).while_locked());
+        assert!(
+            !Action::Spawn {
+                command: vec!["foot".to_owned()],
+                agent: false
+            }
+            .while_locked()
+        );
         assert!(!Action::Reload.while_locked());
     }
 

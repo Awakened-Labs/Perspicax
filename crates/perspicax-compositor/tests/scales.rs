@@ -48,6 +48,7 @@ fn two_monitors() -> Backend {
         access: Access::open(),
         person: false,
         opacity: Default::default(),
+        agent: Default::default(),
     }
 }
 

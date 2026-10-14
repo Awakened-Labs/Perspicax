@@ -10,7 +10,10 @@
 //! `judge` are the production ones; only [`Desktop`] is faked, and only because
 //! there is no compositor in a unit test to be the other side of it.
 
-use std::sync::Mutex;
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use perspicax_index::{
     Consent, Delta, Drawn, HostFacts, Index, Layer, Receipt, Selector, Shot, ShotTarget,
@@ -18,7 +21,7 @@ use perspicax_index::{
 };
 use perspicax_node::{Node, NodeId, ObservedNode, Origin, ProcessOrigin, Rect, Role, SurfaceId};
 
-use crate::{Denied, Desktop};
+use crate::{Denied, Desktop, Launched, Unlaunched};
 
 /// The window's surface, the one with a tree on it.
 pub(crate) const WINDOW: SurfaceId = SurfaceId(1);
@@ -110,6 +113,8 @@ pub(crate) struct Fake {
     facts: HostFacts,
     answer: Result<Receipt, Denied>,
     asked: Mutex<Vec<(String, Verb)>>,
+    /// Each launch asked for, with its folder.
+    launched: Mutex<Vec<(Vec<String>, Option<PathBuf>)>>,
 }
 
 impl Fake {
@@ -120,7 +125,13 @@ impl Fake {
             facts: facts(),
             answer,
             asked: Mutex::new(Vec::new()),
+            launched: Mutex::new(Vec::new()),
         }
+    }
+
+    /// What this desktop has been asked to launch, in order.
+    pub(crate) fn launched(&self) -> Vec<(Vec<String>, Option<PathBuf>)> {
+        self.launched.lock().expect("no test poisons this").clone()
     }
 
     /// What this desktop has been asked to do, in order.
@@ -190,6 +201,22 @@ impl Desktop for Fake {
             drawn,
             redacted,
         })
+    }
+
+    /// `flutter` starts, as pid 4343. Anything else is not admitted, as a
+    /// person's list naming only `flutter` would say.
+    fn launch(&self, command: &[String], cwd: Option<&Path>) -> Result<Launched, Unlaunched> {
+        self.launched
+            .lock()
+            .expect("no test poisons this")
+            .push((command.to_vec(), cwd.map(Path::to_owned)));
+        match command.first().map(String::as_str) {
+            Some("flutter") => Ok(Launched { pid: 4343 }),
+            program => Err(Unlaunched::NotAdmitted(format!(
+                "`{}` is not admitted: an agent may start only flutter, each exactly as written",
+                program.unwrap_or_default()
+            ))),
+        }
     }
 
     /// Through the real gate, against the fixture's facts, then a receipt

@@ -26,7 +26,6 @@
 use std::{
     ffi::OsStr,
     fmt::Display,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Child,
     time::{Duration, Instant},
@@ -236,18 +235,12 @@ fn find(beside: Option<&Path>, path: Option<&OsStr>) -> Option<PathBuf> {
         .into_iter()
         .chain(on_path)
         .map(|directory| directory.join(PROGRAM))
-        .find(|candidate| runnable(candidate))
-}
-
-/// Whether `path` is a file that may be run.
-pub(super) fn runnable(path: &Path) -> bool {
-    path.metadata()
-        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .find(|candidate| crate::runnable(candidate))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{env, fs};
+    use std::{env, fs, os::unix::fs::PermissionsExt};
 
     use super::*;
 

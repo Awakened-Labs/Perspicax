@@ -209,7 +209,12 @@ impl core::error::Error for Refusal {}
 /// application at all. On a headless compositor there is no person, and every
 /// client is on a private socket an agent set up, so the answer is
 /// [`Consent::Everyone`]. On a seat the person launched most of what is on
-/// screen, and the default is only what perspicax spawned itself.
+/// screen, and the answer is [`Consent::Granted`]: only the processes the
+/// host holds a grant for, each until it exits. perspicax grants what its
+/// `--spawn` starts, a window's process the person hands over with a key,
+/// what a binding or autostart entry they marked for an agent starts, and
+/// what an agent launches as their list admits, with what that launch
+/// starts while it runs.
 ///
 /// The default is [`Consent::Nobody`], so a host that forgets to publish
 /// consent produces no actable node. This is the same fail-closed rule the
@@ -219,11 +224,13 @@ pub enum Consent {
     /// No application may be acted on.
     #[default]
     Nobody,
-    /// Only processes with these pids: the ones the host started for an
-    /// agent. A process they start in turn is *not* included. Following
-    /// ancestry would mean a terminal perspicax spawned could extend consent
-    /// to anything typed into it.
-    Spawned(Vec<u32>),
+    /// Only processes with these pids: the ones the host holds a grant for.
+    /// Which those are, and for how long, is the host's to decide and to
+    /// keep current; a pid is only safe to list while the host knows its
+    /// process has not exited, since the kernel reissues the number after.
+    /// A process a granted one starts is *not* included by this rule, and
+    /// the host lists it only where it has decided to.
+    Granted(Vec<u32>),
     /// Every attributed application.
     Everyone,
 }
@@ -232,14 +239,13 @@ impl Consent {
     /// Whether an agent may act on something drawn by `origin`. Never for an
     /// unattributed origin, whatever the policy: a policy about processes
     /// cannot say yes to a process nobody has identified.
-    #[must_use]
     ///
     /// An X11 origin is judged by its server, never by its client: every X
     /// client shares one Xwayland, and X11 lets any of them read and inject
     /// into the others, so consenting to one X client is consenting to all of
-    /// them. The Xwayland perspicax starts for a person is never among the
-    /// processes it spawned for an agent, so on a seat X11 applications are
-    /// refused unless consent is everyone.
+    /// them. The Xwayland perspicax starts for a person is never granted,
+    /// so on a seat X11 applications are refused unless consent is everyone.
+    #[must_use]
     pub fn permits(&self, origin: &Origin) -> bool {
         let pid = match origin {
             Origin::Unattributed => return false,
@@ -248,7 +254,7 @@ impl Consent {
         };
         match self {
             Self::Nobody => false,
-            Self::Spawned(pids) => pids.contains(&pid),
+            Self::Granted(pids) => pids.contains(&pid),
             Self::Everyone => true,
         }
     }
@@ -746,7 +752,7 @@ mod tests {
     fn no_consent_policy_permits_an_unattributed_origin() {
         for consent in [
             Consent::Nobody,
-            Consent::Spawned(vec![0]),
+            Consent::Granted(vec![0]),
             Consent::Everyone,
         ] {
             assert!(!consent.permits(&Origin::Unattributed), "{consent:?}");
@@ -766,10 +772,10 @@ mod tests {
             basis: perspicax_node::X11Basis::XRes,
         }));
         assert!(
-            !Consent::Spawned(vec![900]).permits(&x11),
+            !Consent::Granted(vec![900]).permits(&x11),
             "the client is not the unit"
         );
-        assert!(Consent::Spawned(vec![700]).permits(&x11));
+        assert!(Consent::Granted(vec![700]).permits(&x11));
         assert!(Consent::Everyone.permits(&x11));
     }
 
@@ -810,7 +816,7 @@ mod tests {
         );
         assert!(check_window(&facts, SurfaceId(2), WindowVerb::Close).is_ok());
 
-        let facts = tabs(front(), Consent::Spawned(vec![11]));
+        let facts = tabs(front(), Consent::Granted(vec![11]));
         assert!(matches!(
             check_window(&facts, SurfaceId(2), WindowVerb::Close),
             Err(Refusal::NoCapability { .. })
@@ -896,7 +902,7 @@ mod tests {
             ],
             1,
         )
-        .with_consent(Consent::Spawned(vec![10]));
+        .with_consent(Consent::Granted(vec![10]));
         assert!(matches!(
             check_window(&facts, SurfaceId(1), WindowVerb::Forward),
             Err(Refusal::NoCapability { .. })

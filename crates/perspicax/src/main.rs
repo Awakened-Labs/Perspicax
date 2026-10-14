@@ -30,6 +30,8 @@
 //! ```
 //!
 //! and the agent, in that terminal, runs `perspicax attach` as its MCP server.
+//! A session the display manager starts, which no flag reaches, serves the
+//! same socket when its config says `[agent] socket = true`.
 //!
 //! It needs `XDG_RUNTIME_DIR` set, which is where the Wayland socket goes. Over
 //! SSH that is `export XDG_RUNTIME_DIR=/run/user/$(id -u)`, the same variable
@@ -44,15 +46,16 @@ use std::{
     fs::File,
     io,
     os::{fd::AsFd as _, unix::net::UnixListener},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     time::Duration,
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use perspicax::{attach, bus, desk::Desk, keep::keep_current, observe, session, wire::Wire};
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop, Virtual};
+use perspicax_config::{AgentSocket, Built};
 use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt::writer::BoxMakeWriter};
 
 #[derive(Parser)]
@@ -183,6 +186,11 @@ struct Cli {
     /// is refused, naming who serves it. Every program the session starts is
     /// told where it is in `PERSPICAX_MCP_SOCKET`, and `perspicax attach`
     /// connects to it. `$XDG_RUNTIME_DIR` is the place for it.
+    ///
+    /// On a seat, the config's `[agent] socket` goes over this, read once at
+    /// start: `false` serves none, a path serves there, and `true` serves
+    /// here, or at `$XDG_RUNTIME_DIR/perspicax-mcp` when this is not given.
+    /// Beside `--mcp`, which is already serving an agent, it serves none.
     #[arg(long, value_name = "PATH", conflicts_with = "mcp")]
     mcp_socket: Option<PathBuf>,
 
@@ -336,6 +344,61 @@ fn open_log() -> Result<File> {
     session::open_log(&path).with_context(|| format!("could not open {}", path.display()))
 }
 
+/// What this build can honour, as the config's feature check reads it: what
+/// the seat's own reading of the file is told too.
+const BUILT: Built = Built {
+    seat: cfg!(feature = "seat"),
+    xwayland: cfg!(feature = "xwayland"),
+    capture: cfg!(feature = "capture"),
+};
+
+/// Where the agent socket is served, if anywhere. Headless reads no config, so
+/// `--mcp-socket` says; a person's session reads `[agent] socket` in the file
+/// at `config_path` first, here, since the socket is bound before the seat is
+/// taken. The seat reads the file again, for everything else.
+fn agent_socket(cli: &Cli, config_path: Option<&Path>) -> Result<Option<PathBuf>> {
+    if !cli.on_seat() {
+        return Ok(cli.mcp_socket.clone());
+    }
+    let said = match config_path {
+        // In the seat's own words, which are the ones it would refuse it in.
+        Some(path) => {
+            perspicax_config::load(path, BUILT)
+                .map_err(|error| anyhow!("config: {}: {error}", path.display()))?
+                .agent
+                .socket
+        }
+        None => AgentSocket::Unsaid,
+    };
+    // `--mcp` serves the agent that started this process, and a desktop holds
+    // one agent at a time: its wire is not taken from under it for a socket.
+    if cli.mcp {
+        if matches!(said, AgentSocket::On | AgentSocket::At(_)) {
+            tracing::info!(
+                "[agent] socket is not served beside --mcp, whose agent the desktop is \
+                 already serving on stdin and stdout"
+            );
+        }
+        return Ok(None);
+    }
+    let served = session::agent_socket(cli.mcp_socket.as_deref(), &said, |name| {
+        std::env::var(name).ok()
+    })?;
+    match (&cli.mcp_socket, &served) {
+        (Some(flag), None) => tracing::warn!(
+            flag = %flag.display(),
+            "the config's [agent] socket = false goes over --mcp-socket: none is served"
+        ),
+        (Some(flag), Some(path)) if path != flag => tracing::warn!(
+            flag = %flag.display(),
+            served = %path.display(),
+            "the config's [agent] socket goes over --mcp-socket"
+        ),
+        _ => {}
+    }
+    Ok(served)
+}
+
 /// Everything once there is a log: the run, from its first child to its end.
 /// `wire` is the agent's, under `--mcp`.
 fn run(cli: &Cli, wire: Option<Wire>) -> Result<()> {
@@ -355,6 +418,8 @@ fn run(cli: &Cli, wire: Option<Wire>) -> Result<()> {
             // Nobody sits at it, so no window rearranges itself.
             person: false,
             opacity: Default::default(),
+            // Every client: nobody sits at it to be asked.
+            agent: Default::default(),
         }
     };
     // First, before the accessibility bus is touched: a backend this binary
@@ -365,9 +430,11 @@ fn run(cli: &Cli, wire: Option<Wire>) -> Result<()> {
     // Second, for the same reason: a socket another session is serving is a
     // reason not to start at all. The file is held to the end of this
     // function, which is what removes it on the way out, however `run` ends.
-    let (socket, listener) = cli
-        .mcp_socket
-        .as_deref()
+    let config_path = cli
+        .on_seat()
+        .then(|| cli.config.clone().or_else(perspicax_config::default_path))
+        .flatten();
+    let (socket, listener) = agent_socket(cli, config_path.as_deref())?
         .map(perspicax_mcp::Socket::bind)
         .transpose()?
         .unzip();
@@ -426,10 +493,7 @@ fn run(cli: &Cli, wire: Option<Wire>) -> Result<()> {
         ]
         .concat(),
         run_for: cli.run_for.map(Duration::from_secs_f64),
-        config: cli
-            .on_seat()
-            .then(|| cli.config.clone().or_else(perspicax_config::default_path))
-            .flatten(),
+        config: config_path,
         socket: None,
         xwayland: false,
     };

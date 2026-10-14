@@ -18,12 +18,16 @@
 //! height off, and the receipt would still say it hit. Only [`bbox`] and the
 //! input region grow to take in the frame.
 //!
+//! The line marking a window an agent may act on grows neither. It is no part
+//! of the window to press on, and in the bbox it would tell a maximized
+//! window it is on the next monitor too, which only the line reaches.
+//!
 //! [`Space`]: smithay::desktop::Space
 //! [`bbox`]: SpaceElement::bbox
 
 use std::{cell::RefCell, ops::Deref};
 
-use perspicax_policy::{Insets, Rect, frame_rects};
+use perspicax_policy::{Insets, Rect, frame_rects, outline_rects, outset};
 use smithay::{
     backend::renderer::{
         ImportAll, ImportMem, Renderer,
@@ -110,9 +114,16 @@ struct Dress {
     #[cfg(feature = "seat")]
     alpha: Option<f32>,
     titles: Vec<Title>,
+    /// The line round a window an agent may act on: how wide, 0 for none.
+    outline: i32,
+    /// The frame it goes round, which is the compositor's word on it rather
+    /// than `insets`: headless, where no frame is worn, still has frames.
+    outline_around: Insets,
+    outline_colour: [f32; 4],
+    outline_strips: Vec<SolidColorBuffer>,
 }
 
-#[cfg(feature = "seat")]
+#[cfg(any(feature = "seat", feature = "capture"))]
 fn rgba(colour: perspicax_policy::Colour) -> [f32; 4] {
     let channel = |value: u8| f32::from(value) / 255.0;
     [channel(colour.r), channel(colour.g), channel(colour.b), 1.0]
@@ -154,6 +165,18 @@ impl Framed {
             if title_at.is_none() {
                 dress.titles.clear();
             }
+        });
+    }
+
+    /// Mark the window out as one an agent may act on, or not: a line
+    /// `width` wide, 0 for none, round the frame `around` reaches, in
+    /// `colour`.
+    #[cfg(any(feature = "seat", feature = "capture"))]
+    pub(crate) fn mark(&self, around: Insets, width: i32, colour: perspicax_policy::Colour) {
+        self.dress(|dress| {
+            dress.outline = width;
+            dress.outline_around = around;
+            dress.outline_colour = rgba(colour);
         });
     }
 
@@ -285,9 +308,11 @@ where
 {
     type RenderElement = FramedElement<R>;
 
-    /// The client's surfaces, then the title, then the bars: front to back,
-    /// so popups, which come first among the client's, still draw over the
-    /// titlebar, and the title over the bar it is written on.
+    /// The agent's outline, then the client's surfaces, then the title, then
+    /// the bars: front to back. The outline is in front of everything the
+    /// window draws, for a client's shadow is drawn just where it goes, and
+    /// would hide it. Popups, which come first among the client's, still
+    /// draw over the titlebar, and the title over the bar it is written on.
     fn render_elements<C: From<Self::RenderElement>>(
         &self,
         renderer: &mut R,
@@ -295,18 +320,41 @@ where
         scale: Scale<f64>,
         alpha: f32,
     ) -> Vec<C> {
-        let mut elements: Vec<C> = self
-            .0
-            .render_elements::<WaylandSurfaceRenderElement<R>>(renderer, location, scale, alpha)
-            .into_iter()
-            .map(|element| C::from(FramedElement::Surface(element)))
-            .collect();
-
         // `location` is where the surface's own origin goes; the client
         // geometry, which the frame is measured from, is offset within it.
         let geometry = self.0.geometry();
         let origin = location + geometry.loc.to_physical_precise_round(scale);
         let client = Rect::new(0, 0, geometry.size.w, geometry.size.h);
+        let solid = |strip: &Rect, buffer: &mut SolidColorBuffer, colour: [f32; 4]| {
+            buffer.update((strip.w, strip.h), colour);
+            let at = origin + Point::from((strip.x, strip.y)).to_physical_precise_round(scale);
+            C::from(FramedElement::Bar(SolidColorRenderElement::from_buffer(
+                buffer,
+                at,
+                scale,
+                alpha,
+                Kind::Unspecified,
+            )))
+        };
+
+        let mut elements: Vec<C> = self.dress(|dress| {
+            let strips = outline_rects(outset(client, dress.outline_around), dress.outline);
+            let colour = dress.outline_colour;
+            let buffers = &mut dress.outline_strips;
+            buffers.resize_with(strips.len(), || SolidColorBuffer::new((0, 0), [0.0; 4]));
+            strips
+                .iter()
+                .zip(buffers)
+                .map(|(strip, buffer)| solid(strip, buffer, colour))
+                .collect()
+        });
+        elements.extend(
+            self.0
+                .render_elements::<WaylandSurfaceRenderElement<R>>(renderer, location, scale, alpha)
+                .into_iter()
+                .map(|element| C::from(FramedElement::Surface(element))),
+        );
+
         self.dress(|dress| {
             let whole = whole_scale(scale.x);
             let title = dress.titles.iter().find(|title| title.key.scale == whole);
@@ -326,21 +374,12 @@ where
             }
 
             let strips = frame_rects(client, dress.insets);
+            let colour = dress.colour;
             dress
                 .strips
                 .resize_with(strips.len(), || SolidColorBuffer::new((0, 0), [0.0; 4]));
             for (strip, buffer) in strips.iter().zip(&mut dress.strips) {
-                buffer.update((strip.w, strip.h), dress.colour);
-                let at = origin + Point::from((strip.x, strip.y)).to_physical_precise_round(scale);
-                elements.push(C::from(FramedElement::Bar(
-                    SolidColorRenderElement::from_buffer(
-                        buffer,
-                        at,
-                        scale,
-                        alpha,
-                        Kind::Unspecified,
-                    ),
-                )));
+                elements.push(solid(strip, buffer, colour));
             }
         });
         elements

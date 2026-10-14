@@ -7,9 +7,11 @@
 //! locks (see [`crate::keyboard`]). Pointer settings go to every device.
 //! Outputs are relit only if their rules changed, because relighting is a
 //! modeset and the screens blink. Autostart, the config's and XDG's, is not
-//! re-run: those programs are already running. The shell is told when its
-//! own table changed, and is started or stopped when `enabled` was turned on
-//! or off (see [`supervise`]).
+//! re-run: those programs are already running. Nor is the agent socket
+//! moved: it is bound before the seat is taken, so a change to it waits for
+//! the next login. The shell is told when its own table changed, and is
+//! started or stopped when `enabled` was turned on or off (see
+//! [`supervise`]).
 //!
 //! Saving is watched with inotify on the file's *directory*, not the file:
 //! most editors save by writing a new file and renaming it over the old one,
@@ -45,6 +47,7 @@ use super::{Session, relight, supervise};
 use crate::{
     Error, Keymap, Launch,
     backend::{Running, cursor::Cursor},
+    grants::Why,
     state::Compositor,
 };
 
@@ -258,6 +261,12 @@ pub(crate) fn reload(state: &mut Compositor) {
     let shell_changed = fresh.shell != session.settings.shell;
     let shell = session.settings.shell.clone();
     let workspaces = fresh.workspaces;
+    if fresh.agent.socket != session.settings.agent.socket {
+        tracing::info!(
+            "[agent] socket is read once, before the seat is taken: the change applies at \
+             the next login"
+        );
+    }
     if fresh.flipping.delay_ms != session.settings.flipping.delay_ms {
         session.dwell = perspicax_policy::EdgeDwell::new(fresh.flipping.delay_ms);
     }
@@ -397,31 +406,36 @@ fn look(state: &mut Compositor) {
     }
 }
 
+/// Start the config's autostart programs, in order, then the XDG autostart
+/// entries unless the config turns them off. An entry marked `agent = true`
+/// is started for an agent, and granted; the rest are the person's. A
+/// program that will not start is reported and skipped: one missing panel
+/// must not keep the person out of their session.
 fn autostart(state: &mut Compositor) {
-    let launch = state.launch.clone();
-    if let Running::Seat(session) = &mut state.backend {
-        session.autostart(launch.as_ref());
+    let Some(launch) = state.launch.clone() else {
+        return;
+    };
+    let Running::Seat(session) = &state.backend else {
+        return;
+    };
+    let starts = session.settings.autostart.clone();
+    for start in &starts {
+        if start.agent {
+            if let Err(error) = state.start_for_agent(&start.command, None, Why::Autostart) {
+                tracing::warn!(%error, "could not start");
+            }
+        } else if let Running::Seat(session) = &mut state.backend {
+            session.spawn_in(&launch, &start.command, None);
+        }
+    }
+    if let Running::Seat(session) = &mut state.backend
+        && session.settings.xdg_autostart
+    {
+        session.xdg_autostart(&launch);
     }
 }
 
 impl Session {
-    /// Start the config's autostart programs, then the XDG autostart
-    /// entries unless the config turns them off. A program that will not
-    /// start is reported and skipped: one missing panel must not keep the
-    /// person out of their session.
-    pub(crate) fn autostart(&mut self, launch: Option<&Launch>) {
-        let Some(launch) = launch else {
-            return;
-        };
-        let commands = self.settings.autostart.clone();
-        for command in &commands {
-            self.spawn_in(launch, command, None);
-        }
-        if self.settings.xdg_autostart {
-            self.xdg_autostart(launch);
-        }
-    }
-
     /// Start what the system and the person installed to start with every
     /// desktop (see [`autostart`](mod@autostart)). The folders, the
     /// desktop's names and `PATH` are read as the programs started are given
@@ -487,11 +501,11 @@ fn autostart_files(folders: &[PathBuf]) -> Vec<(String, Option<String>)> {
 /// run, at the path it names, or else in a folder of `path`.
 fn installed(program: &str, path: Option<&str>) -> bool {
     if program.contains('/') {
-        return supervise::runnable(Path::new(program));
+        return crate::runnable(Path::new(program));
     }
     path.into_iter()
         .flat_map(std::env::split_paths)
-        .any(|folder| supervise::runnable(&folder.join(program)))
+        .any(|folder| crate::runnable(&folder.join(program)))
 }
 
 impl Session {

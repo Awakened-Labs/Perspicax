@@ -414,6 +414,7 @@ fn another_workspace_takes_the_pointer_back() {
             access: Access::open(),
             person: true,
             opacity: Default::default(),
+            agent: Default::default(),
         },
     );
     let mut client = with_window(&session);
