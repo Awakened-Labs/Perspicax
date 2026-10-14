@@ -15,7 +15,7 @@
 //!
 //! Implementing [`Desktop`] out here also proves the trait is satisfiable from
 //! outside the crate, which is the whole claim of it: a GNOME extension or a
-//! KWin plugin re-implements these five methods and gets the eight tools.
+//! KWin plugin re-implements these six methods and gets the nine tools.
 
 mod common;
 
@@ -88,6 +88,7 @@ async fn the_server_introduces_itself_and_lists_its_tools_with_no_compositor_run
         [
             "act",
             "deltas",
+            "launch",
             "observe",
             "resolve",
             "screenshot",
@@ -200,7 +201,7 @@ async fn a_request_before_the_handshake_is_refused_and_the_handshake_still_works
     // And the conversation is still there to be had.
     client.handshake().await;
     let listed = client.call(2, "tools/list", json!({})).await;
-    assert_eq!(listed["tools"].as_array().map(Vec::len), Some(8));
+    assert_eq!(listed["tools"].as_array().map(Vec::len), Some(9));
 
     drop(client);
     ended_cleanly(serving).await;
@@ -235,7 +236,7 @@ async fn a_ping_before_the_handshake_is_still_answered() {
 
     client.handshake().await;
     let listed = client.call(2, "tools/list", json!({})).await;
-    assert_eq!(listed["tools"].as_array().map(Vec::len), Some(8));
+    assert_eq!(listed["tools"].as_array().map(Vec::len), Some(9));
 
     drop(client);
     ended_cleanly(serving).await;

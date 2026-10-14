@@ -1,9 +1,9 @@
 //! The agent interface -- an MCP server over stdio, or on a Unix socket.
 //!
-//! Eight tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
-//! `tab_forward`, `deltas` and `screenshot`. Everything above them is `rmcp`
-//! and everything below them is [`Desktop`], a trait with five methods that
-//! this crate never implements.
+//! Nine tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
+//! `tab_forward`, `deltas`, `screenshot` and `launch`. Everything above them
+//! is `rmcp` and everything below them is [`Desktop`], a trait with six
+//! methods that this crate never implements.
 //!
 //! # What this crate can and cannot see
 //!
@@ -12,7 +12,7 @@
 //! restraint `perspicax-index` observes and it is load-bearing for the same
 //! reason: the agent interface is portable, so a port of this project to a
 //! GNOME extension or a KWin plugin re-implements [`Desktop`] and gets these
-//! eight tools unchanged. A crate that cannot see a compositor cannot come to
+//! nine tools unchanged. A crate that cannot see a compositor cannot come to
 //! depend on one.
 //!
 //! The consequence is that the act path is **injected, not imported**.
@@ -36,7 +36,9 @@
 //! Headless, consent is everyone: perspicax is one actuator among several, and
 //! a boundary an agent could walk around by running a command would invite the
 //! reliance it cannot support. On `--seat`, where the person launched most of
-//! what is on screen, consent covers only what perspicax spawned, and
+//! what is on screen, consent covers only what was granted to the agent --
+//! what perspicax spawned for it, what the person handed it, and what it
+//! launched as the person's list allows -- and
 //! [`perspicax_index::Refusal::NoCapability`] is what an agent hears about the
 //! rest.
 //!
@@ -58,7 +60,7 @@ mod socket;
 #[cfg(test)]
 mod fixture;
 
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use perspicax_index::{
     Delta, HostFacts, Index, Receipt, Refusal, Selector, Shot, ShotTarget, Verb, WindowReceipt,
@@ -71,10 +73,10 @@ pub use crate::socket::{Socket, SocketError, serve_socket};
 
 /// What an MCP server needs from the process hosting it.
 ///
-/// Five methods, and the split between them is the crate boundary this
+/// Six methods, and the split between them is the crate boundary this
 /// project's architecture rests on: two questions about the past, which any
-/// reader can answer from a snapshot, and three things only the thread that
-/// owns the compositor can do -- two acts and a picture.
+/// reader can answer from a snapshot, and four things only the thread that
+/// owns the compositor can do -- two acts, a picture and a launch.
 ///
 /// `Send + Sync + 'static` because the server is handed round an async runtime
 /// and its tools run on the blocking pool. Implementors are expected to be
@@ -131,6 +133,45 @@ pub trait Desktop: Send + Sync + 'static {
     /// [`Denied::NotBuilt`] from a build that cannot take pictures, and
     /// [`Denied::Undispatched`] when the compositor could not.
     fn capture(&self, target: ShotTarget) -> Result<Shot, Denied>;
+
+    /// Start a program for the agent, in `cwd` if one is named: `command` is
+    /// the program and its arguments. What it starts is the agent's to act
+    /// on for as long as it runs.
+    ///
+    /// Blocks until the host answers, which is as long as starting a process
+    /// takes.
+    ///
+    /// # Errors
+    ///
+    /// [`Unlaunched::NotAdmitted`] when the host does not let an agent start
+    /// it, and [`Unlaunched::NotStarted`] when it would not start or the host
+    /// could not be asked.
+    fn launch(&self, command: &[String], cwd: Option<&Path>) -> Result<Launched, Unlaunched>;
+}
+
+/// A program started for the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Launched {
+    /// The process it started as.
+    pub pid: u32,
+}
+
+/// Why a program was not started for the agent.
+///
+/// Two answers an agent does different things with: one says to ask the
+/// person, or to start something the host admits, and the other says what
+/// went wrong. Each is a message, for the reason [`Denied::Undispatched`] is:
+/// the host's own type belongs to a crate this one cannot see.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Unlaunched {
+    /// The host does not let an agent start this program. The message says
+    /// what it does let one start, if anything.
+    #[error("not admitted: {0}")]
+    NotAdmitted(String),
+    /// Admitted, and not started: not found, the session locked, or no host
+    /// to ask. The message says which.
+    #[error("not started: {0}")]
+    NotStarted(String),
 }
 
 /// Why an act produced no receipt.
@@ -174,7 +215,7 @@ pub enum ServeError {
     Stopped(String),
 }
 
-/// Serve the eight tools over stdio until the client goes away.
+/// Serve the nine tools over stdio until the client goes away.
 ///
 /// # A conversation begins with `initialize`
 ///
