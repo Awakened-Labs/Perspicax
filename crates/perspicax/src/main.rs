@@ -53,7 +53,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use perspicax::{attach, bus, desk::Desk, keep::keep_current, observe, session, wire::Wire};
+use perspicax::{attach, bus, desk::Desk, keep::keep_current, lock, observe, session, wire::Wire};
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop, Virtual};
 use perspicax_config::{AgentSocket, Built};
 use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt::writer::BoxMakeWriter};
@@ -223,6 +223,24 @@ enum Command {
         #[arg(value_name = "PATH")]
         socket: Option<PathBuf>,
     },
+
+    /// Lock the screen as the menus' Lock does: `[shell] lock`, swaylock by
+    /// default, in the theme, with ARGS after its own. What a key or swayidle
+    /// runs: `["swayidle", "-w", "before-sleep", "perspicax lock -f"]`.
+    ///
+    /// The config is the session's (`$PERSPICAX_CONFIG`), or else
+    /// `$XDG_CONFIG_HOME/perspicax/config.toml`. One that cannot be read
+    /// still locks, in the default theme.
+    Lock {
+        /// Passed on to the lock program, after `[shell] lock`'s own: `-f`,
+        /// or a swaylock flag that wins over the theme's.
+        #[arg(
+            value_name = "ARGS",
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
+        args: Vec<String>,
+    },
 }
 
 impl Cli {
@@ -241,6 +259,12 @@ fn main() -> Result<()> {
     if let Some(Command::Attach { socket }) = &cli.command {
         let path = attach::socket_path(socket.clone(), |name| std::env::var(name).ok())?;
         return attach::attach(&path);
+    }
+
+    // Likewise: this process becomes the lock program, or says why it could
+    // not.
+    if let Some(Command::Lock { args }) = &cli.command {
+        return Err(lock::lock(args));
     }
 
     // Before the log is opened and before anything is started, because when it
@@ -490,6 +514,7 @@ fn run(cli: &Cli, wire: Option<Wire>) -> Result<()> {
             session::accessibility_env(),
             desktop.clone(),
             agent_env.clone(),
+            session::config_env(config_path.as_deref()),
         ]
         .concat(),
         run_for: cli.run_for.map(Duration::from_secs_f64),
@@ -862,6 +887,23 @@ mod tests {
         ));
         assert_eq!(
             parse(&["--headless", "attach"]).err(),
+            Some(ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn locking_needs_no_session_and_passes_its_flags_on() {
+        let args = |cli: Cli| match cli.command {
+            Some(Command::Lock { args }) => args,
+            _ => panic!("not lock"),
+        };
+        assert!(args(parse(&["lock"]).expect("lock alone")).is_empty());
+        assert_eq!(
+            args(parse(&["lock", "-f", "--ring-color", "00ff00"]).expect("lock ARGS")),
+            ["-f", "--ring-color", "00ff00"]
+        );
+        assert_eq!(
+            parse(&["--seat", "lock"]).err(),
             Some(ErrorKind::ArgumentConflict)
         );
     }
