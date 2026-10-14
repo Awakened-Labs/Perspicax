@@ -480,6 +480,9 @@ impl Compositor {
             });
         state.attribute(origin.clone(), pidfd);
         tracing::info!(id = ?client.id(), ?origin, "client connected");
+        if let Origin::Process(process) = &origin {
+            self.grant_lineage(process.pid, &state);
+        }
         self.clients.push((client.id(), state));
     }
 

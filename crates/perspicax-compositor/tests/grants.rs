@@ -301,6 +301,120 @@ fn a_program_that_will_not_start_says_why() {
     session.stop(());
 }
 
+/// A shell command that puts up [`window_probe`]'s window, as a program an
+/// agent launched would start one: from a process of its own, under the
+/// shell. The `; :` keeps the shell from becoming the probe.
+fn probe_under_sh(session: &Session) -> Vec<String> {
+    let exe = std::env::current_exe().expect("this test's binary");
+    words(&[
+        "sh",
+        "-c",
+        &format!(
+            "{PROBE}={} '{}' --exact window_probe --ignored --test-threads=1 >/dev/null; :",
+            session.socket(),
+            exe.display()
+        ),
+    ])
+}
+
+/// The pid that drew the window titled `title`.
+fn drawn_by(facts: &HostFacts, title: &str) -> Option<u32> {
+    match &titled(facts, title)?.origin {
+        perspicax_node::Origin::Process(process) => Some(process.pid),
+        _ => None,
+    }
+}
+
+fn kill(pid: u32) {
+    let killed = Command::new("kill").arg(pid.to_string()).status();
+    assert!(killed.is_ok_and(|status| status.success()), "kill {pid}");
+}
+
+/// What `flutter run` needs: the window is drawn by a process the launched
+/// program started, and that is granted too.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_a_launched_program_starts_is_granted_while_it_runs() {
+    let session = launching("lineage-granted", &["sh"]);
+    let host = Host::new(&session.facts, &session.requests);
+    let sh = host
+        .launch(&probe_under_sh(&session), None)
+        .expect("sh is admitted");
+    let facts = session.wait_for(|facts| drawn_by(facts, "probe").is_some());
+    let probe = drawn_by(&facts, "probe").expect("drawn");
+    assert_ne!(probe, sh, "drawn by the shell's child");
+    session.wait_for(|facts| granted(facts).is_some_and(|pids| pids.contains(&probe)));
+
+    kill(probe);
+    session.wait_for(|facts| granted(facts).is_some_and(|pids| !pids.contains(&probe)));
+    session.stop(());
+}
+
+/// A launch's descendants are covered while it lives: once it is gone,
+/// what it started is no longer the agent's, though it runs on.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_lineage_goes_when_the_launch_does() {
+    let session = launching("lineage-ends", &["sh"]);
+    let host = Host::new(&session.facts, &session.requests);
+    let sh = host
+        .launch(&probe_under_sh(&session), None)
+        .expect("sh is admitted");
+    let facts = session.wait_for(|facts| drawn_by(facts, "probe").is_some());
+    let probe = drawn_by(&facts, "probe").expect("drawn");
+    session.wait_for(|facts| granted(facts).is_some_and(|pids| pids.len() == 2));
+
+    kill(sh);
+    let facts = session.wait_for(|facts| granted(facts).is_some_and(<[u32]>::is_empty));
+    assert!(
+        drawn_by(&facts, "probe").is_some(),
+        "the window is still there, and no longer the agent's"
+    );
+    kill(probe);
+    session.stop(());
+}
+
+/// Lineage is the launch's own: a window from elsewhere is not covered,
+/// though a launch runs beside it.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_the_launch_did_not_start_is_not_granted() {
+    let session = launching("lineage-elsewhere", &["sleep"]);
+    let host = Host::new(&session.facts, &session.requests);
+    let sleep = host
+        .launch(&words(&["sleep", "30"]), None)
+        .expect("sleep is admitted");
+    let mut probe = probe(&session);
+    let facts = session.wait_for(|facts| granted(facts).is_some_and(|pids| !pids.is_empty()));
+    assert_eq!(granted(&facts), Some(&[sleep][..]));
+    probe.kill().expect("the probe is ours to kill");
+    probe.wait().expect("and ours to reap");
+    session.stop(());
+}
+
+/// What a binding marked `agent = true` starts is granted, and what that
+/// starts is not, though a launch runs beside it: only the person's
+/// `[agent] launch` bounds what a lineage may be.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_a_spawned_program_starts_is_not_granted() {
+    let session = launching("lineage-spawned", &["sleep"]);
+    let host = Host::new(&session.facts, &session.requests);
+    host.launch(&words(&["sleep", "30"]), None)
+        .expect("sleep is admitted");
+    session.perform(Action::Spawn {
+        command: probe_under_sh(&session),
+        agent: true,
+    });
+    let facts = session.wait_for(|facts| drawn_by(facts, "probe").is_some());
+    let probe = drawn_by(&facts, "probe").expect("drawn");
+    let granted_now = granted(&facts).expect("published").to_vec();
+    assert_eq!(granted_now.len(), 2, "sleep and the shell: {granted_now:?}");
+    assert!(!granted_now.contains(&probe));
+    kill(probe);
+    session.stop(());
+}
+
 /// Not a test: the window [`probe`] puts up, in a process of its own.
 #[test]
 #[ignore = "a window in a process of its own, for the tests that need one"]

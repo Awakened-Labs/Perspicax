@@ -67,6 +67,46 @@ pub(crate) fn attest(pid: i32) -> (Origin, Option<OwnedFd>) {
     (origin, pidfd)
 }
 
+/// The longest chain of parents [`ancestors`] follows. Far past any real
+/// one, and a bound on what a client can make this compositor read.
+const FARTHEST: usize = 64;
+
+/// The processes `pid` descends from, its parent first, up to but not
+/// including the init process. Empty for a process that has gone.
+///
+/// Each parent is pinned, then the child is asked again who its parent is.
+/// A parent that exits hands its children to another before its own pid can
+/// be given to anyone else, so a child still naming it after the pin means
+/// the pin holds that parent, not a process given its pid since.
+pub(crate) fn ancestors(pid: u32) -> Vec<u32> {
+    let mut chain = Vec::new();
+    let Some(mut child) = Pinned::open(pid) else {
+        return chain;
+    };
+    while chain.len() < FARTHEST {
+        let Some(parent) = child.parent().filter(|&parent| parent > 1) else {
+            break;
+        };
+        let Some(pinned) = Pinned::open(parent) else {
+            break;
+        };
+        if child.parent() != Some(parent) {
+            break;
+        }
+        chain.push(parent);
+        child = pinned;
+    }
+    chain
+}
+
+/// The parent's pid in a `stat` line. Read past the last `)`, since what
+/// comes before it is the program's name in brackets, and a name may hold a
+/// bracket or a space of its own.
+fn parent_in(stat: &str) -> Option<u32> {
+    let after_name = &stat[stat.rfind(')')? + 1..];
+    after_name.split_whitespace().nth(1)?.parse().ok()
+}
+
 /// Everything a pin can say about its process.
 fn describe(pid: u32, pinned: Option<&Pinned>) -> Origin {
     // Pin first, then derive everything from the one handle. Opening the
@@ -118,6 +158,11 @@ impl Pinned {
     /// parent yet to collect it. Either way its pid is still its own.
     fn unreaped(&self) -> bool {
         fs::read(self.path().join("stat")).is_ok()
+    }
+
+    /// The pid of its parent, while it has one.
+    fn parent(&self) -> Option<u32> {
+        parent_in(&fs::read_to_string(self.path().join("stat")).ok()?)
     }
 
     /// The executable behind the pid.
@@ -230,6 +275,33 @@ mod tests {
         let (origin, pidfd) = attest(0x7FFF_FFFE);
         assert!(matches!(origin, Origin::Process(_)));
         assert!(pidfd.is_none());
+    }
+
+    #[test]
+    fn a_parent_is_read_past_a_name_with_a_parenthesis() {
+        assert_eq!(parent_in("4242 (a) b (c) S 17 4242 4242 0 -1"), Some(17));
+        assert_eq!(parent_in("1 (init) S 0 1 1 0 -1"), Some(0));
+        assert_eq!(parent_in("4242 (truncated"), None);
+    }
+
+    /// A child of this process descends from it, and the chain ends before
+    /// the init process.
+    #[test]
+    fn a_child_descends_from_this_process() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep is in coreutils");
+        let chain = ancestors(child.id());
+        child.kill().expect("the child is ours to kill");
+        child.wait().expect("and ours to reap");
+
+        assert_eq!(chain.first(), Some(&std::process::id()), "{chain:?}");
+        assert!(!chain.contains(&1), "{chain:?}");
+        assert!(
+            ancestors(0x7FFF_FFFE).is_empty(),
+            "a pid with nothing behind it"
+        );
     }
 
     /// Negative pids are what a failed lookup looks like in C, and they are not

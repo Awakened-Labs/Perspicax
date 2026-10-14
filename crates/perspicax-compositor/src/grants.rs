@@ -42,6 +42,7 @@ use smithay::{
 use crate::{
     framed::Framed,
     host::LaunchError,
+    origin,
     shell::id_of,
     state::{ClientState, Compositor},
 };
@@ -64,6 +65,8 @@ pub(crate) enum Why {
     Autostart,
     /// An agent started it for itself, with `launch`, as the rule admits.
     Launch,
+    /// A program an agent launched started it, and runs yet.
+    Lineage,
 }
 
 /// One process granted.
@@ -74,6 +77,9 @@ struct Held {
     /// The pidfd watch that ends the grant, for a process that is not a
     /// child of this compositor; a child's ends with its reap.
     watch: Option<RegistrationToken>,
+    /// The launch it descends from, whose end ends it too: for
+    /// [`Why::Lineage`].
+    under: Option<u32>,
 }
 
 /// Every grant, and the consent they add up to.
@@ -107,6 +113,13 @@ impl Grants {
 
     fn holds(&self, pid: u32) -> bool {
         self.held.iter().any(|held| held.pid == pid)
+    }
+
+    /// Whether `pid` is a program an agent launched, granted yet.
+    fn launched(&self, pid: u32) -> bool {
+        self.held
+            .iter()
+            .any(|held| held.pid == pid && held.why == Why::Launch)
     }
 
     fn recount(&mut self) {
@@ -199,30 +212,64 @@ impl Compositor {
     /// reaped (see [`Self::reap_spawned`]). Nothing, where consent is not by
     /// grant. A process already granted keeps its first grant.
     pub(crate) fn grant(&mut self, pid: u32, why: Why) {
-        self.keep_grant(pid, why, None);
+        self.keep_grant(pid, why, None, None);
+    }
+
+    /// Grant a client's process, `pid`, if a program an agent launched
+    /// started it and runs yet: until either exits. Asked as each client is
+    /// accepted, and held by the pidfd it was vouched for with.
+    ///
+    /// What a launched program starts is the agent's because the person's
+    /// `[agent] launch` named the program that started it, and so bounds it.
+    /// What `--spawn`, a key or `agent = true` grants covers that process
+    /// alone. A program that starts its window through a second fork, or
+    /// asks D-Bus or a running copy of itself to, is not found: its window's
+    /// process does not descend from the launch.
+    pub(crate) fn grant_lineage(&mut self, pid: u32, client: &ClientState) {
+        if !self.grants.by_grant || !self.grants.held.iter().any(|held| held.why == Why::Launch) {
+            return;
+        }
+        let root = origin::ancestors(pid)
+            .into_iter()
+            .find(|&ancestor| self.grants.launched(ancestor));
+        if let Some((root, pidfd)) = root.zip(client.pidfd()) {
+            self.grant_watched(pid, pidfd, Why::Lineage, Some(root));
+        }
     }
 
     /// Grant `pid`, anyone's process, to the agent: until `pidfd`, which
-    /// names it, says it exited. Nothing, where consent is not by grant.
-    fn grant_watched(&mut self, pid: u32, pidfd: OwnedFd, why: Why) {
+    /// names it, says it exited, or the launch it is `under` ends. Nothing,
+    /// where consent is not by grant.
+    fn grant_watched(&mut self, pid: u32, pidfd: OwnedFd, why: Why, under: Option<u32>) {
         if !self.grants.by_grant || self.grants.holds(pid) {
             return;
         }
         match watch(&self.loop_handle, pidfd, move |state: &mut Self| {
             state.exited(pid);
         }) {
-            Ok(token) => self.keep_grant(pid, why, Some(token)),
+            Ok(token) => self.keep_grant(pid, why, Some(token), under),
             // A grant nothing will end is one not made.
             Err(error) => tracing::warn!(pid, %error, "not granted: its exit could not be watched"),
         }
     }
 
-    fn keep_grant(&mut self, pid: u32, why: Why, watch: Option<RegistrationToken>) {
+    fn keep_grant(
+        &mut self,
+        pid: u32,
+        why: Why,
+        watch: Option<RegistrationToken>,
+        under: Option<u32>,
+    ) {
         if !self.grants.by_grant || self.grants.holds(pid) {
             return;
         }
-        tracing::info!(pid, ?why, "granted to the agent");
-        self.grants.held.push(Held { pid, why, watch });
+        tracing::info!(pid, ?why, ?under, "granted to the agent");
+        self.grants.held.push(Held {
+            pid,
+            why,
+            watch,
+            under,
+        });
         self.grants.recount();
         self.publish_facts();
     }
@@ -235,16 +282,22 @@ impl Compositor {
         self.revoke(pid);
     }
 
-    /// End `pid`'s grant, if it holds one.
+    /// End `pid`'s grant, if it holds one, and those of what it started
+    /// while it was a launch.
     pub(crate) fn revoke(&mut self, pid: u32) {
-        let Some(at) = self.grants.held.iter().position(|held| held.pid == pid) else {
+        let (ended, kept) = std::mem::take(&mut self.grants.held)
+            .into_iter()
+            .partition::<Vec<_>, _>(|held| held.pid == pid || held.under == Some(pid));
+        self.grants.held = kept;
+        if ended.is_empty() {
             return;
-        };
-        let held = self.grants.held.remove(at);
-        if let Some(token) = held.watch {
-            self.loop_handle.remove(token);
         }
-        tracing::info!(pid, why = ?held.why, "no longer granted to the agent");
+        for held in ended {
+            if let Some(token) = held.watch {
+                self.loop_handle.remove(token);
+            }
+            tracing::info!(pid = held.pid, why = ?held.why, "no longer granted to the agent");
+        }
         self.grants.recount();
         self.publish_facts();
     }
@@ -307,7 +360,7 @@ impl Compositor {
             return;
         }
         match self.pidfd_of(window) {
-            Some(pidfd) => self.grant_watched(pid, pidfd, Why::Key),
+            Some(pidfd) => self.grant_watched(pid, pidfd, Why::Key, None),
             None => tracing::warn!(
                 surface = ?id,
                 pid,
@@ -386,6 +439,7 @@ mod tests {
             pid: 7,
             why: Why::Spawn,
             watch: None,
+            under: None,
         });
         grants.recount();
         assert!(grants.consent().permits(&process(7)));
