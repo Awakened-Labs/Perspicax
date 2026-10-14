@@ -2,8 +2,8 @@
 //! starts anything, `perspicax attach` carrying a conversation, and a headless
 //! session serving one conversation after another while it runs on (issue #30).
 //! And `--mcp`'s wire, which nothing but the agent interface reaches (#43),
-//! and which perspicax refuses to serve on when the session bus holds it too
-//! (#52).
+//! which perspicax refuses to serve on when the session bus holds it too
+//! (#52), and which no other process may take from it (#118).
 //!
 //! The refusals need nothing but a filesystem, because the socket is bound
 //! before the accessibility registry is touched, and `attach` is tested against
@@ -400,10 +400,33 @@ fn link(pid: &str, fd: impl std::fmt::Display) -> Option<String> {
         .ok()
 }
 
+/// Whether this process is refused a look at `fd` of process `pid`, as one
+/// that keeps every other out of itself refuses it (issue #118).
+fn refused(pid: u32, fd: u8) -> bool {
+    fs::read_link(format!("/proc/{pid}/fd/{fd}"))
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
+/// Whether this process may look into any other, `CAP_SYS_PTRACE` being
+/// what the kernel lets past one that keeps the rest out.
+fn looks_into_anything() -> bool {
+    fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            let held = status
+                .lines()
+                .find_map(|line| line.strip_prefix("CapEff:"))?;
+            u64::from_str_radix(held.trim(), 16).ok()
+        })
+        .is_some_and(|held| held & (1 << 19) != 0)
+}
+
 /// Under `--mcp`, nothing reaches the agent's wire but the agent interface
 /// (issue #43): not the programs the session starts, which read nothing and
 /// print to stderr, and not anything in perspicax itself, whose fds 0 and 1
-/// are `/dev/null` and stderr once it has taken the wire for its own.
+/// are `/dev/null` and stderr once it has taken the wire for its own. Those
+/// two are `wire.rs`'s to check, from inside, since nothing outside may look
+/// at them now, not even this test, which started it (issue #118).
 #[test]
 #[ignore = "needs a live accessibility bus"]
 fn the_agents_wire_carries_nothing_but_the_agent_interface() {
@@ -418,7 +441,6 @@ fn the_agents_wire_carries_nothing_but_the_agent_interface() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("perspicax starts");
-    let pid = session.id().to_string();
     let log = link(
         "self",
         session.stderr.as_ref().expect("its stderr").as_raw_fd(),
@@ -447,10 +469,6 @@ fn the_agents_wire_carries_nothing_but_the_agent_interface() {
         }
     });
 
-    // perspicax's own: a `println!` reaches stderr, and a read reads nothing.
-    eventually("perspicax kept fds 0 and 1 for the wire", || {
-        link(&pid, 0).as_deref() == Some("/dev/null") && link(&pid, 1).as_ref() == Some(&log)
-    });
     // What it started. Before stdin closes: the server answers before the
     // programs are started, and the agent leaving ends the run.
     eventually("the spawned programs never said where they print", || {
@@ -478,6 +496,11 @@ fn the_agents_wire_carries_nothing_but_the_agent_interface() {
         assert_eq!(answer["jsonrpc"], "2.0", "{line}");
         assert_eq!(answer["id"], id, "{line}");
     }
+    // Answering, perspicax has the wire, and keeps every other process out.
+    assert!(
+        looks_into_anything() || refused(session.id(), 0),
+        "perspicax let this test look at its descriptors"
+    );
 
     // The agent leaves: the run ends, and the wire with it, having carried
     // nothing more. Closed, too, which it would not be while a program the

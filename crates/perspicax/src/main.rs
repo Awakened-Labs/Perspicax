@@ -158,6 +158,11 @@ struct Cli {
     /// fds 3 and 4 inside `dbus-run-session` instead, as the README shows, or
     /// use `--mcp-socket`.
     ///
+    /// Nor may another process running as you take the wire: perspicax keeps
+    /// them all out of itself, so none can reopen the wire through `/proc`,
+    /// take it with `pidfd_getfd`, or attach to perspicax with ptrace. So it
+    /// leaves no core dump, and looking at its descriptors takes root.
+    ///
     /// Headless, the run ends when the client does: an agent-driven compositor
     /// with no agent left has nothing to host, and it exits non-zero if the
     /// agent interface failed rather than ended. On a seat the session is the

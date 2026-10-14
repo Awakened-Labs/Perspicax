@@ -24,6 +24,15 @@
 //! every program started here prints to it. So [`Wire::shares`] and
 //! [`Wire::held_by`] say when another holder is there, and the run is refused
 //! rather than served on a wire it cannot keep.
+//!
+//! Nor may a copy be *taken* without being given (issue #118). By default the
+//! kernel lets any process running as this user reopen a pipe this one holds
+//! through `/proc/<pid>/fd/<n>`, take a descriptor whole with `pidfd_getfd`, or
+//! attach with ptrace and rewrite whatever this process says, and a hosted
+//! program is such a process. So [`Wire::take`] first keeps them all out of
+//! this one ([`keep_others_out`]). The client's own end is the client's to
+//! keep: a pipe it holds can be reopened through its own `/proc/<pid>/fd` just
+//! the same, where a socket end cannot be.
 
 use std::{
     fs::{self, File},
@@ -35,6 +44,8 @@ use std::{
     path::Path,
 };
 
+use rustix::process::DumpableBehavior;
+
 /// The agent's two ends, off fds 0 and 1.
 #[derive(Debug)]
 pub struct Wire {
@@ -44,7 +55,9 @@ pub struct Wire {
 
 impl Wire {
     /// Take stdin and stdout for the agent interface, leaving `/dev/null` and
-    /// stderr in their place.
+    /// stderr in their place, and keep every other process running as this
+    /// user out of this one ([`keep_others_out`]), so that none can take the
+    /// wire from it either.
     ///
     /// Called before anything is started and before any thread runs, so that
     /// nothing has inherited the wire or is part-way through a line on it.
@@ -53,9 +66,10 @@ impl Wire {
     ///
     /// # Errors
     ///
-    /// When a descriptor cannot be copied, or `/dev/null` opened. Nothing has
-    /// moved unless both copies were made.
+    /// When others cannot be kept out, a descriptor cannot be copied, or
+    /// `/dev/null` opened. Nothing has moved unless both copies were made.
     pub fn take() -> io::Result<Self> {
+        keep_others_out()?;
         // Close-on-exec, and numbered from 3: no program started can have them.
         let input = io::stdin().as_fd().try_clone_to_owned()?;
         let output = io::stdout().as_fd().try_clone_to_owned()?;
@@ -144,12 +158,47 @@ impl Wire {
     }
 }
 
+/// Keep every other process running as this user out of this one (issue
+/// #118), by making it one the kernel will not let them look into. What it
+/// gives a process's own user by default, and now refuses anybody without
+/// `CAP_SYS_PTRACE`:
+///
+/// - reopening a descriptor through `/proc/<pid>/fd/<n>`, which opens the very
+///   pipe, FIFO or file it is open on, to write a reply this process did not
+///   send;
+/// - `pidfd_getfd`, which takes a descriptor whole, a socket's as much as a
+///   pipe's;
+/// - ptrace and `/proc/<pid>/mem`, which read and rewrite anything this
+///   process holds: the index, and every verdict it gives.
+///
+/// Yama, where a kernel has it, keeps the last two to a process's ancestors
+/// already, and lets the first through.
+///
+/// It costs this process its core dump, and its `/proc/<pid>` becomes root's,
+/// so looking at its descriptors from outside takes root; its own it reads as
+/// before. A program it starts is not kept out with it: an `exec` undoes this.
+///
+/// # Errors
+///
+/// When the kernel refuses it, which `prctl` does only for an argument it does
+/// not know.
+pub fn keep_others_out() -> io::Result<()> {
+    rustix::process::set_dumpable_behavior(DumpableBehavior::NotDumpable)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         fs::OpenOptions,
-        io::{PipeReader, PipeWriter},
+        io::{BufRead as _, BufReader, PipeReader, PipeWriter, Read as _, Write as _},
+        os::fd::{AsRawFd as _, RawFd},
         process::{Child, Command, Stdio},
+    };
+
+    use rustix::{
+        io::Errno,
+        process::{Pid, PidfdFlags, PidfdGetfdFlags},
     };
 
     use super::*;
@@ -246,5 +295,141 @@ mod tests {
         assert_eq!(held.expect("an answer"), None);
 
         assert!(wire.held_by(u32::MAX).is_err(), "no such process");
+    }
+
+    /// Set for the copy of this binary that [`take_probe`] runs in.
+    const PROBE: &str = "PERSPICAX_WIRE_PROBE";
+
+    /// Where this process's `fd` points, as `/proc` says: `/dev/null`, or
+    /// `pipe:[N]`.
+    fn link(fd: RawFd) -> String {
+        fs::read_link(format!("/proc/self/fd/{fd}"))
+            .expect("a /proc fd link")
+            .display()
+            .to_string()
+    }
+
+    /// Whether this process may look into any other, `CAP_SYS_PTRACE` being
+    /// what the kernel lets past one that keeps the rest out.
+    fn looks_into_anything() -> bool {
+        fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                let held = status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("CapEff:"))?;
+                u64::from_str_radix(held.trim(), 16).ok()
+            })
+            .is_some_and(|held| held & (1 << 19) != 0)
+    }
+
+    /// A process that has taken the wire, run in a copy of this binary given
+    /// three different pipes, so that where its fds 0 and 1 went proves
+    /// something. Looked at from here, the process that started it: the
+    /// ancestor Yama lets in where a kernel has it, and so one only the probe
+    /// itself can keep out (issue #118).
+    #[test]
+    fn a_process_that_took_the_wire_keeps_every_other_out() {
+        let mut probe = Command::new(std::env::current_exe().expect("this test's binary"))
+            .args(["--exact", "wire::tests::take_probe", "--ignored"])
+            .args(["--test-threads=1", "--nocapture"])
+            .env(PROBE, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the probe runs");
+        let log = link(probe.stderr.as_ref().expect("its stderr").as_raw_fd());
+        // After what the test harness says first, on the stdout that is the
+        // wire until the probe takes it: the test's name, on the same line.
+        let report = BufReader::new(probe.stdout.take().expect("its stdout"))
+            .lines()
+            .map_while(Result::ok)
+            .find_map(|line| Some(line.split_once("taken ")?.1.to_owned()));
+        let Some(report) = report else {
+            let ended = probe.wait_with_output().expect("the probe ends");
+            panic!(
+                "the probe never said it took the wire: {}",
+                String::from_utf8_lossy(&ended.stderr)
+            );
+        };
+        let [dumpable, stdin, stdout, output] = report
+            .split(' ')
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap_or_else(|said| panic!("not a report: {said:?}"));
+
+        assert_eq!(dumpable, "NotDumpable");
+        assert_eq!(stdin, "/dev/null", "a read reads nothing");
+        assert_eq!(stdout, log, "a `println!` lands in the log");
+        if looks_into_anything() {
+            eprintln!(
+                "this test holds CAP_SYS_PTRACE, which nothing keeps out: the probe's \
+                 own word is all there is to check"
+            );
+        } else {
+            let pid = probe.id();
+            // The issue's: the wire reopened, for a reply perspicax did not
+            // send.
+            let reopened = OpenOptions::new()
+                .write(true)
+                .open(format!("/proc/{pid}/fd/{output}"));
+            assert_eq!(
+                reopened.map(drop).map_err(|error| error.kind()),
+                Err(io::ErrorKind::PermissionDenied),
+                "the wire reopened through /proc"
+            );
+            // What ptrace reads and rewrites.
+            let memory = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(format!("/proc/{pid}/mem"));
+            assert_eq!(
+                memory.map(drop).map_err(|error| error.kind()),
+                Err(io::ErrorKind::PermissionDenied),
+                "its memory"
+            );
+            // An end taken whole, as a socket's would be.
+            let pidfd = Pid::from_raw(i32::try_from(pid).expect("a pid"))
+                .map(|pid| rustix::process::pidfd_open(pid, PidfdFlags::empty()))
+                .expect("a pid")
+                .expect("a pidfd");
+            let output = output.parse().expect("a descriptor");
+            assert_eq!(
+                rustix::process::pidfd_getfd(pidfd, output, PidfdGetfdFlags::empty()).map(drop),
+                Err(Errno::PERM),
+                "the wire taken whole"
+            );
+        }
+
+        // The probe waits on the wire for the far end to finish.
+        drop(probe.stdin.take());
+        let ended = probe.wait_with_output().expect("the probe ends");
+        let said = String::from_utf8_lossy(&ended.stderr);
+        // A filter that matched nothing passes too, having run nothing.
+        assert!(
+            ended.status.success() && said.contains("1 passed"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    #[ignore = "run by a_process_that_took_the_wire_keeps_every_other_out"]
+    fn take_probe() {
+        if std::env::var_os(PROBE).is_none() {
+            return;
+        }
+        let wire = Wire::take().expect("the wire");
+        let dumpable = rustix::process::dumpable_behavior().expect("an answer");
+        let (input, output) = (File::from(wire.input), File::from(wire.output));
+        writeln!(
+            &output,
+            "taken {dumpable:?} {} {} {}",
+            link(0),
+            link(1),
+            output.as_raw_fd()
+        )
+        .expect("the wire");
+        let _ = (&input).read_to_end(&mut Vec::new());
     }
 }
