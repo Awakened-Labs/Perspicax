@@ -41,11 +41,13 @@ use smithay::{
 
 use crate::{Keymap, framed::Framed, shell, state::Compositor};
 
-/// What input lands on: an application's window, or a layer-shell surface
-/// (a panel, a wallpaper, a menu) where it sits in global space.
+/// What input lands on: an application's window, a layer-shell surface (a
+/// panel, a wallpaper, the shell's menu) where it sits in global space, or a
+/// menu, combo list or tooltip an application opened, where smithay draws it.
 enum Target {
     Window(Framed),
     Layer(LayerSurface, Rectangle<i32, Logical>),
+    Popup(Box<crate::facts::PlacedPopup>),
 }
 
 /// Where a pointer event goes: a point in global space, on a surface whose
@@ -342,10 +344,19 @@ impl Compositor {
         // be a panel or a wallpaper as well as a window.
         let target = match action {
             Action::Close | Action::Forward => self.any_window(surface).map(Target::Window),
-            _ => self.window_for_id(surface).map(Target::Window).or_else(|| {
-                self.layer_by_id(surface)
-                    .map(|(layer, placed)| Target::Layer(layer, placed))
-            }),
+            _ => self
+                .window_for_id(surface)
+                .map(Target::Window)
+                .or_else(|| {
+                    self.layer_by_id(surface)
+                        .map(|(layer, placed)| Target::Layer(layer, placed))
+                })
+                // Only where smithay draws it now: a menu dismissed, or
+                // hanging from a window put away, takes no input.
+                .or_else(|| {
+                    self.popup_placed(surface)
+                        .map(|placed| Target::Popup(Box::new(placed)))
+                }),
         }
         .ok_or(ActError::NoSuchSurface(surface.0))?;
         let focus_before = self.keyboard_owner();
@@ -363,8 +374,8 @@ impl Compositor {
                 self.activate_tab(window);
                 Ok(())
             }
-            // Found by `any_window`, so never a layer.
-            (Action::Close | Action::Forward, Target::Layer(..)) => {
+            // Found by `any_window`, so never a layer or a menu.
+            (Action::Close | Action::Forward, Target::Layer(..) | Target::Popup(..)) => {
                 Err(ActError::NoSuchSurface(surface.0))
             }
         }?;
@@ -387,6 +398,16 @@ impl Compositor {
                 layer.wl_surface().clone()
             }
             Target::Layer(..) => return Err(ActError::TakesNoKeyboard(id.0)),
+            // A menu has the keyboard only through its own client's grab,
+            // which it took when it opened: there is no giving it one. Asked
+            // of a menu that holds it already, there is nothing to do.
+            Target::Popup(_) => {
+                return if self.keyboard_holder() == Some(id) {
+                    Ok(())
+                } else {
+                    Err(ActError::TakesNoKeyboard(id.0))
+                };
+            }
         };
         self.focus_surface(wl_surface, id);
         Ok(())
@@ -403,6 +424,20 @@ impl Compositor {
                     global,
                     origin,
                     surface: crate::shell::surface_of(window)?,
+                })
+            }
+            // A menu's rect is in its window geometry, which begins its
+            // geometry's offset into its surface, where smithay draws it.
+            Target::Popup(placed) => {
+                let origin = (placed.buffer_origin.x, placed.buffer_origin.y);
+                let local = centre(at);
+                Some(Aim {
+                    global: (
+                        origin.0 + f64::from(placed.geometry.loc.x) + local.0,
+                        origin.1 + f64::from(placed.geometry.loc.y) + local.1,
+                    ),
+                    origin,
+                    surface: placed.popup.wl_surface().clone(),
                 })
             }
             // A layer surface has no shadow and no frame: it is its own
@@ -527,11 +562,16 @@ impl Compositor {
     /// Type a string on the seat's keyboard, into `surface`'s window.
     ///
     /// A keyboard has no target: whatever holds focus receives the keys. So
-    /// they are sent only if that is `surface`'s window, and refused as
+    /// they are sent only if that is `surface`, and refused as
     /// [`ActError::FocusElsewhere`] otherwise. The agent asks for `Focus`
     /// first. Typing regardless is how an agent with consent for one window
     /// typed into another it had none for, the person's terminal included
     /// (#35).
+    ///
+    /// A menu holding the keyboard is the surface it goes to, not its
+    /// window (#112): keys typed at a field of the window would land in the
+    /// menu, where a letter can choose an item. They are refused, naming the
+    /// menu, and keys typed at the menu are typed.
     ///
     /// The check is made here, on the loop thread, in the same call that
     /// presses the keys, so nothing can move focus between the two. A gate
@@ -539,7 +579,7 @@ impl Compositor {
     /// takes focus, and the keys would follow it.
     fn act_type(&mut self, surface: SurfaceId, text: &str) -> Result<(), ActError> {
         let keyboard = self.keyboard.clone().ok_or(ActError::NoKeyboard)?;
-        let focused = self.keyboard_owner();
+        let focused = self.keyboard_holder();
         if focused != Some(surface) {
             return Err(ActError::FocusElsewhere { focused });
         }

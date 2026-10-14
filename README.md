@@ -263,8 +263,11 @@ its user, and answers.
 `window_list` lists the desk as well as the windows: a panel, a wallpaper or a
 menu is `kind: layer`, with the `layer` it stacks in and the
 `untrusted_namespace` its program gave it, and a screen locker's cover is
-`kind: lock_cover`. An agent can read and click a panel as it would a window;
-a window verb aimed at one is refused as `not_a_window`.
+`kind: lock_cover`. A menu, a combo list or a tooltip an application opened is
+`kind: popup`, with `from` naming the window or panel it hangs from: drawn
+over it, and covering what is under it (see "A menu covers what is under it",
+below). An agent can read and click a panel or a menu as it would a window; a
+window verb aimed at one is refused as `not_a_window`.
 
 An agent names a control and never a coordinate — the rectangle comes from the
 index and turning it into anything global is the compositor's job, so an agent
@@ -285,7 +288,9 @@ because none could be honest:
 ```
 
 `damage` says what the pixels did in the 200 ms the act was given, scoped to the
-target's own rectangle, a menu the act opened, lit or closed included. Weigh it
+target's own rectangle, a menu the act opened, lit or closed included. Choosing
+an item usually closes its menu, so an act on a menu that has gone by then is
+read where the menu was drawn on its window, its closing a frame there. Weigh it
 against the idle rates in the table below: an idle GTK window repaints about
 forty times a second, so `on_target` means less there than it does on Qt, and
 `quiet` — nothing changed at all — is the strong answer on both. A boolean would
@@ -317,6 +322,13 @@ because it can only refuse: an application that says this falsely loses its
 own control and nothing else. A disabled control stays actable, since a press
 on it lands where the agent aimed and `state.disabled` already says it will do
 nothing.
+
+A control of a menu is refused as `menu_unplaced`, naming the open menu as
+`popup`, while its window has a menu open that perspicax has not yet matched
+to the application's controls. Toolkits measure a menu's controls from
+different places, and placed on the window they could be judged, and clicked,
+somewhere else entirely. It clears within moments, once the application has
+been read since the menu opened: resolve it again then.
 
 A control its application gives no bounds for is refused as `unplaced`.
 Without a rectangle there is nothing to judge, and unlike `unjudged`, waiting
@@ -351,7 +363,9 @@ An agent has nothing to do but resolve it again in a moment.
 typing is done only while the node's window holds it, and otherwise refused as
 `focus_elsewhere`, naming the surface that does. The agent `focus`es the node
 first. The compositor makes that check in the same turn it presses the keys, so
-focus cannot move between the two.
+focus cannot move between the two. While a window's menu holds the keyboard,
+the keys go to the menu, where a letter can choose an item: typing at the
+window is refused, naming the menu, and typing at the menu goes ahead.
 
 While a game holds the pointer ([see Mouse](#a-game-holding-the-pointer)), an
 agent's `click` and `scroll`, on the game or anywhere else, are refused as
@@ -389,9 +403,22 @@ is see-through, and gains nothing by saying less than it paints. A node
 just beside a window can therefore be refused under its shadow, though a
 person can make it out and click it. The person can bring its window
 forward; an agent can't yet
-([#147](https://github.com/Awakened-Labs/Perspicax/issues/147)). Menus are
-not windows here yet, and a menu over another window covers nothing
-([#112](https://github.com/Awakened-Labs/Perspicax/issues/112)).
+([#147](https://github.com/Awakened-Labs/Perspicax/issues/147)).
+
+**A menu covers what is under it.** A menu, a combo list or a tooltip is a
+popup: a surface of its own, drawn directly above the window or panel it hangs
+from, where it takes the pointer. So a control under an open menu is refused as
+`occluded`, naming the menu, whether it is another application's or one of the
+menu's own window: a click there would land on the menu. And a menu's own
+items are judged inside the menu, an item hanging past its window's edge
+included, and an agent's click on one lands on the menu. Toolkits disagree
+about where they measure a menu's items from: GTK 3 from the menu itself, GTK
+4 from its window. Perspicax tells which by where the items land in each, and
+joins a menu to its items only when exactly one puts them on the menu; until
+it can, its window's menus are refused as `menu_unplaced`. A menu of a window
+that has drawn nothing yet covers what is under it all the same. An X11
+application's menus are still windows of their own
+([#159](https://github.com/Awakened-Labs/Perspicax/issues/159)).
 
 **Text an application rendered is marked as such.** Every string reaches an
 agent under `untrusted_text`, beside the credentials of the process that drew
@@ -557,9 +584,10 @@ loading a page, Firefox committed its subsurface 252 times and drew in 79 of
 them.
 
 So is what a window's menus draw. A menu, a combo list or a tooltip is a popup:
-a surface of its own, outside the window's tree of subsurfaces. Its accessible
-nodes hang off the window's all the same, so its frames are the window's too,
-placed where the menu is drawn on it, past the window's edge if it hangs there.
+a surface of its own, outside the window's tree of subsurfaces. Its frames are
+its own, for an act on one of its items, and the window's too, placed where the
+menu is drawn on it, past the window's edge if it hangs there, for an act that
+opened it.
 A menu closing is a frame where it was. A panel's menus are the panel's. Each
 frame is kept where it landed, not as one box around them all: a menu hanging
 below a window and a caret blinking at its top leave every control between

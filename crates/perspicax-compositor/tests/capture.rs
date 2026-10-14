@@ -15,12 +15,12 @@
 
 mod common;
 
-use common::{Session, drawn_in, until};
+use common::{Session, configured, drawn_in, until};
 use perspicax_compositor::{ActError, Backend, Host};
-use perspicax_index::{HostFacts, Shot, ShotTarget};
+use perspicax_index::{HostFacts, Shot, ShotTarget, SurfaceKind};
 use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::Action;
-use smithay_client_toolkit::shell::WaylandSurface;
+use smithay_client_toolkit::shell::{WaylandSurface, xdg::XdgSurface as _};
 use wayland_client::protocol::wl_output;
 
 /// ARGB, as the client writes it.
@@ -89,6 +89,58 @@ fn a_granted_window_is_outlined_over_its_own_shadow() {
         pixel(&shot, right + 3.0, middle),
         white,
         "the shadow past it"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// A window's menu is drawn in front of the line round it, as it is in front
+/// of its titlebar: the index stacks a menu directly above its window
+/// (#112), and the picture is what it describes. The line still runs where
+/// the menu is not.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_granted_windows_menu_is_drawn_over_its_outline() {
+    let session = Session::start(
+        "capture-outline-menu",
+        Backend::headless((800, 600)).granting(),
+    );
+    let host = Host::new(&session.facts, &session.requests);
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_declaring(&qh, "shadowed", Some((10, 10, 380, 280)));
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    session.wait_for(|facts| facts.surfaces().iter().any(|surface| surface.mapped));
+    session.perform(Action::ToggleAgent);
+    session.wait_for(|facts| {
+        facts
+            .surfaces()
+            .iter()
+            .any(|surface| surface.frame.len() == 4)
+    });
+
+    // Across the window's right edge, where the line runs.
+    let menu = desk.open_popup(&qh, desk.windows[0].xdg_surface(), (360, 100), (60, 40));
+    configured(&mut desk, &mut queue, 1);
+    desk.paint(menu.wl_surface(), (60, 40), ORANGE);
+    menu.wl_surface().commit();
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| {
+        facts
+            .surfaces()
+            .iter()
+            .any(|surface| matches!(surface.kind, SurfaceKind::Popup { .. }) && surface.mapped)
+    });
+    let (_, area) = geometry(&facts, "shadowed");
+    let shot = host.capture(ShotTarget::Output(None)).expect("a picture");
+    assert_eq!(
+        pixel(&shot, area.x1 + 1.0, area.y0 + 120.0),
+        rgba(ORANGE),
+        "the menu, over the line"
+    );
+    assert_eq!(
+        pixel(&shot, area.x1 + 1.0, area.y0 + 200.0),
+        OUTLINE,
+        "the line, away from the menu"
     );
 
     session.stop((desk, queue));

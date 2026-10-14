@@ -47,14 +47,17 @@
 //! the read awaits the bus and touches no index, and the admitting touches the
 //! index and awaits nothing, so the index is never held across a wait.
 
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context as _, Result};
 use perspicax_atspi::{AppRef, AtspiIngest, Ids, Spared};
 use perspicax_compositor::Facts;
 use perspicax_index::{
     Change, Finding, HostFacts, Index, Ingest as _, Join, SurfaceClaim, SurfaceFacts, Tally,
-    WindowClaim, join,
+    WindowClaim, join, join::MenuFinding,
 };
 use perspicax_node::{NodeId, ObservedNode, Origin, Role, SurfaceId, Vec2};
 
@@ -93,6 +96,12 @@ pub struct App {
     pub joins: Vec<Join>,
     /// Its toplevels that could not be bound, and why.
     pub findings: Vec<Finding>,
+    /// Its open menus no part of its tree could be bound to, and why
+    /// (issue #112).
+    pub menus: Vec<MenuFinding>,
+    /// Its open menus it has been read again for, since each opened: one
+    /// read for each, and no more. See [`App::owes_a_read_for_a_menu`].
+    menus_read: HashSet<SurfaceId>,
     /// Still attached, and still subscribed. This is what makes staying
     /// current a matter of listening rather than reading again.
     ingest: AtspiIngest,
@@ -165,6 +174,9 @@ impl App {
                 .map_or(Origin::Unattributed, |facts| facts.origin.clone());
             index.join_subtree(join.node, join.surface, &origin);
         }
+        // A window's walk takes back every node beneath it, its open menus'
+        // included, so those go back to their popups after it.
+        index.restamp_menus(facts);
     }
 
     /// Bind this application's windows to the host's surfaces again, then
@@ -176,10 +188,53 @@ impl App {
     /// weighing is over a handful of windows and surfaces, with no I/O.
     pub fn relink(&mut self, index: &mut Index, facts: &HostFacts) {
         let windows = toplevels(index, self.root, Some(self.pid));
-        let surfaces: Vec<SurfaceClaim> =
-            facts.surfaces().iter().map(SurfaceFacts::claim).collect();
-        (self.joins, self.findings) = join(&windows, &surfaces);
+        (self.joins, self.findings) = join(&windows, &surfaces(facts));
         self.rejoin(index, facts);
+        // Its open menus last, measured against the windows just joined.
+        let windows: Vec<(NodeId, SurfaceId)> = self
+            .joins
+            .iter()
+            .map(|join| (join.node, join.surface))
+            .collect();
+        self.menus = index.join_popups(self.root, self.pid, &windows, facts);
+    }
+
+    /// The menus this application has open, as the host describes them.
+    pub fn popups<'a>(&self, facts: &'a HostFacts) -> impl Iterator<Item = &'a SurfaceFacts> {
+        let pid = self.pid;
+        facts.surfaces().iter().filter(move |surface| {
+            surface.hangs_from().is_some() && surface.claim().pid == Some(pid)
+        })
+    }
+
+    /// Whether this application should be read again for a menu it has
+    /// open that nothing of its tree is bound to yet: once for each menu,
+    /// a moment after it opens.
+    ///
+    /// GTK 4 announces a menu it opens, and the join binds it from that. GTK
+    /// 3 says nothing of a context menu, an untitled window of its own, so
+    /// the menu would stay refused as unplaced for as long as it was open,
+    /// measured on 2026-10-14. A read after it opened finds it. The moment
+    /// is for the announcement to arrive first, and once is enough: a menu
+    /// that a read made after it opened does not bind -- a tooltip, or a
+    /// menu its toolkit does not describe -- is not read for again.
+    pub fn owes_a_read_for_a_menu(
+        &mut self,
+        index: &Index,
+        facts: &HostFacts,
+        now: Instant,
+    ) -> bool {
+        let open: Vec<(SurfaceId, Option<Instant>)> = self
+            .popups(facts)
+            .filter(|popup| popup.mapped)
+            .map(|popup| (popup.id, popup.mapped_at))
+            .collect();
+        menus_to_read(
+            &mut self.menus_read,
+            &open,
+            |popup| index.menu_of(popup).is_some(),
+            now,
+        )
     }
 }
 
@@ -192,6 +247,10 @@ pub struct Snapshot {
     nodes: Vec<ObservedNode>,
     /// The host as it was when the read began.
     before: HostFacts,
+    /// When the read began: what every node it holds is credited with being
+    /// seen at, so that a menu that opened while it was under way is not
+    /// taken to be in it.
+    began: Instant,
     ingest: AtspiIngest,
 }
 
@@ -205,7 +264,7 @@ impl Snapshot {
     /// Put this application into `index`, its windows bound to the surfaces
     /// the host had when the read began.
     pub fn admit(self, index: &mut Index) -> App {
-        index.ingest_snapshot(self.nodes);
+        index.ingest_read(self.nodes, self.began);
         let mut app = App {
             name: self.name,
             toolkit: self.toolkit,
@@ -213,6 +272,8 @@ impl Snapshot {
             root: self.root,
             joins: Vec::new(),
             findings: Vec::new(),
+            menus: Vec::new(),
+            menus_read: HashSet::new(),
             ingest: self.ingest,
         };
         app.relink(index, &self.before);
@@ -247,6 +308,10 @@ impl Snapshot {
                 .surface(join.surface)
                 .map_or(0, |facts| facts.damage_generation);
             index.reconcile(join.surface, generation);
+        }
+        // Its open menus too, which its windows' nodes may be joined to.
+        for popup in app.popups(&self.before) {
+            index.reconcile(popup.id, popup.damage_generation);
         }
         app
     }
@@ -388,6 +453,7 @@ async fn snapshot(
     // The state of the host *before* the read, kept so the reconciliation
     // can be honest about what this tree does and does not contain.
     let before = facts.read();
+    let began = Instant::now();
     let nodes = ingest.snapshot(root).await?;
     Ok(Snapshot {
         name,
@@ -396,8 +462,51 @@ async fn snapshot(
         root,
         nodes,
         before,
+        began,
         ingest,
     })
+}
+
+/// Every surface a window could have been drawn on, as claims to be weighed.
+///
+/// Not a popup, however much it shares its window's process: offered as one,
+/// it would make a window with no title of its own ambiguous whenever a menu
+/// of it was open.
+fn surfaces(facts: &HostFacts) -> Vec<SurfaceClaim> {
+    facts
+        .surfaces()
+        .iter()
+        .filter(|surface| surface.hangs_from().is_none())
+        .map(SurfaceFacts::claim)
+        .collect()
+}
+
+/// How long an open menu may stay unbound before its application is read
+/// again for it: about one turn of the keeper, for the toolkit's own
+/// announcement of the menu to arrive first.
+const MENU_GRACE: Duration = Duration::from_millis(250);
+
+/// Which of `open` menus, each with when it opened, are owed a read now:
+/// none bound, open longer than [`MENU_GRACE`], and not read for already
+/// (`read`, which keeps those still open, these added). Whether any are.
+fn menus_to_read(
+    read: &mut HashSet<SurfaceId>,
+    open: &[(SurfaceId, Option<Instant>)],
+    bound: impl Fn(SurfaceId) -> bool,
+    now: Instant,
+) -> bool {
+    read.retain(|done| open.iter().any(|(popup, _)| popup == done));
+    let owed: Vec<SurfaceId> = open
+        .iter()
+        .filter(|(popup, mapped_at)| {
+            !read.contains(popup)
+                && !bound(*popup)
+                && mapped_at.is_some_and(|at| now.saturating_duration_since(at) >= MENU_GRACE)
+        })
+        .map(|(popup, _)| *popup)
+        .collect();
+    read.extend(owed.iter().copied());
+    !owed.is_empty()
 }
 
 /// An application's toplevels, as claims to be weighed.
@@ -414,6 +523,12 @@ fn toplevels(index: &Index, root: NodeId, bus_pid: Option<u32>) -> Vec<WindowCla
     node.node
         .children()
         .iter()
+        // A menu GTK 3 puts beside the windows, as an untitled window of its
+        // own, is a popup's, not a window to weigh. Weighed, it binds to
+        // the application's one surface as well as its window does, and the
+        // two are both demoted as contested: the whole window unattributed
+        // for as long as a context menu or combo list is open.
+        .filter(|child| index.menu_window(**child).is_none())
         .filter_map(|child| index.get(*child))
         .map(|window| WindowClaim {
             node: window.id,
@@ -493,6 +608,29 @@ pub fn report(reading: &Reading, host: &HostFacts) {
             );
         }
         for finding in &app.findings {
+            println!("  FINDING: {finding}");
+        }
+        // Its open menus, each with what of its tree is bound to it, and in
+        // which frame: whether its toolkit measures it from the menu or from
+        // its window, the question #112 had to answer per toolkit.
+        for popup in app.popups(host) {
+            match index.menu_of(popup.id) {
+                Some(menu) => println!(
+                    "  menu {} from surface {:?} <- nodes {:?}, measured in {:?}, from {:?}",
+                    popup.id.0,
+                    popup.hangs_from().map(|from| from.0),
+                    menu.roots.iter().map(|root| root.0).collect::<Vec<_>>(),
+                    menu.frame,
+                    (menu.origin.x, menu.origin.y),
+                ),
+                None => println!(
+                    "  menu {} from surface {:?}: nothing bound",
+                    popup.id.0,
+                    popup.hangs_from().map(|from| from.0),
+                ),
+            }
+        }
+        for finding in &app.menus {
             println!("  FINDING: {finding}");
         }
 
@@ -576,4 +714,89 @@ fn sample_node(index: &Index, app: &App) -> Option<NodeId> {
                 )
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use perspicax_node::{Node, ObservedNode, Rect, Role, SurfaceId};
+
+    use super::*;
+
+    fn node(id: u64, role: Role, label: Option<&str>, children: &[u64]) -> ObservedNode {
+        let mut node = Node::new(role);
+        if let Some(label) = label {
+            node.set_label(label);
+        }
+        node.set_children(children.iter().map(|c| NodeId(*c)).collect::<Vec<_>>());
+        ObservedNode::unjoined(NodeId(id), node)
+    }
+
+    /// GTK 3 puts an open context menu or combo list beside the application's
+    /// windows, as an untitled window holding the menu. Weighed as a window,
+    /// it binds to the application's one surface as well as the window does,
+    /// and both are demoted as contested: the whole window unattributed while
+    /// the menu is open, as slice 1 of #112 found on main. It is not weighed.
+    #[test]
+    fn a_menu_beside_an_applications_windows_is_not_one_of_them() {
+        let mut index = Index::new();
+        index.ingest_snapshot([
+            node(100, Role::Application, Some("menus3.py"), &[1, 8]),
+            node(1, Role::Window, Some("menus3"), &[]),
+            node(8, Role::Window, None, &[9]),
+            node(9, Role::Menu, None, &[]),
+        ]);
+        let claims = toplevels(&index, NodeId(100), Some(9182));
+        assert_eq!(
+            claims.iter().map(|claim| claim.node).collect::<Vec<_>>(),
+            [NodeId(1)]
+        );
+    }
+
+    /// An open menu nothing is bound to is owed one read, a moment after it
+    /// opens, and no more: one that a read did not bind is a tooltip, or a
+    /// menu its toolkit does not describe, and reading again will not change
+    /// that. One bound needs none, and one that closed is forgotten, so it is
+    /// owed a read again if it reopens unbound.
+    #[test]
+    fn an_unbound_menu_is_owed_one_read_a_moment_after_it_opens() {
+        let opened = Instant::now();
+        let menu = SurfaceId(5);
+        let mut read = HashSet::new();
+        let open = [(menu, Some(opened))];
+        let unbound = |_| false;
+
+        assert!(!menus_to_read(&mut read, &open, unbound, opened), "not yet");
+        let later = opened + MENU_GRACE;
+        assert!(menus_to_read(&mut read, &open, unbound, later));
+        assert!(!menus_to_read(&mut read, &open, unbound, later), "once");
+
+        assert!(
+            !menus_to_read(&mut HashSet::new(), &open, |_| true, later),
+            "a bound menu needs none"
+        );
+        assert!(!menus_to_read(&mut read, &[], unbound, later));
+        assert!(read.is_empty(), "a closed menu is forgotten");
+    }
+
+    /// Nor is a popup a surface a window could be on.
+    #[test]
+    fn a_popup_is_not_a_surface_a_window_could_be_on() {
+        let area = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let facts = HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(SurfaceId(1), area),
+                SurfaceFacts::new(SurfaceId(5), area).hung_from(SurfaceId(1), Instant::now()),
+            ],
+            1,
+        );
+        assert_eq!(
+            surfaces(&facts)
+                .iter()
+                .map(|claim| claim.surface)
+                .collect::<Vec<_>>(),
+            [SurfaceId(1)]
+        );
+    }
 }

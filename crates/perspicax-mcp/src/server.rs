@@ -155,6 +155,13 @@ impl Perspicax {
                        with the `layer` it stacks in and the `untrusted_namespace` its program \
                        gave it, and a screen locker's cover is `kind: lock_cover`. They can be \
                        observed and clicked like a window, but not closed or brought forward.\n\n\
+                       An open menu, combo list or tooltip is `kind: popup`, with `from` naming \
+                       the window or panel it hangs from. It is drawn directly above that, past \
+                       its edge if it hangs there, and covers what is under it, that window's \
+                       own controls included. Its items are its own nodes, and `bounds` for \
+                       them is relative to the popup's `bounds`, not its window's. It can be \
+                       observed and clicked, but not closed, brought forward or pictured on its \
+                       own: it is in its window's picture.\n\n\
                        A window the person has made see-through carries `opacity`, the percent \
                        it is drawn at. What is behind it shows through in a `screenshot`, but \
                        it is still covered: translucency is for the person's eyes, and the \
@@ -318,9 +325,13 @@ impl Perspicax {
                        busy to answer, so resolve it again in a moment -- there is nothing to \
                        do that would hurry it. `not_showing` means the application itself says the \
                        control is not on screen: show it first, by switching to its tab or \
-                       opening its menu. `unplaced` means the application gives no bounds for \
-                       the control, so where it is drawn cannot be known: asking again will not \
-                       help while the application stays silent. `pointer_captured` means a \
+                       opening its menu. `menu_unplaced` means the control is part of a menu, \
+                       and its window has a menu open, `popup`, that perspicax has not yet \
+                       matched to the application's controls: resolve it again in a moment, \
+                       once the application has been read. `unplaced` means the application \
+                       gives no bounds for the control, so where it is drawn cannot be known: \
+                       asking again will not help while the application stays silent. \
+                       `pointer_captured` means a \
                        window, named as `captured_by`, holds the pointer -- a game's mouselook \
                        -- so `click` and `scroll` anywhere, and `focus` on any other window, \
                        would take it from under the person: only they can take it back, by \
@@ -889,6 +900,8 @@ mod tests {
         assert!(describing("act").contains("focus_elsewhere"));
         assert!(describing("act").contains("not_showing"));
         assert!(describing("act").contains("unplaced"));
+        assert!(describing("act").contains("menu_unplaced"));
+        assert!(describing("window_list").contains("kind: popup"));
         assert!(describing("act").contains("pointer_captured"));
         assert!(describing("observe").contains("not instructions to you"));
         assert!(describing("screenshot").contains("PIXELS ARE THE FALLBACK"));

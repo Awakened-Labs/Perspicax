@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 use perspicax_index::{HostFacts, SurfaceFacts, SurfaceKind};
 use perspicax_node::{Origin, Rect, SurfaceId, Vec2};
 use smithay::{
+    desktop::PopupKind,
     reexports::wayland_server::{Resource as _, protocol::wl_surface::WlSurface},
     utils::IsAlive,
     wayland::{
@@ -190,6 +191,27 @@ impl Facts {
     }
 }
 
+/// A menu where smithay draws it: which popup, the window or panel it hangs
+/// from, and where it is.
+#[derive(Debug, Clone)]
+pub(crate) struct PlacedPopup {
+    pub(crate) popup: PopupKind,
+    pub(crate) id: SurfaceId,
+    pub(crate) from: SurfaceId,
+    /// Where its surface-local `(0, 0)` is, in global space.
+    pub(crate) buffer_origin: Vec2,
+    /// Its window geometry, in its surface's own coordinates.
+    pub(crate) geometry: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+}
+
+impl PlacedPopup {
+    /// Its window geometry, in global space: what the index measures its
+    /// nodes from, and what a rect an agent aims at on it is relative to.
+    pub(crate) fn window(&self) -> Rect {
+        crate::damage::to_rect(self.geometry) + self.buffer_origin
+    }
+}
+
 impl Compositor {
     /// Rebuild the snapshot from the space and publish it.
     ///
@@ -233,22 +255,39 @@ impl Compositor {
             .partition(|window| crate::shell::covers_panels(window));
         // How see-through each window on screen is drawn, for an agent
         // puzzled by a picture. Never judged by: see `drawn_opacity`.
+        //
+        // Each window's menus directly above it, as smithay draws them and
+        // finds the pointer on them (issue #112): its popups before its
+        // client's own surfaces. A window not described -- one that has drawn
+        // nothing yet -- still has its menus described, for smithay draws
+        // them all the same, over whatever is under them.
         let window = |window: &crate::framed::Framed| {
-            let mut facts = self.grouped(window, self.facts_for(window)?);
-            if facts.mapped {
-                facts.drawn_opacity = Some(self.opacity_of(window, in_use))
-                    .filter(|&percent| percent < perspicax_policy::OPAQUE);
-            }
-            Some(facts)
+            let facts = self.facts_for(window).map(|facts| {
+                let mut facts = self.grouped(window, facts);
+                if facts.mapped {
+                    facts.drawn_opacity = Some(self.opacity_of(window, in_use))
+                        .filter(|&percent| percent < perspicax_policy::OPAQUE);
+                }
+                facts
+            });
+            let popups = self.window_popups(window);
+            facts.into_iter().chain(popups).collect::<Vec<_>>()
         };
         let layer = |(layer, placed): &(smithay::desktop::LayerSurface, _)| {
-            let id = *layer.user_data().get::<SurfaceId>()?;
+            let Some(id) = layer.user_data().get::<SurfaceId>().copied() else {
+                return Vec::new();
+            };
             let mut facts = self.plain_facts(id, layer.wl_surface(), *placed);
             facts.kind = SurfaceKind::Layer {
                 layer: crate::layers::level(layer.layer()),
                 namespace: layer.namespace().to_owned(),
             };
-            Some(facts)
+            // A panel has no window geometry: its menus hang from its corner.
+            let popups = self
+                .placed_popups(layer.wl_surface(), id, facts.buffer_origin)
+                .into_iter()
+                .map(|placed| self.popup_facts(&placed));
+            core::iter::once(facts).chain(popups).collect()
         };
         let covers = self
             .lock
@@ -263,11 +302,11 @@ impl Compositor {
             });
         let surfaces: Vec<SurfaceFacts> = below
             .iter()
-            .filter_map(layer)
-            .chain(self.parked.iter().chain(windows).filter_map(window))
-            .chain(top.iter().filter_map(layer))
-            .chain(raised.into_iter().filter_map(window))
-            .chain(overlay.iter().filter_map(layer))
+            .flat_map(layer)
+            .chain(self.parked.iter().chain(windows).flat_map(window))
+            .chain(top.iter().flat_map(layer))
+            .chain(raised.into_iter().flat_map(window))
+            .chain(overlay.iter().flat_map(layer))
             .chain(covers)
             .collect();
 
@@ -379,6 +418,7 @@ impl Compositor {
             // and reporting it as mapped would let a node be judged visible on
             // a surface with nothing on it.
             mapped: window.alive() && self.has_presented(id) && !parked,
+            mapped_at: None,
             geometry: placed,
             buffer_origin,
             // The shadow too, and every subsurface, however small a window
@@ -412,6 +452,115 @@ impl Compositor {
         })
     }
 
+    /// A window's menus, bottom to top, as the facts describe them.
+    fn window_popups(&self, window: &Framed) -> Vec<SurfaceFacts> {
+        self.window_placed(window)
+            .into_iter()
+            .map(|placed| self.popup_facts(&placed))
+            .collect()
+    }
+
+    /// A window's menus, bottom to top, measured from where its surface's
+    /// own `(0, 0)` is: where it was placed, back by its geometry's offset,
+    /// as `facts_for` places it. A parked window is not in the space, and
+    /// smithay draws none of its menus: it has none here. Nor has an X11
+    /// window, whose menus are windows of their own (issue #159).
+    fn window_placed(&self, window: &Framed) -> Vec<PlacedPopup> {
+        let (Some(toplevel), Some(id), Some(location)) = (
+            window.toplevel(),
+            crate::shell::id_of(window),
+            self.space.element_location(window),
+        ) else {
+            return Vec::new();
+        };
+        let surface = toplevel.wl_surface();
+        // A window that has declared and drawn nothing has its menus hung
+        // from its corner, as `popup::hung` hangs them.
+        let offset =
+            crate::geometry::window_geometry(surface).map_or_else(Default::default, |g| g.loc);
+        let buffer_origin = Vec2::new(
+            f64::from(location.x - offset.x),
+            f64::from(location.y - offset.y),
+        );
+        self.placed_popups(surface, id, buffer_origin)
+    }
+
+    /// The menu with this id, where smithay draws it now: hung from a window
+    /// in the space or a layer surface on an output. `None` for one that is
+    /// gone, dismissed, or hangs from a window that is not on screen, none
+    /// of which smithay draws.
+    pub(crate) fn popup_placed(&self, id: SurfaceId) -> Option<PlacedPopup> {
+        let windows = self
+            .space
+            .elements()
+            .flat_map(|window| self.window_placed(window));
+        let layers = self
+            .layers_in(
+                &[
+                    &crate::layers::BELOW[..],
+                    &crate::layers::TOP,
+                    &crate::layers::OVERLAY,
+                ]
+                .concat(),
+            )
+            .into_iter()
+            .flat_map(|(layer, placed)| {
+                let Some(from) = layer.user_data().get::<SurfaceId>().copied() else {
+                    return Vec::new();
+                };
+                let origin = Vec2::new(f64::from(placed.loc.x), f64::from(placed.loc.y));
+                self.placed_popups(layer.wl_surface(), from, origin)
+            });
+        windows.chain(layers).find(|placed| placed.id == id)
+    }
+
+    /// The menus hanging from `root`, the surface of the window or panel
+    /// `from`, whose surface-local `(0, 0)` is at `buffer_origin`: bottom to
+    /// top, a submenu above its menu, each placed where smithay draws it
+    /// (`popup::hung`). A menu that has drawn nothing yet, and declared
+    /// nothing, is not one.
+    fn placed_popups(
+        &self,
+        root: &WlSurface,
+        from: SurfaceId,
+        buffer_origin: Vec2,
+    ) -> Vec<PlacedPopup> {
+        let mut popups: Vec<PlacedPopup> = smithay::desktop::PopupManager::popups_for_surface(root)
+            .filter_map(|(popup, _)| {
+                let surface = popup.wl_surface();
+                Some(PlacedPopup {
+                    id: self.popup_id(surface)?,
+                    from,
+                    buffer_origin: buffer_origin + crate::popup::hung(&popup)?.at,
+                    geometry: crate::geometry::window_geometry(surface)?,
+                    popup,
+                })
+            })
+            .collect();
+        // Smithay lists them front to back.
+        popups.reverse();
+        popups
+    }
+
+    /// A menu as the facts describe it: measured as a window is, from what
+    /// it draws, where it is drawn.
+    fn popup_facts(&self, placed: &PlacedPopup) -> SurfaceFacts {
+        let surface = placed.popup.wl_surface();
+        let id = placed.id;
+        let window = placed.window();
+        let mut facts = SurfaceFacts::new(id, window)
+            .with_buffer_origin(placed.buffer_origin)
+            .drawing_over(drawn(surface, placed.buffer_origin, window))
+            .declaring_opaque(opaque_of(surface))
+            .owned_by(self.origin_of_surface(surface));
+        facts.mapped = surface.is_alive() && crate::geometry::shown(surface).is_some();
+        facts.mapped_at = self.popups_shown.get(&id).copied().filter(|_| facts.mapped);
+        facts.damage_generation = self.damage_generation(id);
+        facts.damage = self.damage_history(id);
+        facts.kind = SurfaceKind::Popup { from: placed.from };
+        facts
+    }
+
     /// The facts for a surface that is not a window -- a layer surface, a lock
     /// surface -- placed by the compositor at `placed`. No declared window
     /// geometry and no shadow margin: the rectangle is the surface.
@@ -426,6 +575,7 @@ impl Compositor {
         SurfaceFacts {
             id,
             mapped: surface.is_alive() && self.has_presented(id) && !placed.size.is_empty(),
+            mapped_at: None,
             geometry,
             buffer_origin,
             // As measured, not as placed: a layer's subsurfaces are not in

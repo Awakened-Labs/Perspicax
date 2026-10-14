@@ -641,12 +641,41 @@ impl Compositor {
     /// grab is still the menu's, and the caller may be taking the keyboard
     /// from every window. The pointer's is the caller's to end.
     pub(crate) fn close_menu(&mut self) {
-        if let Some(mut menu) = self.menu.take() {
+        let closed = self.menu.take().map(|mut menu| {
+            let open = !menu.has_ended();
             menu.ungrab(PopupUngrabStrategy::All);
-        }
+            open
+        });
         if let Some(keyboard) = self.keyboard.clone() {
             keyboard.unset_grab(self);
         }
+        // Smithay stops drawing a dismissed menu at once, though its client
+        // has yet to destroy it, so the facts stop describing it at once too:
+        // otherwise an item of it would be judged on a menu no longer drawn.
+        if closed == Some(true) {
+            self.publish_facts();
+        }
+    }
+
+    /// After a button the person pressed while a menu held the pointer
+    /// (`held`, asked of [`Self::menu_held`] before it): the press may have
+    /// dismissed the menu, as smithay does for a press on any other client's
+    /// surface, or on none. Smithay stops drawing a dismissed menu at once,
+    /// though its client has yet to destroy it, so the facts stop describing
+    /// it at once too. Smithay's grab does not say it dismissed anything until
+    /// the client destroys the menu (`has_ended` stays false while a
+    /// dismissed menu lives), so every such button publishes: cheap, and only
+    /// while a menu is open.
+    pub(crate) fn after_menu_button(&mut self, held: bool) {
+        if held {
+            self.publish_facts();
+        }
+    }
+
+    /// Whether a menu holds the keyboard and pointer: what
+    /// [`Self::after_menu_button`] is told before a button.
+    pub(crate) fn menu_held(&self) -> bool {
+        self.menu.as_ref().is_some_and(|menu| !menu.has_ended())
     }
 
     /// A window's menu its client closed -- an item chosen -- gives the

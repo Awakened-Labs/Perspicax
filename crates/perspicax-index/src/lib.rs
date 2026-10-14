@@ -91,6 +91,18 @@ pub enum Refusal {
     NotShowing,
     /// No compositor has judged this node's visibility. Fails closed.
     Unjudged,
+    /// The node belongs to a menu of a window that has a menu open, and
+    /// nothing has yet said which open menu, of the `popup` surfaces on
+    /// screen, its nodes are (issue #112).
+    ///
+    /// A menu is a surface of its own, and toolkits disagree about where they
+    /// measure its nodes from: GTK 4 from the window, GTK 3 from the menu
+    /// itself. Placed on the window regardless, a GTK 3 menu's items would be
+    /// judged and clicked over the window's own top-left corner. So while a
+    /// window has an open menu its nodes are not matched to, the nodes of its
+    /// menus are refused rather than guessed at. It usually clears within
+    /// moments, once the application has been read since the menu opened.
+    MenuUnplaced { popup: SurfaceId },
     /// The node is on a window, and its application gives no bounds for it:
     /// it did not answer when asked where the node is, or had nothing to say.
     /// Without a rectangle there is nothing to judge, and waiting does not
@@ -119,11 +131,17 @@ pub enum Refusal {
     /// A window verb named a surface that is not an application's window: a
     /// panel, a wallpaper, a menu, a lock screen. They are part of the desk,
     /// and nothing closes them or brings them forward but their own program.
+    /// A picture of a menu is refused the same way: it is drawn as part of
+    /// its window's, which is the one to ask for.
     NotAWindow,
     /// Typing was asked of a node whose window does not hold the keyboard.
     /// Keys go where focus is, so typing anyway would land them in `focused`
     /// -- possibly a window the agent holds no consent for. `focus` the node
     /// and try again. `None` when no window or layer holds the keyboard.
+    ///
+    /// A menu of the node's own window holding the keyboard is `focused`
+    /// too: the keys would go to the menu, where a letter can choose an
+    /// item. Typed at the menu, they go ahead.
     ///
     /// The host decides this, not the gate: only the host can compare focus
     /// with the target in the same step that presses the keys, and anything
@@ -161,6 +179,11 @@ impl core::fmt::Display for Refusal {
             }
             Self::NotShowing => write!(f, "node's application reports it as not being shown"),
             Self::Unjudged => write!(f, "node visibility has not been judged by a compositor"),
+            Self::MenuUnplaced { popup } => write!(
+                f,
+                "node belongs to a menu, and the open menu {} has not been placed yet",
+                popup.0
+            ),
             Self::Unplaced => write!(
                 f,
                 "node's application gives no bounds for it, so where it is drawn cannot be judged"
@@ -324,6 +347,9 @@ pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
 /// The [`Refusal`] saying why not.
 pub fn check_readable(facts: &HostFacts, surface: SurfaceId) -> Result<&SurfaceFacts, Refusal> {
     let window = facts.surface(surface).ok_or(Refusal::NotFound)?;
+    if window.hangs_from().is_some() {
+        return Err(Refusal::NotAWindow);
+    }
     match &window.origin {
         Origin::Unattributed => Err(Refusal::Unattributed),
         origin if facts.consent().permits(origin) => Ok(window),
@@ -837,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn a_window_verb_refuses_a_panel_a_wallpaper_and_a_lock_screen() {
+    fn a_window_verb_refuses_a_panel_a_wallpaper_a_lock_screen_and_a_menu() {
         let area = Rect::new(0.0, 0.0, 400.0, 300.0);
         let facts = HostFacts::bottom_to_top(
             [
@@ -850,11 +876,14 @@ mod tests {
                 SurfaceFacts::new(SurfaceId(3), area)
                     .owned_by(owned_by(11))
                     .lock_cover(),
+                SurfaceFacts::new(SurfaceId(4), area)
+                    .owned_by(owned_by(10))
+                    .hung_from(SurfaceId(2), std::time::Instant::now()),
             ],
             1,
         )
         .with_consent(Consent::Everyone);
-        for id in 1..=3 {
+        for id in 1..=4 {
             for verb in [WindowVerb::Close, WindowVerb::Forward] {
                 assert_eq!(
                     check_window(&facts, SurfaceId(id), verb).unwrap_err(),
@@ -862,6 +891,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A menu is drawn as part of its window's picture, so a picture of the
+    /// menu is refused, pointing the agent at the window.
+    #[test]
+    fn a_picture_of_a_menu_is_refused_as_not_a_window() {
+        let area = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let facts = HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(SurfaceId(1), area).owned_by(owned_by(10)),
+                SurfaceFacts::new(SurfaceId(2), area)
+                    .owned_by(owned_by(10))
+                    .hung_from(SurfaceId(1), std::time::Instant::now()),
+            ],
+            1,
+        )
+        .with_consent(Consent::Everyone);
+        assert!(check_readable(&facts, SurfaceId(1)).is_ok());
+        assert_eq!(
+            check_readable(&facts, SurfaceId(2)).unwrap_err(),
+            Refusal::NotAWindow
+        );
     }
 
     #[test]

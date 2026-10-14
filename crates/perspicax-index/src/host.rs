@@ -108,7 +108,10 @@ use std::time::Instant;
 
 use perspicax_node::{Origin, Rect, SurfaceId, Vec2, Visibility};
 
-use crate::{Consent, join::SurfaceClaim};
+use crate::{
+    Consent,
+    join::{PopupClaim, SurfaceClaim},
+};
 
 /// One surface, as its host currently sees it.
 ///
@@ -135,6 +138,17 @@ pub enum SurfaceKind {
     },
     /// What a screen locker drew over a monitor while the session is locked.
     LockCover,
+    /// A menu, a combo list or a tooltip: an `xdg_popup`, a surface of its
+    /// own that its client places beside a window or panel and that is drawn
+    /// directly above it. It covers what is under it, the window it hangs from
+    /// included, and its accessible nodes are joined to it, not to that
+    /// window, once the index can say which they are (issue #112).
+    Popup {
+        /// The window or panel it hangs from, through any menus between: a
+        /// submenu's is its menu's. It may be a surface these facts do not
+        /// describe, such as a window that has drawn nothing yet.
+        from: SurfaceId,
+    },
 }
 
 /// The four layers of `wlr-layer-shell`, bottom to top. Windows stack between
@@ -180,6 +194,12 @@ pub struct SurfaceFacts {
     /// Whether it is on screen at all. An unmapped surface is a closed menu or
     /// a hidden window, and nothing on it can be seen or acted on.
     pub mapped: bool,
+    /// When a popup was put on screen: its accessible nodes are joined to it
+    /// only from a read made after this, so that a menu that closed a moment
+    /// ago, and was not yet reported gone, is never taken for the one that
+    /// opened in its place. `None` for anything that is not a popup, and for
+    /// a popup that is not on screen.
+    pub mapped_at: Option<Instant>,
     /// Where the surface sits in global space, as the host places it: the
     /// window geometry, which is window space's origin. Where the window is,
     /// and not how far it reaches: that is `drawn`.
@@ -204,7 +224,8 @@ pub struct SurfaceFacts {
     /// the picture, and still takes clicks on it (issue #103). So this, and
     /// never less than `geometry`, is what it covers: see
     /// [`SurfaceFacts::covers`]. Not the frame the host drew around it,
-    /// which is `frame`, and not its menus, which are trees of their own.
+    /// which is `frame`, and not its menus, which are surfaces of their own
+    /// ([`SurfaceKind::Popup`]) stacked directly above it.
     pub drawn: Rect,
     /// Where the client says it is opaque, in surface-local coordinates: its
     /// own surface's region, and each of its subsurfaces', placed where the
@@ -232,7 +253,9 @@ pub struct SurfaceFacts {
     /// How many frames of damage this surface has taken, its subsurfaces' and
     /// its menus' included: one for each commit that brought a new buffer or
     /// named damage, however many of its tree's surfaces that commit changed,
-    /// and one for each menu that closed showing something.
+    /// and one for each menu that closed showing something. A menu counts its
+    /// own as well, as a surface of its own; its window keeps a copy, so a
+    /// receipt for the button that opened the menu still sees it open.
     /// Monotonic; the index compares it against what it has reconciled to
     /// decide staleness.
     pub damage_generation: u64,
@@ -319,6 +342,7 @@ impl SurfaceFacts {
         Self {
             id,
             mapped: true,
+            mapped_at: None,
             geometry,
             buffer_origin: Vec2::new(geometry.x0, geometry.y0),
             drawn: geometry,
@@ -356,7 +380,7 @@ impl SurfaceFacts {
     pub fn claim(&self) -> SurfaceClaim {
         let namespace = match &self.kind {
             SurfaceKind::Layer { namespace, .. } => Some(namespace.clone()),
-            SurfaceKind::Window | SurfaceKind::LockCover => None,
+            SurfaceKind::Window | SurfaceKind::LockCover | SurfaceKind::Popup { .. } => None,
         };
         SurfaceClaim {
             surface: self.id,
@@ -450,6 +474,40 @@ impl SurfaceFacts {
     pub fn lock_cover(mut self) -> Self {
         self.kind = SurfaceKind::LockCover;
         self
+    }
+
+    /// The same surface, a popup hanging from `from`, put on screen at
+    /// `mapped_at`.
+    #[must_use]
+    pub fn hung_from(mut self, from: SurfaceId, mapped_at: Instant) -> Self {
+        self.kind = SurfaceKind::Popup { from };
+        self.mapped_at = Some(mapped_at);
+        self
+    }
+
+    /// The window or panel this surface hangs from, if it is a popup.
+    #[must_use]
+    pub fn hangs_from(&self) -> Option<SurfaceId> {
+        match self.kind {
+            SurfaceKind::Popup { from } => Some(from),
+            _ => None,
+        }
+    }
+
+    /// This surface as something [`join_popups`](crate::join::join_popups)
+    /// can bind a menu to: a popup on screen. `None` for anything else.
+    #[must_use]
+    pub fn popup_claim(&self) -> Option<PopupClaim> {
+        let from = self.hangs_from().filter(|_| self.mapped)?;
+        Some(PopupClaim {
+            surface: self.id,
+            from,
+            pid: self.claim().pid,
+            mapped_at: self.mapped_at,
+            buffer_origin: self.buffer_origin,
+            geometry: self.geometry,
+            drawn: self.covers(),
+        })
     }
 
     /// The same surface, with the title its client set.

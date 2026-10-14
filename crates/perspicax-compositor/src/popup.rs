@@ -4,11 +4,17 @@
 //! A popup is a surface of its own, with a tree of its own, and it belongs to
 //! its window through xdg-shell rather than through `wl_subsurface`. So
 //! [`damage::root_of`](crate::damage::root_of), which follows subsurfaces up
-//! to their window, stops at a popup. What a popup draws is its window's all
-//! the same: a menu's accessible nodes hang off its window's, and the index
-//! joins them to the window's surface. So it is counted against that window,
-//! moved by where the popup is drawn in it (issue #42). A panel's menu is the
-//! panel's in the same way.
+//! to their window, stops at a popup.
+//!
+//! It is described to the index as a surface of its own too (issue #112),
+//! with an id minted for each `xdg_popup` (`Compositor::popup_ids`), directly
+//! above the window or panel it hangs from, where smithay draws it and finds
+//! the pointer on it: it covers what is under it, that window included, and
+//! its menu's accessible nodes are joined to it once the index can say which
+//! they are. What it draws is counted as its own, and its window keeps a copy,
+//! moved by where the popup is drawn on it (issue #42), so a receipt for the
+//! button that opened a menu sees it open. A panel's menu is the panel's in
+//! the same way.
 //!
 //! # Where smithay draws it
 //!
@@ -25,10 +31,10 @@
 
 use std::sync::PoisonError;
 
-use perspicax_node::Vec2;
+use perspicax_node::{SurfaceId, Vec2};
 use smithay::{
     desktop::{PopupKind, find_popup_root_surface, get_popup_toplevel_coords},
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    reexports::wayland_server::{Resource as _, protocol::wl_surface::WlSurface},
     utils::{Logical, Point},
     wayland::{
         compositor::{get_role, with_states},
@@ -72,6 +78,14 @@ pub(crate) fn hung(popup: &PopupKind) -> Option<Hung> {
         from,
         at: Vec2::new(f64::from(at.x), f64::from(at.y)),
     })
+}
+
+impl crate::state::Compositor {
+    /// The id this popup's surface was given for the popup it is now: see
+    /// `Compositor::popup_ids`. `None` for a surface that is no popup.
+    pub(crate) fn popup_id(&self, surface: &WlSurface) -> Option<SurfaceId> {
+        self.popup_ids.get(&surface.id()).copied()
+    }
 }
 
 /// Where the popups of the window or panel whose surface is `from` are

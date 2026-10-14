@@ -397,8 +397,10 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
     }
     // Delivered to the client, or to the grab just started, which is how the
     // grab learns which button to wait for the release of.
+    let held = state.menu_held();
     handle.button(state, &event);
     handle.frame(state);
+    state.after_menu_button(held);
 }
 
 /// The left button went down on `window`'s frame.

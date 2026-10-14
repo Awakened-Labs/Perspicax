@@ -755,6 +755,8 @@ pub struct Desk {
     /// Which of our surfaces the pointer is over, from its last arrival
     /// until it leaves.
     pub pointed: Option<wl_surface::WlSurface>,
+    /// Where on it the pointer last arrived, in its own coordinates.
+    pub arrived: Option<(f64, f64)>,
     /// Every button the pointer pressed (`true`) or let go (`false`) on one
     /// of our surfaces, by Linux code, in order.
     pub buttons: Vec<(u32, bool)>,
@@ -862,6 +864,7 @@ impl Desk {
             pointed: None,
             buttons: Vec::new(),
             pressed: None,
+            arrived: None,
             scrolls: 0,
             motions: Vec::new(),
             relative_motions: Vec::new(),
@@ -2299,10 +2302,14 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
     ) {
         match event {
             wl_pointer::Event::Enter {
-                serial, surface, ..
+                serial,
+                surface,
+                surface_x,
+                surface_y,
             } => {
                 desk.entered = Some(serial);
                 desk.pointed = Some(surface);
+                desk.arrived = Some((surface_x, surface_y));
             }
             wl_pointer::Event::Leave { .. } => {
                 desk.entered = None;

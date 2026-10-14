@@ -38,10 +38,10 @@ use std::{thread, time::Duration, time::Instant};
 
 use perspicax_compositor::{ActError, Facts, Host};
 use perspicax_index::{
-    DamageWitness, Index, Receipt, Refusal, Selector, Verb, WindowReceipt, WindowVerb,
-    WindowWitness, check_window,
+    DamageWitness, HostFacts, Index, Receipt, Refusal, Selector, SurfaceFacts, Verb, WindowReceipt,
+    WindowVerb, WindowWitness, check_window,
 };
-use perspicax_node::SurfaceId;
+use perspicax_node::{Rect, SurfaceId};
 
 /// How long an act is given to have a visible effect, by default.
 ///
@@ -124,10 +124,7 @@ pub fn act(
     let origin = node.origin.clone();
 
     // Marked before the act, never after. See the module docs.
-    let before = facts
-        .read()
-        .surface(surface)
-        .map_or(0, |facts| facts.damage_generation);
+    let marked = facts.read();
 
     let action = verb.at(rect);
     let started = Instant::now();
@@ -139,19 +136,7 @@ pub fn act(
     // Re-read rather than reuse: the whole point of the wait is that the world
     // moved, and the snapshot taken before it is precisely the one that cannot
     // say so.
-    let after = facts.read();
-    let damage = after
-        .surface(surface)
-        .map_or(DamageWitness::Quiet, |facts| {
-            let frames = facts.damage_generation.saturating_sub(before);
-            if frames == 0 {
-                DamageWitness::Quiet
-            } else if facts.damage_touches(before, rect) {
-                DamageWitness::OnTarget { frames }
-            } else {
-                DamageWitness::Elsewhere { frames }
-            }
-        });
+    let damage = witness(&marked, &facts.read(), surface, rect);
 
     Ok(Receipt {
         selector: selector.to_string(),
@@ -164,6 +149,43 @@ pub fn act(
         focus_after: dispatched.focus_after,
         damage,
         damage_window: window,
+    })
+}
+
+/// What the screen did where a node was acted on, from the facts marked
+/// before the act and read after it: the frames of damage its surface took
+/// since, and whether any landed on `rect`, in window space.
+///
+/// Choosing an item usually closes its menu, so a node on a popup may be on a
+/// surface that is gone by the time this is read. The window the menu hung
+/// from keeps a copy of what it drew, its closing included, where it was drawn
+/// (#42), so that is read in the menu's place: from its own mark, at the
+/// rect's place in that window.
+fn witness(marked: &HostFacts, after: &HostFacts, surface: SurfaceId, rect: Rect) -> DamageWitness {
+    let read = |facts: &SurfaceFacts, before: u64, rect: Rect| {
+        let frames = facts.damage_generation.saturating_sub(before);
+        if frames == 0 {
+            DamageWitness::Quiet
+        } else if facts.damage_touches(before, rect) {
+            DamageWitness::OnTarget { frames }
+        } else {
+            DamageWitness::Elsewhere { frames }
+        }
+    };
+    let Some(was) = marked.surface(surface) else {
+        return after
+            .surface(surface)
+            .map_or(DamageWitness::Quiet, |now| read(now, 0, rect));
+    };
+    if let Some(now) = after.surface(surface) {
+        return read(now, was.damage_generation, rect);
+    }
+    let Some(from) = was.hangs_from().and_then(|from| marked.surface(from)) else {
+        return DamageWitness::Quiet;
+    };
+    let in_window = was.to_global(rect) - from.geometry.origin().to_vec2();
+    after.surface(from.id).map_or(DamageWitness::Quiet, |now| {
+        read(now, from.damage_generation, in_window)
     })
 }
 
@@ -204,7 +226,11 @@ pub fn act_window(
             appeared: after
                 .surfaces()
                 .iter()
-                .filter(|facts| !known.contains(&facts.id) && facts.origin == origin)
+                .filter(|facts| {
+                    !known.contains(&facts.id)
+                        && facts.origin == origin
+                        && facts.hangs_from().is_none()
+                })
                 .map(|facts| facts.id)
                 .collect(),
         },
@@ -246,6 +272,72 @@ mod tests {
 
     fn host() -> Host {
         Host::new(&Facts::new(), &Requests::new()).waiting(Duration::from_millis(20))
+    }
+
+    /// A window at the corner of the desk and, when `menu` is given, its menu
+    /// hanging below its edge with that damage history.
+    fn menu_desk(window: &[(u64, Rect)], menu: Option<&[(u64, Rect)]>) -> HostFacts {
+        let mut surfaces = vec![
+            SurfaceFacts::new(SurfaceId(1), Rect::new(0.0, 0.0, 400.0, 300.0))
+                .damaging(window.iter().copied()),
+        ];
+        surfaces.extend(menu.map(|history| {
+            SurfaceFacts::new(SurfaceId(5), Rect::new(0.0, 300.0, 120.0, 380.0))
+                .hung_from(SurfaceId(1), Instant::now())
+                .damaging(history.iter().copied())
+        }));
+        HostFacts::bottom_to_top(surfaces, 1)
+    }
+
+    /// An item of the menu, in the menu's window space: its second row.
+    const ITEM: Rect = Rect::new(0.0, 30.0, 120.0, 60.0);
+
+    /// A menu still open after the act, its item lit: the menu's own frames.
+    #[test]
+    fn a_receipt_on_a_menu_still_open_reads_the_menus_own_damage() {
+        let menu_before = [(1, Rect::new(0.0, 0.0, 120.0, 80.0))];
+        let marked = menu_desk(
+            &[(1, Rect::new(0.0, 0.0, 400.0, 300.0))],
+            Some(&menu_before),
+        );
+        let lit = [menu_before[0], (2, ITEM)];
+        let after = menu_desk(&[(1, Rect::new(0.0, 0.0, 400.0, 300.0))], Some(&lit));
+        assert_eq!(
+            witness(&marked, &after, SurfaceId(5), ITEM),
+            DamageWitness::OnTarget { frames: 1 }
+        );
+    }
+
+    /// Choosing an item closes its menu: the menu is gone when the receipt
+    /// is read, and the window it hung from has the menu's closing, where the
+    /// menu was (#42). Read there, the act was on target, not quiet.
+    #[test]
+    fn a_receipt_on_a_menu_the_act_closed_reads_its_window_where_it_was() {
+        let window_before = [(1, Rect::new(0.0, 0.0, 400.0, 300.0))];
+        let marked = menu_desk(
+            &window_before,
+            Some(&[(1, Rect::new(0.0, 0.0, 120.0, 80.0))]),
+        );
+        let closed = [window_before[0], (2, Rect::new(0.0, 300.0, 120.0, 380.0))];
+        assert_eq!(
+            witness(&marked, &menu_desk(&closed, None), SurfaceId(5), ITEM),
+            DamageWitness::OnTarget { frames: 1 }
+        );
+
+        let elsewhere = [window_before[0], (2, Rect::new(200.0, 10.0, 220.0, 30.0))];
+        assert_eq!(
+            witness(&marked, &menu_desk(&elsewhere, None), SurfaceId(5), ITEM),
+            DamageWitness::Elsewhere { frames: 1 }
+        );
+        assert_eq!(
+            witness(
+                &marked,
+                &menu_desk(&window_before, None),
+                SurfaceId(5),
+                ITEM
+            ),
+            DamageWitness::Quiet
+        );
     }
 
     #[test]
