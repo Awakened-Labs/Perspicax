@@ -62,6 +62,7 @@ mod scale;
 mod screencopy;
 mod shell;
 mod shell_protocol;
+mod sizes;
 mod stall;
 pub mod state;
 mod toplevels;

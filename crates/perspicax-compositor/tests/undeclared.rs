@@ -10,9 +10,9 @@
 //! visible, and any client could hide a control that way on purpose.
 //!
 //! The rest is the same question asked from the other side: a geometry
-//! declared without area is no geometry, and one declared larger than what
-//! is drawn is clipped to it, as smithay draws it. What a window covers past
-//! its geometry is `covers.rs`'s.
+//! declared larger than what is drawn is clipped to it, as smithay draws it.
+//! One declared without area is a protocol error (`sizes.rs`). What a window
+//! covers past its geometry is `covers.rs`'s.
 //!
 //! Like the other live tests these bind a real Wayland socket, so they need
 //! `XDG_RUNTIME_DIR`, and are `#[ignore]`d for `ci/live-tests.sh` to run.
@@ -232,27 +232,6 @@ fn a_window_that_has_drawn_nothing_and_declares_nothing_is_not_described() {
         (width(&bare), height(&bare)),
         (f64::from(WINDOW.0), f64::from(WINDOW.1))
     );
-
-    session.stop((desk, queue));
-}
-
-#[test]
-#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
-fn a_geometry_declared_without_area_is_no_geometry() {
-    let session = session("undeclared-no-area");
-    let (mut desk, mut queue, qh, _) = session.client();
-    // Smithay takes either without complaint, and would clip either to
-    // nothing. A negative size is refused here the same way, but only a
-    // release build lets one through to be refused: in a debug build, such
-    // as this one, smithay asserts against it as it reads the request.
-    for (title, geometry) in [("empty", (0, 0, 0, 0)), ("flat", (0, 0, 400, 0))] {
-        let window = settle(&session, &mut desk, &mut queue, &qh, title, Some(geometry));
-        assert_eq!(
-            (width(&window), height(&window)),
-            (f64::from(WINDOW.0), f64::from(WINDOW.1)),
-            "{title}: as big as what it draws"
-        );
-    }
 
     session.stop((desk, queue));
 }
