@@ -236,7 +236,11 @@ async fn refresh(apps: &mut [App], desk: &Desk, owed: &mut Owed, epoch: Instant)
             });
         }
 
-        if !invalidated && !owed.due(app.root, millis(epoch.elapsed())) {
+        // A menu it has open that nothing of its tree is bound to: read once
+        // after the menu opened, which is what binds it, for GTK 3.
+        let for_a_menu =
+            desk.update(|index, facts| app.owes_a_read_for_a_menu(index, facts, Instant::now()));
+        if !invalidated && !for_a_menu && !owed.due(app.root, millis(epoch.elapsed())) {
             continue;
         }
         let started = Instant::now();
@@ -264,15 +268,17 @@ async fn reread(app: &mut App, desk: &Desk) -> anyhow::Result<()> {
     // would silently swallow the frames that arrived during it.
     let before: Vec<_> = {
         let facts = desk.facts();
-        app.joins
-            .iter()
-            .map(|join| {
-                let generation = facts
-                    .surface(join.surface)
-                    .map_or(0, |facts| facts.damage_generation);
-                (join.surface, generation)
-            })
-            .collect()
+        let windows = app.joins.iter().map(|join| {
+            let generation = facts
+                .surface(join.surface)
+                .map_or(0, |facts| facts.damage_generation);
+            (join.surface, generation)
+        });
+        // And its open menus, which its nodes may be joined to.
+        let menus = app
+            .popups(&facts)
+            .map(|popup| (popup.id, popup.damage_generation));
+        windows.chain(menus).collect()
     };
     // When the read began, which every node it holds is credited with being
     // seen at: a menu that opened during it may not be in it.
