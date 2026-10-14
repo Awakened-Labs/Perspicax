@@ -35,7 +35,7 @@ use crate::{
 
 use smithay::{
     delegate_cursor_shape, delegate_data_device, delegate_output, delegate_primary_selection,
-    delegate_relative_pointer, delegate_seat, delegate_shm, delegate_xdg_activation,
+    delegate_relative_pointer, delegate_seat, delegate_xdg_activation,
     desktop::{PopupGrab, PopupKind, PopupManager, Space, Window, find_popup_root_surface},
     input::{
         Seat, SeatHandler, SeatState,
@@ -1662,7 +1662,6 @@ impl ClientData for ClientState {
 delegate_data_device!(Compositor);
 delegate_output!(Compositor);
 delegate_seat!(Compositor);
-delegate_shm!(Compositor);
 delegate_primary_selection!(Compositor);
 delegate_xdg_activation!(Compositor);
 delegate_cursor_shape!(Compositor);

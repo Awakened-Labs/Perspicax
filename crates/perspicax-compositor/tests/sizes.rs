@@ -184,3 +184,27 @@ fn a_negative_min_or_max_size_is_a_protocol_error() {
 
     session.stop((desk, queue));
 }
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_pool_resized_to_nothing_is_a_protocol_error() {
+    let session = session("sizes-pool");
+    // A pool only grows. Smithay 0.7.0 posts `invalid_fd` for a size of 0
+    // or below, then went on to resize the pool to it: at 0 that unwrapped
+    // a `NonZeroUsize` of 0, and panicked a release build too.
+    for size in [0, -1] {
+        let (mut desk, mut queue, ..) = session.client();
+        let pool = desk.raw_pool(4096);
+        pool.pool().resize(size);
+        assert_eq!(
+            refused(&mut queue, &mut desk),
+            ("wl_shm_pool".to_owned(), 2),
+            "resized to {size}: invalid_fd"
+        );
+        assert!(!session.ended(), "the compositor is still running");
+        drop(pool);
+    }
+
+    let (desk, queue, ..) = session.client();
+    session.stop((desk, queue));
+}

@@ -6,7 +6,9 @@
 //! real one with a bug, or a hostile one -- panicked a debug build, which
 //! every `cargo run` and every test run is, and ended the session (issue
 //! #106). A release build took the values without complaint, as rectangles
-//! turned inside out.
+//! turned inside out. One more panicked a release build too: smithay posts
+//! `invalid_fd` for `wl_shm_pool.resize(0)`, then goes on to unwrap a
+//! `NonZeroUsize` of the 0 it refused (#153).
 //!
 //! So those requests are asked here first, and smithay answers only what
 //! passes. What doesn't is refused as the protocol says where it says, and
@@ -18,6 +20,7 @@
 //! | `wl_region.add`, `subtract` | a side is not above 0 | dropped, as master drops it |
 //! | `xdg_surface.set_window_geometry` | a side is not above 0 | xdg-shell's `invalid_size` |
 //! | `xdg_toplevel.set_min_size`, `set_max_size` | a side is negative | xdg-shell's `invalid_size` |
+//! | `wl_shm_pool.resize` | the size is not above 0 | `invalid_fd`, as smithay posts it |
 //!
 //! A refusal with a protocol error ends the client, which is what the
 //! protocol asks; a geometry without area, accepted until #106, is refused
@@ -28,7 +31,8 @@
 //! Each check goes once a smithay release carries its own, and the
 //! `delegate_*!` macro its section stands in for comes back in its place.
 //! Smithay master has the region, geometry and min/max checks; the damage
-//! check is in a pull request (Smithay/smithay#2200).
+//! check is in a pull request (Smithay/smithay#2200), and so is the pool's
+//! (#2197).
 
 use smithay::{
     reexports::{
@@ -44,9 +48,12 @@ use smithay::{
             backend::ClientId,
             delegate_dispatch, delegate_global_dispatch,
             protocol::{
+                wl_buffer::WlBuffer,
                 wl_callback::WlCallback,
                 wl_compositor::WlCompositor,
                 wl_region::{self, WlRegion},
+                wl_shm::{self, WlShm},
+                wl_shm_pool::{self, WlShmPool},
                 wl_subcompositor::WlSubcompositor,
                 wl_subsurface::WlSubsurface,
                 wl_surface::{self, WlSurface},
@@ -59,6 +66,7 @@ use smithay::{
             XdgPositionerUserData, XdgShellState, XdgShellSurfaceUserData, XdgSurfaceUserData,
             XdgWmBaseUserData,
         },
+        shm::{ShmBufferUserData, ShmPoolUserData, ShmState},
     },
 };
 
@@ -171,6 +179,30 @@ fn limits(toplevel: &XdgToplevel, request: &xdg_toplevel::Request) -> bool {
     toplevel.post_error(
         xdg_toplevel::Error::InvalidSize,
         format!("a size limit of {width}x{height}: neither side may be negative"),
+    );
+    true
+}
+
+// `delegate_shm!`, but for `wl_shm_pool`.
+
+delegate_global_dispatch!(Compositor: [WlShm: ()] => ShmState);
+delegate_dispatch!(Compositor: [WlShm: ()] => ShmState);
+checked!(WlShmPool: ShmPoolUserData => ShmState, pool_size);
+delegate_dispatch!(Compositor: [WlBuffer: ShmBufferUserData] => ShmState);
+
+/// A pool only grows, and has a size above 0. Smithay posts the error
+/// itself, but then resizes the pool anyway, unwrapping a `NonZeroUsize` of
+/// the size: at 0, a panic in any build (#153).
+fn pool_size(pool: &WlShmPool, request: &wl_shm_pool::Request) -> bool {
+    let wl_shm_pool::Request::Resize { size } = *request else {
+        return false;
+    };
+    if size > 0 {
+        return false;
+    }
+    pool.post_error(
+        wl_shm::Error::InvalidFd,
+        format!("a pool resized to {size}: its size must be above 0"),
     );
     true
 }

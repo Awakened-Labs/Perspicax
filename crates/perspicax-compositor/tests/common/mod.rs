@@ -47,7 +47,7 @@ use smithay_client_toolkit::{
             window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
         },
     },
-    shm::{Shm, ShmHandler, slot::SlotPool},
+    shm::{Shm, ShmHandler, raw::RawPool, slot::SlotPool},
     subcompositor::SubcompositorState,
 };
 use wayland_client::{
@@ -1172,6 +1172,12 @@ impl Desk {
     /// from as it likes.
     pub fn region(&self) -> Region {
         Region::new(&self.compositor).expect("a region")
+    }
+
+    /// A pool of shared memory `len` bytes long, for a test to ask of as it
+    /// likes.
+    pub fn raw_pool(&self, len: usize) -> RawPool {
+        RawPool::new(len, &self.shm).expect("a pool")
     }
 
     /// A subsurface of `parent`, at `at` in the parent's coordinates, with
