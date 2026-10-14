@@ -216,7 +216,7 @@ impl From<Rect> for Bounds {
 pub struct Refused {
     /// One of `occluded`, `clipped`, `unmapped`, `off_screen`,
     /// `other_workspace`, `inactive_tab`, `not_showing`, `unjudged`,
-    /// `unplaced`, `unattributed`, `stale`, `no_capability`,
+    /// `menu_unplaced`, `unplaced`, `unattributed`, `stale`, `no_capability`,
     /// `ambiguous_selector`, `not_found`, `not_a_window`, `focus_elsewhere`,
     /// `pointer_captured`.
     pub kind: &'static str,
@@ -251,6 +251,12 @@ pub struct Refused {
     /// and typed into.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub captured_by: Option<u64>,
+    /// `menu_unplaced`: the open menu, a `popup` in `window_list`, that the
+    /// node's window has open and that perspicax has not yet matched to its
+    /// application's nodes. It usually clears within moments, once the
+    /// application has been read since the menu opened; resolve again then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub popup: Option<u64>,
 }
 
 impl From<&Refusal> for Refused {
@@ -265,6 +271,7 @@ impl From<&Refusal> for Refused {
                 Refusal::InactiveTab { .. } => "inactive_tab",
                 Refusal::NotShowing => "not_showing",
                 Refusal::Unjudged => "unjudged",
+                Refusal::MenuUnplaced { .. } => "menu_unplaced",
                 Refusal::Unplaced => "unplaced",
                 Refusal::Unattributed => "unattributed",
                 Refusal::Stale { .. } => "stale",
@@ -283,6 +290,7 @@ impl From<&Refusal> for Refused {
             shown_tab: None,
             focused: None,
             captured_by: None,
+            popup: None,
         };
         match refusal {
             Refusal::Occluded { by } => refused.occluded_by = Some(by.0),
@@ -294,6 +302,7 @@ impl From<&Refusal> for Refused {
                 refused.focused = focused.map(|surface| surface.0);
             }
             Refusal::PointerCaptured { by } => refused.captured_by = Some(by.0),
+            Refusal::MenuUnplaced { popup } => refused.popup = Some(popup.0),
             _ => {}
         }
         refused
@@ -466,9 +475,16 @@ pub struct Window {
     /// The compositor surface.
     pub surface: u64,
     /// What it is: `window`, an application's; `layer`, part of the desk
-    /// such as a panel, a wallpaper or a menu; or `lock_cover`, a screen
-    /// locker's. `window_close` and `tab_forward` are for windows only.
+    /// such as a panel, a wallpaper or a menu; `popup`, a menu, a combo list
+    /// or a tooltip an application opened from a window or panel; or
+    /// `lock_cover`, a screen locker's. `window_close` and `tab_forward` are
+    /// for windows only.
     pub kind: &'static str,
+    /// For a popup, the window or panel it hangs from, through any menus
+    /// between. It is drawn directly above that, and covers what is under it,
+    /// that window's own nodes included.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<u64>,
     /// For a layer surface, which layer it stacks in: `background` and
     /// `bottom` under every window, `top` and `overlay` over them.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -572,16 +588,29 @@ impl Window {
                 ("layer", Some(layer.name()), Some(namespace.clone()))
             }
             SurfaceKind::LockCover => ("lock_cover", None, None),
+            SurfaceKind::Popup { .. } => ("popup", None, None),
+        };
+        // The index's own record of the window node: the one its nodes'
+        // window bounds are measured from, so that what `observe` shows of
+        // this window and where it says its nodes are agree. A menu is
+        // measured from the popup, not from a node, and only a menu bound as
+        // one node has one to give.
+        let node = match facts.hangs_from() {
+            Some(_) => index
+                .menu_of(facts.id)
+                .and_then(|menu| match menu.roots[..] {
+                    [only] => Some(only),
+                    _ => None,
+                }),
+            None => index.window_node(facts.id),
         };
         Self {
             surface: facts.id.0,
             kind,
+            from: facts.hangs_from().map(|from| from.0),
             layer,
             untrusted_namespace: namespace,
-            // The index's own record of the window node: the one its nodes'
-            // window bounds are measured from, so that what `observe` shows
-            // of this window and where it says its nodes are agree.
-            node: index.window_node(facts.id).map(|id| id.0),
+            node: node.map(|id| id.0),
             nodes: order.iter().filter(on_this_surface).count(),
             mapped: facts.mapped,
             bounds: facts.geometry.into(),
@@ -1064,6 +1093,44 @@ mod tests {
             serde_json::json!({"kind": "pointer_captured",
             "message": "surface 4 holds the pointer, and only the person can take it back",
             "captured_by": 4})
+        );
+    }
+
+    /// A menu of an open window that nothing has been matched to yet names
+    /// the menu, so an agent can find it in `window_list` and try again once
+    /// the application has been read.
+    #[test]
+    fn menu_unplaced_names_the_open_menu() {
+        let unplaced = Refusal::MenuUnplaced {
+            popup: SurfaceId(9),
+        };
+        assert_eq!(
+            serde_json::to_value(Refused::from(&unplaced)).unwrap(),
+            serde_json::json!({"kind": "menu_unplaced",
+            "message": "node belongs to a menu, and the open menu 9 has not been placed yet",
+            "popup": 9})
+        );
+    }
+
+    /// A menu is listed, as a popup, naming the window it hangs from: the
+    /// surface an `occluded` refusal may name, and where to look for it.
+    #[test]
+    fn a_menu_is_listed_as_a_popup_of_its_window() {
+        let menu = SurfaceFacts::new(
+            SurfaceId(9),
+            perspicax_node::Rect::new(0.0, 0.0, 120.0, 80.0),
+        )
+        .hung_from(WINDOW, std::time::Instant::now());
+        let facts = HostFacts::bottom_to_top(facts().surfaces().iter().cloned().chain([menu]), 1);
+        let windows = Window::all(&index(), &facts);
+        let listed = windows.iter().find(|window| window.surface == 9).unwrap();
+        assert_eq!(listed.kind, "popup");
+        assert_eq!(listed.from, Some(WINDOW.0));
+        assert!(
+            windows
+                .iter()
+                .filter(|window| window.surface != 9)
+                .all(|window| window.from.is_none())
         );
     }
 

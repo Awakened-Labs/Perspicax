@@ -274,9 +274,12 @@ async fn reread(app: &mut App, desk: &Desk) -> anyhow::Result<()> {
             })
             .collect()
     };
+    // When the read began, which every node it holds is credited with being
+    // seen at: a menu that opened during it may not be in it.
+    let began = Instant::now();
     let nodes = app.reread().await?;
     desk.update(|index, facts| {
-        index.ingest_snapshot(nodes);
+        index.ingest_read(nodes, began);
         app.relink(index, facts);
         for (surface, generation) in before {
             index.reconcile(surface, generation);

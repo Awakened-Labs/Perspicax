@@ -7,7 +7,10 @@
 //! last known state and emits a [`Delta`] only where the new state actually
 //! differs from it.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 use perspicax_node::{NodeId, ObservedNode, Origin, Rect, SurfaceId, Vec2, Visibility};
 
@@ -15,8 +18,11 @@ use crate::{
     Change, Consent, Refusal, check_actable,
     host::overlaps,
     host::{HostFacts, Judgement, Tally, judge},
+    join::PopupJoin,
     selector::Selector,
 };
+
+mod menus;
 
 /// Something an agent subscribed to changes would want to hear about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +72,16 @@ pub struct Index {
     /// Whether an agent might act on each surface, as of the last
     /// [`Index::judge`]: what a change in consent is a change from.
     permitted: HashMap<SurfaceId, bool>,
+    /// When each node was last read, or last reported by its application:
+    /// what a menu must be newer than to be joined to a popup that has just
+    /// opened, so that one that closed a moment ago is never taken for it.
+    seen: HashMap<NodeId, Instant>,
+    /// Each open popup's menu: the nodes joined to it, and where the popup
+    /// begins in their coordinates. See [`Index::join_popups`].
+    menus: HashMap<SurfaceId, PopupJoin>,
+    /// Nodes of a menu whose window has a menu open that nothing is bound to,
+    /// as of the last [`Index::judge`], each with that open menu.
+    unplaced: HashMap<NodeId, SurfaceId>,
 }
 
 impl Index {
@@ -132,6 +148,17 @@ impl Index {
         }
     }
 
+    /// Load a bulk read that began at `began`, crediting every node it holds
+    /// with being seen then rather than when the read finished: a menu that
+    /// opened while the read was under way may not be in it.
+    pub fn ingest_read(&mut self, nodes: impl IntoIterator<Item = ObservedNode>, began: Instant) {
+        for node in nodes {
+            let id = node.id;
+            self.upsert(node);
+            self.seen.insert(id, began);
+        }
+    }
+
     /// Apply one change volunteered by an ingest path.
     pub fn apply(&mut self, change: Change) {
         match change {
@@ -155,6 +182,7 @@ impl Index {
     pub fn upsert(&mut self, mut node: ObservedNode) {
         let id = node.id;
 
+        self.seen.insert(id, Instant::now());
         if let Some(existing) = self.nodes.get(&id)
             && existing.node == node.node
         {
@@ -195,6 +223,7 @@ impl Index {
             }
             self.parents.remove(&id);
             self.stale.remove(&id);
+            self.seen.remove(&id);
         }
         let nodes = &self.nodes;
         self.windows.retain(|_, window| nodes.contains_key(window));
@@ -374,11 +403,11 @@ impl Index {
     /// and say how many nodes were attributed.
     ///
     /// The natural unit: an accessibility bridge reports one tree per window,
-    /// and every node in it was drawn on that window's surface. A menu or a
-    /// combo popup is a surface of its own, but its accessible nodes hang off
-    /// the window's, and the host counts what it draws as the window's,
-    /// where it is drawn on the window: so this walk covers it too, nodes and
-    /// pixels on the same surface.
+    /// and every node in it was drawn on that window's surface, but for its
+    /// open menus. A menu or a combo list is a surface of its own, and its
+    /// nodes may hang beneath the window's: this walk takes them too, and
+    /// [`Index::join_popups`] or [`Index::restamp_menus`] joins them to their
+    /// popups again after it.
     ///
     /// `root` becomes the surface's window node, the one its subtree's
     /// coordinates are measured from: see [`Index::window_origin`].
@@ -437,8 +466,22 @@ impl Index {
     /// `None`, failing closed, when the surface has no window node or its
     /// window node reports no extents with any area: there is nothing to
     /// measure from, and guessing is how #45 happened.
+    ///
+    /// A popup's is not measured from a node: its menu may have no node of
+    /// its size, and its toolkit may measure it from the popup or from its
+    /// window. It is where the popup's geometry begins in whichever of those
+    /// its menu was bound in ([`Index::join_popups`]), while every node bound
+    /// to it is still joined there.
     #[must_use]
     pub fn window_origin(&self, surface: SurfaceId) -> Option<Vec2> {
+        if let Some(menu) = self.menus.get(&surface) {
+            let joined = menu.roots.iter().all(|root| {
+                self.nodes
+                    .get(root)
+                    .is_some_and(|node| node.surface == Some(surface))
+            });
+            return joined.then_some(menu.origin);
+        }
         let bounds = self.get(self.window_node(surface)?)?.node_space_bounds()?;
         (!bounds.is_empty()).then(|| bounds.origin().to_vec2())
     }
@@ -469,6 +512,10 @@ impl Index {
     pub fn judge(&mut self, facts: &HostFacts) -> Tally {
         self.consent = facts.consent().clone();
         self.note_consent(facts);
+        self.refresh_menus(facts);
+        self.unplaced = self.unplaced(facts);
+        self.reconciled
+            .retain(|surface, _| facts.surface(*surface).is_some());
         // Decided first and written after: a node's window bounds are read
         // from its window node, which is one of the nodes being written.
         let verdicts: Vec<(NodeId, Judgement)> = self
@@ -476,6 +523,12 @@ impl Index {
             .iter()
             .map(|(id, node)| {
                 let verdict = match (node.surface, self.window_bounds(*id)) {
+                    // A menu's node, while a menu of its window is open and
+                    // unbound: where it is cannot be said yet.
+                    _ if self.unplaced.contains_key(id) => Judgement {
+                        visibility: Visibility::Unknown,
+                        unproven: false,
+                    },
                     (Some(surface), Some(rect)) => judge(facts, surface, rect),
                     // No surface joined, a bridge that reported no extents,
                     // or a window that reported none to measure them from.
@@ -510,7 +563,14 @@ impl Index {
     fn note_consent(&mut self, facts: &HostFacts) {
         let by_grant = matches!(self.consent, Consent::Granted(_));
         let mut permitted = HashMap::with_capacity(facts.surfaces().len());
-        for surface in facts.surfaces() {
+        // A menu is its window's to grant: announcing each one that opens
+        // would tell an agent of a grant every time a person hovered a
+        // tooltip.
+        for surface in facts
+            .surfaces()
+            .iter()
+            .filter(|surface| surface.hangs_from().is_none())
+        {
             let now = self.consent.permits(&surface.origin);
             let before = self
                 .permitted
@@ -632,6 +692,9 @@ impl Index {
         let node = self.nodes.get(&id).ok_or(Refusal::NotFound)?;
         if let Some(frames) = self.stale.get(&id) {
             return Err(Refusal::Stale { frames: *frames });
+        }
+        if let Some(popup) = self.unplaced.get(&id) {
+            return Err(Refusal::MenuUnplaced { popup: *popup });
         }
         check_actable(node)?;
         if !self.consent.permits(&node.origin) {

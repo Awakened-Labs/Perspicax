@@ -379,6 +379,7 @@ impl Compositor {
             // and reporting it as mapped would let a node be judged visible on
             // a surface with nothing on it.
             mapped: window.alive() && self.has_presented(id) && !parked,
+            mapped_at: None,
             geometry: placed,
             buffer_origin,
             // The shadow too, and every subsurface, however small a window
@@ -426,6 +427,7 @@ impl Compositor {
         SurfaceFacts {
             id,
             mapped: surface.is_alive() && self.has_presented(id) && !placed.size.is_empty(),
+            mapped_at: None,
             geometry,
             buffer_origin,
             // As measured, not as placed: a layer's subsurfaces are not in

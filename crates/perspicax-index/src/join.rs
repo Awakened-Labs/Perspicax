@@ -42,7 +42,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use perspicax_node::{NodeId, SurfaceId};
+use perspicax_node::{NodeId, Rect, SurfaceId, Vec2};
 
 /// How far apart a host's focus and a bridge's activation may be and still
 /// describe the same event.
@@ -353,6 +353,293 @@ fn closest_focus<'a>(
     }
 }
 
+// # Menus
+//
+// A menu is a surface of its own (an `xdg_popup`), and its accessible nodes
+// hang somewhere in its application's tree with nothing that names the
+// surface. Measured on 2026-10-14 (issue #112), two toolkits put them in two
+// places, measured from two origins:
+//
+// - GTK 3 measures a menu's nodes from the menu's own surface. They hang under
+//   the combo box or menu bar item that opened it, or as an untitled window
+//   of their own beside the application's windows.
+// - GTK 4 measures them in the node space of the window they hang under,
+//   like the rest of that window's nodes.
+//
+// No node is reliably the menu's size, either: GTK 3's menu-bar menus have
+// no node of their own, GTK 4's measures the menu's whole picture, shadow
+// included, or neither that nor its window. What does tell them apart is the
+// frame. Read in the right one, a menu's extent lands on its popup. Read in
+// the other, it lands somewhere else entirely, so a menu is joined to a popup
+// only when exactly one frame puts it there.
+
+/// The coordinates a menu's nodes are measured in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Frame {
+    /// The popup's own surface, as GTK 3 measures them.
+    Own,
+    /// The node space of the window the menu hangs under, as GTK 4 measures
+    /// them.
+    Window(SurfaceId),
+}
+
+/// An open popup, as its host placed it: what a menu's nodes must land on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PopupClaim {
+    /// The popup's surface.
+    pub surface: SurfaceId,
+    /// The window or panel it hangs from.
+    pub from: SurfaceId,
+    /// The process that drew it, from its client's credentials.
+    pub pid: Option<u32>,
+    /// When it was put on screen. A menu read before then may be one that
+    /// has since closed.
+    pub mapped_at: Option<Instant>,
+    /// Where its surface-local `(0, 0)` is, in global space.
+    pub buffer_origin: Vec2,
+    /// Its window geometry, in global space.
+    pub geometry: Rect,
+    /// Everything it draws, its shadow included, in global space.
+    pub drawn: Rect,
+}
+
+/// The window a menu's nodes hang under, as far as reading them in its
+/// frame needs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Under {
+    /// The window's surface.
+    pub surface: SurfaceId,
+    /// Where its window geometry begins in its node space:
+    /// [`Index::window_origin`](crate::Index::window_origin).
+    pub origin: Vec2,
+    /// Its window geometry, in global space.
+    pub geometry: Rect,
+}
+
+/// Part of an application's tree that could be an open menu.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuClaim {
+    /// The nodes that would be joined to the popup with all beneath them:
+    /// the menu's own node, or, for a menu-bar item whose items are measured
+    /// from the menu it opens, those items.
+    pub roots: Vec<NodeId>,
+    /// Where `roots` reach, together, in node space.
+    pub extent: Rect,
+    /// The process serving them, from the accessibility bus.
+    pub pid: Option<u32>,
+    /// The window they hang under, or `None` for a menu that is an
+    /// application's window of its own.
+    pub under: Option<Under>,
+    /// When the least recently read of `roots` was read.
+    pub seen_at: Option<Instant>,
+    /// The claim to make instead when this one lands on no popup: the menu's
+    /// items, for a menu whose own node is not where they are. GTK 3 measures
+    /// a menu-bar item on the bar and the items it opens from their menu, so
+    /// only the items land on it.
+    pub items: Option<Box<MenuClaim>>,
+}
+
+/// A menu bound to the popup it is, and where that popup begins in the
+/// menu's coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PopupJoin {
+    /// The popup's surface.
+    pub popup: SurfaceId,
+    /// What is joined to it.
+    pub roots: Vec<NodeId>,
+    /// The coordinates its nodes are measured in.
+    pub frame: Frame,
+    /// Where the popup's window geometry begins in that frame's node space:
+    /// what its nodes' bounds are measured from, as a window's are from its
+    /// window node.
+    pub origin: Vec2,
+}
+
+/// An open popup no menu could be bound to, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MenuFinding {
+    /// No menu of its application, read since it opened, lands on it.
+    Unmatched {
+        /// The popup.
+        popup: SurfaceId,
+    },
+    /// Several do, or one that lands on it also lands on another popup, and
+    /// nothing here says which is which. Joining none costs a refusal;
+    /// joining the wrong one would put another menu's items where this one's
+    /// are.
+    Ambiguous {
+        /// The popup.
+        popup: SurfaceId,
+        /// How many menus it could be.
+        menus: usize,
+    },
+}
+
+impl core::fmt::Display for MenuFinding {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unmatched { popup } => write!(
+                f,
+                "open menu {} matches none of its application's menus read since it opened",
+                popup.0
+            ),
+            Self::Ambiguous { popup, menus } => write!(
+                f,
+                "open menu {} could be any of {menus} of its application's menus",
+                popup.0
+            ),
+        }
+    }
+}
+
+/// How much of a popup's window geometry a menu has to cover to be it, in
+/// either frame. GTK 4's drop-down list covers 99% of its own, measuring its
+/// shadow and not quite all of its window; anything well short is a part of
+/// some menu, or a node that only happens to sit there.
+const COVERS: f64 = 0.9;
+
+/// Where `extent`, measured in `frame`, is in global space, or `None` for a
+/// window frame on a menu that hangs under no window.
+fn placed(popup: &PopupClaim, menu: &MenuClaim, frame: Frame) -> Option<Rect> {
+    match (frame, menu.under) {
+        (Frame::Own, _) => Some(menu.extent + popup.buffer_origin),
+        (Frame::Window(_), Some(under)) => {
+            Some(menu.extent - under.origin + under.geometry.origin().to_vec2())
+        }
+        (Frame::Window(_), None) => None,
+    }
+}
+
+/// Whether `menu`, read in `frame`, is `popup`: inside what the popup draws,
+/// a pixel of rounding allowed, and covering nearly all of its window.
+#[must_use]
+pub fn lands_on(popup: &PopupClaim, menu: &MenuClaim, frame: Frame) -> bool {
+    let Some(global) = placed(popup, menu, frame) else {
+        return false;
+    };
+    let drawn = popup.drawn;
+    let inside = global.x0 >= drawn.x0 - 1.0
+        && global.y0 >= drawn.y0 - 1.0
+        && global.x1 <= drawn.x1 + 1.0
+        && global.y1 <= drawn.y1 + 1.0;
+    let geometry = popup.geometry.area();
+    inside && geometry > 0.0 && global.intersect(popup.geometry).area() >= COVERS * geometry
+}
+
+/// Where `popup`'s window geometry begins in `frame`'s node space.
+#[must_use]
+pub fn popup_origin(popup: &PopupClaim, under: Option<&Under>, frame: Frame) -> Option<Vec2> {
+    match (frame, under) {
+        (Frame::Own, _) => Some(popup.geometry.origin() - popup.buffer_origin.to_point()),
+        (Frame::Window(_), Some(under)) => {
+            Some(under.origin + (popup.geometry.origin() - under.geometry.origin()))
+        }
+        (Frame::Window(_), None) => None,
+    }
+}
+
+/// The one frame `menu` lands on `popup` in, if exactly one does.
+fn the_frame(popup: &PopupClaim, menu: &MenuClaim) -> Option<Frame> {
+    let mut frames = vec![Frame::Own];
+    if let Some(under) = menu.under {
+        frames.push(Frame::Window(under.surface));
+    }
+    match frames
+        .into_iter()
+        .filter(|frame| lands_on(popup, menu, *frame))
+        .collect::<Vec<_>>()[..]
+    {
+        [only] => Some(only),
+        _ => None,
+    }
+}
+
+/// Whether `menu` could be `popup` at all, before any geometry: the same
+/// process, read since the popup opened, and, for a menu under a window,
+/// hung from that window.
+fn eligible(popup: &PopupClaim, menu: &MenuClaim) -> bool {
+    let fresh = matches!(
+        (menu.seen_at, popup.mapped_at),
+        (Some(seen), Some(mapped)) if seen >= mapped
+    );
+    let from = menu.under.is_none_or(|under| under.surface == popup.from);
+    fresh && from && matches!((menu.pid, popup.pid), (Some(a), Some(b)) if a == b)
+}
+
+/// Bind each open popup to the one menu that is it, and say why the rest
+/// could not be.
+///
+/// The rules are the window join's, applied to menus. A menu is a
+/// candidate only from the same process, read since the popup opened, and
+/// landing on it in exactly one frame. And a pairing stands only when it is
+/// one to one: a popup two menus land on, or a menu that lands on two
+/// popups, binds nothing, and every party to it is refused rather than
+/// guessed. `popups` are taken in the order given, bottom to top, which is
+/// the order their joins must be applied in, so that a submenu's nodes,
+/// which hang beneath its menu's, end up on the submenu.
+#[must_use]
+pub fn join_popups(
+    popups: &[PopupClaim],
+    menus: &[MenuClaim],
+) -> (Vec<PopupJoin>, Vec<MenuFinding>) {
+    let lands_anywhere = |menu: &MenuClaim| {
+        popups
+            .iter()
+            .any(|popup| eligible(popup, menu) && the_frame(popup, menu).is_some())
+    };
+    let menus: Vec<&MenuClaim> = menus
+        .iter()
+        .map(|menu| match &menu.items {
+            Some(items) if !lands_anywhere(menu) => &**items,
+            _ => menu,
+        })
+        .collect();
+    let landed: Vec<Vec<(usize, Frame)>> = popups
+        .iter()
+        .map(|popup| {
+            menus
+                .iter()
+                .enumerate()
+                .filter(|(_, menu)| eligible(popup, menu))
+                .filter_map(|(index, menu)| the_frame(popup, menu).map(|frame| (index, frame)))
+                .collect()
+        })
+        .collect();
+    let mut popups_per_menu: HashMap<usize, usize> = HashMap::new();
+    for (index, _) in landed.iter().flatten() {
+        *popups_per_menu.entry(*index).or_default() += 1;
+    }
+
+    let mut joins = Vec::new();
+    let mut findings = Vec::new();
+    for (popup, landed) in popups.iter().zip(landed) {
+        match landed[..] {
+            [] => findings.push(MenuFinding::Unmatched {
+                popup: popup.surface,
+            }),
+            [(index, frame)] if popups_per_menu.get(&index) == Some(&1) => {
+                let menu = menus[index];
+                match popup_origin(popup, menu.under.as_ref(), frame) {
+                    Some(origin) => joins.push(PopupJoin {
+                        popup: popup.surface,
+                        roots: menu.roots.clone(),
+                        frame,
+                        origin,
+                    }),
+                    None => findings.push(MenuFinding::Unmatched {
+                        popup: popup.surface,
+                    }),
+                }
+            }
+            _ => findings.push(MenuFinding::Ambiguous {
+                popup: popup.surface,
+                menus: landed.len(),
+            }),
+        }
+    }
+    (joins, findings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,5 +854,320 @@ mod tests {
                 },
             ]
         );
+    }
+
+    // # Menus
+    //
+    // Every shape below is one slice 1 of #112 measured from a real client
+    // (`~/perspicax-test/issue-112/FINDINGS.md`): a 400x300 window placed at
+    // (2, 26), whose window node GTK puts at (0, 0), and the popups it
+    // opened, with their geometry, their shadow, and where the toolkit said
+    // the menu's nodes were.
+
+    const PID: u32 = 9182;
+    const WINDOW: SurfaceId = SurfaceId(1);
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect::new(x, y, x + w, y + h)
+    }
+
+    /// The window the menus hang under, in the frame its nodes are read in.
+    fn under() -> Under {
+        Under {
+            surface: WINDOW,
+            origin: Vec2::ZERO,
+            geometry: rect(2.0, 26.0, 400.0, 300.0),
+        }
+    }
+
+    /// When a popup opened, and a moment after, when its menu was read.
+    fn times() -> (Instant, Instant) {
+        let opened = Instant::now();
+        (opened, opened + Duration::from_millis(5))
+    }
+
+    /// A popup of the window whose geometry is `at` in the window's space,
+    /// drawn with a shadow of `(left, top, right, bottom)` around it.
+    fn popup(id: u64, at: Rect, shadow: (f64, f64, f64, f64), opened: Instant) -> PopupClaim {
+        let geometry = at + Vec2::new(2.0, 26.0);
+        let (left, top, right, bottom) = shadow;
+        PopupClaim {
+            surface: SurfaceId(id),
+            from: WINDOW,
+            pid: Some(PID),
+            mapped_at: Some(opened),
+            buffer_origin: Vec2::new(geometry.x0 - left, geometry.y0 - top),
+            geometry,
+            drawn: Rect::new(
+                geometry.x0 - left,
+                geometry.y0 - top,
+                geometry.x1 + right,
+                geometry.y1 + bottom,
+            ),
+        }
+    }
+
+    fn menu(roots: &[u64], extent: Rect, under: Option<Under>, seen: Instant) -> MenuClaim {
+        MenuClaim {
+            roots: roots.iter().copied().map(NodeId).collect(),
+            extent,
+            pid: Some(PID),
+            under,
+            seen_at: Some(seen),
+            items: None,
+        }
+    }
+
+    /// GTK 3 draws with a shadow of 6, 5, 6 and 7.
+    const GTK3: (f64, f64, f64, f64) = (6.0, 5.0, 6.0, 7.0);
+    /// GTK 4 draws with a shadow of 3, 2, 3 and 4.
+    const GTK4: (f64, f64, f64, f64) = (3.0, 2.0, 3.0, 4.0);
+
+    fn joined(popups: &[PopupClaim], menus: &[MenuClaim]) -> Vec<(u64, Vec<u64>, Frame, Vec2)> {
+        let (joins, findings) = join_popups(popups, menus);
+        assert!(findings.is_empty(), "{findings:?}");
+        joins
+            .into_iter()
+            .map(|join| {
+                (
+                    join.popup.0,
+                    join.roots.iter().map(|root| root.0).collect(),
+                    join.frame,
+                    join.origin,
+                )
+            })
+            .collect()
+    }
+
+    /// GTK 3's context menu is an untitled window of its own, its menu
+    /// measured from the popup's surface, exactly the popup's window.
+    #[test]
+    fn a_gtk3_context_menu_binds_in_its_own_frame() {
+        let (opened, read) = times();
+        let context = popup(5, rect(300.0, 200.0, 102.0, 86.0), GTK3, opened);
+        assert_eq!(
+            joined(
+                &[context],
+                &[menu(&[40], rect(6.0, 5.0, 102.0, 86.0), None, read)]
+            ),
+            [(5, vec![40], Frame::Own, Vec2::new(6.0, 5.0))]
+        );
+    }
+
+    /// GTK 3's combo list hangs under the combo box, in the window's tree,
+    /// and is still measured from its own surface: read in the window's
+    /// frame it would sit over the window's top-left corner.
+    #[test]
+    fn a_gtk3_combo_list_under_its_window_binds_in_its_own_frame() {
+        let (opened, read) = times();
+        let list = popup(5, rect(77.0, 86.0, 86.0, 218.0), GTK3, opened);
+        assert_eq!(
+            joined(
+                &[list],
+                &[menu(
+                    &[15],
+                    rect(6.0, 5.0, 86.0, 218.0),
+                    Some(under()),
+                    read
+                )]
+            ),
+            [(5, vec![15], Frame::Own, Vec2::new(6.0, 5.0))]
+        );
+    }
+
+    /// GTK 4's popover menu is measured in its window's node space, and its
+    /// node is the popup's whole picture, arrow and shadow included.
+    #[test]
+    fn a_gtk4_popover_binds_in_its_window_frame() {
+        let (opened, read) = times();
+        let popover = popup(5, rect(-14.0, 300.0, 106.0, 174.0), GTK4, opened);
+        assert_eq!(
+            joined(
+                &[popover],
+                &[menu(
+                    &[10],
+                    rect(-17.0, 298.0, 112.0, 180.0),
+                    Some(under()),
+                    read
+                )]
+            ),
+            [(5, vec![10], Frame::Window(WINDOW), Vec2::new(-14.0, 300.0))]
+        );
+    }
+
+    /// GTK 4's drop-down list is neither its popup's window nor its picture:
+    /// the picture's width and the window's height. It covers 99% of the
+    /// window, inside the picture, and binds.
+    #[test]
+    fn a_gtk4_drop_down_list_binds_in_its_window_frame() {
+        let (opened, read) = times();
+        let list = popup(5, rect(86.0, 300.0, 97.0, 255.0), GTK4, opened);
+        assert_eq!(
+            joined(
+                &[list],
+                &[menu(
+                    &[11],
+                    rect(83.0, 298.0, 103.0, 255.0),
+                    Some(under()),
+                    read
+                )]
+            ),
+            [(5, vec![11], Frame::Window(WINDOW), Vec2::new(86.0, 300.0))]
+        );
+    }
+
+    /// GTK 3's menu-bar menu has no node of its own: the bar item is on the
+    /// bar, in the window's coordinates, and its items are in the menu's. A
+    /// submenu's are the same, under the item that opened it. Each popup
+    /// takes the items that land on it, the menu's first, so that the
+    /// submenu's, beneath them, end up on the submenu.
+    #[test]
+    fn a_gtk3_menu_bar_menu_and_its_submenu_bind_their_items() {
+        let (opened, read) = times();
+        let file = popup(5, rect(0.0, 26.0, 121.0, 78.0), GTK3, opened);
+        let more = popup(6, rect(119.0, 78.0, 113.0, 52.0), GTK3, opened);
+        let bar_item = MenuClaim {
+            items: Some(Box::new(menu(
+                &[21, 22, 23],
+                rect(6.0, 5.0, 121.0, 78.0),
+                Some(under()),
+                read,
+            ))),
+            ..menu(&[20], rect(0.0, 0.0, 39.0, 26.0), Some(under()), read)
+        };
+        let more_item = MenuClaim {
+            items: Some(Box::new(menu(
+                &[31, 32],
+                rect(6.0, 5.0, 113.0, 52.0),
+                Some(under()),
+                read,
+            ))),
+            ..menu(&[23], rect(6.0, 57.0, 121.0, 26.0), Some(under()), read)
+        };
+        assert_eq!(
+            joined(&[file, more], &[bar_item, more_item]),
+            [
+                (5, vec![21, 22, 23], Frame::Own, Vec2::new(6.0, 5.0)),
+                (6, vec![31, 32], Frame::Own, Vec2::new(6.0, 5.0)),
+            ]
+        );
+    }
+
+    /// A menu that lands on its popup read either way says nothing about
+    /// which way its toolkit measures, and is not bound.
+    #[test]
+    fn a_menu_landing_in_both_frames_is_not_bound() {
+        let (opened, read) = times();
+        // At the window's own corner, with no shadow: both frames agree.
+        let corner = popup(5, rect(0.0, 0.0, 100.0, 80.0), (0.0, 0.0, 0.0, 0.0), opened);
+        let (joins, findings) = join_popups(
+            &[corner],
+            &[menu(
+                &[10],
+                rect(0.0, 0.0, 100.0, 80.0),
+                Some(under()),
+                read,
+            )],
+        );
+        assert!(joins.is_empty());
+        assert_eq!(
+            findings,
+            [MenuFinding::Unmatched {
+                popup: SurfaceId(5)
+            }]
+        );
+    }
+
+    /// One item of a menu lands inside it but is not it: a popup is bound to
+    /// what covers nearly all of it.
+    #[test]
+    fn a_single_item_is_not_its_menu() {
+        let (opened, read) = times();
+        let context = popup(5, rect(300.0, 200.0, 102.0, 86.0), GTK3, opened);
+        let (joins, _) = join_popups(
+            &[context],
+            &[menu(&[41], rect(6.0, 9.0, 102.0, 26.0), None, read)],
+        );
+        assert!(joins.is_empty());
+    }
+
+    /// A menu read before its popup opened may be one that has since closed
+    /// in its place, with the same size and the same frame: a submenu the
+    /// pointer has just left for the next. It is not bound.
+    #[test]
+    fn a_menu_read_before_its_popup_opened_is_not_bound() {
+        let read = Instant::now();
+        let opened = read + Duration::from_millis(5);
+        let context = popup(5, rect(300.0, 200.0, 102.0, 86.0), GTK3, opened);
+        let (joins, findings) = join_popups(
+            &[context],
+            &[menu(&[40], rect(6.0, 5.0, 102.0, 86.0), None, read)],
+        );
+        assert!(joins.is_empty());
+        assert_eq!(
+            findings,
+            [MenuFinding::Unmatched {
+                popup: SurfaceId(5)
+            }]
+        );
+    }
+
+    /// Another process's menu, or a menu under another window, is never a
+    /// popup's, wherever it lands.
+    #[test]
+    fn a_menu_of_another_process_or_window_is_not_bound() {
+        let (opened, read) = times();
+        let popover = popup(5, rect(-14.0, 300.0, 106.0, 174.0), GTK4, opened);
+        let elsewhere = Under {
+            surface: SurfaceId(2),
+            ..under()
+        };
+        let menus = [
+            MenuClaim {
+                pid: Some(PID + 1),
+                ..menu(&[10], rect(-17.0, 298.0, 112.0, 180.0), Some(under()), read)
+            },
+            menu(
+                &[11],
+                rect(-17.0, 298.0, 112.0, 180.0),
+                Some(elsewhere),
+                read,
+            ),
+        ];
+        let (joins, _) = join_popups(&[popover], &menus);
+        assert!(joins.is_empty());
+    }
+
+    /// Two menus that both land on one popup, or one menu that lands on two
+    /// popups, bind nothing: which is which is not this join's to guess.
+    #[test]
+    fn a_popup_two_menus_land_on_or_a_menu_landing_on_two_binds_nothing() {
+        let (opened, read) = times();
+        let context = popup(5, rect(300.0, 200.0, 102.0, 86.0), GTK3, opened);
+        let (joins, findings) = join_popups(
+            core::slice::from_ref(&context),
+            &[
+                menu(&[40], rect(6.0, 5.0, 102.0, 86.0), None, read),
+                menu(&[50], rect(6.0, 5.0, 102.0, 86.0), None, read),
+            ],
+        );
+        assert!(joins.is_empty());
+        assert_eq!(
+            findings,
+            [MenuFinding::Ambiguous {
+                popup: SurfaceId(5),
+                menus: 2
+            }]
+        );
+
+        // The same size, elsewhere: measured from its own surface, the one
+        // menu lands on either.
+        let twin = popup(6, rect(20.0, 20.0, 102.0, 86.0), GTK3, opened);
+        let (joins, findings) = join_popups(
+            &[context, twin],
+            &[menu(&[40], rect(6.0, 5.0, 102.0, 86.0), None, read)],
+        );
+        assert!(joins.is_empty());
+        assert_eq!(findings.len(), 2);
     }
 }

@@ -47,7 +47,10 @@
 //! the read awaits the bus and touches no index, and the admitting touches the
 //! index and awaits nothing, so the index is never held across a wait.
 
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context as _, Result};
 use perspicax_atspi::{AppRef, AtspiIngest, Ids, Spared};
@@ -165,6 +168,9 @@ impl App {
                 .map_or(Origin::Unattributed, |facts| facts.origin.clone());
             index.join_subtree(join.node, join.surface, &origin);
         }
+        // A window's walk takes back every node beneath it, its open menus'
+        // included, so those go back to their popups after it.
+        index.restamp_menus(facts);
     }
 
     /// Bind this application's windows to the host's surfaces again, then
@@ -176,9 +182,7 @@ impl App {
     /// weighing is over a handful of windows and surfaces, with no I/O.
     pub fn relink(&mut self, index: &mut Index, facts: &HostFacts) {
         let windows = toplevels(index, self.root, Some(self.pid));
-        let surfaces: Vec<SurfaceClaim> =
-            facts.surfaces().iter().map(SurfaceFacts::claim).collect();
-        (self.joins, self.findings) = join(&windows, &surfaces);
+        (self.joins, self.findings) = join(&windows, &surfaces(facts));
         self.rejoin(index, facts);
     }
 }
@@ -192,6 +196,10 @@ pub struct Snapshot {
     nodes: Vec<ObservedNode>,
     /// The host as it was when the read began.
     before: HostFacts,
+    /// When the read began: what every node it holds is credited with being
+    /// seen at, so that a menu that opened while it was under way is not
+    /// taken to be in it.
+    began: Instant,
     ingest: AtspiIngest,
 }
 
@@ -205,7 +213,7 @@ impl Snapshot {
     /// Put this application into `index`, its windows bound to the surfaces
     /// the host had when the read began.
     pub fn admit(self, index: &mut Index) -> App {
-        index.ingest_snapshot(self.nodes);
+        index.ingest_read(self.nodes, self.began);
         let mut app = App {
             name: self.name,
             toolkit: self.toolkit,
@@ -388,6 +396,7 @@ async fn snapshot(
     // The state of the host *before* the read, kept so the reconciliation
     // can be honest about what this tree does and does not contain.
     let before = facts.read();
+    let began = Instant::now();
     let nodes = ingest.snapshot(root).await?;
     Ok(Snapshot {
         name,
@@ -396,8 +405,23 @@ async fn snapshot(
         root,
         nodes,
         before,
+        began,
         ingest,
     })
+}
+
+/// Every surface a window could have been drawn on, as claims to be weighed.
+///
+/// Not a popup, however much it shares its window's process: offered as one,
+/// it would make a window with no title of its own ambiguous whenever a menu
+/// of it was open.
+fn surfaces(facts: &HostFacts) -> Vec<SurfaceClaim> {
+    facts
+        .surfaces()
+        .iter()
+        .filter(|surface| surface.hangs_from().is_none())
+        .map(SurfaceFacts::claim)
+        .collect()
 }
 
 /// An application's toplevels, as claims to be weighed.
@@ -414,6 +438,12 @@ fn toplevels(index: &Index, root: NodeId, bus_pid: Option<u32>) -> Vec<WindowCla
     node.node
         .children()
         .iter()
+        // A menu GTK 3 puts beside the windows, as an untitled window of its
+        // own, is a popup's, not a window to weigh. Weighed, it binds to
+        // the application's one surface as well as its window does, and the
+        // two are both demoted as contested: the whole window unattributed
+        // for as long as a context menu or combo list is open.
+        .filter(|child| index.menu_window(**child).is_none())
         .filter_map(|child| index.get(*child))
         .map(|window| WindowClaim {
             node: window.id,
@@ -576,4 +606,63 @@ fn sample_node(index: &Index, app: &App) -> Option<NodeId> {
                 )
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use perspicax_node::{Node, ObservedNode, Rect, Role, SurfaceId};
+
+    use super::*;
+
+    fn node(id: u64, role: Role, label: Option<&str>, children: &[u64]) -> ObservedNode {
+        let mut node = Node::new(role);
+        if let Some(label) = label {
+            node.set_label(label);
+        }
+        node.set_children(children.iter().map(|c| NodeId(*c)).collect::<Vec<_>>());
+        ObservedNode::unjoined(NodeId(id), node)
+    }
+
+    /// GTK 3 puts an open context menu or combo list beside the application's
+    /// windows, as an untitled window holding the menu. Weighed as a window,
+    /// it binds to the application's one surface as well as the window does,
+    /// and both are demoted as contested: the whole window unattributed while
+    /// the menu is open, as slice 1 of #112 found on main. It is not weighed.
+    #[test]
+    fn a_menu_beside_an_applications_windows_is_not_one_of_them() {
+        let mut index = Index::new();
+        index.ingest_snapshot([
+            node(100, Role::Application, Some("menus3.py"), &[1, 8]),
+            node(1, Role::Window, Some("menus3"), &[]),
+            node(8, Role::Window, None, &[9]),
+            node(9, Role::Menu, None, &[]),
+        ]);
+        let claims = toplevels(&index, NodeId(100), Some(9182));
+        assert_eq!(
+            claims.iter().map(|claim| claim.node).collect::<Vec<_>>(),
+            [NodeId(1)]
+        );
+    }
+
+    /// Nor is a popup a surface a window could be on.
+    #[test]
+    fn a_popup_is_not_a_surface_a_window_could_be_on() {
+        let area = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let facts = HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(SurfaceId(1), area),
+                SurfaceFacts::new(SurfaceId(5), area).hung_from(SurfaceId(1), Instant::now()),
+            ],
+            1,
+        );
+        assert_eq!(
+            surfaces(&facts)
+                .iter()
+                .map(|claim| claim.surface)
+                .collect::<Vec<_>>(),
+            [SurfaceId(1)]
+        );
+    }
 }
