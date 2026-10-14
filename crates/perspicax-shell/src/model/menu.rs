@@ -108,7 +108,7 @@ impl Session {
                     Some(argv) => {
                         which(fs, argv.first()?, path)?;
                         Does::Run(Run {
-                            argv: argv.to_vec(),
+                            argv,
                             terminal: false,
                             dir: None,
                         })
@@ -768,6 +768,18 @@ mod tests {
             ["Log Out"],
             "nothing installed"
         );
+    }
+
+    #[test]
+    fn lock_runs_swaylock_in_the_theme() {
+        let files = Files::default().program("/usr/bin/swaylock");
+        let shell = Shell::profile(Profile::Classic, ShellBuilt::FULL);
+        let session = Session::of(&shell, true, &files, &[PathBuf::from("/usr/bin")]);
+        let Some((Leave::Lock, Does::Run(lock))) = session.leave.first() else {
+            panic!("no Lock: {session:?}");
+        };
+        assert_eq!(lock.argv, shell.lock_command(&[]));
+        assert_eq!(lock.argv[..3], ["swaylock", "-C", "/dev/null"]);
     }
 
     #[test]
