@@ -72,13 +72,14 @@ pub use crate::{
     act::{ActError, Dispatched},
     backend::{Agent, Backend, Virtual},
     facts::{Facts, SessionFacts},
-    host::{Command, Host, Request, Requests},
+    host::{Command, Host, LaunchError, Request, Requests},
     keyboard::Keymap,
 };
 
 use std::{
     ffi::{OsStr, OsString},
     io,
+    os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _, process::CommandExt as _},
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{
@@ -330,6 +331,15 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
                         let _ = request.reply.send(shot);
                         return;
                     }
+                    ChannelEvent::Msg(Inbound::Launch(request)) => {
+                        let launched =
+                            state.launch_for_agent(&request.command, request.cwd.as_deref());
+                        if let Err(ref error) = launched {
+                            tracing::warn!(%error, "launch refused");
+                        }
+                        let _ = request.reply.send(launched);
+                        return;
+                    }
                     ChannelEvent::Closed => return,
                 };
                 let outcome = state.act(request.surface, &request.action);
@@ -475,7 +485,14 @@ impl Launch {
     }
 
     /// Start one program in `dir`, or where this process is if `None`: a
-    /// desktop entry's `Path`.
+    /// desktop entry's `Path`, or the folder an agent named.
+    ///
+    /// A bare name is looked for here, before the program starts, in the
+    /// folders of the session's `PATH` that are whole paths, and the file
+    /// found is started under that name, as a shell would start it. Left to
+    /// the start, it would be looked for after the change to `dir`, where a
+    /// folder of `PATH` such as `.` or `bin` names one inside `dir`, so
+    /// whoever chose the folder would choose the program.
     ///
     /// It reads nothing, and what it prints goes where this process's own log
     /// goes, its stderr (issue #43). Under `--mcp` this process's stdin and
@@ -499,7 +516,21 @@ impl Launch {
             command: String::new(),
             source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "an empty command"),
         })?;
-        let mut command_line = std::process::Command::new(program);
+        let program = program.as_ref();
+        let mut command_line = if program.as_bytes().contains(&b'/') {
+            std::process::Command::new(program)
+        } else {
+            let found = self.find(program).ok_or_else(|| Error::Spawn {
+                command: shown.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "in no folder of PATH named by a whole path",
+                ),
+            })?;
+            let mut command_line = std::process::Command::new(found);
+            command_line.arg0(program);
+            command_line
+        };
         command_line
             .args(arguments)
             .stdin(Stdio::null())
@@ -531,7 +562,6 @@ impl Launch {
 
     /// An environment variable as the programs this starts are given it: the
     /// session's own value where it sets one, else this process's.
-    #[cfg(feature = "seat")]
     pub(crate) fn var(&self, name: &str) -> Option<String> {
         self.env
             .iter()
@@ -540,17 +570,36 @@ impl Launch {
             .map(|(_, value)| value.clone())
             .or_else(|| std::env::var(name).ok())
     }
+
+    /// Where `program`, a bare name, is: the first file of that name that
+    /// may be run, in a folder of the session's `PATH` that is a whole path.
+    fn find(&self, program: &OsStr) -> Option<PathBuf> {
+        let path = self.var("PATH")?;
+        std::env::split_paths(&path)
+            .filter(|folder| folder.is_absolute())
+            .map(|folder| folder.join(program))
+            .find(|candidate| runnable(candidate))
+    }
+}
+
+/// Whether `path` is a file that may be run.
+pub(crate) fn runnable(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
+        env, fs, io,
+        os::unix::fs::PermissionsExt as _,
         path::{Path, PathBuf},
         process::{Command, Stdio},
+        thread,
+        time::{Duration, Instant},
     };
 
-    use super::Launch;
+    use super::{Error, Launch};
 
     /// Set for the copy of this binary that [`launch_probe`] runs in.
     const PROBE: &str = "PERSPICAX_LAUNCH_PROBE";
@@ -608,5 +657,120 @@ mod tests {
 
         assert_eq!(stdin, Path::new("/dev/null"), "it has nothing to read");
         assert_eq!(stdout, link("self", 2), "it prints to this one's stderr");
+    }
+
+    /// A fresh folder for one test, removed when it ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir =
+                env::temp_dir().join(format!("perspicax-launch-{name}-{}", std::process::id()));
+            fs::create_dir_all(&dir).expect("a scratch folder");
+            Self(dir)
+        }
+
+        /// A file at `path` in it, with `mode`: a program, if that says it
+        /// may be run.
+        fn file(&self, path: &str, mode: u32) -> PathBuf {
+            let file = self.0.join(path);
+            fs::create_dir_all(file.parent().expect("a folder")).expect("its folder");
+            fs::write(&file, "#!/bin/sh\nexec sleep 30\n").expect("a file");
+            fs::set_permissions(&file, fs::Permissions::from_mode(mode)).expect("its mode");
+            file
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    /// What starts programs with `PATH` set to `path`.
+    fn on_path(path: &str) -> Launch {
+        Launch {
+            socket: "wayland-probe".into(),
+            env: vec![("PATH".to_owned(), path.to_owned())],
+            x11_display: None,
+            look: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_bare_name_is_found_only_in_the_folders_of_path_that_are_whole_paths() {
+        let scratch = Scratch::new("find");
+        let program = scratch.file("bin/perspicax-found", 0o755);
+        scratch.file("bin/perspicax-unrunnable", 0o644);
+        let bin = scratch.0.join("bin");
+        // The same folder, named from where this test runs.
+        let here = env::current_dir().expect("a folder to run in");
+        let relative = Path::new(&"../".repeat(here.components().count() - 1))
+            .join(bin.strip_prefix("/").expect("a whole path"));
+        assert!(
+            relative.join("perspicax-found").is_file(),
+            "it names the folder"
+        );
+
+        let found = |path: String, program: &str| on_path(&path).find(program.as_ref());
+        let (bin, relative) = (bin.display(), relative.display());
+        assert_eq!(found(format!("{relative}"), "perspicax-found"), None);
+        assert_eq!(
+            found(format!("{relative}:/nonexistent:{bin}"), "perspicax-found"),
+            Some(program)
+        );
+        assert_eq!(found(format!("{bin}"), "perspicax-unrunnable"), None);
+    }
+
+    /// What the lookup is made before the start for: a folder of `PATH`
+    /// such as `bin`, looked in once the program's own folder is changed to,
+    /// would find a program there.
+    #[test]
+    fn a_program_in_the_folder_it_starts_in_is_not_found_by_a_folder_of_path_inside_it() {
+        let scratch = Scratch::new("inside");
+        scratch.file("bin/perspicax-only-here", 0o755);
+        let started =
+            on_path("bin:/usr/bin:/bin").spawn_in(&["perspicax-only-here"], Some(&scratch.0));
+        match started {
+            Err(Error::Spawn { command, source }) => {
+                assert_eq!(command, "perspicax-only-here");
+                assert_eq!(source.kind(), io::ErrorKind::NotFound, "{source}");
+            }
+            Ok(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("started from inside the folder it was started in");
+            }
+            Err(other) => panic!("{other}"),
+        }
+    }
+
+    #[test]
+    fn a_program_found_starts_in_its_folder_under_the_name_it_was_asked_by() {
+        let scratch = Scratch::new("arg0");
+        let launch = Launch {
+            env: Vec::new(),
+            ..on_path("")
+        };
+        let mut child = launch
+            .spawn_in(&["sleep", "30"], Some(&scratch.0))
+            .expect("sleep starts");
+        let pid = child.id();
+        // Read once it is there: spawning returns as the exec takes, a moment
+        // before the new program's arguments can be read.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let said = loop {
+            let said = fs::read(format!("/proc/{pid}/cmdline")).expect("its command line");
+            if !said.is_empty() || Instant::now() >= deadline {
+                break said;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        let folder = fs::read_link(format!("/proc/{pid}/cwd")).expect("its folder");
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(said, b"sleep\x0030\x00", "as a shell would name it");
+        assert_eq!(folder, scratch.0);
     }
 }

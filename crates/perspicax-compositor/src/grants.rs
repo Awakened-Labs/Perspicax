@@ -28,6 +28,7 @@ use std::{ffi::OsStr, os::fd::OwnedFd, path::Path};
 
 use perspicax_index::Consent;
 use perspicax_node::Origin;
+use perspicax_policy::Rule;
 use smithay::{
     reexports::{
         calloop::{
@@ -40,6 +41,7 @@ use smithay::{
 
 use crate::{
     framed::Framed,
+    host::LaunchError,
     shell::id_of,
     state::{ClientState, Compositor},
 };
@@ -60,6 +62,8 @@ pub(crate) enum Why {
         expect(dead_code, reason = "a seat's autostart")
     )]
     Autostart,
+    /// An agent started it for itself, with `launch`, as the rule admits.
+    Launch,
 }
 
 /// One process granted.
@@ -156,6 +160,39 @@ impl Compositor {
         self.grant(pid, why);
         self.spawned.push(child);
         Ok(pid)
+    }
+
+    /// Start a program an agent asked for, in `cwd` if it named one, and
+    /// grant it: what the `launch` tool does. Its pid, or why not.
+    ///
+    /// Refused while the session is locked, as every act is: the person has
+    /// walked away. Otherwise only what the rule admits is started (see
+    /// [`Rule::launches`]): headless, what the test asked, and any program
+    /// by default; on a seat, `[agent] launch` as last saved, which is off
+    /// until the person names programs.
+    pub(crate) fn launch_for_agent(
+        &mut self,
+        command: &[String],
+        cwd: Option<&Path>,
+    ) -> Result<u32, LaunchError> {
+        if self.lock.is_some() {
+            return Err(LaunchError::Locked);
+        }
+        let rule = self.backend.launching();
+        if *rule == Rule::Off {
+            return Err(LaunchError::Off);
+        }
+        let Some(program) = command.first() else {
+            return Err(LaunchError::NotStarted("an empty command".to_owned()));
+        };
+        if !rule.launches(program) {
+            return Err(LaunchError::NotAdmitted {
+                program: program.clone(),
+                admitted: rule.named().into_iter().map(str::to_owned).collect(),
+            });
+        }
+        self.start_for_agent(command, cwd, Why::Launch)
+            .map_err(|error| LaunchError::NotStarted(error.to_string()))
     }
 
     /// Grant `pid`, a child of this compositor, to the agent: until it is

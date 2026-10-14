@@ -21,6 +21,7 @@
 //! argument the architecture made and nothing had ever had to keep.
 
 use std::{
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         mpsc::{self, RecvTimeoutError, SyncSender},
@@ -152,11 +153,52 @@ pub(crate) struct CaptureRequest {
     pub(crate) reply: SyncSender<Result<perspicax_index::Shot, ActError>>,
 }
 
+/// A program an agent asked to start, with somewhere to put its pid.
+pub(crate) struct LaunchRequest {
+    pub(crate) command: Vec<String>,
+    pub(crate) cwd: Option<PathBuf>,
+    pub(crate) reply: SyncSender<Result<u32, LaunchError>>,
+}
+
+/// Why a program an agent asked for was not started.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LaunchError {
+    /// Nothing may be started for an agent here: on a seat, the person has
+    /// not named a program in `[agent] launch`.
+    #[error("launching is off: the person has named no program an agent may start")]
+    Off,
+    /// The rule names programs, and not this one. `admitted` is what it
+    /// names, as written: a bare name admits only itself, for the session's
+    /// `PATH` to find, and a path only itself.
+    #[error(
+        "`{program}` is not admitted: an agent may start only {}, each exactly as written",
+        .admitted.join(", ")
+    )]
+    NotAdmitted {
+        /// The program asked for, the command's first word.
+        program: String,
+        /// What may be started instead.
+        admitted: Vec<String>,
+    },
+    /// The session is locked. The person has walked away, and nothing is
+    /// started on their desk until they unlock it.
+    #[error("the session is locked")]
+    Locked,
+    /// Admitted, and it would not start: not found, not a program, or no
+    /// such folder to start it in. Says which.
+    #[error("{0}")]
+    NotStarted(String),
+    /// No compositor loop answered.
+    #[error("no compositor loop answered")]
+    Unreachable,
+}
+
 /// What arrives on the compositor's inbound channel.
 pub(crate) enum Inbound {
     Act(Request),
     Command(Command),
     Capture(CaptureRequest),
+    Launch(LaunchRequest),
 }
 
 /// How long a picture may take. Far longer than an act: drawing a 4K monitor
@@ -303,6 +345,29 @@ impl Host {
         answer
             .recv_timeout(CAPTURE_TIMEOUT.max(self.timeout))
             .unwrap_or(Err(ActError::Unreachable))
+    }
+
+    /// Ask the compositor to start a program for the agent, in `cwd` if one
+    /// is named, and wait for its pid. What starts is granted to the agent
+    /// until it exits, where consent is by grant.
+    ///
+    /// # Errors
+    ///
+    /// [`LaunchError::Unreachable`] if no loop answers in time; otherwise
+    /// why the compositor would not or could not start it.
+    pub fn launch(&self, command: &[String], cwd: Option<&Path>) -> Result<u32, LaunchError> {
+        let (reply, answer) = mpsc::sync_channel(1);
+        self.requests
+            .sender
+            .send(Inbound::Launch(LaunchRequest {
+                command: command.to_vec(),
+                cwd: cwd.map(Path::to_owned),
+                reply,
+            }))
+            .map_err(|_| LaunchError::Unreachable)?;
+        answer
+            .recv_timeout(self.timeout)
+            .unwrap_or(Err(LaunchError::Unreachable))
     }
 }
 

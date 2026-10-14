@@ -493,11 +493,11 @@ fn autostart_files(folders: &[PathBuf]) -> Vec<(String, Option<String>)> {
 /// run, at the path it names, or else in a folder of `path`.
 fn installed(program: &str, path: Option<&str>) -> bool {
     if program.contains('/') {
-        return supervise::runnable(Path::new(program));
+        return crate::runnable(Path::new(program));
     }
     path.into_iter()
         .flat_map(std::env::split_paths)
-        .any(|folder| supervise::runnable(&folder.join(program)))
+        .any(|folder| crate::runnable(&folder.join(program)))
 }
 
 impl Session {

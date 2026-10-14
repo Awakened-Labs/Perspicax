@@ -13,12 +13,15 @@
 
 mod common;
 
-use std::process::{Child, Command, Stdio};
+use std::{
+    path::Path,
+    process::{Child, Command, Stdio},
+};
 
 use common::{Session, until};
-use perspicax_compositor::Backend;
+use perspicax_compositor::{Backend, Host, LaunchError};
 use perspicax_index::{Consent, HostFacts, SurfaceFacts};
-use perspicax_policy::Action;
+use perspicax_policy::{Action, Program, Rule};
 
 /// Set, to the compositor's socket, for the copy of this binary that
 /// [`window_probe`] runs in.
@@ -175,6 +178,126 @@ fn a_binding_spawn_without_agent_grants_nothing() {
         Some(1),
         "the agent's alone"
     );
+    session.stop(());
+}
+
+/// A desk that consents as a seat does, where an agent may start only the
+/// programs `named`, as `[agent] launch` would name them.
+fn launching(name: &str, named: &[&str]) -> Session {
+    let rule = Rule::Only(
+        named
+            .iter()
+            .map(|program| Program::parse(program))
+            .collect(),
+    );
+    Session::start(
+        name,
+        Backend::headless((800, 600)).granting().launching(rule),
+    )
+}
+
+fn words(command: &[&str]) -> Vec<String> {
+    command.iter().map(|&word| word.to_owned()).collect()
+}
+
+/// What `launch` does: the program starts, the agent is told its pid, and
+/// it is granted until it exits.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_launched_program_is_granted_and_its_pid_returned() {
+    let session = launching("launch-granted", &["sleep"]);
+    let host = Host::new(&session.facts, &session.requests);
+    let pid = host
+        .launch(&words(&["sleep", "1"]), None)
+        .expect("sleep is admitted");
+    session.wait_for(|facts| granted(facts) == Some(&[pid][..]));
+    session.wait_for(|facts| granted(facts).is_some_and(<[u32]>::is_empty));
+    session.stop(());
+}
+
+/// A bare name admits only itself, never a path an agent chose, and the
+/// refusal says what is admitted.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_program_the_list_does_not_name_is_refused_naming_the_list() {
+    let session = launching("launch-not-admitted", &["sleep"]);
+    let host = Host::new(&session.facts, &session.requests);
+    let refused = host.launch(&words(&["/usr/bin/sleep", "30"]), None);
+    assert_eq!(
+        refused,
+        Err(LaunchError::NotAdmitted {
+            program: "/usr/bin/sleep".to_owned(),
+            admitted: words(&["sleep"]),
+        })
+    );
+    let said = refused.expect_err("refused").to_string();
+    assert!(said.contains("may start only sleep"), "{said}");
+    assert!(matches!(
+        host.launch(&words(&["true"]), None),
+        Err(LaunchError::NotAdmitted { .. })
+    ));
+    let facts = session.wait_for(|facts| granted(facts).is_some());
+    assert_eq!(granted(&facts), Some(&[][..]), "nothing started");
+    session.stop(());
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn launching_is_refused_when_off() {
+    let session = Session::start(
+        "launch-off",
+        Backend::headless((800, 600))
+            .granting()
+            .launching(Rule::Off),
+    );
+    let host = Host::new(&session.facts, &session.requests);
+    assert_eq!(
+        host.launch(&words(&["sleep", "1"]), None),
+        Err(LaunchError::Off)
+    );
+    session.stop(());
+}
+
+/// The person has walked away: nothing is started on their desk.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn launching_is_refused_while_locked() {
+    let session = launching("launch-locked", &["sleep"]);
+    let host = Host::new(&session.facts, &session.requests);
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.lock(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.locked);
+    assert_eq!(
+        host.launch(&words(&["sleep", "1"]), None),
+        Err(LaunchError::Locked)
+    );
+    desk.unlock();
+    session.stop((desk, queue));
+}
+
+/// Headless starts any program, as nobody sits at it to say otherwise. One
+/// that will not start says why.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_program_that_will_not_start_says_why() {
+    let session = Session::start("launch-not-started", Backend::headless((800, 600)));
+    let host = Host::new(&session.facts, &session.requests);
+    host.launch(&words(&["sleep", "1"]), None)
+        .expect("headless admits any program");
+    match host.launch(&words(&["perspicax-no-such-program", "--flag"]), None) {
+        Err(LaunchError::NotStarted(why)) => assert!(
+            why.contains("perspicax-no-such-program --flag") && why.contains("PATH"),
+            "{why}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        host.launch(
+            &words(&["sleep", "1"]),
+            Some(Path::new("/nonexistent/perspicax"))
+        ),
+        Err(LaunchError::NotStarted(_))
+    ));
     session.stop(());
 }
 

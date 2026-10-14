@@ -36,7 +36,7 @@ use smithay::{
     utils::Transform,
 };
 
-use perspicax_policy::{Access, MouseBindings, Opacity, Place, Shape};
+use perspicax_policy::{Access, MouseBindings, Opacity, Place, Rule, Shape};
 
 use crate::{Config, Error, FRAME_INTERVAL, state::Compositor};
 
@@ -84,12 +84,25 @@ pub enum Backend {
 
 /// What an agent may do on a headless desk, where a seat would have its
 /// person and its `[agent]` table decide.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Agent {
     /// Whether an agent may act only on the processes granted to it, as on a
     /// seat, rather than on every client. Off by default; for the tests of
     /// what a seat grants and takes back.
     pub by_grant: bool,
+    /// Which programs an agent may start for itself, as a seat's
+    /// `[agent] launch` says. Any, by default: headless hosts only what an
+    /// agent set up. See [`Backend::launching`].
+    pub launch: Rule,
+}
+
+impl Default for Agent {
+    fn default() -> Self {
+        Self {
+            by_grant: false,
+            launch: Rule::Any,
+        }
+    }
 }
 
 /// One virtual monitor of a headless compositor.
@@ -154,6 +167,16 @@ impl Backend {
     pub fn granting(mut self) -> Self {
         if let Self::Headless { agent, .. } = &mut self {
             agent.by_grant = true;
+        }
+        self
+    }
+
+    /// The same, letting an agent start only what `rule` admits, as a seat's
+    /// `[agent] launch` does.
+    #[must_use]
+    pub fn launching(mut self, rule: Rule) -> Self {
+        if let Self::Headless { agent, .. } = &mut self {
+            agent.launch = rule;
         }
         self
     }
@@ -443,6 +466,17 @@ impl Running {
             Self::Headless { agent, .. } => agent.by_grant,
             #[cfg(feature = "seat")]
             Self::Seat(_) => true,
+        }
+    }
+
+    /// Which programs an agent may start for itself. Headless, any, unless a
+    /// test asked otherwise. On a seat, `[agent] launch` as last saved: off
+    /// until the person names programs.
+    pub(crate) fn launching(&self) -> &Rule {
+        match self {
+            Self::Headless { agent, .. } => &agent.launch,
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => &session.settings.agent.launch,
         }
     }
 
