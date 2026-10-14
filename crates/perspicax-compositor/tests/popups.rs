@@ -31,8 +31,10 @@
 mod common;
 
 use common::{Desk, Session, WINDOW, configured, heard, landed, menu_with_the_keyboard, until};
-use perspicax_compositor::Backend;
-use perspicax_index::{HostFacts, Layer as Level, SurfaceFacts, SurfaceKind, judge};
+use perspicax_compositor::{ActError, Backend, Host};
+use perspicax_index::{
+    Action as Verb, HostFacts, Layer as Level, PointerButton, SurfaceFacts, SurfaceKind, judge,
+};
 use perspicax_node::{Rect, SurfaceId, Vec2, Visibility};
 use smithay_client_toolkit::shell::{WaylandSurface as _, wlr_layer::Layer, xdg::XdgSurface as _};
 use wayland_client::{EventQueue, Proxy as _, QueueHandle};
@@ -945,6 +947,157 @@ fn a_menu_a_click_outside_dismissed_leaves_the_facts_at_once() {
         menu.wl_surface().is_alive(),
         "its client has not destroyed it"
     );
+
+    session.stop((desk, queue));
+}
+
+// # Acting on a menu (issue #112)
+
+/// Linux's code for the left button.
+const BTN_LEFT: u32 = 0x110;
+
+/// Open a menu of the first window past its edge, drawn with a shadow of 8
+/// around it as toolkits draw one, and wait for the facts to describe it.
+fn shadowed_menu(
+    session: &Session,
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    qh: &QueueHandle<Desk>,
+) -> (
+    smithay_client_toolkit::shell::xdg::popup::Popup,
+    SurfaceFacts,
+) {
+    let menu = desk.open_popup(qh, desk.windows[0].xdg_surface(), (350, 250), (120, 80));
+    configured(desk, queue, 1);
+    menu.xdg_surface().set_window_geometry(8, 8, 120, 80);
+    desk.paint(menu.wl_surface(), (136, 96), MENU);
+    menu.wl_surface().commit();
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| popups(facts).iter().any(|popup| popup.mapped));
+    let shown = popups(&facts)[0].clone();
+    (menu, shown)
+}
+
+/// An agent's click on a menu's item lands on the menu: on its surface, at
+/// the item's centre, measured from the menu's window geometry as the index
+/// measures its nodes. Before, an act could only name a window, and a click
+/// was delivered to the window's surface at the menu's position.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_agents_click_on_a_menu_lands_on_the_menu() {
+    let session = session("popup-click");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_pointer(&globals, &qh);
+    settle(&session, &mut desk, &mut queue, &qh, "page");
+    let (menu, shown) = shadowed_menu(&session, &mut desk, &mut queue, &qh);
+
+    // The menu's third row, past the window's edge.
+    let item = rect((10.0, 40.0), (100.0, 20.0));
+    Host::new(&session.facts, &session.requests)
+        .act(
+            shown.id,
+            &Verb::Click {
+                at: item,
+                button: PointerButton::Left,
+            },
+        )
+        .expect("clicked");
+    until(&mut queue, &mut desk, |desk| desk.buttons.len() == 2);
+    assert_eq!(desk.pointed.as_ref(), Some(menu.wl_surface()));
+    assert_eq!(
+        desk.arrived,
+        Some((68.0, 58.0)),
+        "the item's centre, its window geometry 8 into its surface"
+    );
+    assert_eq!(desk.buttons, [(BTN_LEFT, true), (BTN_LEFT, false)]);
+
+    session.stop((desk, queue));
+}
+
+/// A menu that has gone takes no act: there is nothing drawn to put it on.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_that_has_gone_takes_no_act() {
+    let session = session("popup-gone-act");
+    let (mut desk, mut queue, qh, _) = session.client();
+    settle(&session, &mut desk, &mut queue, &qh, "page");
+    let (menu, shown) = shadowed_menu(&session, &mut desk, &mut queue, &qh);
+    drop(menu);
+    queue.flush().expect("sent");
+    session.wait_for(|facts| facts.surface(shown.id).is_none());
+
+    assert_eq!(
+        Host::new(&session.facts, &session.requests).act(
+            shown.id,
+            &Verb::Click {
+                at: rect((10.0, 10.0), (10.0, 10.0)),
+                button: PointerButton::Left,
+            },
+        ),
+        Err(ActError::NoSuchSurface(shown.id.0))
+    );
+
+    session.stop((desk, queue));
+}
+
+/// A menu gets the keyboard only through its own grab: an agent cannot give
+/// it one.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_without_the_keyboard_cannot_be_given_it() {
+    let session = session("popup-focus");
+    let (mut desk, mut queue, qh, _) = session.client();
+    settle(&session, &mut desk, &mut queue, &qh, "page");
+    let (_menu, shown) = shadowed_menu(&session, &mut desk, &mut queue, &qh);
+
+    assert_eq!(
+        Host::new(&session.facts, &session.requests).act(shown.id, &Verb::Focus),
+        Err(ActError::TakesNoKeyboard(shown.id.0))
+    );
+
+    session.stop((desk, queue));
+}
+
+/// While a window's menu holds the keyboard, keys go to the menu, not the
+/// window: typed at one of the window's fields they would land in the menu,
+/// where a letter can choose an item. So typing at the window is refused,
+/// naming the menu, and typing at the menu is typed (dave, #112). The
+/// window is still the one in use (#97).
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn keys_typed_while_a_menu_holds_the_keyboard_go_only_to_the_menu() {
+    let session = seated("popup-typing");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    let (page, _) = settle(&session, &mut desk, &mut queue, &qh, "page");
+    let menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, page);
+    let facts = session.wait_for(|facts| popups(facts).iter().any(|popup| popup.mapped));
+    let shown = popups(&facts)[0].id;
+    let host = Host::new(&session.facts, &session.requests);
+
+    let type_at = |surface: SurfaceId, text: &str| {
+        host.act(
+            surface,
+            &Verb::Type {
+                text: text.to_owned(),
+            },
+        )
+    };
+    assert_eq!(
+        type_at(page, "x").map(|_| ()),
+        Err(ActError::FocusElsewhere {
+            focused: Some(shown)
+        })
+    );
+    let dispatched = type_at(shown, "y").expect("typed");
+    assert_eq!(
+        dispatched.focus_before,
+        Some(page),
+        "the window is the one in use"
+    );
+    until(&mut queue, &mut desk, |_| heard(&ear).typed() == "y");
+    assert_eq!(heard(&ear).entered, Some(menu.wl_surface().id()));
+    assert!(host.act(shown, &Verb::Focus).is_ok(), "it has it already");
 
     session.stop((desk, queue));
 }

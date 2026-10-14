@@ -874,15 +874,24 @@ impl Compositor {
     /// window's own surface and is what window management asks. A menu open
     /// on a window takes the keyboard itself, and its keys are that window's;
     /// a layer surface holding the keyboard (a launcher, the shell's menu) is
-    /// its own. This is the question an agent's typing has to ask, and the
-    /// one its receipts answer. `None` for a lock surface, or one that is
-    /// gone.
+    /// its own. This is the question an agent's receipts answer; typing asks
+    /// the narrower [`Self::keyboard_holder`]. `None` for a lock surface, or
+    /// one that is gone.
     pub(crate) fn keyboard_owner(&self) -> Option<SurfaceId> {
         let root = self.keyboard_root()?;
         self.window_for(&root)
             .as_ref()
             .and_then(shell::id_of)
             .or_else(|| self.layer_owning(&root))
+    }
+
+    /// The surface the keys go to right now, exactly: a menu holding the
+    /// keyboard is itself, where [`Self::keyboard_owner`] answers with its
+    /// window. What an agent's typing asks (#112), for keys typed at a field
+    /// of a window whose menu holds the keyboard land in the menu.
+    pub(crate) fn keyboard_holder(&self) -> Option<SurfaceId> {
+        let focus = self.keyboard_focus()?;
+        self.popup_id(&focus).or_else(|| self.keyboard_owner())
     }
 
     /// The window the keys go to right now, through any menu it opened: the

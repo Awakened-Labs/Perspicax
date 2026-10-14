@@ -35,10 +35,10 @@ use smithay::{
             AsRenderElements, Kind,
             memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
             solid::{SolidColorBuffer, SolidColorRenderElement},
-            surface::WaylandSurfaceRenderElement,
+            surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
         },
     },
-    desktop::{Window, space::SpaceElement},
+    desktop::{PopupManager, Window, space::SpaceElement},
     output::Output,
     utils::{IsAlive, Logical, Physical, Point, Rectangle, Scale},
 };
@@ -308,11 +308,14 @@ where
 {
     type RenderElement = FramedElement<R>;
 
-    /// The agent's outline, then the client's surfaces, then the title, then
-    /// the bars: front to back. The outline is in front of everything the
-    /// window draws, for a client's shadow is drawn just where it goes, and
-    /// would hide it. Popups, which come first among the client's, still
-    /// draw over the titlebar, and the title over the bar it is written on.
+    /// The client's menus, then the agent's outline, then the client's own
+    /// surfaces, then the title, then the bars: front to back, as smithay
+    /// draws a window but for the outline between. The outline is in front
+    /// of the client's own picture, for a client's shadow is drawn just
+    /// where it goes, and would hide it. Its menus are in front of all of
+    /// it, as they are of the titlebar: the index stacks them directly above
+    /// their window (#112), and what is drawn is what it describes. The title
+    /// is over the bar it is written on.
     fn render_elements<C: From<Self::RenderElement>>(
         &self,
         renderer: &mut R,
@@ -337,7 +340,49 @@ where
             )))
         };
 
-        let mut elements: Vec<C> = self.dress(|dress| {
+        // An xdg window's menus and its own tree, apart, as smithay's
+        // `Window::render_elements` draws them together. An X11 window's
+        // menus are windows of their own.
+        let (menus, own): (
+            Vec<WaylandSurfaceRenderElement<R>>,
+            Vec<WaylandSurfaceRenderElement<R>>,
+        ) = match self.0.toplevel() {
+            Some(toplevel) => {
+                let root = toplevel.wl_surface();
+                let mut menus = Vec::new();
+                for (popup, offset) in PopupManager::popups_for_surface(root) {
+                    let offset = (geometry.loc + offset - popup.geometry().loc)
+                        .to_physical_precise_round(scale);
+                    menus.extend(render_elements_from_surface_tree(
+                        renderer,
+                        popup.wl_surface(),
+                        location + offset,
+                        scale,
+                        alpha,
+                        Kind::Unspecified,
+                    ));
+                }
+                let own = render_elements_from_surface_tree(
+                    renderer,
+                    root,
+                    location,
+                    scale,
+                    alpha,
+                    Kind::Unspecified,
+                );
+                (menus, own)
+            }
+            None => (
+                Vec::new(),
+                self.0.render_elements(renderer, location, scale, alpha),
+            ),
+        };
+
+        let mut elements: Vec<C> = menus
+            .into_iter()
+            .map(|element| C::from(FramedElement::Surface(element)))
+            .collect();
+        elements.extend(self.dress(|dress| {
             let strips = outline_rects(outset(client, dress.outline_around), dress.outline);
             let colour = dress.outline_colour;
             let buffers = &mut dress.outline_strips;
@@ -346,12 +391,10 @@ where
                 .iter()
                 .zip(buffers)
                 .map(|(strip, buffer)| solid(strip, buffer, colour))
-                .collect()
-        });
+                .collect::<Vec<_>>()
+        }));
         elements.extend(
-            self.0
-                .render_elements::<WaylandSurfaceRenderElement<R>>(renderer, location, scale, alpha)
-                .into_iter()
+            own.into_iter()
                 .map(|element| C::from(FramedElement::Surface(element))),
         );
 
