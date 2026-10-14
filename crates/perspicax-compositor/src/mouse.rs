@@ -333,8 +333,10 @@ impl Compositor {
             button: code,
             state,
         };
+        let held = self.menu_held();
         pointer.button(self, &event);
         pointer.frame(self);
+        self.after_menu_button(held);
     }
 
     /// A person's mouse moving by `by`, for a test: see

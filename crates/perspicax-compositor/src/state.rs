@@ -47,7 +47,7 @@ use smithay::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
             Client, DisplayHandle, Resource as _,
-            backend::{ClientData, ClientId, DisconnectReason},
+            backend::{ClientData, ClientId, DisconnectReason, ObjectId},
             protocol::{
                 wl_buffer::WlBuffer, wl_output::WlOutput, wl_seat::WlSeat, wl_surface::WlSurface,
             },
@@ -221,6 +221,15 @@ pub struct Compositor {
     /// Popups (menus, tooltips), tracked so they render and hit-test with
     /// their window and so a grab can dismiss them.
     pub(crate) popups: PopupManager,
+    /// Each popup's id, by its surface: minted in `new_popup` for each
+    /// `xdg_popup` and gone with it. A client may give its surface a new
+    /// popup -- GTK 4 does, each time a popover opens again -- and the new
+    /// menu gets a new id, so nothing addressed to the old one, its nodes or
+    /// an act, ever reaches the new one.
+    pub(crate) popup_ids: HashMap<ObjectId, SurfaceId>,
+    /// When each popup was last put on screen: what the index joins a menu
+    /// to it only from a read made after.
+    pub(crate) popups_shown: HashMap<SurfaceId, Instant>,
     /// The last grab a window's menu took of the keyboard and pointer: what
     /// [`Self::close_menu`] closes. Kept once the menu has gone, when
     /// smithay has forgotten it and closing it again does nothing.
@@ -405,6 +414,8 @@ impl Compositor {
             generation: 0,
             next_surface: 0,
             popups: PopupManager::default(),
+            popup_ids: HashMap::new(),
+            popups_shown: HashMap::new(),
             menu: None,
             parked: Vec::new(),
             withdrawn: Vec::new(),
@@ -979,7 +990,8 @@ impl CompositorHandler for Compositor {
         let (root, at) = damage::root_of(surface);
         let is_root = root == *surface;
         // A menu's tree ends at the menu, and what it draws is the window's
-        // or panel's it hangs from, where it is drawn on them.
+        // or panel's it hangs from, where it is drawn on them, as well as
+        // the menu's own.
         let popup = self.popups.find_popup(&root);
         let hung = popup.as_ref().and_then(popup::hung);
         let shift = hung.as_ref().map_or(Vec2::ZERO, |hung| hung.at);
@@ -1066,6 +1078,20 @@ impl CompositorHandler for Compositor {
                     .data_map
                     .insert_if_missing_threadsafe(|| crate::xwayland::PresentedUnclaimed);
             });
+        }
+        // A menu's frames are its own as well, in its own coordinates, so a
+        // receipt for one of its items reads them there. The window keeps
+        // its copy, where the menu is drawn on it (#42).
+        if let Some(own) = popup
+            .as_ref()
+            .and_then(|popup| self.popup_id(popup.wl_surface()))
+        {
+            self.record_damage(own, taken.rects.iter().map(|rect| *rect - shift).collect());
+            if geometry::shown(&root).is_some() {
+                self.popups_shown.entry(own).or_insert_with(Instant::now);
+            } else {
+                self.popups_shown.remove(&own);
+            }
         }
         if let Some(id) = id {
             // Whether there is anything to look at is the root's own picture,
@@ -1171,6 +1197,8 @@ impl XdgShellHandler for Compositor {
         if let Err(error) = self.popups.track_popup(PopupKind::Xdg(surface.clone())) {
             tracing::warn!(%error, "could not track popup");
         }
+        let id = self.mint_surface_id();
+        self.popup_ids.insert(surface.wl_surface().id(), id);
         if let Err(error) = surface.send_configure() {
             tracing::warn!(%error, "could not configure popup");
         }
@@ -1188,20 +1216,26 @@ impl XdgShellHandler for Compositor {
         // First, and whatever it showed: a menu with nothing in it may hold
         // the keyboard too.
         self.hand_back_keyboard(&surface);
-        let popup = PopupKind::Xdg(surface);
-        if geometry::shown(popup.wl_surface()).is_none() {
-            return;
+        // Its id goes with it, and what was kept under it: a surface given a
+        // popup again gets a new one (`new_popup`).
+        if let Some(id) = self.popup_ids.remove(&surface.wl_surface().id()) {
+            self.damage.remove(&id);
+            self.focused_at.remove(&id);
+            self.popups_shown.remove(&id);
         }
-        let Some(hung) = popup::hung(&popup) else {
-            return;
-        };
-        let Some(id) = self.hung_from(&hung) else {
-            return;
-        };
-        let whole = geometry::window_geometry(popup.wl_surface())
-            .map(|whole| damage::to_rect(whole) + hung.at);
-        self.record_damage(id, whole.into_iter().collect());
+        let popup = PopupKind::Xdg(surface);
+        if geometry::shown(popup.wl_surface()).is_some()
+            && let Some(hung) = popup::hung(&popup)
+            && let Some(id) = self.hung_from(&hung)
+        {
+            let whole = geometry::window_geometry(popup.wl_surface())
+                .map(|whole| damage::to_rect(whole) + hung.at);
+            self.record_damage(id, whole.into_iter().collect());
+        }
         self.backend.redraw();
+        // Always: it was a surface of the facts, covering what is under it,
+        // whatever it showed and wherever it hung, and smithay has already
+        // stopped drawing it.
         self.publish_facts();
     }
 

@@ -233,22 +233,36 @@ impl Compositor {
             .partition(|window| crate::shell::covers_panels(window));
         // How see-through each window on screen is drawn, for an agent
         // puzzled by a picture. Never judged by: see `drawn_opacity`.
+        //
+        // Each window's menus directly above it, as smithay draws them and
+        // finds the pointer on them (issue #112): its popups before its
+        // client's own surfaces. A window not described -- one that has drawn
+        // nothing yet -- still has its menus described, for smithay draws
+        // them all the same, over whatever is under them.
         let window = |window: &crate::framed::Framed| {
-            let mut facts = self.grouped(window, self.facts_for(window)?);
-            if facts.mapped {
-                facts.drawn_opacity = Some(self.opacity_of(window, in_use))
-                    .filter(|&percent| percent < perspicax_policy::OPAQUE);
-            }
-            Some(facts)
+            let facts = self.facts_for(window).map(|facts| {
+                let mut facts = self.grouped(window, facts);
+                if facts.mapped {
+                    facts.drawn_opacity = Some(self.opacity_of(window, in_use))
+                        .filter(|&percent| percent < perspicax_policy::OPAQUE);
+                }
+                facts
+            });
+            let popups = self.window_popups(window);
+            facts.into_iter().chain(popups).collect::<Vec<_>>()
         };
         let layer = |(layer, placed): &(smithay::desktop::LayerSurface, _)| {
-            let id = *layer.user_data().get::<SurfaceId>()?;
+            let Some(id) = layer.user_data().get::<SurfaceId>().copied() else {
+                return Vec::new();
+            };
             let mut facts = self.plain_facts(id, layer.wl_surface(), *placed);
             facts.kind = SurfaceKind::Layer {
                 layer: crate::layers::level(layer.layer()),
                 namespace: layer.namespace().to_owned(),
             };
-            Some(facts)
+            // A panel has no window geometry: its menus hang from its corner.
+            let popups = self.popups_of(layer.wl_surface(), id, facts.buffer_origin);
+            core::iter::once(facts).chain(popups).collect()
         };
         let covers = self
             .lock
@@ -263,11 +277,11 @@ impl Compositor {
             });
         let surfaces: Vec<SurfaceFacts> = below
             .iter()
-            .filter_map(layer)
-            .chain(self.parked.iter().chain(windows).filter_map(window))
-            .chain(top.iter().filter_map(layer))
-            .chain(raised.into_iter().filter_map(window))
-            .chain(overlay.iter().filter_map(layer))
+            .flat_map(layer)
+            .chain(self.parked.iter().chain(windows).flat_map(window))
+            .chain(top.iter().flat_map(layer))
+            .chain(raised.into_iter().flat_map(window))
+            .chain(overlay.iter().flat_map(layer))
             .chain(covers)
             .collect();
 
@@ -411,6 +425,74 @@ impl Compositor {
             workspace: None,
             kind: SurfaceKind::Window,
         })
+    }
+
+    /// A window's menus, bottom to top, measured from where its surface's
+    /// own `(0, 0)` is: where it was placed, back by its geometry's offset,
+    /// as `facts_for` places it. A parked window is not in the space, and
+    /// smithay draws none of its menus: it has none here. Nor has an X11
+    /// window, whose menus are windows of their own (issue #159).
+    fn window_popups(&self, window: &Framed) -> Vec<SurfaceFacts> {
+        let (Some(toplevel), Some(id), Some(location)) = (
+            window.toplevel(),
+            crate::shell::id_of(window),
+            self.space.element_location(window),
+        ) else {
+            return Vec::new();
+        };
+        let surface = toplevel.wl_surface();
+        // A window that has declared and drawn nothing has its menus hung
+        // from its corner, as `popup::hung` hangs them.
+        let offset =
+            crate::geometry::window_geometry(surface).map_or_else(Default::default, |g| g.loc);
+        let buffer_origin = Vec2::new(
+            f64::from(location.x - offset.x),
+            f64::from(location.y - offset.y),
+        );
+        self.popups_of(surface, id, buffer_origin)
+    }
+
+    /// The menus hanging from `root`, the surface of the window or panel
+    /// `from`, whose surface-local `(0, 0)` is at `buffer_origin`: bottom to
+    /// top, a submenu above its menu, each placed where smithay draws it
+    /// (`popup::hung`) and measured as a window is, from what it draws.
+    /// A menu that has drawn nothing yet, and declared nothing, is not one.
+    fn popups_of(
+        &self,
+        root: &WlSurface,
+        from: SurfaceId,
+        buffer_origin: Vec2,
+    ) -> Vec<SurfaceFacts> {
+        let mut popups: Vec<SurfaceFacts> =
+            smithay::desktop::PopupManager::popups_for_surface(root)
+                .filter_map(|(popup, _)| {
+                    let surface = popup.wl_surface();
+                    let id = self.popup_id(surface)?;
+                    let hung = crate::popup::hung(&popup)?;
+                    let geometry = crate::geometry::window_geometry(surface)?;
+                    let buffer_origin = buffer_origin + hung.at;
+                    let placed = Rect::new(
+                        buffer_origin.x + f64::from(geometry.loc.x),
+                        buffer_origin.y + f64::from(geometry.loc.y),
+                        buffer_origin.x + f64::from(geometry.loc.x + geometry.size.w),
+                        buffer_origin.y + f64::from(geometry.loc.y + geometry.size.h),
+                    );
+                    let mut facts = SurfaceFacts::new(id, placed)
+                        .with_buffer_origin(buffer_origin)
+                        .drawing_over(drawn(surface, buffer_origin, placed))
+                        .declaring_opaque(opaque_of(surface))
+                        .owned_by(self.origin_of_surface(surface));
+                    facts.mapped = surface.is_alive() && crate::geometry::shown(surface).is_some();
+                    facts.mapped_at = self.popups_shown.get(&id).copied().filter(|_| facts.mapped);
+                    facts.damage_generation = self.damage_generation(id);
+                    facts.damage = self.damage_history(id);
+                    facts.kind = SurfaceKind::Popup { from };
+                    Some(facts)
+                })
+                .collect();
+        // Smithay lists them front to back.
+        popups.reverse();
+        popups
     }
 
     /// The facts for a surface that is not a window -- a layer surface, a lock

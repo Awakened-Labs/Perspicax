@@ -19,6 +19,12 @@
 //! still the one in use while it is open (issue #97): those tests have a
 //! person, and a keyboard of their own to see where the keys went.
 //!
+//! A menu is also a surface of its own in the facts (issue #112), directly
+//! above the window or panel it hangs from, as smithay draws it and finds
+//! the pointer on it: it covers what is under it, that window's own nodes
+//! included, and a node joined to it is judged inside it, past its window's
+//! edge too. The tests from `a_menu_is_a_surface_of_its_own` on check that.
+//!
 //! Like the other live tests these bind a real Wayland socket, so they need
 //! `XDG_RUNTIME_DIR`, and are `#[ignore]`d for `ci/live-tests.sh` to run.
 
@@ -26,8 +32,8 @@ mod common;
 
 use common::{Desk, Session, WINDOW, configured, heard, landed, menu_with_the_keyboard, until};
 use perspicax_compositor::Backend;
-use perspicax_index::{HostFacts, Layer as Level, SurfaceFacts, SurfaceKind};
-use perspicax_node::{Rect, SurfaceId};
+use perspicax_index::{HostFacts, Layer as Level, SurfaceFacts, SurfaceKind, judge};
+use perspicax_node::{Rect, SurfaceId, Vec2, Visibility};
 use smithay_client_toolkit::shell::{WaylandSurface as _, wlr_layer::Layer, xdg::XdgSurface as _};
 use wayland_client::{EventQueue, Proxy as _, QueueHandle};
 use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::State;
@@ -544,6 +550,401 @@ fn a_menu_opened_from_a_popup_without_the_grab_gives_the_keyboard_back_to_its_wi
     until(&mut queue, &mut desk, |_| {
         heard(&ear).entered.as_ref() == Some(&window)
     });
+
+    session.stop((desk, queue));
+}
+
+// # What a menu covers (issue #112)
+
+/// Every popup the facts describe, bottom to top.
+fn popups(facts: &HostFacts) -> Vec<&SurfaceFacts> {
+    facts
+        .surfaces()
+        .iter()
+        .filter(|surface| matches!(surface.kind, SurfaceKind::Popup { .. }))
+        .collect()
+}
+
+/// Where a surface is in the stack, counting from the bottom.
+fn place(facts: &HostFacts, id: SurfaceId) -> usize {
+    facts
+        .surfaces()
+        .iter()
+        .position(|surface| surface.id == id)
+        .expect("described")
+}
+
+/// Open a menu of the first window, `size` big at `at` in its window
+/// geometry, paint it, and wait for the facts to describe it on screen.
+fn open_and_show(
+    session: &Session,
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    qh: &QueueHandle<Desk>,
+    at: (i32, i32),
+    size: (u32, u32),
+) -> (
+    smithay_client_toolkit::shell::xdg::popup::Popup,
+    SurfaceFacts,
+) {
+    let menu = desk.open_popup(qh, desk.windows[0].xdg_surface(), at, size);
+    let configured_before = desk.popups_configured;
+    configured(desk, queue, configured_before + 1);
+    desk.paint(menu.wl_surface(), size, MENU);
+    menu.wl_surface().commit();
+    queue.flush().expect("sent");
+    let known: Vec<SurfaceId> = popups(&session.facts.read()).iter().map(|p| p.id).collect();
+    let facts = session.wait_for(|facts| {
+        popups(facts)
+            .iter()
+            .any(|popup| popup.mapped && !known.contains(&popup.id))
+    });
+    let shown = popups(&facts)
+        .into_iter()
+        .find(|popup| !known.contains(&popup.id))
+        .cloned()
+        .expect("waited for");
+    (menu, shown)
+}
+
+/// A rect `size` big at `at` in a surface's window space.
+fn rect(at: (f64, f64), size: (f64, f64)) -> Rect {
+    Rect::new(at.0, at.1, at.0 + size.0, at.1 + size.1)
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_is_a_surface_of_its_own_directly_above_its_window() {
+    let session = session("popup-surface");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let (page, _) = settle(&session, &mut desk, &mut queue, &qh, "page");
+    let (_menu, shown) = open_and_show(&session, &mut desk, &mut queue, &qh, (40, 30), (120, 80));
+
+    let facts = session.facts.read();
+    let window = facts.surface(page).expect("described");
+    assert_eq!(shown.kind, SurfaceKind::Popup { from: page });
+    assert_eq!(place(&facts, shown.id), place(&facts, page) + 1);
+    assert_eq!(
+        shown.geometry,
+        rect((40.0, 30.0), (120.0, 80.0)) + window.geometry.origin().to_vec2(),
+        "where its positioner put it in its window's geometry"
+    );
+    assert!(shown.mapped_at.is_some(), "said when it came on screen");
+    assert_eq!(shown.origin, window.origin, "drawn by its window's client");
+    // Its own frames, in its own space, beside its window's copy (#42).
+    assert!(shown.damage_generation >= 1);
+    assert!(shown.damage_touches(0, rect((10.0, 10.0), (20.0, 20.0))));
+
+    session.stop((desk, queue));
+}
+
+/// Issue #112's first failure, on the menu's own window: a button under
+/// it was judged visible, and the menu took the click.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_windows_own_node_under_its_menu_is_covered_by_it() {
+    let session = session("popup-covers-own");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let (page, _) = settle(&session, &mut desk, &mut queue, &qh, "page");
+    let (_menu, shown) = open_and_show(&session, &mut desk, &mut queue, &qh, (40, 30), (120, 80));
+
+    let facts = session.facts.read();
+    let under = rect((60.0, 50.0), (10.0, 10.0));
+    assert_eq!(
+        judge(&facts, page, under).visibility,
+        Visibility::Occluded { by: shown.id }
+    );
+    assert_eq!(
+        judge(&facts, page, rect((300.0, 200.0), (10.0, 10.0))).visibility,
+        Visibility::Visible,
+        "away from it, as ever"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// Issue #112's first failure on another application's window: a menu
+/// opened over a button of a window beneath its own covered nothing, and
+/// took the click meant for the button.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_node_of_another_window_under_a_menu_is_covered_by_it() {
+    let session = session("popup-covers-other");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let (beneath, _) = settle(&session, &mut desk, &mut queue, &qh, "beneath");
+    desk.open_window(&qh, "above", "above");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 2);
+    let facts = session.wait_for(|facts| titled(facts, "above").is_some_and(|w| w.mapped));
+    let above = titled(&facts, "above").expect("waited for").clone();
+
+    // A menu of the window above, hanging off its left edge over the strip
+    // of the window beneath that nothing else covers.
+    let menu = desk.open_popup(&qh, desk.windows[1].xdg_surface(), (-30, 100), (25, 50));
+    configured(&mut desk, &mut queue, 1);
+    desk.paint(menu.wl_surface(), (25, 50), MENU);
+    menu.wl_surface().commit();
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| popups(facts).iter().any(|popup| popup.mapped));
+    let shown = popups(&facts)[0].clone();
+    assert_eq!(shown.kind, SurfaceKind::Popup { from: above.id });
+
+    let window = facts.surface(beneath).expect("described");
+    let global = rect(
+        (shown.geometry.x0 + 5.0, shown.geometry.y0 + 5.0),
+        (10.0, 10.0),
+    );
+    assert!(
+        global.intersect(above.covers()).area() == 0.0
+            && above
+                .frame
+                .iter()
+                .all(|strip| strip.intersect(global).area() == 0.0),
+        "nothing but the menu is over it"
+    );
+    assert_eq!(
+        judge(&facts, beneath, global - window.geometry.origin().to_vec2()).visibility,
+        Visibility::Occluded { by: shown.id }
+    );
+
+    session.stop((desk, queue));
+}
+
+/// Issue #112's second failure: an item of a menu hanging past its
+/// window's edge was refused as clipped. Judged on its menu, it is inside.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_item_past_its_windows_edge_is_inside_its_menu() {
+    let session = session("popup-past-edge");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let (page, _) = settle(&session, &mut desk, &mut queue, &qh, "page");
+    let (_menu, shown) = open_and_show(&session, &mut desk, &mut queue, &qh, (350, 250), (120, 80));
+
+    let facts = session.facts.read();
+    let window = facts.surface(page).expect("described");
+    // The menu's last item, wholly past the window's corner.
+    let item = rect((60.0, 60.0), (40.0, 15.0));
+    assert_eq!(
+        judge(&facts, shown.id, item).visibility,
+        Visibility::Visible
+    );
+    let on_the_window = shown.to_global(item) - window.geometry.origin().to_vec2();
+    assert_eq!(
+        judge(&facts, page, on_the_window).visibility,
+        Visibility::Clipped,
+        "on its window, where it used to be joined, it is past the edge"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// A submenu hangs from the window its menu does, directly above the menu.
+/// Of two menus opened from one window, the first is drawn in front: smithay
+/// lists a window's menus in the order they opened, each after its
+/// submenus, front to back.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn menus_stack_as_smithay_draws_them() {
+    let session = session("popup-stack");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let (page, _) = settle(&session, &mut desk, &mut queue, &qh, "page");
+    let (menu, first) = open_and_show(&session, &mut desk, &mut queue, &qh, (40, 30), (120, 80));
+
+    let submenu = desk.open_popup(&qh, menu.xdg_surface(), (100, 10), (80, 60));
+    configured(&mut desk, &mut queue, 2);
+    desk.paint(submenu.wl_surface(), (80, 60), HIGHLIT);
+    submenu.wl_surface().commit();
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| popups(facts).iter().filter(|p| p.mapped).count() == 2);
+    let sub = popups(&facts)
+        .into_iter()
+        .find(|popup| popup.id != first.id)
+        .cloned()
+        .expect("waited for");
+    assert_eq!(sub.kind, SurfaceKind::Popup { from: page }, "its window's");
+    assert_eq!(place(&facts, first.id), place(&facts, page) + 1);
+    assert_eq!(place(&facts, sub.id), place(&facts, first.id) + 1);
+    assert_eq!(
+        sub.geometry.origin(),
+        first.geometry.origin() + Vec2::new(100.0, 10.0),
+        "where its menu put it"
+    );
+
+    // A second menu of the window itself, opened after the first.
+    let (_later, second) =
+        open_and_show(&session, &mut desk, &mut queue, &qh, (200, 100), (60, 60));
+    let facts = session.facts.read();
+    assert_eq!(
+        [
+            place(&facts, second.id),
+            place(&facts, first.id),
+            place(&facts, sub.id)
+        ],
+        [
+            place(&facts, page) + 1,
+            place(&facts, page) + 2,
+            place(&facts, page) + 3
+        ],
+        "the later one behind the first and its submenu"
+    );
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_panels_menu_is_a_surface_above_the_panel() {
+    let session = session("popup-panel-surface");
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_strip(&qh, Layer::Top, "strip", 40, MENU);
+    until(&mut queue, &mut desk, |desk| desk.layers_drawn == 1);
+    let facts = session.wait_for(|facts| {
+        facts.surfaces().iter().any(|s| {
+            matches!(&s.kind, SurfaceKind::Layer { namespace, .. } if namespace == "strip")
+                && s.mapped
+        })
+    });
+    let panel = facts
+        .surfaces()
+        .iter()
+        .find(|s| matches!(&s.kind, SurfaceKind::Layer { namespace, .. } if namespace == "strip"))
+        .cloned()
+        .expect("waited for");
+
+    let menu = desk.open_panel_popup(&qh, &desk.layers[0].0, (20, 40), (100, 150));
+    configured(&mut desk, &mut queue, 1);
+    desk.paint(menu.wl_surface(), (100, 150), HIGHLIT);
+    menu.wl_surface().commit();
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| popups(facts).iter().any(|popup| popup.mapped));
+    let shown = popups(&facts)[0].clone();
+    assert_eq!(shown.kind, SurfaceKind::Popup { from: panel.id });
+    assert_eq!(place(&facts, shown.id), place(&facts, panel.id) + 1);
+    assert_eq!(
+        shown.geometry,
+        rect((20.0, 40.0), (100.0, 150.0)) + panel.geometry.origin().to_vec2(),
+        "from the panel's own corner"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// A minimized window's menus are not drawn, so they are not described.
+/// Seated, since only a person's window is minimized at its client's asking.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_parked_windows_menu_is_not_described() {
+    let session = seated("popup-parked");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let (page, _) = settle(&session, &mut desk, &mut queue, &qh, "page");
+    let (_menu, shown) = open_and_show(&session, &mut desk, &mut queue, &qh, (40, 30), (120, 80));
+
+    desk.windows[0].set_minimized();
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| facts.surface(page).is_some_and(|w| !w.mapped));
+    assert!(facts.surface(shown.id).is_none());
+
+    session.stop((desk, queue));
+}
+
+/// A window that has drawn nothing is not described, but smithay draws its
+/// menus all the same, over whatever is under them: an empty window and a
+/// painted menu is issue #112's attack by another route. The menu is
+/// described, and covers.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_of_a_window_that_has_drawn_nothing_covers_what_is_under_it() {
+    let session = session("popup-empty-window");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let (beneath, _) = settle(&session, &mut desk, &mut queue, &qh, "beneath");
+    desk.open_bare(&qh, "empty");
+    until(&mut queue, &mut desk, |desk| desk.blank_configured >= 1);
+
+    let menu = desk.open_popup(&qh, desk.blank[0].xdg_surface(), (10, 10), (120, 80));
+    configured(&mut desk, &mut queue, 1);
+    desk.paint(menu.wl_surface(), (120, 80), MENU);
+    menu.wl_surface().commit();
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| popups(facts).iter().any(|popup| popup.mapped));
+    let shown = popups(&facts)[0].clone();
+    assert!(
+        titled(&facts, "empty").is_none(),
+        "the window itself is not described"
+    );
+    let window = facts.surface(beneath).expect("described");
+    let under =
+        shown.to_global(rect((20.0, 20.0), (10.0, 10.0))) - window.geometry.origin().to_vec2();
+    assert_eq!(
+        judge(&facts, beneath, under).visibility,
+        Visibility::Occluded { by: shown.id }
+    );
+
+    session.stop((desk, queue));
+}
+
+/// A menu its client destroys leaves the facts, and its window's nodes
+/// under it are uncovered again.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_its_client_destroys_leaves_the_facts() {
+    let session = session("popup-destroyed");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let (page, _) = settle(&session, &mut desk, &mut queue, &qh, "page");
+    let (menu, shown) = open_and_show(&session, &mut desk, &mut queue, &qh, (40, 30), (120, 80));
+
+    drop(menu);
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| facts.surface(shown.id).is_none());
+    assert_eq!(
+        judge(&facts, page, rect((60.0, 50.0), (10.0, 10.0))).visibility,
+        Visibility::Visible
+    );
+
+    session.stop((desk, queue));
+}
+
+/// A person's click outside a menu that holds the pointer dismisses it, and
+/// smithay stops drawing it at once, though its client has yet to destroy
+/// it -- this one never does. The facts stop describing it at once too:
+/// otherwise its items would be judged on a menu that is no longer drawn.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_a_click_outside_dismissed_leaves_the_facts_at_once() {
+    use perspicax_compositor::Command;
+    use perspicax_policy::{Button, Mods};
+
+    let session = seated("popup-dismissed");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    let (page, _) = settle(&session, &mut desk, &mut queue, &qh, "page");
+    let menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, page);
+    let facts = session.wait_for(|facts| popups(facts).iter().any(|popup| popup.mapped));
+    let shown = popups(&facts)[0].clone();
+    // On the empty desk, away from every window: smithay passes a press on
+    // the menu's own client through to it, and dismisses the menu for any
+    // other.
+    let at = (900, 700);
+    assert!(
+        facts
+            .surfaces()
+            .iter()
+            .all(|surface| !surface.covers().contains((900.0, 700.0).into()))
+    );
+    session.command(Command::Press {
+        at,
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    session.command(Command::Release {
+        button: Button::Left,
+    });
+    until(&mut queue, &mut desk, |desk| desk.popups_done == 1);
+    let facts = session.wait_for(|facts| facts.surface(shown.id).is_none());
+    assert!(popups(&facts).is_empty());
+    assert!(
+        menu.wl_surface().is_alive(),
+        "its client has not destroyed it"
+    );
 
     session.stop((desk, queue));
 }
