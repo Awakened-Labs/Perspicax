@@ -67,6 +67,26 @@ pub struct Built {
     pub capture: bool,
 }
 
+/// What an agent may do on the seat, beyond acting on what it was granted:
+/// the `[agent]` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Agent {
+    /// Which programs an agent may start for itself, with the `launch`
+    /// tool, and act on: `"off"`, `"any"`, or a list of programs, each a
+    /// bare name the session's `PATH` finds or a whole path (see
+    /// [`Rule::launches`]). What a listed program starts is the agent's too,
+    /// so a terminal, a shell or an interpreter listed here admits anything.
+    /// Off in both profiles: the first thing an agent can put on the
+    /// person's screen, so the person names it.
+    pub launch: Rule,
+}
+
+impl Default for Agent {
+    fn default() -> Self {
+        Self { launch: Rule::Off }
+    }
+}
+
 /// A program to start once the session is up: an `autostart` entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Start {
@@ -145,6 +165,8 @@ pub struct Config {
     /// Which programs may use the protocols that reach past their own
     /// windows: taskbars, pagers, screenshot and display tools.
     pub protocols: Access,
+    /// What an agent may do on the seat: the `[agent]` table.
+    pub agent: Agent,
     /// What perspicax-shell puts on the desktop, read as if the shell had
     /// every component: which it was built with is for it to check, through
     /// [`shell`].
@@ -478,6 +500,7 @@ impl Config {
             theme: Theme::default(),
             xwayland: built.xwayland,
             protocols: protocols(built),
+            agent: Agent::default(),
             shell: Shell::profile(profile, ShellBuilt::FULL),
         }
     }
@@ -667,7 +690,36 @@ struct Raw {
     decorations: Option<RawDecorations>,
     theme: Option<RawTheme>,
     protocols: Option<RawProtocols>,
+    agent: Option<RawAgent>,
     shell: Option<RawShell>,
+}
+
+/// The `[agent]` table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawAgent {
+    launch: Option<RawRule>,
+}
+
+impl RawAgent {
+    fn apply(self, mut agent: Agent) -> Result<Agent, Error> {
+        if let Some(launch) = self.launch {
+            let rule = launch.rule("agent.launch")?;
+            for (at, program) in rule.named().into_iter().enumerate() {
+                if program.contains('/') && !program.starts_with('/') {
+                    return Err(invalid(
+                        format!("agent.launch[{at}]"),
+                        format!(
+                            "`{program}` is a path from nowhere in particular; write the whole \
+                             path, from /, or a bare name for the session's PATH to find"
+                        ),
+                    ));
+                }
+            }
+            agent.launch = rule;
+        }
+        Ok(agent)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -1013,6 +1065,12 @@ impl Raw {
                     feature: "seat",
                 });
             }
+            if self.agent.is_some() {
+                return Err(Error::NotBuilt {
+                    key: "agent",
+                    feature: "seat",
+                });
+            }
         }
         if let Some(xdg_autostart) = self.xdg_autostart {
             if xdg_autostart && !built.seat {
@@ -1213,6 +1271,9 @@ impl Raw {
 
         if let Some(protocols) = self.protocols {
             config.protocols = protocols.apply(config.protocols, built)?;
+        }
+        if let Some(agent) = self.agent {
+            config.agent = agent.apply(config.agent)?;
         }
 
         // Whatever the shell was built with: see `shell`.
@@ -1478,7 +1539,7 @@ impl RawProtocols {
         ];
         for (protocol, raw) in written {
             let Some(raw) = raw else { continue };
-            let rule = raw.rule(protocol)?;
+            let rule = raw.rule(&format!("protocols.{}", protocol.key()))?;
             if protocol == Protocol::Screencopy && rule != Rule::Off && !built.capture {
                 return Err(Error::NotBuilt {
                     key: "protocols.screencopy",
@@ -1492,8 +1553,9 @@ impl RawProtocols {
 }
 
 impl RawRule {
-    fn rule(self, protocol: Protocol) -> Result<Rule, Error> {
-        let key = || format!("protocols.{}", protocol.key());
+    /// The rule this is, at `key`: a protocol's, or `agent.launch`.
+    fn rule(self, key: &str) -> Result<Rule, Error> {
+        let key = || key.to_owned();
         match self {
             Self::Word(word) => match word.as_str() {
                 "any" => Ok(Rule::Any),
@@ -3281,5 +3343,44 @@ mod tests {
     fn a_word_other_than_any_or_off_is_refused() {
         let error = parse("[protocols]\nworkspace = \"all\"", SEAT).unwrap_err();
         assert!(error.to_string().contains("`all` is not a rule"), "{error}");
+    }
+
+    #[test]
+    fn agent_launch_is_off_in_both_profiles() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            assert_eq!(Config::profile(profile, SEAT).agent.launch, Rule::Off);
+        }
+        let config = parse("[agent]\nlaunch = [\"flutter\", \"/usr/bin/zenity\"]", SEAT);
+        assert_eq!(
+            config.unwrap().agent.launch.named(),
+            ["flutter", "/usr/bin/zenity"]
+        );
+    }
+
+    #[test]
+    fn a_bad_launch_rule_is_named_by_its_key() {
+        let key = |toml: &str| match parse(toml, SEAT).unwrap_err() {
+            Error::Invalid { key, .. } => key,
+            other => panic!("{other}"),
+        };
+        assert_eq!(key("[agent]\nlaunch = \"sometimes\""), "agent.launch");
+        assert_eq!(key("[agent]\nlaunch = []"), "agent.launch");
+        assert_eq!(key("[agent]\nlaunch = [\"foot\", \"\"]"), "agent.launch[1]");
+        assert_eq!(
+            key("[agent]\nlaunch = [\"foot\", \"bin/x\"]"),
+            "agent.launch[1]",
+            "a path from wherever the compositor stands"
+        );
+        let error = parse("[agent]\nlaunch = \"any\"", Built::default()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::NotBuilt {
+                    key: "agent",
+                    feature: "seat"
+                }
+            ),
+            "{error}"
+        );
     }
 }
