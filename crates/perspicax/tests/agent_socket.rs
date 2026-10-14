@@ -221,6 +221,11 @@ fn attach_carries_a_conversation_to_the_sessions_socket_and_ends_with_it() {
     }
     assert_eq!(answer()["result"]["serverInfo"]["name"], "perspicax");
     assert_eq!(answer()["result"]["structuredContent"]["count"], 0);
+    // Carrying the wire, it keeps every other process out (issue #118).
+    assert!(
+        looks_into_anything() || refused(attached.id(), 1),
+        "attach let this test look at its descriptors"
+    );
 
     // The client is done: its conversation ends, and so does the wire.
     drop(asking);

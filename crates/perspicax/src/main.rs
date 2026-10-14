@@ -223,6 +223,10 @@ enum Command {
     /// Ends when the session closes the connection. The client closing stdin
     /// is passed on as the end of what it will say, so its conversation ends
     /// and the next agent may connect.
+    ///
+    /// Like `--mcp`, it keeps every other process running as you out of
+    /// itself, so none can reopen or take the wire through it, or attach to
+    /// it with ptrace.
     Attach {
         /// The socket, instead of the session's own in `$PERSPICAX_MCP_SOCKET`.
         #[arg(value_name = "PATH")]
