@@ -14,10 +14,12 @@
 //! These tests serve a small application of their own over a private,
 //! peer-to-peer D-Bus connection: no bus daemon, no desktop, nothing to
 //! `#[ignore]`. It has one main thread, as a toolkit does, and asking where
-//! one of its Flutter nodes is holds that thread for [`FREEZE`]. It counts
-//! what it is asked and how often it froze, so what the tests assert is how
-//! many calls a read made and what they cost the application, not how long
-//! the read took.
+//! one of its Flutter nodes is holds that thread for [`FREEZE`]. Each node
+//! also says its index among its parent's children, as ATK counts them: a
+//! bare socket and Flutter's plug have no ATK parent, so they say -1 though a
+//! node of their own process lists them (#124). It counts what it is asked
+//! and how often it froze, so what the tests assert is how many calls a read
+//! made and what they cost the application, not how long the read took.
 
 use std::{
     collections::HashMap,
@@ -70,6 +72,8 @@ struct Fake {
     /// Whether every `Accessible` call on it goes unanswered, until
     /// [`Served::unmute`].
     mute: bool,
+    /// What it says when asked its index among its parent's children.
+    index: Index,
 }
 
 #[derive(Clone, Copy)]
@@ -78,6 +82,17 @@ enum Extents {
     /// Asking freezes the application for [`FREEZE`], and the answer, when it
     /// comes, has no geometry in it: a node beneath Flutter's plug.
     Freezes,
+}
+
+/// What a node says when asked `GetIndexInParent`.
+#[derive(Clone, Copy)]
+enum Index {
+    /// Its place among the children of the first node that holds it, or -1
+    /// for the root, which nothing holds.
+    Position,
+    /// -1, though a node of its own process lists it: it has no ATK parent.
+    /// Measured on ParadoxShift, of both the bare socket and the plug.
+    Disowned,
 }
 
 impl Fake {
@@ -90,6 +105,7 @@ impl Fake {
             extents: None,
             listed: true,
             mute: false,
+            index: Index::Position,
         }
     }
 
@@ -118,6 +134,12 @@ impl Fake {
         self.mute = true;
         self
     }
+
+    /// Say -1 when asked its index, as a node with no ATK parent does.
+    fn disowned(mut self) -> Self {
+        self.index = Index::Disowned;
+        self
+    }
 }
 
 /// What every object of the fake application shares: one main thread, and
@@ -131,6 +153,8 @@ struct Process {
     asked: Mutex<HashMap<String, usize>>,
     /// `GetExtents` calls received by nodes that being asked freezes.
     asked_freezing: AtomicUsize,
+    /// `GetIndexInParent` calls received, by object path.
+    indexed: Mutex<HashMap<String, usize>>,
     /// How often being asked froze the application.
     freezes: AtomicUsize,
     /// Whether the nodes made [`Fake::mute`] are silent still.
@@ -138,10 +162,12 @@ struct Process {
 }
 
 struct Accessible {
+    path: String,
     role: Role,
     name: String,
     children: Vec<(String, OwnedObjectPath)>,
     interfaces: Vec<String>,
+    index: i32,
     mute: bool,
     delay: Duration,
     process: Arc<Process>,
@@ -179,6 +205,17 @@ impl Accessible {
 
     async fn get_interfaces(&self) -> Vec<String> {
         self.answer(self.interfaces.clone()).await
+    }
+
+    async fn get_index_in_parent(&self) -> i32 {
+        *self
+            .process
+            .indexed
+            .lock()
+            .unwrap()
+            .entry(self.path.clone())
+            .or_default() += 1;
+        self.answer(self.index).await
     }
 
     #[zbus(property)]
@@ -249,6 +286,11 @@ impl Served {
         self.process.asked_freezing.load(Ordering::SeqCst)
     }
 
+    /// `GetIndexInParent` calls the whole application received.
+    fn asked_index_total(&self) -> usize {
+        self.process.indexed.lock().unwrap().values().sum()
+    }
+
     /// How often being asked froze the application.
     fn freezes(&self) -> usize {
         self.process.freezes.load(Ordering::SeqCst)
@@ -292,10 +334,19 @@ async fn serve(nodes: Vec<Fake>, delay: Duration) -> Served {
         main: tokio::sync::Mutex::new(()),
         asked: Mutex::new(HashMap::new()),
         asked_freezing: AtomicUsize::new(0),
+        indexed: Mutex::new(HashMap::new()),
         freezes: AtomicUsize::new(0),
         muted: AtomicBool::new(true),
     });
     let root = nodes[0].path.clone();
+    let mut positions: HashMap<String, i32> = HashMap::new();
+    for fake in &nodes {
+        for (position, child) in fake.children.iter().enumerate() {
+            positions
+                .entry(child.clone())
+                .or_insert(i32::try_from(position).unwrap());
+        }
+    }
     for fake in nodes {
         let objects = server.object_server();
         let children = fake
@@ -312,11 +363,17 @@ async fn serve(nodes: Vec<Fake>, delay: Duration) -> Served {
         if fake.extents.is_some() && fake.listed {
             interfaces.push(COMPONENT.to_owned());
         }
+        let index = match fake.index {
+            Index::Position => positions.get(&fake.path).copied().unwrap_or(-1),
+            Index::Disowned => -1,
+        };
         let accessible = Accessible {
+            path: fake.path.clone(),
             role: fake.role,
             name: fake.name,
             children,
             interfaces,
+            index,
             mute: fake.mute,
             delay,
             process: Arc::clone(&process),
@@ -348,7 +405,8 @@ async fn serve(nodes: Vec<Fake>, delay: Duration) -> Served {
 /// ParadoxShift's shape. A GTK frame and button, and Flutter's view: a GTK
 /// container holding a bare socket, in which Flutter's plug is embedded by
 /// the same process. The socket answers at once, with no geometry; asking
-/// where the plug or any node beneath it is freezes the application.
+/// where the plug or any node beneath it is freezes the application. Neither
+/// the socket nor the plug has an ATK parent, so each says its index is -1.
 fn flutter(squares: usize) -> Vec<Fake> {
     let square_paths: Vec<String> = (0..squares).map(|n| format!("/square/{n}")).collect();
     let square_refs: Vec<&str> = square_paths.iter().map(String::as_str).collect();
@@ -363,14 +421,30 @@ fn flutter(squares: usize) -> Vec<Fake> {
             .at(0, 40, 1280, 727),
         Fake::new("/socket", Role::Filler, "socket")
             .holding(&["/plug"])
-            .at(-1, -1, -1, -1),
+            .at(-1, -1, -1, -1)
+            .disowned(),
         Fake::new("/plug", Role::Panel, "plug")
             .holding(&square_refs)
-            .freezes(),
+            .freezes()
+            .disowned(),
     ];
     for (n, path) in square_paths.iter().enumerate() {
         nodes.push(Fake::new(path, Role::Button, &format!("square {n}")).freezes());
     }
+    nodes
+}
+
+/// ParadoxShift's shape once Flutter gives its socket a place
+/// (flutter/flutter#153560) while at-spi2-core still answers the plug by
+/// asking itself: the plug freezes the application as before, but nothing
+/// says where it is first.
+fn flutter_whose_socket_has_a_place(squares: usize) -> Vec<Fake> {
+    let mut nodes = flutter(squares);
+    let socket = nodes
+        .iter_mut()
+        .find(|node| node.path == "/socket")
+        .unwrap();
+    socket.extents = Some(Extents::Answered(0, 40, 1280, 727));
     nodes
 }
 
@@ -432,19 +506,25 @@ async fn a_flutter_application_is_read_whole_and_frozen_once() {
 
     assert_eq!(placed, Placed::Spared(served.key("/plug")));
     assert_eq!(served.asked_freezing(), 1);
+    assert_eq!(
+        served.asked_index_total(),
+        0,
+        "nothing asks a node its index"
+    );
     served.idle().await;
     assert_eq!(served.freezes(), 1);
     assert_eq!(walking.gave_up(), None, "every walk call was answered");
 }
 
-/// The issue's deterministic reproduction. Each re-read stands for a signal
-/// the application sends when it wakes, which is what brought the next freeze
+/// #80's deterministic reproduction. Each re-read stands for a signal the
+/// application sends when it wakes, which is what brought the next freeze
 /// every 25 s. Once the plug froze it straight after a walk it answered in
 /// full, neither the plug nor anything beneath it is asked again -- and what
-/// answers is still asked, and still placed.
+/// answers is still asked, and still placed. Here the socket has a place, so
+/// nothing says the plug will freeze before it does.
 #[tokio::test]
 async fn a_node_that_froze_its_application_is_never_asked_again_nor_anything_beneath_it() {
-    let served = serve(flutter(20), Duration::ZERO).await;
+    let served = serve(flutter_whose_socket_has_a_place(20), Duration::ZERO).await;
     let (mut walking, spared) = (Patience::new(), Spared::default());
 
     read_placing(&served, &mut walking, &spared).await;
@@ -469,7 +549,7 @@ async fn a_node_that_froze_its_application_is_never_asked_again_nor_anything_ben
 /// extents climb to is the node that is spared.
 #[tokio::test]
 async fn nodes_are_asked_top_down_whatever_order_the_read_gave() {
-    let served = serve(flutter(20), Duration::ZERO).await;
+    let served = serve(flutter_whose_socket_has_a_place(20), Duration::ZERO).await;
     let (mut walking, spared) = (Patience::new(), Spared::default());
     walking.begin(None);
     let (_, mut nodes) = read::cold_read(&served.reader, &served.app, &mut walking)
@@ -494,7 +574,7 @@ async fn nodes_are_asked_top_down_whatever_order_the_read_gave() {
 /// answered in full, a silence that begins at `GetExtents` is.
 #[tokio::test]
 async fn silence_after_a_walk_that_went_unanswered_is_not_held_against_the_node() {
-    let mut nodes = flutter(2);
+    let mut nodes = flutter_whose_socket_has_a_place(2);
     // A label beside OK that answers nothing, until it is unmuted.
     nodes[1].children.insert(1, "/busy".to_owned());
     nodes.push(Fake::new("/busy", Role::Label, "busy").mute());
