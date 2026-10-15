@@ -1231,7 +1231,9 @@ A pie is PieDock's: a ring of icons that opens centred on the pointer when a
 key or a button bound to `{ pie = "<name>" }` is pressed, and chooses by
 direction. Pointing anywhere past its middle, out to the screen's edge,
 picks the icon that way, which grows as the pointer turns toward it and has
-its name in the middle. Then:
+its name in the middle. Its neighbours grow too, less the further round from
+the pointer they are, as `grow` and `grow-falloff` say. The icons stay where
+they are, so a grown one is drawn over its neighbours. Then:
 
 - **Left button.** It opens a submenu in the pie's place, or starts the
   program. If the program has windows open, it brings the next of them
@@ -1239,7 +1241,8 @@ its name in the middle. Then:
 - **Middle button.** It starts the program, whatever is open.
 - **Right button.** It goes back out of a submenu, and closes the pie from
   its first ring.
-- **Wheel.** It spins the pie a place a notch.
+- **Wheel.** It spins the pie a place a notch. What is picked changes at
+  once, and the ring glides round to it.
 - **Keys.** Escape closes it, Enter is the left button, Up and Down spin
   it, and Backspace is the right button.
 - **Its own binding.** Pressed again, it closes the pie.
@@ -1250,6 +1253,9 @@ its name in the middle. Then:
 
 [shell.pie]
 size = 512                          # across, in pixels; 128 to 1024
+grow = 2.0                          # the icon pointed at, times its size; 1 to 3
+grow-falloff = 90                   # degrees round from the pointer that icons
+                                    # still grow, less in a line; 1 to 180
 icons = "~/.piedock/icons"          # <name>.png or .svg, any case, looked for
                                     # before the icon theme
 aliases = [                         # what names a running window: its app-id,
