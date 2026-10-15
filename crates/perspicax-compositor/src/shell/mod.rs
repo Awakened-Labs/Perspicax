@@ -657,6 +657,33 @@ impl Compositor {
         }
     }
 
+    /// Close the menu holding the keyboard as a click outside it does: it
+    /// and every menu it opened are dismissed, the pointer is let go, and
+    /// the keyboard goes back to the window it was opened from. What a
+    /// binding on the focused window does first, so it acts on the window
+    /// rather than on nothing: the window is not the focused one while its
+    /// menu holds the keyboard (#114). Nothing if no menu holds it.
+    ///
+    /// The window is given the keyboard back as smithay gives it after a
+    /// click outside, as it was before its menu took it. One that is no
+    /// longer on screen leaves it to the window on top.
+    pub(crate) fn dismiss_menu(&mut self) {
+        let Some(root) = self.held_menu_root() else {
+            return;
+        };
+        self.let_go();
+        if self
+            .space
+            .elements()
+            .any(|window| is_toplevel_of(window, &root))
+        {
+            self.focus_plain(root);
+        } else {
+            self.focus_top_window();
+        }
+        self.repoint();
+    }
+
     /// After a button the person pressed while a menu held the pointer
     /// (`held`, asked of [`Self::menu_held`] before it): the press may have
     /// dismissed the menu, as smithay does for a press on any other client's
