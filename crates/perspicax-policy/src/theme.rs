@@ -169,8 +169,12 @@ roles! {
     Lock = "lock",
     /// The lock screen's text.
     LockInk = "lock-ink",
-    /// The lock screen's ring, at rest.
+    /// The lock screen's ring, at rest: the brand's terracotta, whatever the
+    /// screen behind it, as the mark's own runs are.
     LockRing = "lock-ring",
+    /// The lock screen's ring as keys are typed, and while a password is
+    /// checked.
+    LockAccent = "lock-accent",
     /// A refusal: a wrong password, and a key taken back while typing one.
     Alert = "alert",
 }
@@ -283,9 +287,9 @@ pub fn follows(role: Role) -> Option<Rule> {
             ..p[Accent]
         }),
         LockInk => (&[Lock], |p| ink(p, Lock)),
-        LockRing => (&[Lock, LockInk], |p| mix(p, Lock, LockInk, 250)),
+        LockAccent => (&[Accent], |p| p[Accent]),
         Accent | TitleFocused | TitleUnfocused | SnapPreview | Panel | Menu | LabelInk
-        | LabelShadow | Lock | Alert => return None,
+        | LabelShadow | Lock | LockRing | Alert => return None,
     };
     Some(rule)
 }
@@ -327,7 +331,8 @@ impl Builtin {
     /// The two Breezes write their window, view, header and selection
     /// colours, from Plasma's colour schemes, over this theme's and let the
     /// rest follow; the desktop's labels and the snap preview are the same in
-    /// all three. The lock screen is dark in all but Breeze Light.
+    /// all three. The lock screen is dark in all but Breeze Light, and its
+    /// ring terracotta in all three.
     #[must_use]
     pub fn palette(self) -> Palette {
         use Role::*;
@@ -373,7 +378,9 @@ const fn opaque(hex: u32) -> Rgba {
 }
 
 /// The `perspicax` theme: every colour perspicax drew before there were
-/// themes, so that the default changes nothing anyone can see.
+/// themes, so that the default changes nothing anyone can see -- but the lock
+/// screen's ring, which is the brand's terracotta now that the lock screen
+/// wears the brand.
 const fn perspicax(role: Role) -> Rgba {
     use Role::*;
     match role {
@@ -399,7 +406,8 @@ const fn perspicax(role: Role) -> Rgba {
         LabelShadow => Rgba::new(0, 0, 0, 0xc0),
         Lock => opaque(0x0c2440),
         LockInk => opaque(0xffffff),
-        LockRing => opaque(0x495b70),
+        LockRing => opaque(0xc06a3c),
+        LockAccent => opaque(0x3daee9),
         Alert => opaque(0xda4453),
     }
 }
@@ -697,18 +705,51 @@ mod tests {
             lock(Builtin::BreezeLight.palette()),
             (Colour::rgb(0xcb, 0xd8, 0xdf), black)
         );
-        assert_ne!(
-            Builtin::BreezeLight.palette()[Role::LockRing],
-            Palette::default()[Role::LockRing],
-            "the ring follows the screen"
-        );
         for theme in Builtin::ALL {
+            assert_eq!(
+                theme.palette()[Role::LockRing].colour(),
+                Colour::rgb(0xc0, 0x6a, 0x3c),
+                "{theme:?}: the ring is the brand's terracotta on any screen"
+            );
             assert_eq!(
                 theme.palette()[Role::Alert].colour(),
                 Colour::rgb(0xda, 0x44, 0x53),
                 "{theme:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_locks_accent_is_the_accent_until_it_is_written_itself() {
+        let accent = Rgba::new(0xe9, 0x3d, 0x5a, 0xff);
+        let palette = Palette::default().written_over(&BTreeMap::from([(Role::Accent, accent)]));
+        assert_eq!(palette[Role::LockAccent], accent);
+        assert_eq!(
+            Palette::default()[Role::LockAccent],
+            Palette::default()[Role::Accent]
+        );
+
+        let own = Rgba::new(0x7b, 0xae, 0xcd, 0xff);
+        let palette = Palette::default().written_over(&BTreeMap::from([
+            (Role::Accent, accent),
+            (Role::LockAccent, own),
+        ]));
+        assert_eq!(palette[Role::LockAccent], own);
+        assert_eq!(
+            palette[Role::Accent],
+            accent,
+            "and the accent keeps its own"
+        );
+    }
+
+    #[test]
+    fn a_written_lock_screen_leaves_the_ring_terracotta() {
+        let palette = Palette::default().written_over(&BTreeMap::from([(
+            Role::Lock,
+            Rgba::new(0xff, 0xff, 0xff, 0xff),
+        )]));
+        assert_eq!(palette[Role::LockInk].colour(), Colour::rgb(0, 0, 0));
+        assert_eq!(palette[Role::LockRing], Palette::default()[Role::LockRing]);
     }
 
     #[test]

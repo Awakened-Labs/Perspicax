@@ -40,10 +40,10 @@ const PAINT: &[(&str, Option<Role>)] = {
         ("--ring-color", Some(LockRing)),
         ("--ring-clear-color", Some(LockRing)),
         ("--ring-caps-lock-color", Some(LockRing)),
-        ("--ring-ver-color", Some(Accent)),
+        ("--ring-ver-color", Some(LockAccent)),
         ("--ring-wrong-color", Some(Alert)),
-        ("--key-hl-color", Some(Accent)),
-        ("--caps-lock-key-hl-color", Some(Accent)),
+        ("--key-hl-color", Some(LockAccent)),
+        ("--caps-lock-key-hl-color", Some(LockAccent)),
         ("--bs-hl-color", Some(Alert)),
         ("--caps-lock-bs-hl-color", Some(Alert)),
         ("--line-color", None),
@@ -226,7 +226,7 @@ mod tests {
         let command = dress(&["swaylock"]);
         assert_eq!(command[..3], ["swaylock", "-C", "/dev/null"]);
         assert_eq!(value(&command, "--color"), Some("0c2440ff"));
-        assert_eq!(value(&command, "--ring-color"), Some("495b70ff"));
+        assert_eq!(value(&command, "--ring-color"), Some("c06a3cff"));
         assert_eq!(value(&command, "--key-hl-color"), Some("3daee9ff"));
         assert_eq!(value(&command, "--ring-wrong-color"), Some("da4453ff"));
         assert_eq!(value(&command, "--text-color"), Some("ffffffff"));
@@ -274,7 +274,11 @@ mod tests {
             ..Font::default()
         };
         let command = dressed(words(&["swaylock"]), &palette, &font);
-        assert_eq!(value(&command, "--key-hl-color"), Some("e93d5aff"));
+        assert_eq!(
+            value(&command, "--key-hl-color"),
+            Some("e93d5aff"),
+            "the lock's accent is the accent, unwritten"
+        );
         assert_eq!(value(&command, "--color"), Some("202020ff"));
         assert_eq!(value(&command, "--font"), Some("Noto Sans"));
 
@@ -285,6 +289,23 @@ mod tests {
         );
         assert_eq!(value(&light, "--color"), Some("cbd8dfff"));
         assert_eq!(value(&light, "--text-color"), Some("000000ff"));
+    }
+
+    #[test]
+    fn the_locks_own_accent_lights_the_keys_and_the_check() {
+        let palette = Palette::default().written_over(&BTreeMap::from([
+            (Role::Accent, Rgba::new(0xe9, 0x3d, 0x5a, 0xff)),
+            (Role::LockAccent, Rgba::new(0x7b, 0xae, 0xcd, 0xff)),
+        ]));
+        let command = dressed(words(&["swaylock"]), &palette, &Font::default());
+        for flag in [
+            "--key-hl-color",
+            "--caps-lock-key-hl-color",
+            "--ring-ver-color",
+        ] {
+            assert_eq!(value(&command, flag), Some("7baecdff"), "{flag}");
+        }
+        assert_eq!(value(&command, "--ring-color"), Some("c06a3cff"));
     }
 
     #[test]

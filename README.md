@@ -1208,7 +1208,7 @@ search line finds the last three. Suspend does not lock the screen first;
 Lock wears the theme. swaylock, which `lock` runs unless it names another
 program, is given `-C /dev/null`, so it reads no config file of its own, and
 then the theme as flags: the screen in `lock`, its text in `lock-ink`, its ring
-in `lock-ring`, the accent as keys are typed and `alert` for a wrong password
+in `lock-ring`, `lock-accent` as keys are typed and `alert` for a wrong password
 (see [Themes](#themes)), in `[theme] font`. Flags written in `lock` come
 after, so they win: `lock = ["swaylock", "-f", "--ring-color", "00ff00"]` rings
 it green. To have swaylock read a file of its own, name it, whole, since `~` is
@@ -1322,7 +1322,8 @@ panel = "#102030"
 `perspicax` is what was drawn before there were themes: blue titlebars, a dark
 panel, light menus. The two Breezes take their window, view, header and
 selection colours from Plasma's Breeze schemes. The lock screen is dark,
-`#0c2440`, but under `breeze-light`, which locks on `#cbd8df`.
+`#0c2440`, but under `breeze-light`, which locks on `#cbd8df`; its ring is
+terracotta under all three.
 
 The palette is a set of roles, not of widgets, so one colour written recolours
 everything that has that job. A colour is `"#rrggbb"`. Only `selected` and
@@ -1361,7 +1362,8 @@ the first colour toward the second. The last column is the `perspicax` theme.
 | `label-shadow` | the shadow that name casts, so it reads on any wallpaper | — | `#000000c0` |
 | `lock` | the lock screen, behind the ring a password is typed into | — | `#0c2440` |
 | `lock-ink` | the lock screen's text | its ink | `#ffffff` |
-| `lock-ring` | the lock screen's ring, at rest | `lock` 25% toward `lock-ink` | `#495b70` |
+| `lock-ring` | the lock screen's ring, at rest: the brand's terracotta on any screen | — | `#c06a3c` |
+| `lock-accent` | the lock screen's ring as keys are typed, and while a password is checked | `accent` | `#3daee9` |
 | `alert` | a refusal: a wrong password, and a key taken back while typing one | — | `#da4453` |
 
 `[decorations] focused` and `unfocused` are `title-focused` and
