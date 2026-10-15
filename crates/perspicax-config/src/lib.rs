@@ -23,6 +23,7 @@
 //! entries, which the shell lists in its menus and the session starts in
 //! [`autostart`](mod@autostart), by the same rules. And the [`menu`]
 //! vocabulary, which the menu file, the start menu and a pie are written in.
+//! And [`locate`]: where a path written in the file points.
 
 pub mod autostart;
 pub mod desktop;
@@ -54,7 +55,7 @@ pub use crate::shell::{
 pub use perspicax_policy::DOUBLE_CLICK_MS;
 /// The theme's types, as the shell reads them from [`Shell`].
 pub use perspicax_policy::{
-    Appearance, Builtin, ColorScheme, Contrast, Family, Font, Palette, Rgba, Role, Theme,
+    Appearance, Builtin, ColorScheme, Contrast, Family, Font, Logo, Palette, Rgba, Role, Theme,
 };
 
 /// Which cargo features this binary was built with, as far as config cares.
@@ -183,6 +184,11 @@ pub struct Config {
     pub decorations: Decorations,
     /// What everything perspicax draws looks like: the `[theme]` table.
     pub theme: Theme,
+    /// Whether a session shows the splash as it starts -- the `splash`
+    /// colour and the theme's logo, where the desktop will be -- until the
+    /// desktop is drawn over it: the `[splash]` table. On wherever there is a
+    /// seat; saying `true` in a build without one is an error.
+    pub splash: bool,
     /// Whether X11 applications get an Xwayland. Only meaningful in a build
     /// with the `xwayland` feature; saying `true` in one without it is an
     /// error.
@@ -523,6 +529,7 @@ impl Config {
             },
             decorations: Decorations::default(),
             theme: Theme::default(),
+            splash: built.seat,
             xwayland: built.xwayland,
             protocols: protocols(built),
             agent: Agent::default(),
@@ -596,6 +603,21 @@ pub fn default_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
     Some(base.join("perspicax").join("config.toml"))
+}
+
+/// Where a file `written` in the config file is: an image, a menu's icon
+/// folder. `~/` is the home folder, and a relative path is beside the config
+/// file, so a person can keep a wallpaper next to the config that names it.
+/// Read by both processes, so a path means the same thing to each.
+#[must_use]
+pub fn locate(written: &Path, config: Option<&Path>, home: Option<&Path>) -> PathBuf {
+    if let (Ok(rest), Some(home)) = (written.strip_prefix("~"), home) {
+        return home.join(rest);
+    }
+    match config.and_then(Path::parent) {
+        Some(beside) if written.is_relative() => beside.join(written),
+        _ => written.to_owned(),
+    }
 }
 
 /// Read and parse a config file. A file that does not exist is the classic
@@ -714,6 +736,7 @@ struct Raw {
     opacity: Option<RawOpacity>,
     decorations: Option<RawDecorations>,
     theme: Option<RawTheme>,
+    splash: Option<RawSplash>,
     protocols: Option<RawProtocols>,
     agent: Option<RawAgent>,
     shell: Option<RawShell>,
@@ -793,10 +816,18 @@ enum RawContrast {
     High,
 }
 
+/// The `[splash]` table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawSplash {
+    enabled: Option<bool>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct RawTheme {
     name: Option<String>,
+    logo: Option<String>,
     font: Option<String>,
     font_size: Option<u16>,
     cursor: Option<String>,
@@ -1156,6 +1187,15 @@ impl Raw {
                 });
             }
             config.xwayland = xwayland;
+        }
+        if let Some(enabled) = self.splash.and_then(|splash| splash.enabled) {
+            if enabled && !built.seat {
+                return Err(Error::NotBuilt {
+                    key: "splash.enabled",
+                    feature: "seat",
+                });
+            }
+            config.splash = enabled;
         }
 
         if let Some(focus) = self.focus {
@@ -1575,6 +1615,20 @@ fn theme(written: Option<RawTheme>, decorations: Option<&RawDecorations>) -> Res
         apps.accent = Some(accent.colour());
     }
 
+    let logo = match written.logo.as_deref() {
+        None | Some("perspicax") => Logo::Perspicax,
+        Some("none") => Logo::None,
+        Some(path) if path.trim().is_empty() => {
+            return Err(invalid(
+                "theme.logo".to_owned(),
+                "an empty path; leave it out for Perspicax's lockup, or write \"none\" for the \
+                 colour alone"
+                    .to_owned(),
+            ));
+        }
+        Some(path) => Logo::File(path.into()),
+    };
+
     Ok(Theme {
         builtin,
         palette: builtin.palette().written_over(&colours),
@@ -1582,6 +1636,7 @@ fn theme(written: Option<RawTheme>, decorations: Option<&RawDecorations>) -> Res
         cursor: written.cursor,
         cursor_size: written.cursor_size,
         apps,
+        logo,
     })
 }
 
@@ -2927,6 +2982,63 @@ mod tests {
     }
 
     #[test]
+    fn the_logo_is_perspicaxs_unless_another_or_none_is_written() {
+        let logo = |text: &str| parse(&format!("[theme]\n{text}"), SEAT).unwrap().theme.logo;
+        assert_eq!(logo(""), Logo::Perspicax);
+        assert_eq!(logo("logo = \"perspicax\""), Logo::Perspicax);
+        assert_eq!(logo("logo = \"none\""), Logo::None);
+        assert_eq!(
+            logo("logo = \"~/Pictures/logo.png\""),
+            Logo::File("~/Pictures/logo.png".into()),
+            "as written: the compositor finds it"
+        );
+    }
+
+    #[test]
+    fn the_splash_is_on_wherever_there_is_a_seat_and_can_be_turned_off() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            assert!(Config::profile(profile, SEAT).splash, "{profile:?}");
+        }
+        assert!(!parse("[splash]\nenabled = false", SEAT).unwrap().splash);
+        assert!(parse("[splash]", SEAT).unwrap().splash, "unsaid is on");
+        let error = parse("[splash]\nenabled = true", Built::default()).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::NotBuilt {
+                key: "splash.enabled",
+                feature: "seat"
+            }
+        ));
+        assert!(
+            !parse("[splash]\nenabled = false", Built::default())
+                .unwrap()
+                .splash
+        );
+        assert!(matches!(
+            parse("[splash]\ncolour = \"#000000\"", SEAT),
+            Err(Error::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn a_path_is_found_from_home_or_beside_the_config() {
+        let config = Path::new("/etc/xdg/perspicax/config.toml");
+        let home = Path::new("/home/ada");
+        assert_eq!(
+            locate(Path::new("~/Pictures/a.png"), Some(config), Some(home)),
+            Path::new("/home/ada/Pictures/a.png")
+        );
+        assert_eq!(
+            locate(Path::new("a.png"), Some(config), Some(home)),
+            Path::new("/etc/xdg/perspicax/a.png")
+        );
+        assert_eq!(
+            locate(Path::new("/srv/a.png"), Some(config), Some(home)),
+            Path::new("/srv/a.png")
+        );
+    }
+
+    #[test]
     fn a_theme_is_named_and_written_over_one_colour_at_a_time() {
         let config = parse(
             "[theme]\nname = \"breeze-dark\"\nfont = \"Noto Sans\"\nfont-size = 12\n\
@@ -3034,6 +3146,7 @@ mod tests {
             ("font-size = 40", "theme.font-size"),
             ("cursor = \"\"", "theme.cursor"),
             ("cursor-size = 4", "theme.cursor-size"),
+            ("logo = \" \"", "theme.logo"),
             (
                 "[theme.palette]\nbackground = \"#000000\"",
                 "theme.palette.background",

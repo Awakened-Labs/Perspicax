@@ -4,10 +4,7 @@
 //! the file's name where they can be, and kept as premultiplied RGBA, which
 //! is what tiny-skia draws with and a compositor blends.
 
-use std::{
-    io::Cursor,
-    path::{Path, PathBuf},
-};
+use std::{io::Cursor, path::Path};
 
 use tiny_skia::{IntSize, Pixmap};
 
@@ -31,18 +28,9 @@ pub(crate) enum LoadError {
     Size,
 }
 
-/// Where the image named `written` in the config file is. `~/` is the home
-/// folder, and a relative path is beside the config file, so a person can
-/// keep a wallpaper next to the config that names it.
-pub(crate) fn locate(written: &Path, config: Option<&Path>, home: Option<&Path>) -> PathBuf {
-    if let (Ok(rest), Some(home)) = (written.strip_prefix("~"), home) {
-        return home.join(rest);
-    }
-    match config.and_then(Path::parent) {
-        Some(beside) if written.is_relative() => beside.join(written),
-        _ => written.to_owned(),
-    }
-}
+/// Where the image named `written` in the config file is, as the compositor
+/// finds the lock screen's logo.
+pub(crate) use perspicax_config::locate;
 
 /// The start button's icon, `written` in `[shell.start-menu]`, as the icon
 /// theme looks for it: with a `/` in it, an image file, found as a wallpaper
@@ -274,24 +262,6 @@ fn premultiply(rgba: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_image_path_is_found_from_home_or_beside_the_config() {
-        let config = Path::new("/etc/xdg/perspicax/config.toml");
-        let home = Path::new("/home/ada");
-        assert_eq!(
-            locate(Path::new("~/Pictures/a.png"), Some(config), Some(home)),
-            Path::new("/home/ada/Pictures/a.png")
-        );
-        assert_eq!(
-            locate(Path::new("a.png"), Some(config), Some(home)),
-            Path::new("/etc/xdg/perspicax/a.png")
-        );
-        assert_eq!(
-            locate(Path::new("/srv/a.png"), Some(config), Some(home)),
-            Path::new("/srv/a.png")
-        );
-    }
 
     #[test]
     fn a_png_is_read_as_premultiplied_rgba() {

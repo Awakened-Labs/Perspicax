@@ -16,6 +16,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::{Index, IndexMut},
+    path::PathBuf,
 };
 
 use crate::Colour;
@@ -177,6 +178,9 @@ roles! {
     LockAccent = "lock-accent",
     /// A refusal: a wrong password, and a key taken back while typing one.
     Alert = "alert",
+    /// The splash a session shows as it starts, behind the logo, until the
+    /// desktop is drawn over it.
+    Splash = "splash",
 }
 
 impl Role {
@@ -288,6 +292,7 @@ pub fn follows(role: Role) -> Option<Rule> {
         }),
         LockInk => (&[Lock], |p| ink(p, Lock)),
         LockAccent => (&[Accent], |p| p[Accent]),
+        Splash => (&[Lock], |p| p[Lock]),
         Accent | TitleFocused | TitleUnfocused | SnapPreview | Panel | Menu | LabelInk
         | LabelShadow | Lock | LockRing | Alert => return None,
     };
@@ -409,6 +414,7 @@ const fn perspicax(role: Role) -> Rgba {
         LockRing => opaque(0xc06a3c),
         LockAccent => opaque(0x3daee9),
         Alert => opaque(0xda4453),
+        Splash => opaque(0x0c2440),
     }
 }
 
@@ -505,6 +511,21 @@ impl Builtin {
     }
 }
 
+/// What the lock screen and the splash show over their colour: the
+/// `[theme] logo` key.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Logo {
+    /// Perspicax's lockup, the mark over its name, lettered navy or white,
+    /// whichever reads on the colour behind it.
+    #[default]
+    Perspicax,
+    /// The colour alone.
+    None,
+    /// A PNG of the person's, as written: `~` and a path beside config.toml
+    /// are for whoever reads it to resolve.
+    File(PathBuf),
+}
+
 /// How perspicax draws: the `[theme]` table, decided.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Theme {
@@ -520,6 +541,8 @@ pub struct Theme {
     pub cursor_size: Option<u32>,
     /// What applications are told.
     pub apps: Appearance,
+    /// What the lock screen and the splash show over their colour.
+    pub logo: Logo,
 }
 
 impl Default for Palette {
@@ -740,6 +763,23 @@ mod tests {
             accent,
             "and the accent keeps its own"
         );
+    }
+
+    #[test]
+    fn the_splash_is_the_lock_screens_colour_until_it_is_written_itself() {
+        for theme in Builtin::ALL {
+            let palette = theme.palette();
+            assert_eq!(palette[Role::Splash], palette[Role::Lock], "{theme:?}");
+        }
+        let lock = Rgba::new(0x20, 0x20, 0x20, 0xff);
+        let palette = Palette::default().written_over(&BTreeMap::from([(Role::Lock, lock)]));
+        assert_eq!(palette[Role::Splash], lock);
+        let splash = Rgba::new(0xcb, 0xd8, 0xdf, 0xff);
+        let palette = Palette::default().written_over(&BTreeMap::from([
+            (Role::Lock, lock),
+            (Role::Splash, splash),
+        ]));
+        assert_eq!(palette[Role::Splash], splash);
     }
 
     #[test]

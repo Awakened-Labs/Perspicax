@@ -1313,6 +1313,8 @@ cursor = "breeze_cursors"      # an Xcursor theme; unset, XCURSOR_THEME's
 cursor-size = 32               # 8 to 128; unset, XCURSOR_SIZE's
 color-scheme = "dark"          # what applications are told: dark, light or
 contrast = "high"              # no-preference; normal or high
+logo = "~/Pictures/logo.png"   # on the lock screen and the splash: perspicax
+                               # (the default), a PNG's path, or none
 
 [theme.palette]                # any role below, written over the theme's own
 accent = "#e93d5a"
@@ -1365,6 +1367,15 @@ the first colour toward the second. The last column is the `perspicax` theme.
 | `lock-ring` | the lock screen's ring, at rest: the brand's terracotta on any screen | — | `#c06a3c` |
 | `lock-accent` | the lock screen's ring as keys are typed, and while a password is checked | `accent` | `#3daee9` |
 | `alert` | a refusal: a wrong password, and a key taken back while typing one | — | `#da4453` |
+| `splash` | the splash a session shows as it starts, behind the logo | `lock` | `#0c2440` |
+
+`logo` is what the lock screen and the splash show over their colour.
+`perspicax`, the default, is Perspicax's mark over its name, lettered in white
+on a dark colour and in navy on a light one, so it reads on whatever `lock` and
+`splash` are. A path names a PNG of your own, found as a wallpaper is (`~` is
+your home, and a relative path is beside the config), and shown on every colour
+as it is; one that cannot be read is said once in the log, and Perspicax's is
+shown instead until the config is saved again. `none` leaves the colour alone.
 
 `[decorations] focused` and `unfocused` are `title-focused` and
 `title-unfocused` written in their older place, and still win over any theme;
