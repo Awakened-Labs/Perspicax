@@ -132,7 +132,8 @@ cargo test --locked --workspace -- --include-ignored --test-threads=1 --nocaptur
 # keyboard, and asking for and told their states as Wine does. The run above
 # builds without features, so it compiles them out; they are asked for by name
 # here rather than by turning `xwayland` on for the whole suite, which would
-# change what every other test was built against.
+# change what every other test was built against. Without `capture`, as the
+# run above is; the capture pass below runs them again with it.
 #
 # Checked for first, because a missing Xwayland surfaces inside the tests as
 # "Xwayland never became ready", which reads like a compositor bug.
@@ -150,3 +151,12 @@ cargo test --locked -p perspicax-compositor --features xwayland --test xwayland 
 # pictures.
 cargo test --locked -p perspicax-compositor --features capture \
     -- --ignored --test-threads=1 --nocapture
+
+# The X11 tests under `capture` too, asked for by name as above. Two of them
+# exist only with it, and without it libtest just counts two tests fewer:
+# a stand-in person's press finds what is under it by the clients' buffers,
+# which headless keeps only with `capture`. They are an X game's pointer
+# confine held through Xwayland (#108) and a window whose size hints are
+# negative (#106).
+cargo test --locked -p perspicax-compositor --features xwayland,capture \
+    --test xwayland -- --ignored --nocapture
