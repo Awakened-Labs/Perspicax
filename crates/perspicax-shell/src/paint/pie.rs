@@ -17,7 +17,7 @@ use super::{
     text::Text,
 };
 use crate::{
-    layout::{Measure, Rect, pie::ZOOM},
+    layout::{Measure, Rect},
     model::pie::Does,
     pie::View,
 };
@@ -45,7 +45,7 @@ pub(crate) fn paint(
     let ring = &view.ring;
     // Every icon is read once, at the size it is drawn at its biggest, and
     // drawn smaller from that.
-    let biggest = (ring.icon * (1.0 + ZOOM)).ceil() as u32;
+    let biggest = ring.biggest().ceil() as u32;
     let s = f64::from(scale);
     let mut order: Vec<_> = (0..view.slots.len())
         .map(|index| (index, ring.place(index, view.spin, view.pointer)))
@@ -160,7 +160,10 @@ mod tests {
     use tiny_skia::Pixmap;
 
     use super::*;
-    use crate::{layout::pie::Ring, model::pie::Slot};
+    use crate::{
+        layout::pie::{Ring, Shape},
+        model::pie::Slot,
+    };
 
     /// A red square icon, written as a PNG where the test can find it,
     /// named for `test` so that tests running at once keep apart.
@@ -195,7 +198,15 @@ mod tests {
         View {
             output: "eDP-1",
             label: "launchers",
-            ring: Ring::new(slots.len(), 256, (128, 128), Rect::new(0, 0, 256, 256)),
+            ring: Ring::new(
+                slots.len(),
+                Shape {
+                    size: 256,
+                    ..Shape::default()
+                },
+                (128, 128),
+                Rect::new(0, 0, 256, 256),
+            ),
             slots,
             spin: 0,
             pointer,

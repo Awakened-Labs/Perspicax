@@ -42,6 +42,7 @@ use super::{
 };
 use crate::{
     a11y::{self, adapter::Served},
+    layout::pie::Shape,
     model::{
         fs::Disk,
         image,
@@ -120,7 +121,7 @@ impl Pies {
             .is_some_and(|shown| shown.layer.wl_surface() == surface)
     }
 
-    /// How big the pies are across, and the slots of the one named `name`,
+    /// How the pies are shaped, and the slots of the one named `name`,
     /// if the config has it, with the running `windows`, each `(serial,
     /// app-id, title)`.
     pub(super) fn built(
@@ -128,7 +129,7 @@ impl Pies {
         name: &str,
         installed: &mut Installed,
         windows: &[(u64, String, String)],
-    ) -> Option<(u32, Vec<Slot>)> {
+    ) -> Option<(Shape, Vec<Slot>)> {
         let pie = self.pie.as_ref()?;
         let items = pie.menus.get(name)?;
         let running = seen(
@@ -153,7 +154,7 @@ impl Pies {
             locale: &installed.places().locale,
             running: &running,
         };
-        Some((pie.size, sources.pie(items)))
+        Some((Shape::from(pie), sources.pie(items)))
     }
 
     /// The wheel turned `notches`, up negative, in fractions of one: the

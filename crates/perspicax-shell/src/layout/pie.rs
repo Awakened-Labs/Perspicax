@@ -1,6 +1,6 @@
 //! Where a pie's icons go, which one the pointer is pointing at, and how
 //! much each grows as it points at it: worked out from how many there are,
-//! the pie's size and where it opened, with no drawing.
+//! the pie's [`Shape`] and where it opened, with no drawing.
 //!
 //! The icons sit round a ring, the first at the top and the rest clockwise,
 //! spun round by whole places. The pie is a square `size` across, centred
@@ -10,15 +10,17 @@
 //! Pointing is by angle alone, as Fitts would have it: past a small dead
 //! middle, the icon pointed at is the one in that direction however far off
 //! the pointer is, out to the screen's edge. An icon grows the nearer the
-//! pointer's direction is to its own, so the one pointed at is biggest and
-//! its neighbours a little bigger than the rest.
+//! pointer's direction is to its own: `grow` times its size straight on,
+//! less in a straight line the further round it is, and not at all from
+//! `falloff` degrees round on. The icons stay where they are as they grow,
+//! so a grown one may cover its neighbours.
 
 use std::f64::consts::{PI, TAU};
 
+use perspicax_config::pie::{GROW, GROW_FALLOFF, Pie, SIZE};
+
 use super::Rect;
 
-/// How much bigger than at rest an icon pointed straight at is drawn.
-pub(crate) const ZOOM: f64 = 0.5;
 /// Room left between neighbouring icons at rest, as a share of an icon.
 const GAP: f64 = 0.15;
 /// The pie's margin, as a share of its size.
@@ -30,8 +32,39 @@ const SMALLEST: f64 = 16.0;
 /// The dead middle, as a share of the ring's radius: nothing is pointed at
 /// from inside it.
 const DEAD: f64 = 0.4;
-/// How far round the ring an icon's growing reaches, in places.
-const REACH: f64 = 1.5;
+
+/// How a pie is drawn, as `[shell.pie]` says.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Shape {
+    /// How far across, in logical pixels.
+    pub(crate) size: u32,
+    /// How many times its size at rest the icon pointed straight at is
+    /// drawn.
+    pub(crate) grow: f64,
+    /// How far round from the pointer's direction, in degrees, an icon
+    /// still grows.
+    pub(crate) falloff: u32,
+}
+
+impl Default for Shape {
+    fn default() -> Self {
+        Self {
+            size: SIZE,
+            grow: GROW,
+            falloff: GROW_FALLOFF,
+        }
+    }
+}
+
+impl From<&Pie> for Shape {
+    fn from(pie: &Pie) -> Self {
+        Self {
+            size: pie.size,
+            grow: pie.grow,
+            falloff: pie.grow_falloff,
+        }
+    }
+}
 
 /// A pie of some icons, laid out.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,12 +79,22 @@ pub(crate) struct Ring {
     pub(crate) icon: f64,
     /// How many icons.
     pub(crate) places: usize,
+    /// How many times its size at rest the icon pointed straight at is.
+    grow: f64,
+    /// How far round from the pointer's direction an icon grows, in
+    /// radians.
+    falloff: f64,
 }
 
 impl Ring {
-    /// `places` icons round a pie `size` across, opened `at` a point, kept
+    /// `places` icons round a pie of `shape`, opened `at` a point, kept
     /// inside `area`.
-    pub(crate) fn new(places: usize, size: u32, at: (i32, i32), area: Rect) -> Self {
+    pub(crate) fn new(places: usize, shape: Shape, at: (i32, i32), area: Rect) -> Self {
+        let Shape {
+            size,
+            grow,
+            falloff,
+        } = shape;
         let side = f64::from(size)
             .min(f64::from(area.w))
             .min(f64::from(area.h))
@@ -67,15 +110,22 @@ impl Ring {
             CAP * side
         } else {
             let gap = (PI / places as f64).sin();
-            (2.0 * gap * outer / (1.0 + GAP + gap * (1.0 + ZOOM))).clamp(SMALLEST, CAP * side)
+            (2.0 * gap * outer / (1.0 + GAP + gap * grow)).clamp(SMALLEST, CAP * side)
         };
         Self {
             centre,
             side,
-            radius: (outer - icon * (1.0 + ZOOM) / 2.0).max(0.0),
+            radius: (outer - icon * grow / 2.0).max(0.0),
             icon,
             places,
+            grow,
+            falloff: f64::from(falloff.max(1)).to_radians(),
         }
+    }
+
+    /// How big an icon is at its biggest, pointed straight at.
+    pub(crate) fn biggest(&self) -> f64 {
+        self.icon * self.grow
     }
 
     /// The square the pie is drawn in, in whole pixels, rounded out.
@@ -122,15 +172,16 @@ impl Ring {
         Some((place - i64::from(spin)).rem_euclid(self.places as i64) as usize)
     }
 
-    /// How much bigger than at rest icon `item` is drawn, with the pointer
-    /// at `pointer`.
+    /// How many times its size at rest icon `item` is drawn, with the
+    /// pointer at `pointer`: `grow` pointed straight at, and less in a
+    /// straight line the further round from the pointer's direction it is,
+    /// to none at `falloff`.
     pub(crate) fn zoom(&self, item: usize, spin: i32, pointer: Option<(f64, f64)>) -> f64 {
         let Some(towards) = pointer.and_then(|pointer| self.pointing(pointer)) else {
             return 1.0;
         };
         let apart = (towards - self.angle(self.place_of(item, spin)) + PI).rem_euclid(TAU) - PI;
-        let reach = REACH * TAU / self.places as f64;
-        1.0 + ZOOM * (1.0 - apart.abs() / reach).clamp(0.0, 1.0)
+        1.0 + (self.grow - 1.0) * (1.0 - apart.abs() / self.falloff).clamp(0.0, 1.0)
     }
 
     /// Where icon `item` is drawn, spun round `spin` places, with the
@@ -159,7 +210,17 @@ mod tests {
     const SCREEN: Rect = Rect::new(0, 0, 1920, 1048);
 
     fn ring(places: usize) -> Ring {
-        Ring::new(places, 512, (960, 500), SCREEN)
+        shaped(places, Shape::default())
+    }
+
+    fn shaped(places: usize, shape: Shape) -> Ring {
+        Ring::new(places, shape, (960, 500), SCREEN)
+    }
+
+    /// Out from the middle, `degrees` clockwise of straight up.
+    fn towards(degrees: f64) -> Option<(f64, f64)> {
+        let angle = (-90.0 + degrees).to_radians();
+        Some((960.0 + 400.0 * angle.cos(), 500.0 + 400.0 * angle.sin()))
     }
 
     #[test]
@@ -167,15 +228,22 @@ mod tests {
         let sizes: Vec<_> = [1, 2, 6, 12, 20]
             .map(|places| ring(places).icon.round() as i32)
             .to_vec();
-        assert_eq!(sizes, [102, 102, 102, 83, 56]);
-        for places in [1, 2, 6, 12, 20, 60] {
-            let ring = ring(places);
-            let biggest = ring.icon * (1.0 + ZOOM);
-            assert!(
-                ring.radius + biggest / 2.0 <= ring.side / 2.0 + 1e-9,
-                "{places} icons stick out"
-            );
-            assert!(ring.icon >= SMALLEST);
+        assert_eq!(sizes, [102, 102, 102, 76, 53]);
+        for grow in [1.0, 2.0, 3.0] {
+            for places in [1, 2, 6, 12, 20, 60] {
+                let ring = shaped(
+                    places,
+                    Shape {
+                        grow,
+                        ..Shape::default()
+                    },
+                );
+                assert!(
+                    ring.radius + ring.biggest() / 2.0 <= ring.side / 2.0 + 1e-9,
+                    "{places} icons grown {grow} times stick out"
+                );
+                assert!(ring.icon >= SMALLEST);
+            }
         }
         // Neighbours at rest do not touch.
         let twelve = ring(12);
@@ -239,27 +307,62 @@ mod tests {
         assert!((none.zoom(0, 0, Some((960.0, 0.0))) - 1.0).abs() < f64::EPSILON);
     }
 
+    /// How many times its size each of `ring`'s icons is, pointed `degrees`
+    /// clockwise of straight up, to a thousandth.
+    fn zooms(ring: &Ring, degrees: f64) -> Vec<f64> {
+        (0..ring.places)
+            .map(|item| (ring.zoom(item, 0, towards(degrees)) * 1000.0).round() / 1000.0)
+            .collect()
+    }
+
     #[test]
-    fn the_icon_pointed_at_grows_most_and_less_the_further_round() {
+    fn the_icon_pointed_at_grows_most_and_less_in_a_line_the_further_round() {
+        // Twelve, 30 degrees apart, growing twice their size and to none
+        // 90 degrees round.
         let twelve = ring(12);
-        let up = Some((960.0, 0.0));
-        let zooms: Vec<f64> = (0..12).map(|item| twelve.zoom(item, 0, up)).collect();
-        assert!((zooms[0] - (1.0 + ZOOM)).abs() < 1e-9);
-        assert!(zooms[1] < zooms[0] && zooms[1] > 1.0);
-        assert!((zooms[1] - zooms[11]).abs() < 1e-9, "the same either side");
-        assert!((zooms[2] - 1.0).abs() < 1e-9 && (zooms[6] - 1.0).abs() < 1e-9);
+        assert_eq!(
+            zooms(&twelve, 0.0),
+            [
+                2.0, 1.667, 1.333, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.333, 1.667
+            ]
+        );
+        // Pointed between two, both grow alike, by how far round each is.
+        let between = zooms(&twelve, 15.0);
+        assert_eq!(between[..3], [1.833, 1.833, 1.5]);
+        assert_eq!(between[11], 1.5);
         // From the middle, nothing grows.
         assert!((twelve.zoom(0, 0, Some((960.0, 500.0))) - 1.0).abs() < 1e-9);
         assert!((twelve.zoom(0, 0, None) - 1.0).abs() < 1e-9);
     }
 
     #[test]
+    fn how_much_and_how_far_round_the_icons_grow_is_the_shapes() {
+        let grown = |grow, falloff| {
+            let ring = shaped(
+                12,
+                Shape {
+                    grow,
+                    falloff,
+                    ..Shape::default()
+                },
+            );
+            zooms(&ring, 0.0)[..4].to_vec()
+        };
+        assert_eq!(grown(3.0, 45), [3.0, 1.667, 1.0, 1.0]);
+        assert_eq!(grown(2.0, 180), [2.0, 1.833, 1.667, 1.5]);
+        // Falling off inside a place, only the icon pointed at grows.
+        assert_eq!(grown(2.0, 20), [2.0, 1.0, 1.0, 1.0]);
+        // Not growing at all.
+        assert_eq!(grown(1.0, 90), [1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
     fn a_pie_opened_near_an_edge_is_kept_inside_its_room() {
-        let corner = Ring::new(6, 512, (5, 1040), SCREEN);
+        let corner = Ring::new(6, Shape::default(), (5, 1040), SCREEN);
         assert_eq!(corner.centre, (256.0, 1048.0 - 256.0));
         assert_eq!(corner.square(), Rect::new(0, 536, 512, 512));
         // Room smaller than the pie: the pie shrinks to it.
-        let small = Ring::new(6, 512, (100, 100), Rect::new(0, 32, 400, 300));
+        let small = Ring::new(6, Shape::default(), (100, 100), Rect::new(0, 32, 400, 300));
         assert_eq!(small.side, 300.0);
         assert_eq!(small.square(), Rect::new(0, 32, 300, 300));
     }

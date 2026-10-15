@@ -20,7 +20,10 @@
 //! the keyboard closes it.
 
 use crate::{
-    layout::{Rect, pie::Ring},
+    layout::{
+        Rect,
+        pie::{Ring, Shape},
+    },
     model::{
         Button,
         apps::Run,
@@ -47,7 +50,7 @@ pub(crate) enum Event {
         name: String,
         output: String,
         area: Rect,
-        size: u32,
+        shape: Shape,
         at: (i32, i32),
         slots: Vec<Slot>,
         /// The window that had the keyboard when it was asked for: the
@@ -93,7 +96,7 @@ struct Open {
     name: String,
     output: String,
     area: Rect,
-    size: u32,
+    shape: Shape,
     /// Where it opened.
     at: (i32, i32),
     /// The first ring, then each submenu opened from the one before.
@@ -153,7 +156,7 @@ impl State {
             name,
             output,
             area,
-            size,
+            shape,
             at,
             slots,
             active,
@@ -172,7 +175,7 @@ impl State {
                 name,
                 output,
                 area,
-                size,
+                shape,
                 at,
                 pointer: None,
                 selected: None,
@@ -241,7 +244,7 @@ enum Then {
 impl Open {
     fn ring(&self) -> Ring {
         let places = self.levels.last().map_or(0, |level| level.slots.len());
-        Ring::new(places, self.size, self.at, self.area)
+        Ring::new(places, self.shape, self.at, self.area)
     }
 
     /// The pointer is at `at` now, or off the pie. The icons grow as it
@@ -387,7 +390,7 @@ mod tests {
             name: name.to_owned(),
             output: "eDP-1".to_owned(),
             area: SCREEN,
-            size: 512,
+            shape: Shape::default(),
             at: MIDDLE,
             slots: vec![
                 launcher("terminal"),
@@ -408,7 +411,7 @@ mod tests {
             name: "launchers".to_owned(),
             output: "eDP-1".to_owned(),
             area: SCREEN,
-            size: 512,
+            shape: Shape::default(),
             at: MIDDLE,
             slots: vec![
                 Slot {

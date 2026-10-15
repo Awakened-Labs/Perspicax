@@ -1214,7 +1214,10 @@ mod pies {
     mod tests {
         use super::*;
         use crate::{
-            layout::{Rect as Area, pie::Ring},
+            layout::{
+                Rect as Area,
+                pie::{Ring, Shape},
+            },
             model::{
                 apps::Run,
                 pie::{Does, Slot},
@@ -1254,7 +1257,7 @@ mod pies {
             let view = View {
                 output: "eDP-1",
                 label: "launchers",
-                ring: Ring::new(3, 512, (960, 500), Area::new(0, 0, 1920, 1048)),
+                ring: Ring::new(3, Shape::default(), (960, 500), Area::new(0, 0, 1920, 1048)),
                 slots: &slots,
                 spin: 0,
                 pointer: Some((960.0, 2.0)),
