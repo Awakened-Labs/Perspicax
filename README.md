@@ -363,12 +363,20 @@ freezes the whole application for 25 seconds, and the answer then has no
 geometry in it. A client frozen while a person moves the pointer over it
 stops reading what the compositor sends, and is disconnected once a megabyte
 waits for it: half a minute or more of an ordinary mouse moving. So perspicax
-stops asking where controls are at the first call left unanswered. If the
-application had just answered the rest of the read in full, that control and
-everything beneath it are never asked again while the application runs, and
-are refused as `unplaced`. A Flutter application is frozen once, at its first
-read, rather than at every change it makes. One that was already silent,
-busy with something else, is asked again at its next read.
+never asks. Flutter's controls hang beneath a plug that its own process
+embeds in a socket, and the application says three things at once that mark
+it: the socket has no place, the plug is on the socket's own bus, and the
+plug has no parent of its own. perspicax knows the plug by those, and asks
+neither it nor anything beneath it where it is. Its controls are refused as
+`unplaced`, and a Flutter application is never frozen by being read.
+
+Any other control left unanswered when asked where it is ends the asking for
+that read. If the application had just answered the rest of the read in full,
+that control and everything beneath it are never asked again while the
+application runs, and are refused as `unplaced`: an application that asking
+freezes some other way is frozen once, at its first read, rather than at every
+change it makes. One that was already silent, busy with something else, is
+asked again at its next read.
 
 A control its application has changed since it was read is refused as
 `stale` until it is read again, and perspicax reads it again itself, at once.
