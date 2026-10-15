@@ -33,7 +33,7 @@
 //! One GPU: the primary. A second card's connectors are ignored, and said so
 //! in the log.
 
-use std::{path::PathBuf, sync::Once};
+use std::{path::PathBuf, sync::Once, time::Instant};
 
 use smithay::{
     backend::{
@@ -188,6 +188,10 @@ pub(crate) struct Session {
     /// Where art decoded on a thread is sent, for the backdrop: a logo of
     /// the person's, read each time the config is. See [`crate::backdrop`].
     art: Sender<Arrived>,
+    /// When the DRM reset turned every monitor dark. Taken when the first
+    /// frame is queued, to log how long a person logging in looked at a dark
+    /// screen.
+    reset: Option<Instant>,
     /// The last press on a titlebar, by window, time and place: the first
     /// half of a double-click.
     pub(super) title_press: Option<(Option<perspicax_node::SurfaceId>, perspicax_policy::Press)>,
@@ -252,6 +256,10 @@ impl Session {
         // without the compositor ever waiting on it.
         let (art, arriving) = channel::channel();
         backdrop::decode_builtin(art.clone());
+        // And the fonts, found meanwhile: the scan is slow, and the monitors
+        // stay dark from the reset below until the first frame. Only a
+        // title waits for the fonts.
+        let titles = titles::Titles::new();
 
         // First, before the seat is taken: a config that cannot be used is
         // refused while the person is still looking at a text console that
@@ -292,6 +300,7 @@ impl Session {
         // else's CRTC configuration.
         let (drm, drm_events) = DrmDevice::new(fd.clone(), true)
             .map_err(|error| Error::Seat(format!("could not take DRM master: {error}")))?;
+        let reset = Some(Instant::now());
         let gbm = GbmDevice::new(fd)
             .map_err(|error| Error::Seat(format!("could not create a GBM device: {error}")))?;
 
@@ -382,8 +391,9 @@ impl Session {
             children: Vec::new(),
             shell: supervise::Supervisor::new(),
             cursor,
-            titles: titles::Titles::new(),
+            titles,
             art,
+            reset,
             title_press: None,
             button_press: None,
             preview,
@@ -896,6 +906,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         preview,
         titles,
         settings,
+        reset,
         ..
     } = &mut **session;
     let Some(head) = heads.iter_mut().find(|head| head.crtc == crtc) else {
@@ -988,7 +999,16 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     );
     match head.drm.render_frame(renderer, &elements, ground, PLANES) {
         Ok(frame) if !frame.is_empty => match head.drm.queue_frame(()) {
-            Ok(()) => head.queued = true,
+            Ok(()) => {
+                head.queued = true;
+                if let Some(since) = reset.take() {
+                    tracing::info!(
+                        output = head.output.name(),
+                        dark = ?since.elapsed(),
+                        "the first frame is queued"
+                    );
+                }
+            }
             Err(error) => tracing::warn!(output = head.output.name(), %error, "frame not queued"),
         },
         Ok(_) => {}

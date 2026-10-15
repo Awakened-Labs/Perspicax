@@ -5,8 +5,11 @@
 //! font has no glyph for a character, falls back across the system's fonts,
 //! so a title in Japanese or ending in an emoji is written rather than boxed.
 //! Finding the fonts is a scan of the system's font directories, done once
-//! when the seat starts. It is the one slow thing here, and headless never
-//! does it, because headless draws nothing.
+//! when the seat starts. It is the one slow thing here, so it runs on a
+//! thread of its own while the seat comes up: the monitors are dark until the
+//! first frame, and the first frame needs no fonts. The first title written
+//! waits for the scan, if it is still going. Headless never does it, because
+//! headless draws nothing.
 //!
 //! The buttons are drawn as shapes rather than as characters from a font:
 //! a font that lacks a ballot X would leave a window that cannot be closed
@@ -17,9 +20,11 @@
 //! output it shows on. Everything else is a cached buffer, and its unchanged
 //! id is what lets the damage tracker leave the titlebar alone.
 
+use std::thread::JoinHandle;
+
 use cosmic_text::{
     Align, Attrs, Buffer, Color, Ellipsize, EllipsizeHeightLimit, Family, FontSystem, Metrics,
-    Shaping, SwashCache, Wrap,
+    Shaping, SwashCache, Wrap, fontdb,
 };
 use perspicax_policy::{FrameButton, Rect, buttons_in, tab_rects};
 use smithay::{
@@ -40,14 +45,15 @@ const BEHIND: u8 = 150;
 
 /// The fonts, and the glyphs already rasterised from them.
 pub(super) struct Titles {
-    fonts: FontSystem,
+    fonts: Fonts,
     glyphs: SwashCache,
 }
 
 impl Titles {
+    /// Start finding the system's fonts, and return without waiting for them.
     pub(super) fn new() -> Self {
         Self {
-            fonts: FontSystem::new(),
+            fonts: Fonts::find(),
             glyphs: SwashCache::new(),
         }
     }
@@ -171,8 +177,14 @@ impl Titles {
         if room <= 0 {
             return;
         }
+        let fonts = self.fonts.found();
+        // With no fonts at all cosmic-text has nothing to shape with, and
+        // panics rather than say so.
+        if fonts.db().is_empty() {
+            return;
+        }
         let line = place.h as f32;
-        let mut text = Buffer::new(&mut self.fonts, Metrics::new(line * TEXT_SHARE, line));
+        let mut text = Buffer::new(fonts, Metrics::new(line * TEXT_SHARE, line));
         text.set_wrap(Wrap::None);
         text.set_ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)));
         text.set_size(Some(room as f32), Some(line));
@@ -184,20 +196,65 @@ impl Titles {
         );
         let (left, right) = (place.x + padding, place.x + padding + room);
         let bottom = (place.y + place.h).min(pixels.len() as i32 / 4 / width.max(1));
-        text.draw(
-            &mut self.fonts,
-            &mut self.glyphs,
-            ink,
-            |x, y, w, h, colour| {
-                for row in (place.y + y).max(place.y)..(place.y + y + h as i32).min(bottom) {
-                    for column in (left + x).max(left)..(left + x + w as i32).min(right) {
-                        let at = ((row * width + column) * 4) as usize;
-                        over(&mut pixels[at..at + 4], colour);
-                    }
+        text.draw(fonts, &mut self.glyphs, ink, |x, y, w, h, colour| {
+            for row in (place.y + y).max(place.y)..(place.y + y + h as i32).min(bottom) {
+                for column in (left + x).max(left)..(left + x + w as i32).min(right) {
+                    let at = ((row * width + column) * 4) as usize;
+                    over(&mut pixels[at..at + 4], colour);
                 }
-            },
-        );
+            }
+        });
     }
+}
+
+/// The system's fonts, found on a thread of their own and waited for only
+/// when a title is first written.
+struct Fonts {
+    /// The scan, until it is waited for.
+    finding: Option<JoinHandle<FontSystem>>,
+    /// What it found: none until then, and none for good if it panicked.
+    found: FontSystem,
+}
+
+impl Fonts {
+    /// Start the scan. Where no thread can be had, it is done here and now.
+    fn find() -> Self {
+        match std::thread::Builder::new()
+            .name("perspicax-fonts".to_owned())
+            .spawn(FontSystem::new)
+        {
+            Ok(finding) => Self {
+                finding: Some(finding),
+                found: none(),
+            },
+            Err(error) => {
+                tracing::warn!(%error, "could not start a thread to find the fonts; finding them now");
+                Self {
+                    finding: None,
+                    found: FontSystem::new(),
+                }
+            }
+        }
+    }
+
+    /// The fonts, once the scan is done, waiting for it if need be. A scan
+    /// that panicked leaves none: titles are written without their text, and
+    /// the buttons, which need no font, are still drawn.
+    fn found(&mut self) -> &mut FontSystem {
+        if let Some(finding) = self.finding.take() {
+            match finding.join() {
+                Ok(fonts) => self.found = fonts,
+                Err(_) => tracing::error!("finding the fonts failed; titles go without their text"),
+            }
+        }
+        &mut self.found
+    }
+}
+
+/// No fonts at all. The locale only chooses among fallback fonts, and there
+/// are none to choose among.
+fn none() -> FontSystem {
+    FontSystem::new_with_locale_and_db(String::from("en-US"), fontdb::Database::new())
 }
 
 /// The theme's family as cosmic-text names it. A named family missing from
@@ -289,7 +346,7 @@ mod tests {
     #[test]
     fn a_title_is_written_inside_its_padding_and_cut_short_when_long() {
         let mut titles = Titles::new();
-        if titles.fonts.db().is_empty() {
+        if titles.fonts.found().db().is_empty() {
             return;
         }
         let key = |text: &str| TitleKey {
@@ -327,6 +384,50 @@ mod tests {
         assert!(
             close.clone().any(|column| column_inked(&long, column)),
             "and the close button is drawn in the corner"
+        );
+    }
+
+    #[test]
+    fn the_fonts_used_are_the_ones_the_thread_found_waited_for_once() {
+        let mut fonts = Fonts {
+            finding: Some(std::thread::spawn(|| {
+                FontSystem::new_with_locale_and_db(String::from("la"), fontdb::Database::new())
+            })),
+            found: none(),
+        };
+        assert_eq!(fonts.found().locale(), "la", "the thread's, not none");
+        assert!(fonts.finding.is_none(), "waited for once");
+    }
+
+    /// A scan that panicked leaves no fonts, as a machine with none has none.
+    #[test]
+    fn with_no_fonts_a_title_is_its_buttons_alone() {
+        let mut titles = Titles {
+            fonts: Fonts {
+                finding: Some(std::thread::spawn(|| {
+                    panic!("a scan that falls over, on purpose")
+                })),
+                found: none(),
+            },
+            glyphs: SwashCache::new(),
+        };
+        let key = TitleKey {
+            labels: vec!["Terminal — foot".to_owned()],
+            front: 0,
+            size: (200, 24),
+            ink: perspicax_policy::Colour::rgb(0xff, 0xff, 0xff),
+            family: perspicax_policy::Family::SansSerif,
+            scale: 1,
+        };
+        let (pixels, (width, height)) = titles.pixels(&key);
+        let inked = |column: i32| {
+            (0..height).any(|row| pixels[((row * width + column) * 4 + 3) as usize] > 0)
+        };
+        let buttons = 3 * height;
+        assert!((0..width - buttons).all(|column| !inked(column)), "no text");
+        assert!(
+            ((width - height)..width).any(inked),
+            "and the close button, which needs no font"
         );
     }
 
