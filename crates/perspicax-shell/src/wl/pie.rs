@@ -18,9 +18,14 @@
 //! It is drawn again on every move of the pointer, as its icons grow, but
 //! no faster than the monitor shows it: a picture waits for the compositor
 //! to say it showed the one before, and only the last of what changed
-//! meanwhile is drawn.
+//! meanwhile is drawn. A spun ring glides by the same: each time the
+//! compositor says it showed a picture, the ring is told how long ago that
+//! one was drawn and steps on, and is drawn again until it is still.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use accesskit::{Action, ActionHandler, ActionRequest};
 use perspicax_config::{Shell, pie::Pie};
@@ -85,6 +90,8 @@ struct Shown {
     waiting: bool,
     /// Whether what is shown is older than what the pie is.
     stale: bool,
+    /// When the last picture was drawn.
+    drawn: Option<Instant>,
 }
 
 impl Pies {
@@ -236,6 +243,7 @@ impl Pies {
                 frames: Frames::default(),
                 waiting: false,
                 stale: false,
+                drawn: None,
             });
         }
         self.draw(canvas, kit);
@@ -274,14 +282,18 @@ impl Pies {
         tracing::debug!(took = ?started.elapsed(), "the pie was drawn");
         shown.waiting = shown_now;
         shown.stale = !shown_now;
+        if shown_now {
+            shown.drawn = Some(started);
+        }
         shown
             .a11y
             .show(a11y::pie(&shown.namespace, Some(size), Some(&view)));
         watch::slow("drawing the pie", started.elapsed());
     }
 
-    /// The compositor showed the last picture on `surface`: draw what
-    /// changed since, if anything did.
+    /// The compositor showed the last picture on `surface`: a gliding ring
+    /// steps on by how long ago that was drawn, and what changed since is
+    /// drawn, if anything did.
     pub(super) fn frame(
         &mut self,
         canvas: &mut Canvas,
@@ -296,6 +308,14 @@ impl Pies {
             return;
         };
         shown.waiting = false;
+        let since = shown.drawn.map(|drawn| drawn.elapsed()).unwrap_or_default();
+        if self
+            .state
+            .update(Event::Frame(since))
+            .contains(&Effect::Redraw)
+        {
+            shown.stale = true;
+        }
         if shown.stale {
             self.draw(canvas, kit);
         }

@@ -48,7 +48,7 @@ pub(crate) fn paint(
     let biggest = ring.biggest().ceil() as u32;
     let s = f64::from(scale);
     let mut order: Vec<_> = (0..view.slots.len())
-        .map(|index| (index, ring.place(index, view.spin, view.pointer)))
+        .map(|index| (index, ring.place(index, view.turn, view.pointer)))
         .collect();
     // The biggest last, so the icon pointed at is over its neighbours.
     order.sort_by(|(_, (_, a)), (_, (_, b))| a.total_cmp(b));
@@ -209,6 +209,7 @@ mod tests {
             ),
             slots,
             spin: 0,
+            turn: 0.0,
             pointer,
             picked,
         }
@@ -246,7 +247,7 @@ mod tests {
         let slots = slots(&icon);
         let at_rest = drawn(&view(&slots, None, None));
         let ring = view(&slots, None, None).ring;
-        let ((x, y), _) = ring.place(0, 0, None);
+        let ((x, y), _) = ring.place(0, 0.0, None);
         assert_eq!(pixel(&at_rest, x as u32, y as u32), [0xff, 0, 0, 0xff]);
         assert_eq!(
             pixel(&at_rest, 128, 128),
@@ -304,7 +305,7 @@ mod tests {
         let ring = view(&slots, None, None).ring;
         let accent = colour(&Palette::default(), Role::Accent);
         let dotted = |item: usize| {
-            let ((x, y), side) = ring.place(item, 0, None);
+            let ((x, y), side) = ring.place(item, 0.0, None);
             let radius = (side as f32 * DOT).max(1.5);
             let row = (y + side / 2.0) as f32 - 2.0 * radius;
             (0..picture.width())

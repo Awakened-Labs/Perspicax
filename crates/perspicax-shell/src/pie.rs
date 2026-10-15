@@ -18,11 +18,16 @@
 //! pie a place a notch. Escape closes it, Enter is the left button, the
 //! arrows up and down spin it, and Backspace is the right button. Losing
 //! the keyboard closes it.
+//!
+//! A spin picks at once, but the ring is drawn gliding round to it, a step
+//! each frame the monitor shows ([`Event::Frame`]), until it is there.
+
+use std::time::Duration;
 
 use crate::{
     layout::{
         Rect,
-        pie::{Ring, Shape},
+        pie::{Glide, Ring, Shape},
     },
     model::{
         Button,
@@ -72,6 +77,9 @@ pub(crate) enum Event {
     Choose(usize),
     /// An assistive technology moved to it.
     Select(usize),
+    /// The monitor showed the last picture of the pie, this long after it
+    /// was drawn.
+    Frame(Duration),
 }
 
 /// What to do about it.
@@ -117,6 +125,19 @@ struct Level {
     label: String,
     slots: Vec<Slot>,
     spin: i32,
+    /// Where it is drawn, on its way round to `spin`.
+    glide: Glide,
+}
+
+impl Level {
+    fn new(label: String, slots: Vec<Slot>) -> Self {
+        Self {
+            label,
+            slots,
+            spin: 0,
+            glide: Glide::default(),
+        }
+    }
 }
 
 /// What an open pie shows.
@@ -127,7 +148,10 @@ pub(crate) struct View<'a> {
     pub(crate) label: &'a str,
     pub(crate) ring: Ring,
     pub(crate) slots: &'a [Slot],
+    /// How many places round it is spun: what is pointed at goes by it.
     pub(crate) spin: i32,
+    /// How many places round it is drawn, gliding to `spin`.
+    pub(crate) turn: f64,
     pub(crate) pointer: Option<(f64, f64)>,
     /// The slot pointed at.
     pub(crate) picked: Option<usize>,
@@ -145,6 +169,7 @@ impl State {
             ring,
             slots: &level.slots,
             spin: level.spin,
+            turn: level.glide.turn,
             pointer: open.pointer,
             picked: open.picked(),
         })
@@ -167,11 +192,7 @@ impl State {
                 .as_ref()
                 .is_some_and(|open| open.name == name && open.output == output);
             self.open = (!same).then(|| Open {
-                levels: vec![Level {
-                    label: name.clone(),
-                    slots,
-                    spin: 0,
-                }],
+                levels: vec![Level::new(name.clone(), slots)],
                 name,
                 output,
                 area,
@@ -221,6 +242,7 @@ impl State {
                 open.selected = Some(index);
                 (Then::Stay, Vec::new())
             }
+            Event::Frame(since) => open.glide(since),
         };
         match then {
             Then::Close => self.open = None,
@@ -272,12 +294,30 @@ impl Open {
             .or_else(|| self.ring().pointed(self.pointer?, level.spin))
     }
 
-    /// Spin the ring open `by` places, clockwise.
+    /// Spin the ring open `by` places, clockwise. It glides there from
+    /// where it is drawn.
     fn spin(&mut self, by: i32) -> (Then, Vec<Effect>) {
         if let Some(level) = self.levels.last_mut() {
             level.spin += by;
         }
         (Then::Stay, vec![Effect::Redraw])
+    }
+
+    /// `since` on, the ring open glides on toward its spin: drawn again
+    /// while it is on its way.
+    fn glide(&mut self, since: Duration) -> (Then, Vec<Effect>) {
+        let moved = self
+            .levels
+            .last_mut()
+            .is_some_and(|level| level.glide.toward(level.spin, since));
+        (
+            Then::Stay,
+            if moved {
+                vec![Effect::Redraw]
+            } else {
+                Vec::new()
+            },
+        )
     }
 
     /// Do what slot `index` does: open its submenu, bring its next window
@@ -288,11 +328,7 @@ impl Open {
         };
         match (&slot.does, self.next(&slot.windows)) {
             (Does::Open(below), _) => {
-                let level = Level {
-                    label: slot.label.clone(),
-                    slots: below.clone(),
-                    spin: 0,
-                };
+                let level = Level::new(slot.label.clone(), below.clone());
                 self.levels.push(level);
                 self.selected = None;
                 (Then::Stay, Vec::new())
@@ -328,10 +364,14 @@ impl Open {
         windows.get(after % windows.len().max(1)).copied()
     }
 
-    /// Out of the submenu open, or closed from the first ring.
+    /// Out of the submenu open, or closed from the first ring. The ring
+    /// gone back to is drawn where it was spun to, not on its way there.
     fn back(&mut self) -> (Then, Vec<Effect>) {
         if self.levels.len() > 1 {
             self.levels.pop();
+            if let Some(level) = self.levels.last_mut() {
+                level.glide = Glide::at(level.spin);
+            }
             self.selected = None;
             (Then::Stay, Vec::new())
         } else {
@@ -544,6 +584,51 @@ mod tests {
         state.update(Event::Wheel(1));
         state.update(Event::Key(Key::Up));
         assert_eq!(picked(&state), Some("games"));
+    }
+
+    /// One frame of a monitor showing sixty a second.
+    const FRAME: Event = Event::Frame(Duration::from_millis(16));
+
+    fn turn(state: &State) -> f64 {
+        state.view().expect("open").turn
+    }
+
+    #[test]
+    fn a_spun_pie_glides_round_a_frame_at_a_time_and_stops_drawing_once_there() {
+        let mut state = opened();
+        assert_eq!(state.update(FRAME), [], "still, a frame draws nothing");
+        state.update(Event::Motion(UP));
+        state.update(Event::Wheel(-1));
+        assert_eq!(picked(&state), Some("editor"), "picked at once");
+        assert_eq!(turn(&state), 0.0, "but drawn where it was");
+        assert_eq!(state.update(FRAME), [Effect::Redraw]);
+        let first = turn(&state);
+        assert!(0.0 < first && first < 1.0, "on its way: {first}");
+        let mut frames = 1;
+        while state.update(FRAME) == [Effect::Redraw] {
+            frames += 1;
+        }
+        assert_eq!(turn(&state), 1.0, "there");
+        assert!(frames < 40, "within a second: {frames} frames");
+        assert_eq!(state.update(FRAME), [], "and still");
+        assert_eq!(State::default().update(FRAME), [], "no pie, no frames");
+    }
+
+    #[test]
+    fn a_ring_gone_back_to_is_drawn_where_it_was_spun_to() {
+        let mut state = opened();
+        state.update(Event::Key(Key::Up));
+        state.update(FRAME);
+        // Opened mid-glide, a submenu starts still; back out, its ring is
+        // where it was spun to.
+        state.update(Event::Choose(1));
+        assert_eq!(
+            (state.view().expect("open").label, turn(&state)),
+            ("games", 0.0)
+        );
+        state.update(Event::Key(Key::Back));
+        assert_eq!(turn(&state), 1.0);
+        assert_eq!(state.update(FRAME), []);
     }
 
     #[test]

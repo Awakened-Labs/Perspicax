@@ -3,9 +3,9 @@
 //! the pie's [`Shape`] and where it opened, with no drawing.
 //!
 //! The icons sit round a ring, the first at the top and the rest clockwise,
-//! spun round by whole places. The pie is a square `size` across, centred
-//! where it opened but kept wholly inside the room it has, and every icon
-//! fits in it at its biggest.
+//! spun round by whole places and drawn gliding between them (a [`Glide`]).
+//! The pie is a square `size` across, centred where it opened but kept
+//! wholly inside the room it has, and every icon fits in it at its biggest.
 //!
 //! Pointing is by angle alone, as Fitts would have it: past a small dead
 //! middle, the icon pointed at is the one in that direction however far off
@@ -15,7 +15,10 @@
 //! `falloff` degrees round on. The icons stay where they are as they grow,
 //! so a grown one may cover its neighbours.
 
-use std::f64::consts::{PI, TAU};
+use std::{
+    f64::consts::{PI, TAU},
+    time::Duration,
+};
 
 use perspicax_config::pie::{GROW, GROW_FALLOFF, Pie, SIZE};
 
@@ -32,6 +35,14 @@ const SMALLEST: f64 = 16.0;
 /// The dead middle, as a share of the ring's radius: nothing is pointed at
 /// from inside it.
 const DEAD: f64 = 0.4;
+/// How quickly a spun ring glides to its place: its spring's rate, a
+/// second. Spun a place, it is most of the way there in a fifth of a
+/// second, and still in a third.
+const GLIDE: f64 = 25.0;
+/// Near enough its place for a gliding ring to be put there, in places:
+/// once it is this near, and would turn less than this in a `GLIDE`th of a
+/// second.
+const THERE: f64 = 1e-3;
 
 /// How a pie is drawn, as `[shell.pie]` says.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -139,15 +150,11 @@ impl Ring {
         Rect::new(x as i32, y as i32, (right - x) as i32, (bottom - y) as i32)
     }
 
-    /// The angle of place `place`: the top is the first, and on clockwise.
-    fn angle(&self, place: usize) -> f64 {
-        -PI / 2.0 + TAU * place as f64 / self.places as f64
-    }
-
-    /// The place icon `item` is in, spun round `spin` places.
-    fn place_of(&self, item: usize, spin: i32) -> usize {
-        let places = self.places as i64;
-        (item as i64 + i64::from(spin)).rem_euclid(places) as usize
+    /// The angle icon `item` is at, turned `turn` places round: the first
+    /// place is the top, and on clockwise, and a turn between whole places
+    /// puts it between them.
+    fn angle(&self, item: usize, turn: f64) -> f64 {
+        -PI / 2.0 + TAU * (item as f64 + turn) / self.places as f64
     }
 
     /// Which way, from the middle, `pointer` is, if it is out of the dead
@@ -172,34 +179,82 @@ impl Ring {
         Some((place - i64::from(spin)).rem_euclid(self.places as i64) as usize)
     }
 
-    /// How many times its size at rest icon `item` is drawn, with the
-    /// pointer at `pointer`: `grow` pointed straight at, and less in a
-    /// straight line the further round from the pointer's direction it is,
-    /// to none at `falloff`.
-    pub(crate) fn zoom(&self, item: usize, spin: i32, pointer: Option<(f64, f64)>) -> f64 {
+    /// How many times its size at rest icon `item` is drawn, turned `turn`
+    /// places round, with the pointer at `pointer`: `grow` pointed straight
+    /// at, and less in a straight line the further round from the pointer's
+    /// direction it is, to none at `falloff`.
+    pub(crate) fn zoom(&self, item: usize, turn: f64, pointer: Option<(f64, f64)>) -> f64 {
         let Some(towards) = pointer.and_then(|pointer| self.pointing(pointer)) else {
             return 1.0;
         };
-        let apart = (towards - self.angle(self.place_of(item, spin)) + PI).rem_euclid(TAU) - PI;
+        let apart = (towards - self.angle(item, turn) + PI).rem_euclid(TAU) - PI;
         1.0 + (self.grow - 1.0) * (1.0 - apart.abs() / self.falloff).clamp(0.0, 1.0)
     }
 
-    /// Where icon `item` is drawn, spun round `spin` places, with the
+    /// Where icon `item` is drawn, turned `turn` places round, with the
     /// pointer at `pointer`: its middle and how big it is.
     pub(crate) fn place(
         &self,
         item: usize,
-        spin: i32,
+        turn: f64,
         pointer: Option<(f64, f64)>,
     ) -> ((f64, f64), f64) {
-        let angle = self.angle(self.place_of(item, spin));
+        let angle = self.angle(item, turn);
         (
             (
                 self.centre.0 + self.radius * angle.cos(),
                 self.centre.1 + self.radius * angle.sin(),
             ),
-            self.icon * self.zoom(item, spin, pointer),
+            self.icon * self.zoom(item, turn, pointer),
         )
+    }
+}
+
+/// Where a spun ring is drawn as it glides round to its spin.
+///
+/// A critically damped spring: it eases out of rest and into its place,
+/// never past it from rest, and spun again on the way it carries on from
+/// the speed it has rather than starting over. It is stepped by how long
+/// it has been, exactly, so it glides alike at any frame rate.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct Glide {
+    /// How far round the ring is drawn, in places, as its spin is counted.
+    pub(crate) turn: f64,
+    /// How fast it is turning, in places a second.
+    speed: f64,
+}
+
+impl Glide {
+    /// Still, at `spin`.
+    pub(crate) fn at(spin: i32) -> Self {
+        Self {
+            turn: f64::from(spin),
+            speed: 0.0,
+        }
+    }
+
+    /// Glide `dt` on toward `spin`, and whether it was on its way there:
+    /// still at `spin`, it does not move.
+    pub(crate) fn toward(&mut self, spin: i32, dt: Duration) -> bool {
+        let still = Self::at(spin);
+        if *self == still {
+            return false;
+        }
+        // x(t) = (x + (v + wx)t)e^-wt, and v(t), its rate, for a spring
+        // `off` from its place at `speed`.
+        let (off, speed, t) = (self.turn - still.turn, self.speed, dt.as_secs_f64());
+        let pull = speed + GLIDE * off;
+        let decay = (-GLIDE * t).exp();
+        let (off, speed) = ((off + pull * t) * decay, (speed - GLIDE * pull * t) * decay);
+        *self = if off.abs() < THERE && speed.abs() < THERE * GLIDE {
+            still
+        } else {
+            Self {
+                turn: still.turn + off,
+                speed,
+            }
+        };
+        true
     }
 }
 
@@ -247,8 +302,8 @@ mod tests {
         }
         // Neighbours at rest do not touch.
         let twelve = ring(12);
-        let ((x0, y0), _) = twelve.place(0, 0, None);
-        let ((x1, y1), _) = twelve.place(1, 0, None);
+        let ((x0, y0), _) = twelve.place(0, 0.0, None);
+        let ((x1, y1), _) = twelve.place(1, 0.0, None);
         assert!((x1 - x0).hypot(y1 - y0) > twelve.icon);
     }
 
@@ -256,7 +311,7 @@ mod tests {
     fn the_first_is_at_the_top_and_the_rest_go_clockwise() {
         let four = ring(4);
         let at = |item| {
-            let ((x, y), _) = four.place(item, 0, None);
+            let ((x, y), _) = four.place(item, 0.0, None);
             ((x - 960.0).round() as i32, (y - 500.0).round() as i32)
         };
         let r = four.radius.round() as i32;
@@ -265,11 +320,87 @@ mod tests {
             [(0, -r), (r, 0), (0, r), (-r, 0)]
         );
         // Spun one place on, the first is where the second was.
-        let ((x, y), _) = four.place(0, 1, None);
+        let ((x, y), _) = four.place(0, 1.0, None);
         assert_eq!(
             ((x - 960.0).round() as i32, (y - 500.0).round() as i32),
             (r, 0)
         );
+    }
+
+    #[test]
+    fn turned_part_of_a_place_an_icon_is_between_places_and_grows_as_it_is_round() {
+        let four = ring(4);
+        // Half a place on, the first is 45 degrees round from the top.
+        let ((x, y), _) = four.place(0, 0.5, None);
+        let half = four.radius * std::f64::consts::FRAC_1_SQRT_2;
+        assert!((x - (960.0 + half)).abs() < 1e-9 && (y - (500.0 - half)).abs() < 1e-9);
+        // Pointed straight up, it is 45 of its 90 degrees' falloff round:
+        // halfway grown.
+        assert!((four.zoom(0, 0.5, towards(0.0)) - 1.5).abs() < 1e-9);
+        // A turn is counted as a spin is, by whole turns too.
+        let ((x4, y4), _) = four.place(0, 4.5, None);
+        assert!((x4 - x).abs() < 1e-9 && (y4 - y).abs() < 1e-9);
+    }
+
+    /// `glide` stepped `frames` frames of `ms` each toward `spin`: where it
+    /// is drawn after each.
+    fn glided(glide: &mut Glide, spin: i32, frames: usize, ms: u64) -> Vec<f64> {
+        (0..frames)
+            .map(|_| {
+                glide.toward(spin, Duration::from_millis(ms));
+                glide.turn
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_spun_ring_eases_out_of_rest_and_into_its_place_never_past_it() {
+        let mut glide = Glide::default();
+        let turns = glided(&mut glide, 1, 60, 16);
+        let steps: Vec<f64> = std::iter::once(0.0)
+            .chain(turns.iter().copied())
+            .collect::<Vec<_>>()
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .collect();
+        assert!(steps[1] > steps[0], "it gathers speed: {steps:?}");
+        assert!(steps.iter().all(|&step| step >= 0.0), "never back");
+        assert!(turns.iter().all(|&turn| turn <= 1.0), "never past");
+        assert!(turns[11] > 0.9, "most of the way in a fifth of a second");
+        assert_eq!(glide, Glide::at(1), "and there, still, after a second");
+        assert!(
+            !glide.toward(1, Duration::from_millis(16)),
+            "there, it is still"
+        );
+        assert_eq!(glide.turn, 1.0);
+    }
+
+    #[test]
+    fn a_glide_is_alike_at_any_frame_rate() {
+        let (mut fast, mut slow) = (Glide::default(), Glide::default());
+        glided(&mut fast, 3, 4, 8);
+        glided(&mut slow, 3, 2, 16);
+        assert!((fast.turn - slow.turn).abs() < 1e-12);
+        assert!((fast.speed - slow.speed).abs() < 1e-9);
+    }
+
+    #[test]
+    fn spun_again_on_its_way_a_ring_carries_on_from_where_it_is() {
+        let mut glide = Glide::default();
+        let before = *glided(&mut glide, 1, 3, 16).last().expect("three frames");
+        let after = glided(&mut glide, 2, 1, 16)[0];
+        assert!(
+            after > before && after - before < 0.5,
+            "on from {before}, not over: {after}"
+        );
+        glided(&mut glide, 2, 60, 16);
+        assert_eq!(glide, Glide::at(2));
+        // Spun back on its way, it turns back and comes to rest where it
+        // started.
+        let mut glide = Glide::default();
+        glided(&mut glide, 1, 3, 16);
+        glided(&mut glide, 0, 60, 16);
+        assert_eq!(glide, Glide::at(0));
     }
 
     #[test]
@@ -304,14 +435,14 @@ mod tests {
     fn a_pie_with_nothing_in_it_points_at_nothing() {
         let none = ring(0);
         assert_eq!(none.pointed((960.0, 0.0), 0), None);
-        assert!((none.zoom(0, 0, Some((960.0, 0.0))) - 1.0).abs() < f64::EPSILON);
+        assert!((none.zoom(0, 0.0, Some((960.0, 0.0))) - 1.0).abs() < f64::EPSILON);
     }
 
     /// How many times its size each of `ring`'s icons is, pointed `degrees`
     /// clockwise of straight up, to a thousandth.
     fn zooms(ring: &Ring, degrees: f64) -> Vec<f64> {
         (0..ring.places)
-            .map(|item| (ring.zoom(item, 0, towards(degrees)) * 1000.0).round() / 1000.0)
+            .map(|item| (ring.zoom(item, 0.0, towards(degrees)) * 1000.0).round() / 1000.0)
             .collect()
     }
 
@@ -331,8 +462,8 @@ mod tests {
         assert_eq!(between[..3], [1.833, 1.833, 1.5]);
         assert_eq!(between[11], 1.5);
         // From the middle, nothing grows.
-        assert!((twelve.zoom(0, 0, Some((960.0, 500.0))) - 1.0).abs() < 1e-9);
-        assert!((twelve.zoom(0, 0, None) - 1.0).abs() < 1e-9);
+        assert!((twelve.zoom(0, 0.0, Some((960.0, 500.0))) - 1.0).abs() < 1e-9);
+        assert!((twelve.zoom(0, 0.0, None) - 1.0).abs() < 1e-9);
     }
 
     #[test]
