@@ -9,7 +9,9 @@
 //! second path that hides or shows a window and could disagree with it.
 //!
 //! The window in the person's hand is on whatever workspace its monitor is
-//! showing, however that changed: it goes where they go.
+//! showing, however that changed: it goes where they go. A window's own menu
+//! goes with the window: one parked closes its menu, and the keyboard moves
+//! on from it as from the window (#114).
 //!
 //! A parked window keeps where it was in its [`super::Placement`], and that
 //! is also how its monitor is known while it is off screen: per output, a
