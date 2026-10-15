@@ -13,6 +13,12 @@
 //!
 //! While the session is locked, nothing is sent: a taskbar learns what
 //! changed behind the lock once it is lifted, in one batch.
+//!
+//! A diff names a monitor once, to the `wl_output`s a taskbar holds then. A
+//! taskbar that binds a monitor later -- one plugged in, or lit again under
+//! the same name -- is told on the new object which windows are on it, when
+//! it binds it ([`Compositor::enter_toplevels`]). That is so even while the
+//! session is locked: it is only what the taskbar was told before.
 
 mod list;
 mod wlr;
@@ -34,7 +40,7 @@ use smithay::{
             zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
             zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
         },
-        wayland_server::{DisplayHandle, Resource},
+        wayland_server::{DisplayHandle, Resource, protocol::wl_output::WlOutput},
     },
     wayland::{compositor::with_states, shell::xdg::XdgToplevelSurfaceData},
 };
@@ -183,6 +189,19 @@ impl Compositor {
                 );
             }
             toplevels.known.insert(id, known);
+        }
+    }
+
+    /// A client bound `wl_output`, the monitor `name`: tell its taskbars,
+    /// on that object, which windows they were last told are on it.
+    pub(crate) fn enter_toplevels(&self, name: &str, wl_output: &WlOutput) {
+        let Some(client) = wl_output.client() else {
+            return;
+        };
+        for known in self.toplevels.known.values() {
+            if known.snapshot.outputs.iter().any(|on| on == name) {
+                wlr::entered(known, &client, wl_output);
+            }
         }
     }
 
