@@ -780,11 +780,9 @@ fn light(
         },
     );
     let wl_mode = WlMode::from(mode);
-    let scale = match rule.and_then(|rule| rule.scale) {
-        Some(scale) if scale.fract() == 0.0 => Scale::Integer(scale as i32),
-        Some(scale) => Scale::Fractional(scale),
-        None => Scale::Integer(1),
-    };
+    let scale = rule
+        .and_then(|rule| rule.scale)
+        .map_or(Scale::Integer(1), crate::heads::output_scale);
     output.set_preferred(wl_mode);
     output.change_current_state(Some(wl_mode), Some(Transform::Normal), Some(scale), None);
 

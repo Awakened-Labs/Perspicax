@@ -143,6 +143,9 @@ impl Compositor {
             }
         }
         self.arrange_outputs();
+        // A window sized to fill a monitor or a zone was sized for its old
+        // size.
+        self.refit_frames();
     }
 }
 
@@ -158,17 +161,23 @@ fn reshape(virtual_output: &mut Virtual, change: &HeadChange) {
 
 fn rescale(plugged: &Plugged, change: &HeadChange) {
     if let Some(scale) = change.scale {
-        let scale = if scale.fract() == 0.0 {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "a whole number from 1 to 4, checked by check_heads"
-            )]
-            Scale::Integer(scale as i32)
-        } else {
-            Scale::Fractional(scale)
-        };
         plugged
             .output
-            .change_current_state(None, None, Some(scale), None);
+            .change_current_state(None, None, Some(output_scale(scale)), None);
+    }
+}
+
+/// A monitor's scale as smithay takes it: a whole one as a whole one, so a
+/// client that only knows `wl_output.scale` is told it exactly.
+pub(crate) fn output_scale(scale: f64) -> Scale {
+    if scale.fract() == 0.0 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a whole number from 1 to 4: the config and check_heads both hold a \
+                      scale to 0.5 to 4"
+        )]
+        Scale::Integer(scale as i32)
+    } else {
+        Scale::Fractional(scale)
     }
 }
