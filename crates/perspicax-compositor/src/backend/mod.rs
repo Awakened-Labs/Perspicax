@@ -630,6 +630,12 @@ impl Compositor {
                 self.stand_in_scroll(*at, *v120, *mods);
             }
             crate::Command::Motion { by } => self.stand_in_motion(*by),
+            #[cfg(any(feature = "seat", feature = "capture"))]
+            crate::Command::Splash { lasts, palette } => self.splash_for_test(*lasts, palette),
+            #[cfg(not(any(feature = "seat", feature = "capture")))]
+            crate::Command::Splash { .. } => {
+                tracing::warn!("the splash is drawn only on a seat or in a picture");
+            }
         }
     }
 

@@ -33,7 +33,7 @@
 //! One GPU: the primary. A second card's connectors are ignored, and said so
 //! in the log.
 
-use std::{path::PathBuf, sync::Once};
+use std::{path::PathBuf, sync::Once, time::Instant};
 
 use smithay::{
     backend::{
@@ -68,7 +68,10 @@ use smithay::{
     input::{keyboard::Keycode, pointer::CursorImageStatus},
     output::{Mode as WlMode, Output, PhysicalProperties, Scale},
     reexports::{
-        calloop::LoopHandle,
+        calloop::{
+            LoopHandle,
+            channel::{self, Sender},
+        },
         drm::control::{Device as _, ModeTypeFlags, connector, crtc},
         input::Libinput,
         rustix::fs::OFlags,
@@ -81,7 +84,11 @@ use smithay::{
 };
 
 use super::{Running, connectors, cursor::Cursor};
-use crate::{Error, state::Compositor};
+use crate::{
+    Error,
+    backdrop::{self, Arrived},
+    state::Compositor,
+};
 
 mod input;
 mod overdue;
@@ -96,10 +103,12 @@ type Exporter = GbmFramebufferExporter<DrmDeviceFd>;
 
 render_elements! {
     /// What one output shows, front to back: the pointer, a snap preview,
-    /// then the windows.
+    /// the windows or the lock, then the backdrop's logo. An `Image` is one
+    /// the compositor made: the pointer's, or the logo. A client's cursor
+    /// surface, and the lock's, are a `CursorSurface`.
     Elements<=GlesRenderer>;
     Space=SpaceRenderElements<GlesRenderer, crate::framed::FramedElement<GlesRenderer>>,
-    Cursor=MemoryRenderBufferRenderElement<GlesRenderer>,
+    Image=MemoryRenderBufferRenderElement<GlesRenderer>,
     CursorSurface=WaylandSurfaceRenderElement<GlesRenderer>,
     Preview=SolidColorRenderElement,
 }
@@ -128,6 +137,11 @@ fn preview_colour(settings: &perspicax_config::Config) -> [f32; 4] {
 /// The GPU does a little more work per frame; direct scanout of a fullscreen
 /// client on the primary plane is still allowed.
 const PLANES: FrameFlags = FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT;
+
+/// The longest the splash stays up where no wallpaper ever covers it: long
+/// enough for a slow desktop to come up over it, short enough that a session
+/// with no wallpaper is not left looking like one still starting.
+const SPLASH_MOST: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Scanout formats, in order of preference: 8 bits per channel with and
 /// without alpha. Every GPU Mesa drives supports these; 10-bit formats are a
@@ -171,6 +185,13 @@ pub(crate) struct Session {
     cursor: Cursor,
     /// The fonts window titles are written in. See [`titles`].
     titles: titles::Titles,
+    /// Where art decoded on a thread is sent, for the backdrop: a logo of
+    /// the person's, read each time the config is. See [`crate::backdrop`].
+    art: Sender<Arrived>,
+    /// When the DRM reset turned every monitor dark. Taken when the first
+    /// frame is queued, to log how long a person logging in looked at a dark
+    /// screen.
+    reset: Option<Instant>,
     /// The last press on a titlebar, by window, time and place: the first
     /// half of a double-click.
     pub(super) title_press: Option<(Option<perspicax_node::SurfaceId>, perspicax_policy::Press)>,
@@ -231,6 +252,15 @@ impl Session {
         handle: &LoopHandle<'static, Compositor>,
         config_path: Option<PathBuf>,
     ) -> Result<Self, Error> {
+        // Perspicax's lockup, decoded meanwhile, so the lock screen has it
+        // without the compositor ever waiting on it.
+        let (art, arriving) = channel::channel();
+        backdrop::decode_builtin(art.clone());
+        // And the fonts, found meanwhile: the scan is slow, and the monitors
+        // stay dark from the reset below until the first frame. Only a
+        // title waits for the fonts.
+        let titles = titles::Titles::new();
+
         // First, before the seat is taken: a config that cannot be used is
         // refused while the person is still looking at a text console that
         // can show them why.
@@ -270,6 +300,7 @@ impl Session {
         // else's CRTC configuration.
         let (drm, drm_events) = DrmDevice::new(fd.clone(), true)
             .map_err(|error| Error::Seat(format!("could not take DRM master: {error}")))?;
+        let reset = Some(Instant::now());
         let gbm = GbmDevice::new(fd)
             .map_err(|error| Error::Seat(format!("could not create a GBM device: {error}")))?;
 
@@ -330,6 +361,15 @@ impl Session {
                 UdevEvent::Removed { .. } => {}
             })
             .map_err(|error| Error::EventLoop(error.to_string()))?;
+        handle
+            .insert_source(arriving, |event, (), state| {
+                if let channel::Event::Msg(arrived) = event
+                    && state.backdrop.arrived(arrived)
+                {
+                    state.backend.redraw();
+                }
+            })
+            .map_err(|error| Error::EventLoop(error.to_string()))?;
 
         let dwell = perspicax_policy::EdgeDwell::new(settings.flipping.delay_ms);
         let preview = SolidColorBuffer::new((1, 1), preview_colour(&settings));
@@ -351,7 +391,9 @@ impl Session {
             children: Vec::new(),
             shell: supervise::Supervisor::new(),
             cursor,
-            titles: titles::Titles::new(),
+            titles,
+            art,
+            reset,
             title_press: None,
             button_press: None,
             preview,
@@ -428,6 +470,7 @@ pub(crate) fn attach(state: &mut Compositor) -> Result<(), Error> {
     let numlock = session.settings.keyboard.numlock;
     settings::apply_keyboard(state, numlock);
     settings::tell_appearance(state);
+    settings::dress_backdrop(state);
     rescan(state);
     let Running::Seat(session) = &state.backend else {
         return Ok(());
@@ -436,6 +479,10 @@ pub(crate) fn attach(state: &mut Compositor) -> Result<(), Error> {
         return Err(Error::Seat(
             "no connected monitor could be lit on the primary GPU".to_owned(),
         ));
+    }
+    // From the first frames, which the scan above has just asked for.
+    if session.settings.splash {
+        state.show_splash(SPLASH_MOST);
     }
     Ok(())
 }
@@ -894,6 +941,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         space,
         cursor: status,
         lock,
+        backdrop,
         snap_preview,
         tab_drop,
         ..
@@ -909,6 +957,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         preview,
         titles,
         settings,
+        reset,
         ..
     } = &mut **session;
     let Some(head) = heads.iter_mut().find(|head| head.crtc == crtc) else {
@@ -989,12 +1038,28 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
             }
         },
     }
-    match head
-        .drm
-        .render_frame(renderer, &elements, crate::BACKDROP, PLANES)
-    {
+    // Beneath everything, on the colour the frame is cleared to: the
+    // backdrop's logo. Locked, the lock surface is clear but for its ring,
+    // and this is the lock screen. As the session starts, it is the splash,
+    // until the wallpaper covers it.
+    let (ground, image) = backdrop.shown(&head.output, lock.is_some());
+    elements.extend(
+        image
+            .and_then(|image| image.element(renderer))
+            .map(Elements::Image),
+    );
+    match head.drm.render_frame(renderer, &elements, ground, PLANES) {
         Ok(frame) if !frame.is_empty => match head.drm.queue_frame(()) {
-            Ok(()) => head.queued = true,
+            Ok(()) => {
+                head.queued = true;
+                if let Some(since) = reset.take() {
+                    tracing::info!(
+                        output = head.output.name(),
+                        dark = ?since.elapsed(),
+                        "the first frame is queued"
+                    );
+                }
+            }
             Err(error) => tracing::warn!(output = head.output.name(), %error, "frame not queued"),
         },
         Ok(_) => {}

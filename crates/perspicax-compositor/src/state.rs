@@ -289,6 +289,10 @@ pub struct Compositor {
     /// [`crate::lock`].
     pub(crate) lock_manager: SessionLockManagerState,
     pub(crate) lock: Option<crate::lock::Locked>,
+    /// What each output shows where nothing else is: the lock screen's
+    /// colour and logo, and the splash's. See [`crate::backdrop`].
+    #[cfg(any(feature = "seat", feature = "capture"))]
+    pub(crate) backdrop: crate::backdrop::Backdrop,
     /// Idle notification (swayidle) and the surfaces inhibiting it.
     pub(crate) idle: IdleNotifierState<Self>,
     #[expect(dead_code, reason = "RAII handle for the idle-inhibit global")]
@@ -438,6 +442,8 @@ impl Compositor {
             // work when everything else has gone wrong.
             lock_manager: SessionLockManagerState::new::<Self, _>(display, |_| true),
             lock: None,
+            #[cfg(any(feature = "seat", feature = "capture"))]
+            backdrop: crate::backdrop::Backdrop::default(),
             idle: IdleNotifierState::new(display, event_loop.clone()),
             #[cfg(feature = "xwayland")]
             xwayland: crate::xwayland::Xwayland::default(),

@@ -1535,6 +1535,7 @@ dependencies = [
  "perspicax-policy",
  "perspicax-protocols",
  "perspicax-shell",
+ "png",
  "smithay",
  "smithay-client-toolkit",
  "thiserror 2.0.20",

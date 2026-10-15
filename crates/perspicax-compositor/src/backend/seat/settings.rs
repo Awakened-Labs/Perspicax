@@ -5,6 +5,9 @@
 //! and bindings are just values, and are swapped. The keyboard is recompiled
 //! only if `[input.keyboard]` changed, and keeps the layout in use and its
 //! locks (see [`crate::keyboard`]). Pointer settings go to every device.
+//! The lock screen's and the splash's colours and logo go to the backdrop,
+//! and a logo of the person's is read again, at every save; one turning the
+//! splash off ends it (see [`crate::backdrop`]).
 //! Outputs are touched only if their rules changed, and relit only if a
 //! monitor is turned on or off or changes mode, because relighting is a
 //! modeset and the screens blink; a new scale or place is changed where the
@@ -29,7 +32,7 @@ use std::{
 };
 
 use perspicax_config::{
-    Built, Config, Pointer,
+    Built, Config, Logo, Pointer, Role,
     autostart::{self, Skip},
 };
 use smithay::{
@@ -48,6 +51,7 @@ use smithay::{
 use super::{Session, put_rules_in_force, supervise};
 use crate::{
     Error, Keymap, Launch,
+    backdrop::{self, Look},
     backend::{Running, cursor::Cursor},
     grants::Why,
     state::Compositor,
@@ -313,6 +317,10 @@ pub(crate) fn reload(state: &mut Compositor) {
         }
         look(state);
     }
+    // At every save, theme changed or not: a logo file is read again, since
+    // it may have changed on disk, or been put right since it could not be
+    // read.
+    dress_backdrop(state);
     if theme_changed {
         state.backend.redraw();
     }
@@ -374,6 +382,39 @@ pub(crate) fn populate(
     }
     ready(state);
     Ok(())
+}
+
+/// Tell the backdrop how the config has the lock screen and the splash look,
+/// and start reading the person's logo if it names one: found as a wallpaper
+/// is, `~` the home folder and a relative path beside the config.
+pub(super) fn dress_backdrop(state: &mut Compositor) {
+    let Running::Seat(session) = &state.backend else {
+        return;
+    };
+    let theme = &session.settings.theme;
+    let logo = match &theme.logo {
+        Logo::File(written) => {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            Logo::File(perspicax_config::locate(
+                written,
+                session.config_path.as_deref(),
+                home.as_deref(),
+            ))
+        }
+        logo => logo.clone(),
+    };
+    let look = Look {
+        lock: theme.palette[Role::Lock],
+        splash: theme.palette[Role::Splash],
+        logo,
+    };
+    if let Some(asked) = state.backdrop.dress(look) {
+        backdrop::read(asked, session.art.clone());
+    }
+    // `[splash] enabled = false`, saved while it is up, ends it now.
+    if !session.settings.splash && state.backdrop.end_splash() {
+        state.backend.redraw();
+    }
 }
 
 /// Publish what applications are told about the theme, for whoever serves

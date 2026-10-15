@@ -295,10 +295,14 @@ impl Compositor {
             .flat_map(|locked| &locked.surfaces)
             .filter_map(|cover| {
                 let area = self.space.output_geometry(&cover.output)?;
-                Some(
-                    self.plain_facts(cover.id, cover.surface.wl_surface(), area)
-                        .lock_cover(),
-                )
+                let facts = self.plain_facts(cover.id, cover.surface.wl_surface(), area);
+                // The lock client may paint only its ring, and declare
+                // nothing opaque. Beneath it, on whatever monitor shows it,
+                // the compositor paints the lock's own colour over the whole
+                // output, and stands behind that as covering what is under
+                // it (`crate::backdrop`).
+                let whole = facts.geometry;
+                Some(facts.lock_cover().framed([whole]))
             });
         let surfaces: Vec<SurfaceFacts> = below
             .iter()

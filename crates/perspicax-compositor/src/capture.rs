@@ -80,14 +80,15 @@ mod taking {
 
     smithay::backend::renderer::element::render_elements! {
         /// What a picture is made of: windows with their frames, layer
-        /// surfaces, the blocks painted over what may not be shown, and the
-        /// pointer where it was asked for. A client's cursor surface is a
-        /// `Surface`; the compositor's own image is a `Cursor`.
+        /// surfaces, the blocks painted over what may not be shown, the
+        /// pointer where it was asked for, and on a monitor's the backdrop's
+        /// logo. A client's cursor surface is a `Surface`; an `Image` is one
+        /// the compositor made: the pointer's, or the logo.
         pub(crate) Scene<R> where R: ImportAll + ImportMem;
         Window=FramedElement<R>,
         Surface=WaylandSurfaceRenderElement<R>,
         Solid=SolidColorRenderElement,
-        Cursor=MemoryRenderBufferRenderElement<R>,
+        Image=MemoryRenderBufferRenderElement<R>,
     }
 
     /// What is painted over a window the agent may not see: opaque, and
@@ -118,6 +119,11 @@ mod taking {
         /// only in a recording that asked for it, and only on its monitor.
         /// Never in an agent's picture, which is of what applications drew.
         pointer: Option<Point<f64, Logical>>,
+        /// Beneath everything, what the monitor shows where nothing else is:
+        /// the colour to clear to, and the logo on it, as the splash has
+        /// them. Only in a picture of a monitor: one of a window is of the
+        /// window alone, on the plain grey.
+        backdrop: Option<([f32; 4], Option<crate::backdrop::Image>)>,
     }
 
     /// A window, where it is drawn from, and whether it is painted over.
@@ -295,6 +301,7 @@ mod taking {
         Ok(Plan {
             size,
             scale,
+            backdrop: Some(state.backdrop.shown(&output, state.lock.is_some())),
             output: Some(output.name()),
             overlay,
             top,
@@ -348,6 +355,7 @@ mod taking {
             }],
             redacted: Vec::new(),
             pointer: None,
+            backdrop: None,
         })
     }
 
@@ -463,6 +471,15 @@ mod taking {
         elements.extend(layers(renderer, &plan.top));
         elements.extend(windows(renderer, false));
         elements.extend(layers(renderer, &plan.lower));
+        let ground = plan
+            .backdrop
+            .as_ref()
+            .map_or(BACKDROP, |(ground, _)| *ground);
+        let logo = plan.backdrop.as_ref().and_then(|(_, image)| image.as_ref());
+        elements.extend(
+            logo.and_then(|image| image.element(renderer))
+                .map(Scene::Image),
+        );
 
         let size = plan.size;
         let buffer: Size<i32, BufferCoord> = (size.w, size.h).into();
@@ -471,7 +488,7 @@ mod taking {
             .map_err(|error| failed(&error))?;
         let mut framebuffer = renderer.bind(&mut target).map_err(|error| failed(&error))?;
         OutputDamageTracker::new(size, plan.scale, Transform::Normal)
-            .render_output(renderer, &mut framebuffer, 0, &elements, BACKDROP)
+            .render_output(renderer, &mut framebuffer, 0, &elements, ground)
             .map_err(|error| failed(&format!("{error:?}")))?;
         let mapping = renderer
             .copy_framebuffer(&framebuffer, Rectangle::from_size(buffer), Fourcc::Abgr8888)

@@ -1032,6 +1032,20 @@ so a first login here can start something that has never run there before:
 PipeWire beside a PulseAudio that was the sound server until then, for one.
 Turn off what you do not want with a `Hidden=true` entry of your own.
 
+**The splash** is what a session shows from its first frame, in place of a
+dark screen while all that comes up: the theme's `splash` colour, which is
+`lock`'s unless written, with `[theme] logo` in the middle (see
+[Themes](#themes)). It is drawn beneath everything, so a window that opens
+early is seen over it, and it ends on each monitor as a wallpaper covers it:
+the shell's, or any surface on the background layer over the whole monitor.
+With nothing ever over it, as with `[shell] wallpaper = "none"` or no shell,
+it ends after ten seconds. A save that turns it off ends it at once.
+
+```toml
+[splash]
+enabled = false                # the plain grey, as before there was a splash
+```
+
 ## The desktop
 
 `perspicax-shell` is the desktop: a wallpaper, a panel, menus of the installed
@@ -1208,21 +1222,28 @@ asks the compositor instead. Typing "sleep", "reboot" or "power off" in the
 search line finds the last three. Suspend does not lock the screen first;
 `["swayidle", "-w", "before-sleep", "perspicax lock -f"]` in `autostart` does.
 
-Lock wears the theme. swaylock, which `lock` runs unless it names another
-program, is given `-C /dev/null`, so it reads no config file of its own, and
-then the theme as flags: the screen in `lock`, its text in `lock-ink`, its ring
-in `lock-ring`, the accent as keys are typed and `alert` for a wrong password
-(see [Themes](#themes)), in `[theme] font`. Flags written in `lock` come
-after, so they win: `lock = ["swaylock", "-f", "--ring-color", "00ff00"]` rings
-it green. To have swaylock read a file of its own, name it, whole, since `~` is
-not expanded: `lock = ["swaylock", "-C", "/home/me/.config/swaylock/config"]`
-runs as written, and so does any other program.
+Lock wears the theme. perspicax draws the lock screen itself, from the moment
+it locks: `lock`'s colour, with `[theme] logo` on it, above where the ring will
+be. swaylock, which `lock` runs unless it names another program, draws only
+its ring and its text over that. It is given `-C /dev/null`, so it reads no
+config file of its own, and then the theme as flags: no colour of its own for
+the screen, so perspicax's shows through, its text in `lock-ink`, its ring in
+`lock-ring`, `lock-accent` as keys are typed and `alert` for a wrong password
+(see [Themes](#themes)), in `[theme] font`. The ring stays hidden until a key
+is typed. Flags written in `lock` come after, so they win:
+`lock = ["swaylock", "-f", "--ring-color", "00ff00"]` rings it green, and a
+`--color` or `-i` of your own paints over perspicax's screen, logo and all. A
+ring moved or enlarged with swaylock's own flags may cross the logo. To have
+swaylock read a file of its own, name it, whole, since `~` is not expanded:
+`lock = ["swaylock", "-C", "/home/me/.config/swaylock/config"]` runs as
+written, and so does any other program, each drawing its own screen.
 
 `perspicax lock` locks as Lock does, from a key or from swayidle: it runs
 `lock` with its own arguments after `lock`'s, and becomes it. It reads the
 config of the session it was started in, which the session tells every program
 it starts in `PERSPICAX_CONFIG`; a config it cannot read still locks, in the
-default theme.
+default theme. Run outside a perspicax session, where nothing of perspicax's is
+drawn beneath it, it has swaylock paint the screen in `lock` itself.
 
 ```toml
 [keys]
@@ -1316,6 +1337,8 @@ cursor = "breeze_cursors"      # an Xcursor theme; unset, XCURSOR_THEME's
 cursor-size = 32               # 8 to 128; unset, XCURSOR_SIZE's
 color-scheme = "dark"          # what applications are told: dark, light or
 contrast = "high"              # no-preference; normal or high
+logo = "~/Pictures/logo.png"   # on the lock screen and the splash: perspicax
+                               # (the default), a PNG's path, or none
 
 [theme.palette]                # any role below, written over the theme's own
 accent = "#e93d5a"
@@ -1325,7 +1348,8 @@ panel = "#102030"
 `perspicax` is what was drawn before there were themes: blue titlebars, a dark
 panel, light menus. The two Breezes take their window, view, header and
 selection colours from Plasma's Breeze schemes. The lock screen is dark,
-`#0c2440`, but under `breeze-light`, which locks on `#cbd8df`.
+`#0c2440`, but under `breeze-light`, which locks on `#cbd8df`; its ring is
+terracotta under all three.
 
 The palette is a set of roles, not of widgets, so one colour written recolours
 everything that has that job. A colour is `"#rrggbb"`. Only `selected` and
@@ -1364,8 +1388,20 @@ the first colour toward the second. The last column is the `perspicax` theme.
 | `label-shadow` | the shadow that name casts, so it reads on any wallpaper | — | `#000000c0` |
 | `lock` | the lock screen, behind the ring a password is typed into | — | `#0c2440` |
 | `lock-ink` | the lock screen's text | its ink | `#ffffff` |
-| `lock-ring` | the lock screen's ring, at rest | `lock` 25% toward `lock-ink` | `#495b70` |
+| `lock-ring` | the lock screen's ring, at rest: the brand's terracotta on any screen | — | `#c06a3c` |
+| `lock-accent` | the lock screen's ring as keys are typed, and while a password is checked | `accent` | `#3daee9` |
 | `alert` | a refusal: a wrong password, and a key taken back while typing one | — | `#da4453` |
+| `splash` | the splash a session shows as it starts, behind the logo | `lock` | `#0c2440` |
+
+`logo` is what the lock screen and the splash show over their colour.
+`perspicax`, the default, is Perspicax's mark over its name, lettered in white
+on a dark colour and in navy on a light one, so it reads on whatever `lock` and
+`splash` are. A path names a PNG of your own, found as a wallpaper is (`~` is
+your home, and a relative path is beside the config), and shown on every colour
+as it is, never larger than its own pixels. One that cannot be read, is not a
+PNG, or is more than 4096 pixels a side is said once in the log, and
+Perspicax's is shown instead until the config is saved again, when it is read
+afresh. `none` leaves the colour alone.
 
 `[decorations] focused` and `unfocused` are `title-focused` and
 `title-unfocused` written in their older place, and still win over any theme;

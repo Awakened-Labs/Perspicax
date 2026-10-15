@@ -9,6 +9,13 @@
 //! it. A person who names a file of their own with `-C` gets swaylock as they
 //! wrote it, and so does any lock program that is not swaylock.
 //!
+//! Inside a perspicax session, perspicax draws the lock screen itself,
+//! beneath swaylock: the `lock` colour and the logo. swaylock is then given
+//! no colour for the screen, so its surface is clear but for its ring and
+//! its words, and perspicax's screen shows through. Outside one, whatever
+//! another compositor shows would show through instead, so there swaylock
+//! paints the screen in `lock` itself, as it always has.
+//!
 //! An unknown flag makes swaylock print its usage and not lock at all, the
 //! worst way a lock can fail: the screen stays open while its owner walks
 //! away. So only the flags in [`PAINT`] and `--font` are written, every one
@@ -26,12 +33,17 @@ const NO_FILE: &str = "/dev/null";
 /// value, and with nothing after it the next word is.
 const VALUED: &[char] = &['c', 'i', 's', 'C', 'R'];
 
+/// The flag for the colour of swaylock's whole screen, behind its ring.
+const SCREEN: &str = "--color";
+
 /// What each of swaylock's colours is painted, in the order written: a role,
-/// or `None` for no colour at all, so the lock screen shows through.
+/// or `None` for no colour at all, so the lock screen shows through. The
+/// screen's own, [`SCREEN`], is painted `lock` only where nothing is drawn
+/// beneath swaylock (see [`dressed`]).
 const PAINT: &[(&str, Option<Role>)] = {
     use Role::*;
     &[
-        ("--color", Some(Lock)),
+        (SCREEN, Some(Lock)),
         ("--inside-color", None),
         ("--inside-clear-color", None),
         ("--inside-caps-lock-color", None),
@@ -40,10 +52,10 @@ const PAINT: &[(&str, Option<Role>)] = {
         ("--ring-color", Some(LockRing)),
         ("--ring-clear-color", Some(LockRing)),
         ("--ring-caps-lock-color", Some(LockRing)),
-        ("--ring-ver-color", Some(Accent)),
+        ("--ring-ver-color", Some(LockAccent)),
         ("--ring-wrong-color", Some(Alert)),
-        ("--key-hl-color", Some(Accent)),
-        ("--caps-lock-key-hl-color", Some(Accent)),
+        ("--key-hl-color", Some(LockAccent)),
+        ("--caps-lock-key-hl-color", Some(LockAccent)),
         ("--bs-hl-color", Some(Alert)),
         ("--caps-lock-bs-hl-color", Some(Alert)),
         ("--line-color", None),
@@ -66,7 +78,16 @@ const PAINT: &[(&str, Option<Role>)] = {
 /// `command`, dressed in `palette` and `font` when it is swaylock with no
 /// config file named: `-C /dev/null`, the theme, then its own arguments as
 /// written. Anything else comes back as it was.
-pub(crate) fn dressed(command: Vec<String>, palette: &Palette, font: &Font) -> Vec<String> {
+///
+/// `beneath` is whether perspicax draws the lock screen beneath it, as it
+/// does inside its own session. Then the screen is left clear, and only the
+/// ring and the words are swaylock's to paint.
+pub(crate) fn dressed(
+    command: Vec<String>,
+    palette: &Palette,
+    font: &Font,
+    beneath: bool,
+) -> Vec<String> {
     let Some((program, arguments)) = command.split_first() else {
         return command;
     };
@@ -75,7 +96,11 @@ pub(crate) fn dressed(command: Vec<String>, palette: &Palette, font: &Font) -> V
     }
     let theme = PAINT
         .iter()
-        .flat_map(|&(flag, paint)| [flag.to_owned(), hex(paint, palette)])
+        .map(|&(flag, paint)| match flag {
+            SCREEN if beneath => (flag, None),
+            _ => (flag, paint),
+        })
+        .flat_map(|(flag, paint)| [flag.to_owned(), hex(paint, palette)])
         .chain(["--font".to_owned(), family(&font.family).to_owned()]);
     [program.clone(), "-C".to_owned(), NO_FILE.to_owned()]
         .into_iter()
@@ -208,8 +233,10 @@ mod tests {
         written.iter().map(|&word| word.to_owned()).collect()
     }
 
+    /// `written`, dressed as the session's menus dress it: with perspicax
+    /// drawing the screen beneath.
     fn dress(written: &[&str]) -> Vec<String> {
-        dressed(words(written), &Palette::default(), &Font::default())
+        dressed(words(written), &Palette::default(), &Font::default(), true)
     }
 
     /// The value written after `flag`, the last time it is.
@@ -225,8 +252,12 @@ mod tests {
     fn swaylock_reads_no_file_and_wears_the_theme() {
         let command = dress(&["swaylock"]);
         assert_eq!(command[..3], ["swaylock", "-C", "/dev/null"]);
-        assert_eq!(value(&command, "--color"), Some("0c2440ff"));
-        assert_eq!(value(&command, "--ring-color"), Some("495b70ff"));
+        assert_eq!(
+            value(&command, "--color"),
+            Some("00000000"),
+            "clear, over the screen perspicax draws"
+        );
+        assert_eq!(value(&command, "--ring-color"), Some("c06a3cff"));
         assert_eq!(value(&command, "--key-hl-color"), Some("3daee9ff"));
         assert_eq!(value(&command, "--ring-wrong-color"), Some("da4453ff"));
         assert_eq!(value(&command, "--text-color"), Some("ffffffff"));
@@ -236,6 +267,32 @@ mod tests {
             command.len(),
             3 + 2 * (PAINT.len() + 1),
             "nothing but the theme"
+        );
+    }
+
+    #[test]
+    fn with_nothing_drawn_beneath_swaylock_paints_the_screen_itself() {
+        let alone = dressed(
+            words(&["swaylock"]),
+            &Palette::default(),
+            &Font::default(),
+            false,
+        );
+        assert_eq!(
+            value(&alone, "--color"),
+            Some("0c2440ff"),
+            "the lock colour"
+        );
+        let over = dress(&["swaylock"]);
+        let differ: Vec<_> = alone
+            .iter()
+            .zip(&over)
+            .filter(|(alone, over)| alone != over)
+            .collect();
+        assert_eq!(
+            differ,
+            [(&"0c2440ff".to_owned(), &"00000000".to_owned())],
+            "and nothing else is dressed differently"
         );
     }
 
@@ -273,8 +330,12 @@ mod tests {
             family: Family::Named("Noto Sans".to_owned()),
             ..Font::default()
         };
-        let command = dressed(words(&["swaylock"]), &palette, &font);
-        assert_eq!(value(&command, "--key-hl-color"), Some("e93d5aff"));
+        let command = dressed(words(&["swaylock"]), &palette, &font, false);
+        assert_eq!(
+            value(&command, "--key-hl-color"),
+            Some("e93d5aff"),
+            "the lock's accent is the accent, unwritten"
+        );
         assert_eq!(value(&command, "--color"), Some("202020ff"));
         assert_eq!(value(&command, "--font"), Some("Noto Sans"));
 
@@ -282,9 +343,27 @@ mod tests {
             words(&["swaylock"]),
             &Builtin::BreezeLight.palette(),
             &Font::default(),
+            false,
         );
         assert_eq!(value(&light, "--color"), Some("cbd8dfff"));
         assert_eq!(value(&light, "--text-color"), Some("000000ff"));
+    }
+
+    #[test]
+    fn the_locks_own_accent_lights_the_keys_and_the_check() {
+        let palette = Palette::default().written_over(&BTreeMap::from([
+            (Role::Accent, Rgba::new(0xe9, 0x3d, 0x5a, 0xff)),
+            (Role::LockAccent, Rgba::new(0x7b, 0xae, 0xcd, 0xff)),
+        ]));
+        let command = dressed(words(&["swaylock"]), &palette, &Font::default(), true);
+        for flag in [
+            "--key-hl-color",
+            "--caps-lock-key-hl-color",
+            "--ring-ver-color",
+        ] {
+            assert_eq!(value(&command, flag), Some("7baecdff"), "{flag}");
+        }
+        assert_eq!(value(&command, "--ring-color"), Some("c06a3cff"));
     }
 
     #[test]

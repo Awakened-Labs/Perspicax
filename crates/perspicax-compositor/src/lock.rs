@@ -6,7 +6,10 @@
 //! Nothing but the lock surfaces is drawn, hit-tested or given the keyboard
 //! or the pointer, and no binding runs: a launcher binding that opened a
 //! terminal over the lock screen would be an unlock. Only the escape hatches
-//! still work, and both leave the session rather than bypass the lock.
+//! still work, and both leave the session rather than bypass the lock. On a
+//! seat, beneath the lock surfaces, the compositor draws the lock screen's
+//! own colour and logo (`crate::backdrop`), which show wherever the lock
+//! client leaves its surface clear, and before it has drawn at all.
 //!
 //! The pointer is taken from the windows the moment the session locks, not
 //! at the next motion: a hand at rest, or a tap of the touchpad to wake the

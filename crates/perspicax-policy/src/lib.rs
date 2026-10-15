@@ -76,7 +76,7 @@ pub use crate::{
     tabs::Groups,
     tap::{LogoTap, is_logo},
     theme::{
-        Appearance, Builtin, ColorScheme, Contrast, Family, Font, Palette, Rgba, Role, Theme,
+        Appearance, Builtin, ColorScheme, Contrast, Family, Font, Logo, Palette, Rgba, Role, Theme,
         follows,
     },
     workspace::{Cell, Direction, Grid, GroupView, Home, Mode, Shape, WorkspaceView, Workspaces},

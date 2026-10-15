@@ -97,6 +97,18 @@ impl Compositor {
         // Per output, a rescued window joined its new monitor's workspace,
         // and a monitor that is gone took its own workspace with it.
         self.show_what_belongs();
+        // Each monitor's logo is built now, for its mode and scale, so that
+        // locking does no pixel work; one unplugged takes its own with it.
+        #[cfg(any(feature = "seat", feature = "capture"))]
+        self.backdrop
+            .screens(placements.iter().filter_map(|(output, _)| {
+                let mode = output.current_mode()?;
+                Some((
+                    output.clone(),
+                    mode.size,
+                    output.current_scale().fractional_scale(),
+                ))
+            }));
 
         self.backend.redraw();
         self.publish_facts();

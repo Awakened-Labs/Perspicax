@@ -145,6 +145,15 @@ pub enum Command {
     /// game reads for mouselook even where the pointer could not follow.
     /// Like the others, it needs `capture` headless.
     Motion { by: (i32, i32) },
+    /// Put the splash up as a seat does as its session starts, in
+    /// `palette`'s colours, with Perspicax's lockup decoded there and then,
+    /// until a wallpaper covers each output or `lasts` is over. So a test
+    /// can see it in a picture of a monitor, which needs `capture`. For a
+    /// test: a seat puts up its own, once.
+    Splash {
+        lasts: Duration,
+        palette: perspicax_policy::Palette,
+    },
 }
 
 /// A picture asked for, with somewhere to put it.
