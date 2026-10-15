@@ -26,8 +26,10 @@
 //! The pointer is moved as on any backend ([`Compositor::travel`]): kept on
 //! the outputs, hit-tested against the stack, and the mouse's own motion
 //! passed on beside it, for a game's mouselook. Every motion and press is
-//! then put to the focus policy ([`perspicax_policy::Focus`]), whose decision
-//! is carried out here. For a button or the wheel, the order of authority is:
+//! then put to the focus policy ([`perspicax_policy::Focus`]), as a test's
+//! stand-in hand is ([`Compositor::follow_pointer`],
+//! [`Compositor::follow_press`]). For a button or the wheel, the order of
+//! authority is:
 //!
 //! 1. the `[mouse]` bindings ([`crate::mouse`], shared with headless);
 //! 2. what the compositor does with a press itself: a frame's buttons, edges
@@ -72,7 +74,7 @@ use super::{
 };
 use crate::{
     framed::Framed,
-    mouse::{Scrolled, Travelled, policy},
+    mouse::{Scrolled, Travelled},
     shell::{covers_panels, id_of},
     state::Compositor,
 };
@@ -278,20 +280,7 @@ fn moved(
         }
         return;
     };
-    // The focus policy is about windows. Over a panel it has nothing to say:
-    // passing it the panel as "no window" would make strict focus drop the
-    // keyboard every time the pointer crossed the taskbar.
-    let over_layer = under.as_ref().is_some_and(|hit| hit.window.is_none());
-    let over = under
-        .as_ref()
-        .and_then(|hit| hit.window.as_ref())
-        .and_then(id_of);
-    if let Some(focus) = policy(state)
-        && !over_layer
-    {
-        let decision = focus.pointer_over(over, state.focused_surface());
-        state.apply_focus(decision);
-    }
+    state.follow_pointer(under.as_ref());
     // After the focus policy, so the window in use is the one it chose.
     state.settle_hold();
     // The cursor itself moved, whatever the policy decided.
@@ -335,10 +324,7 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
         // receives its click already on top and focused, as it would under
         // any desktop. And before a binding, so one that acts on a window
         // acts on the window clicked.
-        if let Some(focus) = policy(state) {
-            let decision = focus.pressed(over.as_ref().and_then(id_of), state.focused_surface());
-            state.apply_focus(decision);
-        }
+        state.follow_press(hit.as_ref());
         // A press a binding took is no half of a titlebar's double-click.
         if state.bound_press(hit.as_ref(), at, code, held(state), time) {
             if let Running::Seat(session) = &mut state.backend {

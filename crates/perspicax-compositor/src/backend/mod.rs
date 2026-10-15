@@ -224,6 +224,9 @@ pub(crate) enum Running {
         person: bool,
         opacity: Opacity,
         agent: Agent,
+        /// The focus policy a test put in force
+        /// ([`crate::Command::FocusPolicy`]), and none until one does.
+        focus: Option<perspicax_policy::Focus>,
         /// Virtual monitors a display tool turned off, kept so it can turn
         /// them on again.
         dark: Vec<Virtual>,
@@ -268,6 +271,7 @@ impl Running {
                 person: *person,
                 opacity: opacity.clone(),
                 agent: agent.clone(),
+                focus: None,
                 dark: Vec::new(),
                 #[cfg(feature = "capture")]
                 pictures: None,
@@ -356,10 +360,11 @@ impl Running {
     }
 
     /// The focus policy: the person's `[focus]` on a seat. Headless has
-    /// none, for nobody points at anything there.
+    /// none, for nobody points at anything there, until a test puts one in
+    /// force for its stand-in hand ([`crate::Command::FocusPolicy`]).
     pub(crate) fn focus(&self) -> Option<perspicax_policy::Focus> {
         match self {
-            Self::Headless { .. } => None,
+            Self::Headless { focus, .. } => *focus,
             #[cfg(feature = "seat")]
             Self::Seat(session) => Some(session.settings.focus),
         }
@@ -619,6 +624,7 @@ impl Compositor {
                 self.layout_memory.set_switching(*switching);
             }
             crate::Command::MouseBindings(bindings) => self.mouse = bindings.clone(),
+            crate::Command::FocusPolicy(focus) => self.put_focus(*focus),
             crate::Command::Click { at, button, mods } => {
                 self.stand_in_click(*at, *button, *mods);
             }
@@ -635,6 +641,19 @@ impl Compositor {
             #[cfg(not(any(feature = "seat", feature = "capture")))]
             crate::Command::Splash { .. } => {
                 tracing::warn!("the splash is drawn only on a seat or in a picture");
+            }
+        }
+    }
+
+    /// Put a test's focus policy in force: see
+    /// [`crate::Command::FocusPolicy`]. A seat's is its person's `[focus]`,
+    /// so there it is refused in the log.
+    fn put_focus(&mut self, policy: perspicax_policy::Focus) {
+        match &mut self.backend {
+            Running::Headless { focus, .. } => *focus = Some(policy),
+            #[cfg(feature = "seat")]
+            Running::Seat(_) => {
+                tracing::warn!("a seat's focus policy is its person's [focus]");
             }
         }
     }
