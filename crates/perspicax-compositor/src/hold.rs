@@ -9,6 +9,10 @@
 //! `ClipCursor`) becomes a confine, and a hidden pointer warped back to the
 //! middle (Wine's and SDL2's mouselook) becomes a lock -- which Xwayland
 //! only does when this and the relative pointer are both advertised.
+//! Xwayland gives up an X game's confine as soon as the pointer leaves the
+//! window, and asks again only when the game grabs again or its window is
+//! moved or resized. So a game let go here, for a launcher, say, comes back
+//! unconfined until one of those happens.
 //!
 //! smithay keeps the requests. What this module decides is when one takes
 //! hold, what the pointer does while it holds, and when it lets go.

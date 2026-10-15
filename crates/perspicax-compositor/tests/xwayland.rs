@@ -2068,9 +2068,20 @@ fn two_workspaces() -> Backend {
 /// surface -- given that the compositor offers it. Then the person's mouse
 /// cannot take the pointer off the X game onto the Wayland window beside it.
 ///
-/// Xwayland asks on a connection of its own, so the confine may reach the
-/// compositor a moment after the grab: a push that gets out before it does
-/// is brought back and tried again. Without the protocol none ever holds.
+/// Two things Xwayland does are waited out, not retried (issue #120):
+/// - A grab made while Xwayland counts the X cursor hidden is held with a
+///   lock, its stand-in for a game's mouselook, not a confine. And it shows
+///   the cursor of a window the pointer has just come onto only once the
+///   pointer moves on it, or 5 ms later. So the pointer arrives a pixel off
+///   and, once X has it there, moves onto its spot.
+/// - Xwayland asks for the confine on a connection of its own, after it has
+///   answered the grab, and gives it up if the pointer leaves the window
+///   first. Here nothing would make it ask again. So once it has the grab,
+///   the game draws a mark. By the time the compositor has the mark, it has
+///   the confine, asked for before the mark on the same connection.
+///
+/// A push that gets out after that is a failure, as it is without the
+/// protocol, when none ever holds.
 #[cfg(feature = "capture")]
 #[test]
 #[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
@@ -2101,21 +2112,40 @@ fn an_x11_pointer_grab_confined_to_its_window_keeps_the_mouse_in_it() {
         "the game must leave some of the Wayland window beside it: {x0}"
     );
 
-    // The mouse onto the game, from the origin where the pointer starts.
-    let onto = (x0 as i32 + 20, y0 as i32 + 20);
-    x11.session.command(Command::Motion { by: onto });
+    // Where on the game the X server has the pointer, once it has it there.
     let pointed = |x11: &X11| {
         let pointer = x11.x.query_pointer(window).ok()?.reply().ok()?;
         pointer
             .same_screen
             .then_some((pointer.win_x, pointer.win_y))
     };
+    let reaches = |x11: &X11, at: (i16, i16)| {
+        eventually(Duration::from_secs(5), || {
+            pointed(x11).filter(|seen| *seen == at)
+        })
+    };
+
+    // The mouse onto the game, from the origin where the pointer starts, a
+    // pixel right of its spot. Once X has it there, the pixel back: a move
+    // on the window, which shows X's cursor.
+    x11.session.command(Command::Motion {
+        by: (x0 as i32 + 21, y0 as i32 + 20),
+    });
     assert_eq!(
-        eventually(Duration::from_secs(5), || pointed(&x11)
-            .filter(|at| *at == (20, 20))),
-        Some((20, 20)),
+        reaches(&x11, (21, 20)),
+        Some((21, 20)),
         "the X server never saw the pointer arrive"
     );
+    x11.session.command(Command::Motion { by: (-1, 0) });
+    assert_eq!(
+        reaches(&x11, (20, 20)),
+        Some((20, 20)),
+        "the X server never saw the pointer move on the game"
+    );
+    // Whatever the arrival told the Wayland window has been heard. From
+    // here on, the pointer arriving there is the pointer getting out.
+    queue.roundtrip(&mut desk).expect("a roundtrip");
+    desk.arrived = None;
 
     let grab = x11
         .x
@@ -2134,40 +2164,40 @@ fn an_x11_pointer_grab_confined_to_its_window_keeps_the_mouse_in_it() {
         .expect("the grab's answer");
     assert_eq!(grab.status, GrabStatus::SUCCESS);
 
-    // Far to the left, over the Wayland window, until the confine holds.
-    let held = eventually(Duration::from_secs(10), || {
-        desk.entered = None;
-        x11.session.command(Command::Motion { by: (-1000, 0) });
-        let escaped = eventually(Duration::from_secs(2), || {
-            queue.roundtrip(&mut desk).expect("a roundtrip");
-            if desk.entered.is_some() {
-                return Some(true);
-            }
-            pointed(&x11).filter(|&(x, _)| x == 0).map(|_| false)
-        });
-        if escaped == Some(false) {
-            return Some(());
-        }
-        // Out before the confine reached the compositor: back onto the game.
-        x11.session.command(Command::Motion { by: onto });
-        None
-    });
-    assert!(held.is_some(), "the pointer never stayed on the X game");
+    // The game's mark: a patch of its background drawn again, where nothing
+    // else draws, so damage there can only be this.
+    let (x, y, width, height) = (3, 5, 7, 11);
+    x11.x
+        .clear_area(false, window, x, y, width, height)
+        .expect("clear_area");
+    x11.x.flush().expect("flush");
+    let mark = Rect::new(
+        f64::from(x),
+        f64::from(y),
+        f64::from(x) + f64::from(width),
+        f64::from(y) + f64::from(height),
+    );
+    x11.surface_where("game", |game| {
+        game.damage.iter().any(|(_, drawn)| *drawn == mark)
+    })
+    .unwrap_or_else(|| panic!("the game's mark never arrived: {:?}", x11.facts()));
 
-    // Held: however far the mouse goes, the pointer stays on its left edge.
-    desk.entered = None;
+    // Far to the left, over the Wayland window: the pointer stops at the
+    // game's left edge, and however far the mouse goes on, slides along it.
+    x11.session.command(Command::Motion { by: (-1000, 0) });
+    assert_eq!(
+        reaches(&x11, (0, 20)),
+        Some((0, 20)),
+        "the pointer left the X game"
+    );
     x11.session.command(Command::Motion { by: (-1000, 50) });
     assert_eq!(
-        eventually(Duration::from_secs(5), || pointed(&x11)
-            .filter(|&(_, y)| y == 70)),
+        reaches(&x11, (0, 70)),
         Some((0, 70)),
         "slid down along the left edge"
     );
     queue.roundtrip(&mut desk).expect("a roundtrip");
-    assert!(
-        desk.entered.is_none(),
-        "the Wayland window never had the pointer"
-    );
+    assert_eq!(desk.arrived, None, "the Wayland window had the pointer");
 
     drop((desk, queue));
     x11.stop();
