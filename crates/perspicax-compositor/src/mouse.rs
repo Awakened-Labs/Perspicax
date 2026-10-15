@@ -43,7 +43,11 @@ use crate::{framed::Framed, hold::Hold, layers, shell::id_of, state::Compositor}
 
 /// What the pointer is over.
 pub(crate) struct Hit {
-    /// Set when it is a window, which is all the focus policy decides about.
+    /// Set when it is a window this compositor manages, which is all the
+    /// focus policy and the bindings decide about. An X11 window that places
+    /// itself ([`crate::shell::places_itself`]), an application's menu, is
+    /// drawn, hit and given the pointer like any, but comes with its surface
+    /// and no window, as a panel's menu does.
     pub(crate) window: Option<Framed>,
     /// Set when it is a layer surface that may take the keyboard on a click.
     #[cfg_attr(
@@ -91,13 +95,15 @@ pub(crate) fn under(state: &Compositor, at: Point<f64, Logical>) -> Option<Hit> 
         if raised && !crate::shell::covers_panels(window) {
             return None;
         }
+        // One that places itself is its client's alone (#181).
+        let managed = (!crate::shell::places_itself(window)).then(|| window.clone());
         // The client first, so a popup hanging over the titlebar gets its
         // clicks; then the frame around it.
         if let Some((surface, offset)) =
             window.surface_under(at - location.to_f64(), WindowSurfaceType::ALL)
         {
             return Some(Hit {
-                window: Some(window.clone()),
+                window: managed,
                 takes_focus: false,
                 surface: Some(surface),
                 origin: (location + offset).to_f64(),
@@ -105,7 +111,7 @@ pub(crate) fn under(state: &Compositor, at: Point<f64, Logical>) -> Option<Hit> 
             });
         }
         Some(Hit {
-            window: Some(window.clone()),
+            window: managed,
             takes_focus: false,
             surface: None,
             origin: location.to_f64(),
@@ -278,9 +284,10 @@ impl Compositor {
     /// either backend, and before the hold is settled, so the window in use
     /// is the one the policy chose.
     pub(crate) fn follow_pointer(&mut self, hit: Option<&Hit>) {
-        // The focus policy is about windows. Over a panel it has nothing to
-        // say: passing it the panel as "no window" would make strict focus
-        // drop the keyboard every time the pointer crossed the taskbar.
+        // The focus policy is about windows. Over a panel, or an X11 menu,
+        // it has nothing to say: passing it the panel as "no window" would
+        // make strict focus drop the keyboard every time the pointer crossed
+        // the taskbar, and the menu's window every time it opened one.
         let over_other = hit.is_some_and(|hit| hit.window.is_none());
         let over = hit.and_then(|hit| hit.window.as_ref()).and_then(id_of);
         if let Some(focus) = policy(self)

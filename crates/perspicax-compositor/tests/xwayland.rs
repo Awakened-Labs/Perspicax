@@ -31,7 +31,7 @@ use common::{Session, until};
 use perspicax_compositor::{Backend, Command, Config, Error, Facts, Requests, Stop};
 use perspicax_index::{HostFacts, SurfaceFacts, judge};
 use perspicax_node::{Origin, Rect, Visibility, X11Basis};
-use perspicax_policy::{Action, Button, Mods};
+use perspicax_policy::{Action, Button, Focus, FocusModel, Mods, Opacity};
 use x11rb::{
     connection::Connection as _,
     properties::{WmHints, WmHintsState, WmSizeHints},
@@ -41,7 +41,7 @@ use x11rb::{
         xproto::{
             AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConfigureWindowAux,
             ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, GrabStatus, MapState,
-            PropMode, WindowClass,
+            NotifyMode, PropMode, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -464,6 +464,8 @@ x11rb::atom_manager! {
         _NET_WM_STATE_FOCUSED,
         _NET_ACTIVE_WINDOW,
         _NET_WM_MOVERESIZE,
+        _NET_WM_WINDOW_TYPE,
+        _NET_WM_WINDOW_TYPE_POPUP_MENU,
     }
 }
 
@@ -620,6 +622,119 @@ impl X11 {
                 .expect("_NET_WM_STATE");
         }
         window
+    }
+
+    /// A menu titled `title`, as Steam's are: a window that bypasses the
+    /// window manager (override-redirect) and places itself at `at`, `size`
+    /// big, typed a popup menu, with no `WM_TRANSIENT_FOR` and no word on
+    /// input, so X would let it have the keyboard. Mapped, once the
+    /// compositor has it on screen. Its presses are heard.
+    fn menu(&self, title: &str, at: (i16, i16), size: (u16, u16)) -> u32 {
+        let window = self.x.generate_id().expect("an X id");
+        self.x
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                window,
+                self.root,
+                at.0,
+                at.1,
+                size.0,
+                size.1,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new()
+                    .background_pixel(self.white)
+                    .override_redirect(1)
+                    .event_mask(EventMask::PROPERTY_CHANGE | EventMask::BUTTON_PRESS),
+            )
+            .expect("create_window");
+        self.x
+            .change_property8(
+                PropMode::REPLACE,
+                window,
+                AtomEnum::WM_NAME,
+                AtomEnum::STRING,
+                title.as_bytes(),
+            )
+            .expect("WM_NAME");
+        self.x
+            .change_property32(
+                PropMode::REPLACE,
+                window,
+                self.atoms._NET_WM_WINDOW_TYPE,
+                AtomEnum::ATOM,
+                &[self.atoms._NET_WM_WINDOW_TYPE_POPUP_MENU],
+            )
+            .expect("_NET_WM_WINDOW_TYPE");
+        self.x.map_window(window).expect("map_window");
+        self.x.flush().expect("flush");
+        self.surface_where(title, |surface| surface.mapped)
+            .unwrap_or_else(|| panic!("{title} never mapped: {:?}", self.facts()));
+        window
+    }
+
+    /// Hear `window` gain and lose the keyboard, besides its property
+    /// changes.
+    fn hear_focus(&self, window: u32) {
+        self.x
+            .change_window_attributes(
+                window,
+                &ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::PROPERTY_CHANGE | EventMask::FOCUS_CHANGE),
+            )
+            .expect("change_window_attributes")
+            .check()
+            .expect("the window's focus changes");
+    }
+
+    /// Whether `window` is told, within a second, that it lost the keyboard:
+    /// the `FocusOut` a client closes its menus on. Only what is heard after
+    /// the last [`X11::drain`].
+    fn told_focus_out(&self, window: u32) -> bool {
+        eventually(Duration::from_secs(1), || {
+            loop {
+                match self.x.poll_for_event().ok()? {
+                    Some(Event::FocusOut(out))
+                        if out.event == window && out.mode == NotifyMode::NORMAL =>
+                    {
+                        return Some(());
+                    }
+                    Some(_) => {}
+                    None => return None,
+                }
+            }
+        })
+        .is_some()
+    }
+
+    /// Whether the X client is told of a press of X's button `detail` on
+    /// `window`. Only what is heard after the last [`X11::drain`].
+    fn heard_press(&self, window: u32, detail: u8) -> bool {
+        eventually(Duration::from_secs(5), || {
+            loop {
+                match self.x.poll_for_event().ok()? {
+                    Some(Event::ButtonPress(press))
+                        if press.event == window && press.detail == detail =>
+                    {
+                        return Some(());
+                    }
+                    Some(_) => {}
+                    None => return None,
+                }
+            }
+        })
+        .is_some()
+    }
+
+    /// Whether the X server comes to have the pointer at `at` on `window`,
+    /// in the window's own coordinates.
+    fn pointer_reaches(&self, window: u32, at: (i16, i16)) -> bool {
+        eventually(Duration::from_secs(5), || {
+            let pointer = self.x.query_pointer(window).ok()?.reply().ok()?;
+            (pointer.same_screen && (pointer.win_x, pointer.win_y) == at).then_some(())
+        })
+        .is_some()
     }
 
     /// Ask, as a client does: a client message to the root, which the window
@@ -2230,5 +2345,184 @@ fn an_x11_game_is_offered_only_the_monitors_own_resolution() {
         .map(|mode| (mode.width, mode.height))
         .collect();
     assert_eq!(modes, [(800, 600)]);
+    x11.stop();
+}
+
+/// Headless at 1280 by 800 with a person at it, a window without the
+/// keyboard drawn at `unfocused` percent as a seat's `[opacity]` says, and a
+/// focus policy of `model` in force for the person's hand.
+fn seated(name: &str, unfocused: u8, model: FocusModel) -> X11 {
+    let mut backend = Backend::headless((1280, 800)).with_person();
+    if let Backend::Headless { opacity, .. } = &mut backend {
+        *opacity = Opacity {
+            unfocused,
+            ..Opacity::default()
+        };
+    }
+    let x11 = X11::start(name, backend);
+    x11.session.command(Command::FocusPolicy(Focus {
+        model,
+        autoraise: false,
+    }));
+    x11
+}
+
+/// "steam", with the keyboard, and a menu it opened over itself, as Steam
+/// opens its own: where it is, and the menu.
+fn steam_with_a_menu(x11: &X11) -> (u32, u32, (i16, i16)) {
+    let steam = x11.open("steam");
+    assert!(
+        eventually(Duration::from_secs(5), || (x11.focus() == steam)
+            .then_some(()))
+        .is_some(),
+        "steam never took the keyboard"
+    );
+    x11.hear_focus(steam);
+    let (x0, y0, _, _) = rect_of(
+        &x11.surface_where("steam", |surface| surface.mapped)
+            .expect("mapped"),
+    );
+    let at = (x0 as i16 + 40, y0 as i16 + 40);
+    let menu = x11.menu("menu", at, (120, 100));
+    (steam, menu, at)
+}
+
+/// Issue #181: under sloppy focus the pointer moving onto an X application's
+/// menu gave the menu the keyboard. smithay told X the window that opened
+/// it had lost it, the application closed its menu on the `FocusOut`, and
+/// for that moment the window was drawn as one without the keyboard. Steam's
+/// menus closed as soon as the pointer reached them.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn pointing_at_an_x11_menu_under_sloppy_focus_leaves_the_keyboard_with_its_window_and_its_window_undimmed()
+ {
+    let x11 = seated("x11-menu-sloppy", 90, FocusModel::Sloppy);
+    let (steam, menu, at) = steam_with_a_menu(&x11);
+    x11.drain();
+
+    // The pointer from the origin, where it starts, onto the menu.
+    x11.session.command(Command::Motion {
+        by: (i32::from(at.0) + 20, i32::from(at.1) + 20),
+    });
+    assert!(
+        x11.pointer_reaches(menu, (20, 20)),
+        "the X server never saw the pointer reach the menu"
+    );
+
+    assert!(
+        !x11.told_focus_out(steam),
+        "steam was told it lost the keyboard"
+    );
+    assert_eq!(x11.focus(), steam, "the menu took the keyboard");
+    assert_eq!(focused_last(&x11.session.facts).as_deref(), Some("steam"));
+    let facts = x11.facts();
+    for title in ["steam", "menu"] {
+        let surface = facts
+            .surfaces()
+            .iter()
+            .find(|surface| surface.title.as_deref() == Some(title))
+            .expect("on screen");
+        assert_eq!(surface.drawn_opacity, None, "{title} was drawn dimmed");
+    }
+
+    x11.stop();
+}
+
+/// Issue #181: under strict focus too, and the keyboard is not taken from
+/// the window either, as it is over the bare desktop: the menu is the
+/// window's own.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn pointing_at_an_x11_menu_under_strict_focus_keeps_the_keyboard_with_its_window() {
+    let x11 = seated("x11-menu-strict", 100, FocusModel::Strict);
+    let (steam, menu, at) = steam_with_a_menu(&x11);
+    x11.drain();
+
+    x11.session.command(Command::Motion {
+        by: (i32::from(at.0) + 20, i32::from(at.1) + 20),
+    });
+    assert!(
+        x11.pointer_reaches(menu, (20, 20)),
+        "the X server never saw the pointer reach the menu"
+    );
+
+    assert!(
+        !x11.told_focus_out(steam),
+        "steam was told it lost the keyboard"
+    );
+    assert_eq!(x11.focus(), steam);
+
+    x11.stop();
+}
+
+/// Issue #181: a click focuses and raises the window clicked under every
+/// focus model, and an X application's menu was taken for one: an item
+/// clicked lost the window the keyboard, and its menu, before the click
+/// was even delivered.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn clicking_an_x11_menu_reaches_it_and_leaves_the_keyboard_with_its_window() {
+    let x11 = seated("x11-menu-click", 100, FocusModel::Click);
+    let (steam, menu, at) = steam_with_a_menu(&x11);
+    x11.drain();
+
+    x11.session.command(Command::Click {
+        at: (i32::from(at.0) + 20, i32::from(at.1) + 20),
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    // Heard after the keyboard moved, if it moved, so its `FocusOut` is
+    // gone by the time the press is: X's focus says it instead.
+    assert!(x11.heard_press(menu, 1), "the menu never heard the click");
+
+    assert_eq!(x11.focus(), steam, "the menu took the keyboard");
+    assert_eq!(focused_last(&x11.session.facts).as_deref(), Some("steam"));
+
+    x11.stop();
+}
+
+/// Issue #181: an X application's menu is no window to a window binding,
+/// any more than a panel's menu is: a binding on a window's thumb button
+/// left a click on the menu to the menu, rather than flipping the workspace
+/// out from under it.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_window_binding_is_not_set_off_by_a_click_on_an_x11_menu() {
+    let x11 = X11::start("x11-menu-binding", two_workspaces().with_person());
+    x11.session.command(Command::MouseBindings(
+        perspicax_policy::MouseBindings::default().bind(
+            perspicax_policy::Context::Window,
+            perspicax_policy::MouseChord {
+                mods: Mods::default(),
+                gesture: perspicax_policy::Gesture::Press(Button::Side),
+            },
+            Action::CycleWorkspace { forward: true },
+        ),
+    ));
+    let (_, menu, at) = steam_with_a_menu(&x11);
+    x11.drain();
+
+    x11.session.command(Command::Click {
+        at: (i32::from(at.0) + 20, i32::from(at.1) + 20),
+        button: Button::Side,
+        mods: Mods::default(),
+    });
+
+    // X's button 8 is the thumb button nearer the wrist.
+    assert!(
+        x11.heard_press(menu, 8),
+        "the binding took the menu's click"
+    );
+    assert!(
+        x11.surface_where("steam", |surface| surface.mapped)
+            .is_some(),
+        "the workspace flipped: {:?}",
+        x11.facts()
+    );
+
     x11.stop();
 }

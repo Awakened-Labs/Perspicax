@@ -760,7 +760,7 @@ impl Compositor {
     fn managed_x11_by_id(&self, id: u32) -> Option<(Framed, X11Surface)> {
         let window = self.x11_window_by_id(id)?;
         let x11 = window.x11_surface()?.clone();
-        (!x11.is_override_redirect()).then_some((window, x11))
+        (!shell::places_itself(&window)).then_some((window, x11))
     }
 
     /// The mapped or parked window wrapping this X11 surface.
