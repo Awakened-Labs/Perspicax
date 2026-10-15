@@ -14,6 +14,8 @@
 
 mod common;
 
+#[cfg(feature = "capture")]
+use common::menu_with_the_keyboard;
 use common::{Configured, Desk, Said, Session, WINDOW, configured, heard, until};
 use perspicax_compositor::Backend;
 #[cfg(feature = "capture")]
@@ -736,6 +738,71 @@ fn a_resize_under_way_tells_a_window_its_client_unmapped_nothing_more() {
         "the resize went on configuring the window its client unmapped: {:?}",
         desk.said_to(desk.windows[1].wl_surface())
     );
+
+    session.stop((desk, queue));
+}
+
+/// #114: a window unmapped after its menu was dismissed by a click outside
+/// it, before its client destroyed the menu, leaves the person's drag of
+/// another window alone. The menu holds nothing by then. Smithay counts a
+/// dismissed menu's grab as held until its client destroys the menu, which
+/// a slow client may not have done, and this one never does: asked that,
+/// unmapping the window let go of the pointer, and the window being moved
+/// stopped under the person's hand.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_unmapped_after_its_menu_was_dismissed_leaves_a_drag_be() {
+    let session = seated("unmap-dismissed-menu");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_pointer(&globals, &qh);
+    let ear = desk.bind_keyboard(&globals, &qh);
+    let page = opened(&session, &mut desk, &mut queue, &qh, "page");
+    let _menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, page);
+
+    // Dismissed by a click on the empty desk, and left undestroyed.
+    let desktop = (1270, 1014);
+    let at = session.facts.read().surface(page).expect("open").geometry;
+    assert!(f64::from(desktop.0) > at.x1 && f64::from(desktop.1) > at.y1);
+    session.command(Command::Click {
+        at: desktop,
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    until(&mut queue, &mut desk, |desk| desk.popups_done == 1);
+
+    // The person takes another window by its client, which asks to be
+    // moved, as a toolkit drawing its own titlebar does.
+    let other = opened(&session, &mut desk, &mut queue, &qh, "other");
+    let from = session.facts.read().surface(other).expect("open").geometry;
+    session.command(Command::Press {
+        at: (
+            ((from.x0 + from.x1) / 2.0).round() as i32,
+            ((from.y0 + from.y1) / 2.0).round() as i32,
+        ),
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    until(&mut queue, &mut desk, |desk| desk.pressed.is_some());
+    let seat = desk.seat.clone().expect("our pointer's seat");
+    desk.windows[1].move_(&seat, desk.pressed.expect("waited for"));
+    until(&mut queue, &mut desk, |desk| desk.pointed.is_none());
+
+    unmap(&mut desk, &mut queue, 0);
+    session.wait_for(|facts| facts.surface(page).is_none());
+    // The drag is the person's still: the window goes where their hand
+    // takes it.
+    session.command(Command::Motion { by: (40, 30) });
+    session.command(Command::Release {
+        button: Button::Left,
+    });
+    let moved = session.wait_for(|facts| {
+        facts
+            .surface(other)
+            .is_some_and(|window| window.geometry.x0 == from.x0 + 40.0)
+    });
+    let to = moved.surface(other).expect("waited for").geometry;
+    assert_eq!((to.x0, to.y0), (from.x0 + 40.0, from.y0 + 30.0));
 
     session.stop((desk, queue));
 }

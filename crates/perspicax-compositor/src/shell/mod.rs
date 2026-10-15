@@ -678,6 +678,30 @@ impl Compositor {
         self.menu.as_ref().is_some_and(|menu| !menu.has_ended())
     }
 
+    /// The window a menu holding the keyboard right now was opened from, by
+    /// its surface. `None` once the menu has let go of the keyboard, however
+    /// it did: closed by its client, dismissed by a click outside, or its
+    /// grab of the pointer taken over by another, a move begun on a
+    /// titlebar, say, which ends its grab of the keyboard too.
+    ///
+    /// Narrower than [`Self::menu_held`]. Smithay's grab counts as held
+    /// until its client has destroyed every menu of it, dismissed or not, so
+    /// a client slow to, or one that never does, would leave a menu looking
+    /// held while the keyboard and pointer are another window's. While the
+    /// keyboard's grab is this menu's, the pointer's is too: whatever took
+    /// that over would have ended both.
+    pub(crate) fn held_menu_root(&self) -> Option<WlSurface> {
+        let menu = self.menu.as_ref().filter(|menu| !menu.has_ended())?;
+        if !self.keyboard.as_ref()?.has_grab(menu.serial()) {
+            return None;
+        }
+        menu.keyboard_grab_start_data()
+            .focus
+            .as_ref()?
+            .wl_surface()
+            .map(std::borrow::Cow::into_owned)
+    }
+
     /// A window's menu its client closed -- an item chosen -- gives the
     /// keyboard back at once, where smithay's grab would give it at the next
     /// key or motion: to the menu below, if that holds the grab too, or else
