@@ -28,8 +28,10 @@ use std::{
 };
 
 use common::{Session, until};
-use perspicax_compositor::{Backend, Command, Config, Error, Facts, Requests, Stop};
-use perspicax_index::{HostFacts, SurfaceFacts, judge};
+use perspicax_compositor::{
+    ActError, Backend, Command, Config, Error, Facts, Host, Requests, Stop,
+};
+use perspicax_index::{Action as Verb, HostFacts, SurfaceFacts, judge};
 use perspicax_node::{Origin, Rect, Visibility, X11Basis};
 use perspicax_policy::{Action, Button, Focus, FocusModel, Mods, Opacity};
 use x11rb::{
@@ -2605,6 +2607,101 @@ fn switching_to_an_empty_workspace_while_an_x11_menu_is_up_gives_the_menu_no_key
         (x11.focus() == menu).then_some(())
     });
     assert!(took.is_none(), "the menu took the keyboard");
+
+    x11.stop();
+}
+
+/// The id the facts give the window titled `title`.
+fn id_of(x11: &X11, title: &str) -> perspicax_node::SurfaceId {
+    x11.surface_where(title, |surface| surface.mapped)
+        .unwrap_or_else(|| panic!("{title} never mapped"))
+        .id
+}
+
+/// Issue #181: an X application's menu has the keyboard only through its
+/// own client, which moves X's focus to it from the window that has the
+/// keyboard. An agent's `Focus` on one is refused as on a Wayland menu:
+/// given it, the menu's window would lose the keyboard, and the menu.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_agent_cannot_give_an_x11_menu_the_keyboard() {
+    let x11 = X11::start("x11-menu-agent-focus", Backend::headless((1280, 800)));
+    let host = Host::new(&x11.session.facts, &x11.session.requests);
+    let (steam, _, _) = steam_with_a_menu(&x11);
+    let menu = id_of(&x11, "menu");
+
+    assert_eq!(
+        host.act(menu, &Verb::Focus).map(|_| ()),
+        Err(ActError::TakesNoKeyboard(menu.0))
+    );
+    assert_eq!(x11.focus(), steam);
+
+    x11.stop();
+}
+
+/// Issue #181: closing a window is asking its client to, and an X
+/// application's menu has no `WM_DELETE_WINDOW` to be asked by, so smithay
+/// destroys it outright. An agent's `Close` on one finds no window to close,
+/// as on a Wayland menu.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_agent_cannot_close_an_x11_menu() {
+    let x11 = X11::start("x11-menu-agent-close", Backend::headless((1280, 800)));
+    let host = Host::new(&x11.session.facts, &x11.session.requests);
+    let (_, menu_window, _) = steam_with_a_menu(&x11);
+    let menu = id_of(&x11, "menu");
+
+    assert_eq!(
+        host.act(menu, &Verb::Close).map(|_| ()),
+        Err(ActError::NoSuchSurface(menu.0))
+    );
+    assert!(x11.viewable(menu_window), "the menu was destroyed");
+
+    x11.stop();
+}
+
+/// Issue #181: a window that places itself is not the window manager's to
+/// minimize, even when it asks: it was parked, taken off screen while X
+/// still showed it.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_menu_asking_to_be_minimized_stays_where_it_put_itself() {
+    let x11 = X11::start(
+        "x11-menu-iconic",
+        Backend::headless((1280, 800)).with_person(),
+    );
+    let (steam, menu, _) = steam_with_a_menu(&x11);
+
+    x11.change_state(menu, ICONIC);
+    x11.settled(steam);
+
+    let hidden = eventually(Duration::from_secs(1), || {
+        x11.surface_where("menu", |surface| !surface.mapped)
+    });
+    assert!(hidden.is_none(), "the menu was minimized");
+
+    x11.stop();
+}
+
+/// Issue #181: nor to make fullscreen: it was told it was, and moved on
+/// screen while X still had it where it put itself.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_menu_asking_for_fullscreen_stays_where_it_put_itself() {
+    let x11 = X11::start(
+        "x11-menu-fullscreen",
+        Backend::headless((1280, 800)).with_person(),
+    );
+    let (steam, menu, _) = steam_with_a_menu(&x11);
+
+    x11.ask_state(menu, ADD, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    x11.settled(steam);
+
+    assert!(
+        !x11.net_wm_state(menu)
+            .contains(&x11.atoms._NET_WM_STATE_FULLSCREEN),
+        "the menu was made fullscreen"
+    );
 
     x11.stop();
 }

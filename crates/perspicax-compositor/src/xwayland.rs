@@ -772,6 +772,15 @@ impl Compositor {
             .cloned()
     }
 
+    /// The same, if it is one the window manager manages. smithay passes on
+    /// a state or move request from any window it knows, and a menu or a
+    /// tooltip that asks is not the window manager's to minimize, fill or
+    /// drag: it places itself, and X would not follow (#181).
+    fn managed_x11(&self, surface: &X11Surface) -> Option<Framed> {
+        self.x11_window(surface)
+            .filter(|window| !shell::places_itself(window))
+    }
+
     /// Whether the keyboard is with an X11 window, which is when X clients
     /// may read the clipboard.
     fn x11_has_focus(&self) -> bool {
@@ -1197,7 +1206,7 @@ impl Compositor {
 
     /// A request to be minimized: see `minimize_request`.
     fn minimize_asked(&mut self, x11: &X11Surface) {
-        let Some(window) = self.x11_window(x11) else {
+        let Some(window) = self.managed_x11(x11) else {
             return;
         };
         if self.backend.has_person() && !Self::is_minimized(&window) {
@@ -1210,7 +1219,7 @@ impl Compositor {
     /// A request to be brought back from minimized: see
     /// `unminimize_request`.
     fn unminimize_asked(&mut self, x11: &X11Surface) {
-        let Some(window) = self.x11_window(x11) else {
+        let Some(window) = self.managed_x11(x11) else {
             return;
         };
         if self.backend.has_person() && Self::is_minimized(&window) {
@@ -1335,12 +1344,13 @@ impl Compositor {
     }
 
     /// The window an X11 request to change its state is about, if the
-    /// request is one to honour: a person at the seat, and a window we know.
+    /// request is one to honour: a person at the seat, and a window we know
+    /// and manage.
     fn honoured(&self, x11: &X11Surface) -> Option<Framed> {
         if !self.backend.has_person() {
             return None;
         }
-        self.x11_window(x11)
+        self.managed_x11(x11)
     }
 
     /// Make an X11 window fullscreen on `on`, or the monitor it is on: the
@@ -1435,7 +1445,7 @@ impl Compositor {
         }
         let pointer = self.pointer.as_ref()?;
         let start = pointer.grab_start_data()?;
-        Some((self.x11_window(x11)?, start))
+        Some((self.managed_x11(x11)?, start))
     }
 }
 

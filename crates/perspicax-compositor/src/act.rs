@@ -91,8 +91,9 @@ pub enum ActError {
     /// their applications until they unlock it.
     #[error("the session is locked")]
     Locked,
-    /// Focus was asked for a layer surface that takes no keyboard: a
-    /// wallpaper, or a panel that is only ever clicked.
+    /// Focus was asked for a surface that takes no keyboard from the
+    /// compositor: a wallpaper, a panel that is only ever clicked, or a menu,
+    /// which has it only through its own client.
     #[error("surface {0} takes no keyboard focus")]
     TakesNoKeyboard(u64),
     /// No compositor loop answered. It has not started, it has stopped, or it
@@ -341,9 +342,14 @@ impl Compositor {
         // A window verb addresses a window wherever it is: a tab behind
         // another is parked, and closing a window on a hidden workspace is
         // still closing it. Input goes only to what is on screen, which may
-        // be a panel or a wallpaper as well as a window.
+        // be a panel or a wallpaper as well as a window. An X11 menu is no
+        // window to close or bring forward, any more than a Wayland one is:
+        // smithay would destroy it, having no `WM_DELETE_WINDOW` to ask by.
         let target = match action {
-            Action::Close | Action::Forward => self.any_window(surface).map(Target::Window),
+            Action::Close | Action::Forward => self
+                .any_window(surface)
+                .filter(|window| !shell::places_itself(window))
+                .map(Target::Window),
             _ => self
                 .window_for_id(surface)
                 .map(Target::Window)
@@ -391,6 +397,12 @@ impl Compositor {
     /// takes it.
     fn act_focus(&mut self, target: &Target, id: SurfaceId) -> Result<(), ActError> {
         let wl_surface = match target {
+            // An X11 menu has the keyboard only through its own client, which
+            // moves X's focus to it from the window that has the keyboard:
+            // given it here, that window would lose it, and its menu (#181).
+            Target::Window(window) if shell::places_itself(window) => {
+                return Err(ActError::TakesNoKeyboard(id.0));
+            }
             Target::Window(window) => {
                 crate::shell::surface_of(window).ok_or(ActError::NoSuchSurface(id.0))?
             }
