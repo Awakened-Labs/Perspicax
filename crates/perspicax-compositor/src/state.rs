@@ -1538,7 +1538,18 @@ impl BufferHandler for Compositor {
     fn buffer_destroyed(&mut self, _buffer: &WlBuffer) {}
 }
 
-impl OutputHandler for Compositor {}
+impl OutputHandler for Compositor {
+    /// A client bound a monitor: tell its taskbars and pagers, on that
+    /// object, what they were last told is on the monitor. Both are fed by
+    /// name, so a monitor bound after it was named to them -- one just
+    /// plugged in, or lit again under the same name -- would otherwise never
+    /// be named on the object the client now holds for it.
+    fn output_bound(&mut self, output: smithay::output::Output, wl_output: WlOutput) {
+        let name = output.name();
+        self.enter_toplevels(&name, &wl_output);
+        self.enter_workspaces(&name, &wl_output);
+    }
+}
 
 impl SelectionHandler for Compositor {
     type SelectionUserData = ();

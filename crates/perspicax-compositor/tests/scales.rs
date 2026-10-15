@@ -27,6 +27,8 @@ mod common;
 
 use common::{Said, Session, advertised, rescale, until};
 use perspicax_compositor::{Backend, Virtual};
+use perspicax_index::{HostFacts, SurfaceKind};
+use perspicax_node::Rect;
 use perspicax_policy::{Access, Action, Direction, Place, Shape, Side, Towards};
 use smithay_client_toolkit::shell::WaylandSurface;
 
@@ -209,6 +211,61 @@ fn a_panel_is_told_its_monitors_scale() {
         desk.scales_told(&panel).len() == 2
     });
     assert_eq!(desk.scales_told(&panel), [120, 150]);
+
+    session.stop((desk, queue));
+}
+
+/// Where the layer surface that gave the namespace `namespace` is.
+fn layer_at(facts: &HostFacts, namespace: &str) -> Option<Rect> {
+    facts
+        .surfaces()
+        .iter()
+        .find(|surface| {
+            matches!(&surface.kind, SurfaceKind::Layer { namespace: given, .. }
+                if given == namespace)
+        })
+        .map(|surface| surface.geometry)
+}
+
+/// Issue #172: a monitor given a new scale where it stands is a new size
+/// for the panels on it, and they are fitted to it at once. Before, smithay
+/// was never told to arrange them, and a panel kept its old width until it
+/// happened to commit. 2 rather than a fraction, so the protocol's 256ths
+/// carry it exactly.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_panel_is_sized_again_when_its_monitor_is_rescaled() {
+    let session = Session::start("scales-panel-sized", Backend::headless((800, 600)));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.open_panel(&qh, "panel", 30, 0xff20_2020);
+    until(&mut queue, &mut desk, |desk| desk.layers_drawn == 1);
+    session.wait_for(|facts| layer_at(facts, "panel") == Some(Rect::new(0.0, 0.0, 800.0, 30.0)));
+
+    rescale(&mut desk, &mut queue, &qh, &globals, "HEADLESS-1", 2.0);
+    until(&mut queue, &mut desk, |desk| desk.layers_drawn == 2);
+    session.wait_for(|facts| layer_at(facts, "panel") == Some(Rect::new(0.0, 0.0, 400.0, 30.0)));
+
+    session.stop((desk, queue));
+}
+
+/// Issue #172: a maximized window fills its monitor, and a monitor given a
+/// new scale where it stands is a new size to fill.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_maximized_window_is_fitted_again_when_its_monitor_is_rescaled() {
+    let session = Session::start("scales-maximized", Backend::headless((800, 600)));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.open_window(&qh, "big", "org.example.Big");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    session.perform(Action::ToggleMaximize);
+    until(&mut queue, &mut desk, |desk| {
+        desk.offered.is_some_and(|(width, _)| width == 800)
+    });
+
+    rescale(&mut desk, &mut queue, &qh, &globals, "HEADLESS-1", 2.0);
+    until(&mut queue, &mut desk, |desk| {
+        desk.offered.is_some_and(|(width, _)| width == 400)
+    });
 
     session.stop((desk, queue));
 }

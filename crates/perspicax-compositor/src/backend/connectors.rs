@@ -102,6 +102,38 @@ pub(crate) fn pick_mode(
     }
 }
 
+/// What a monitor's rule asks that only lighting it can give: whether it is
+/// on, and the mode it shows, as `pick_mode` takes it. A monitor with no
+/// rule is on, at its preferred mode.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Asked {
+    pub enable: bool,
+    pub mode: Option<(u16, u16, Option<f64>)>,
+}
+
+impl Default for Asked {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            mode: None,
+        }
+    }
+}
+
+/// Whether putting rules in force takes a modeset: a lit monitor turned off,
+/// or asked for a mode other than the one it shows, or a dark one turned on.
+/// Anything else a rule says -- where a monitor goes, its scale -- can be
+/// changed where it stands, with no screen going blank.
+///
+/// `lit` is each lit monitor's ask, the modes it offers, and which of them it
+/// shows; `dark` is each dark one's ask.
+pub(crate) fn modeset(lit: &[(Asked, &[Offered], usize)], dark: &[Asked]) -> bool {
+    let changed = |&(asked, offered, showing): &(Asked, &[Offered], usize)| {
+        !asked.enable || pick_mode(asked.mode, offered).map(|(at, _)| at) != Some(showing)
+    };
+    lit.iter().any(changed) || dark.iter().any(|asked| asked.enable)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +234,79 @@ mod tests {
     #[test]
     fn a_monitor_with_no_modes_has_nothing_to_pick() {
         assert_eq!(pick_mode(None, &[]), None);
+    }
+
+    /// A monitor at its preferred 2560x1440 at 59.95 Hz, as a rule with none
+    /// of its own lit it.
+    fn showing_preferred(modes: &[Offered]) -> (Asked, &[Offered], usize) {
+        (Asked::default(), modes, 1)
+    }
+
+    #[test]
+    fn a_new_scale_or_place_alone_takes_no_modeset() {
+        // Neither is in what is asked: a rule that changed only those asks
+        // what it asked before.
+        let modes = monitor();
+        assert!(!modeset(&[showing_preferred(&modes)], &[]));
+    }
+
+    #[test]
+    fn a_lit_monitor_turned_off_takes_a_modeset() {
+        let modes = monitor();
+        let off = Asked {
+            enable: false,
+            mode: None,
+        };
+        assert!(modeset(&[(off, &modes, 1)], &[]));
+    }
+
+    #[test]
+    fn a_dark_monitor_turned_on_takes_a_modeset() {
+        let modes = monitor();
+        let still_off = Asked {
+            enable: false,
+            mode: None,
+        };
+        assert!(!modeset(&[showing_preferred(&modes)], &[still_off]));
+        assert!(modeset(&[showing_preferred(&modes)], &[Asked::default()]));
+    }
+
+    #[test]
+    fn another_mode_takes_a_modeset() {
+        let modes = monitor();
+        let faster = Asked {
+            enable: true,
+            mode: Some((2560, 1440, Some(144.0))),
+        };
+        assert!(modeset(&[(faster, &modes, 1)], &[]));
+    }
+
+    #[test]
+    fn the_mode_already_shown_written_out_takes_no_modeset() {
+        let modes = monitor();
+        let written = Asked {
+            enable: true,
+            mode: Some((2560, 1440, Some(60.0))),
+        };
+        assert!(!modeset(&[(written, &modes, 1)], &[]));
+    }
+
+    #[test]
+    fn a_rule_removed_goes_back_to_the_preferred_mode() {
+        let modes = monitor();
+        // Showing the 120 Hz mode a rule asked for, and the rule is gone.
+        assert!(modeset(&[(Asked::default(), &modes, 3)], &[]));
+    }
+
+    #[test]
+    fn a_mode_the_monitor_lacks_keeps_the_preferred_one_it_shows() {
+        // Lit at its preferred mode for a size it does not offer, as `light`
+        // does; asking for that size again changes nothing.
+        let modes = monitor();
+        let lacking = Asked {
+            enable: true,
+            mode: Some((800, 600, None)),
+        };
+        assert!(!modeset(&[(lacking, &modes, 1)], &[]));
     }
 }

@@ -239,3 +239,32 @@ fn a_retitle_reaches_the_taskbar_and_the_facts() {
 
     session.stop((desk, queue));
 }
+
+/// Issue #172: a monitor lit again under the same name -- a new scale saved
+/// in the config, on a seat -- is a new `wl_output`. A taskbar that lists the
+/// windows on its own monitor listed none there, because nothing said any
+/// window was on the new object. Binding a monitor twice is the same thing
+/// seen from the client.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_taskbar_is_told_again_which_windows_are_on_a_monitor_it_binds_again() {
+    let session = session("taskbar-bound-again");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.open_window(&qh, "first", "first");
+    until(&mut queue, &mut desk, |desk| {
+        desk.task("first").is_some_and(|task| task.outputs == 1)
+    });
+    let done = desk.task("first").unwrap().done;
+
+    assert_eq!(desk.bind_outputs_again(&globals, &qh), 1);
+    until(&mut queue, &mut desk, |desk| {
+        desk.task("first").is_some_and(|task| task.outputs == 2)
+    });
+    assert!(
+        desk.task("first").unwrap().done > done,
+        "and done, so a taskbar acts on it"
+    );
+
+    session.stop((desk, queue));
+}

@@ -704,6 +704,35 @@ fn each_monitor_shows_the_wallpaper_of_the_workspace_it_shows() {
     shell.stop_with(session);
 }
 
+/// Issue #172: a monitor plugged in joins the workspaces spanning the
+/// others, and shows the wallpaper of the one showing. The shell learns
+/// which that is only by being told, on the monitor it bound, that the
+/// group is on it; before, it was told before it could bind it, and the new
+/// monitor showed the shell's own wallpaper whatever the workspace.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_monitor_plugged_in_later_shows_the_wallpaper_of_the_workspace_spanning_it() {
+    let session = Session::start("shell-plug-wallpaper", four_workspaces());
+    let shell = Shell::start(&session, "plug-wallpaper", OWN_WALLPAPERS);
+    session.wait_for(|facts| desktops(facts).len() == 1);
+    session.perform(Action::GoToWorkspace(2));
+    until_colour_on(&session, Some("HEADLESS-1"), (100, 100), OWN);
+
+    session.command(Command::Plug(Virtual {
+        place: Place::Beside {
+            side: Side::RightOf,
+            of: "HEADLESS-1".to_owned(),
+            offset: 0,
+        },
+        ..Virtual::numbered(2, (1280, 800))
+    }));
+    session.wait_for(|facts| desktops(facts).len() == 2);
+    until_colour_on(&session, Some("HEADLESS-2"), (100, 100), OWN);
+
+    shell.stop_with(session);
+}
+
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn an_agents_right_click_on_the_wallpaper_opens_the_menu_on_the_overlay_layer() {
