@@ -225,6 +225,50 @@ async fn every_node_that_says_where_it_is_offers_component() {
     }
 }
 
+/// Read `name` with geometry twice, cold and then warm -- for GTK a walk and
+/// then its cache -- and say what the reads spared.
+async fn spared_by_reading(name: &str) -> std::collections::HashSet<perspicax_atspi::ObjectKey> {
+    let spared = perspicax_atspi::Spared::default();
+    let mut ingest = AtspiIngest::connect(name)
+        .await
+        .unwrap_or_else(|error| panic!("connect {name}: {error}"))
+        .with_geometry(true)
+        .sparing(&spared);
+    for read in ["cold", "warm"] {
+        let root = ingest.root_id();
+        let nodes = ingest.snapshot(root).await.unwrap();
+        println!(
+            "{name}  {read} read: {} nodes via {:?}",
+            nodes.len(),
+            ingest.strategy()
+        );
+    }
+    spared.lock().unwrap().clone()
+}
+
+/// A node is spared before it is asked where it is only in the shape of a
+/// plug its own application embedded (#124): listed, on its own bus, by a node
+/// that has just answered with no place, and saying it has no parent. The
+/// shape is narrow rather than impossible elsewhere -- GTK 3 gives its own
+/// internal children no parent, and GTK leaves a widget it has not laid out
+/// with no size -- so a toolkit that met it by accident would lose a subtree
+/// to it for as long as it ran. Neither toolkit here embeds a plug, and
+/// neither is ever frozen by being asked, so nothing may be spared at all.
+#[tokio::test]
+#[ignore = "needs a live accessibility bus and gtk4-widget-factory running"]
+async fn no_gtk_node_is_taken_for_a_plug() {
+    let spared = spared_by_reading(GTK).await;
+    assert!(spared.is_empty(), "{GTK}: spared {spared:?}");
+}
+
+/// [`no_gtk_node_is_taken_for_a_plug`], for Qt.
+#[tokio::test]
+#[ignore = "needs a live accessibility bus and the Qt widget gallery running"]
+async fn no_qt_node_is_taken_for_a_plug() {
+    let spared = spared_by_reading(QT).await;
+    assert!(spared.is_empty(), "{QT}: spared {spared:?}");
+}
+
 /// Reading a tree must not destroy it.
 ///
 /// zbus caches proxy properties by default, which issues

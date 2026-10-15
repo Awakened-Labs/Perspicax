@@ -53,7 +53,7 @@ pub use crate::{
     app::{AppRef, ObjectKey},
     error::Error,
     events::Subscription,
-    read::{GaveUp, Patience, Placed, Spared, Strategy},
+    read::{GaveUp, Patience, Placed, Placing, Spared, Strategy},
 };
 
 /// The one id map for a desktop, shared by every ingest reading it.
@@ -123,7 +123,7 @@ pub struct AtspiIngest {
     /// this application to the next.
     walking: Patience,
     /// The nodes never asked where they are again, because asking froze
-    /// their application.
+    /// their application, or would have.
     ///
     /// Private by default and shared by [`AtspiIngest::sparing`]. A reader
     /// of a desktop shares one, so that what an application taught it outlasts
@@ -268,13 +268,14 @@ impl AtspiIngest {
         self
     }
 
-    /// Remember what froze an application in `spared`, with every other
-    /// ingest sharing it: a node any of them found that asking froze is never
-    /// asked where it is again, nor anything beneath it.
+    /// Remember in `spared`, with every other ingest sharing it, what asking
+    /// froze an application or would have: a node any of them found so is
+    /// never asked where it is again, nor anything beneath it.
     ///
     /// For anything reading a desktop, which forgets an application that
     /// stops drawing and reads it afresh if it draws again: without it, the
-    /// fresh reading asks the node that froze the application once more.
+    /// fresh reading asks a plug its index once more, and asks the node that
+    /// froze the application where it is once more.
     #[must_use]
     pub fn sparing(mut self, spared: &Spared) -> Self {
         self.spared = Arc::clone(spared);
@@ -377,12 +378,23 @@ fn walked(app: &str, patience: &Patience) {
     }
 }
 
-/// Say that asking where nodes are stopped short, and why.
+/// Say which plugs a pass found, and that asking where nodes are stopped
+/// short, and why.
 ///
-/// A node is spared on one read only, so that warning is given once for as
+/// A node is spared on one read only, so each of those is said once for as
 /// long as the application runs, and the reads after it are quiet about it.
-fn placed(app: &str, outcome: &Placed) {
-    match outcome {
+fn placed(app: &str, outcome: &Placing) {
+    for plug in &outcome.plugs {
+        tracing::info!(
+            app,
+            node = plug.path(),
+            "never asking where this node is, nor anything beneath it: it is a plug its own \
+             application embedded, in a socket with no place, and its bridge would answer by \
+             asking itself and freeze until libdbus gives up (#124). They are refused as \
+             unplaced"
+        );
+    }
+    match &outcome.ended {
         Placed::All => {}
         Placed::OutOfTime => tracing::warn!(
             app,
@@ -400,8 +412,9 @@ fn placed(app: &str, outcome: &Placed) {
         Placed::Unanswered(node) => tracing::warn!(
             app,
             node = node.path(),
-            "stopped asking GetExtents: the application, silent during the walk too, left \
-             a call unanswered, so the rest go unasked this read and what was read is kept"
+            "stopped asking GetExtents: the application left a call about this node \
+             unanswered, while silent during the walk too or when asked only its index, so \
+             the rest go unasked this read and what was read is kept"
         ),
     }
 }
