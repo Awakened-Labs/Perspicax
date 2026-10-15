@@ -23,7 +23,7 @@ use smithay::{
         },
         wayland_server::{
             Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
-            backend::ClientId,
+            backend::ClientId, protocol::wl_output::WlOutput,
         },
     },
 };
@@ -122,6 +122,17 @@ pub(super) fn changed(
             handle.parent(now.parent.and_then(|_| parent_held_by(&client)).as_ref());
         }
         handle.done();
+    }
+}
+
+/// Tell `client`'s taskbars the window is on `wl_output`, a monitor it has
+/// just bound.
+pub(super) fn entered(known: &Known, client: &Client, wl_output: &WlOutput) {
+    for handle in &known.wlr {
+        if handle.client().as_ref() == Some(client) {
+            handle.output_enter(wl_output);
+            handle.done();
+        }
     }
 }
 

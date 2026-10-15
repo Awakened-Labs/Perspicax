@@ -513,6 +513,10 @@ pub struct PagedGroup {
     pub removed: bool,
 }
 
+/// A monitor bound again by `Desk::bind_outputs_again`, beside the one
+/// `OutputState` holds.
+pub struct Spare;
+
 /// One screencopy frame, as grim would see it.
 pub struct Grab {
     pub frame: ZwlrScreencopyFrameV1,
@@ -1450,6 +1454,25 @@ impl Desk {
                 .bind::<ExtWorkspaceManagerV1, _, _>(qh, 1..=1, ())
                 .expect("ext_workspace_manager_v1"),
         );
+    }
+
+    /// Bind every monitor there was at the start once more, as a client that
+    /// has just been told of a monitor does, and say how many. These are
+    /// spares: the client's own monitors, the ones `OutputState` holds, are
+    /// left as they are.
+    pub fn bind_outputs_again(&self, globals: &GlobalList, qh: &QueueHandle<Self>) -> usize {
+        let outputs: Vec<(u32, u32)> = globals.contents().with_list(|list| {
+            list.iter()
+                .filter(|global| global.interface == "wl_output")
+                .map(|global| (global.name, global.version))
+                .collect()
+        });
+        for &(name, version) in &outputs {
+            globals
+                .registry()
+                .bind::<wl_output::WlOutput, _, _>(name, version.min(4), qh, Spare);
+        }
+        outputs.len()
     }
 
     /// The groups the pager knows, not removed.
@@ -2404,6 +2427,18 @@ impl Dispatch<wl_seat::WlSeat, ()> for Desk {
         _: &wl_seat::WlSeat,
         _: wl_seat::Event,
         _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, Spare> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &wl_output::WlOutput,
+        _: wl_output::Event,
+        _: &Spare,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {

@@ -904,8 +904,11 @@ for the pointer (`grim -c`, OBS's *Show cursor*) gets it drawn in, and a
 recording waiting for a change is sent one when the pointer moves. A display tool's
 change to the monitors lasts for the session: it is put in force as the output
 rules, exactly as if `[[output]]` had said it, and a reload that changes
-`[[output]]` puts the file back in charge. Moving a monitor just moves it; a
-new mode, scale, or a monitor turned on or off lights the monitors again.
+`[[output]]` puts the file back in charge. Moving or rescaling a monitor
+changes it where it stands, and its panels, wallpaper and maximized windows
+follow; a new mode, or a monitor turned on or off, lights the monitors again.
+A program that binds a monitor after it was named -- one plugged in, or lit
+again -- is told then which workspace and windows are on it.
 
 `[agent]` says what an agent may do on the seat beyond what the person grants
 it: the programs it may start for itself (`launch`), and whether the session

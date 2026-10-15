@@ -15,6 +15,12 @@
 //! [`Compositor::sync_workspaces`] compares what the grid looks like with
 //! what was last sent and sends the difference. Nothing is sent while the
 //! session is locked, and nothing a pager asks for is done.
+//!
+//! The difference names a monitor once, to the `wl_output`s a pager holds
+//! then. A pager that binds a monitor later -- one plugged in, or lit again
+//! under the same name -- is told on the new object which group shows there,
+//! when it binds it ([`Compositor::enter_workspaces`]). That is so even while
+//! the session is locked: it is only what the pager was told before.
 
 use perspicax_policy::{Cell, GroupView, Protocol};
 use smithay::{
@@ -27,7 +33,7 @@ use smithay::{
         },
         wayland_server::{
             Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
-            backend::ClientId,
+            backend::ClientId, protocol::wl_output::WlOutput,
         },
     },
 };
@@ -100,6 +106,38 @@ impl Compositor {
             send(&display, manager, &pager.sent, &now, &outputs);
         }
         pager.sent = now;
+    }
+
+    /// A client bound `wl_output`, the monitor `name`: tell its pagers, on
+    /// that object, which group was last sent as showing there.
+    pub(crate) fn enter_workspaces(&self, name: &str, wl_output: &WlOutput) {
+        let Some(client) = wl_output.client() else {
+            return;
+        };
+        let showing: Vec<String> = self
+            .pager
+            .sent
+            .iter()
+            .filter(|view| view.outputs.iter().any(|on| on == name))
+            .map(key)
+            .collect();
+        for manager in &self.pager.managers {
+            if manager.manager.client().as_ref() != Some(&client) {
+                continue;
+            }
+            let mut told = false;
+            for (_, group) in manager
+                .groups
+                .iter()
+                .filter(|(group, _)| showing.contains(group))
+            {
+                group.output_enter(wl_output);
+                told = true;
+            }
+            if told {
+                manager.manager.done();
+            }
+        }
     }
 
     /// Withdraw the pager from every client the rules no longer admit.

@@ -5,13 +5,15 @@
 //! and bindings are just values, and are swapped. The keyboard is recompiled
 //! only if `[input.keyboard]` changed, and keeps the layout in use and its
 //! locks (see [`crate::keyboard`]). Pointer settings go to every device.
-//! Outputs are relit only if their rules changed, because relighting is a
-//! modeset and the screens blink. Autostart, the config's and XDG's, is not
-//! re-run: those programs are already running. Nor is the agent socket
-//! moved: it is bound before the seat is taken, so a change to it waits for
-//! the next login. The shell is told when its own table changed, and is
-//! started or stopped when `enabled` was turned on or off (see
-//! [`supervise`]).
+//! Outputs are touched only if their rules changed, and relit only if a
+//! monitor is turned on or off or changes mode, because relighting is a
+//! modeset and the screens blink; a new scale or place is changed where the
+//! monitor stands (see [`put_rules_in_force`]). Autostart, the config's and
+//! XDG's, is not re-run: those programs are already running. Nor is the
+//! agent socket moved: it is bound before the seat is taken, so a change to
+//! it waits for the next login. The shell is told when its own table
+//! changed, and is started or stopped when `enabled` was turned on or off
+//! (see [`supervise`]).
 //!
 //! Saving is watched with inotify on the file's *directory*, not the file:
 //! most editors save by writing a new file and renaming it over the old one,
@@ -43,7 +45,7 @@ use smithay::{
     },
 };
 
-use super::{Session, relight, supervise};
+use super::{Session, put_rules_in_force, supervise};
 use crate::{
     Error, Keymap, Launch,
     backend::{Running, cursor::Cursor},
@@ -284,7 +286,7 @@ pub(crate) fn reload(state: &mut Compositor) {
         if let Running::Seat(session) = &mut state.backend {
             session.runtime = None;
         }
-        relight(state);
+        put_rules_in_force(state);
     }
     if workspaces != state.workspaces.shape() {
         state.workspaces.reshape(workspaces);

@@ -19,20 +19,30 @@ use perspicax_policy::{
 };
 
 fn session(name: &str, mode: Mode) -> Session {
+    session_on(
+        name,
+        mode,
+        vec![Virtual::numbered(1, (1280, 1024)), second_monitor()],
+    )
+}
+
+/// The second monitor, to the right of the first.
+fn second_monitor() -> Virtual {
+    Virtual {
+        place: Place::Beside {
+            side: Side::RightOf,
+            of: "HEADLESS-1".to_owned(),
+            offset: 0,
+        },
+        ..Virtual::numbered(2, (1920, 1080))
+    }
+}
+
+fn session_on(name: &str, mode: Mode, outputs: Vec<Virtual>) -> Session {
     Session::start(
         name,
         Backend::Headless {
-            outputs: vec![
-                Virtual::numbered(1, (1280, 1024)),
-                Virtual {
-                    place: Place::Beside {
-                        side: Side::RightOf,
-                        of: "HEADLESS-1".to_owned(),
-                        offset: 0,
-                    },
-                    ..Virtual::numbered(2, (1920, 1080))
-                },
-            ],
+            outputs,
             workspaces: Shape {
                 mode,
                 grid: Grid {
@@ -160,5 +170,97 @@ fn a_narrowed_rule_takes_the_pager_back() {
     until(&mut queue, &mut desk, |desk| desk.pager_finished);
     assert!(desk.live_groups().is_empty());
 
+    session.stop((desk, queue));
+}
+
+/// Issue #172: a monitor plugged in is named to a pager in the same turn
+/// it is announced, before the pager's client can have bound it. Unless it
+/// is named again when the client binds it, the pager never learns its
+/// group shows there.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_pager_bound_before_a_monitor_is_plugged_in_is_told_its_group_is_on_it() {
+    let session = session_on(
+        "pager-plugged",
+        Mode::Spanning,
+        vec![Virtual::numbered(1, (1280, 1024))],
+    );
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_pager(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.pager_done > 0);
+    assert_eq!(desk.live_groups()[0].outputs, 1);
+
+    session.command(Command::Plug(second_monitor()));
+    until(&mut queue, &mut desk, |desk| {
+        desk.live_groups()[0].outputs == 2
+    });
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert_eq!(desk.live_groups()[0].outputs, 2, "told once, not twice");
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn per_output_a_monitor_plugged_in_later_has_a_group_on_it() {
+    let session = session_on(
+        "pager-plugged-per-output",
+        Mode::PerOutput,
+        vec![Virtual::numbered(1, (1280, 1024))],
+    );
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_pager(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.pager_done > 0);
+
+    session.command(Command::Plug(second_monitor()));
+    until(&mut queue, &mut desk, |desk| {
+        let groups = desk.live_groups();
+        groups.len() == 2 && groups.iter().all(|group| group.outputs == 1)
+    });
+
+    session.stop((desk, queue));
+}
+
+/// Issue #172: a monitor lit again under the same name is a new
+/// `wl_output`, which a pager knows only by being told its group is on it.
+/// Binding a monitor twice is the same thing seen from the client.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_pager_is_told_again_on_a_monitor_it_binds_twice() {
+    let session = session("pager-bound-again", Mode::Spanning);
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_pager(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.pager_done > 0);
+    assert_eq!(desk.live_groups()[0].outputs, 2);
+    let done = desk.pager_done;
+
+    assert_eq!(desk.bind_outputs_again(&globals, &qh), 2);
+    until(&mut queue, &mut desk, |desk| {
+        desk.live_groups()[0].outputs == 4
+    });
+    assert!(desk.pager_done > done, "and done, so a pager acts on it");
+
+    session.stop((desk, queue));
+}
+
+/// Nothing new reaches a pager while the session is locked, but a monitor
+/// it binds then is still named to it: what it is told is only what it was
+/// told before the lock, on the new object.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_pager_binding_a_monitor_while_locked_is_told_what_it_knew() {
+    let session = session("pager-bound-locked", Mode::Spanning);
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_pager(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.pager_done > 0);
+    desk.lock(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.locked);
+
+    desk.bind_outputs_again(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| {
+        desk.live_groups()[0].outputs == 4
+    });
+
+    desk.unlock();
     session.stop((desk, queue));
 }

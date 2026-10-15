@@ -12,9 +12,14 @@
 //! the one on the right slides to the origin, the windows on it slide too. The
 //! windows left on a monitor that is gone are then rescued onto the nearest
 //! one that remains.
+//!
+//! A monitor's layers -- its panels and wallpaper -- are fitted to it again
+//! here too, so a monitor given a new scale or mode, where it stands, resizes
+//! them without waiting for them to commit.
 
 use perspicax_policy::{Rect, Screen, arrange, overlapping, rescue};
 use smithay::{
+    desktop::layer_map_for_output,
     output::Output,
     utils::{Logical, Point, Rectangle, Size},
 };
@@ -63,6 +68,10 @@ impl Compositor {
                 self.space.map_output(output, at);
                 tracing::info!(output = output.name(), ?at, "output placed");
             }
+            // smithay arranges a monitor's layers only when told, and
+            // configures only a layer whose size it changed. Before the
+            // rescue below, which fills by the room the layers leave.
+            layer_map_for_output(output).arrange();
         }
         let areas = self.output_rects();
         if let Some((a, b)) = overlapping(&areas) {
