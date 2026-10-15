@@ -21,7 +21,7 @@ use common::{Desk, Ear, Said, Session, heard, menu_with_the_keyboard, until};
 use perspicax_compositor::{Backend, Command, Keymap, Virtual};
 use perspicax_index::{HostFacts, SurfaceFacts};
 use perspicax_node::SurfaceId;
-use perspicax_policy::{Access, Action, Direction, Grid, Mode, Shape};
+use perspicax_policy::{Access, Action, Direction, Grid, Mode, Place, Shape, Side, Towards};
 use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::{EventQueue, Proxy as _, QueueHandle};
 
@@ -33,6 +33,39 @@ fn seated(name: &str) -> Session {
             outputs: vec![Virtual::numbered(1, (1280, 1024))],
             workspaces: Shape {
                 mode: Mode::Spanning,
+                grid: Grid {
+                    columns: 2,
+                    rows: 1,
+                    wrap: false,
+                },
+            },
+            access: Access::open(),
+            person: true,
+            opacity: Default::default(),
+            agent: Default::default(),
+        },
+    )
+}
+
+/// Two monitors side by side, each with two workspaces of its own, and a
+/// person at them.
+fn seated_per_output(name: &str) -> Session {
+    Session::start(
+        name,
+        Backend::Headless {
+            outputs: vec![
+                Virtual::numbered(1, (1280, 1024)),
+                Virtual {
+                    place: Place::Beside {
+                        side: Side::RightOf,
+                        of: "HEADLESS-1".to_owned(),
+                        offset: 0,
+                    },
+                    ..Virtual::numbered(2, (1280, 1024))
+                },
+            ],
+            workspaces: Shape {
+                mode: Mode::PerOutput,
                 grid: Grid {
                     columns: 2,
                     rows: 1,
@@ -291,6 +324,59 @@ fn a_layout_switched_with_a_menu_open_leaves_it_open() {
         Some(&menu.wl_surface().id()),
         "the keyboard left the menu"
     );
+
+    session.stop((desk, queue));
+}
+
+/// A workspace switched with a window's menu open leaves the window behind,
+/// and its menu goes with it: closed, and the keyboard out of it, rather than
+/// typing into a menu nobody can see. Coming back, the window has it again.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_workspace_switch_closes_the_menu_of_the_window_it_leaves_behind() {
+    let session = seated("menu-open-switch");
+    let (mut desk, mut queue, qh, ear, page) = page(&session);
+    let _menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, page);
+
+    session.perform(Action::Workspace(Direction::Right));
+    session.wait_for(|facts| {
+        facts
+            .surface(page)
+            .is_some_and(|page| page.off_workspace == Some(1))
+    });
+    until(&mut queue, &mut desk, |desk| {
+        desk.popups_done == 1 && heard(&ear).entered.is_none()
+    });
+
+    session.perform(Action::Workspace(Direction::Left));
+    until(&mut queue, &mut desk, |desk| on_window(desk, &ear, 0));
+
+    session.stop((desk, queue));
+}
+
+/// A key acts on the monitor the person is working on: the one with the
+/// window whose menu is open, not the one under the pointer.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_key_switches_the_workspace_of_the_monitor_the_menu_is_open_on() {
+    let session = seated_per_output("menu-open-monitor");
+    let (mut desk, mut queue, qh, ear, page) = page(&session);
+    // Away from the pointer, which stays on the first monitor.
+    session.perform(Action::MoveToOutput(Towards::Next));
+    session.wait_for(|facts| {
+        facts
+            .surface(page)
+            .is_some_and(|page| page.mapped && page.geometry.x0 >= 1280.0)
+    });
+    let _menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, page);
+
+    session.perform(Action::Workspace(Direction::Right));
+    session.wait_for(|facts| {
+        facts
+            .surface(page)
+            .is_some_and(|page| page.off_workspace == Some(1))
+    });
+    until(&mut queue, &mut desk, |desk| desk.popups_done == 1);
 
     session.stop((desk, queue));
 }

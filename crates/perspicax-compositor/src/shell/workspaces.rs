@@ -18,7 +18,7 @@
 use perspicax_policy::{Cell, Direction, Home};
 use smithay::utils::Rectangle;
 
-use super::{extent_size, id_of, placement, surface_of};
+use super::{extent_size, id_of, placement};
 use crate::{framed::Framed, state::Compositor};
 
 impl Compositor {
@@ -66,7 +66,8 @@ impl Compositor {
     /// Run the rule: park every window that should not be on screen, bring
     /// back every parked one that should. Then, if the window with the
     /// keyboard was parked, focus moves to whatever is on top, as it does when
-    /// a window closes.
+    /// a window closes, and so it does from a menu of that window's, which
+    /// closes.
     ///
     /// The window being dragged is put on whatever its monitor shows now
     /// before it is judged: a switch with a window in hand takes it along, by
@@ -96,12 +97,19 @@ impl Compositor {
             }
         }
 
-        let lost = self.keyboard_focus().is_some_and(|focus| {
-            self.parked
-                .iter()
-                .any(|parked| surface_of(parked).as_ref() == Some(&focus))
-        });
+        // In a menu of a parked window, the keyboard is as lost: the menu
+        // goes with its window, closed as a click outside it would close it,
+        // which lets go of the keyboard so it can move on. Only a menu that
+        // holds it: whatever else holds the pointer, a drag flipping the
+        // workspace say, is left be.
+        let lost = self
+            .window_in_use()
+            .is_some_and(|id| self.parked_with(id).is_some());
         if lost {
+            if self.held_menu_root().is_some() {
+                self.let_go();
+                self.repoint();
+            }
             self.focus_top_window();
         }
     }
@@ -277,10 +285,11 @@ impl Compositor {
             .map(|output| output.name())
     }
 
-    /// The monitor the person is working on: the focused window's, or the
-    /// one under the pointer. Where a key binding acts.
+    /// The monitor the person is working on: the window in use's, its own
+    /// menu open or not, or the one under the pointer. Where a key binding
+    /// acts.
     pub(crate) fn working_monitor(&self) -> Option<String> {
-        self.focused_surface()
+        self.window_in_use()
             .and_then(|id| self.window_for_id(id))
             .and_then(|window| self.monitor_of(&window))
             .or_else(|| self.output_under_pointer().map(|output| output.name()))
