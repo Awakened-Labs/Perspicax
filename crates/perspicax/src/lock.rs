@@ -11,6 +11,13 @@
 //! It never refuses to lock over the config: one it cannot read locks all the
 //! same, in the default theme, rather than leave the screen open while its
 //! owner walks away.
+//!
+//! Inside a perspicax session, the compositor draws the lock screen beneath
+//! swaylock, which is dressed clear but for its ring. Outside one, nothing of
+//! perspicax's would be beneath it, and another compositor's desktop would
+//! show through a clear lock; so there swaylock paints its screen itself. It
+//! is inside a session when the session's `PERSPICAX_CONFIG` is set at all,
+//! even empty, as it is for a session that read no config.
 
 use std::{
     os::unix::process::CommandExt as _,
@@ -25,6 +32,14 @@ use perspicax_config::{Profile, Shell, ShellBuilt};
 /// config file the session read, which `perspicax lock` reads too.
 pub const CONFIG: &str = "PERSPICAX_CONFIG";
 
+/// Whether this runs inside a perspicax session, which draws the lock screen
+/// beneath the lock program: whether `PERSPICAX_CONFIG` is set, even empty.
+///
+/// `var` reads the environment, as [`config_path`]'s does.
+pub fn in_session(var: impl Fn(&str) -> Option<String>) -> bool {
+    var(CONFIG).is_some()
+}
+
 /// The config to read: the session's, or else the one a session would read
 /// by default.
 ///
@@ -38,9 +53,9 @@ pub fn config_path(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
 
 /// What locking runs: the `[shell]` at `config`, or the classic profile's
 /// when there is none or it cannot be read, with `more` after `lock`'s own
-/// words.
+/// words. `beneath` is whether the session draws the lock screen beneath it.
 #[must_use]
-pub fn command(config: Option<&Path>, more: &[String]) -> Vec<String> {
+pub fn command(config: Option<&Path>, more: &[String], beneath: bool) -> Vec<String> {
     let classic = || Shell::profile(Profile::Classic, ShellBuilt::FULL);
     let shell = match config {
         // What the shell was built with is not this command's to check.
@@ -55,17 +70,15 @@ pub fn command(config: Option<&Path>, more: &[String]) -> Vec<String> {
         }
         None => classic(),
     };
-    shell.lock_command(more)
+    shell.lock_command(more, beneath)
 }
 
 /// Become what locking runs, with `more` after `lock`'s own words. Returns
 /// only if it could not be started.
 #[must_use]
 pub fn lock(more: &[String]) -> Error {
-    let command = command(
-        config_path(|name| std::env::var(name).ok()).as_deref(),
-        more,
-    );
+    let var = |name: &str| std::env::var(name).ok();
+    let command = command(config_path(var).as_deref(), more, in_session(var));
     let Some((program, arguments)) = command.split_first() else {
         return anyhow!("[shell] lock is empty");
     };
@@ -109,27 +122,53 @@ mod tests {
     }
 
     #[test]
+    fn a_session_is_known_by_its_config_being_said_even_empty() {
+        let said = |value: Option<&str>| {
+            let env: HashMap<&str, &str> = value.map(|value| (CONFIG, value)).into_iter().collect();
+            in_session(|name| env.get(name).map(|&value| value.to_owned()))
+        };
+        assert!(said(Some("/run/session/config.toml")));
+        assert!(said(Some("")), "a session that read no config");
+        assert!(!said(None), "outside any");
+    }
+
+    #[test]
     fn lock_runs_what_the_menus_lock_runs_with_more_after() {
         let path = config(
             "written",
             "[theme]\nname = \"breeze-light\"\n[shell]\nlock = [\"swaylock\", \"-e\"]\n",
         );
-        let command = command(Some(&path), &words(&["-f"]));
+        let command = command(Some(&path), &words(&["-f"]), true);
         let shell = perspicax_config::load_shell(&path, ShellBuilt::FULL).unwrap();
-        assert_eq!(command, shell.lock_command(&words(&["-f"])));
-        assert_eq!(command[3..5], ["--color", "cbd8dfff"], "the theme's");
+        assert_eq!(command, shell.lock_command(&words(&["-f"]), true));
+        assert_eq!(
+            command[3..5],
+            ["--color", "00000000"],
+            "clear, in the session"
+        );
         assert_eq!(command[command.len() - 2..], ["-e", "-f"]);
+
+        let outside = super::command(Some(&path), &words(&["-f"]), false);
+        assert_eq!(
+            outside[3..5],
+            ["--color", "cbd8dfff"],
+            "outside one, the theme's lock colour"
+        );
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn a_config_that_cannot_be_read_still_locks_in_the_default_theme() {
-        let default = command(None, &[]);
+        let default = command(None, &[], true);
         assert_eq!(default[..3], ["swaylock", "-C", "/dev/null"]);
         let broken = config("broken", "[shell]\nlock = 42\n");
-        assert_eq!(command(Some(&broken), &[]), default);
+        assert_eq!(command(Some(&broken), &[], true), default);
         let missing = broken.with_file_name("missing.toml");
-        assert_eq!(command(Some(&missing), &[]), default, "no file is classic");
+        assert_eq!(
+            command(Some(&missing), &[], true),
+            default,
+            "no file is classic"
+        );
         fs::remove_dir_all(broken.parent().unwrap()).unwrap();
     }
 }

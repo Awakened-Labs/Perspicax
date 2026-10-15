@@ -5,6 +5,8 @@
 //! and bindings are just values, and are swapped. The keyboard is recompiled
 //! only if `[input.keyboard]` changed, and keeps the layout in use and its
 //! locks (see [`crate::keyboard`]). Pointer settings go to every device.
+//! The lock screen's colour and logo go to the backdrop, and a logo of the
+//! person's is read again, at every save (see [`crate::backdrop`]).
 //! Outputs are relit only if their rules changed, because relighting is a
 //! modeset and the screens blink. Autostart, the config's and XDG's, is not
 //! re-run: those programs are already running. Nor is the agent socket
@@ -27,7 +29,7 @@ use std::{
 };
 
 use perspicax_config::{
-    Built, Config, Pointer,
+    Built, Config, Logo, Pointer, Role,
     autostart::{self, Skip},
 };
 use smithay::{
@@ -46,6 +48,7 @@ use smithay::{
 use super::{Session, relight, supervise};
 use crate::{
     Error, Keymap, Launch,
+    backdrop::{self, Look},
     backend::{Running, cursor::Cursor},
     grants::Why,
     state::Compositor,
@@ -311,6 +314,10 @@ pub(crate) fn reload(state: &mut Compositor) {
         }
         look(state);
     }
+    // At every save, theme changed or not: a logo file is read again, since
+    // it may have changed on disk, or been put right since it could not be
+    // read.
+    dress_backdrop(state);
     if theme_changed {
         state.backend.redraw();
     }
@@ -372,6 +379,34 @@ pub(crate) fn populate(
     }
     ready(state);
     Ok(())
+}
+
+/// Tell the backdrop how the config has the lock screen look, and start
+/// reading the person's logo if it names one: found as a wallpaper is, `~`
+/// the home folder and a relative path beside the config.
+pub(super) fn dress_backdrop(state: &mut Compositor) {
+    let Running::Seat(session) = &state.backend else {
+        return;
+    };
+    let theme = &session.settings.theme;
+    let logo = match &theme.logo {
+        Logo::File(written) => {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            Logo::File(perspicax_config::locate(
+                written,
+                session.config_path.as_deref(),
+                home.as_deref(),
+            ))
+        }
+        logo => logo.clone(),
+    };
+    let look = Look {
+        lock: theme.palette[Role::Lock],
+        logo,
+    };
+    if let Some(asked) = state.backdrop.dress(look) {
+        backdrop::read(asked, session.art.clone());
+    }
 }
 
 /// Publish what applications are told about the theme, for whoever serves

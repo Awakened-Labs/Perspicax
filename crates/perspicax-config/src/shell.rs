@@ -368,7 +368,8 @@ impl Shell {
     #[must_use]
     pub fn runs(&self, leave: Leave) -> Option<Vec<String>> {
         match leave {
-            Leave::Lock => Some(self.lock_command(&[])),
+            // The menus run inside the session, which draws the screen.
+            Leave::Lock => Some(self.lock_command(&[], true)),
             Leave::LogOut => None,
             Leave::Suspend => Some(self.suspend.clone()),
             Leave::Reboot => Some(self.reboot.clone()),
@@ -379,11 +380,13 @@ impl Shell {
     /// What locking the screen runs: `lock`, then `more`. swaylock is given
     /// no config file of its own and the theme as flags, before the ones
     /// written, unless they name a file for it with `-C`; any other program
-    /// runs as written.
+    /// runs as written. `beneath` is whether perspicax draws the lock screen
+    /// beneath it, as it does inside a perspicax session: swaylock then
+    /// leaves its screen clear, and paints only its ring and its words.
     #[must_use]
-    pub fn lock_command(&self, more: &[String]) -> Vec<String> {
+    pub fn lock_command(&self, more: &[String], beneath: bool) -> Vec<String> {
         let command = self.lock.iter().chain(more).cloned().collect();
-        swaylock::dressed(command, &self.palette, &self.font)
+        swaylock::dressed(command, &self.palette, &self.font, beneath)
     }
 }
 
@@ -1346,10 +1349,15 @@ mod tests {
         let written = |text: &str| shell(text, ShellBuilt::FULL).unwrap();
         let light =
             written("[theme]\nname = \"breeze-light\"\n[shell]\nlock = [\"swaylock\", \"-f\"]");
-        let lock = light.lock_command(&["--ring-color".to_owned(), "00ff00".to_owned()]);
+        let lock = light.lock_command(&["--ring-color".to_owned(), "00ff00".to_owned()], false);
         assert_eq!(
             lock[..5],
             ["swaylock", "-C", "/dev/null", "--color", "cbd8dfff"]
+        );
+        assert_eq!(
+            light.runs(Leave::Lock).unwrap()[3..5],
+            ["--color", "00000000"],
+            "the menus' Lock runs in the session, over the screen it draws"
         );
         assert_eq!(
             lock[lock.len() - 3..],
@@ -1365,7 +1373,7 @@ mod tests {
         );
         let other = written("[shell]\nlock = [\"gtklock\"]");
         assert_eq!(
-            other.lock_command(&["-d".to_owned()]),
+            other.lock_command(&["-d".to_owned()], true),
             ["gtklock", "-d"],
             "not swaylock"
         );

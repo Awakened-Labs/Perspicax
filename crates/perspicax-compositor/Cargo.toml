@@ -53,6 +53,10 @@ xcursor = { version = "0.3", optional = true }
 # Seat-only: window titles, shaped and rasterised. See the workspace manifest
 # for what it brings.
 cosmic-text = { workspace = true, optional = true }
+# Seat-only: the lockup the lock screen shows, decoded from the PNGs in
+# `art/`, and a logo of the person's. Pure Rust, MIT OR Apache-2.0, and the
+# version already in the tree for the shell's wallpapers and screenshots.
+png = { version = "0.18", optional = true }
 
 # Backends, as cargo features, so a build carries only the system libraries it
 # will actually use. Neither is on by default: the four gates build the
@@ -68,6 +72,7 @@ seat = [
     "dep:perspicax-config",
     "dep:xcursor",
     "dep:cosmic-text",
+    "dep:png",
     "smithay/backend_drm",
     "smithay/backend_gbm",
     "smithay/backend_egl",

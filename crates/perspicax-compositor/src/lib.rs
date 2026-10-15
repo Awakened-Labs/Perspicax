@@ -36,6 +36,8 @@
 
 mod access;
 pub mod act;
+#[cfg(feature = "seat")]
+mod backdrop;
 mod backend;
 mod capture;
 mod damage;

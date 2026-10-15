@@ -778,7 +778,7 @@ mod tests {
         let Some((Leave::Lock, Does::Run(lock))) = session.leave.first() else {
             panic!("no Lock: {session:?}");
         };
-        assert_eq!(lock.argv, shell.lock_command(&[]));
+        assert_eq!(lock.argv, shell.lock_command(&[], true));
         assert_eq!(lock.argv[..3], ["swaylock", "-C", "/dev/null"]);
     }
 

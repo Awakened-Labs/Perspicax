@@ -1205,21 +1205,28 @@ asks the compositor instead. Typing "sleep", "reboot" or "power off" in the
 search line finds the last three. Suspend does not lock the screen first;
 `["swayidle", "-w", "before-sleep", "perspicax lock -f"]` in `autostart` does.
 
-Lock wears the theme. swaylock, which `lock` runs unless it names another
-program, is given `-C /dev/null`, so it reads no config file of its own, and
-then the theme as flags: the screen in `lock`, its text in `lock-ink`, its ring
-in `lock-ring`, `lock-accent` as keys are typed and `alert` for a wrong password
-(see [Themes](#themes)), in `[theme] font`. Flags written in `lock` come
-after, so they win: `lock = ["swaylock", "-f", "--ring-color", "00ff00"]` rings
-it green. To have swaylock read a file of its own, name it, whole, since `~` is
-not expanded: `lock = ["swaylock", "-C", "/home/me/.config/swaylock/config"]`
-runs as written, and so does any other program.
+Lock wears the theme. perspicax draws the lock screen itself, from the moment
+it locks: `lock`'s colour, with `[theme] logo` on it, above where the ring will
+be. swaylock, which `lock` runs unless it names another program, draws only
+its ring and its text over that. It is given `-C /dev/null`, so it reads no
+config file of its own, and then the theme as flags: no colour of its own for
+the screen, so perspicax's shows through, its text in `lock-ink`, its ring in
+`lock-ring`, `lock-accent` as keys are typed and `alert` for a wrong password
+(see [Themes](#themes)), in `[theme] font`. The ring stays hidden until a key
+is typed. Flags written in `lock` come after, so they win:
+`lock = ["swaylock", "-f", "--ring-color", "00ff00"]` rings it green, and a
+`--color` or `-i` of your own paints over perspicax's screen, logo and all. A
+ring moved or enlarged with swaylock's own flags may cross the logo. To have
+swaylock read a file of its own, name it, whole, since `~` is not expanded:
+`lock = ["swaylock", "-C", "/home/me/.config/swaylock/config"]` runs as
+written, and so does any other program, each drawing its own screen.
 
 `perspicax lock` locks as Lock does, from a key or from swayidle: it runs
 `lock` with its own arguments after `lock`'s, and becomes it. It reads the
 config of the session it was started in, which the session tells every program
 it starts in `PERSPICAX_CONFIG`; a config it cannot read still locks, in the
-default theme.
+default theme. Run outside a perspicax session, where nothing of perspicax's is
+drawn beneath it, it has swaylock paint the screen in `lock` itself.
 
 ```toml
 [keys]
@@ -1374,8 +1381,10 @@ the first colour toward the second. The last column is the `perspicax` theme.
 on a dark colour and in navy on a light one, so it reads on whatever `lock` and
 `splash` are. A path names a PNG of your own, found as a wallpaper is (`~` is
 your home, and a relative path is beside the config), and shown on every colour
-as it is; one that cannot be read is said once in the log, and Perspicax's is
-shown instead until the config is saved again. `none` leaves the colour alone.
+as it is, never larger than its own pixels. One that cannot be read, is not a
+PNG, or is more than 4096 pixels a side is said once in the log, and
+Perspicax's is shown instead until the config is saved again, when it is read
+afresh. `none` leaves the colour alone.
 
 `[decorations] focused` and `unfocused` are `title-focused` and
 `title-unfocused` written in their older place, and still win over any theme;
