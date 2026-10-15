@@ -18,9 +18,10 @@
 //!
 //! And a call can do worse than go unanswered. Asking a Flutter application
 //! where one of its nodes is freezes it for 25 s, because its bridge answers
-//! by asking itself (#80). So asking where nodes are is [`place`]'s, which
-//! remembers what froze an application and never asks it again: see
-//! [`Spared`].
+//! by asking itself (#80). So asking where nodes are is [`place`]'s. It knows
+//! the node that question would freeze before asking it, and never asks it
+//! (#124), and it remembers anything else that froze an application and never
+//! asks that again: see [`Spared`].
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -111,7 +112,10 @@ pub struct RawNode {
     pub key: ObjectKey,
     /// Its parent, absent for an application root.
     pub parent: Option<ObjectKey>,
-    /// Its position among its parent's children, when the source said.
+    /// Its position among its parent's children, when the source said: in a
+    /// walk, its place in the list that held it, and in the modern cache, the
+    /// item's own. Not what the node says when asked `GetIndexInParent`, and
+    /// so not what tells a plug: [`place`] asks for that. See [`Spared`].
     pub index: Option<i32>,
     /// Its children, in order. Empty until [`link_children`] runs for a source
     /// that reports parentage the other way round.
@@ -730,11 +734,44 @@ pub async fn accessible<'a>(
 /// frozen waits in its queue and freezes it again when its turn comes,
 /// however long ago perspicax stopped waiting for it.
 ///
+/// # Knowing the plug before asking it
+///
+/// So the plug is put here before it is asked where it is (#124), from three
+/// things its application says at once and without asking anyone. [`place`]
+/// asks top-down, so it has each of them by the plug's turn:
+///
+/// 1. **The node that lists it has no place.** A bare socket answers
+///    `GetExtents` at once, with nothing in it. A plug's own answer is its
+///    socket's, forwarded, so once the socket has said it is nowhere, asking
+///    the plug can only cost. It also keeps the extra question to the few
+///    children of nodes with no place.
+/// 2. **It is on its lister's own bus name.** at-spi2-atk holds one
+///    connection per process, and that is the connection the forwarded call
+///    would block. A plug embedded from another process, as WebKitGTK's is,
+///    has its call answered there, and is asked as any node is.
+/// 3. **Its own `GetIndexInParent` is -1.** ATK gives it no parent, though a
+///    node of its own process lists it: the socket's link, which the bridge
+///    makes and ATK knows nothing of.
+///
+/// None of the three is enough alone. Measured on ParadoxShift, the socket
+/// says -1 too, and so do GTK 3's own header bar fillers: it is their
+/// listers' places that keep them asked.
+///
+/// # And learning from the first silence
+///
+/// A plug the three do not mark is asked, and freezes its application once:
+/// one whose socket has a place, as Flutter's would once
+/// flutter/flutter#153560 is fixed while at-spi2-core still asks itself.
 /// So the first `GetExtents` an application leaves unanswered ends the asking,
 /// and the node it was asked of is remembered here: it, and every node beneath
 /// it, keep no bounds and are refused as `unplaced` from then on, which fails
-/// closed. That is the plug, for Flutter: [`place`] asks top-down, so the plug
-/// is asked before anything its silence reaches.
+/// closed. For a plug that is the plug itself, since it is asked before
+/// anything its silence reaches.
+///
+/// | | at-spi2-core asks itself | at-spi2-core fixed |
+/// |---|---|---|
+/// | the socket has no place (today) | known: never asked, never frozen | known: never asked, and nothing lost |
+/// | the socket has a place | asked: frozen once, then spared | asked, and answers |
 ///
 /// # Why only after a walk answered in full
 ///
@@ -743,25 +780,46 @@ pub async fn accessible<'a>(
 /// application already silent during the walk is busy, or frozen by something
 /// else, and its silence says nothing about the node it was asked of.
 ///
+/// # A wrong spare
+///
+/// Either way, a node put here stays for the life of its process, and costs
+/// it its subtree's bounds. That is the price of never asking twice, and the
+/// rules above keep it to a node that fits the shape of a plug or went silent
+/// straight after a clean walk.
+///
 /// A unique bus name is never reused, so an [`ObjectKey`] here names one node
 /// of one process, and nothing here knows what a toolkit is.
 pub type Spared = Arc<Mutex<HashSet<ObjectKey>>>;
 
-/// What asking each node where it is came to.
+/// How asking each node where it is ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Placed {
-    /// Every node that offers `Component`, and is not spared, was asked.
+    /// Every node that offers `Component`, and is neither spared nor beneath
+    /// a node that is, was asked.
     All,
     /// The read's budget ran out first. Not held against anything: it says how
     /// long a tree is, not whether its application answers.
     OutOfTime,
-    /// The node went unanswered straight after a walk the application
-    /// answered in full, so it, and everything beneath it, are spared from
-    /// now on. See [`Spared`].
+    /// The node went unanswered when asked where it is, straight after a walk
+    /// the application answered in full, so it, and everything beneath it,
+    /// are spared from now on. See [`Spared`].
     Spared(ObjectKey),
-    /// The node went unanswered in a read whose walk went unanswered too: the
-    /// application was silent already, and nothing is held against the node.
+    /// A call about the node went unanswered that asking where it is cannot
+    /// be blamed for: the walk before it went unanswered too, so the
+    /// application was silent already, or the call asked only its index.
+    /// Nothing is held against the node.
     Unanswered(ObjectKey),
+}
+
+/// What one pass of [`place`] came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placing {
+    /// How the asking ended.
+    pub ended: Placed,
+    /// The plugs it found that no pass had found before, each spared before
+    /// it was asked where it is: see [`Spared`]. Only the new ones, so a
+    /// caller can say so once for as long as the application runs.
+    pub plugs: Vec<ObjectKey>,
 }
 
 /// Ask each node where it is, top-down from `root`, until one goes unanswered
@@ -769,10 +827,18 @@ pub enum Placed {
 ///
 /// A node that offers no `Component` is not asked -- an application root
 /// offers none, and atk-bridge prints a CRITICAL for every `GetExtents` it is
-/// sent anyway -- and neither is a node in `spared`, or beneath one. A node
-/// with no usable size to give, or that fails, is left without bounds. The
-/// first node that does not answer ends the asking, and is spared if `walk`,
-/// the read's walk, was answered in full: see [`Spared`].
+/// sent anyway -- and neither is a node in `spared`, or beneath one.
+///
+/// Nor is a plug its own application embedded, nor anything beneath it. A
+/// node listed by one that has just answered with no place, on that node's own
+/// bus, is asked its index among its parent's children first, and one that
+/// says -1 is spared there and then. A pass rooted beneath a socket would
+/// not know its plug, having no lister for it to ask about; every caller reads
+/// from an application's root.
+///
+/// A node with no usable size to give, or that fails, is left without bounds.
+/// The first node that does not answer ends the asking, and is spared if
+/// `walk`, the read's walk, was answered in full: see [`Spared`].
 pub async fn place(
     connection: &Connection,
     nodes: &mut [RawNode],
@@ -780,27 +846,77 @@ pub async fn place(
     walk: &Patience,
     spared: &Spared,
     until: Option<Instant>,
-) -> Placed {
+) -> Placing {
     let order = placing_order(nodes, root, &remembered(spared));
-    for index in order {
-        if until.is_some_and(|until| Instant::now() >= until) {
-            return Placed::OutOfTime;
+    let mut plugs = Vec::new();
+    // The nodes this pass found to have no place, and the nodes it leaves
+    // unasked along with everything beneath them.
+    let (mut nowhere, mut left) = (HashSet::new(), HashSet::new());
+    for Turn { node, lister } in order {
+        if lister.is_some_and(|lister| left.contains(&lister)) {
+            left.insert(node);
+            continue;
         }
-        let node = &mut nodes[index];
-        match extents(connection, &node.key).await {
-            Ok(bounds) => node.bounds = bounds,
-            Err(error) if error.is_unanswered() => {
-                let key = node.key.clone();
-                if walk.heard_silence() {
-                    return Placed::Unanswered(key);
+        if until.is_some_and(|until| Instant::now() >= until) {
+            return Placing {
+                ended: Placed::OutOfTime,
+                plugs,
+            };
+        }
+        let key = nodes[node].key.clone();
+        let may_be_a_plug = lister.is_some_and(|lister| {
+            nowhere.contains(&lister) && nodes[lister].key.bus() == key.bus()
+        });
+        if may_be_a_plug {
+            let index = index_in_parent(connection, &key).await;
+            tracing::debug!(
+                path = key.path(),
+                ?index,
+                "asked a node its index: it is listed, on its own bus, by a node with no place"
+            );
+            match index {
+                Ok(-1) => {
+                    left.insert(node);
+                    if remembered(spared).insert(key.clone()) {
+                        plugs.push(key);
+                    }
+                    continue;
                 }
-                remembered(spared).insert(key.clone());
-                return Placed::Spared(key);
+                Err(error) if error.is_unanswered() => {
+                    return Placing {
+                        ended: Placed::Unanswered(key),
+                        plugs,
+                    };
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
+        if !nodes[node].interfaces.contains(Interface::Component) {
+            continue;
+        }
+        match extents(connection, &key).await {
+            Ok(bounds) => {
+                if bounds.is_none() {
+                    nowhere.insert(node);
+                }
+                nodes[node].bounds = bounds;
+            }
+            Err(error) if error.is_unanswered() => {
+                let ended = if walk.heard_silence() {
+                    Placed::Unanswered(key)
+                } else {
+                    remembered(spared).insert(key.clone());
+                    Placed::Spared(key)
+                };
+                return Placing { ended, plugs };
             }
             Err(_) => {}
         }
     }
-    Placed::All
+    Placing {
+        ended: Placed::All,
+        plugs,
+    }
 }
 
 /// The spared nodes, locked. A panic cannot leave a set half made, so a
@@ -809,14 +925,31 @@ fn remembered(spared: &Spared) -> std::sync::MutexGuard<'_, HashSet<ObjectKey>> 
     spared.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The order to ask `nodes` where they are: top-down from `root`, a parent
-/// before its children, whatever order the read delivered them in -- a
-/// cache's is its own. Leaves out a spared node and everything beneath it,
-/// and a node that offers no `Component`, though not its children.
+/// One node's turn in [`place`], beside the node that listed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Turn {
+    /// The node, by its index in the read's nodes.
+    node: usize,
+    /// The node whose children it was found among, or `None` for the pass's
+    /// root.
+    lister: Option<usize>,
+}
+
+/// The order in which `nodes` take their turns to be placed: top-down from
+/// `root`, a parent before its children, whatever order the read delivered
+/// them in -- a cache's is its own. Each turn names the node that listed it,
+/// so that [`place`] can leave out everything beneath a node it leaves out,
+/// and can ask about a node what its lister answered. Leaves out a spared
+/// node and everything beneath it.
+///
+/// A node that offers no `Component` has its turn too, though it is not asked
+/// where it is: a plug that offered none would still have beneath it the
+/// nodes whose asking freezes.
 ///
 /// Breadth-first over a visited set, as [`walk`] is: a bridge is not a
-/// trusted source of structure.
-fn placing_order(nodes: &[RawNode], root: &ObjectKey, spared: &HashSet<ObjectKey>) -> Vec<usize> {
+/// trusted source of structure. A node listed twice has one turn, beside the
+/// first node to list it.
+fn placing_order(nodes: &[RawNode], root: &ObjectKey, spared: &HashSet<ObjectKey>) -> Vec<Turn> {
     let at: HashMap<&ObjectKey, usize> = nodes
         .iter()
         .enumerate()
@@ -824,21 +957,33 @@ fn placing_order(nodes: &[RawNode], root: &ObjectKey, spared: &HashSet<ObjectKey
         .collect();
     let mut order = Vec::new();
     let mut seen = HashSet::new();
-    let mut queue = VecDeque::from([root]);
-    while let Some(key) = queue.pop_front() {
+    let mut queue = VecDeque::from([(root, None)]);
+    while let Some((key, lister)) = queue.pop_front() {
         if spared.contains(key) || !seen.insert(key) {
             continue;
         }
-        let Some(&index) = at.get(key) else {
+        let Some(&node) = at.get(key) else {
             continue;
         };
-        let node = &nodes[index];
-        if node.interfaces.contains(Interface::Component) {
-            order.push(index);
-        }
-        queue.extend(&node.children);
+        order.push(Turn { node, lister });
+        queue.extend(nodes[node].children.iter().map(|child| (child, Some(node))));
     }
     order
+}
+
+/// What a node says its index among its parent's children is, as its toolkit
+/// counts them: -1 for one with no parent of its own. Asked only of a node
+/// that may be a plug, since that answer is what tells one; see [`Spared`].
+///
+/// # Errors
+///
+/// [`Error::Call`] if the node has gone, cannot say, or does not answer
+/// before [`ANSWER`]: [`Error::is_unanswered`].
+pub async fn index_in_parent(connection: &Connection, key: &ObjectKey) -> Result<i32, Error> {
+    Ok(accessible(connection, key)
+        .await?
+        .get_index_in_parent()
+        .await?)
 }
 
 /// One node's bounds in node space -- window-relative, from whichever origin
@@ -1187,14 +1332,28 @@ mod tests {
         }
     }
 
-    fn ordered<'a>(nodes: &'a [RawNode], spared: &[&str]) -> Vec<&'a str> {
+    /// Each turn `placing_order` gives, as the path of its node and of the
+    /// node that listed it.
+    fn turns<'a>(nodes: &'a [RawNode], spared: &[&str]) -> Vec<(&'a str, Option<&'a str>)> {
         let spared = spared
             .iter()
             .map(|path| ObjectKey::new(":1.2", path))
             .collect();
         placing_order(nodes, &ObjectKey::new(":1.2", "/root"), &spared)
             .into_iter()
-            .map(|index| nodes[index].key.path())
+            .map(|turn| {
+                (
+                    nodes[turn.node].key.path(),
+                    turn.lister.map(|lister| nodes[lister].key.path()),
+                )
+            })
+            .collect()
+    }
+
+    fn ordered<'a>(nodes: &'a [RawNode], spared: &[&str]) -> Vec<&'a str> {
+        turns(nodes, spared)
+            .into_iter()
+            .map(|(node, _)| node)
             .collect()
     }
 
@@ -1225,9 +1384,11 @@ mod tests {
         assert_eq!(ordered(&nodes, &["/plug"]), ["/root", "/ok"]);
     }
 
-    /// An application root offers no `Component`, and its windows do.
+    /// An application root offers no `Component`, and its windows do. The
+    /// root has its turn anyway, though it is not asked where it is: a plug
+    /// that offered none would still be what its children freeze on.
     #[test]
-    fn a_node_that_offers_no_component_is_not_asked_and_its_children_are() {
+    fn a_node_that_offers_no_component_has_its_turn_and_so_do_its_children() {
         let nodes = vec![
             RawNode {
                 interfaces: InterfaceSet::empty(),
@@ -1235,13 +1396,53 @@ mod tests {
             },
             placeable("/frame", &[]),
         ];
-        assert_eq!(ordered(&nodes, &[]), ["/frame"]);
+        assert_eq!(ordered(&nodes, &[]), ["/root", "/frame"]);
     }
 
     #[test]
     fn a_cycle_in_the_reported_tree_is_asked_once_round() {
         let nodes = vec![placeable("/root", &["/a"]), placeable("/a", &["/root"])];
         assert_eq!(ordered(&nodes, &[]), ["/root", "/a"]);
+    }
+
+    /// What a plug is known by is what its lister answered, so each turn
+    /// says whose children it was found among.
+    #[test]
+    fn each_node_has_its_turn_beside_the_node_that_listed_it() {
+        let nodes = vec![
+            placeable("/root", &["/socket", "/ok"]),
+            placeable("/socket", &["/plug"]),
+            placeable("/ok", &[]),
+            placeable("/plug", &[]),
+        ];
+        assert_eq!(
+            turns(&nodes, &[]),
+            [
+                ("/root", None),
+                ("/socket", Some("/root")),
+                ("/ok", Some("/root")),
+                ("/plug", Some("/socket")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_node_listed_twice_has_one_turn_beside_the_first_to_list_it() {
+        let nodes = vec![
+            placeable("/root", &["/a", "/b"]),
+            placeable("/a", &["/shared"]),
+            placeable("/b", &["/shared"]),
+            placeable("/shared", &[]),
+        ];
+        assert_eq!(
+            turns(&nodes, &[]),
+            [
+                ("/root", None),
+                ("/a", Some("/root")),
+                ("/b", Some("/root")),
+                ("/shared", Some("/a")),
+            ]
+        );
     }
 
     /// Running out of time says how long a tree is, not whether its

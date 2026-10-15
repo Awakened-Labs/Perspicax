@@ -112,8 +112,10 @@ pub enum Refusal {
     ///
     /// A Flutter application's every node is refused this way (#51): asking
     /// its bridge where a node is freezes the application until libdbus gives
-    /// up, and the answer then has no geometry in it, so perspicax asks once
-    /// and never again (#80).
+    /// up, and the answer then has no geometry in it. So perspicax knows the
+    /// plug they climb to before asking it anything, and never asks (#124);
+    /// anything else that froze an application is asked once and never again
+    /// (#80).
     Unplaced,
     /// No compositor has attributed this node to a process, so no capability
     /// decision can be made about it. Fails closed.
