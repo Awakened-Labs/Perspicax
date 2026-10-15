@@ -638,15 +638,13 @@ fn rescan(state: &mut Compositor) {
 }
 
 /// Put a display tool's request in force: the rules it implies, as if the
-/// config had said them. Only where monitors go changed, and they are moved;
-/// anything else, and they are lit again, which is a modeset.
+/// config had said them (see [`put_rules_in_force`]).
 pub(crate) fn apply_heads(state: &mut Compositor, changes: &[perspicax_policy::HeadChange]) {
     let Running::Seat(session) = &mut state.backend else {
         return;
     };
     let current = session.heads(&state.space);
     let mut rules = session.rules().to_vec();
-    let mut moved_only = true;
     for change in changes {
         let Some(head) = current.iter().find(|head| head.name == change.name) else {
             continue;
@@ -665,16 +663,10 @@ pub(crate) fn apply_heads(state: &mut Compositor, changes: &[perspicax_policy::H
             }
         };
         let rule = &mut rules[at];
-        if change.enabled != head.enabled {
-            moved_only = false;
-        }
         rule.enable = change.enabled;
         if let Some(perspicax_policy::ModeChoice::Listed(index)) = change.mode
             && let Some(mode) = head.modes.get(index)
         {
-            if head.current != Some(index) {
-                moved_only = false;
-            }
             rule.mode = Some(perspicax_config::Mode {
                 width: u16::try_from(mode.width).unwrap_or(0),
                 height: u16::try_from(mode.height).unwrap_or(0),
@@ -682,9 +674,6 @@ pub(crate) fn apply_heads(state: &mut Compositor, changes: &[perspicax_policy::H
             });
         }
         if let Some(scale) = change.scale {
-            if (scale - head.scale).abs() > f64::EPSILON {
-                moved_only = false;
-            }
             rule.scale = Some(scale);
         }
         if let Some((x, y)) = change.position {
@@ -692,17 +681,81 @@ pub(crate) fn apply_heads(state: &mut Compositor, changes: &[perspicax_policy::H
         }
     }
     session.runtime = Some(rules);
-    if moved_only {
-        state.arrange_outputs();
-    } else {
-        relight(state);
-        state.refit_frames();
-    }
+    put_rules_in_force(state);
 }
 
-/// Tear every output down and light them again from the config. A modeset
-/// on every monitor, which is why reload only does it when the output rules
-/// changed.
+/// Bring the monitors into line with the output rules now in force: the
+/// config's, or a display tool's.
+///
+/// A monitor turned on or off, or asked for another mode, takes a modeset,
+/// and every monitor is lit again ([`relight`]). Anything else a rule says --
+/// where a monitor goes, its scale -- is changed where it stands: the same
+/// output, which clients keep, and no screen goes blank. Either way, windows
+/// sized to fill a monitor or a zone are fitted to it again.
+pub(super) fn put_rules_in_force(state: &mut Compositor) {
+    let Running::Seat(session) = &mut state.backend else {
+        return;
+    };
+    let rules = session.rules();
+    let lit: Vec<_> = session
+        .heads
+        .iter()
+        .map(|head| {
+            (
+                asked(rules, &head.output.name()),
+                head.modes.as_slice(),
+                head.mode,
+            )
+        })
+        .collect();
+    let dark: Vec<_> = session
+        .dark
+        .iter()
+        .map(|(name, _)| asked(rules, name))
+        .collect();
+    if connectors::modeset(&lit, &dark) {
+        tracing::info!("a monitor is turned on or off or changes mode: lighting them again");
+        relight(state);
+    } else {
+        for head in &session.heads {
+            let scale = rules
+                .iter()
+                .find(|rule| rule.name == head.output.name())
+                .and_then(|rule| rule.scale)
+                .map_or(Scale::Integer(1), crate::heads::output_scale);
+            let now = head.output.current_scale().fractional_scale();
+            if (scale.fractional_scale() - now).abs() > f64::EPSILON {
+                head.output
+                    .change_current_state(None, None, Some(scale), None);
+                head.drm.reset_buffers();
+                tracing::info!(
+                    output = head.output.name(),
+                    scale = scale.fractional_scale(),
+                    "monitor rescaled where it stands"
+                );
+            }
+        }
+        state.arrange_outputs();
+    }
+    state.refit_frames();
+}
+
+/// What `name`'s rule asks that only lighting it can give.
+fn asked(rules: &[perspicax_config::OutputRule], name: &str) -> connectors::Asked {
+    rules
+        .iter()
+        .find(|rule| rule.name == name)
+        .map_or_else(connectors::Asked::default, |rule| connectors::Asked {
+            enable: rule.enable,
+            mode: rule
+                .mode
+                .map(|mode| (mode.width, mode.height, mode.refresh)),
+        })
+}
+
+/// Tear every output down and light them again from the rules. A modeset on
+/// every monitor, which is why it is only done when one is turned on or off
+/// or changes mode (see [`put_rules_in_force`]).
 fn relight(state: &mut Compositor) {
     let Running::Seat(session) = &mut state.backend else {
         return;

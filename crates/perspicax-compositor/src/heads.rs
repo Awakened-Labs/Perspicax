@@ -5,8 +5,10 @@
 //! to say; this is carrying it out, per backend. Headless, a monitor is a
 //! virtual one, and any size can be asked of it. On a seat, the request
 //! becomes the output rules in force for the rest of the session, exactly as
-//! if the config file had said it, and the monitors are lit again from them
-//! by the same code that lit them at login. The file itself is not touched:
+//! if the config file had said it, and they are put in force as a reload's
+//! are: a new scale or place where the monitor stands, and a monitor turned
+//! on or off or given a new mode by lighting the monitors again, by the same
+//! code that lit them at login. The file itself is not touched:
 //! it stays what the person wrote, and a reload that changes `[[output]]`
 //! puts it back in force.
 
