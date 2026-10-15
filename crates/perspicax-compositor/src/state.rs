@@ -439,7 +439,8 @@ impl Compositor {
             activation: XdgActivationState::new::<Self>(display),
             layer_shell: WlrLayerShellState::new::<Self>(display),
             // Any client may lock. A lock client is the one kind that must
-            // work when everything else has gone wrong.
+            // work when everything else has gone wrong. Only the lock that
+            // holds the session may unlock it: see `crate::lock`.
             lock_manager: SessionLockManagerState::new::<Self, _>(display, |_| true),
             lock: None,
             #[cfg(any(feature = "seat", feature = "capture"))]

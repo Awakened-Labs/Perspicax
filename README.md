@@ -1643,6 +1643,16 @@ resized stays where it got to; a tab being dragged goes back to its group. No
 window can open a menu over the lock screen. Unlocked, the window under the
 pointer has it back, and its own cursor with it.
 
+The program that locked the screen holds the lock, and only it can unlock it.
+Another program that asks to lock while it runs is refused, and cannot unlock
+the screen either: a second swaylock, as swayidle may start, says another lock
+screen is running and exits, and a program that locks only to unlock straight
+away is cut off. If the program holding the lock dies without unlocking, the
+screen stays locked, and none of your windows show. Start a lock program again
+-- `perspicax lock` from another virtual terminal or over ssh, with the
+session's `WAYLAND_DISPLAY` set -- and it takes the lock over, and unlocks as
+usual.
+
 ### A game holding the pointer
 
 A game turns its camera by how far the mouse moves, and keeps the pointer from

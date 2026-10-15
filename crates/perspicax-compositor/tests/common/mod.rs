@@ -213,8 +213,16 @@ impl Session {
 /// A client of the compositor on `socket`, its registry read: for a client
 /// in a process of its own, which has a socket's name and no [`Session`].
 pub fn client_on(socket: &str) -> (Desk, EventQueue<Desk>, QueueHandle<Desk>, GlobalList) {
-    let client = connect(socket);
-    let (globals, queue) = registry_queue_init(&client).expect("the registry");
+    client_over(&connect(socket))
+}
+
+/// A client over a connection the test made itself, its registry read: one
+/// on a [`stream`] the test keeps a handle on, to cut it off as a client
+/// that dies is.
+pub fn client_over(
+    connection: &Connection,
+) -> (Desk, EventQueue<Desk>, QueueHandle<Desk>, GlobalList) {
+    let (globals, queue) = registry_queue_init(connection).expect("the registry");
     let qh = queue.handle();
     (Desk::new(&globals, &qh), queue, qh, globals)
 }
@@ -743,6 +751,9 @@ pub struct Desk {
     pub listed: HashMap<ObjectId, Listed>,
     pub lock: Option<ExtSessionLockV1>,
     pub locked: bool,
+    /// Whether a lock of ours was told `finished`: refused, as a lock is
+    /// while another holds the session.
+    pub lock_finished: bool,
     /// The lock surfaces covering the monitors, as swaylock's do, each with
     /// its surface.
     pub covers: Vec<(ExtSessionLockSurfaceV1, wl_surface::WlSurface)>,
@@ -859,6 +870,7 @@ impl Desk {
             listed: HashMap::new(),
             lock: None,
             locked: false,
+            lock_finished: false,
             covers: Vec::new(),
             covers_drawn: 0,
             taskbar: None,
@@ -2545,8 +2557,10 @@ impl Dispatch<ExtSessionLockV1, ()> for Desk {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let ext_session_lock_v1::Event::Locked = event {
-            desk.locked = true;
+        match event {
+            ext_session_lock_v1::Event::Locked => desk.locked = true,
+            ext_session_lock_v1::Event::Finished => desk.lock_finished = true,
+            _ => {}
         }
     }
 }
