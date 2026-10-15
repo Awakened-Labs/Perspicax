@@ -18,9 +18,14 @@
 //! It is drawn again on every move of the pointer, as its icons grow, but
 //! no faster than the monitor shows it: a picture waits for the compositor
 //! to say it showed the one before, and only the last of what changed
-//! meanwhile is drawn.
+//! meanwhile is drawn. A spun ring glides by the same: each time the
+//! compositor says it showed a picture, the ring is told how long ago that
+//! one was drawn and steps on, and is drawn again until it is still.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use accesskit::{Action, ActionHandler, ActionRequest};
 use perspicax_config::{Shell, pie::Pie};
@@ -42,6 +47,7 @@ use super::{
 };
 use crate::{
     a11y::{self, adapter::Served},
+    layout::pie::Shape,
     model::{
         fs::Disk,
         image,
@@ -84,6 +90,8 @@ struct Shown {
     waiting: bool,
     /// Whether what is shown is older than what the pie is.
     stale: bool,
+    /// When the last picture was drawn.
+    drawn: Option<Instant>,
 }
 
 impl Pies {
@@ -120,7 +128,7 @@ impl Pies {
             .is_some_and(|shown| shown.layer.wl_surface() == surface)
     }
 
-    /// How big the pies are across, and the slots of the one named `name`,
+    /// How the pies are shaped, and the slots of the one named `name`,
     /// if the config has it, with the running `windows`, each `(serial,
     /// app-id, title)`.
     pub(super) fn built(
@@ -128,7 +136,7 @@ impl Pies {
         name: &str,
         installed: &mut Installed,
         windows: &[(u64, String, String)],
-    ) -> Option<(u32, Vec<Slot>)> {
+    ) -> Option<(Shape, Vec<Slot>)> {
         let pie = self.pie.as_ref()?;
         let items = pie.menus.get(name)?;
         let running = seen(
@@ -153,7 +161,7 @@ impl Pies {
             locale: &installed.places().locale,
             running: &running,
         };
-        Some((pie.size, sources.pie(items)))
+        Some((Shape::from(pie), sources.pie(items)))
     }
 
     /// The wheel turned `notches`, up negative, in fractions of one: the
@@ -235,6 +243,7 @@ impl Pies {
                 frames: Frames::default(),
                 waiting: false,
                 stale: false,
+                drawn: None,
             });
         }
         self.draw(canvas, kit);
@@ -273,14 +282,18 @@ impl Pies {
         tracing::debug!(took = ?started.elapsed(), "the pie was drawn");
         shown.waiting = shown_now;
         shown.stale = !shown_now;
+        if shown_now {
+            shown.drawn = Some(started);
+        }
         shown
             .a11y
             .show(a11y::pie(&shown.namespace, Some(size), Some(&view)));
         watch::slow("drawing the pie", started.elapsed());
     }
 
-    /// The compositor showed the last picture on `surface`: draw what
-    /// changed since, if anything did.
+    /// The compositor showed the last picture on `surface`: a gliding ring
+    /// steps on by how long ago that was drawn, and what changed since is
+    /// drawn, if anything did.
     pub(super) fn frame(
         &mut self,
         canvas: &mut Canvas,
@@ -295,6 +308,14 @@ impl Pies {
             return;
         };
         shown.waiting = false;
+        let since = shown.drawn.map(|drawn| drawn.elapsed()).unwrap_or_default();
+        if self
+            .state
+            .update(Event::Frame(since))
+            .contains(&Effect::Redraw)
+        {
+            shown.stale = true;
+        }
         if shown.stale {
             self.draw(canvas, kit);
         }

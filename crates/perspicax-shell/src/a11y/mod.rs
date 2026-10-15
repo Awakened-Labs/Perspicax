@@ -1179,7 +1179,8 @@ mod pies {
                 let id = NodeId(SLOT + 1 + index as u64);
                 let mut entry = Node::new(Role::MenuItem);
                 entry.set_label(slot.label.as_str());
-                let ((x, y), side) = view.ring.place(index, view.spin, view.pointer);
+                // Where it is spun to, not where it is drawn gliding there.
+                let ((x, y), side) = view.ring.place(index, f64::from(view.spin), view.pointer);
                 let half = side / 2.0;
                 entry.set_bounds(Rect::new(x - half, y - half, x + half, y + half));
                 if let Does::Open(_) = slot.does {
@@ -1214,7 +1215,10 @@ mod pies {
     mod tests {
         use super::*;
         use crate::{
-            layout::{Rect as Area, pie::Ring},
+            layout::{
+                Rect as Area,
+                pie::{Ring, Shape},
+            },
             model::{
                 apps::Run,
                 pie::{Does, Slot},
@@ -1254,9 +1258,10 @@ mod pies {
             let view = View {
                 output: "eDP-1",
                 label: "launchers",
-                ring: Ring::new(3, 512, (960, 500), Area::new(0, 0, 1920, 1048)),
+                ring: Ring::new(3, Shape::default(), (960, 500), Area::new(0, 0, 1920, 1048)),
                 slots: &slots,
                 spin: 0,
+                turn: 0.0,
                 pointer: Some((960.0, 2.0)),
                 picked: Some(0),
             };
@@ -1269,7 +1274,7 @@ mod pies {
             assert_eq!(first.description(), Some("running, 2 windows"));
             assert!(first.is_selected().unwrap_or(false));
             assert_eq!(tree.focus, ring.children()[0]);
-            let ((x, y), side) = view.ring.place(0, 0, view.pointer);
+            let ((x, y), side) = view.ring.place(0, 0.0, view.pointer);
             assert_eq!(
                 first.bounds(),
                 Some(Rect::new(

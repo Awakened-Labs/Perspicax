@@ -81,7 +81,7 @@ impl App {
                 .all()
                 .find(|(_, window)| window.active)
                 .map(|(serial, _)| serial);
-            let Some((size, slots)) = self.pies.built(name, &mut self.installed, &windows) else {
+            let Some((shape, slots)) = self.pies.built(name, &mut self.installed, &windows) else {
                 tracing::warn!(name, "asked for a pie the config does not have");
                 return;
             };
@@ -90,7 +90,7 @@ impl App {
                 name: name.to_owned(),
                 output: monitor,
                 area,
-                size,
+                shape,
                 at: (x, y),
                 slots,
                 active,
