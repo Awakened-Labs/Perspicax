@@ -78,6 +78,29 @@
 //! property changing; whenever it no longer names that window, it is named
 //! again. A client that reads between the two writes still reads the root.
 //!
+//! # Windows that place themselves
+//!
+//! An application's menus, tooltips and drag icons are override-redirect
+//! windows: X maps them where their client says, without asking the window
+//! manager. They are mapped into the space here, so they are drawn, stacked,
+//! hit and given the pointer where they put themselves, and cover what is
+//! under them. Otherwise they are left to their client, as an X11 window
+//! manager leaves them ([`shell::places_itself`]): never focused, raised,
+//! moved, resized, closed, framed or listed, no binding acts on one, and what
+//! one asks of the window manager is not done (issue #181).
+//!
+//! The keyboard above all. Smithay gives an X11 window the keyboard by
+//! telling X: `SetInputFocus` of nothing for the window that had it, then of
+//! the new one. A client takes the first for its window losing the keyboard,
+//! and closes the menu it has open: Steam's closed as soon as the pointer
+//! reached one under sloppy focus. A menu needs no keyboard of the
+//! compositor's, since its client moves X's focus among its own windows, from
+//! the one that holds it. Left out: a window that places itself and grabs the
+//! keyboard for itself while none of its client's windows holds it -- dmenu
+//! on X11, an old fullscreen game -- gets no keys (issue #182). And an X
+//! pointer grab is invisible here, so sloppy focus still follows the pointer
+//! across another window on its way to a menu item (issue #183).
+//!
 //! # Started eagerly, not lazily
 //!
 //! Smithay 0.7 creates the X11 sockets and starts the server in one call, with
@@ -917,7 +940,9 @@ impl XwmHandler for Compositor {
     }
 
     /// Menus and tooltips place themselves; the compositor only records
-    /// where, so they render, hit-test and occlude like anything else.
+    /// where, so they render, hit-test and occlude like anything else, and
+    /// otherwise leaves them to their client: see "Windows that place
+    /// themselves" above.
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, x11: X11Surface) {
         let at = x11.geometry().loc;
         let window = Framed::from(Window::new_x11_window(x11.clone()));

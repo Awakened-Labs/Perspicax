@@ -14,6 +14,14 @@
 //! `_NET_WM_STATE`, as Wine does before it changes anything more. Most of these seat a person at the headless
 //! compositor, since a window rearranges itself only for a person.
 //!
+//! Menus (issue #181): an application's menus bypass the window manager, made
+//! here as Steam makes its own, and are left to their client. Pointing at
+//! one, clicking it, cycling focus, closing a window, switching workspace, an
+//! agent, and the menu's own requests never give it the keyboard or move it,
+//! so the window it was opened from keeps the keyboard. The pointer's tests
+//! need `capture`, and put a focus policy in force with
+//! `Command::FocusPolicy`.
+//!
 //! The X client is this test process, speaking X11 through x11rb, so nothing
 //! beyond `Xwayland` itself has to be installed. Needs `XDG_RUNTIME_DIR` and
 //! `Xwayland` on the `PATH`, and is `#[ignore]`d for `ci/live-tests.sh`.
