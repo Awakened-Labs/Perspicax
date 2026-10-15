@@ -710,12 +710,15 @@ impl Compositor {
         }
     }
 
-    /// Give the keyboard back to the topmost window, or to nothing.
+    /// Give the keyboard back to the topmost window, or to nothing. Never to
+    /// an X11 window that places itself, which an application's menu is,
+    /// and which is on top of everything when it opens (#181).
     pub(crate) fn focus_top_window(&mut self) {
         let top = self
             .space
             .elements()
-            .last()
+            .rev()
+            .find(|window| !shell::places_itself(window))
             .and_then(|window| Some((shell::surface_of(window)?, shell::id_of(window)?)));
         match top {
             Some((surface, id)) => self.focus_surface(surface, id),

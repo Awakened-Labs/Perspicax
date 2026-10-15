@@ -2526,3 +2526,85 @@ fn a_window_binding_is_not_set_off_by_a_click_on_an_x11_menu() {
 
     x11.stop();
 }
+
+/// Issue #181: cycling focus walks the stack from the bottom, and an X
+/// application's menu was in it: the second press gave the menu the
+/// keyboard, and its window lost it and the menu with it.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn cycling_focus_never_lands_on_an_x11_menu() {
+    let x11 = X11::start("x11-menu-cycle", Backend::headless((1280, 800)));
+    let (steam, _, _) = steam_with_a_menu(&x11);
+    x11.drain();
+
+    x11.perform(Action::CycleFocus);
+    x11.perform(Action::CycleFocus);
+
+    assert!(
+        !x11.told_focus_out(steam),
+        "steam was told it lost the keyboard"
+    );
+    assert_eq!(x11.focus(), steam, "the menu took the keyboard");
+
+    x11.stop();
+}
+
+/// Issue #181: the window with the keyboard closing gives it to the window
+/// on top, and an X application's menu is on top of everything when it
+/// opens. The keyboard went to the menu rather than to the window beneath.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn closing_the_x11_window_with_the_keyboard_while_a_menu_is_up_gives_the_keyboard_to_the_window_beneath()
+ {
+    let x11 = X11::start(
+        "x11-menu-close",
+        Backend::headless((1280, 800)).with_person(),
+    );
+    let (steam, menu, _) = steam_with_a_menu(&x11);
+    let dialog = x11.open("dialog");
+    assert!(
+        eventually(Duration::from_secs(5), || (x11.focus() == dialog)
+            .then_some(()))
+        .is_some(),
+        "the dialog never took the keyboard"
+    );
+
+    x11.x.unmap_window(dialog).expect("unmap_window");
+    x11.x.flush().expect("flush");
+
+    // Through none: X drops the focus as the dialog unmaps, and smithay
+    // takes it from the dialog before giving it on.
+    let to = eventually(Duration::from_secs(5), || {
+        let focus = x11.focus();
+        (focus != dialog && focus != x11rb::NONE).then_some(focus)
+    });
+    assert_eq!(
+        to,
+        Some(steam),
+        "the keyboard went to {to:#x?}, the menu is {menu:#x}"
+    );
+
+    x11.stop();
+}
+
+/// Issue #181: leaving the workspace whose window had the keyboard gives
+/// the keyboard to the window on top of what is showing, and an X
+/// application's menu shows on every workspace, since it belongs to none.
+/// It was given the keyboard there.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn switching_to_an_empty_workspace_while_an_x11_menu_is_up_gives_the_menu_no_keyboard() {
+    let x11 = X11::start("x11-menu-workspace", two_workspaces());
+    let (_, menu, _) = steam_with_a_menu(&x11);
+
+    x11.perform(Action::GoToWorkspace(2));
+    x11.surface_where("steam", |surface| !surface.mapped)
+        .expect("steam left behind on the first workspace");
+
+    let took = eventually(Duration::from_secs(1), || {
+        (x11.focus() == menu).then_some(())
+    });
+    assert!(took.is_none(), "the menu took the keyboard");
+
+    x11.stop();
+}

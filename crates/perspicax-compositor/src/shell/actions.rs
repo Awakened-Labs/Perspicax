@@ -11,7 +11,7 @@ use perspicax_node::SurfaceId;
 use perspicax_policy::{Action, Change, Decision, cycle};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 
-use super::{id_of, surface_of};
+use super::{id_of, places_itself, surface_of};
 use crate::{framed::Framed, state::Compositor};
 
 impl Compositor {
@@ -101,7 +101,8 @@ impl Compositor {
                 // bottom of the stack, so cycling reaches them first and
                 // brings them back: without a taskbar (W4), this is how a
                 // minimized window returns. Windows on other workspaces are
-                // not in the cycle, as they are not in Plasma's.
+                // not in the cycle, as they are not in Plasma's. Nor is an
+                // X11 application's menu, which is its client's (#181).
                 let stack: Vec<SurfaceId> = self
                     .parked
                     .iter()
@@ -109,6 +110,7 @@ impl Compositor {
                         Self::is_minimized(window) && self.on_showing_workspace(window)
                     })
                     .chain(self.space.elements())
+                    .filter(|window| !places_itself(window))
                     .filter_map(id_of)
                     .collect();
                 if let Some(next) = cycle(&stack, self.focused_surface()) {
