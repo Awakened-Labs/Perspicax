@@ -36,7 +36,7 @@
 
 mod access;
 pub mod act;
-#[cfg(feature = "seat")]
+#[cfg(any(feature = "seat", feature = "capture"))]
 mod backdrop;
 mod backend;
 mod capture;
@@ -120,9 +120,10 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// it is needed.
 const MOST_UNREAD: usize = 1 << 20;
 
-/// What shows where no window is: a dark grey, so a working output is
-/// distinguishable from a dead one, on a monitor and in a picture of one. The
-/// wallpaper is the shell's job (W5).
+/// What shows where no window is, once the splash is over and while the
+/// session is not locked (see `backdrop`): a dark grey, so a working output
+/// is distinguishable from a dead one, on a monitor and in a picture of one.
+/// The wallpaper is the shell's job (W5).
 #[cfg_attr(
     not(any(feature = "seat", feature = "capture")),
     expect(dead_code, reason = "drawn only by a seat or a picture")

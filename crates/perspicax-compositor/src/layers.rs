@@ -155,6 +155,18 @@ impl Compositor {
                 reserved,
             )
         };
+        // The wallpaper is up: the splash beneath it is done on this output,
+        // unseen, since the wallpaper already covers it.
+        #[cfg(any(feature = "seat", feature = "capture"))]
+        if self.backdrop.splash_on(&output)
+            && self.is_wallpaper(&output, &layer)
+            && self.backdrop.splash_done_on(&output)
+        {
+            tracing::info!(
+                output = output.name(),
+                "the wallpaper is up; the splash is done"
+            );
+        }
         let configured = with_states(surface, |states| {
             states
                 .data_map
@@ -185,6 +197,23 @@ impl Compositor {
         self.repoint();
         self.backend.redraw();
         layer.user_data().get::<SurfaceId>().copied()
+    }
+
+    /// Whether `layer` is a wallpaper that is up on `output`: in the
+    /// background, over the whole output, with a buffer to show.
+    #[cfg(any(feature = "seat", feature = "capture"))]
+    fn is_wallpaper(&self, output: &Output, layer: &LayerSurface) -> bool {
+        let Some(area) = self.space.output_geometry(output) else {
+            return false;
+        };
+        layer.layer() == Layer::Background
+            && layer_map_for_output(output).layer_geometry(layer)
+                == Some(Rectangle::from_size(area.size))
+            && smithay::backend::renderer::utils::with_renderer_surface_state(
+                layer.wl_surface(),
+                |drawn| drawn.buffer().is_some(),
+            )
+            .unwrap_or(false)
     }
 
     /// The id of the layer surface that `surface` is, rearranging nothing:

@@ -53,9 +53,10 @@ xcursor = { version = "0.3", optional = true }
 # Seat-only: window titles, shaped and rasterised. See the workspace manifest
 # for what it brings.
 cosmic-text = { workspace = true, optional = true }
-# Seat-only: the lockup the lock screen shows, decoded from the PNGs in
-# `art/`, and a logo of the person's. Pure Rust, MIT OR Apache-2.0, and the
-# version already in the tree for the shell's wallpapers and screenshots.
+# The lockup the lock screen and the splash show, decoded from the PNGs in
+# `art/`, and a logo of the person's: on a seat, and in a picture. Pure Rust,
+# MIT OR Apache-2.0, and the version already in the tree for the shell's
+# wallpapers and screenshots.
 png = { version = "0.18", optional = true }
 
 # Backends, as cargo features, so a build carries only the system libraries it
@@ -91,8 +92,8 @@ xwayland = ["smithay/xwayland", "dep:x11rb"]
 # system libpixman-1 found by pkg-config), so that CI tests the same path;
 # it is a feature so the headless build still needs nothing but
 # libxkbcommon unless a picture is wanted. xcursor draws the pointer into a
-# recording that asks for it.
-capture = ["smithay/renderer_pixman", "dep:xcursor"]
+# recording that asks for it, and png the splash's lockup into a picture.
+capture = ["smithay/renderer_pixman", "dep:xcursor", "dep:png"]
 
 # A real Wayland client for the live tests, so a layer-shell test needs no
 # panel program installed. MIT; default features off, since the tests need

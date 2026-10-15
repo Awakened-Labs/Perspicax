@@ -805,7 +805,9 @@ pub struct Desk {
     /// How many of the channel's layout events arrived, of any kind.
     pub layout_events: usize,
     layer_shell: LayerShell,
-    /// Strips across the top of the screen, each with its colour and height.
+    /// Strips across the top of the screen, each with its colour and height,
+    /// and wallpapers, whose height is 0 for the whole of what they are
+    /// given.
     pub layers: Vec<(LayerSurface, u32, u32)>,
     pub layers_drawn: usize,
     /// How many configures the popups this client opened have had. Nothing
@@ -937,6 +939,24 @@ impl Desk {
         strip.set_size(0, height);
         strip.commit();
         self.layers.push((strip, colour, height));
+    }
+
+    /// A wallpaper: on `background`, over the whole of its output, drawn in
+    /// one colour, ARGB, and moved by no panel, as a desktop's wallpaper is.
+    pub fn open_wallpaper(&mut self, qh: &QueueHandle<Self>, colour: u32) {
+        let surface = self.compositor.create_surface(qh);
+        let wallpaper = self.layer_shell.create_layer_surface(
+            qh,
+            surface,
+            Layer::Background,
+            Some("wallpaper"),
+            None,
+        );
+        wallpaper.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+        wallpaper.set_size(0, 0);
+        wallpaper.set_exclusive_zone(-1);
+        wallpaper.commit();
+        self.layers.push((wallpaper, colour, 0));
     }
 
     /// The same on `overlay`, asking for every key as a launcher does: the
@@ -2546,6 +2566,11 @@ impl LayerShellHandler for Desk {
             return;
         };
         let width = configure.new_size.0.max(1);
+        let height = if height == 0 {
+            configure.new_size.1.max(1)
+        } else {
+            height
+        };
         let (buffer, canvas) = self
             .pool
             .create_buffer(

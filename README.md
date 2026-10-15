@@ -1029,6 +1029,20 @@ so a first login here can start something that has never run there before:
 PipeWire beside a PulseAudio that was the sound server until then, for one.
 Turn off what you do not want with a `Hidden=true` entry of your own.
 
+**The splash** is what a session shows from its first frame, in place of a
+dark screen while all that comes up: the theme's `splash` colour, which is
+`lock`'s unless written, with `[theme] logo` in the middle (see
+[Themes](#themes)). It is drawn beneath everything, so a window that opens
+early is seen over it, and it ends on each monitor as a wallpaper covers it:
+the shell's, or any surface on the background layer over the whole monitor.
+With nothing ever over it, as with `[shell] wallpaper = "none"` or no shell,
+it ends after ten seconds. A save that turns it off ends it at once.
+
+```toml
+[splash]
+enabled = false                # the plain grey, as before there was a splash
+```
+
 ## The desktop
 
 `perspicax-shell` is the desktop: a wallpaper, a panel, menus of the installed

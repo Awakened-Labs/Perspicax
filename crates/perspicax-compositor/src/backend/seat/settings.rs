@@ -5,8 +5,9 @@
 //! and bindings are just values, and are swapped. The keyboard is recompiled
 //! only if `[input.keyboard]` changed, and keeps the layout in use and its
 //! locks (see [`crate::keyboard`]). Pointer settings go to every device.
-//! The lock screen's colour and logo go to the backdrop, and a logo of the
-//! person's is read again, at every save (see [`crate::backdrop`]).
+//! The lock screen's and the splash's colours and logo go to the backdrop,
+//! and a logo of the person's is read again, at every save; one turning the
+//! splash off ends it (see [`crate::backdrop`]).
 //! Outputs are relit only if their rules changed, because relighting is a
 //! modeset and the screens blink. Autostart, the config's and XDG's, is not
 //! re-run: those programs are already running. Nor is the agent socket
@@ -381,9 +382,9 @@ pub(crate) fn populate(
     Ok(())
 }
 
-/// Tell the backdrop how the config has the lock screen look, and start
-/// reading the person's logo if it names one: found as a wallpaper is, `~`
-/// the home folder and a relative path beside the config.
+/// Tell the backdrop how the config has the lock screen and the splash look,
+/// and start reading the person's logo if it names one: found as a wallpaper
+/// is, `~` the home folder and a relative path beside the config.
 pub(super) fn dress_backdrop(state: &mut Compositor) {
     let Running::Seat(session) = &state.backend else {
         return;
@@ -402,10 +403,15 @@ pub(super) fn dress_backdrop(state: &mut Compositor) {
     };
     let look = Look {
         lock: theme.palette[Role::Lock],
+        splash: theme.palette[Role::Splash],
         logo,
     };
     if let Some(asked) = state.backdrop.dress(look) {
         backdrop::read(asked, session.art.clone());
+    }
+    // `[splash] enabled = false`, saved while it is up, ends it now.
+    if !session.settings.splash && state.backdrop.end_splash() {
+        state.backend.redraw();
     }
 }
 

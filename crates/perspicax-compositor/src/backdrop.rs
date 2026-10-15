@@ -4,6 +4,7 @@
 //! | | Ground | Image |
 //! |---|---|---|
 //! | Locked | the theme's `lock` | the logo, above swaylock's ring |
+//! | The splash still up on the output | the theme's `splash` | the logo, centred |
 //! | Otherwise | [`BACKDROP`](crate::BACKDROP) grey | none |
 //!
 //! While locked, a seat draws nothing but the lock surfaces, and swaylock is
@@ -13,6 +14,20 @@
 //! screen from the moment the session locks, before the lock client has
 //! drawn anything. A lock client that paints its whole surface hides them,
 //! as it should: the screen is then its to draw.
+//!
+//! # The splash
+//!
+//! A session starts on a seat with the splash, from its first frame, instead
+//! of a dark screen while the desktop comes up behind it. It is beneath
+//! everything, never a curtain over the windows: what a window shows, the
+//! person sees, and what the facts say they see stays true. The shell's
+//! wallpaper covers it the moment it draws, and so ends it on that output:
+//! a surface in the background layer, covering the whole output, committing
+//! a buffer ([`Compositor::layer_committed`]). Where nothing ever covers it,
+//! with no wallpaper or no shell, it ends everywhere after a while. It never
+//! comes back in that session, and a save turning `[splash]` off ends it at
+//! once. Locked meanwhile, the lock is shown; unlocked, the splash again, if
+//! it is still up there.
 //!
 //! # The art
 //!
@@ -50,10 +65,10 @@
 //! leave it alone.
 
 use std::{
-    fs::File,
-    io::{BufRead, BufReader, Seek},
+    io::{BufRead, Seek},
     path::PathBuf,
     rc::Rc,
+    time::Duration,
 };
 
 use perspicax_policy::{Colour, Logo, Palette, Rgba, Role};
@@ -69,9 +84,11 @@ use smithay::{
         },
     },
     output::Output,
-    reexports::calloop::channel::Sender,
+    reexports::calloop::timer::{TimeoutAction, Timer},
     utils::{Logical, Physical, Point, Rectangle, Size, Transform},
 };
+
+use crate::state::Compositor;
 
 /// Perspicax's lockup, lettered navy, for a light ground.
 const NAVY: &[u8] = include_bytes!("../art/perspicax-lockup.png");
@@ -132,6 +149,8 @@ enum Placement {
     /// Centred across, its foot [`ABOVE_RING`] above swaylock's ring, and
     /// never in the top tenth of the screen.
     Lock,
+    /// Centred.
+    Splash,
 }
 
 /// An image's place on one output: its size in the output's logical
@@ -170,8 +189,8 @@ fn place(
     let most_w = (width * 2 / 5).min(own(art_w));
     let mut most_h = (height / 4).min(own(art_h));
     let foot = height / 2 - RING - ABOVE_RING;
-    match placement {
-        Placement::Lock => most_h = most_h.min(foot - (height + 9) / 10),
+    if placement == Placement::Lock {
+        most_h = most_h.min(foot - (height + 9) / 10);
     }
     // Bound by whichever side runs out first; the other follows the art.
     let (w, h) = if most_w * art_h <= most_h * art_w {
@@ -190,6 +209,7 @@ fn place(
     let size = Size::from((physical(w), physical(h)));
     let down = match placement {
         Placement::Lock => physical(foot) - size.h,
+        Placement::Splash => (mode.h - size.h) / 2,
     };
     Some(Placed {
         logical: Size::from((i32::try_from(w).ok()?, i32::try_from(h).ok()?)),
@@ -314,8 +334,12 @@ fn decode(source: impl BufRead + Seek) -> Result<Picture, Unread> {
     })
 }
 
-/// Art decoded on a thread, on its way to the backdrop.
+/// Art decoded off the compositor's thread, on its way to the backdrop.
 #[derive(Debug)]
+#[cfg_attr(
+    not(any(feature = "seat", test)),
+    expect(dead_code, reason = "a person's logo is read on a seat alone")
+)]
 pub(crate) enum Arrived {
     /// Perspicax's lockup: lettered navy, then white.
     Builtin(Box<(Picture, Picture)>),
@@ -327,38 +351,43 @@ pub(crate) enum Arrived {
     },
 }
 
-/// A reading of the person's logo to start: [`read`] starts it.
+/// A reading of the person's logo to start: `read` starts it, on a seat.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Asked {
     number: u64,
     path: PathBuf,
 }
 
+/// Perspicax's lockup, decoded.
+fn builtin() -> Result<Arrived, Unread> {
+    let navy = decode(std::io::Cursor::new(NAVY))?;
+    let white = decode(std::io::Cursor::new(WHITE))?;
+    Ok(Arrived::Builtin(Box::new((navy, white))))
+}
+
 /// Decode Perspicax's lockup on a thread of its own, and send it to `to`.
-pub(crate) fn decode_builtin(to: Sender<Arrived>) {
-    spawn("perspicax-lockup", move || {
-        let pair = decode(std::io::Cursor::new(NAVY))
-            .and_then(|navy| Ok((navy, decode(std::io::Cursor::new(WHITE))?)));
-        match pair {
-            // Unsent only once the session has ended, with nobody to show it.
-            Ok(pair) => {
-                let _ = to.send(Arrived::Builtin(Box::new(pair)));
-            }
-            Err(error) => tracing::error!(
-                %error,
-                "Perspicax's lockup could not be decoded; the backdrop goes without it"
-            ),
+#[cfg(feature = "seat")]
+pub(crate) fn decode_builtin(to: smithay::reexports::calloop::channel::Sender<Arrived>) {
+    spawn("perspicax-lockup", move || match builtin() {
+        // Unsent only once the session has ended, with nobody to show it.
+        Ok(arrived) => {
+            let _ = to.send(arrived);
         }
+        Err(error) => tracing::error!(
+            %error,
+            "Perspicax's lockup could not be decoded; the backdrop goes without it"
+        ),
     });
 }
 
 /// Read and decode the person's logo on a thread of its own, and send what
 /// came of it to `to`.
-pub(crate) fn read(asked: Asked, to: Sender<Arrived>) {
+#[cfg(feature = "seat")]
+pub(crate) fn read(asked: Asked, to: smithay::reexports::calloop::channel::Sender<Arrived>) {
     spawn("perspicax-logo", move || {
-        let read = File::open(&asked.path)
+        let read = std::fs::File::open(&asked.path)
             .map_err(Unread::from)
-            .and_then(|file| decode(BufReader::new(file)))
+            .and_then(|file| decode(std::io::BufReader::new(file)))
             .map_err(|error| error.to_string());
         let arrived = Arrived::File {
             asked: asked.number,
@@ -371,6 +400,7 @@ pub(crate) fn read(asked: Asked, to: Sender<Arrived>) {
 
 /// Run `work` on a thread named `name`. Without one the backdrop goes
 /// without what it would have decoded.
+#[cfg(feature = "seat")]
 fn spawn(name: &str, work: impl FnOnce() + Send + 'static) {
     if let Err(error) = std::thread::Builder::new()
         .name(name.to_owned())
@@ -385,16 +415,26 @@ fn spawn(name: &str, work: impl FnOnce() + Send + 'static) {
 pub(crate) struct Look {
     /// The lock screen's ground: the theme's `lock`.
     pub(crate) lock: Rgba,
+    /// The splash's ground: the theme's `splash`.
+    pub(crate) splash: Rgba,
     /// The logo, with a file's path already found.
     pub(crate) logo: Logo,
 }
 
-impl Default for Look {
-    fn default() -> Self {
+impl Look {
+    /// How `palette` has it look, with Perspicax's lockup.
+    pub(crate) fn of(palette: &Palette) -> Self {
         Self {
-            lock: Palette::default()[Role::Lock],
+            lock: palette[Role::Lock],
+            splash: palette[Role::Splash],
             logo: Logo::Perspicax,
         }
+    }
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self::of(&Palette::default())
     }
 }
 
@@ -433,13 +473,17 @@ impl Art {
     }
 }
 
-/// One lit monitor, and the lock's image as built for it.
+/// One lit monitor, and the images built for it.
 #[derive(Debug)]
 struct Screen {
     output: Output,
     mode: Size<i32, Physical>,
     scale: f64,
+    /// The lock's, built whether or not the session is locked, so that
+    /// locking does no pixel work.
     lock: Option<Built>,
+    /// The splash's, while the splash is up on this output.
+    splash: Option<Built>,
 }
 
 /// An image built for one output, and what it was built from.
@@ -472,6 +516,36 @@ impl Built {
             buffer,
         })
     }
+
+    /// Make `slot` hold `wanted`: kept as it is if it already does, so its
+    /// buffer keeps its id, and built afresh if not. Whether it changed.
+    fn keep_or_build(slot: &mut Option<Self>, wanted: Option<(&Rc<Picture>, Placed)>) -> bool {
+        let unchanged = match (&*slot, &wanted) {
+            (Some(built), Some((picture, placed))) => {
+                Rc::ptr_eq(&built.picture, picture) && built.placed == *placed
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !unchanged {
+            *slot = wanted.and_then(|(picture, placed)| Self::new(picture.clone(), placed));
+        }
+        !unchanged
+    }
+
+    fn image(&self) -> Image {
+        Image {
+            buffer: self.buffer.clone(),
+            placed: self.placed,
+        }
+    }
+}
+
+/// The splash, while it is up: the outputs it has ended on, by name, so
+/// that a monitor plugged in again does not bring it back.
+#[derive(Debug, Default)]
+struct Splash {
+    done: Vec<String>,
 }
 
 /// What each output shows where nothing else is. See the module.
@@ -483,16 +557,18 @@ pub(crate) struct Backdrop {
     /// older one is stale, and dropped.
     asked: u64,
     screens: Vec<Screen>,
+    splash: Option<Splash>,
 }
 
-/// The image an output shows on its ground, ready to be drawn.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Image<'a> {
-    buffer: &'a MemoryRenderBuffer,
+/// The image an output shows on its ground, ready to be drawn: its buffer
+/// shared, with the same id, so it costs nothing to hand out.
+#[derive(Debug, Clone)]
+pub(crate) struct Image {
+    buffer: MemoryRenderBuffer,
     placed: Placed,
 }
 
-impl Image<'_> {
+impl Image {
     /// The image as an element to draw: its buffer's pixels one to one with
     /// the monitor's, the whole buffer shown over its logical size.
     pub(crate) fn element<R>(&self, renderer: &mut R) -> Option<MemoryRenderBufferRenderElement<R>>
@@ -512,7 +588,7 @@ impl Image<'_> {
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             at.to_f64(),
-            self.buffer,
+            &self.buffer,
             None,
             Some(src),
             Some(logical),
@@ -587,65 +663,133 @@ impl Backdrop {
         self.screens = lit
             .into_iter()
             .map(|(output, mode, scale)| {
-                let lock = before
-                    .iter_mut()
-                    .find(|screen| screen.output == output)
-                    .and_then(|screen| screen.lock.take());
+                let was = before.iter_mut().find(|screen| screen.output == output);
+                let (lock, splash) =
+                    was.map_or((None, None), |was| (was.lock.take(), was.splash.take()));
                 Screen {
                     output,
                     mode,
                     scale,
                     lock,
+                    splash,
                 }
             })
             .collect();
         self.build();
     }
 
-    /// What `output` shows where nothing else is, `locked` or not: the colour
-    /// to clear it to, and the image on it, if any.
-    pub(crate) fn shown(&self, output: &Output, locked: bool) -> ([f32; 4], Option<Image<'_>>) {
-        if !locked {
-            return (crate::BACKDROP, None);
-        }
-        let image = self
-            .screens
-            .iter()
-            .find(|screen| &screen.output == output)
-            .and_then(|screen| screen.lock.as_ref())
-            .map(|built| Image {
-                buffer: &built.buffer,
-                placed: built.placed,
-            });
-        (clear(self.look.lock), image)
+    /// Put the splash up on every output, until [`Self::splash_done_on`]
+    /// or [`Self::end_splash`].
+    fn begin_splash(&mut self) {
+        self.splash = Some(Splash::default());
+        self.build();
     }
 
-    /// Build each image not built yet, or built from something that has
-    /// changed since. Whether any was.
+    /// Whether the splash is still up on `output`.
+    pub(crate) fn splash_on(&self, output: &Output) -> bool {
+        self.splash
+            .as_ref()
+            .is_some_and(|splash| !splash.done.iter().any(|name| *name == output.name()))
+    }
+
+    /// A wallpaper covers `output`: the splash is done there. Whether it was
+    /// still up there.
+    pub(crate) fn splash_done_on(&mut self, output: &Output) -> bool {
+        if !self.splash_on(output) {
+            return false;
+        }
+        if let Some(splash) = &mut self.splash {
+            splash.done.push(output.name());
+        }
+        self.build();
+        true
+    }
+
+    /// End the splash everywhere, for the rest of the session. Whether any
+    /// output was still showing it.
+    pub(crate) fn end_splash(&mut self) -> bool {
+        let shown = self
+            .screens
+            .iter()
+            .any(|screen| self.splash_on(&screen.output));
+        self.splash = None;
+        self.build();
+        shown
+    }
+
+    /// What `output` shows where nothing else is, `locked` or not: the colour
+    /// to clear it to, and the image on it, if any.
+    pub(crate) fn shown(&self, output: &Output, locked: bool) -> ([f32; 4], Option<Image>) {
+        let screen = self.screens.iter().find(|screen| &screen.output == output);
+        if locked {
+            let image = screen.and_then(|screen| screen.lock.as_ref());
+            (clear(self.look.lock), image.map(Built::image))
+        } else if self.splash_on(output) {
+            let image = screen.and_then(|screen| screen.splash.as_ref());
+            (clear(self.look.splash), image.map(Built::image))
+        } else {
+            (crate::BACKDROP, None)
+        }
+    }
+
+    /// Build each image wanted and not built yet, or built from something
+    /// that has changed since, and drop each no longer wanted. Whether any
+    /// changed.
     fn build(&mut self) -> bool {
         let mut changed = false;
         for screen in &mut self.screens {
-            let wanted = self
-                .art
-                .on(&self.look.logo, self.look.lock)
-                .and_then(|picture| {
-                    place(screen.mode, screen.scale, picture.size, Placement::Lock)
+            let splash_up = self.splash.as_ref().is_some_and(|splash| {
+                !splash.done.iter().any(|name| *name == screen.output.name())
+            });
+            let wanted = |ground: Rgba, placement: Placement| {
+                self.art.on(&self.look.logo, ground).and_then(|picture| {
+                    place(screen.mode, screen.scale, picture.size, placement)
                         .map(|placed| (picture, placed))
-                });
-            let unchanged = match (&screen.lock, &wanted) {
-                (Some(built), Some((picture, placed))) => {
-                    Rc::ptr_eq(&built.picture, picture) && built.placed == *placed
-                }
-                (None, None) => true,
-                _ => false,
+                })
             };
-            if !unchanged {
-                screen.lock =
-                    wanted.and_then(|(picture, placed)| Built::new(picture.clone(), placed));
-                changed = true;
-            }
+            let lock = wanted(self.look.lock, Placement::Lock);
+            let splash = wanted(self.look.splash, Placement::Splash).filter(|_| splash_up);
+            changed |= Built::keep_or_build(&mut screen.lock, lock);
+            changed |= Built::keep_or_build(&mut screen.splash, splash);
         }
         changed
+    }
+}
+
+impl Compositor {
+    /// Put the splash up until a wallpaper covers each output, and take it
+    /// down everywhere after `lasts` at the most, should nothing ever cover
+    /// it: no wallpaper, or no shell.
+    pub(crate) fn show_splash(&mut self, lasts: Duration) {
+        self.backdrop.begin_splash();
+        let armed = self
+            .loop_handle
+            .insert_source(Timer::from_duration(lasts), |_, (), state| {
+                if state.backdrop.end_splash() {
+                    tracing::info!("nothing covered the splash in time; it is over");
+                    state.backend.redraw();
+                }
+                TimeoutAction::Drop
+            });
+        if let Err(error) = armed {
+            tracing::warn!(%error, "the splash ends only where a wallpaper covers it");
+        }
+        self.backend.redraw();
+    }
+
+    /// The splash as a test asks for it: in `palette`'s colours, with
+    /// Perspicax's lockup decoded here and now rather than on a thread, as a
+    /// seat would, for `lasts` at the most.
+    pub(crate) fn splash_for_test(&mut self, lasts: Duration, palette: &Palette) {
+        // Perspicax's lockup, so no reading is ever asked for.
+        let _ = self.backdrop.dress(Look::of(palette));
+        match builtin() {
+            Ok(arrived) => {
+                self.backdrop.arrived(arrived);
+            }
+            Err(error) => tracing::error!(%error, "Perspicax's lockup could not be decoded"),
+        }
+        self.show_splash(lasts);
     }
 }
 
@@ -773,6 +917,25 @@ mod tests {
     }
 
     #[test]
+    fn the_splash_logo_is_as_large_as_the_locks_and_centred() {
+        let splash = |mode: (i32, i32), scale| {
+            place(mode.into(), scale, ART, Placement::Splash).expect("placed")
+        };
+        let placed = splash((1920, 1080), 1.0);
+        assert_eq!(placed.logical, lock((1920, 1080), 1.0, ART).logical);
+        assert_eq!(placed.at, ((1920 - 341) / 2, (1080 - 270) / 2).into());
+        let portrait = splash((1080, 1920), 1.0);
+        assert_eq!(portrait.at, ((1080 - 432) / 2, (1920 - 341) / 2).into());
+        let at_half = splash((3840, 2160), 1.5);
+        assert_eq!(at_half.physical, (683, 540).into());
+        assert_eq!(at_half.at, ((3840 - 683) / 2, (2160 - 540) / 2).into());
+        assert!(
+            place((640, 200).into(), 1.0, ART, Placement::Splash).is_some(),
+            "with no ring to keep clear of, it has room where the lock has none"
+        );
+    }
+
+    #[test]
     fn the_logo_is_never_enlarged() {
         let huge = lock((7680, 4320), 1.0, ART);
         assert_eq!(huge.physical, (1024, 809).into(), "at its own size");
@@ -781,11 +944,14 @@ mod tests {
         for mode in [(1920, 1080), (3840, 2160), (7680, 4320), (5120, 1440)] {
             for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5] {
                 for art in [ART, (101, 51), (33, 97), (4096, 7), (3, 3)] {
-                    if let Some(placed) = place(mode.into(), scale, art, Placement::Lock) {
+                    for placement in [Placement::Lock, Placement::Splash] {
+                        let Some(placed) = place(mode.into(), scale, art, placement) else {
+                            continue;
+                        };
                         let physical = placed.physical;
                         assert!(
                             physical.w <= art.0 as i32 && physical.h <= art.1 as i32,
-                            "{art:?} on {mode:?} at {scale}: {physical:?}"
+                            "{art:?} on {mode:?} at {scale}, {placement:?}: {physical:?}"
                         );
                     }
                 }
@@ -964,7 +1130,8 @@ mod tests {
         }
     }
 
-    fn builtin() -> Arrived {
+    /// Stand-ins for Perspicax's lockup: lettered "navy", then "white".
+    fn stand_ins() -> Arrived {
         Arrived::Builtin(Box::new((picture(0x10), picture(0xf0))))
     }
 
@@ -993,7 +1160,7 @@ mod tests {
         assert_eq!(ground, clear(Palette::default()[Role::Lock]));
         assert!(image.is_none(), "the ground alone, until the art is here");
 
-        assert!(backdrop.arrived(builtin()), "drawn again");
+        assert!(backdrop.arrived(stand_ins()), "drawn again");
         let (_, image) = backdrop.shown(&screen, true);
         let image = image.expect("the logo");
         assert_eq!(image.placed, lock((1920, 1080), 1.0, (64, 32)));
@@ -1008,14 +1175,11 @@ mod tests {
         let screen = output("DP-1");
         let mut backdrop = Backdrop::default();
         backdrop.screens([(screen.clone(), (1920, 1080).into(), 1.0)]);
-        backdrop.arrived(builtin());
+        backdrop.arrived(stand_ins());
         let white = shown_picture(&backdrop, &screen).expect("built").clone();
         assert_eq!(white.pixels[0], 0xf0, "white lettering on navy");
 
-        backdrop.dress(Look {
-            lock: Builtin::BreezeLight.palette()[Role::Lock],
-            logo: Logo::Perspicax,
-        });
+        backdrop.dress(Look::of(&Builtin::BreezeLight.palette()));
         let navy = shown_picture(&backdrop, &screen).expect("built");
         assert_eq!(navy.pixels[0], 0x10, "navy on a light ground");
 
@@ -1049,7 +1213,7 @@ mod tests {
     fn a_buffer_is_kept_while_what_it_was_built_from_is_unchanged() {
         let screen = output("DP-1");
         let mut backdrop = Backdrop::default();
-        backdrop.arrived(builtin());
+        backdrop.arrived(stand_ins());
         backdrop.screens([(screen.clone(), (1920, 1080).into(), 1.0)]);
         let kept = backdrop.screens[0]
             .lock
@@ -1090,7 +1254,7 @@ mod tests {
         let path = PathBuf::from("/home/me/logo.png");
         let mut backdrop = Backdrop::default();
         backdrop.screens([(screen.clone(), (1920, 1080).into(), 1.0)]);
-        backdrop.arrived(builtin());
+        backdrop.arrived(stand_ins());
         let look = Look {
             logo: Logo::File(path.clone()),
             ..Look::default()
@@ -1141,5 +1305,71 @@ mod tests {
             0xf0,
             "one that cannot be read gives the lockup"
         );
+    }
+
+    #[test]
+    fn the_splash_shows_until_a_wallpaper_covers_each_output_or_it_ends() {
+        let (left, right) = (output("DP-1"), output("DP-2"));
+        let mut backdrop = Backdrop::default();
+        backdrop.screens([
+            (left.clone(), (1920, 1080).into(), 1.0),
+            (right.clone(), (1280, 1024).into(), 1.0),
+        ]);
+        backdrop.arrived(stand_ins());
+        let light = Rgba::new(0xcb, 0xd8, 0xdf, 0xff);
+        backdrop.dress(Look {
+            splash: light,
+            ..Look::default()
+        });
+        assert_eq!(backdrop.shown(&left, false).0, crate::BACKDROP, "none yet");
+
+        backdrop.begin_splash();
+        let (ground, image) = backdrop.shown(&left, false);
+        assert_eq!(ground, clear(light), "its own ground");
+        let expected = place((1920, 1080).into(), 1.0, (64, 32), Placement::Splash);
+        assert_eq!(image.map(|image| image.placed), expected, "centred");
+        let built = &backdrop.screens[0];
+        let tint = |built: &Option<Built>| built.as_ref().map(|built| built.picture.pixels[0]);
+        assert_eq!(tint(&built.splash), Some(0x10), "navy, on its light ground");
+        assert_eq!(
+            tint(&built.lock),
+            Some(0xf0),
+            "and white on the lock's dark one"
+        );
+        let (ground, _) = backdrop.shown(&left, true);
+        assert_eq!(
+            ground,
+            clear(Palette::default()[Role::Lock]),
+            "locked, the lock"
+        );
+
+        assert!(backdrop.splash_done_on(&left), "a wallpaper on the left");
+        assert!(!backdrop.splash_done_on(&left), "said once");
+        let (ground, image) = backdrop.shown(&left, false);
+        assert_eq!(ground, crate::BACKDROP, "done there");
+        assert!(image.is_none());
+        assert!(backdrop.screens[0].splash.is_none(), "its buffer dropped");
+        assert_eq!(
+            backdrop.shown(&right, false).0,
+            clear(light),
+            "still up there"
+        );
+
+        let again = output("DP-1");
+        backdrop.screens([
+            (again.clone(), (1920, 1080).into(), 1.0),
+            (right.clone(), (1280, 1024).into(), 1.0),
+        ]);
+        assert!(!backdrop.splash_on(&again), "plugged in again, not back");
+
+        assert!(backdrop.end_splash(), "the right was still showing it");
+        assert_eq!(backdrop.shown(&right, false).0, crate::BACKDROP);
+        assert!(
+            backdrop
+                .screens
+                .iter()
+                .all(|screen| screen.splash.is_none())
+        );
+        assert!(!backdrop.end_splash(), "over already");
     }
 }

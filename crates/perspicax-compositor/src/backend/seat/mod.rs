@@ -138,6 +138,11 @@ fn preview_colour(settings: &perspicax_config::Config) -> [f32; 4] {
 /// client on the primary plane is still allowed.
 const PLANES: FrameFlags = FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT;
 
+/// The longest the splash stays up where no wallpaper ever covers it: long
+/// enough for a slow desktop to come up over it, short enough that a session
+/// with no wallpaper is not left looking like one still starting.
+const SPLASH_MOST: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Scanout formats, in order of preference: 8 bits per channel with and
 /// without alpha. Every GPU Mesa drives supports these; 10-bit formats are a
 /// later refinement and a common source of black screens on older drivers.
@@ -465,6 +470,10 @@ pub(crate) fn attach(state: &mut Compositor) -> Result<(), Error> {
             "no connected monitor could be lit on the primary GPU".to_owned(),
         ));
     }
+    // From the first frames, which the scan above has just asked for.
+    if session.settings.splash {
+        state.show_splash(SPLASH_MOST);
+    }
     Ok(())
 }
 
@@ -661,18 +670,6 @@ fn rescan(state: &mut Compositor) {
             Err(error) => tracing::warn!(?handle, %error, "could not light monitor"),
         }
     }
-    // Each monitor's logo is built now, for its mode and scale, so that
-    // locking does no pixel work; one unplugged takes its own with it.
-    state
-        .backdrop
-        .screens(session.heads.iter().filter_map(|head| {
-            let mode = head.output.current_mode()?;
-            Some((
-                head.output.clone(),
-                mode.size,
-                head.output.current_scale().fractional_scale(),
-            ))
-        }));
     session.request_frames();
     state.arrange_outputs();
 }
@@ -981,7 +978,8 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     }
     // Beneath everything, on the colour the frame is cleared to: the
     // backdrop's logo. Locked, the lock surface is clear but for its ring,
-    // and this is the lock screen.
+    // and this is the lock screen. As the session starts, it is the splash,
+    // until the wallpaper covers it.
     let (ground, image) = backdrop.shown(&head.output, lock.is_some());
     elements.extend(
         image
