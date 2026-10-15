@@ -114,9 +114,12 @@ impl DecorationStates {
 impl Compositor {
     /// Whether this compositor draws `window`'s frame.
     pub(crate) fn is_server_decorated(window: &Framed) -> bool {
+        if crate::shell::places_itself(window) {
+            return false;
+        }
         #[cfg(feature = "xwayland")]
         if let Some(x11) = window.x11_surface() {
-            return !x11.is_override_redirect() && !x11.is_decorated();
+            return !x11.is_decorated();
         }
         window
             .toplevel()

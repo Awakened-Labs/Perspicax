@@ -14,7 +14,7 @@
 use perspicax_node::SurfaceId;
 use perspicax_policy::OPAQUE;
 
-use super::{Fill, id_of, placement};
+use super::{Fill, id_of, placement, places_itself};
 use crate::{framed::Framed, state::Compositor};
 
 impl Compositor {
@@ -23,9 +23,10 @@ impl Compositor {
     /// drawing many.
     ///
     /// Wholly opaque, whatever is asked, for:
-    /// - An X11 window that bypasses the window manager: a menu or a tooltip.
-    ///   It never has the keyboard, so dimming what lacks it would dim every
-    ///   one, and nothing ties it to the window it belongs to.
+    /// - An X11 window that places itself ([`super::places_itself`]): a menu
+    ///   or a tooltip. It never has the keyboard, so dimming what lacks it
+    ///   would dim every one, and nothing ties it to the window it belongs
+    ///   to.
     /// - A fullscreen window, in use or not: a video is not dimmed by a rule
     ///   meant for its window. Its own value returns when it leaves.
     ///
@@ -73,16 +74,9 @@ impl Compositor {
     }
 
     /// Whether `window` is drawn opaque whatever it has: an X11 window that
-    /// bypasses the window manager, or a fullscreen one.
+    /// places itself, or a fullscreen one.
     fn drawn_whole(window: &Framed) -> bool {
-        #[cfg(feature = "xwayland")]
-        if window
-            .x11_surface()
-            .is_some_and(smithay::xwayland::X11Surface::is_override_redirect)
-        {
-            return true;
-        }
-        Self::filling(window) == Some(Fill::Fullscreen)
+        places_itself(window) || Self::filling(window) == Some(Fill::Fullscreen)
     }
 
     /// What `window` has of its own: what the keys set, or else its

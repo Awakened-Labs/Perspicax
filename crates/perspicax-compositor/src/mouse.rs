@@ -3,17 +3,21 @@
 //! there.
 //!
 //! A seat comes here from libinput, through `backend::seat::input`, which
-//! keeps for itself what only a seat does with a press: the focus policy,
-//! the frame's own buttons and edges, dragging tabs and windows, and
-//! flipping workspaces with the wheel. Headless comes here from a test,
-//! through [`crate::Command::Click`] -- or a [`crate::Command::Press`] held
-//! down until its [`crate::Command::Release`] -- and
-//! [`crate::Command::Scroll`], which stand in for a person's hand as
-//! [`crate::Command::Perform`] stands in for their keys.
+//! keeps for itself what only a seat does with a press: the frame's own
+//! buttons and edges, dragging tabs and windows, and flipping workspaces
+//! with the wheel. Headless comes here from a test, through
+//! [`crate::Command::Click`] -- or a [`crate::Command::Press`] held down
+//! until its [`crate::Command::Release`] -- and [`crate::Command::Scroll`],
+//! which stand in for a person's hand as [`crate::Command::Perform`] stands
+//! in for their keys.
 //!
 //! Both move the pointer the same way, through [`Compositor::travel`]: kept
 //! on the outputs, given to what is under it, and the device's own motion
-//! passed on to the client there, as a game's mouselook reads it.
+//! passed on to the client there, as a game's mouselook reads it. And both
+//! put each motion and press to the focus policy the same way
+//! ([`Compositor::follow_pointer`], [`Compositor::follow_press`]): a seat's
+//! is its person's `[focus]`, and headless has none until a test puts one
+//! in force ([`crate::Command::FocusPolicy`]).
 //!
 //! An agent never comes here. Its clicks and scrolls go straight to the
 //! pointer (`crate::act`), so no binding can be set off by one. An agent
@@ -39,7 +43,11 @@ use crate::{framed::Framed, hold::Hold, layers, shell::id_of, state::Compositor}
 
 /// What the pointer is over.
 pub(crate) struct Hit {
-    /// Set when it is a window, which is all the focus policy decides about.
+    /// Set when it is a window this compositor manages, which is all the
+    /// focus policy and the bindings decide about. An X11 window that places
+    /// itself ([`crate::shell::places_itself`]), an application's menu, is
+    /// drawn, hit and given the pointer like any, but comes with its surface
+    /// and no window, as a panel's menu does.
     pub(crate) window: Option<Framed>,
     /// Set when it is a layer surface that may take the keyboard on a click.
     #[cfg_attr(
@@ -87,13 +95,15 @@ pub(crate) fn under(state: &Compositor, at: Point<f64, Logical>) -> Option<Hit> 
         if raised && !crate::shell::covers_panels(window) {
             return None;
         }
+        // One that places itself is its client's alone (#181).
+        let managed = (!crate::shell::places_itself(window)).then(|| window.clone());
         // The client first, so a popup hanging over the titlebar gets its
         // clicks; then the frame around it.
         if let Some((surface, offset)) =
             window.surface_under(at - location.to_f64(), WindowSurfaceType::ALL)
         {
             return Some(Hit {
-                window: Some(window.clone()),
+                window: managed,
                 takes_focus: false,
                 surface: Some(surface),
                 origin: (location + offset).to_f64(),
@@ -101,7 +111,7 @@ pub(crate) fn under(state: &Compositor, at: Point<f64, Logical>) -> Option<Hit> 
             });
         }
         Some(Hit {
-            window: Some(window.clone()),
+            window: managed,
             takes_focus: false,
             surface: None,
             origin: location.to_f64(),
@@ -116,7 +126,8 @@ pub(crate) fn under(state: &Compositor, at: Point<f64, Logical>) -> Option<Hit> 
 }
 
 /// The focus policy, unless the session is locked: then the lock surface
-/// holds the keyboard and no pointing may move it. Headless has none.
+/// holds the keyboard and no pointing may move it. Headless has none until a
+/// test puts one in force.
 pub(crate) fn policy(state: &Compositor) -> Option<Focus> {
     if state.lock.is_some() {
         return None;
@@ -260,17 +271,42 @@ impl Compositor {
         // Over a window, a binding acts on that window, as it would had the
         // hand clicked it first: a scroll alone never moves the focus, but a
         // scroll that does something to a window does.
-        if let Some(focus) = policy(self)
-            && let Some(window) = hit.and_then(|hit| hit.window.as_ref())
-        {
-            let decision = focus.pressed(id_of(window), self.focused_surface());
-            self.apply_focus(decision);
-        }
+        self.follow_press(hit);
         let monitor = self.monitor_at(at);
         for action in &actions {
             self.perform_on(action, monitor.clone());
         }
         true
+    }
+
+    /// The pointer moved, and is now over `hit`: the focus policy says where
+    /// the keyboard goes, and it goes there. Asked after every motion, on
+    /// either backend, and before the hold is settled, so the window in use
+    /// is the one the policy chose.
+    pub(crate) fn follow_pointer(&mut self, hit: Option<&Hit>) {
+        // The focus policy is about windows. Over a panel, or an X11 menu,
+        // it has nothing to say: passing it the panel as "no window" would
+        // make strict focus drop the keyboard every time the pointer crossed
+        // the taskbar, and the menu's window every time it opened one.
+        let over_other = hit.is_some_and(|hit| hit.window.is_none());
+        let over = hit.and_then(|hit| hit.window.as_ref()).and_then(id_of);
+        if let Some(focus) = policy(self)
+            && !over_other
+        {
+            let decision = focus.pointer_over(over, self.focused_surface());
+            self.apply_focus(decision);
+        }
+    }
+
+    /// A button went down over `hit`: the focus policy focuses and raises
+    /// the window clicked, as every model does. A click over no window
+    /// changes nothing.
+    pub(crate) fn follow_press(&mut self, hit: Option<&Hit>) {
+        if let Some(focus) = policy(self) {
+            let over = hit.and_then(|hit| hit.window.as_ref()).and_then(id_of);
+            let decision = focus.pressed(over, self.focused_surface());
+            self.apply_focus(decision);
+        }
     }
 
     /// The monitor under `at`, by name: where a mouse binding acts.
@@ -296,6 +332,9 @@ impl Compositor {
         // refused for a hand that has stopped.
         self.person_button(code, true);
         let time = self.now_ms();
+        // Focus and raise before the press is delivered, and before a
+        // binding, as a seat does.
+        self.follow_press(hit.as_ref());
         if !self.bound_press(hit.as_ref(), at, code, mods, time) {
             self.stand_in_button(&pointer, code, ButtonState::Pressed, time);
         }
@@ -356,10 +395,10 @@ impl Compositor {
             utime: self.now_us(),
         };
         let time = self.now_ms();
-        if self
-            .travel(from + delta, Some(&relative), time, |_, _| None)
-            .is_some()
+        if let Some(Travelled { hit }) =
+            self.travel(from + delta, Some(&relative), time, |_, _| None)
         {
+            self.follow_pointer(hit.as_ref());
             self.settle_hold();
             #[cfg(feature = "capture")]
             self.flush_screencopy_for_pointer();
@@ -433,6 +472,7 @@ impl Compositor {
         };
         pointer.motion(self, focus, &event);
         pointer.frame(self);
+        self.follow_pointer(hit.as_ref());
         self.settle_hold();
         #[cfg(feature = "capture")]
         self.flush_screencopy_for_pointer();
@@ -452,11 +492,7 @@ impl Compositor {
 
 /// What [`Compositor::travel`] found where it took the pointer.
 pub(crate) struct Travelled {
-    /// What the pointer is over now, for the seat's focus policy.
-    #[cfg_attr(
-        not(feature = "seat"),
-        expect(dead_code, reason = "the seat's focus policy")
-    )]
+    /// What the pointer is over now, for the focus policy.
     pub(crate) hit: Option<Hit>,
 }
 

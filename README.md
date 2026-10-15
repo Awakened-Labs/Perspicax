@@ -712,6 +712,26 @@ minimizes or brings back, as Openbox takes it. And the root's
 `_NET_ACTIVE_WINDOW` names the X11 window with the keyboard, or none while a
 Wayland window has it, which Wine goes by for the window in front.
 
+An X11 application's menus, tooltips and drag icons place themselves: they
+bypass the window manager (override-redirect, in X's terms), and are left to
+their application, as any X11 window manager leaves them. Each is drawn where
+it puts itself, over what it covers, and the pointer reaches it. But it is
+never focused, raised, moved, closed or listed, no binding acts on it, and it
+never takes the keyboard: not when the pointer reaches it, whatever the focus
+model, not when it is clicked, and never as the next window when one closes,
+a workspace switches or Alt+Tab cycles. Its keys reach it through the window
+it was opened from, which keeps the keyboard and stays the window in use, lit
+and undimmed, while the menu is open. Given the keyboard, as before #181, the
+window lost it and the application closed its menu: Steam's closed as soon as
+the pointer reached one. An agent sees such a menu as a window until #159, but
+cannot focus or close it. Two things are left:
+- under sloppy or strict focus, a menu still closes if the pointer crosses
+  another window on its way to an item (#183);
+- an X program that bypasses the window manager to take the keyboard for
+  itself -- dmenu or rofi on X11, an old fullscreen game, Wine with its
+  windows unmanaged -- types only while one of its own X11 windows has the
+  keyboard (#182).
+
 A Wayland client may take its window off the screen without closing it, by
 attaching no buffer to it, as xdg-shell allows, and ask for it again later.
 To everyone else the window has closed. It leaves the screen, the taskbar
@@ -1473,7 +1493,9 @@ any key or mouse binding can.
   draws one over another, as a browser does a video, the one beneath shows
   faintly through it.
 - **X11 menus and tooltips are drawn opaque,** since nothing ties one to its
-  window. A client's own `_NET_WM_WINDOW_OPACITY` is ignored.
+  window. A client's own `_NET_WM_WINDOW_OPACITY` is ignored. One never takes
+  the keyboard, so the window it was opened from stays in use, and undimmed,
+  while it is open.
 
 **For your eyes, not an agent's.** A see-through window still covers what is
 behind it as far as an agent is told: a node beneath it is `occluded`, naming

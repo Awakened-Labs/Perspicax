@@ -100,6 +100,12 @@ pub enum Command {
     /// Put `[mouse]` bindings in force, as a seat does when a save changes
     /// them. Headless starts with none.
     MouseBindings(perspicax_policy::MouseBindings),
+    /// Put a focus policy in force, as a seat does when a save changes
+    /// `[focus]`: the keyboard then follows the stand-in hand of
+    /// [`Command::Motion`] and [`Command::Click`] as it follows a person's.
+    /// Headless only, and headless starts with none, so a hand moves no
+    /// keyboard until a test says how it should.
+    FocusPolicy(perspicax_policy::Focus),
     /// Click a button at a point on the desk, in global coordinates, with
     /// `mods` held, as a person's hand would: the pointer goes there, a
     /// `[mouse]` binding is looked for, and whatever no binding takes goes to
@@ -108,10 +114,12 @@ pub enum Command {
     ///
     /// Not an MCP tool, for the reason [`Command::Perform`] is not, and not
     /// an agent's click either: an agent clicks through [`Request`], which
-    /// never sets a binding off. Only what both backends share is run, so a
-    /// seat's focus policy, and the presses a window's frame takes for
-    /// itself, are not. A headless build without `capture` keeps no buffers
-    /// to find a surface's size by, so it refuses this in the log.
+    /// never sets a binding off. Only what both backends share is run: the
+    /// focus policy, once [`Command::FocusPolicy`] has put one in force, but
+    /// not the presses a window's frame takes for itself, the drag modifier,
+    /// or a click giving a panel the keyboard. A headless build without
+    /// `capture` keeps no buffers to find a surface's size by, so it refuses
+    /// this in the log.
     ///
     /// A [`Command::Press`] and its [`Command::Release`], in one turn.
     Click {

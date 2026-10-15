@@ -751,6 +751,31 @@ pub(crate) fn id_of(window: &Framed) -> Option<SurfaceId> {
     window.user_data().get::<SurfaceId>().copied()
 }
 
+/// Whether `window` places itself: an X11 window that bypasses the window
+/// manager (override-redirect), as an application's menus, tooltips and
+/// drag icons do, which X maps where its client says without asking.
+///
+/// Window management leaves it be, as an X11 window manager must. It is
+/// drawn and stacked where it puts itself, and its client gets the pointer
+/// over it; but it is never focused, raised, moved, resized, closed, framed
+/// or listed, no binding acts on it, and it is never picked to take the
+/// keyboard next. Its client moves X's own focus among its windows, from
+/// the one that has the keyboard: giving a menu the keyboard takes it from
+/// that window, which closes the menu (#181). Asked afresh each time, since
+/// a client may set the flag differently each time it maps. Never, without
+/// `xwayland`.
+#[cfg_attr(not(feature = "xwayland"), expect(unused_variables, reason = "X11's"))]
+pub(crate) fn places_itself(window: &Framed) -> bool {
+    #[cfg(feature = "xwayland")]
+    if window
+        .x11_surface()
+        .is_some_and(smithay::xwayland::X11Surface::is_override_redirect)
+    {
+        return true;
+    }
+    false
+}
+
 /// xdg-shell's resize edge, as policy's.
 pub(crate) fn edges(edge: xdg_toplevel::ResizeEdge) -> Edges {
     use xdg_toplevel::ResizeEdge as E;

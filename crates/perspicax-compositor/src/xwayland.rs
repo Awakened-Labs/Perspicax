@@ -78,6 +78,29 @@
 //! property changing; whenever it no longer names that window, it is named
 //! again. A client that reads between the two writes still reads the root.
 //!
+//! # Windows that place themselves
+//!
+//! An application's menus, tooltips and drag icons are override-redirect
+//! windows: X maps them where their client says, without asking the window
+//! manager. They are mapped into the space here, so they are drawn, stacked,
+//! hit and given the pointer where they put themselves, and cover what is
+//! under them. Otherwise they are left to their client, as an X11 window
+//! manager leaves them ([`shell::places_itself`]): never focused, raised,
+//! moved, resized, closed, framed or listed, no binding acts on one, and what
+//! one asks of the window manager is not done (issue #181).
+//!
+//! The keyboard above all. Smithay gives an X11 window the keyboard by
+//! telling X: `SetInputFocus` of nothing for the window that had it, then of
+//! the new one. A client takes the first for its window losing the keyboard,
+//! and closes the menu it has open: Steam's closed as soon as the pointer
+//! reached one under sloppy focus. A menu needs no keyboard of the
+//! compositor's, since its client moves X's focus among its own windows, from
+//! the one that holds it. Left out: a window that places itself and grabs the
+//! keyboard for itself while none of its client's windows holds it -- dmenu
+//! on X11, an old fullscreen game -- gets no keys (issue #182). And an X
+//! pointer grab is invisible here, so sloppy focus still follows the pointer
+//! across another window on its way to a menu item (issue #183).
+//!
 //! # Started eagerly, not lazily
 //!
 //! Smithay 0.7 creates the X11 sockets and starts the server in one call, with
@@ -760,7 +783,7 @@ impl Compositor {
     fn managed_x11_by_id(&self, id: u32) -> Option<(Framed, X11Surface)> {
         let window = self.x11_window_by_id(id)?;
         let x11 = window.x11_surface()?.clone();
-        (!x11.is_override_redirect()).then_some((window, x11))
+        (!shell::places_itself(&window)).then_some((window, x11))
     }
 
     /// The mapped or parked window wrapping this X11 surface.
@@ -770,6 +793,15 @@ impl Compositor {
             .chain(&self.parked)
             .find(|window| window.x11_surface() == Some(surface))
             .cloned()
+    }
+
+    /// The same, if it is one the window manager manages. smithay passes on
+    /// a state or move request from any window it knows, and a menu or a
+    /// tooltip that asks is not the window manager's to minimize, fill or
+    /// drag: it places itself, and X would not follow (#181).
+    fn managed_x11(&self, surface: &X11Surface) -> Option<Framed> {
+        self.x11_window(surface)
+            .filter(|window| !shell::places_itself(window))
     }
 
     /// Whether the keyboard is with an X11 window, which is when X clients
@@ -908,7 +940,9 @@ impl XwmHandler for Compositor {
     }
 
     /// Menus and tooltips place themselves; the compositor only records
-    /// where, so they render, hit-test and occlude like anything else.
+    /// where, so they render, hit-test and occlude like anything else, and
+    /// otherwise leaves them to their client: see "Windows that place
+    /// themselves" above.
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, x11: X11Surface) {
         let at = x11.geometry().loc;
         let window = Framed::from(Window::new_x11_window(x11.clone()));
@@ -1197,7 +1231,7 @@ impl Compositor {
 
     /// A request to be minimized: see `minimize_request`.
     fn minimize_asked(&mut self, x11: &X11Surface) {
-        let Some(window) = self.x11_window(x11) else {
+        let Some(window) = self.managed_x11(x11) else {
             return;
         };
         if self.backend.has_person() && !Self::is_minimized(&window) {
@@ -1210,7 +1244,7 @@ impl Compositor {
     /// A request to be brought back from minimized: see
     /// `unminimize_request`.
     fn unminimize_asked(&mut self, x11: &X11Surface) {
-        let Some(window) = self.x11_window(x11) else {
+        let Some(window) = self.managed_x11(x11) else {
             return;
         };
         if self.backend.has_person() && Self::is_minimized(&window) {
@@ -1335,12 +1369,13 @@ impl Compositor {
     }
 
     /// The window an X11 request to change its state is about, if the
-    /// request is one to honour: a person at the seat, and a window we know.
+    /// request is one to honour: a person at the seat, and a window we know
+    /// and manage.
     fn honoured(&self, x11: &X11Surface) -> Option<Framed> {
         if !self.backend.has_person() {
             return None;
         }
-        self.x11_window(x11)
+        self.managed_x11(x11)
     }
 
     /// Make an X11 window fullscreen on `on`, or the monitor it is on: the
@@ -1435,7 +1470,7 @@ impl Compositor {
         }
         let pointer = self.pointer.as_ref()?;
         let start = pointer.grab_start_data()?;
-        Some((self.x11_window(x11)?, start))
+        Some((self.managed_x11(x11)?, start))
     }
 }
 

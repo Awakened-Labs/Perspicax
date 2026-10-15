@@ -48,7 +48,7 @@ use smithay::{
 use crate::{
     access::{Filtered, Gate},
     framed::Framed,
-    shell::id_of,
+    shell::{id_of, places_itself},
     state::Compositor,
 };
 
@@ -236,13 +236,13 @@ impl Compositor {
     }
 
     fn snapshot(&self, window: &Framed) -> Option<Snapshot> {
+        if places_itself(window) {
+            return None;
+        }
         let outputs = self.monitor_of(window).into_iter().collect();
         let minimized = Self::is_minimized(window);
         #[cfg(feature = "xwayland")]
         if let Some(x11) = window.x11_surface() {
-            if x11.is_override_redirect() {
-                return None;
-            }
             return Some(Snapshot {
                 title: x11.title(),
                 app_id: x11.class(),
