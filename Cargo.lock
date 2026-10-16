@@ -1536,6 +1536,8 @@ dependencies = [
  "perspicax-protocols",
  "perspicax-shell",
  "png",
+ "serde",
+ "serde_json",
  "smithay",
  "smithay-client-toolkit",
  "thiserror 2.0.20",

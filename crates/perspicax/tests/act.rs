@@ -283,6 +283,7 @@ fn run(spawn: Vec<Vec<String>>) -> Drive {
         env: session::accessibility_env(),
         run_for: Some(Duration::from_secs(180)),
         config: None,
+        places: None,
         socket: None,
         xwayland: false,
     };

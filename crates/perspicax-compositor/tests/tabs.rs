@@ -65,6 +65,7 @@ fn two_windows_grouped_share_one_place_and_the_one_behind_says_which_is_in_front
                 env: Vec::new(),
                 run_for: Some(Duration::from_secs(30)),
                 config: None,
+                places: None,
                 socket: Some(socket),
                 xwayland: false,
             };
@@ -169,6 +170,7 @@ fn a_tab_coming_forward_takes_the_groups_state_not_its_own() {
                 env: Vec::new(),
                 run_for: Some(Duration::from_secs(30)),
                 config: None,
+                places: None,
                 socket: Some(socket),
                 xwayland: false,
             };

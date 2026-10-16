@@ -22,6 +22,7 @@
 mod actions;
 mod grabs;
 mod opacity;
+mod remember;
 mod resist;
 mod snap;
 mod stacking;
@@ -68,7 +69,9 @@ pub(crate) use stacking::{Stack, stack};
 pub(crate) use withdrawn::Withdrawn;
 
 /// What the compositor remembers about one window's placement, kept in the
-/// window's own user data so it lives and dies with the window.
+/// window's own user data so it lives and dies with the window. Where its
+/// program's next window opens outlives it, and is kept apart (see
+/// `remember`).
 #[derive(Debug, Default)]
 pub(crate) struct Placement {
     /// Where the window was, at what size, before it was maximized or made
@@ -96,6 +99,11 @@ pub(crate) struct Placement {
     /// already. From then on, where it goes is the person's. See
     /// [`Compositor::settle_new`].
     pub(crate) settled: bool,
+    /// The step of the cascade a Wayland window was given at `get_toplevel`,
+    /// before anything was known of it, and gives back if it opens where its
+    /// program's last window closed instead. See
+    /// [`Compositor::place_remembered`].
+    pub(crate) cascaded: Option<u32>,
 }
 
 /// How a window fills its monitor.
@@ -902,6 +910,26 @@ pub(crate) fn places_itself(window: &Framed) -> bool {
         .is_some_and(smithay::xwayland::X11Surface::is_override_redirect)
     {
         return true;
+    }
+    false
+}
+
+/// Whether `window` is one of its program's main windows, not a dialog, a
+/// palette or a splash screen over one: no xdg parent, and under X11 no
+/// `WM_TRANSIENT_FOR`, not modal, and no window type but normal. Where a
+/// main window was is where its program's next one opens; a dialog opens
+/// over its own window, wherever that is.
+pub(crate) fn is_main(window: &Framed) -> bool {
+    if let Some(toplevel) = window.toplevel() {
+        return toplevel.parent().is_none();
+    }
+    #[cfg(feature = "xwayland")]
+    if let Some(x11) = window.x11_surface() {
+        return x11.is_transient_for().is_none()
+            && !x11.is_popup()
+            && x11
+                .window_type()
+                .is_none_or(|kind| kind == smithay::xwayland::xwm::WmWindowType::Normal);
     }
     false
 }

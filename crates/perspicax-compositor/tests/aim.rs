@@ -176,6 +176,7 @@ fn start(
                 env: Vec::new(),
                 run_for: Some(Duration::from_secs(30)),
                 config: None,
+                places: None,
                 socket: Some(socket),
                 xwayland: false,
             };

@@ -59,6 +59,7 @@ mod output_management;
 mod outputs;
 mod pager;
 mod popup;
+mod remembered;
 mod scale;
 #[cfg(feature = "capture")]
 mod screencopy;
@@ -230,6 +231,13 @@ pub struct Config {
     /// reads no config at all: what CI and an agent run has to be the same
     /// on every machine, whatever its owner likes their focus model to be.
     pub config: Option<PathBuf>,
+    /// Where each program's last window closed is kept between sessions,
+    /// for its next one to open there: the seat's `windows.json`, which the
+    /// binary names. `None` keeps nothing past this run. Read at start, as
+    /// `[placement]` allows, and written as windows go and as the session
+    /// ends. Headless, a test's: there is nothing to remember with nobody
+    /// at the seat.
+    pub places: Option<PathBuf>,
     /// The Wayland socket's name in `XDG_RUNTIME_DIR`, instead of the first
     /// free `wayland-N`. For whoever has to connect without being spawned
     /// by us: a test's own client, or a second session beside a first.
@@ -270,6 +278,9 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
     let backend = Running::start(config, &handle, &event_loop.handle())?;
     let mut state = Compositor::new(&handle, event_loop.handle(), backend, facts.clone());
     Running::attach(&mut state, &event_loop.handle())?;
+    if let Some(path) = &config.places {
+        state.keep_places_at(path.clone());
+    }
     // Once before any client, so a reader sees this host's consent policy and
     // outputs from the start rather than an empty default until something
     // happens to change.
@@ -420,6 +431,12 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
             break Ok(());
         }
     };
+
+    // The windows still open are where their programs look for them next
+    // session, as though each had closed; and what is owed is written now,
+    // with no second left to wait.
+    state.remember_open_windows();
+    state.save_places();
 
     // Children are killed rather than left behind. A compositor that exits
     // owing a live GTK window to a socket nobody is listening on has produced a

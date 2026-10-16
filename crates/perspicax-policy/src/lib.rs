@@ -18,7 +18,8 @@
 //! The decisions, by module: focus and what a chord means (`focus`, `binds`);
 //! what a button, a double-click or the wheel means where the pointer is
 //! (`mouse`);
-//! where a window goes and how big (`geometry`); where each monitor sits
+//! where a window goes and how big (`geometry`); where each program's window
+//! last closed, so its next one opens there (`remember`); where each monitor sits
 //! (`layout`); which workspace shows which windows (`workspace`); changing
 //! workspace with the pointer (`flip`); snapping to halves and quarters
 //! (`snap`); holding a window being moved at the edges of screens and panels
@@ -43,6 +44,7 @@ mod keyboard;
 mod layout;
 mod mouse;
 mod opacity;
+mod remember;
 mod resist;
 mod restart;
 mod snap;
@@ -62,14 +64,15 @@ pub use crate::{
         outline_rects, outset, part_at, tab_rects, titlebar,
     },
     geometry::{
-        DRAG_THRESHOLD, Edges, Rect, anchor, carry, dragged, edges_near, neighbour, place, resize,
-        settle, unmaximized_at,
+        DRAG_THRESHOLD, Edges, Rect, anchor, carry, clear_of, dragged, edges_near, neighbour,
+        place, resize, settle, unmaximized_at,
     },
     heads::{Head, HeadChange, HeadMode, ModeChoice, Rejection, check_heads},
     keyboard::{LayoutMemory, Switching},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
     mouse::{Button, Clicks, Context, Gesture, MouseBindings, MouseChord, Wheel},
     opacity::{OPAQUE, Opacity},
+    remember::{APP_ID_MAX, Places, REMEMBERED, Remembering, Spot},
     resist::{Resistance, resist},
     restart::{EX_CONFIG, EX_UNAVAILABLE, Ended, Restart, Restarts},
     snap::{Snapping, Zone, keyed, zone},

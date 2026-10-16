@@ -348,6 +348,30 @@ impl Running {
         }
     }
 
+    /// Whether any program's place is remembered: `[placement] remember` on
+    /// a seat, a person at it headless.
+    pub(crate) fn remembers_any(&self) -> bool {
+        match self {
+            Self::Headless { person, .. } => *person,
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.settings.remembering.on,
+        }
+    }
+
+    /// Whether the place of `app`'s last window is remembered, for its next
+    /// one to open there: the person's `[placement]` on a seat. Headless only
+    /// with a person at the seat, and then every program: with nobody, a
+    /// window stays where the cascade puts it (see `crate::shell`).
+    pub(crate) fn remembers(&self, app: &str) -> bool {
+        match self {
+            Self::Headless { person, .. } => {
+                *person && perspicax_policy::Remembering::default().remembers(app)
+            }
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.settings.remembering.remembers(app),
+        }
+    }
+
     /// Who draws window frames, and how they look: the person's config on a
     /// seat. Headless takes the defaults, so the frames a seat would draw are
     /// in the facts CI tests, though nothing is drawn.

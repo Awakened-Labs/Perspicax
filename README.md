@@ -771,10 +771,40 @@ its place (USPosition or PPosition), as a program that puts itself back
 where it was last time says, opens there. That is its own top-left corner,
 not our frame's, on the monitor most of it is on, or the one under the
 pointer if that monitor is gone, and it is slid and shrunk onto it the same
-way. A Wayland window has no way to ask for a place (#89). All this is done
-once, as a window opens: after that, where it goes is the person's, and a
-window dragged partly off the screen stays there. With nobody at the seat,
-a window stays where the cascade put it, at the size it chose.
+way. A Wayland window has no way to ask for a place, so its program's last
+one is remembered instead (below). All this is done once, as a window opens:
+after that, where it goes is the person's, and a window dragged partly off
+the screen stays there. With nobody at the seat, a window stays where the
+cascade put it, at the size it chose.
+
+With a person at the seat, a program's next window opens where its last one
+closed, so a Wayland program, which cannot ask, still opens where it was
+left. A program is known by its Wayland app id or its X11 `WM_CLASS` class,
+and what is remembered is the monitor its last window was on and where that
+window's corner was on it: where it would have been put back, for a window
+closed maximized, snapped or minimized, and where its group was, for a tab
+behind another. Not its size, which a program chooses as it first draws,
+and not its workspace: it opens on the one showing now. A place an X11
+window asks for itself comes first, the cascade only after, and either way
+the window is then put wholly inside its room as any new window is. If that
+monitor has been unplugged, it opens at the same corner of the one under the
+pointer. A second window of a program, opened while the first is still
+there, steps 32 pixels aside. A dialog is never remembered, nor put where its
+program was: an xdg window with a parent, or an X11 one transient for
+another, modal, or of any type but normal. Windows still open as the session
+ends are remembered as though they had closed. With nobody at the seat,
+nothing is.
+
+Where programs' windows closed is kept between sessions in
+`$XDG_STATE_HOME/perspicax/windows.json` (`~/.local/state` without it),
+beside the session's log, and only you can read it. It names programs by app
+id and monitors by connector, never a window's title, which carries document
+names and URLs, and holds the 200 programs closed most recently. It is your
+history, not the state of a window, so none of it reaches an agent: not
+`window_list`, not anything the index is told. `[placement] remember =
+false` turns it off and deletes the file; `forget` lists programs never to be
+remembered, by app id or `WM_CLASS` class matched exactly, and forgets what
+was kept of them.
 
 The session reads `$XDG_CONFIG_HOME/perspicax/config.toml` (or `--config PATH`),
 and reads it again whenever it is saved. Without one it runs the `classic`
@@ -892,6 +922,12 @@ seams = 0                      # the same where two monitors meet
 
 [opacity]                      # windows drawn see-through, for your eyes
 unfocused = 85                 # only; see See-through windows below
+
+[placement]
+remember = true                # a program's next window opens where its last
+                               # one closed; false forgets every one
+forget = ["org.keepassxc.KeePassXC"]
+                               # never remembered: app ids, or WM_CLASS classes
 
 [decorations]
 mode = "server"                # draw titlebars for clients that ask; "client"

@@ -33,6 +33,7 @@ fn a_headless_compositor_comes_up_and_stops_when_told() {
         env: Vec::new(),
         run_for: Some(Duration::from_millis(250)),
         config: None,
+        places: None,
         socket: None,
         xwayland: false,
     };
@@ -77,6 +78,7 @@ fn a_command_that_does_not_exist_is_named_in_the_error() {
         env: Vec::new(),
         run_for: Some(Duration::from_millis(50)),
         config: None,
+        places: None,
         socket: None,
         xwayland: false,
     };
@@ -102,6 +104,7 @@ fn a_stop_request_ends_the_loop_before_its_deadline() {
         env: Vec::new(),
         run_for: Some(Duration::from_secs(60)),
         config: None,
+        places: None,
         socket: None,
         xwayland: false,
     };
@@ -136,6 +139,7 @@ fn the_socket_is_published_to_whoever_watches_the_session() {
         env: Vec::new(),
         run_for: Some(Duration::from_millis(250)),
         config: None,
+        places: None,
         socket: Some(socket.clone()),
         xwayland: false,
     };

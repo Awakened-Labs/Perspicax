@@ -906,16 +906,19 @@ impl XwmHandler for Compositor {
         // Where it asked to be, if its WM_NORMAL_HINTS say it asked
         // (USPosition or PPosition): a program putting itself back where it
         // was last time. Its client's corner there, as the program saved it:
-        // no _NET_FRAME_EXTENTS tells it how big our frame is. Otherwise, and
-        // with nobody at the seat, the cascade's next place.
+        // no _NET_FRAME_EXTENTS tells it how big our frame is. Otherwise
+        // where its program's last window closed, if it did, which takes no
+        // step of the cascade (see `shell::remember`). Otherwise, and with
+        // nobody at the seat, the cascade's next place.
         let asked = self.backend.has_person()
             && x11
                 .size_hints()
                 .is_some_and(|hints| hints.position.is_some());
-        let at = if asked {
-            x11.geometry().loc
-        } else {
-            self.place_new()
+        let remembered = (!asked).then(|| self.remembered_place(&window)).flatten();
+        let at = match &remembered {
+            _ if asked => x11.geometry().loc,
+            Some((at, _)) => *at,
+            None => self.place_new(),
         };
         let size = x11.geometry().size;
         let _ = x11.configure(Rectangle::new(at, size));
@@ -924,9 +927,14 @@ impl XwmHandler for Compositor {
         // and so is its size: it is put wholly inside the work area, frame
         // and all, with a person at the seat. A place it asked for is on the
         // monitor most of it is on; if none of it is on one now, the one
-        // under the pointer, as `settle_new` falls back. Whatever else, its
-        // titlebar starts on screen.
-        let on = asked.then(|| self.mostly_on(&window)).flatten();
+        // under the pointer, as `settle_new` falls back. A remembered one is
+        // on the monitor it was remembered on. Whatever else, its titlebar
+        // starts on screen.
+        let on = if asked {
+            self.mostly_on(&window)
+        } else {
+            remembered.as_ref().map(|(_, output)| output.clone())
+        };
         self.settle_new(&window, on);
         self.fit_frame(&window);
         self.adopt(&window);
@@ -952,6 +960,8 @@ impl XwmHandler for Compositor {
             surface = id.0,
             title = x11.title(),
             minimized = wants.minimized,
+            asked,
+            remembered = remembered.is_some(),
             "X11 window mapped"
         );
         self.backend.redraw();

@@ -68,6 +68,7 @@ fn a_titlebar_is_negotiated_published_and_covers_what_is_under_it() {
                 env: Vec::new(),
                 run_for: Some(Duration::from_secs(30)),
                 config: None,
+                places: None,
                 socket: Some(socket),
                 xwayland: false,
             };
