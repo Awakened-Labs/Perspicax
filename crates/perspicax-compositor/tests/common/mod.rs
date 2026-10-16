@@ -585,8 +585,8 @@ pub enum Told {
 }
 
 /// What the compositor said to one of the client's surfaces, in the order
-/// it said it: which monitor it is on, when it may draw again, and, to a
-/// window, how to look.
+/// it said it: which monitor it is on, when it may draw again, how to look,
+/// and, to a layer, that it is done.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Said {
     /// It is on the monitor of this name now (`wl_surface.enter`).
@@ -600,6 +600,11 @@ pub enum Said {
     PreferredScale(u32),
     /// A window's configure.
     Configure(Configured),
+    /// A layer surface's configure: the size it was offered.
+    LayerConfigure((u32, u32)),
+    /// A layer surface is closed, and will not be shown again
+    /// (`zwlr_layer_surface_v1.closed`).
+    Closed,
 }
 
 /// A window drawn at a size of its own and shown at another: see
@@ -840,6 +845,9 @@ pub struct Desk {
     /// given.
     pub layers: Vec<(LayerSurface, u32, u32)>,
     pub layers_drawn: usize,
+    /// The surfaces of layers that take their configures and draw nothing,
+    /// until [`Desk::draw_layer`]: see [`Desk::leave_undrawn`].
+    pub undrawn: Vec<ObjectId>,
     /// How many configures the popups this client opened have had. Nothing
     /// is drawn in reply: a test paints a popup itself, once it may.
     pub popups_configured: usize,
@@ -930,6 +938,7 @@ impl Desk {
             layer_shell: LayerShell::bind(globals, qh).expect("zwlr_layer_shell_v1"),
             layers: Vec::new(),
             layers_drawn: 0,
+            undrawn: Vec::new(),
             popups_configured: 0,
             popup_serial: None,
             popups_done: 0,
@@ -1020,6 +1029,45 @@ impl Desk {
         panel.set_exclusive_zone(i32::try_from(height).expect("a panel's height"));
         panel.commit();
         self.layers.push((panel, colour, height));
+    }
+
+    /// Have the `nth` layer take its configures without drawing, as a
+    /// client asked for a layer that has nothing to show yet does, until
+    /// [`Desk::draw_layer`]. Before its configure has come, so as soon as it
+    /// is opened.
+    pub fn leave_undrawn(&mut self, nth: usize) {
+        self.undrawn.push(self.layers[nth].0.wl_surface().id());
+    }
+
+    /// Draw the `nth` layer, left undrawn, at the size it was last offered,
+    /// and have it draw at every configure again.
+    pub fn draw_layer(&mut self, nth: usize) {
+        let surface = self.layers[nth].0.wl_surface().clone();
+        self.undrawn.retain(|undrawn| *undrawn != surface.id());
+        let offered = self
+            .said_to(&surface)
+            .iter()
+            .rev()
+            .find_map(|said| match said {
+                Said::LayerConfigure(size) => Some(*size),
+                _ => None,
+            })
+            .expect("configured before it draws");
+        self.paint_layer(nth, offered);
+    }
+
+    /// Draw the `nth` layer in its colour at `offered`, and commit: as tall
+    /// as it asked to be, or as it is given if it asked for all of it.
+    fn paint_layer(&mut self, nth: usize, offered: (u32, u32)) {
+        let (layer, colour, height) = self.layers[nth].clone();
+        let width = offered.0.max(1);
+        let height = if height == 0 {
+            offered.1.max(1)
+        } else {
+            height
+        };
+        self.paint(layer.wl_surface(), (width, height), colour);
+        layer.commit();
     }
 
     pub fn open_window(&mut self, qh: &QueueHandle<Self>, title: &str, app_id: &str) {
@@ -2678,7 +2726,9 @@ impl Dispatch<XdgActivationTokenV1, wl_surface::WlSurface> for Desk {
 }
 
 impl LayerShellHandler for Desk {
-    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {}
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
+        self.said.push((layer.wl_surface().id(), Said::Closed));
+    }
 
     fn configure(
         &mut self,
@@ -2688,32 +2738,17 @@ impl LayerShellHandler for Desk {
         configure: LayerSurfaceConfigure,
         _: u32,
     ) {
-        let Some(&(_, colour, height)) = self.layers.iter().find(|(known, _, _)| known == layer)
-        else {
+        let surface = layer.wl_surface().id();
+        self.said
+            .push((surface.clone(), Said::LayerConfigure(configure.new_size)));
+        let Some(nth) = self.layers.iter().position(|(known, ..)| known == layer) else {
             return;
         };
-        let width = configure.new_size.0.max(1);
-        let height = if height == 0 {
-            configure.new_size.1.max(1)
-        } else {
-            height
-        };
-        let (buffer, canvas) = self
-            .pool
-            .create_buffer(
-                i32::try_from(width).unwrap(),
-                i32::try_from(height).unwrap(),
-                i32::try_from(width * 4).unwrap(),
-                wl_shm::Format::Argb8888,
-            )
-            .expect("a buffer");
-        for pixel in canvas.chunks_exact_mut(4) {
-            pixel.copy_from_slice(&colour.to_le_bytes());
+        // Acknowledged all the same: smithay-client-toolkit does that.
+        if self.undrawn.contains(&surface) {
+            return;
         }
-        let surface = layer.wl_surface();
-        buffer.attach_to(surface).expect("attach");
-        surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
-        layer.commit();
+        self.paint_layer(nth, configure.new_size);
         self.layers_drawn += 1;
     }
 }

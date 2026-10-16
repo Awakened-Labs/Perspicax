@@ -711,7 +711,7 @@ impl Compositor {
         }
         let gone = outputs.remove(at);
         self.workspaces.forget_output(&gone.output.name());
-        crate::layers::close_on(&gone.output);
+        crate::layers::close_on(&gone.output, &mut self.withdrawn_layers);
         self.space.unmap_output(&gone.output);
         self.display.remove_global::<Compositor>(gone.global);
         self.arrange_outputs();

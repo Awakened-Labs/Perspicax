@@ -245,6 +245,10 @@ pub struct Compositor {
     /// everyone but their clients, which still hold them and may ask for
     /// them again. Kept in the order they went. See `shell::withdrawn`.
     pub(crate) withdrawn: Vec<shell::Withdrawn>,
+    /// Layer surfaces their clients unmapped the same way: gone to everyone
+    /// but their clients, which may ask for them again. See
+    /// [`crate::layers`].
+    pub(crate) withdrawn_layers: Vec<crate::layers::Withdrawn>,
     /// Which workspace every window is on and which each monitor shows.
     pub(crate) workspaces: Workspaces<SurfaceId, String>,
     /// Which windows are tabs of one another, and which tab of each group is
@@ -423,6 +427,7 @@ impl Compositor {
             menu: None,
             parked: Vec::new(),
             withdrawn: Vec::new(),
+            withdrawn_layers: Vec::new(),
             workspaces: Workspaces::new(workspace_shape),
             tabs: perspicax_policy::Groups::default(),
             layout_memory: perspicax_policy::LayoutMemory::default(),
@@ -590,12 +595,17 @@ impl Compositor {
             .iter()
             .flat_map(|locked| &locked.surfaces)
             .map(|cover| cover.surface.wl_surface().clone());
-        // And a window its client unmapped: it may be waiting for the word
-        // before it asks for its window again, as GTK waits for every frame.
+        // And a window or panel its client unmapped: it may be waiting for
+        // the word before it asks for it again, as GTK waits for every frame.
         let withdrawn = self
             .withdrawn
             .iter()
-            .map(|withdrawn| withdrawn.toplevel.wl_surface().clone());
+            .map(|withdrawn| withdrawn.toplevel.wl_surface().clone())
+            .chain(
+                self.withdrawn_layers
+                    .iter()
+                    .map(|withdrawn| withdrawn.surface.wl_surface().clone()),
+            );
         for surface in windows
             .chain(layers)
             .chain(covers)
@@ -860,15 +870,22 @@ impl Compositor {
     }
 
     /// A window or panel committed with its picture taken away. An xdg
-    /// window that had drawn has been unmapped by its client, and is
-    /// withdrawn; anything else just shows nothing now, which the commit
-    /// records as it does any picture.
+    /// window or a layer surface that had drawn has been unmapped by its
+    /// client, and is withdrawn; anything else just shows nothing now, which
+    /// the commit records as it does any picture.
     ///
     /// An X11 window's surface is Xwayland's to empty, and the X server says
     /// when the window is withdrawn. One that never drew was never mapped,
     /// and has nothing to unmap: smithay counts it so too. Whether it was
     /// withdrawn.
     fn unmapped(&mut self, surface: &WlSurface) -> bool {
+        if let Some(id) = self.layer_id(surface) {
+            let presented = self.presented.remove(&id);
+            if presented {
+                self.withdraw_layer(surface, id);
+            }
+            return presented;
+        }
         let Some(window) = self
             .window_for(surface)
             .filter(|window| window.toplevel().is_some())
@@ -1060,10 +1077,11 @@ impl CompositorHandler for Compositor {
             // in its own.
             damage::clear(surface);
         }
-        // A window whose client took its picture away has been unmapped:
-        // closed to everyone but its client, which may ask for it again (see
-        // `shell::withdrawn`). Before it is measured, so a tab coming forward
-        // in its place takes the size it had.
+        // A window or panel whose client took its picture away has been
+        // unmapped: gone to everyone but its client, which may ask for it
+        // again (see `shell::withdrawn` and `layers`). Before it is measured,
+        // so a tab coming forward in its place takes the size it had, and
+        // before a panel's commit is taken in, so a launcher's takes no keys.
         let withdrew = is_root
             && popup.is_none()
             && matches!(taken.own, damage::Buffer::Removed)
@@ -1076,9 +1094,12 @@ impl CompositorHandler for Compositor {
         self.popups.commit(surface);
         // A window its client unmapped, asked for again: answered as a new
         // window is, and on screen again from its first picture (see
-        // `shell::withdrawn`). Never in the commit that unmapped it.
+        // `shell::withdrawn`). A panel is back from the asking commit, as a
+        // new one is, which this commit then configures (see `layers`).
+        // Never in the commit that unmapped it.
         if is_root && popup.is_none() && !withdrew {
             self.map_again(&root, taken.own);
+            self.map_layer_again(&root);
         }
         // A window or a layer surface: both are described to the index, so
         // both keep the same presentation and damage records. A subsurface's
@@ -1242,9 +1263,10 @@ impl XdgShellHandler for Compositor {
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
         // A popup needs its window on screen: one opened from a window its
         // client unmapped is dismissed at once, rather than kept to come back
-        // with it.
+        // with it. So is a submenu of a panel's menu, the panel unmapped; a
+        // panel's own menu is given to it later (see `layers`).
         if find_popup_root_surface(&PopupKind::Xdg(surface.clone()))
-            .is_ok_and(|root| self.is_withdrawn(&root))
+            .is_ok_and(|root| self.is_withdrawn(&root) || self.is_withdrawn_layer(&root))
         {
             surface.send_popup_done();
             return;

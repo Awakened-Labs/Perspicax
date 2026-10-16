@@ -744,6 +744,17 @@ It returns as a new window: placed, given the keyboard, announced to the
 taskbar, and with a new id. An X11 window its client withdraws and maps
 again goes and comes back the same way.
 
+A panel, a launcher or any other layer-shell surface may be taken off the
+screen the same way, by attaching no buffer to it, as layer-shell allows.
+To everyone else it has gone, as one destroyed has. The room it kept is given
+back, and a window that fills its monitor fills it again. Its menus are
+dismissed, the keyboard goes to the window on top if it had it, with or
+without a person at the seat, and an agent can no longer reach it. Asked for
+again, it is configured as a new one is, keeps its room again from the
+commit that asks, and returns with a new id. One whose monitor is unplugged
+while it is away is told it is closed. A launcher that asks for every key,
+new or back, has them from the first picture it draws, and not before.
+
 A new window opens on the monitor under the pointer, in the room its panels
 leave, cascaded from the top-left corner: 32 pixels further in for each
 window opened before it, back to the corner before the middle. With a
