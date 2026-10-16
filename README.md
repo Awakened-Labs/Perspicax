@@ -1669,8 +1669,13 @@ hides the cursor without a nudge, on whichever monitor the pointer is. What
 your hand held lets go as the screen locks: an open menu closes, as a click
 outside it would, so it cannot take the password; a window being moved or
 resized stays where it got to; a tab being dragged goes back to its group. No
-window can open a menu over the lock screen. Unlocked, the window under the
-pointer has it back, and its own cursor with it.
+window can open a menu over the lock screen, nor take the keyboard from it: a
+window that opens behind it, asks to be brought forward, or comes forward as
+the tab in front of it closes gets none of what you type, so a chat window, a
+terminal or a dialog that pops up while you type your password never sees it.
+Unlocked, the window under the pointer has the pointer back, and its own cursor
+with it, and the window on top has the keyboard, often the one that opened
+meanwhile.
 
 The program that locked the screen holds the lock, and only it can unlock it.
 Another program that asks to lock while it runs is refused, and cannot unlock
