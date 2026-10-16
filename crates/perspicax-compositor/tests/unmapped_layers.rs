@@ -181,6 +181,41 @@ fn a_launcher_its_client_unmaps_gives_the_keyboard_to_the_window_beneath() {
     session.stop((desk, queue));
 }
 
+/// #144: a launcher that wants every key takes the keyboard once it shows a
+/// picture, and not at the commit that asked for its configure: until then
+/// it is not mapped, and the keys typed at it would go to a surface nobody
+/// can see. The window it opened over keeps them till then.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_launcher_takes_the_keyboard_once_it_shows_a_picture_and_not_before() {
+    let session = seated("layer-keyboard-picture");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    desk.open_window(&qh, "beneath", "beneath");
+    let beneath = desk.windows[0].wl_surface().id();
+    until(&mut queue, &mut desk, |desk| {
+        desk.drawn == 1 && heard(&ear).entered.as_ref() == Some(&beneath)
+    });
+    desk.open_launcher(&qh, 200, LAUNCHER);
+    desk.leave_undrawn(0);
+    let launcher = desk.layers[0].0.wl_surface().id();
+    until(&mut queue, &mut desk, |desk| layer_configures(desk, 0) == 1);
+    // Both of its commits taken in, and whatever followed them sent.
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert_eq!(
+        heard(&ear).entered.as_ref(),
+        Some(&beneath),
+        "the launcher took the keyboard before it showed anything"
+    );
+
+    desk.draw_layer(0);
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&launcher)
+    });
+
+    session.stop((desk, queue));
+}
+
 /// #144: a panel's open menu is dismissed when its client unmaps the panel,
 /// and a menu given to the panel while it is away is dismissed at once: a
 /// menu needs its panel on screen.

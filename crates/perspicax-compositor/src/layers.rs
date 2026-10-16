@@ -135,8 +135,9 @@ pub(crate) struct Withdrawn {
 impl Compositor {
     /// A commit on a layer surface: rearrange its output (its size or
     /// exclusive zone may have changed), send its first configure if this is
-    /// its first commit, and give it the keyboard if it asks for all of it.
-    /// Returns its id, for the damage bookkeeping every surface gets.
+    /// its first commit, and give it the keyboard if it asks for all of it
+    /// and has something to show. Returns its id, for the damage bookkeeping
+    /// every surface gets.
     pub(crate) fn layer_committed(&mut self, surface: &WlSurface) -> Option<SurfaceId> {
         let output = self.space.outputs().find(|output| {
             layer_map_for_output(output)
@@ -177,13 +178,17 @@ impl Compositor {
         if !configured {
             layer.layer_surface().send_configure();
         }
-        // A launcher or lock-ish overlay that wants every key gets them, the
+        // A launcher or lock-ish overlay that wants every key gets them the
         // moment it is up, unless the session is locked (`focus_plain`
-        // refuses). `OnDemand` waits for a click (see the seat's input path).
+        // refuses). Up is its first picture, not the commit that asked for
+        // its configure: until it shows something it is not mapped, and the
+        // keys typed at it would go to a surface nobody can see. `OnDemand`
+        // waits for a click (see the seat's input path).
         let exclusive = layer.cached_state().keyboard_interactivity
             == KeyboardInteractivity::Exclusive
             && ABOVE.contains(&layer.layer());
-        if exclusive && self.keyboard_focus().as_ref() != Some(surface) {
+        let shown = crate::geometry::shown(surface).is_some();
+        if exclusive && shown && self.keyboard_focus().as_ref() != Some(surface) {
             self.focus_plain(surface.clone());
         }
         // The usable area changed under the windows: a panel appearing
