@@ -908,7 +908,10 @@ impl XwmHandler for Compositor {
         let _ = x11.configure(Rectangle::new(at, size));
         self.space.map_element(window.clone(), at, false);
         // Its Motif hints are in by now, so whether it is framed is known,
-        // and the titlebar has to start on screen.
+        // and so is its size: it is put wholly inside the work area, frame
+        // and all, with a person at the seat. Whatever else, its titlebar
+        // starts on screen.
+        self.settle_new(&window, None);
         self.fit_frame(&window);
         self.adopt(&window);
         // Maximized first, so that leaving fullscreen lands on it; both

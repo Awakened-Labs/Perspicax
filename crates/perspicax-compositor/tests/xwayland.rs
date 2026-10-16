@@ -630,19 +630,33 @@ impl X11 {
         window
     }
 
-    /// A window titled `title`, not yet mapped, with `_NET_WM_STATE` set to
-    /// `state` if that is not empty. Its property changes are heard.
-    fn create(&self, title: &str, state: &[u32]) -> u32 {
+    /// A window titled `title`, created at `(x, y, width, height)` with
+    /// `hints` as its `WM_NORMAL_HINTS`, mapped, once the compositor has it
+    /// on screen. Its property changes are heard.
+    fn open_at(&self, title: &str, at: (i16, i16, u16, u16), hints: Option<WmSizeHints>) -> u32 {
+        let window = self.create_at(title, at, hints);
+        self.x.map_window(window).expect("map_window");
+        self.x.flush().expect("flush");
+        self.surface_where(title, |surface| surface.mapped)
+            .unwrap_or_else(|| panic!("{title} never mapped: {:?}", self.facts()));
+        window
+    }
+
+    /// A window titled `title`, not yet mapped, created at `(x, y, width,
+    /// height)`, with `hints` as its `WM_NORMAL_HINTS` if there are any: what
+    /// a program asking for a place or a least size sets before it maps.
+    /// Its property changes are heard.
+    fn create_at(&self, title: &str, at: (i16, i16, u16, u16), hints: Option<WmSizeHints>) -> u32 {
         let window = self.x.generate_id().expect("an X id");
         self.x
             .create_window(
                 x11rb::COPY_DEPTH_FROM_PARENT,
                 window,
                 self.root,
-                0,
-                0,
-                320,
-                200,
+                at.0,
+                at.1,
+                at.2,
+                at.3,
                 0,
                 WindowClass::INPUT_OUTPUT,
                 0,
@@ -660,6 +674,21 @@ impl X11 {
                 title.as_bytes(),
             )
             .expect("WM_NAME");
+        if let Some(hints) = hints {
+            hints
+                .set_normal_hints(&self.x, window)
+                .expect("WM_NORMAL_HINTS")
+                .check()
+                .expect("WM_NORMAL_HINTS set");
+        }
+        window
+    }
+
+    /// A 320 by 200 window titled `title`, not yet mapped, with
+    /// `_NET_WM_STATE` set to `state` if that is not empty. Its property
+    /// changes are heard.
+    fn create(&self, title: &str, state: &[u32]) -> u32 {
+        let window = self.create_at(title, (0, 0, 320, 200), None);
         if !state.is_empty() {
             self.x
                 .change_property32(
@@ -2750,6 +2779,72 @@ fn an_x11_menu_asking_for_fullscreen_stays_where_it_put_itself() {
             .contains(&x11.atoms._NET_WM_STATE_FULLSCREEN),
         "the menu was made fullscreen"
     );
+
+    x11.stop();
+}
+
+/// Issue #88: a new window bigger than the room the panel leaves is put in
+/// its top-left corner, frame and all, and given all of that room, which X
+/// is told: the window there is that big.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_new_x11_window_bigger_than_the_work_area_is_shrunk_to_it_below_the_panel() {
+    let x11 = X11::start(
+        "x11-opens-big",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let panel = x11.panel(40);
+    let window = x11.open_at("big", (0, 0, 2000, 1000), None);
+
+    // A 2 px border each side and below, and a 24 px titlebar above, in the
+    // 1280 by 984 the panel leaves.
+    x11.surface_where("big", |surface| {
+        surface.frame.len() == 4 && rect_of(surface) == (2.0, 66.0, 1278.0, 1022.0)
+    })
+    .unwrap_or_else(|| panic!("never fitted under the panel: {:?}", x11.facts()));
+    let told = eventually(Duration::from_secs(5), || {
+        let geometry = x11.x.get_geometry(window).ok()?.reply().ok()?;
+        (geometry.width == 1276).then_some((geometry.width, geometry.height))
+    });
+    assert_eq!(told, Some((1276, 956)), "X was never told its new size");
+
+    drop(panel);
+    x11.stop();
+}
+
+/// Issue #88: never below the least its `WM_NORMAL_HINTS` allow. Still too
+/// big, it keeps its titlebar on screen and hangs off the right.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_shrinks_no_smaller_than_its_size_hints_allow() {
+    let x11 = X11::start(
+        "x11-opens-least",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let mut hints = WmSizeHints::new();
+    hints.min_size = Some((1400, 300));
+    x11.open_at("least", (0, 0, 2000, 800), Some(hints));
+
+    x11.surface_where("least", |surface| {
+        surface.frame.len() == 4 && rect_of(surface) == (2.0, 26.0, 1402.0, 826.0)
+    })
+    .unwrap_or_else(|| panic!("not shrunk to its least: {:?}", x11.facts()));
+
+    x11.stop();
+}
+
+/// Issue #88: with nobody at the seat a new window keeps its size, and only
+/// its titlebar is brought on screen, as before.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn with_nobody_at_the_seat_a_new_x11_window_wider_than_the_screen_keeps_its_size() {
+    let x11 = X11::start("x11-nobody-opens-wide", Backend::headless((1280, 1024)));
+    x11.open_at("wide", (0, 0, 2000, 800), None);
+
+    let wide = x11
+        .surface_where("wide", |surface| surface.frame.len() == 4)
+        .unwrap_or_else(|| panic!("never framed: {:?}", x11.facts()));
+    assert_eq!(rect_of(&wide), (2.0, 26.0, 2002.0, 826.0));
 
     x11.stop();
 }
