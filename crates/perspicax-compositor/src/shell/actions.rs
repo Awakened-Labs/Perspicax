@@ -6,6 +6,16 @@
 //! starting a program for the person, and re-reading the person's config.
 //! Headless has neither a person nor a config. A program a binding starts
 //! for an agent starts anywhere, as `--spawn`'s do.
+//!
+//! A binding on the focused window acts on it while its own menu is open
+//! too, a right-click menu say, which holds the keyboard meanwhile: Alt+F4
+//! closes the window, Alt+Tab goes to the next one. The menu is closed
+//! first, as a click outside it would close it
+//! ([`Compositor::dismiss_menu`]). A binding that is not about the window
+//! (a layout, a program started, the shell's menus) leaves it open; which
+//! is which is `Action::on_focused_window`. The keyboard handed anywhere
+//! else while a menu holds it, by a click on another window say, does not
+//! close it yet: #185.
 
 use perspicax_node::SurfaceId;
 use perspicax_policy::{Action, Change, Decision, cycle};
@@ -25,6 +35,13 @@ impl Compositor {
     /// a click on the desktop of one monitor switches that one, wherever the
     /// focused window is.
     pub(crate) fn perform_on(&mut self, action: &Action, monitor: Option<String>) {
+        // A window's own menu holds the keyboard while it is open, and the
+        // window is not the focused one meanwhile. A binding on the window
+        // closes the menu first, as a click outside it would, and the
+        // keyboard is back on the window by the time the binding asks.
+        if action.on_focused_window() {
+            self.dismiss_menu();
+        }
         let focused = self.focused_surface().and_then(|id| self.window_for_id(id));
         match action {
             Action::Close => {

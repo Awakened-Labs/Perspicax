@@ -23,9 +23,8 @@
 
 use perspicax_node::SurfaceId;
 use smithay::{
-    desktop::PopupManager,
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
-    wayland::{seat::WaylandFocus as _, shell::xdg::ToplevelSurface},
+    desktop::PopupManager, reexports::wayland_server::protocol::wl_surface::WlSurface,
+    wayland::shell::xdg::ToplevelSurface,
 };
 
 use super::Fill;
@@ -143,14 +142,10 @@ impl Compositor {
     }
 
     /// Whether the menu that holds the keyboard and pointer, if one does,
-    /// was opened from the window whose surface is `surface`. Smithay starts
-    /// a menu's grab of the keyboard from the window it was opened from.
+    /// was opened from the window whose surface is `surface`. Not one that
+    /// has let go of them: letting go of the pointer then would end another
+    /// window's drag.
     fn menu_opened_from(&self, surface: &WlSurface) -> bool {
-        self.menu
-            .as_ref()
-            .filter(|menu| !menu.has_ended())
-            .and_then(|menu| menu.keyboard_grab_start_data().focus.as_ref())
-            .and_then(|focus| focus.wl_surface())
-            .is_some_and(|root| *root == *surface)
+        self.held_menu_root().as_ref() == Some(surface)
     }
 }

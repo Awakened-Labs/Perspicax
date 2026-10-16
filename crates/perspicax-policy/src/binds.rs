@@ -128,6 +128,45 @@ impl Action {
     pub fn while_locked(&self) -> bool {
         matches!(self, Self::CycleLayout { .. } | Self::Layout(_))
     }
+
+    /// Whether this acts on the focused window, or takes the keyboard from
+    /// it: what a menu of that window's holding the keyboard is closed for
+    /// first, so the binding acts on the window and not past it. Switching
+    /// workspace is not, though it may take the window away: it acts on a
+    /// monitor, whatever has the keyboard. Every action is named, so a new
+    /// one is decided here when it is added.
+    #[must_use]
+    pub fn on_focused_window(&self) -> bool {
+        match self {
+            Self::Close
+            | Self::CycleFocus
+            | Self::MoveToOutput(_)
+            | Self::SendToWorkspace(_)
+            | Self::CarryToWorkspace(_)
+            | Self::ToggleSticky
+            | Self::Snap(_)
+            | Self::ToggleMaximize
+            | Self::Minimize
+            | Self::CycleTab { .. }
+            | Self::TabWithPrevious
+            | Self::DetachTab
+            | Self::OpacityUp
+            | Self::OpacityDown
+            | Self::OpacityReset
+            | Self::ToggleAgent => true,
+            Self::Workspace(_)
+            | Self::GoToWorkspace(_)
+            | Self::CycleWorkspace { .. }
+            | Self::Spawn { .. }
+            | Self::Reload
+            | Self::StartMenu
+            | Self::RootMenu
+            | Self::Pie(_)
+            | Self::CycleLayout { .. }
+            | Self::Layout(_)
+            | Self::RevokeAgents => false,
+        }
+    }
 }
 
 /// Which output, from the one a window is on.
@@ -558,6 +597,57 @@ mod tests {
             .while_locked()
         );
         assert!(!Action::Reload.while_locked());
+    }
+
+    #[test]
+    fn what_acts_on_the_focused_window_and_what_does_not() {
+        let on_it = [
+            Action::Close,
+            Action::CycleFocus,
+            Action::MoveToOutput(Towards::Next),
+            Action::SendToWorkspace(Direction::Right),
+            Action::CarryToWorkspace(Direction::Right),
+            Action::ToggleSticky,
+            Action::Snap(Direction::Left),
+            Action::ToggleMaximize,
+            Action::Minimize,
+            Action::CycleTab { forward: true },
+            Action::TabWithPrevious,
+            Action::DetachTab,
+            Action::OpacityUp,
+            Action::OpacityDown,
+            Action::OpacityReset,
+            Action::ToggleAgent,
+        ];
+        let elsewhere = [
+            Action::Workspace(Direction::Right),
+            Action::GoToWorkspace(2),
+            Action::CycleWorkspace { forward: true },
+            Action::Spawn {
+                command: vec!["foot".to_owned()],
+                agent: false,
+            },
+            Action::Reload,
+            Action::StartMenu,
+            Action::RootMenu,
+            Action::Pie("main".to_owned()),
+            Action::CycleLayout { forward: true },
+            Action::Layout(2),
+            Action::RevokeAgents,
+        ];
+        for action in &on_it {
+            assert!(action.on_focused_window(), "{action:?}");
+        }
+        for action in &elsewhere {
+            assert!(!action.on_focused_window(), "{action:?}");
+        }
+        // Nothing that works at the lock screen acts on a window behind it.
+        for action in on_it.iter().chain(&elsewhere) {
+            assert!(
+                !(action.while_locked() && action.on_focused_window()),
+                "{action:?}"
+            );
+        }
     }
 
     #[test]

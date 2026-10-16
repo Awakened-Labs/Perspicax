@@ -657,6 +657,33 @@ impl Compositor {
         }
     }
 
+    /// Close the menu holding the keyboard as a click outside it does: it
+    /// and every menu it opened are dismissed, the pointer is let go, and
+    /// the keyboard goes back to the window it was opened from. What a
+    /// binding on the focused window does first, so it acts on the window
+    /// rather than on nothing: the window is not the focused one while its
+    /// menu holds the keyboard (#114). Nothing if no menu holds it.
+    ///
+    /// The window is given the keyboard back as smithay gives it after a
+    /// click outside, as it was before its menu took it. One that is no
+    /// longer on screen leaves it to the window on top.
+    pub(crate) fn dismiss_menu(&mut self) {
+        let Some(root) = self.held_menu_root() else {
+            return;
+        };
+        self.let_go();
+        if self
+            .space
+            .elements()
+            .any(|window| is_toplevel_of(window, &root))
+        {
+            self.focus_plain(root);
+        } else {
+            self.focus_top_window();
+        }
+        self.repoint();
+    }
+
     /// After a button the person pressed while a menu held the pointer
     /// (`held`, asked of [`Self::menu_held`] before it): the press may have
     /// dismissed the menu, as smithay does for a press on any other client's
@@ -676,6 +703,30 @@ impl Compositor {
     /// [`Self::after_menu_button`] is told before a button.
     pub(crate) fn menu_held(&self) -> bool {
         self.menu.as_ref().is_some_and(|menu| !menu.has_ended())
+    }
+
+    /// The window a menu holding the keyboard right now was opened from, by
+    /// its surface. `None` once the menu has let go of the keyboard, however
+    /// it did: closed by its client, dismissed by a click outside, or its
+    /// grab of the pointer taken over by another, a move begun on a
+    /// titlebar, say, which ends its grab of the keyboard too.
+    ///
+    /// Narrower than [`Self::menu_held`]. Smithay's grab counts as held
+    /// until its client has destroyed every menu of it, dismissed or not, so
+    /// a client slow to, or one that never does, would leave a menu looking
+    /// held while the keyboard and pointer are another window's. While the
+    /// keyboard's grab is this menu's, the pointer's is too: whatever took
+    /// that over would have ended both.
+    pub(crate) fn held_menu_root(&self) -> Option<WlSurface> {
+        let menu = self.menu.as_ref().filter(|menu| !menu.has_ended())?;
+        if !self.keyboard.as_ref()?.has_grab(menu.serial()) {
+            return None;
+        }
+        menu.keyboard_grab_start_data()
+            .focus
+            .as_ref()?
+            .wl_surface()
+            .map(std::borrow::Cow::into_owned)
     }
 
     /// A window's menu its client closed -- an item chosen -- gives the

@@ -779,7 +779,14 @@ side it is pushed towards, as a titlebar is to the top, stays on screen.
 It does not snap. In both, a window being dragged stays in hand: switching
 workspace by a key, a number, a pager or an edge takes it along, sending it
 to another workspace takes the person with it, and one minimized while held
-stays minimized. In both, too, a fullscreen window
+stays minimized. In both, a window's own menu, a right-click menu say, holds
+the keyboard while it is open, and a key on the window still works: Alt+F4,
+Alt+Tab, Logo+arrows and the rest close the menu first, as a click outside it
+would, then act on the window. A key that is not about the window, a layout
+switched, leaves the menu open. Switching workspace acts on the monitor of
+the window whose menu is open, and a window left behind takes its menu with
+it, so the keys go to whatever is in front where the person went. In both,
+too, a fullscreen window
 covers the panels while it is the one in use, and goes back under them when
 another window, the start menu or a launcher takes the keyboard. A menu of
 its own, a video's right-click menu, leaves it over them, while it is open
