@@ -45,7 +45,7 @@ use perspicax_policy::{Action, Button, Focus, FocusModel, Mods, Opacity};
 use wayland_client::Proxy as _;
 use x11rb::{
     connection::Connection as _,
-    properties::{WmHints, WmHintsState, WmSizeHints},
+    properties::{WmHints, WmHintsState, WmSizeHints, WmSizeHintsSpecification},
     protocol::{
         Event,
         randr::ConnectionExt as _,
@@ -2845,6 +2845,208 @@ fn with_nobody_at_the_seat_a_new_x11_window_wider_than_the_screen_keeps_its_size
         .surface_where("wide", |surface| surface.frame.len() == 4)
         .unwrap_or_else(|| panic!("never framed: {:?}", x11.facts()));
     assert_eq!(rect_of(&wide), (2.0, 26.0, 2002.0, 826.0));
+
+    x11.stop();
+}
+
+/// `WM_NORMAL_HINTS` saying a window asked to be where it was created: by
+/// the person (USPosition), as a program putting itself back where it was
+/// last time says, or by the program (PPosition).
+fn asking(said_by: WmSizeHintsSpecification) -> WmSizeHints {
+    let mut hints = WmSizeHints::new();
+    // The obsolete x and y that ICCCM keeps beside the flag: the place
+    // asked for is where the window is.
+    hints.position = Some((said_by, 0, 0));
+    hints
+}
+
+/// Two 1280 by 1024 monitors side by side, with a person at them. The
+/// pointer starts on the first.
+fn two_monitors() -> Backend {
+    Backend::Headless {
+        outputs: vec![
+            perspicax_compositor::Virtual::numbered(1, (1280, 1024)),
+            perspicax_compositor::Virtual::numbered(2, (1280, 1024)),
+        ],
+        workspaces: perspicax_policy::Shape::default(),
+        access: perspicax_policy::Access::open(),
+        person: true,
+        opacity: Default::default(),
+        agent: Default::default(),
+    }
+}
+
+/// Issue #88: a window whose hints say it asked for its place opens there,
+/// its client's corner where it asked, as a program that saved where it
+/// was finds it again: nothing tells an X client how big our frame is. One
+/// created at the same place that did not ask is cascaded as any window,
+/// from where the cascade was: the first did not move it on.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn only_an_x11_window_whose_hints_say_it_asked_for_its_place_opens_there() {
+    let x11 = X11::start(
+        "x11-opens-where-asked",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let user = asking(WmSizeHintsSpecification::UserSpecified);
+    x11.open_at("asked", (300, 200, 640, 400), Some(user));
+    x11.open_at("unasked", (300, 200, 640, 400), None);
+
+    x11.surface_where("asked", |surface| {
+        rect_of(surface) == (300.0, 200.0, 940.0, 600.0)
+    })
+    .unwrap_or_else(|| panic!("not where it asked: {:?}", x11.facts()));
+    x11.surface_where("unasked", |surface| {
+        surface.frame.len() == 4 && rect_of(surface) == (2.0, 26.0, 642.0, 426.0)
+    })
+    .unwrap_or_else(|| panic!("not the cascade's first place: {:?}", x11.facts()));
+
+    x11.stop();
+}
+
+/// Issue #88: a place asked for that runs off the right is slid back on,
+/// frame and all, and X is told where it is.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_asking_for_a_place_off_the_right_is_slid_back_on() {
+    let x11 = X11::start(
+        "x11-opens-off-the-right",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let program = asking(WmSizeHintsSpecification::ProgramSpecified);
+    let window = x11.open_at("off", (1000, 200, 640, 400), Some(program));
+
+    // Its right border's last pixel on the monitor's last column.
+    x11.surface_where("off", |surface| {
+        rect_of(surface) == (638.0, 200.0, 1278.0, 600.0)
+    })
+    .unwrap_or_else(|| panic!("not slid back on: {:?}", x11.facts()));
+    let told = eventually(Duration::from_secs(5), || {
+        let at = x11
+            .x
+            .translate_coordinates(window, x11.root, 0, 0)
+            .ok()?
+            .reply()
+            .ok()?;
+        (at.dst_x == 638).then_some((at.dst_x, at.dst_y))
+    });
+    assert_eq!(told, Some((638, 200)), "X was never told where it is");
+
+    x11.stop();
+}
+
+/// Issue #88: a place remembered on the second monitor is on the second
+/// monitor, wherever the pointer is.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_remembered_on_the_second_monitor_opens_there() {
+    let x11 = X11::start("x11-opens-on-the-second", two_monitors());
+    let user = asking(WmSizeHintsSpecification::UserSpecified);
+    x11.open_at("second", (1600, 200, 640, 400), Some(user));
+
+    x11.surface_where("second", |surface| {
+        rect_of(surface) == (1600.0, 200.0, 2240.0, 600.0)
+    })
+    .unwrap_or_else(|| panic!("not where it asked: {:?}", x11.facts()));
+
+    x11.stop();
+}
+
+/// Issue #88: a place remembered on a monitor that is gone, a second one
+/// unplugged since, is on no monitor: the window opens on the one under the
+/// pointer, as near as it fits to where it asked.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_remembered_where_no_monitor_is_now_opens_on_the_one_under_the_pointer() {
+    let x11 = X11::start(
+        "x11-opens-nowhere",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let user = asking(WmSizeHintsSpecification::UserSpecified);
+    x11.open_at("gone", (3000, 200, 640, 400), Some(user));
+
+    x11.surface_where("gone", |surface| {
+        rect_of(surface) == (638.0, 200.0, 1278.0, 600.0)
+    })
+    .unwrap_or_else(|| panic!("not brought onto the monitor: {:?}", x11.facts()));
+
+    x11.stop();
+}
+
+/// Issue #88: a window moved before it maps, as GTK 3 places one, opens
+/// where it was moved to. Before it maps its place is its own; after, it is
+/// the window manager's.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_moved_before_it_maps_opens_where_it_moved_to() {
+    let x11 = X11::start(
+        "x11-opens-where-moved",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let program = asking(WmSizeHintsSpecification::ProgramSpecified);
+    let window = x11.create_at("moved", (0, 0, 640, 400), Some(program));
+    x11.x
+        .configure_window(window, &ConfigureWindowAux::new().x(300).y(200))
+        .expect("configure_window");
+    x11.x.map_window(window).expect("map_window");
+    x11.x.flush().expect("flush");
+
+    x11.surface_where("moved", |surface| {
+        rect_of(surface) == (300.0, 200.0, 940.0, 600.0)
+    })
+    .unwrap_or_else(|| panic!("not where it moved to: {:?}", x11.facts()));
+
+    x11.stop();
+}
+
+/// Issue #88: once it has mapped, a window's place is the window manager's:
+/// one asking to move itself is told where it is, and stays there.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_asking_to_move_once_it_has_mapped_stays_where_it_is() {
+    let x11 = X11::start(
+        "x11-moves-itself",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let window = x11.open("mover");
+    x11.surface_where("mover", |surface| surface.frame.len() == 4)
+        .unwrap_or_else(|| panic!("never framed: {:?}", x11.facts()));
+    let where_x = || {
+        let at = x11
+            .x
+            .translate_coordinates(window, x11.root, 0, 0)
+            .ok()?
+            .reply()
+            .ok()?;
+        Some((at.dst_x, at.dst_y))
+    };
+    assert_eq!(where_x(), Some((2, 26)), "the cascade's first place");
+
+    x11.x
+        .configure_window(window, &ConfigureWindowAux::new().x(500).y(300))
+        .expect("configure_window");
+    x11.settled(window);
+    let moved = eventually(Duration::from_secs(1), || {
+        where_x().filter(|&at| at != (2, 26))
+    });
+    assert_eq!(moved, None, "it moved itself");
+
+    x11.stop();
+}
+
+/// Issue #88: with nobody at the seat a window asking for a place is
+/// cascaded as any other.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn with_nobody_at_the_seat_an_x11_window_asking_for_a_place_is_cascaded_as_any_other() {
+    let x11 = X11::start("x11-nobody-asks", Backend::headless((1280, 1024)));
+    let user = asking(WmSizeHintsSpecification::UserSpecified);
+    x11.open_at("asked", (300, 200, 640, 400), Some(user));
+
+    let asked = x11
+        .surface_where("asked", |surface| surface.frame.len() == 4)
+        .unwrap_or_else(|| panic!("never framed: {:?}", x11.facts()));
+    assert_eq!(rect_of(&asked), (2.0, 26.0, 642.0, 426.0));
 
     x11.stop();
 }
