@@ -12,6 +12,8 @@
 //! Handled the same headless and on a seat. The slice's live test is exactly
 //! this: a panel occluding a window, judged by a compositor with no screen.
 
+use std::sync::PoisonError;
+
 use smithay::{
     desktop::{LayerSurface, WindowSurfaceType, layer_map_for_output},
     output::Output,
@@ -22,7 +24,7 @@ use smithay::{
         shell::{
             wlr_layer::{
                 KeyboardInteractivity, Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData,
-                WlrLayerShellHandler, WlrLayerShellState,
+                LayerSurfaceState, WlrLayerShellHandler, WlrLayerShellState,
             },
             xdg::PopupSurface,
         },
@@ -99,37 +101,35 @@ impl WlrLayerShellHandler for Compositor {
     /// one waiting for one, and its first commit, after this, files it under
     /// the panel so it renders and hit-tests there. Tracking it here as well
     /// would file it twice, and smithay would draw it twice.
-    fn new_popup(&mut self, _parent: WlrLayerSurface, _popup: PopupSurface) {}
+    ///
+    /// One given to a panel its client unmapped is dismissed at once, as one
+    /// opened from a window its client unmapped is: a menu needs its panel on
+    /// screen.
+    fn new_popup(&mut self, parent: WlrLayerSurface, popup: PopupSurface) {
+        if self.is_withdrawn_layer(parent.wl_surface()) {
+            popup.send_popup_done();
+        }
+    }
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
-        let mut freed = false;
-        for output in self.space.outputs().cloned().collect::<Vec<_>>() {
-            let mut map = layer_map_for_output(&output);
-            let before = map.non_exclusive_zone();
-            let gone = map
-                .layers()
-                .find(|layer| layer.layer_surface() == &surface)
-                .cloned();
-            if let Some(layer) = gone {
-                map.unmap_layer(&layer);
-                map.arrange();
-                freed |= map.non_exclusive_zone() != before;
-            }
-        }
-        // A panel that went gives its room back to the windows that fill.
-        if freed {
-            self.refit_frames();
-        }
-        // A launcher that held the keyboard gives it back to the window
-        // beneath.
-        if self.keyboard_focus().as_ref() == Some(surface.wl_surface()) {
-            self.focus_top_window();
-        }
-        // And the pointer to what it uncovered.
-        self.repoint();
+        // One its client unmapped first was taken off then.
+        self.withdrawn_layers
+            .retain(|withdrawn| withdrawn.surface != surface);
+        self.take_layer_off(surface.wl_surface());
         self.backend.redraw();
         self.publish_facts();
     }
+}
+
+/// A layer surface its client unmapped, waiting to be asked for again. See
+/// [`Compositor::withdraw_layer`].
+pub(crate) struct Withdrawn {
+    /// The client's layer surface. The wrapper the layer map knew it by went
+    /// with its place there.
+    surface: WlrLayerSurface,
+    /// The output it was on, given at `get_layer_surface` or chosen then,
+    /// which it goes back to.
+    output: Output,
 }
 
 impl Compositor {
@@ -197,6 +197,77 @@ impl Compositor {
         self.repoint();
         self.backend.redraw();
         layer.user_data().get::<SurfaceId>().copied()
+    }
+
+    /// Take a layer surface its client unmapped off its output, as though it
+    /// had gone, and keep it until it is asked for again.
+    ///
+    /// Unlike a window's, the keyboard moves on headless too, as it does
+    /// from a layer that went: a launcher takes the keyboard for itself,
+    /// headless or not, and left with it, it would have the keys typed at
+    /// a surface nobody can see.
+    pub(crate) fn withdraw_layer(&mut self, surface: &WlSurface, id: SurfaceId) {
+        let Some((layer, output)) = self.take_layer_off(surface) else {
+            return;
+        };
+        // Its menus go once the keyboard has left them, so none comes back
+        // with it.
+        crate::popup::dismiss_all(surface);
+        unconfigure(surface);
+        self.withdrawn_layers.push(Withdrawn {
+            surface: layer.layer_surface().clone(),
+            output,
+        });
+        tracing::info!(surface = id.0, "layer surface unmapped by its client");
+    }
+
+    /// Whether `surface` is that of a layer its client unmapped.
+    pub(crate) fn is_withdrawn_layer(&self, surface: &WlSurface) -> bool {
+        self.withdrawn_layers
+            .iter()
+            .any(|withdrawn| withdrawn.surface.wl_surface() == surface)
+    }
+
+    /// Take the layer whose surface is `surface` off its output, and give
+    /// back what it held: its room to the windows that fill, the keyboard to
+    /// the window on top, the pointer to what it uncovered. What a layer
+    /// that went and one its client unmapped have in common. The layer as
+    /// its map knew it, and the output it was on, if it was on one.
+    fn take_layer_off(&mut self, surface: &WlSurface) -> Option<(LayerSurface, Output)> {
+        // Asked first, while its layer map still knows it, and with no layer
+        // map held, for asking takes them: the keys are the layer's when it
+        // has them, or a menu of it does.
+        let held = self.keyboard_focus().as_ref() == Some(surface)
+            || self
+                .layer_id(surface)
+                .is_some_and(|id| self.keyboard_owner() == Some(id));
+        let mut taken = None;
+        let mut freed = false;
+        for output in self.space.outputs().cloned().collect::<Vec<_>>() {
+            let mut map = layer_map_for_output(&output);
+            let before = map.non_exclusive_zone();
+            let gone = map
+                .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
+                .cloned();
+            if let Some(layer) = gone {
+                map.unmap_layer(&layer);
+                map.arrange();
+                freed |= map.non_exclusive_zone() != before;
+                taken = Some((layer, output.clone()));
+            }
+        }
+        // A panel that went gives its room back to the windows that fill.
+        if freed {
+            self.refit_frames();
+        }
+        // A launcher that held the keyboard gives it back to the window
+        // beneath.
+        if held {
+            self.focus_top_window();
+        }
+        // And the pointer to what it uncovered.
+        self.repoint();
+        taken
     }
 
     /// Whether `layer` is a wallpaper that is up on `output`: in the
@@ -329,9 +400,42 @@ impl Compositor {
 }
 
 /// An output is going away: tell its layer surfaces, so a panel can move
-/// itself to a screen that is still there.
-pub(crate) fn close_on(output: &Output) {
+/// itself to a screen that is still there. Those their clients unmapped on
+/// it are told too, and forgotten, for there is nothing left to map them on.
+///
+/// Every output taken out of the space is closed on first: a layer unmapped
+/// on one that was not would come back on a monitor nobody sees, its output
+/// kept alive by [`Withdrawn`] alone.
+pub(crate) fn close_on(output: &Output, withdrawn: &mut Vec<Withdrawn>) {
     for layer in layer_map_for_output(output).layers() {
         layer.layer_surface().send_close();
     }
+    withdrawn.retain(|withdrawn| {
+        let on = withdrawn.output == *output;
+        if on {
+            withdrawn.surface.send_close();
+        }
+        !on
+    });
+}
+
+/// Forget every configure the layer surface `surface` was sent, as smithay
+/// does only when one is destroyed: back to the state it had right after
+/// `get_layer_surface`, owed the configure a new layer is owed, as
+/// layer-shell says an unmapped one is. What its client asked for, its
+/// anchor, size, room and keys, it keeps: its client asks for it again
+/// without saying them again, as on wlroots.
+fn unconfigure(surface: &WlSurface) {
+    with_states(surface, |states| {
+        let Some(data) = states.data_map.get::<LayerSurfaceData>() else {
+            return;
+        };
+        let mut attributes = data.lock().unwrap_or_else(PoisonError::into_inner);
+        attributes.initial_configure_sent = false;
+        attributes.configured = false;
+        attributes.configure_serial = None;
+        attributes.server_pending = None;
+        attributes.last_acked = None;
+        attributes.current = LayerSurfaceState::default();
+    });
 }

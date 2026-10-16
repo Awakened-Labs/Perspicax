@@ -655,7 +655,7 @@ fn rescan(state: &mut Compositor) {
         if let Some(at) = session.heads.iter().position(|head| head.crtc == crtc) {
             let head = session.heads.remove(at);
             tracing::info!(output = head.output.name(), "monitor unplugged");
-            crate::layers::close_on(&head.output);
+            crate::layers::close_on(&head.output, &mut state.withdrawn_layers);
             state.space.unmap_output(&head.output);
             state.display.remove_global::<Compositor>(head.global);
         }
@@ -808,7 +808,7 @@ fn relight(state: &mut Compositor) {
         return;
     };
     for head in session.heads.drain(..) {
-        crate::layers::close_on(&head.output);
+        crate::layers::close_on(&head.output, &mut state.withdrawn_layers);
         state.space.unmap_output(&head.output);
         state.display.remove_global::<Compositor>(head.global);
     }

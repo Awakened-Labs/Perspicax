@@ -33,7 +33,7 @@ use std::sync::PoisonError;
 
 use perspicax_node::{SurfaceId, Vec2};
 use smithay::{
-    desktop::{PopupKind, find_popup_root_surface, get_popup_toplevel_coords},
+    desktop::{PopupKind, PopupManager, find_popup_root_surface, get_popup_toplevel_coords},
     reexports::wayland_server::{Resource as _, protocol::wl_surface::WlSurface},
     utils::{Logical, Point},
     wayland::{
@@ -85,6 +85,18 @@ impl crate::state::Compositor {
     /// `Compositor::popup_ids`. `None` for a surface that is no popup.
     pub(crate) fn popup_id(&self, surface: &WlSurface) -> Option<SurfaceId> {
         self.popup_ids.get(&surface.id()).copied()
+    }
+}
+
+/// Dismiss every popup of the window or panel whose surface is `root`, each
+/// told it is done as a click outside it would tell it, so none comes back
+/// with what it hung from: a popup needs that on screen.
+pub(crate) fn dismiss_all(root: &WlSurface) {
+    let popups: Vec<_> = PopupManager::popups_for_surface(root)
+        .map(|(popup, _)| popup)
+        .collect();
+    for popup in popups {
+        let _ = PopupManager::dismiss_popup(root, &popup);
     }
 }
 

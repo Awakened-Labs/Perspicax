@@ -23,7 +23,7 @@
 
 use perspicax_node::SurfaceId;
 use smithay::{
-    desktop::PopupManager, reexports::wayland_server::protocol::wl_surface::WlSurface,
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
     wayland::shell::xdg::ToplevelSurface,
 };
 
@@ -60,14 +60,8 @@ impl Compositor {
         if self.menu_opened_from(&surface) {
             self.let_go();
         }
-        // And every other popup of it goes, so none comes back with it: a
-        // popup needs its window on screen.
-        let popups: Vec<_> = PopupManager::popups_for_surface(&surface)
-            .map(|(popup, _)| popup)
-            .collect();
-        for popup in popups {
-            let _ = PopupManager::dismiss_popup(&surface, &popup);
-        }
+        // And every other popup of it goes, so none comes back with it.
+        crate::popup::dismiss_all(&surface);
         self.forget_window(window);
         // Back as it was right after get_toplevel: nothing maximized,
         // fullscreen or tiled, no size asked for, and owed the configure a new
