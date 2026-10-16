@@ -421,6 +421,10 @@ pub fn is_double(first: Press, second: Press, within_ms: u32) -> bool {
 /// Only ever moves it right and down. A window bigger than the area keeps its
 /// top-left corner in it and hangs off the other two sides, as it would
 /// without a frame.
+///
+/// What every window keeps, whenever the room it has changes. A window
+/// opening with a person at the seat is first put wholly on the area, once,
+/// by `settle`.
 #[must_use]
 pub fn fit(at: (i32, i32), insets: Insets, area: Rect) -> (i32, i32) {
     (

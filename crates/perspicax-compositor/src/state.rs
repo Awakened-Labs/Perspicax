@@ -1113,6 +1113,15 @@ impl CompositorHandler for Compositor {
                     if is_root {
                         self.settle_resize(&window);
                     }
+                    // A Wayland window's first picture is the first time its
+                    // size is known: it is put wholly on screen then, once.
+                    // An X11 one was as it mapped.
+                    if is_root
+                        && window.toplevel().is_some()
+                        && matches!(taken.own, damage::Buffer::New(_))
+                    {
+                        self.settle_new(&window, None);
+                    }
                     shell::id_of(&window)
                 }
                 None if is_root => self.layer_committed(surface),
@@ -1180,7 +1189,7 @@ impl XdgShellHandler for Compositor {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        Self::configure_new(&surface);
+        self.configure_new(&surface);
         self.open_toplevel(surface);
         self.publish_facts();
     }
@@ -1378,10 +1387,14 @@ impl Compositor {
     /// is asked for again (see `shell::withdrawn`).
     ///
     /// Activated from the start: a toolkit that believes it is unfocused
-    /// renders differently, and M2 is about reading what is on screen.
-    pub(crate) fn configure_new(toplevel: &ToplevelSurface) {
+    /// renders differently, and M2 is about reading what is on screen. With
+    /// a person at the seat, told the room it has ([`Self::bounds_for`]),
+    /// so a toolkit that reads it opens at a size that fits.
+    pub(crate) fn configure_new(&self, toplevel: &ToplevelSurface) {
+        let bounds = self.bounds_for(toplevel);
         toplevel.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Activated);
+            state.bounds = bounds;
         });
         toplevel.send_configure();
     }

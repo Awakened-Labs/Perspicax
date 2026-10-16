@@ -227,6 +227,38 @@ pub fn carry(window: Rect, from: Rect, to: Rect) -> (i32, i32) {
     (to.x + dx, to.y + dy)
 }
 
+/// Where a window opening with its frame at `frame` goes, and how big it
+/// gets, so that the whole frame is inside `area`: slid onto it at its own
+/// size, then, if it is still too big, put at the area's left or top edge and
+/// shrunk to it.
+///
+/// `min` is the least the frame may be: the client's own minimum with the
+/// frame around it, `0` meaning no limit. A window whose least is bigger than
+/// the area keeps its top-left corner in it and hangs off the right and the
+/// bottom, so its titlebar can still be grabbed. A window is never grown.
+///
+/// For a window opening, once. After that, where it goes is the person's,
+/// and a window dragged partly off the screen stays there: `fit` is all
+/// that is kept from then on.
+#[must_use]
+pub fn settle(frame: Rect, area: Rect, min: (i32, i32)) -> Rect {
+    if area.w <= 0 || area.h <= 0 {
+        return frame;
+    }
+    let (x, w) = onto(frame.x, frame.w, area.x, area.w, min.0);
+    let (y, h) = onto(frame.y, frame.h, area.y, area.h, min.1);
+    Rect::new(x, y, w, h)
+}
+
+/// One axis of `settle`: a span at `at`, `len` long, put inside the `room`
+/// from `start` on. Shrunk to the room but never below `least`, then its far
+/// end pulled in, then its near end, so that a span still too long for the
+/// room keeps its start in it.
+fn onto(at: i32, len: i32, start: i32, room: i32, least: i32) -> (i32, i32) {
+    let len = len.min(room.max(least));
+    (at.min(start + room - len).max(start), len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +486,87 @@ mod tests {
             carry(Rect::new(1000, 800, 800, 600), FHD, small),
             (2400, 424)
         );
+    }
+
+    /// A 1920 by 1080 monitor with a 40 px panel along its bottom.
+    const AREA: Rect = Rect {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1040,
+    };
+
+    #[test]
+    fn an_opening_window_already_on_the_area_stays_as_it_is() {
+        let inside = Rect::new(300, 300, 800, 600);
+        assert_eq!(settle(inside, AREA, (0, 0)), inside);
+        let flush = Rect::new(1120, 440, 800, 600);
+        assert_eq!(
+            settle(flush, AREA, (0, 0)),
+            flush,
+            "touching the far corner is in"
+        );
+    }
+
+    #[test]
+    fn an_opening_window_off_the_right_or_bottom_slides_back_on_at_its_size() {
+        assert_eq!(
+            settle(Rect::new(1500, 700, 800, 600), AREA, (0, 0)),
+            Rect::new(1120, 440, 800, 600)
+        );
+    }
+
+    #[test]
+    fn an_opening_window_off_the_left_or_top_slides_on_wherever_the_area_is() {
+        assert_eq!(
+            settle(Rect::new(-100, -50, 800, 600), AREA, (0, 0)),
+            Rect::new(0, 0, 800, 600),
+            "remembered from a bigger layout"
+        );
+        // The monitor to the right of the first, under a 32 px panel.
+        let right = Rect::new(1920, 32, 2560, 1408);
+        assert_eq!(
+            settle(Rect::new(1800, 0, 800, 600), right, (0, 0)),
+            Rect::new(1920, 32, 800, 600)
+        );
+    }
+
+    #[test]
+    fn an_opening_window_wider_than_the_area_goes_to_its_left_edge_and_takes_its_width() {
+        // The issue's example, which is 1100 tall to its bottom edge, so it
+        // slides up as well.
+        assert_eq!(
+            settle(Rect::new(300, 300, 2000, 800), AREA, (0, 0)),
+            Rect::new(0, 240, 1920, 800)
+        );
+    }
+
+    #[test]
+    fn an_opening_window_taller_than_the_area_goes_to_its_top_and_takes_its_height() {
+        assert_eq!(
+            settle(Rect::new(300, 300, 800, 1200), AREA, (0, 0)),
+            Rect::new(300, 0, 800, 1040)
+        );
+    }
+
+    #[test]
+    fn an_opening_window_shrinks_no_smaller_than_its_least_and_hangs_off_the_right_and_bottom() {
+        assert_eq!(
+            settle(Rect::new(300, 300, 2000, 1200), AREA, (1950, 1100)),
+            Rect::new(0, 0, 1950, 1100),
+            "its top-left corner, and so its titlebar, stays on the area"
+        );
+    }
+
+    #[test]
+    fn an_opening_window_smaller_than_its_least_is_not_grown() {
+        let small = Rect::new(100, 100, 400, 300);
+        assert_eq!(settle(small, AREA, (500, 400)), small);
+    }
+
+    #[test]
+    fn an_area_with_no_room_leaves_an_opening_window_as_it_is() {
+        let window = Rect::new(100, 100, 400, 300);
+        assert_eq!(settle(window, Rect::new(0, 0, 1920, 0), (0, 0)), window);
     }
 }

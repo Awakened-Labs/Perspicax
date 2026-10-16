@@ -882,10 +882,10 @@ impl XwmHandler for Compositor {
     fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
     /// A managed X11 window wants to be seen: place it as any new window is
-    /// placed, tell it where it is, and give it the keyboard, as a new
-    /// Wayland window takes it. One that asks to start minimized is placed
-    /// all the same, then minimized instead, and the keyboard stays where it
-    /// was.
+    /// placed, or where it asked to be, tell it where it is, and give it the
+    /// keyboard, as a new Wayland window takes it. One that asks to start
+    /// minimized is placed all the same, then minimized instead, and the
+    /// keyboard stays where it was.
     fn map_window_request(&mut self, _xwm: XwmId, x11: X11Surface) {
         // What it asked to be before it mapped -- a game starting
         // fullscreen, say, or a program starting minimized -- read before
@@ -903,12 +903,31 @@ impl XwmHandler for Compositor {
         let id = self.mint_surface_id();
         window.user_data().insert_if_missing(|| id);
         self.claim_x11(&window, &x11);
-        let at = self.place_new();
+        // Where it asked to be, if its WM_NORMAL_HINTS say it asked
+        // (USPosition or PPosition): a program putting itself back where it
+        // was last time. Its client's corner there, as the program saved it:
+        // no _NET_FRAME_EXTENTS tells it how big our frame is. Otherwise, and
+        // with nobody at the seat, the cascade's next place.
+        let asked = self.backend.has_person()
+            && x11
+                .size_hints()
+                .is_some_and(|hints| hints.position.is_some());
+        let at = if asked {
+            x11.geometry().loc
+        } else {
+            self.place_new()
+        };
         let size = x11.geometry().size;
         let _ = x11.configure(Rectangle::new(at, size));
         self.space.map_element(window.clone(), at, false);
         // Its Motif hints are in by now, so whether it is framed is known,
-        // and the titlebar has to start on screen.
+        // and so is its size: it is put wholly inside the work area, frame
+        // and all, with a person at the seat. A place it asked for is on the
+        // monitor most of it is on; if none of it is on one now, the one
+        // under the pointer, as `settle_new` falls back. Whatever else, its
+        // titlebar starts on screen.
+        let on = asked.then(|| self.mostly_on(&window)).flatten();
+        self.settle_new(&window, on);
         self.fit_frame(&window);
         self.adopt(&window);
         // Maximized first, so that leaving fullscreen lands on it; both
@@ -968,28 +987,36 @@ impl XwmHandler for Compositor {
     }
 
     /// An X11 window asking for a size. Granted: the size is the client's to
-    /// choose. The position is not: that is the window manager's. Nor is the
-    /// size of a window that fills its monitor or a zone: it keeps it, and is
-    /// told the rect it has, as ICCCM answers a request not granted. A game
-    /// going fullscreen asks for sizes as it sets its mode.
+    /// choose. So is the position, until the window maps: where it opens is
+    /// where it was put then, if its hints say it asked to be there (see
+    /// `map_window_request`). Once it has mapped, the position is not the
+    /// client's: that is the window manager's. Nor is the size of a window
+    /// that fills its monitor or a zone: it keeps it, and is told the rect
+    /// it has, as ICCCM answers a request not granted. A game going
+    /// fullscreen asks for sizes as it sets its mode.
     fn configure_request(
         &mut self,
         _xwm: XwmId,
         x11: X11Surface,
-        _x: Option<i32>,
-        _y: Option<i32>,
+        x: Option<i32>,
+        y: Option<i32>,
         w: Option<u32>,
         h: Option<u32>,
         _reorder: Option<Reorder>,
     ) {
-        let held = self
-            .x11_window(&x11)
-            .is_some_and(|window| Self::filling(&window).is_some() || Self::is_snapped(&window));
+        let window = self.x11_window(&x11);
+        let held = window
+            .as_ref()
+            .is_some_and(|window| Self::filling(window).is_some() || Self::is_snapped(window));
         if held {
             let _ = x11.configure(None);
             return;
         }
         let mut geometry = x11.geometry();
+        if window.is_none() {
+            geometry.loc.x = x.unwrap_or(geometry.loc.x);
+            geometry.loc.y = y.unwrap_or(geometry.loc.y);
+        }
         if let Some(w) = w.and_then(|w| i32::try_from(w).ok()) {
             geometry.size.w = w;
         }

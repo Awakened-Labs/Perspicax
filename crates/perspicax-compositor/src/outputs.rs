@@ -178,7 +178,7 @@ impl Compositor {
     /// The output most of this window is on, or `None` if none of it is on
     /// any. Unlike `output_of`, no fallback to the pointer's: a window on no
     /// output is exactly what has to be told apart here.
-    fn mostly_on(&self, window: &Framed) -> Option<Output> {
+    pub(crate) fn mostly_on(&self, window: &Framed) -> Option<Output> {
         self.output_at(self.extent(window)?)
     }
 

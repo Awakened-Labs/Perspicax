@@ -624,6 +624,10 @@ pub struct Configured {
     pub fullscreen: bool,
     /// Tiled against any edge: snapped to a half or a quarter.
     pub tiled: bool,
+    /// The most room it was told it has (`xdg_toplevel.configure_bounds`),
+    /// the last time it was told: SCTK keeps it from one configure to the
+    /// next.
+    pub bounds: Option<(u32, u32)>,
 }
 
 impl Configured {
@@ -641,6 +645,7 @@ impl Configured {
                 || configure.is_tiled_right()
                 || configure.is_tiled_top()
                 || configure.is_tiled_bottom(),
+            bounds: configure.suggested_bounds,
         }
     }
 }

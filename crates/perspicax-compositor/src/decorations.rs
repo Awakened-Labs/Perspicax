@@ -28,7 +28,7 @@
 use std::cell::Cell;
 
 use perspicax_node::Rect as NodeRect;
-use perspicax_policy::{Decorations, Insets, Look, fit, frame_rects, outline_rects, outset};
+use perspicax_policy::{Decorations, Insets, Look, fit, frame_rects, inset, outline_rects, outset};
 use smithay::{
     reexports::{
         wayland_protocols::xdg::{
@@ -41,7 +41,7 @@ use smithay::{
         },
         wayland_server::{WEnum, protocol::wl_surface::WlSurface},
     },
-    utils::{Logical, Rectangle},
+    utils::{Logical, Rectangle, Size},
     wayland::{
         compositor::with_states,
         shell::{
@@ -377,10 +377,48 @@ impl Compositor {
         }
     }
 
+    /// The most room a Wayland window has on the monitor it opens on, which
+    /// `xdg_toplevel.configure_bounds` tells it: what the panels leave, less
+    /// the frame this compositor draws around it, if it draws one. A client
+    /// that reads it, as GTK 4 does, picks a size that fits before it first
+    /// draws, and need not be shrunk after ([`Compositor::settle_new`]).
+    ///
+    /// On the monitor its top-left corner is on, where it was put, or before
+    /// it is put, the one under the pointer, where it is about to be. Only
+    /// with a person at the seat: headless, a client sizes itself as it
+    /// always has.
+    pub(crate) fn bounds_for(&self, toplevel: &ToplevelSurface) -> Option<Size<i32, Logical>> {
+        if !self.backend.has_person() {
+            return None;
+        }
+        let surface = toplevel.wl_surface();
+        let output = self
+            .window_for(surface)
+            .and_then(|window| self.space.element_location(&window))
+            .and_then(|at| self.space.output_under(at.to_f64()).next().cloned())
+            .or_else(|| self.output_under_pointer())?;
+        let area = self
+            .usable_area(&output)
+            .filter(|area| area.size.w > 0 && area.size.h > 0)?;
+        let insets = if is_server_side(surface) {
+            Insets::of(&self.backend.decorations(), Look::Normal)
+        } else {
+            Insets::NONE
+        };
+        let room = inset(rect(area), insets);
+        Some((room.w, room.h).into())
+    }
+
     fn answer_xdg(&mut self, toplevel: &ToplevelSurface, asked: Option<XdgMode>) {
         let mode = self.xdg_mode(asked);
-        toplevel.with_pending_state(|pending| pending.decoration_mode = Some(mode));
         set_server_side(toplevel.wl_surface(), mode == XdgMode::ServerSide);
+        // The room it has depends on who draws its frame, and is told with
+        // the mode, in the configure the mode is owed anyway.
+        let bounds = self.bounds_for(toplevel);
+        toplevel.with_pending_state(|pending| {
+            pending.decoration_mode = Some(mode);
+            pending.bounds = bounds;
+        });
         if toplevel.is_initial_configure_sent() {
             toplevel.send_pending_configure();
         }
