@@ -19,7 +19,8 @@
 //! now. A hidden client may commit for reasons of its own, and on screen
 //! before it drew, the window would again be a frame around nothing. An X11
 //! window its client withdraws and maps again goes and comes back the same
-//! way (`crate::xwayland`).
+//! way (`crate::xwayland`). So does a panel its client unmaps, but that it is
+//! back from the commit that asks for it (`crate::layers`).
 
 use perspicax_node::SurfaceId;
 use smithay::{

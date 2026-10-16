@@ -11,6 +11,28 @@
 //!
 //! Handled the same headless and on a seat. The slice's live test is exactly
 //! this: a panel occluding a window, judged by a compositor with no screen.
+//!
+//! # Unmapped by its client
+//!
+//! A client may take its layer surface off the screen without destroying it,
+//! by attaching no buffer to it, and ask for it again later by the steps a
+//! new one takes: a commit with nothing in it, the configure a new layer is
+//! sent in answer, then a picture (#144). In between, to everyone but its
+//! client, it has gone as a destroyed one goes
+//! ([`Compositor::withdraw_layer`]): out of its monitor's layers, so its room
+//! goes back to the windows; out of the facts; its menus dismissed; the
+//! keyboard and the pointer moved on. It waits in
+//! `Compositor::withdrawn_layers`, with the monitor it was on, told nothing
+//! but that it may draw. smithay forgets the configures a layer was sent only
+//! when it is destroyed, so they are forgotten here as it goes.
+//!
+//! It is back from the commit that asks, and not from its first picture as a
+//! window is (`shell::withdrawn`): the size to offer it is the arrangement's
+//! answer, and only a layer among its monitor's layers is arranged, as a new
+//! panel is from its first commit. So, like a new panel, it keeps its room
+//! from then. It comes back as a new layer, with a new id, and, like a new
+//! one, it takes the keyboard, if it wants every key, only once it shows
+//! something.
 
 use std::sync::PoisonError;
 
