@@ -11,6 +11,16 @@
 //! own colour and logo (`crate::backdrop`), which show wherever the lock
 //! client leaves its surface clear, and before it has drawn at all.
 //!
+//! The keyboard goes to the lock's own surfaces and nothing else. One gate,
+//! [`Compositor::may_take_keyboard`], stands wherever anything is given it,
+//! a window, a launcher or a lock surface (#127). A menu's grab, the one
+//! other way to it, is refused while locked (#82). Any client may still open
+//! a window behind the lock, ask for one to be brought forward, or close the
+//! one in front, and on any desktop each of those moves the keyboard. Here
+//! none does: whatever took it would get the password as it is typed, and
+//! Enter would send it. Unlocked, the window on top has the keyboard, often
+//! the one that opened meanwhile.
+//!
 //! The pointer is taken from the windows the moment the session locks, not
 //! at the next motion: a hand at rest, or a tap of the touchpad to wake the
 //! screen, would otherwise click in the window under it, unseen (#82). The
@@ -112,6 +122,13 @@ impl Locked {
     /// The lock surface covering this output.
     pub(crate) fn on(&self, output: &Output) -> Option<&Cover> {
         self.surfaces.iter().find(|cover| &cover.output == output)
+    }
+
+    /// Whether `surface` is one of the holder's lock surfaces.
+    pub(crate) fn covers(&self, surface: &WlSurface) -> bool {
+        self.surfaces
+            .iter()
+            .any(|cover| cover.surface.wl_surface() == surface)
     }
 }
 

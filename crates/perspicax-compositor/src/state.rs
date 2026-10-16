@@ -643,11 +643,28 @@ impl Compositor {
 
     /// Give the keyboard to a surface as it is: a launcher, a lock screen,
     /// or the menu or window a closed menu hung from. A window focused for
-    /// itself goes through [`Self::focus_surface`].
+    /// itself goes through [`Self::focus_surface`]. While the session is
+    /// locked, only to the lock's own surfaces.
     pub(crate) fn focus_plain(&mut self, surface: WlSurface) {
+        if !self.may_take_keyboard(&surface) {
+            return;
+        }
         if let Some(keyboard) = self.keyboard.clone() {
             keyboard.set_focus(self, Some(surface.into()), SERIAL_COUNTER.next_serial());
         }
+    }
+
+    /// Whether `surface` may be given the keyboard: anything may, unless the
+    /// session is locked, when only the holder's lock surfaces may (#127).
+    /// What has the keyboard then has the password as it is typed, and a
+    /// window behind the lock -- a chat window, a terminal, a dialog that
+    /// opened -- would send it with the Enter that was meant to unlock.
+    /// [`Self::focus_plain`] and [`Self::focus_surface`] ask, which is every
+    /// way to the keyboard but a menu's grab, refused while locked (#82).
+    fn may_take_keyboard(&self, surface: &WlSurface) -> bool {
+        self.lock
+            .as_ref()
+            .is_none_or(|locked| locked.covers(surface))
     }
 
     /// A window closed. If it held the keyboard, the keyboard goes to the
@@ -713,6 +730,12 @@ impl Compositor {
     /// Give the keyboard back to the topmost window, or to nothing. Never to
     /// an X11 window that places itself, which an application's menu is,
     /// and which is on top of everything when it opens (#181).
+    ///
+    /// While the session is locked, [`Self::focus_surface`] refuses the
+    /// window the keyboard. Giving it to nothing is not refused, and need
+    /// not be: no caller asks while a lock surface holds the keyboard, only
+    /// once what held it has gone, or while a window, a menu or a launcher
+    /// holds it.
     pub(crate) fn focus_top_window(&mut self) {
         let top = self
             .space
@@ -750,7 +773,14 @@ impl Compositor {
     ///
     /// An X11 window is focused as an X11 window, so the X server's input
     /// focus moves with it. See [`crate::focus`].
+    ///
+    /// Never while the session is locked: a window is no lock surface. It
+    /// is not focused, and has the keyboard once the session unlocks if it
+    /// is the window on top then, as one that opened behind the lock is.
     pub(crate) fn focus_surface(&mut self, surface: WlSurface, id: SurfaceId) {
+        if !self.may_take_keyboard(&surface) {
+            return;
+        }
         let Some(keyboard) = self.keyboard.clone() else {
             return;
         };

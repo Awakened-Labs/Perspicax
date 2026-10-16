@@ -178,12 +178,12 @@ impl Compositor {
             layer.layer_surface().send_configure();
         }
         // A launcher or lock-ish overlay that wants every key gets them, the
-        // moment it is up. `OnDemand` waits for a click (see the seat's
-        // input path).
+        // moment it is up, unless the session is locked (`focus_plain`
+        // refuses). `OnDemand` waits for a click (see the seat's input path).
         let exclusive = layer.cached_state().keyboard_interactivity
             == KeyboardInteractivity::Exclusive
             && ABOVE.contains(&layer.layer());
-        if exclusive && self.keyboard_focus().as_ref() != Some(surface) && self.lock.is_none() {
+        if exclusive && self.keyboard_focus().as_ref() != Some(surface) {
             self.focus_plain(surface.clone());
         }
         // The usable area changed under the windows: a panel appearing

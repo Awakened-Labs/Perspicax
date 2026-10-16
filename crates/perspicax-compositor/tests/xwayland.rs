@@ -35,13 +35,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::{Session, until};
+use common::{Session, heard, until};
 use perspicax_compositor::{
     ActError, Backend, Command, Config, Error, Facts, Host, Requests, Stop,
 };
 use perspicax_index::{Action as Verb, HostFacts, SurfaceFacts, judge};
 use perspicax_node::{Origin, Rect, Visibility, X11Basis};
 use perspicax_policy::{Action, Button, Focus, FocusModel, Mods, Opacity};
+use wayland_client::Proxy as _;
 use x11rb::{
     connection::Connection as _,
     properties::{WmHints, WmHintsState, WmSizeHints},
@@ -459,6 +460,45 @@ fn a_new_x11_window_takes_the_keyboard_when_it_maps() {
         .join()
         .expect("the compositor thread panicked")
         .expect("the compositor failed");
+}
+
+/// Issue #127: an X11 window that maps while the session is locked takes
+/// the keyboard from nothing, as a Wayland one does not: the lock screen
+/// keeps it, and with it the password typed there. Unlocked, the window has
+/// it, being on top. Its surface comes after it maps, so the keyboard it
+/// waits for is asked for only then: that is passed too by the time the
+/// facts say it is on screen.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_that_maps_behind_the_lock_screen_takes_no_keys_from_it() {
+    let x11 = X11::start("x11-behind-the-lock", Backend::headless((800, 600)));
+    let (mut locker, mut queue, qh, globals) = x11.session.client();
+    let ear = locker.bind_keyboard(&globals, &qh);
+    until(&mut queue, &mut locker, |locker| !locker.outputs_empty());
+    locker.lock(&globals, &qh);
+    until(&mut queue, &mut locker, |locker| locker.locked);
+    let held = locker.cover(&qh, "HEADLESS-1", 0xff20_2020).id();
+    until(&mut queue, &mut locker, |_| {
+        heard(&ear).entered.as_ref() == Some(&held)
+    });
+
+    let window = x11.open("behind");
+    queue.roundtrip(&mut locker).expect("dispatch");
+    assert_eq!(
+        heard(&ear).entered.as_ref(),
+        Some(&held),
+        "the lock screen keeps the keys"
+    );
+    assert_ne!(x11.focus(), window, "X gave the window the keys");
+
+    locker.unlock();
+    queue.roundtrip(&mut locker).expect("dispatch");
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == window).then_some(())
+    })
+    .unwrap_or_else(|| panic!("unlocked, it never took the keyboard: {:?}", x11.facts()));
+
+    x11.session.stop((locker, queue));
 }
 
 x11rb::atom_manager! {
