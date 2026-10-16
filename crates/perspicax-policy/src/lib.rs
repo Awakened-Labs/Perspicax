@@ -63,7 +63,7 @@ pub use crate::{
     },
     geometry::{
         DRAG_THRESHOLD, Edges, Rect, anchor, carry, dragged, edges_near, neighbour, place, resize,
-        unmaximized_at,
+        settle, unmaximized_at,
     },
     heads::{Head, HeadChange, HeadMode, ModeChoice, Rejection, check_heads},
     keyboard::{LayoutMemory, Switching},
