@@ -34,9 +34,12 @@ impl Compositor {
         self.workspaces.add(id, &output);
     }
 
-    /// A window has closed: off the screen, out of the parked list, and out
-    /// of the workspaces' bookkeeping.
+    /// A window has closed: where it was is its program's place now, and it
+    /// is off the screen, out of the parked list, and out of the workspaces'
+    /// bookkeeping. Remembered first, while it is still where it was and in
+    /// its tab group.
     pub(crate) fn forget_window(&mut self, window: &Framed) {
+        self.remember_place(window);
         self.tab_closing(window);
         self.space.unmap_elem(window);
         self.parked.retain(|parked| parked != window);

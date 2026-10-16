@@ -348,6 +348,19 @@ impl Running {
         }
     }
 
+    /// Whether the place of `app`'s last window is remembered, for its next
+    /// one to open there. Only with a person at the seat: headless, a window
+    /// stays where the cascade puts it (see `crate::shell`).
+    pub(crate) fn remembers(&self, app: &str) -> bool {
+        match self {
+            Self::Headless { person, .. } => {
+                *person && perspicax_policy::Remembering::default().remembers(app)
+            }
+            #[cfg(feature = "seat")]
+            Self::Seat(_) => perspicax_policy::Remembering::default().remembers(app),
+        }
+    }
+
     /// Who draws window frames, and how they look: the person's config on a
     /// seat. Headless takes the defaults, so the frames a seat would draw are
     /// in the facts CI tests, though nothing is drawn.

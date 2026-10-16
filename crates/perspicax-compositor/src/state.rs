@@ -343,6 +343,10 @@ pub struct Compositor {
     pub(crate) spawn_failed: Option<crate::Error>,
     /// How many windows have been placed, for the cascade.
     pub(crate) placed: u32,
+    /// Where each program's last window closed, by app id, so that its next
+    /// one opens there (see `shell::remember`). The person's history: never
+    /// in the facts.
+    pub(crate) places: perspicax_policy::Places,
     started: Instant,
     /// The clients this compositor accepted, each with its state, until
     /// they go: flushed one by one, to see which have stopped reading
@@ -470,6 +474,7 @@ impl Compositor {
             spawned: Vec::new(),
             spawn_failed: None,
             placed: 0,
+            places: perspicax_policy::Places::default(),
             started: Instant::now(),
             clients: Vec::new(),
         }
@@ -1135,13 +1140,16 @@ impl CompositorHandler for Compositor {
                         self.settle_resize(&window);
                     }
                     // A Wayland window's first picture is the first time its
-                    // size is known: it is put wholly on screen then, once.
-                    // An X11 one was as it mapped.
+                    // size is known, and the first time it can be known by its
+                    // program: it goes where that program's last window closed,
+                    // if it did, then is put wholly on screen, once. An X11
+                    // one was as it mapped.
                     if is_root
                         && window.toplevel().is_some()
                         && matches!(taken.own, damage::Buffer::New(_))
                     {
-                        self.settle_new(&window, None);
+                        let on = self.place_remembered(&window);
+                        self.settle_new(&window, on);
                     }
                     shell::id_of(&window)
                 }
@@ -1432,6 +1440,8 @@ impl Compositor {
         let id = self.mint_surface_id();
         window.user_data().insert_if_missing(|| id);
 
+        // Given back if it opens where its program's last window closed.
+        shell::placement(&window, |placement| placement.cascaded = Some(self.placed));
         let at = self.place_new();
         // Not activated by the map: smithay would unset every other window's
         // state unsaid, and the window in use would never be told it no

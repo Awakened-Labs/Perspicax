@@ -1091,6 +1091,25 @@ impl Desk {
         self.windows.push(window);
     }
 
+    /// Open a dialog, drawn white, over the `parent`th window: a window with
+    /// an xdg parent, as a program's file chooser or settings are.
+    pub fn open_dialog(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        title: &str,
+        app_id: &str,
+        parent: usize,
+    ) {
+        self.colours.push(0xffff_ffff);
+        let surface = self.compositor.create_surface(qh);
+        let window = self.xdg.create_window(surface, WindowDecorations::None, qh);
+        window.set_title(title);
+        window.set_app_id(app_id);
+        window.set_parent(Some(&self.windows[parent]));
+        window.commit();
+        self.windows.push(window);
+    }
+
     /// Open a window, drawn white, that asks for its frame to be drawn for
     /// it, as Qt and foot do.
     pub fn open_framed(&mut self, qh: &QueueHandle<Self>, title: &str) {
