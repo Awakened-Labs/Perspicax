@@ -349,15 +349,16 @@ impl Running {
     }
 
     /// Whether the place of `app`'s last window is remembered, for its next
-    /// one to open there. Only with a person at the seat: headless, a window
-    /// stays where the cascade puts it (see `crate::shell`).
+    /// one to open there: the person's `[placement]` on a seat. Headless only
+    /// with a person at the seat, and then every program: with nobody, a
+    /// window stays where the cascade puts it (see `crate::shell`).
     pub(crate) fn remembers(&self, app: &str) -> bool {
         match self {
             Self::Headless { person, .. } => {
                 *person && perspicax_policy::Remembering::default().remembers(app)
             }
             #[cfg(feature = "seat")]
-            Self::Seat(_) => perspicax_policy::Remembering::default().remembers(app),
+            Self::Seat(session) => session.settings.remembering.remembers(app),
         }
     }
 

@@ -148,6 +148,17 @@ impl Compositor {
         Some(output)
     }
 
+    /// The person changed what is remembered: a program no longer to be is
+    /// forgotten now, and every one if nothing is to be. Its history goes
+    /// with the wish, rather than lying in wait for the switch to go back.
+    #[cfg(feature = "seat")]
+    pub(crate) fn forget_unremembered(&mut self) {
+        let backend = &self.backend;
+        if self.places.retain(|app| backend.remembers(app)) {
+            tracing::info!("forgot where the programs no longer remembered last closed");
+        }
+    }
+
     /// The program `window` is remembered by, if it is: its app id, for a
     /// main window that does not place itself, unless the person said not to.
     fn remembered_app(&self, window: &Framed) -> Option<String> {

@@ -42,7 +42,8 @@ use std::{
 use perspicax_policy::{
     Access, Action, Bindings, Chord, Colour, Context, Decorations, Direction, Drag, Flipping,
     Focus, FocusModel, Gesture, Grid, Keysym, Mods, MouseBindings, MouseChord, OPAQUE, Opacity,
-    Place, Program, Protocol, Resistance, Rule, Shape, Side, Snapping, Switching, Towards,
+    Place, Program, Protocol, Remembering, Resistance, Rule, Shape, Side, Snapping, Switching,
+    Towards,
 };
 use serde::Deserialize;
 
@@ -179,6 +180,10 @@ pub struct Config {
     /// For the person's eyes only: a see-through window still covers what is
     /// behind it, as far as an agent is told.
     pub opacity: Opacity,
+    /// Whether a program's next window opens where its last one closed, and
+    /// the programs whose never does: the `[placement]` table. Where they
+    /// closed is the person's history, kept apart from this file, as state.
+    pub remembering: Remembering,
     /// Who draws a window's titlebar and border, and what they look like.
     /// Its colours are the theme's titlebar colours.
     pub decorations: Decorations,
@@ -516,6 +521,9 @@ impl Config {
             },
             // Nothing see-through in either: it is a taste, and asked for.
             opacity: Opacity::default(),
+            // Both: a Wayland window cannot ask where to open, so it opens
+            // where its program's last one was left.
+            remembering: Remembering::default(),
             flipping: match profile {
                 Profile::Classic => Flipping::default(),
                 // The Fluxbox and Enlightenment habit: the desk is a loop the
@@ -734,6 +742,7 @@ struct Raw {
     snap: Option<RawSnap>,
     resistance: Option<RawResistance>,
     opacity: Option<RawOpacity>,
+    placement: Option<RawPlacement>,
     decorations: Option<RawDecorations>,
     theme: Option<RawTheme>,
     splash: Option<RawSplash>,
@@ -915,6 +924,15 @@ struct RawOpacity {
     unfocused: Option<i64>,
     /// By app id or `WM_CLASS` class, which no schema could list.
     apps: Option<BTreeMap<String, i64>>,
+}
+
+/// The `[placement]` table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawPlacement {
+    remember: Option<bool>,
+    /// By app id or `WM_CLASS` class, which no schema could list.
+    forget: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1366,6 +1384,10 @@ impl Raw {
             config.opacity = opacity.apply(config.opacity)?;
         }
 
+        if let Some(placement) = self.placement {
+            config.remembering = placement.apply(config.remembering)?;
+        }
+
         config.theme = theme(self.theme, self.decorations.as_ref())?;
         if let Some(decorations) = self.decorations {
             config.decorations = decorations.apply(config.decorations)?;
@@ -1455,6 +1477,22 @@ impl RawOpacity {
             opacity.apps.insert(app, value);
         }
         Ok(opacity)
+    }
+}
+
+impl RawPlacement {
+    fn apply(self, mut remembering: Remembering) -> Result<Remembering, Error> {
+        remembering.on = self.remember.unwrap_or(remembering.on);
+        for app in self.forget.unwrap_or_default() {
+            if app.is_empty() {
+                return Err(invalid(
+                    "placement.forget".to_owned(),
+                    "an application is named \"\"; name it by its app id or WM_CLASS".to_owned(),
+                ));
+            }
+            remembering.forget.insert(app);
+        }
+        Ok(remembering)
     }
 }
 
@@ -2878,6 +2916,62 @@ mod tests {
         let error = parse("[opacity.apps]\n\"\" = 90", SEAT).unwrap_err();
         assert!(
             matches!(&error, Error::Invalid { key, .. } if key == "opacity.apps"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn both_profiles_open_a_programs_window_where_its_last_one_closed() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            assert_eq!(
+                Config::profile(profile, SEAT).remembering,
+                Remembering::default(),
+                "{profile:?}"
+            );
+        }
+        let config = parse("", SEAT).unwrap();
+        assert!(config.remembering.on && config.remembering.forget.is_empty());
+    }
+
+    #[test]
+    fn placement_is_configured_in_its_own_table_with_the_programs_to_forget() {
+        let config = parse(
+            "[placement]\nremember = false\n\
+             forget = [\"org.keepassxc.KeePassXC\", \"Firefox\"]",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(
+            config.remembering,
+            Remembering {
+                on: false,
+                forget: BTreeSet::from([
+                    "org.keepassxc.KeePassXC".to_owned(),
+                    "Firefox".to_owned()
+                ]),
+            }
+        );
+        let forget_alone = parse("[placement]\nforget = [\"foot\"]", SEAT).unwrap();
+        assert!(forget_alone.remembering.on, "the default, kept");
+        assert!(!forget_alone.remembering.remembers("foot"));
+        assert!(forget_alone.remembering.remembers("ghostty"));
+        assert!(
+            shell("[placement]\nremember = false", ShellBuilt::FULL).is_ok(),
+            "the shell reads the same file"
+        );
+    }
+
+    #[test]
+    fn a_placement_key_misspelled_or_an_application_unnamed_is_refused() {
+        assert!(parse("[placement]\nremember-size = true", SEAT).is_err());
+        assert!(parse("[placement]\nremember = \"yes\"", SEAT).is_err());
+        assert!(
+            parse("[placement]\nforget = [{ title = \"Inbox\" }]", SEAT).is_err(),
+            "never by title"
+        );
+        let error = parse("[placement]\nforget = [\"foot\", \"\"]", SEAT).unwrap_err();
+        assert!(
+            matches!(&error, Error::Invalid { key, .. } if key == "placement.forget"),
             "{error}"
         );
     }

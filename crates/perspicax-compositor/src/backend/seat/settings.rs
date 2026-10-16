@@ -254,6 +254,7 @@ pub(crate) fn reload(state: &mut Compositor) {
     let outputs_changed = fresh.outputs != session.settings.outputs;
     let decorations_changed = fresh.decorations != session.settings.decorations;
     let opacity_changed = fresh.opacity != session.settings.opacity;
+    let placement_changed = fresh.remembering != session.settings.remembering;
     let theme_changed = fresh.theme != session.settings.theme;
     let appearance_changed = fresh.theme.apps != session.settings.theme.apps;
     let pointer_changed = (&fresh.theme.cursor, fresh.theme.cursor_size)
@@ -331,6 +332,10 @@ pub(crate) fn reload(state: &mut Compositor) {
         state.backend.redraw();
         state.publish_facts();
     }
+    // Turned off, or a program listed to forget: forgotten at once.
+    if placement_changed {
+        state.forget_unremembered();
+    }
     let access_changed = access.is_some();
     if let Some(access) = access {
         state.set_access(access);
@@ -344,6 +349,7 @@ pub(crate) fn reload(state: &mut Compositor) {
         outputs_changed,
         decorations_changed,
         opacity_changed,
+        placement_changed,
         theme_changed,
         access_changed,
         mouse_changed,
