@@ -1113,6 +1113,15 @@ impl CompositorHandler for Compositor {
                     if is_root {
                         self.settle_resize(&window);
                     }
+                    // A Wayland window's first picture is the first time its
+                    // size is known: it is put wholly on screen then, once.
+                    // An X11 one was as it mapped.
+                    if is_root
+                        && window.toplevel().is_some()
+                        && matches!(taken.own, damage::Buffer::New(_))
+                    {
+                        self.settle_new(&window, None);
+                    }
                     shell::id_of(&window)
                 }
                 None if is_root => self.layer_committed(surface),

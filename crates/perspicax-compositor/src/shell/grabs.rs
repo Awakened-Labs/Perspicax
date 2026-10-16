@@ -231,7 +231,7 @@ impl ResizeGrab {
 
 /// The smallest and largest size a window declared, `0` meaning no limit:
 /// from its xdg cached state, or an X client's size hints.
-fn limits(window: &Framed) -> Option<(Size<i32, Logical>, Size<i32, Logical>)> {
+pub(super) fn limits(window: &Framed) -> Option<(Size<i32, Logical>, Size<i32, Logical>)> {
     if let Some(toplevel) = window.toplevel() {
         return Some(with_states(toplevel.wl_surface(), |states| {
             let mut cached = states.cached_state.get::<SurfaceCachedState>();

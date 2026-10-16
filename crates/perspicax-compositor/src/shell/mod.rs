@@ -33,7 +33,7 @@ use std::cell::RefCell;
 
 use perspicax_node::SurfaceId;
 use perspicax_policy::{
-    Edges, Look, Rect, Towards, carry, inset, neighbour, place, unmaximized_at,
+    Edges, Look, Rect, Towards, carry, inset, neighbour, outset, place, settle, unmaximized_at,
 };
 use smithay::{
     desktop::{
@@ -92,6 +92,10 @@ pub(crate) struct Placement {
     /// so a reload changes it; a value the keys set stays until
     /// `opacity-reset`. See [`Compositor::opacity_of`].
     pub(crate) opacity: Option<u8>,
+    /// Put wholly on screen as it opened, or found with a place of its own
+    /// already. From then on, where it goes is the person's. See
+    /// [`Compositor::settle_new`].
+    pub(crate) settled: bool,
 }
 
 /// How a window fills its monitor.
@@ -168,7 +172,8 @@ impl Compositor {
     ///
     /// Headless, the pointer starts at the origin and there is one output
     /// there, so this is the same cascade from `(0, 0)` that M2 placed
-    /// windows with.
+    /// windows with. With a person at the seat, a window too big to stay
+    /// where it was put is then settled ([`Self::settle_new`]).
     pub(crate) fn place_new(&mut self) -> Point<i32, Logical> {
         // Inside the part of the output panels leave free, so a new window
         // never opens under a panel. Headless has no panels, so this is the
@@ -180,6 +185,80 @@ impl Compositor {
         let at = place(self.placed, rect(area));
         self.placed = self.placed.wrapping_add(1);
         at.into()
+    }
+
+    /// Put a window that is opening wholly inside the work area of its
+    /// monitor, frame and all: slid on at its own size, then shrunk if it is
+    /// still too big, never below the least its client allows
+    /// (`perspicax_policy::settle`). An X11 window as it maps; a Wayland one
+    /// at its first picture, the first time its size is known.
+    ///
+    /// On `on`, or else the monitor its top-left corner is on: where it was
+    /// put, whatever the pointer has done since. Not the one it is mostly
+    /// on, which for a window much wider than its monitor is the next one
+    /// along.
+    ///
+    /// Once. After that, where a window goes is the person's, and one
+    /// dragged partly off the screen stays there. A window that opens
+    /// filling its monitor, snapped, in a tab group or parked already has a
+    /// place, and keeps it. Only with a person at the seat: headless, a
+    /// window stays where the cascade put it (see the module doc).
+    pub(crate) fn settle_new(&mut self, window: &Framed, on: Option<Output>) {
+        if !self.backend.has_person() || places_itself(window) {
+            return;
+        }
+        if placement(window, |placement| {
+            std::mem::replace(&mut placement.settled, true)
+        }) {
+            return;
+        }
+        if Self::filling(window).is_some() || Self::is_snapped(window) || self.is_tabbed(window) {
+            return;
+        }
+        // Parked, it has no place on screen to settle.
+        let Some(client) = self.extent(window) else {
+            return;
+        };
+        let area = on
+            .or_else(|| self.space.output_under(client.loc.to_f64()).next().cloned())
+            .or_else(|| self.output_of(window))
+            .and_then(|output| self.usable_area(&output));
+        let Some(area) = area else {
+            return;
+        };
+        let insets = self.insets(window);
+        let (min, _) = grabs::limits(window).unwrap_or_default();
+        let least = (
+            min.w.max(1) + insets.left + insets.right,
+            min.h.max(1) + insets.top + insets.bottom,
+        );
+        let to = inset(
+            settle(outset(rect(client), insets), rect(area), least),
+            insets,
+        );
+        let to = Rectangle::new((to.x, to.y).into(), (to.w, to.h).into());
+        if to == client {
+            return;
+        }
+        if to.size != client.size
+            && let Some(toplevel) = window.toplevel()
+        {
+            toplevel.with_pending_state(|pending| pending.size = Some(to.size));
+            toplevel.send_pending_configure();
+        }
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = window.x11_surface() {
+            let _ = x11.configure(to);
+        }
+        if to.loc != client.loc {
+            self.space.map_element(window.clone(), to.loc, false);
+        }
+        tracing::info!(
+            surface = ?id_of(window).map(|id| id.0),
+            from = ?client,
+            to = ?to,
+            "opened wholly on screen"
+        );
     }
 
     /// Where a window is and how big, in the global space: where it was
