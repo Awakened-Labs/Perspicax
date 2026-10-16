@@ -348,6 +348,16 @@ impl Running {
         }
     }
 
+    /// Whether any program's place is remembered: `[placement] remember` on
+    /// a seat, a person at it headless.
+    pub(crate) fn remembers_any(&self) -> bool {
+        match self {
+            Self::Headless { person, .. } => *person,
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.settings.remembering.on,
+        }
+    }
+
     /// Whether the place of `app`'s last window is remembered, for its next
     /// one to open there: the person's `[placement]` on a seat. Headless only
     /// with a person at the seat, and then every program: with nobody, a

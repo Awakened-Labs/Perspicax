@@ -160,6 +160,7 @@ fn run_demo() -> Reading {
         // is finished, because a Qt tree takes seconds nobody can predict.
         run_for: Some(Duration::from_secs(120)),
         config: None,
+        places: None,
         socket: None,
         xwayland: false,
     };

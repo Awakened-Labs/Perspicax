@@ -341,11 +341,25 @@ pub async fn bus_daemon(connection: &Connection) -> Result<u32> {
 /// `var` reads the environment, as [`has_bus`]'s does.
 #[must_use]
 pub fn log_path(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    Some(state_folder(var)?.join("perspicax.log"))
+}
+
+/// Where a seat keeps where each program's last window closed, for its next
+/// one to open there: `windows.json`, beside the log. State, not config:
+/// the person never writes it, as `ennius gui` keeps its window's apart
+/// from its `config.toml`.
+#[must_use]
+pub fn windows_path(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    Some(state_folder(var)?.join("windows.json"))
+}
+
+/// `$XDG_STATE_HOME/perspicax`, or `~/.local/state/perspicax`.
+fn state_folder(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     // The XDG spec's rule: a relative folder is no folder at all.
     let folder = |name: &str| var(name).map(PathBuf::from).filter(|dir| dir.is_absolute());
     let state = folder("XDG_STATE_HOME")
         .or_else(|| folder("HOME").map(|home| home.join(".local/state")))?;
-    Some(state.join("perspicax").join("perspicax.log"))
+    Some(state.join("perspicax"))
 }
 
 /// Open a fresh log at `path`, keeping the last one beside it as
@@ -607,6 +621,23 @@ mod tests {
             );
         }
         assert_eq!(log(&[]), None);
+    }
+
+    #[test]
+    fn where_windows_closed_is_kept_beside_the_log() {
+        let scratch = Scratch::new("windows-path");
+        let windows = |vars: &[(&str, &str)]| windows_path(scratch.env(vars));
+        assert_eq!(
+            windows(&[("XDG_STATE_HOME", "/state"), ("HOME", "/home/someone")]),
+            Some(PathBuf::from("/state/perspicax/windows.json"))
+        );
+        assert_eq!(
+            windows(&[("XDG_STATE_HOME", "state"), ("HOME", "/home/someone")]),
+            Some(PathBuf::from(
+                "/home/someone/.local/state/perspicax/windows.json"
+            ))
+        );
+        assert_eq!(windows(&[]), None);
     }
 
     #[test]

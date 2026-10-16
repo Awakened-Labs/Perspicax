@@ -72,13 +72,29 @@ impl Compositor {
             return;
         };
         let at = rect.loc - origin;
-        self.places.remember(
-            &app,
-            Spot {
-                output: output.name(),
-                at: (at.x, at.y),
-            },
-        );
+        let spot = Spot {
+            output: output.name(),
+            at: (at.x, at.y),
+        };
+        if self.places.remember(&app, spot) {
+            self.owe_places();
+        }
+    }
+
+    /// The session is ending with windows still open: each is remembered
+    /// as though it closed, those parked first and then those on screen from
+    /// the bottom up, so that of a program's windows the one on top is what
+    /// it is remembered by.
+    pub(crate) fn remember_open_windows(&mut self) {
+        let open: Vec<Framed> = self
+            .parked
+            .iter()
+            .chain(self.space.elements())
+            .cloned()
+            .collect();
+        for window in &open {
+            self.remember_place(window);
+        }
     }
 
     /// Where a window that is opening goes, if its program's last window
@@ -148,14 +164,18 @@ impl Compositor {
         Some(output)
     }
 
-    /// The person changed what is remembered: a program no longer to be is
-    /// forgotten now, and every one if nothing is to be. Its history goes
-    /// with the wish, rather than lying in wait for the switch to go back.
-    #[cfg(feature = "seat")]
+    /// What is remembered was read, or the person changed it: a program no
+    /// longer to be is forgotten now, and if nothing is to be, everything,
+    /// file and all. Its history goes with the wish, rather than lying in
+    /// wait for the switch to go back.
     pub(crate) fn forget_unremembered(&mut self) {
         let backend = &self.backend;
-        if self.places.retain(|app| backend.remembers(app)) {
+        let forgot = self.places.retain(|app| backend.remembers(app));
+        if !self.backend.remembers_any() {
+            self.delete_places();
+        } else if forgot {
             tracing::info!("forgot where the programs no longer remembered last closed");
+            self.owe_places();
         }
     }
 

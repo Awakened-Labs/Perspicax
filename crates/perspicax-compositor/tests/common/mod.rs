@@ -127,22 +127,34 @@ pub struct Session {
 impl Session {
     /// A headless compositor on `backend`, on a socket named for `name`.
     pub fn start(name: &str, backend: Backend) -> Self {
-        Self::start_with(name, backend, Vec::new(), false)
+        Self::start_with(name, backend, Vec::new(), false, None)
+    }
+
+    /// The same, keeping where each program's last window closed at
+    /// `places`, as a seat keeps it in `windows.json`.
+    pub fn start_remembering(name: &str, backend: Backend, places: PathBuf) -> Self {
+        Self::start_with(name, backend, Vec::new(), false, Some(places))
     }
 
     /// The same, with Xwayland: its display is in the facts once it is
     /// ready.
     pub fn start_with_xwayland(name: &str, backend: Backend) -> Self {
-        Self::start_with(name, backend, Vec::new(), true)
+        Self::start_with(name, backend, Vec::new(), true, None)
     }
 
     /// The same, starting `spawn` as `--spawn` would: each a program and
     /// its arguments.
     pub fn start_spawning(name: &str, backend: Backend, spawn: Vec<Vec<String>>) -> Self {
-        Self::start_with(name, backend, spawn, false)
+        Self::start_with(name, backend, spawn, false, None)
     }
 
-    fn start_with(name: &str, backend: Backend, spawn: Vec<Vec<String>>, xwayland: bool) -> Self {
+    fn start_with(
+        name: &str,
+        backend: Backend,
+        spawn: Vec<Vec<String>>,
+        xwayland: bool,
+        places: Option<PathBuf>,
+    ) -> Self {
         let socket = format!("perspicax-{name}-{}", std::process::id());
         let facts = Facts::new();
         let requests = Requests::new();
@@ -161,6 +173,7 @@ impl Session {
                     env: Vec::new(),
                     run_for: Some(Duration::from_secs(30)),
                     config: None,
+                    places,
                     socket: Some(socket),
                     xwayland,
                 };
@@ -213,6 +226,17 @@ impl Session {
             .join()
             .expect("the compositor thread panicked")
             .expect("the compositor failed");
+    }
+
+    /// Stop the compositor with `clients` still connected, their windows
+    /// open, as a session ends at logout; they go only once it has.
+    pub fn end_with_open<D>(self, clients: D) {
+        self.stop.request();
+        self.thread
+            .join()
+            .expect("the compositor thread panicked")
+            .expect("the compositor failed");
+        drop(clients);
     }
 }
 

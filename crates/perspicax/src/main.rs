@@ -528,6 +528,11 @@ fn run(cli: &Cli, wire: Option<Wire>) -> Result<()> {
         .concat(),
         run_for: cli.run_for.map(Duration::from_secs_f64),
         config: config_path,
+        // A person's: headless, an agent's run remembers nothing past itself.
+        places: cli
+            .on_seat()
+            .then(|| session::windows_path(|name| std::env::var(name).ok()))
+            .flatten(),
         socket: None,
         xwayland: false,
     };

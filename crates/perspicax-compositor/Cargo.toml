@@ -40,6 +40,12 @@ perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
 # perspicax's own protocols, the server side: the channel to the desktop
 # shell. Generated from XML by wayland-scanner, as smithay's are.
 perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", features = ["server"] }
+# Where each program's last window closed, kept between sessions as JSON
+# (`remembered`): state the person never writes, as `ennius gui` keeps its
+# own window's. Both already in the tree for the MCP server; MIT OR
+# Apache-2.0.
+serde.workspace = true
+serde_json.workspace = true
 # Xwayland-only: a second X connection, for the X-Resource extension's
 # QueryClientIds -- the X server's own word on which process drew a window.
 # Already in the tree under Smithay's own Xwayland support; MIT OR Apache-2.0.

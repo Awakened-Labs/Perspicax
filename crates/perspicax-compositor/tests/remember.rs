@@ -18,6 +18,14 @@
 
 mod common;
 
+use std::{
+    env, fs,
+    os::unix::fs::PermissionsExt as _,
+    path::{Path, PathBuf},
+    process,
+    time::{Duration, Instant},
+};
+
 use common::{Desk, Session, until};
 use perspicax_compositor::{Backend, Command, Virtual};
 use perspicax_index::{HostFacts, SurfaceFacts};
@@ -375,6 +383,140 @@ fn with_nobody_at_the_seat_a_program_reopens_where_the_cascade_puts_it() {
     assert_eq!(again, (96.0, 96.0));
 
     session.stop((desk, queue));
+}
+
+/// A file of a test's own, to keep places in, in a folder gone when it is.
+struct Kept(PathBuf);
+
+impl Kept {
+    fn new(name: &str) -> Self {
+        let folder = env::temp_dir().join(format!("perspicax-kept-{name}-{}", process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        Self(folder.join("perspicax/windows.json"))
+    }
+
+    fn text(&self) -> Option<String> {
+        fs::read_to_string(&self.0).ok()
+    }
+}
+
+impl Drop for Kept {
+    fn drop(&mut self) {
+        if let Some(folder) = self.0.parent().and_then(Path::parent) {
+            let _ = fs::remove_dir_all(folder);
+        }
+    }
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_program_reopens_where_its_last_window_closed_in_the_session_before() {
+    let kept = Kept::new("next-session");
+    let backend = || Backend::headless((1280, 1024)).with_person();
+    let session = Session::start_remembering("remember-before", backend(), kept.0.clone());
+    let (mut desk, mut queue, qh, _) = session.client();
+    open(&session, &mut desk, &mut queue, &qh, "a", "app.a");
+    open(
+        &session,
+        &mut desk,
+        &mut queue,
+        &qh,
+        "Inbox - payslip.pdf",
+        "app.b",
+    );
+    close(&session, &mut desk, &mut queue, 1, "Inbox - payslip.pdf");
+    session.stop((desk, queue));
+
+    let text = kept.text().expect("kept");
+    assert!(text.contains("app.b"), "{text}");
+    assert!(!text.contains("payslip"), "a title kept: {text}");
+    assert_eq!(
+        fs::metadata(&kept.0).expect("kept").permissions().mode() & 0o777,
+        0o600
+    );
+
+    // The next session's first window would be the cascade's first, at
+    // the origin.
+    let session = Session::start_remembering("remember-after", backend(), kept.0.clone());
+    let (mut desk, mut queue, qh, _) = session.client();
+    let again = open(&session, &mut desk, &mut queue, &qh, "b again", "app.b");
+    assert_eq!(again, (32.0, 32.0));
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_still_open_as_the_session_ends_is_remembered_as_though_it_closed() {
+    let kept = Kept::new("still-open");
+    let backend = || Backend::headless((1280, 1024)).with_person();
+    let session = Session::start_remembering("remember-open", backend(), kept.0.clone());
+    let (mut desk, mut queue, qh, _) = session.client();
+    open(&session, &mut desk, &mut queue, &qh, "a", "app.a");
+    open(&session, &mut desk, &mut queue, &qh, "b", "app.b");
+    // A second of the same program, on top of the first.
+    let top = open(&session, &mut desk, &mut queue, &qh, "b on top", "app.b");
+    assert_eq!(top, (64.0, 64.0));
+    session.end_with_open((desk, queue));
+
+    let session = Session::start_remembering("remember-reopen", backend(), kept.0.clone());
+    let (mut desk, mut queue, qh, _) = session.client();
+    let again = open(&session, &mut desk, &mut queue, &qh, "b again", "app.b");
+    assert_eq!(
+        again,
+        (64.0, 64.0),
+        "where its window on top was, not the one under it, nor the cascade's first"
+    );
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_closing_is_kept_within_a_second_not_only_as_the_session_ends() {
+    let kept = Kept::new("within-a-second");
+    let session = Session::start_remembering(
+        "remember-soon",
+        Backend::headless((1280, 1024)).with_person(),
+        kept.0.clone(),
+    );
+    let (mut desk, mut queue, qh, _) = session.client();
+    open(&session, &mut desk, &mut queue, &qh, "a", "app.a");
+    open(&session, &mut desk, &mut queue, &qh, "b", "app.b");
+    close(&session, &mut desk, &mut queue, 1, "b");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !kept.text().is_some_and(|text| text.contains("app.b")) {
+        assert!(Instant::now() < deadline, "never kept: {:?}", kept.text());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn where_nothing_is_remembered_what_was_is_forgotten_file_and_all() {
+    let kept = Kept::new("forgotten");
+    fs::create_dir_all(kept.0.parent().expect("a folder")).expect("its folder");
+    fs::write(
+        &kept.0,
+        r#"{"version": 1, "windows": [{"app": "app.b", "output": "HEADLESS-1", "x": 32, "y": 32}]}"#,
+    )
+    .expect("kept before");
+
+    // Nobody at the seat: nothing is remembered.
+    let session = Session::start_remembering(
+        "remember-forgets",
+        Backend::headless((1280, 1024)),
+        kept.0.clone(),
+    );
+    let (mut desk, mut queue, qh, _) = session.client();
+    let b = open(&session, &mut desk, &mut queue, &qh, "b", "app.b");
+    assert_eq!(b, (0.0, 0.0), "the cascade's");
+    assert_eq!(kept.text(), None, "forgotten as the session began");
+    session.stop((desk, queue));
+    assert_eq!(kept.text(), None, "nor written as it ended");
 }
 
 #[cfg(feature = "capture")]

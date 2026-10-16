@@ -570,6 +570,7 @@ fn host(name: &str, shell_config: &str, body: impl FnOnce(&Hosted) + Send + 'sta
         env: session::accessibility_env(),
         run_for: Some(Duration::from_secs(120)),
         config: None,
+        places: None,
         socket: Some(socket),
         xwayland: false,
     };

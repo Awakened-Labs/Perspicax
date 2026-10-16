@@ -75,6 +75,7 @@ fn an_x11_window_is_attributed_to_its_client_through_xres() {
                 env: Vec::new(),
                 run_for: Some(Duration::from_secs(30)),
                 config: None,
+                places: None,
                 socket: None,
                 xwayland: true,
             };
@@ -189,6 +190,7 @@ fn a_spawned_program_finds_xwaylands_display() {
                 )],
                 run_for: Some(Duration::from_secs(30)),
                 config: None,
+                places: None,
                 socket: None,
                 xwayland: true,
             };
@@ -233,6 +235,7 @@ fn a_command_that_does_not_exist_is_named_after_waiting_for_xwayland() {
         env: Vec::new(),
         run_for: Some(Duration::from_secs(20)),
         config: None,
+        places: None,
         socket: None,
         xwayland: true,
     };
@@ -289,6 +292,7 @@ fn a_maximized_x11_window_keeps_its_titlebar_and_loses_its_border() {
                 env: Vec::new(),
                 run_for: Some(Duration::from_secs(30)),
                 config: None,
+                places: None,
                 socket: None,
                 xwayland: true,
             };
@@ -404,6 +408,7 @@ fn a_new_x11_window_takes_the_keyboard_when_it_maps() {
                 env: Vec::new(),
                 run_for: Some(Duration::from_secs(30)),
                 config: None,
+                places: None,
                 socket: None,
                 xwayland: true,
             };

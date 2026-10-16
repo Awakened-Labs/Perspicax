@@ -347,6 +347,11 @@ pub struct Compositor {
     /// one opens there (see `shell::remember`). The person's history: never
     /// in the facts.
     pub(crate) places: perspicax_policy::Places,
+    /// Where the places are kept between sessions, if they are (see
+    /// `remembered`).
+    pub(crate) places_kept: Option<std::path::PathBuf>,
+    /// The places changed since they were last written there.
+    pub(crate) places_owed: bool,
     started: Instant,
     /// The clients this compositor accepted, each with its state, until
     /// they go: flushed one by one, to see which have stopped reading
@@ -475,6 +480,8 @@ impl Compositor {
             spawn_failed: None,
             placed: 0,
             places: perspicax_policy::Places::default(),
+            places_kept: None,
+            places_owed: false,
             started: Instant::now(),
             clients: Vec::new(),
         }
