@@ -81,19 +81,7 @@ impl WlrLayerShellHandler for Compositor {
             surface.send_close();
             return;
         };
-        let layer = LayerSurface::new(surface, namespace);
-        let id = self.mint_surface_id();
-        layer.user_data().insert_if_missing(|| id);
-        if let Err(error) = layer_map_for_output(&output).map_layer(&layer) {
-            tracing::warn!(%error, "could not map layer surface");
-            return;
-        }
-        tracing::info!(
-            surface = id.0,
-            namespace = layer.namespace(),
-            output = output.name(),
-            "layer surface mapped"
-        );
+        self.map_layer_on(surface, namespace, &output);
     }
 
     /// A panel's menu, given to its panel. Already tracked: a panel's menu
@@ -126,7 +114,9 @@ impl WlrLayerShellHandler for Compositor {
 pub(crate) struct Withdrawn {
     /// The client's layer surface. The wrapper the layer map knew it by went
     /// with its place there.
-    surface: WlrLayerSurface,
+    pub(crate) surface: WlrLayerSurface,
+    /// The name its client gave it, which it is known by again.
+    namespace: String,
     /// The output it was on, given at `get_layer_surface` or chosen then,
     /// which it goes back to.
     output: Output,
@@ -221,9 +211,69 @@ impl Compositor {
         unconfigure(surface);
         self.withdrawn_layers.push(Withdrawn {
             surface: layer.layer_surface().clone(),
+            namespace: layer.namespace().to_owned(),
             output,
         });
         tracing::info!(surface = id.0, "layer surface unmapped by its client");
+    }
+
+    /// A commit from a layer surface its client unmapped: its client asking
+    /// for it again, or drawing in it. It is back on its output from this
+    /// commit, as a new layer with a new id, and its room is kept again from
+    /// now, as a new panel's is from its first commit. The commit is then
+    /// taken in as a new layer's first is: it is sent the configure a new
+    /// layer is sent, and it takes the keys once it shows something.
+    pub(crate) fn map_layer_again(&mut self, surface: &WlSurface) {
+        let Some(at) = self
+            .withdrawn_layers
+            .iter()
+            .position(|withdrawn| withdrawn.surface.wl_surface() == surface)
+        else {
+            return;
+        };
+        let Withdrawn {
+            surface: layer,
+            namespace,
+            output,
+        } = self.withdrawn_layers.remove(at);
+        // A menu refused while it was away, that its client drew all the
+        // same, was filed under it then, and would come back with it. One its
+        // client first draws from now on is filed under it on screen, which
+        // smithay cannot be told not to do; its client was told it is done.
+        crate::popup::dismiss_all(surface);
+        self.map_layer_on(layer, namespace, &output);
+    }
+
+    /// Put a layer surface on `output` as a new layer: a new wrapper for the
+    /// layer map to know it by, and a new id, so nothing an agent learned of
+    /// it before is taken for what it is now.
+    ///
+    /// The layer map arranges it as it is mapped. A new layer has asked for
+    /// no room yet, but one mapped again asked before it went, so its room is
+    /// kept now, and the windows that fill are fitted to what is left: its
+    /// own commit, which arranges again, finds nothing more changed.
+    fn map_layer_on(&mut self, surface: WlrLayerSurface, namespace: String, output: &Output) {
+        let layer = LayerSurface::new(surface, namespace);
+        let id = self.mint_surface_id();
+        layer.user_data().insert_if_missing(|| id);
+        let reserved = {
+            let mut map = layer_map_for_output(output);
+            let before = map.non_exclusive_zone();
+            if let Err(error) = map.map_layer(&layer) {
+                tracing::warn!(%error, "could not map layer surface");
+                return;
+            }
+            map.non_exclusive_zone() != before
+        };
+        if reserved {
+            self.refit_frames();
+        }
+        tracing::info!(
+            surface = id.0,
+            namespace = layer.namespace(),
+            output = output.name(),
+            "layer surface mapped"
+        );
     }
 
     /// Whether `surface` is that of a layer its client unmapped.

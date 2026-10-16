@@ -371,3 +371,199 @@ fn a_panel_its_client_unmaps_gives_the_pointer_to_what_it_uncovered() {
 
     session.stop(((desk, queue), (menu, menu_queue)));
 }
+
+/// The size the `nth` layer was last offered.
+fn offered_to(desk: &Desk, nth: usize) -> Option<(u32, u32)> {
+    desk.said_to(desk.layers[nth].0.wl_surface())
+        .into_iter()
+        .rev()
+        .find_map(|said| match said {
+            Said::LayerConfigure(size) => Some(size),
+            _ => None,
+        })
+}
+
+/// Ask for the `nth` layer again as layer-shell has a client do it: commit
+/// with nothing attached, and wait for the configure.
+fn ask_again(desk: &mut Desk, queue: &mut EventQueue<Desk>, nth: usize) {
+    let told = layer_configures(desk, nth);
+    desk.layers[nth].0.commit();
+    until(queue, desk, |desk| layer_configures(desk, nth) > told);
+}
+
+/// #144: a panel its client asks for again is sent one configure, the one a
+/// new panel is sent, at the size the room gives it, and is back once it
+/// draws: as a new panel, with an id nothing has seen.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_panel_asked_for_again_is_configured_and_back_as_new_when_it_draws() {
+    let session = session("remap-layer-new");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let gone = panel_up(&session, &mut desk, &mut queue, &qh, "panel");
+    unmap_layer(&mut desk, &mut queue, 0);
+    session.wait_for(|facts| facts.surface(gone).is_none());
+    let told = layer_configures(&desk, 0);
+
+    ask_again(&mut desk, &mut queue, 0);
+    until(&mut queue, &mut desk, |desk| desk.layers_drawn == 2);
+    let facts =
+        session.wait_for(|facts| layer_named(facts, "panel").is_some_and(|panel| panel.mapped));
+    let back = layer_id(&facts, "panel");
+    assert_ne!(back, gone, "back under the id it had");
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert_eq!(layer_configures(&desk, 0), told + 1, "one configure");
+    assert_eq!(offered_to(&desk, 0), Some((1280, PANEL_HEIGHT)));
+
+    session.stop((desk, queue));
+}
+
+/// #144: a panel asked for again keeps its room from the commit that asks,
+/// as a new panel does from its first: a maximized window is fitted below
+/// it again before the panel has drawn.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_panel_asked_for_again_takes_its_room_back_before_it_draws() {
+    let session = seated("remap-layer-room");
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_window(&qh, "filling", "filling");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    desk.windows[0].set_maximized();
+    panel_up(&session, &mut desk, &mut queue, &qh, "panel");
+    until(&mut queue, &mut desk, |desk| {
+        desk.offered == Some((1280, 1024 - PANEL_HEIGHT))
+    });
+    unmap_layer(&mut desk, &mut queue, 0);
+    until(&mut queue, &mut desk, |desk| {
+        desk.offered == Some((1280, 1024))
+    });
+
+    desk.leave_undrawn(0);
+    ask_again(&mut desk, &mut queue, 0);
+    until(&mut queue, &mut desk, |desk| {
+        desk.offered == Some((1280, 1024 - PANEL_HEIGHT))
+    });
+    assert_eq!(desk.layers_drawn, 1, "the panel drew again");
+
+    session.stop((desk, queue));
+}
+
+/// #144: a launcher its client asks for again takes the keyboard once it
+/// draws, as a new one does, and not when it asks.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_launcher_mapped_again_takes_the_keyboard_once_it_draws() {
+    let session = session("remap-layer-keyboard");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    desk.open_window(&qh, "beneath", "beneath");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    let beneath = desk.windows[0].wl_surface().id();
+    desk.open_launcher(&qh, 200, LAUNCHER);
+    let launcher = desk.layers[0].0.wl_surface().id();
+    until(&mut queue, &mut desk, |desk| {
+        desk.layers_drawn == 1 && heard(&ear).entered.as_ref() == Some(&launcher)
+    });
+    unmap_layer(&mut desk, &mut queue, 0);
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&beneath)
+    });
+
+    desk.leave_undrawn(0);
+    ask_again(&mut desk, &mut queue, 0);
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert_eq!(
+        heard(&ear).entered.as_ref(),
+        Some(&beneath),
+        "the launcher took the keyboard before it showed anything"
+    );
+    desk.draw_layer(0);
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&launcher)
+    });
+
+    session.stop((desk, queue));
+}
+
+/// #144: a panel its client draws in again without asking first is back
+/// all the same, and configured, as a window drawn again without asking is.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_panel_drawn_again_without_asking_is_back_and_configured() {
+    let session = session("remap-layer-unasked");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let gone = panel_up(&session, &mut desk, &mut queue, &qh, "panel");
+    unmap_layer(&mut desk, &mut queue, 0);
+    session.wait_for(|facts| facts.surface(gone).is_none());
+    let told = layer_configures(&desk, 0);
+
+    desk.draw_layer(0);
+    until(&mut queue, &mut desk, |desk| {
+        layer_configures(desk, 0) > told
+    });
+    let facts =
+        session.wait_for(|facts| layer_named(facts, "panel").is_some_and(|panel| panel.mapped));
+    assert_ne!(layer_id(&facts, "panel"), gone);
+
+    session.stop((desk, queue));
+}
+
+/// #144: a menu given to a panel while it was away is refused. Its client,
+/// told so in the same breath as it was configured, draws it all the same,
+/// and it does not come back with the panel.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_refused_while_its_panel_was_away_does_not_come_back_with_it() {
+    let session = session("remap-layer-menu");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let gone = panel_up(&session, &mut desk, &mut queue, &qh, "panel");
+    unmap_layer(&mut desk, &mut queue, 0);
+    session.wait_for(|facts| facts.surface(gone).is_none());
+    let layer = desk.layers[0].0.clone();
+    let late = desk.open_panel_popup(&qh, &layer, (20, 40), (100, 150));
+    configured(&mut desk, &mut queue, 1);
+    desk.paint(late.wl_surface(), (100, 150), MENU);
+    late.wl_surface().commit();
+    until(&mut queue, &mut desk, |desk| desk.popups_done >= 1);
+
+    ask_again(&mut desk, &mut queue, 0);
+    until(&mut queue, &mut desk, |desk| desk.layers_drawn == 2);
+    let facts =
+        session.wait_for(|facts| layer_named(facts, "panel").is_some_and(|panel| panel.mapped));
+    let back = layer_id(&facts, "panel");
+    assert!(
+        facts
+            .surfaces()
+            .iter()
+            .all(|surface| surface.kind != SurfaceKind::Popup { from: back }),
+        "the refused menu came back with its panel: {facts:?}"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// #144: a panel that asks to be told when it may draw as its client
+/// unmaps it is told, though no monitor shows it: a client may wait for
+/// that word before it asks for its panel again.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_panel_waiting_to_draw_when_unmapped_is_told_it_may() {
+    let session = session("remap-layer-frames");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let gone = panel_up(&session, &mut desk, &mut queue, &qh, "panel");
+    let surface = desk.layers[0].0.wl_surface().clone();
+    let done = |desk: &Desk| {
+        desk.said_to(&surface)
+            .iter()
+            .filter(|said| **said == Said::Done)
+            .count()
+    };
+    let before = done(&desk);
+
+    surface.attach(None, 0, 0);
+    desk.ask_frame(&qh, &surface);
+    queue.flush().expect("sent");
+    session.wait_for(|facts| facts.surface(gone).is_none());
+    until(&mut queue, &mut desk, |desk| done(desk) > before);
+
+    session.stop((desk, queue));
+}

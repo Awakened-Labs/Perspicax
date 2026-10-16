@@ -595,12 +595,17 @@ impl Compositor {
             .iter()
             .flat_map(|locked| &locked.surfaces)
             .map(|cover| cover.surface.wl_surface().clone());
-        // And a window its client unmapped: it may be waiting for the word
-        // before it asks for its window again, as GTK waits for every frame.
+        // And a window or panel its client unmapped: it may be waiting for
+        // the word before it asks for it again, as GTK waits for every frame.
         let withdrawn = self
             .withdrawn
             .iter()
-            .map(|withdrawn| withdrawn.toplevel.wl_surface().clone());
+            .map(|withdrawn| withdrawn.toplevel.wl_surface().clone())
+            .chain(
+                self.withdrawn_layers
+                    .iter()
+                    .map(|withdrawn| withdrawn.surface.wl_surface().clone()),
+            );
         for surface in windows
             .chain(layers)
             .chain(covers)
@@ -1089,9 +1094,12 @@ impl CompositorHandler for Compositor {
         self.popups.commit(surface);
         // A window its client unmapped, asked for again: answered as a new
         // window is, and on screen again from its first picture (see
-        // `shell::withdrawn`). Never in the commit that unmapped it.
+        // `shell::withdrawn`). A panel is back from the asking commit, as a
+        // new one is, which this commit then configures (see `layers`).
+        // Never in the commit that unmapped it.
         if is_root && popup.is_none() && !withdrew {
             self.map_again(&root, taken.own);
+            self.map_layer_again(&root);
         }
         // A window or a layer surface: both are described to the index, so
         // both keep the same presentation and damage records. A subsurface's

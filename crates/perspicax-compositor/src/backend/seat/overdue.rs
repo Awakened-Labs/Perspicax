@@ -7,8 +7,8 @@
 //! Chromium and games wait for the word with no limit. So once a second,
 //! every window that has waited that long is told anyway, as niri,
 //! cosmic-comp and anvil do: a parked window draws a frame a second, and no
-//! window waits forever, whatever kept it waiting. Nor does one its client
-//! unmapped (see `shell::withdrawn`).
+//! window waits forever, whatever kept it waiting. Nor does a window or a
+//! panel its client unmapped (see `shell::withdrawn` and `layers`).
 //!
 //! A window on screen should never need this, since its monitor tells it as
 //! it is drawn. One that did is named in the log, at debug: something kept
@@ -78,6 +78,17 @@ fn release(state: &mut Compositor) {
     for withdrawn in &state.withdrawn {
         send_frames_surface_tree(
             withdrawn.toplevel.wl_surface(),
+            &output,
+            now,
+            Some(OVERDUE),
+            |_, _| None,
+        );
+    }
+    // A panel its client unmapped is in no monitor's layers, so no monitor
+    // tells it either.
+    for withdrawn in &state.withdrawn_layers {
+        send_frames_surface_tree(
+            withdrawn.surface.wl_surface(),
             &output,
             now,
             Some(OVERDUE),
