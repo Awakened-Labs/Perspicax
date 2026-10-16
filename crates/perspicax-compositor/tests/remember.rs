@@ -417,4 +417,42 @@ mod hand {
 
         session.stop((desk, queue));
     }
+
+    /// A window left hanging off the left of the second monitor, mostly on
+    /// it with its corner on the first, is remembered on the second, and its
+    /// program's next window is slid onto that one, not the first.
+    #[test]
+    #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+    fn a_window_left_hanging_off_its_monitor_reopens_slid_onto_that_monitor() {
+        let session = two_monitors("remember-hanging", Mode::Spanning);
+        let (mut desk, mut queue, qh, globals) = session.client();
+        desk.bind_pointer(&globals, &qh);
+        open(&session, &mut desk, &mut queue, &qh, "a", "app.a");
+
+        session.command(Command::Press {
+            at: (200, 150),
+            button: Button::Left,
+            mods: Mods::default(),
+        });
+        until(&mut queue, &mut desk, |desk| desk.pressed.is_some());
+        let seat = desk.seat.clone().expect("our pointer's seat");
+        desk.windows[0].move_(&seat, desk.pressed.expect("waited for"));
+        until(&mut queue, &mut desk, |desk| desk.pointed.is_none());
+        // 90 of its 400 px on the first monitor, the rest on the second.
+        session.command(Command::Motion { by: (1190, 0) });
+        session.command(Command::Release {
+            button: Button::Left,
+        });
+        session.wait_for(|facts| corner(facts, "a") == Some((1190.0, 0.0)));
+        close(&session, &mut desk, &mut queue, 0, "a");
+
+        let again = open(&session, &mut desk, &mut queue, &qh, "a again", "app.a");
+        assert_eq!(
+            again,
+            (1280.0, 0.0),
+            "onto the second, not back onto the first"
+        );
+
+        session.stop((desk, queue));
+    }
 }

@@ -516,6 +516,7 @@ x11rb::atom_manager! {
         _NET_WM_MOVERESIZE,
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_POPUP_MENU,
+        _NET_WM_WINDOW_TYPE_DIALOG,
     }
 }
 
@@ -1057,6 +1058,84 @@ impl X11 {
 
     fn perform(&self, action: Action) {
         self.session.perform(action);
+    }
+
+    /// Name the program `window` is a window of, as X does in `WM_CLASS`:
+    /// an instance, then the class, which is what its program is known by.
+    fn classed(&self, window: u32, class: &str) {
+        let named = format!("{}\0{class}\0", class.to_lowercase());
+        self.x
+            .change_property8(
+                PropMode::REPLACE,
+                window,
+                AtomEnum::WM_CLASS,
+                AtomEnum::STRING,
+                named.as_bytes(),
+            )
+            .expect("WM_CLASS");
+    }
+
+    /// Say `window` is a dialog over `over`, as `WM_TRANSIENT_FOR` does.
+    fn transient(&self, window: u32, over: u32) {
+        self.x
+            .change_property32(
+                PropMode::REPLACE,
+                window,
+                AtomEnum::WM_TRANSIENT_FOR,
+                AtomEnum::WINDOW,
+                &[over],
+            )
+            .expect("WM_TRANSIENT_FOR");
+    }
+
+    /// Say what kind of window `window` is, in `_NET_WM_WINDOW_TYPE`.
+    fn typed(&self, window: u32, kind: u32) {
+        self.x
+            .change_property32(
+                PropMode::REPLACE,
+                window,
+                self.atoms._NET_WM_WINDOW_TYPE,
+                AtomEnum::ATOM,
+                &[kind],
+            )
+            .expect("_NET_WM_WINDOW_TYPE");
+    }
+
+    /// Map `window`, titled `title`, and wait for the compositor to have it
+    /// on screen: where its client's corner is.
+    fn mapped(&self, window: u32, title: &str) -> (f64, f64) {
+        self.x.map_window(window).expect("map_window");
+        self.x.flush().expect("flush");
+        let surface = self
+            .surface_where(title, |surface| {
+                surface.mapped && surface.geometry.x1 > surface.geometry.x0
+            })
+            .unwrap_or_else(|| panic!("{title} never mapped: {:?}", self.facts()));
+        (surface.geometry.x0, surface.geometry.y0)
+    }
+
+    /// A 320 by 200 window of the program `class`, titled `title`, mapped:
+    /// the window, and where its client's corner is.
+    fn open_classed(&self, title: &str, class: &str) -> (u32, (f64, f64)) {
+        let window = self.create_at(title, (0, 0, 320, 200), None);
+        self.classed(window, class);
+        (window, self.mapped(window, title))
+    }
+
+    /// Close `window`, titled `title`, as its client does, and wait for it
+    /// to be gone.
+    fn destroyed(&self, window: u32, title: &str) {
+        self.x.destroy_window(window).expect("destroy_window");
+        self.x.flush().expect("flush");
+        eventually(Duration::from_secs(10), || {
+            let facts = self.facts();
+            let gone = facts
+                .surfaces()
+                .iter()
+                .all(|surface| surface.title.as_deref() != Some(title));
+            gone.then_some(())
+        })
+        .unwrap_or_else(|| panic!("{title} never went: {:?}", self.facts()));
     }
 
     fn stop(self) {
@@ -3047,6 +3126,201 @@ fn with_nobody_at_the_seat_an_x11_window_asking_for_a_place_is_cascaded_as_any_o
         .surface_where("asked", |surface| surface.frame.len() == 4)
         .unwrap_or_else(|| panic!("never framed: {:?}", x11.facts()));
     assert_eq!(rect_of(&asked), (2.0, 26.0, 642.0, 426.0));
+
+    x11.stop();
+}
+
+/// Issue #89: an X11 program that does not ask for its place opens its next
+/// window where its last one closed, by its `WM_CLASS` class, as a Wayland
+/// one does by its app id, rather than at the cascade's next place, which
+/// it does not move on. Framed, the cascade's first place is (2, 26), and
+/// its nth (32n, 32n) after that.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_program_opens_its_next_window_where_its_last_one_closed() {
+    let x11 = X11::start(
+        "x11-remembered",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    x11.open_classed("a", "App.A");
+    let (b, at) = x11.open_classed("b", "App.B");
+    assert_eq!(at, (32.0, 32.0));
+    x11.destroyed(b, "b");
+    x11.open_classed("c", "App.C");
+
+    let (_, again) = x11.open_classed("b again", "App.B");
+    assert_eq!(again, (32.0, 32.0), "where b closed, not the cascade's 96");
+    let (_, d) = x11.open_classed("d", "App.D");
+    assert_eq!(d, (96.0, 96.0), "the cascade did not move on for it");
+
+    x11.stop();
+}
+
+/// Issue #89: a place a window asks for itself comes before the one its
+/// program last closed at.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_asking_for_a_place_opens_there_whatever_its_program_last_closed_at() {
+    let x11 = X11::start(
+        "x11-asked-over-remembered",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    x11.open_classed("a", "App.A");
+    let (b, _) = x11.open_classed("b", "App.B");
+    x11.destroyed(b, "b");
+
+    let user = asking(WmSizeHintsSpecification::UserSpecified);
+    let asks = x11.create_at("b asks", (300, 200, 320, 200), Some(user));
+    x11.classed(asks, "App.B");
+    assert_eq!(x11.mapped(asks, "b asks"), (300.0, 200.0));
+
+    x11.stop();
+}
+
+/// Issue #89: a dialog, said to be one either way X has, opens as any window
+/// does, not where its program last closed, and its closing is not where
+/// its program is remembered.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_dialog_is_not_remembered_nor_put_where_its_program_was() {
+    let x11 = X11::start(
+        "x11-remembered-dialogs",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let (a, _) = x11.open_classed("a", "App.A");
+    let (b, _) = x11.open_classed("b", "App.B");
+    x11.destroyed(b, "b");
+
+    let transient = x11.create_at("transient", (0, 0, 320, 200), None);
+    x11.classed(transient, "App.B");
+    x11.transient(transient, a);
+    assert_eq!(x11.mapped(transient, "transient"), (64.0, 64.0));
+    let typed = x11.create_at("typed", (0, 0, 320, 200), None);
+    x11.classed(typed, "App.B");
+    x11.typed(typed, x11.atoms._NET_WM_WINDOW_TYPE_DIALOG);
+    assert_eq!(x11.mapped(typed, "typed"), (96.0, 96.0));
+    x11.destroyed(transient, "transient");
+    x11.destroyed(typed, "typed");
+
+    let (_, again) = x11.open_classed("b again", "App.B");
+    assert_eq!(
+        again,
+        (32.0, 32.0),
+        "where b closed, not where a dialog did"
+    );
+
+    x11.stop();
+}
+
+/// Issue #89: a program whose last window closed on the second monitor
+/// opens its next there, wherever the pointer is.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_program_reopens_on_the_monitor_its_last_window_closed_on() {
+    let x11 = X11::start("x11-remembered-second", two_monitors());
+    x11.open_classed("a", "App.A");
+    let user = asking(WmSizeHintsSpecification::UserSpecified);
+    let b = x11.create_at("b", (1600, 200, 320, 200), Some(user));
+    x11.classed(b, "App.B");
+    assert_eq!(x11.mapped(b, "b"), (1600.0, 200.0));
+    x11.destroyed(b, "b");
+
+    let (_, again) = x11.open_classed("b again", "App.B");
+    assert_eq!(again, (1600.0, 200.0), "not the cascade's, on the first");
+
+    x11.stop();
+}
+
+/// Issue #89: with nobody at the seat an X11 program reopens where the
+/// cascade puts it, as a Wayland one does.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn with_nobody_at_the_seat_an_x11_program_reopens_where_the_cascade_puts_it() {
+    let x11 = X11::start("x11-nobody-remembered", Backend::headless((1280, 1024)));
+    x11.open_classed("a", "App.A");
+    let (b, _) = x11.open_classed("b", "App.B");
+    x11.destroyed(b, "b");
+    x11.open_classed("c", "App.C");
+
+    let (_, again) = x11.open_classed("b again", "App.B");
+    assert_eq!(again, (96.0, 96.0));
+
+    x11.stop();
+}
+
+/// Issue #89: an X11 window left hanging off the left of the second
+/// monitor, mostly on it with its corner on the first, is remembered on the
+/// second, and its program's next window is slid onto that one, not the
+/// first. Dragged by the person, as a client drawing its own frame asks:
+/// `_NET_WM_MOVERESIZE`, once its client has seen the press.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_left_hanging_off_its_monitor_reopens_slid_onto_that_monitor() {
+    let x11 = X11::start("x11-remembered-hanging", two_monitors());
+    let window = x11.create_at("a", (0, 0, 320, 200), None);
+    x11.classed(window, "App.A");
+    x11.x
+        .change_window_attributes(
+            window,
+            &ChangeWindowAttributesAux::new()
+                .event_mask(EventMask::PROPERTY_CHANGE | EventMask::BUTTON_PRESS),
+        )
+        .expect("change_window_attributes")
+        .check()
+        .expect("the window's presses");
+    let (x, y) = x11.mapped(window, "a");
+
+    x11.drain();
+    x11.session.command(Command::Press {
+        at: (x as i32 + 20, y as i32 + 20),
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    assert!(
+        eventually(Duration::from_secs(5), || {
+            matches!(x11.x.poll_for_event(), Ok(Some(Event::ButtonPress(_)))).then_some(())
+        })
+        .is_some(),
+        "the X client never saw the press"
+    );
+    let move_ = 8;
+    x11.ask(
+        window,
+        x11.atoms._NET_WM_MOVERESIZE,
+        [x as u32 + 20, y as u32 + 20, move_, 1, 1],
+    );
+    // Nudged until the move has begun, then taken to 1192: 88 of its 324 px
+    // on the first monitor, the rest on the second.
+    let at = || {
+        x11.facts()
+            .surfaces()
+            .iter()
+            .find(|surface| surface.title.as_deref() == Some("a"))
+            .map(|a| a.geometry.x0)
+    };
+    let begun = eventually(Duration::from_secs(10), || {
+        x11.session.command(Command::Motion { by: (1, 0) });
+        thread::sleep(Duration::from_millis(50));
+        at().filter(|now| *now > x)
+    })
+    .unwrap_or_else(|| panic!("never moved: {:?}", x11.facts()));
+    x11.session.command(Command::Motion {
+        by: (1192 - begun as i32, 0),
+    });
+    x11.surface_where("a", |surface| surface.geometry.x0 == 1192.0)
+        .unwrap_or_else(|| panic!("never taken there: {:?}", x11.facts()));
+    x11.session.command(Command::Release {
+        button: Button::Left,
+    });
+    x11.destroyed(window, "a");
+
+    let (_, again) = x11.open_classed("a again", "App.A");
+    assert_eq!(
+        again,
+        (1282.0, y),
+        "its frame onto the second, not back onto the first"
+    );
 
     x11.stop();
 }
