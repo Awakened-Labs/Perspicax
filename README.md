@@ -744,6 +744,27 @@ It returns as a new window: placed, given the keyboard, announced to the
 taskbar, and with a new id. An X11 window its client withdraws and maps
 again goes and comes back the same way.
 
+A new window opens on the monitor under the pointer, in the room its panels
+leave, cascaded from the top-left corner: 32 pixels further in for each
+window opened before it, back to the corner before the middle. With a
+person at the seat it is then put wholly inside that room, frame and all,
+as soon as its size is known: an X11 window as it maps, a Wayland window at
+its first picture. One that runs off the right or the bottom slides back on
+at its own size. One still too big goes to the left or top edge and is
+given all the room there is, never less than its program allows; one whose
+least is bigger than the room keeps its titlebar on screen and hangs off
+the right and the bottom. A Wayland window is told that room before it
+first draws (`configure_bounds`), so a toolkit that reads it, as GTK 4
+does, opens at a size that fits. An X11 window whose hints say it asked for
+its place (USPosition or PPosition), as a program that puts itself back
+where it was last time says, opens there. That is its own top-left corner,
+not our frame's, on the monitor most of it is on, or the one under the
+pointer if that monitor is gone, and it is slid and shrunk onto it the same
+way. A Wayland window has no way to ask for a place (#89). All this is done
+once, as a window opens: after that, where it goes is the person's, and a
+window dragged partly off the screen stays there. With nobody at the seat,
+a window stays where the cascade put it, at the size it chose.
+
 The session reads `$XDG_CONFIG_HOME/perspicax/config.toml` (or `--config PATH`),
 and reads it again whenever it is saved. Without one it runs the `classic`
 profile, which is Plasma's and Windows' habits:
