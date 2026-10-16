@@ -85,7 +85,13 @@ use wayland_protocols::wp::{
     relative_pointer::zv1::client::zwp_relative_pointer_v1::ZwpRelativePointerV1,
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
-use wayland_protocols::xdg::shell::client::{xdg_positioner, xdg_surface};
+use wayland_protocols::xdg::{
+    activation::v1::client::{
+        xdg_activation_token_v1::{self, XdgActivationTokenV1},
+        xdg_activation_v1::XdgActivationV1,
+    },
+    shell::client::{xdg_positioner, xdg_surface},
+};
 use wayland_protocols_wlr::{
     foreign_toplevel::v1::client::{
         zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
@@ -759,6 +765,10 @@ pub struct Desk {
     pub covers: Vec<(ExtSessionLockSurfaceV1, wl_surface::WlSurface)>,
     /// How many times one of them has been configured, and drawn.
     pub covers_drawn: usize,
+    pub activation: Option<XdgActivationV1>,
+    /// How many activation tokens were spent on our windows, each the
+    /// moment it came.
+    pub tokens_spent: usize,
     pub taskbar: Option<ZwlrForeignToplevelManagerV1>,
     pub taskbar_finished: bool,
     pub tasked: Vec<Tasked>,
@@ -873,6 +883,8 @@ impl Desk {
             lock_finished: false,
             covers: Vec::new(),
             covers_drawn: 0,
+            activation: None,
+            tokens_spent: 0,
             taskbar: None,
             taskbar_finished: false,
             tasked: Vec::new(),
@@ -1868,6 +1880,33 @@ impl Desk {
         }
         self.locked = false;
     }
+
+    /// Bind `xdg_activation_v1`, through which a client asks for one of its
+    /// windows to be brought forward. Panics if it is not advertised.
+    pub fn bind_activation(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.activation = Some(
+            globals
+                .bind::<XdgActivationV1, _, _>(qh, 1..=1, ())
+                .expect("xdg_activation_v1"),
+        );
+    }
+
+    /// Ask for the `nth` window to be brought forward, as an application
+    /// started a second time asks for its window: a token for the input
+    /// `serial` names, on our seat, spent on the window the moment it comes
+    /// (`tokens_spent` counts it). Panics if `bind_activation` or a seat's
+    /// binding has not been called.
+    pub fn ask_activation(&self, qh: &QueueHandle<Self>, nth: usize, serial: u32) {
+        let surface = self.windows[nth].wl_surface().clone();
+        let token = self
+            .activation
+            .as_ref()
+            .expect("bind_activation first")
+            .get_activation_token(qh, surface.clone());
+        token.set_serial(serial, self.seat.as_ref().expect("bind a seat first"));
+        token.set_surface(&surface);
+        token.commit();
+    }
 }
 
 impl Dispatch<ExtForeignToplevelListV1, ()> for Desk {
@@ -2596,6 +2635,40 @@ impl Dispatch<ExtSessionLockSurfaceV1, u32> for Desk {
         desk.paint(&surface, (width, height), *colour);
         surface.commit();
         desk.covers_drawn += 1;
+    }
+}
+
+impl Dispatch<XdgActivationV1, ()> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &XdgActivationV1,
+        _: <XdgActivationV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+/// An activation token, the window it is for its user data: spent on it the
+/// moment it comes.
+impl Dispatch<XdgActivationTokenV1, wl_surface::WlSurface> for Desk {
+    fn event(
+        desk: &mut Self,
+        token: &XdgActivationTokenV1,
+        event: xdg_activation_token_v1::Event,
+        surface: &wl_surface::WlSurface,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let xdg_activation_token_v1::Event::Done { token: done } = event else {
+            return;
+        };
+        if let Some(activation) = &desk.activation {
+            activation.activate(done, surface);
+            desk.tokens_spent += 1;
+        }
+        token.destroy();
     }
 }
 
