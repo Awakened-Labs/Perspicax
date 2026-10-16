@@ -50,6 +50,24 @@ pub fn place(nth: u32, output: Rect) -> (i32, i32) {
     (output.x + offset, output.y + offset)
 }
 
+/// Where a window going to `at` goes instead, so that it does not open
+/// exactly on one already at a corner in `taken`: stepped down and to the
+/// right as the cascade steps, until it is clear of every one. A program's
+/// second window, say, opened while its first is still where the program's
+/// last one closed.
+#[must_use]
+pub fn clear_of(at: (i32, i32), taken: &[(i32, i32)]) -> (i32, i32) {
+    let mut at = at;
+    // Each step is past a different one of them, so this many will do.
+    for _ in 0..=taken.len() {
+        if !taken.contains(&at) {
+            break;
+        }
+        at = (at.0 + CASCADE, at.1 + CASCADE);
+    }
+    at
+}
+
 /// The size a window resized from `start` should be, with the pointer moved
 /// `(dx, dy)` since the drag began.
 ///
@@ -296,6 +314,25 @@ mod tests {
         assert_eq!(place(2, FHD), (64, 64));
         let right = Rect::new(1920, 0, 2560, 1440);
         assert_eq!(place(1, right), (1952, 32));
+    }
+
+    #[test]
+    fn a_window_going_where_no_other_is_stays_there() {
+        assert_eq!(clear_of((960, 0), &[]), (960, 0));
+        assert_eq!(clear_of((960, 0), &[(0, 0), (961, 0)]), (960, 0));
+    }
+
+    #[test]
+    fn a_window_going_exactly_onto_another_steps_aside_as_the_cascade_does() {
+        assert_eq!(clear_of((960, 0), &[(960, 0)]), (992, 32));
+    }
+
+    #[test]
+    fn a_window_steps_past_each_one_in_its_way_in_turn() {
+        assert_eq!(
+            clear_of((960, 0), &[(1024, 64), (960, 0), (992, 32)]),
+            (1056, 96)
+        );
     }
 
     #[test]
