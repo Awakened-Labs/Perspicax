@@ -113,7 +113,7 @@ impl Compositor {
         };
         let toplevel = &self.withdrawn[at].toplevel;
         if !toplevel.is_initial_configure_sent() {
-            Self::configure_new(toplevel);
+            self.configure_new(toplevel);
         }
         if !matches!(own, Buffer::New(_)) {
             return;

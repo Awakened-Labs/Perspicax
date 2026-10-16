@@ -57,6 +57,17 @@ fn geometry(facts: &HostFacts, title: &str) -> Option<Rect> {
         .filter(|geometry| geometry.x1 > geometry.x0)
 }
 
+/// The configures the `nth` window opened was sent.
+fn configures(desk: &Desk, nth: usize) -> Vec<Configured> {
+    desk.said_to(desk.windows[nth].wl_surface())
+        .into_iter()
+        .filter_map(|said| match said {
+            Said::Configure(configured) => Some(configured),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The configures the last window opened was sent that offered it a size.
 fn sized(desk: &Desk) -> Vec<Configured> {
     let window = desk.windows.last().expect("a window");
@@ -171,6 +182,42 @@ fn with_nobody_at_the_seat_a_new_window_wider_than_the_screen_stays_where_the_ca
     );
     queue.roundtrip(&mut desk).expect("a roundtrip");
     assert_eq!(sized(&desk), [], "nobody asked for it to be resized");
+    assert!(
+        configures(&desk, 1)
+            .iter()
+            .all(|configured| configured.bounds.is_none()),
+        "told no room, so it sizes itself as it always has"
+    );
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_new_window_is_told_the_room_the_panels_leave_less_any_frame_drawn_for_it() {
+    let session = seated("opening-bounds");
+    let (mut desk, mut queue, qh, _globals) = session.client();
+    desk.open_panel(&qh, "panel", 40, PANEL);
+    until(&mut queue, &mut desk, |desk| desk.layers_drawn == 1);
+
+    // It draws its own frame: all the room under the panel is its.
+    desk.open_window(&qh, "own frame", "own");
+    until(&mut queue, &mut desk, |desk| desk.has_drawn(0));
+    let told = configures(&desk, 0);
+    assert_eq!(
+        told.first().and_then(|configured| configured.bounds),
+        Some((1280, 984)),
+        "told before it first draws"
+    );
+
+    // Ours is drawn around it: a 2 px border, and a 24 px titlebar above.
+    desk.open_framed(&qh, "framed");
+    until(&mut queue, &mut desk, |desk| desk.has_drawn(1));
+    let told = configures(&desk, 1);
+    assert_eq!(
+        told.last().and_then(|configured| configured.bounds),
+        Some((1276, 956))
+    );
 
     session.stop((desk, queue));
 }
