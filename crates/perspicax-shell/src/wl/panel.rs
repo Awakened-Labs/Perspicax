@@ -25,6 +25,12 @@
 //! what perspicax tells the shell channel (see `channel`). News of any draws
 //! the panels again once the loop has nothing else to do, so a batch of it
 //! is drawn once.
+//!
+//! A panel showing the mixer's moving bars keeps its last picture, and
+//! moves the bars by drawing them alone over it, once each time the monitor
+//! shows the last: the compositor takes in their slot and nothing else, and
+//! is asked to say when it has shown it. With nothing playing, the bars come
+//! to rest and nothing more is drawn.
 
 use std::{
     collections::HashMap,
@@ -117,6 +123,12 @@ pub(super) struct Panels {
     sound: Option<crate::model::sound::Level>,
     #[cfg(feature = "audio")]
     playing: Option<crate::layout::panel::Playing>,
+    /// The mixer's moving bars, and when the monitor last showed them, by
+    /// the compositor's clock, in milliseconds.
+    #[cfg(feature = "audio")]
+    bars: crate::model::levels::Bars,
+    #[cfg(feature = "audio")]
+    shown_at: Option<u32>,
     /// The panels are to be drawn again once the loop is idle.
     stale: bool,
     /// Where an assistive technology's press of something on a panel is
@@ -137,6 +149,24 @@ struct Bar {
     size: Option<(u32, u32)>,
     /// What it holds, where it was last drawn.
     placed: Placed,
+    /// Its last picture, while it shows the mixer's moving bars.
+    #[cfg(feature = "audio")]
+    kept: Option<Kept>,
+}
+
+/// A panel's last picture, kept to draw the moving bars over.
+#[cfg(feature = "audio")]
+struct Kept {
+    picture: tiny_skia::Pixmap,
+    copies: super::canvas::Copies,
+    /// How many whole pictures have been drawn.
+    generation: u64,
+    /// The bars' slot, where they were last placed.
+    place: crate::layout::Rect,
+    /// The compositor has yet to show the bars last drawn.
+    waiting: bool,
+    /// The bars moved while the compositor had yet to.
+    stale: bool,
 }
 
 impl Panels {
@@ -169,6 +199,10 @@ impl Panels {
             sound: None,
             #[cfg(feature = "audio")]
             playing: None,
+            #[cfg(feature = "audio")]
+            bars: crate::model::levels::Bars::default(),
+            #[cfg(feature = "audio")]
+            shown_at: None,
             stale: false,
             actions,
         }
@@ -281,6 +315,8 @@ impl Panels {
                     scale: whole(scale),
                     size: None,
                     placed: Placed::default(),
+                    #[cfg(feature = "audio")]
+                    kept: None,
                 });
             }
         }
@@ -633,6 +669,8 @@ impl Panels {
             start: self.start.as_deref(),
             #[cfg(feature = "tray")]
             tray: &self.tray,
+            #[cfg(feature = "audio")]
+            bars: &self.bars,
         };
         let drawn = bar.placed.bar;
         let area = (drawn.x, drawn.y, drawn.w, drawn.h);
@@ -641,6 +679,36 @@ impl Panels {
         // The bar wholly opaque, which lets the compositor skip what is under
         // it, and the rest of the strip clear. Clear is not uncovered: to an
         // agent the whole strip covers what is under it.
+        #[cfg(feature = "audio")]
+        let levels = bar
+            .placed
+            .mixer
+            .iter()
+            .find(|(piece, _)| *piece == perspicax_config::mixer::Piece::Levels)
+            .map(|&(_, place)| place);
+        #[cfg(feature = "audio")]
+        match levels {
+            Some(place) => {
+                let scale = bar.scale;
+                keep(
+                    canvas,
+                    (&bar.layer, &mut bar.kept),
+                    (size, scale),
+                    area,
+                    place,
+                    |picture| {
+                        paint::panel::paint(&shown, picture, scale, text, images, palette);
+                    },
+                );
+            }
+            None => {
+                bar.kept = None;
+                canvas.show(&bar.layer, size, bar.scale, &[area], |picture| {
+                    paint::panel::paint(&shown, picture, bar.scale, text, images, palette);
+                });
+            }
+        }
+        #[cfg(not(feature = "audio"))]
         canvas.show(&bar.layer, size, bar.scale, &[area], |picture| {
             paint::panel::paint(&shown, picture, bar.scale, text, images, palette);
         });
@@ -654,6 +722,136 @@ impl Panels {
             layout,
         ));
         watch::slow("drawing a panel", started.elapsed());
+    }
+}
+
+/// Draw a panel's whole picture, `size` logical pixels at `scale`, with
+/// `paint`, into the picture `kept` for its moving bars, at `place`, and show
+/// it on `layer`, opaque in `area`.
+#[cfg(feature = "audio")]
+fn keep(
+    canvas: &mut Canvas,
+    (layer, kept): (&LayerSurface, &mut Option<Kept>),
+    (size, scale): ((u32, u32), u32),
+    area: super::canvas::Area,
+    place: crate::layout::Rect,
+    paint: impl FnOnce(&mut tiny_skia::PixmapMut<'_>),
+) {
+    let (wide, high) = (size.0 * scale, size.1 * scale);
+    let fits = |kept: &Kept| (kept.picture.width(), kept.picture.height()) == (wide, high);
+    if !kept.as_ref().is_some_and(fits) {
+        *kept = tiny_skia::Pixmap::new(wide, high).map(|picture| Kept {
+            picture,
+            copies: super::canvas::Copies::default(),
+            generation: 0,
+            place,
+            waiting: false,
+            stale: false,
+        });
+    }
+    let Some(kept) = kept else {
+        return;
+    };
+    kept.picture.fill(tiny_skia::Color::TRANSPARENT);
+    paint(&mut kept.picture.as_mut());
+    kept.generation += 1;
+    kept.place = place;
+    // A whole picture asks for no frame, so the bars wait on none.
+    kept.waiting = false;
+    canvas.show_kept(
+        layer,
+        &mut kept.copies,
+        &kept.picture,
+        scale,
+        (&[area], None),
+        kept.generation,
+    );
+}
+
+#[cfg(feature = "audio")]
+impl Panels {
+    /// The spectrum heard now: move the bars to it, on every panel that
+    /// shows them.
+    pub(super) fn hear_levels(
+        &mut self,
+        canvas: &mut Canvas,
+        kit: &Kit,
+        bands: [f32; crate::audio::BANDS],
+    ) {
+        self.bars.hear(bands);
+        for at in 0..self.each.len() {
+            self.move_bars(canvas, kit, at);
+        }
+    }
+
+    /// The compositor showed what was drawn on `surface` at `time`, by its
+    /// clock: let the bars fall for the time since they were last shown,
+    /// and draw them again if they are still moving.
+    pub(super) fn frame(
+        &mut self,
+        canvas: &mut Canvas,
+        kit: &mut Kit,
+        surface: &wl_surface::WlSurface,
+        time: u32,
+    ) {
+        let Some(at) = self
+            .each
+            .iter()
+            .position(|bar| bar.layer.wl_surface() == surface)
+        else {
+            return;
+        };
+        let Some(kept) = &mut self.each[at].kept else {
+            return;
+        };
+        kept.waiting = false;
+        let since = self
+            .shown_at
+            .map_or(0, |shown| time.wrapping_sub(shown).min(100));
+        self.shown_at = Some(time);
+        let moving = self.bars.step(Duration::from_millis(u64::from(since)));
+        let stale = self.each[at]
+            .kept
+            .as_mut()
+            .is_some_and(|kept| std::mem::take(&mut kept.stale));
+        if moving || stale {
+            self.move_bars(canvas, kit, at);
+        } else {
+            // At rest: the next to be heard starts the clock afresh.
+            self.shown_at = None;
+        }
+    }
+
+    /// Draw panel `at`'s bars alone, as they stand, over its kept picture,
+    /// unless the compositor has yet to show the last.
+    fn move_bars(&mut self, canvas: &mut Canvas, kit: &Kit, at: usize) {
+        let bar = &mut self.each[at];
+        let Some(kept) = &mut bar.kept else {
+            return;
+        };
+        if kept.waiting {
+            kept.stale = true;
+            return;
+        }
+        let colours = paint::panel::Colours::of(&kit.palette);
+        let place = kept.place;
+        paint::panel::levels(
+            &mut kept.picture.as_mut(),
+            place,
+            &self.bars,
+            bar.scale,
+            &colours,
+        );
+        let within = crate::layout::panel::bars_in(place);
+        let changed = (within.x, within.y, within.w, within.h);
+        kept.waiting = canvas.show_kept(
+            &bar.layer,
+            &mut kept.copies,
+            &kept.picture,
+            bar.scale,
+            (&[], Some(changed)),
+            kept.generation,
+        );
     }
 }
 

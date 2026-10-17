@@ -15,8 +15,9 @@ use std::{
 };
 
 use pulseaudio::protocol::{
-    self, AuthReply, CardInfo, CardInfoList, Command, DESCRIPTOR_SIZE, MAX_VERSION, ProtocolError,
-    PulseError, ServerInfo, SetClientNameReply, SinkInfo, SinkInfoList, TagStructReader,
+    self, AuthReply, CardInfo, CardInfoList, Command, CreateRecordStreamReply, DESCRIPTOR_SIZE,
+    MAX_VERSION, ProtocolError, PulseError, ServerInfo, SetClientNameReply, SinkInfo, SinkInfoList,
+    TagStructReader,
 };
 
 /// The longest message read: past this it is not a message.
@@ -41,6 +42,8 @@ pub(super) enum Expect {
     Cards,
     /// The card of this index.
     Card(u32),
+    /// The record stream of this number made: its channel.
+    Recording(u64),
 }
 
 /// A reply, read as its command expected.
@@ -54,6 +57,7 @@ pub(super) enum Reply {
     Sink(Box<SinkInfo>),
     Cards(CardInfoList),
     Card(Box<CardInfo>),
+    Recording(Box<CreateRecordStreamReply>),
 }
 
 /// A message from the server.
@@ -65,6 +69,8 @@ pub(super) enum Incoming {
     Refused(Expect, PulseError),
     /// A command of the server's own: a subscription's event, most often.
     Event(Box<Command>),
+    /// What a stream of this channel recorded.
+    Data(u32, Vec<u8>),
 }
 
 /// The connection to the server.
@@ -155,12 +161,12 @@ impl Wire {
                 break;
             }
             at = start + length;
-            // A stream's data: none is asked for yet.
-            if descriptor.channel != u32::MAX {
-                continue;
-            }
             let message = self.inbox[start..at].to_vec();
-            incoming.extend(self.read(&message));
+            if descriptor.channel == u32::MAX {
+                incoming.extend(self.read(&message));
+            } else {
+                incoming.push(Incoming::Data(descriptor.channel, message));
+            }
         }
         self.inbox.drain(..at);
         Ok(incoming)
@@ -209,6 +215,7 @@ impl Expect {
             Self::Sink(_) => Reply::Sink(Box::new(reader.read()?)),
             Self::Cards => Reply::Cards(reader.read()?),
             Self::Card(_) => Reply::Card(Box::new(reader.read()?)),
+            Self::Recording(_) => Reply::Recording(Box::new(reader.read()?)),
         })
     }
 }

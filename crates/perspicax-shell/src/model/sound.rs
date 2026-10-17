@@ -50,6 +50,10 @@ pub(crate) struct Sink {
     /// Its card's ports it can play to, by name, and the one it plays to.
     pub(crate) ports: Vec<String>,
     pub(crate) port: Option<String>,
+    /// Something plays through it now.
+    pub(crate) running: bool,
+    /// The source that hears what it plays, by name.
+    pub(crate) monitor: Option<String>,
 }
 
 /// A sound card, or a Bluetooth device: what plays, by its profiles.
@@ -374,6 +378,8 @@ mod tests {
             card: None,
             ports: Vec::new(),
             port: None,
+            running: false,
+            monitor: None,
         }
     }
 

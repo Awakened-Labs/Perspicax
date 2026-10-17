@@ -17,7 +17,10 @@
 mod client;
 #[cfg(test)]
 mod fake;
+mod levels;
 mod wire;
+
+pub(crate) use levels::BANDS;
 
 use std::path::PathBuf;
 
@@ -38,6 +41,9 @@ pub(crate) enum News {
     Gone,
     /// What was asked could not be done, and why.
     Failed(String),
+    /// What plays now, as the spectrum's bands, each 0 to 1: silence once
+    /// it stops.
+    Levels([f32; BANDS]),
 }
 
 /// What a person asked of the sound.
@@ -49,6 +55,8 @@ pub(crate) enum Ask {
     Volume { target: Target, volume: Vec<u32> },
     /// Make an output the one sound goes to, as its plan says.
     Choose(Plan),
+    /// Read what plays, for the moving bars, or stop.
+    Levels(bool),
 }
 
 /// What an [`Ask`] is of.

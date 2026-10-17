@@ -8,7 +8,7 @@
 
 #[cfg(feature = "menus")]
 use smithay_client_toolkit::shell::wlr_layer::{Anchor, KeyboardInteractivity};
-#[cfg(feature = "pie")]
+#[cfg(any(feature = "pie", feature = "audio"))]
 use smithay_client_toolkit::shm::slot::Buffer;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
@@ -40,7 +40,7 @@ pub(super) struct Canvas {
     shm: Shm,
     pool: SlotPool,
     /// Where what the compositor says of a picture arrives.
-    #[cfg(feature = "pie")]
+    #[cfg(any(feature = "pie", feature = "audio"))]
     qh: QueueHandle<App>,
 }
 
@@ -59,7 +59,7 @@ impl Canvas {
             layers,
             shm,
             pool,
-            #[cfg(feature = "pie")]
+            #[cfg(any(feature = "pie", feature = "audio"))]
             qh: qh.clone(),
         })
     }
@@ -294,6 +294,125 @@ impl Canvas {
     }
 }
 
+impl Canvas {
+    /// Show on `layer` the kept `picture`, premultiplied RGBA at `scale`, in
+    /// one of `copies`' buffers that the compositor has let go of, or a new
+    /// one: all of it, opaque in `opaque`, if `changed` is `None`; or with
+    /// `changed` alone changed since it was last shown, asking the
+    /// compositor to say when it shows it. `generation` is the picture's
+    /// count of whole draws: a buffer that holds an older one is copied the
+    /// whole picture, and one that holds this one only `changed`. Either
+    /// way only `changed` is damaged, the rest of the buffer being what the
+    /// compositor shows already. `false` when every buffer is still the
+    /// compositor's, and nothing was shown.
+    #[cfg(feature = "audio")]
+    pub(super) fn show_kept(
+        &mut self,
+        layer: &LayerSurface,
+        copies: &mut Copies,
+        picture: &tiny_skia::Pixmap,
+        scale: u32,
+        (opaque, changed): (&[Area], Option<Area>),
+        generation: u64,
+    ) -> bool {
+        let (pixels_wide, pixels_high) = (picture.width(), picture.height());
+        let (Ok(wide), Ok(high)) = (i32::try_from(pixels_wide), i32::try_from(pixels_high)) else {
+            return false;
+        };
+        if copies.size != (pixels_wide, pixels_high) {
+            copies.buffers.clear();
+            copies.size = (pixels_wide, pixels_high);
+        }
+        let pool = &mut self.pool;
+        let free = copies
+            .buffers
+            .iter()
+            .position(|(buffer, _)| buffer.canvas(pool).is_some());
+        let at = match free {
+            Some(at) => at,
+            None if copies.buffers.len() < Copies::MOST => {
+                match pool.create_buffer(wide, high, wide * 4, wl_shm::Format::Argb8888) {
+                    Ok((buffer, _)) => {
+                        copies.buffers.push((buffer, u64::MAX));
+                        copies.buffers.len() - 1
+                    }
+                    Err(error) => {
+                        tracing::warn!("no memory for a {wide}x{high} picture: {error}");
+                        return false;
+                    }
+                }
+            }
+            None => return false,
+        };
+        let (buffer, held) = &mut copies.buffers[at];
+        let Some(canvas) = buffer.canvas(pool) else {
+            return false;
+        };
+        let px = |n: i32| u32::try_from(n.max(0)).unwrap_or(0) * scale;
+        let whole = (0, 0, pixels_wide, pixels_high);
+        let area = changed.map_or(whole, |(x, y, w, h)| (px(x), px(y), px(w), px(h)));
+        let copied = to_copy(*held, generation, area, whole);
+        let (left, top, across, down) = copied;
+        let right = (left + across).min(pixels_wide) as usize;
+        let from = picture.data();
+        for row in top.min(pixels_high)..(top + down).min(pixels_high) {
+            let start = (row * pixels_wide) as usize;
+            let line = (start + left as usize) * 4..(start + right) * 4;
+            canvas[line.clone()].copy_from_slice(&from[line]);
+        }
+        paint::argb(canvas, pixels_wide, &[copied]);
+        *held = generation;
+        let surface = layer.wl_surface();
+        surface.set_buffer_scale(scale as i32);
+        if changed.is_none()
+            && let Ok(region) = Region::new(&self.compositor)
+        {
+            for &(x, y, w, h) in opaque {
+                region.add(x, y, w, h);
+            }
+            surface.set_opaque_region(Some(region.wl_region()));
+        }
+        if let Err(error) = buffer.attach_to(surface) {
+            tracing::warn!("could not show a picture: {error}");
+            return false;
+        }
+        let damage = |n: u32| i32::try_from(n).unwrap_or(i32::MAX);
+        let (left, top, across, down) = area;
+        surface.damage_buffer(damage(left), damage(top), damage(across), damage(down));
+        if changed.is_some() {
+            surface.frame(&self.qh, surface.clone());
+        }
+        layer.commit();
+        true
+    }
+}
+
+/// What of a kept picture to copy into a buffer holding its `held`
+/// generation, to show `generation` with `changed` changed: only `changed`
+/// into a buffer that holds this generation, and the `whole` picture into
+/// one that holds another, whose every pixel may be of before.
+#[cfg(feature = "audio")]
+fn to_copy(held: u64, generation: u64, changed: Pixels, whole: Pixels) -> Pixels {
+    if held == generation { changed } else { whole }
+}
+
+/// The buffers a kept picture is copied into, each with the generation of
+/// the picture it holds.
+#[cfg(feature = "audio")]
+#[derive(Default)]
+pub(super) struct Copies {
+    buffers: Vec<(Buffer, u64)>,
+    /// The size each is, in pixels.
+    size: (u32, u32),
+}
+
+#[cfg(feature = "audio")]
+impl Copies {
+    /// Enough for one on screen, one waiting, and one being drawn, as a
+    /// pie's frames.
+    const MOST: usize = 3;
+}
+
 /// The buffers a surface drawn again and again is shown in, in turn.
 #[cfg(feature = "pie")]
 #[derive(Default)]
@@ -305,7 +424,7 @@ pub(super) struct Frames {
 }
 
 /// A rectangle of a buffer, in its pixels: x, y, width, height.
-#[cfg(feature = "pie")]
+#[cfg(any(feature = "pie", feature = "audio"))]
 type Pixels = (u32, u32, u32, u32);
 
 #[cfg(feature = "pie")]
@@ -385,12 +504,17 @@ impl CompositorHandler for App {
         _: &Connection,
         _: &QueueHandle<Self>,
         surface: &wl_surface::WlSurface,
-        _: u32,
+        time: u32,
     ) {
         #[cfg(feature = "pie")]
         self.pies.frame(&mut self.canvas, &mut self.kit, surface);
-        #[cfg(not(feature = "pie"))]
+        #[cfg(feature = "audio")]
+        self.panels
+            .frame(&mut self.canvas, &mut self.kit, surface, time);
+        #[cfg(not(any(feature = "pie", feature = "audio")))]
         let _ = surface;
+        #[cfg(not(feature = "audio"))]
+        let _ = time;
     }
 
     fn surface_enter(
@@ -421,3 +545,16 @@ impl ShmHandler for App {
 delegate_compositor!(App);
 delegate_layer!(App);
 delegate_shm!(App);
+
+#[cfg(all(test, feature = "audio"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_buffer_of_another_picture_is_given_it_whole_and_one_of_this_only_the_change() {
+        let (changed, whole) = ((10, 0, 5, 40), (0, 0, 1280, 40));
+        assert_eq!(to_copy(3, 3, changed, whole), changed);
+        assert_eq!(to_copy(2, 3, changed, whole), whole, "drawn whole since");
+        assert_eq!(to_copy(u64::MAX, 3, changed, whole), whole, "new");
+    }
+}

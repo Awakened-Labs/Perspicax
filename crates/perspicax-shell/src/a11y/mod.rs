@@ -670,8 +670,10 @@ mod panels {
     /// steps by `step` and can be set, described as muted while it is; the
     /// output is a `Button`, "Output", whose value is the output's name and
     /// whose description is its whole name, and a click switches to the
-    /// next. With no sound server, each is disabled, and described so. What
-    /// takes no room on the panel is not in the tree.
+    /// next; the moving bars are a `Meter`, "Sound levels", with no value,
+    /// since they move faster than a tree is worth sending. With no sound
+    /// server, each is disabled, and described so. What takes no room on the
+    /// panel is not in the tree.
     pub(crate) fn panel(
         namespace: &str,
         size: Option<(u32, u32)>,
@@ -838,6 +840,15 @@ mod panels {
                     }
                 }
                 slider
+            }
+            Piece::Levels => {
+                let mut meter = Node::new(Role::Meter);
+                meter.set_label("Sound levels");
+                if level.is_none() {
+                    meter.set_disabled();
+                    meter.set_description("No sound server");
+                }
+                meter
             }
             Piece::Output => {
                 let mut button = Node::new(Role::Button);
@@ -1016,7 +1027,7 @@ mod panels {
                         #[cfg(feature = "tray")]
                         tray: Vec::new(),
                         mixer: Mixing {
-                            pieces: &[Piece::Mute, Piece::Volume],
+                            pieces: &[Piece::Mute, Piece::Volume, Piece::Levels],
                             sound: Sounding {
                                 level,
                                 step: 5,
@@ -1046,9 +1057,16 @@ mod panels {
             assert_eq!(node(&tree, TOOLBAR).children(), [START, MIXER, CLOCK]);
             let mixer = node(&tree, MIXER);
             assert_eq!((mixer.role(), mixer.label()), (Role::Group, Some("Sound")));
-            let [mute, volume] = mixer.children() else {
-                panic!("two pieces: {:?}", mixer.children());
+            let [mute, volume, levels] = mixer.children() else {
+                panic!("three pieces: {:?}", mixer.children());
             };
+            let meter = node(&tree, *levels);
+            assert_eq!(
+                (meter.role(), meter.label()),
+                (Role::Meter, Some("Sound levels"))
+            );
+            assert_eq!(meter.numeric_value(), None, "it moves too fast to tell");
+            assert_eq!(part_of(*levels), Some(Part::Mixer(Piece::Levels)));
             assert_eq!(
                 part_of(*mute),
                 Some(Part::Mixer(Piece::Mute)),

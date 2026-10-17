@@ -53,6 +53,8 @@ pub(super) struct Audio {
     news: Sender<(u64, News)>,
     /// Its thread, while a panel holds the mixer.
     running: Option<Running>,
+    /// A panel shows the moving bars, so the thread reads what plays.
+    levels: bool,
     /// How many times it has started: news from an earlier start is from a
     /// thread since stopped.
     started: u64,
@@ -73,6 +75,7 @@ impl Audio {
             server,
             news,
             running: None,
+            levels: false,
             started: 0,
             facts: None,
             mixer: Mixer::default(),
@@ -89,13 +92,20 @@ impl Audio {
             .panel
             .as_ref()
             .is_some_and(|panel| panel.items.contains(&Item::Mixer));
+        let levels = wanted && self.mixer.panel.contains(&Piece::Levels);
+        if let Some(running) = self.running.as_ref().filter(|_| levels != self.levels) {
+            running.ask(Ask::Levels(levels));
+        }
+        self.levels = levels;
         match (wanted, &self.running) {
             (true, None) => {
                 self.started += 1;
                 let (news, started) = (self.news.clone(), self.started);
-                self.running = Some(crate::audio::start(self.server.clone(), move |told| {
+                let running = crate::audio::start(self.server.clone(), move |told| {
                     news.send((started, told)).is_ok()
-                }));
+                });
+                running.ask(Ask::Levels(levels));
+                self.running = Some(running);
                 false
             }
             (false, Some(_)) => {
@@ -123,6 +133,8 @@ impl Audio {
                 tracing::warn!("the sound server did not do what was asked: {why}");
                 return;
             }
+            // Not facts: the bars move with them, on the panels.
+            News::Levels(_) => return,
         };
         let facts = self.facts.as_deref();
         self.asked.take_if(|(sink, asked, _)| {
@@ -183,6 +195,10 @@ impl App {
     /// News from start `started` of the sound's thread.
     pub(super) fn audio_news(&mut self, started: u64, news: News) {
         if started != self.audio.started {
+            return;
+        }
+        if let News::Levels(bands) = news {
+            self.panels.hear_levels(&mut self.canvas, &self.kit, bands);
             return;
         }
         self.audio.hear(news);
@@ -291,6 +307,8 @@ mod tests {
                 card: None,
                 ports: Vec::new(),
                 port: None,
+                running: false,
+                monitor: None,
             }],
             cards: Vec::new(),
         }

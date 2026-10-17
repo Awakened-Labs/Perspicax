@@ -62,11 +62,14 @@ pub enum Piece {
     /// What the sound plays from, by its glyph and its name: "Speakers",
     /// "E8". A click switches to the next output there is.
     Output,
+    /// Bars moving with what plays, as winamp's did: how loud each band of
+    /// pitch is, the deep ones at the left. Still when nothing plays.
+    Levels,
 }
 
 impl Piece {
     /// Every piece, in the order this crate lists them.
-    pub const ALL: [Self; 3] = [Self::Mute, Self::Volume, Self::Output];
+    pub const ALL: [Self; 4] = [Self::Mute, Self::Volume, Self::Output, Self::Levels];
 
     /// Its name as `panel` writes it.
     #[must_use]
@@ -75,6 +78,7 @@ impl Piece {
             Self::Mute => "mute",
             Self::Volume => "volume",
             Self::Output => "output",
+            Self::Levels => "levels",
         }
     }
 }
@@ -141,9 +145,12 @@ mod tests {
 
     #[test]
     fn a_mixer_is_read_with_its_pieces_and_the_compositor_reads_it_whatever_the_shell_has() {
-        let text = "[shell.panel]\nitems = [\"mixer\"]\n[shell.mixer]\npanel = [\"volume\", \"mute\", \"output\"]\nstep = 2\nlimit = 150";
+        let text = "[shell.panel]\nitems = [\"mixer\"]\n[shell.mixer]\npanel = [\"volume\", \"mute\", \"output\", \"levels\"]\nstep = 2\nlimit = 150";
         let read = mixer(text).unwrap();
-        assert_eq!(read.panel, [Piece::Volume, Piece::Mute, Piece::Output]);
+        assert_eq!(
+            read.panel,
+            [Piece::Volume, Piece::Mute, Piece::Output, Piece::Levels]
+        );
         assert_eq!((read.step, read.limit), (2, 150));
         let panel = shell(text, ShellBuilt::FULL).unwrap().panel.unwrap();
         assert_eq!(panel.items, [Item::Mixer]);

@@ -2237,6 +2237,102 @@ fn a_click_on_the_output_switches_to_the_next_and_round() {
     shell.stop_with(session);
 }
 
+/// A panel of the mixer alone, its moving bars then its speaker, the
+/// speaker at the panel's right end.
+#[cfg(feature = "capture")]
+const LEVELS_AND_MUTE: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"mixer\"]\n\
+    [shell.mixer]\npanel = [\"levels\", \"mute\"]\n";
+
+/// The theme's accent, which the moving bars are drawn in.
+#[cfg(feature = "capture")]
+const ACCENT: [u8; 4] = [0x3d, 0xae, 0xe9, 0xff];
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn the_bars_rise_with_what_plays_and_fall_once_it_stops() {
+    use std::{io::Write as _, time::Duration};
+
+    let sound = SoundServer::start("levels");
+    sound.pactl(&["set-sink-volume", "one", "100%"]);
+    let session = Session::start("shell-levels", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "levels",
+        LEVELS_AND_MUTE,
+        Some(sound.socket()),
+    );
+    until_colour(&session, (1258, 800 - 20), INK);
+    // The bar of the band holding 1 kHz, the ninth of sixteen, low in the
+    // slot left of the speaker: 75 wide, its bars 6 in, each 3 and a gap.
+    let bar = (1280 - 30 - 75 + 6 + 8 * 4 + 1, 800 - 10);
+    assert_eq!(
+        colour_at(&session, bar.0, bar.1),
+        BAR,
+        "still with nothing playing"
+    );
+
+    // A loud 1 kHz sine, played into the default output.
+    let mut player = sound
+        .command("pacat")
+        .args([
+            "--raw",
+            "--format=float32le",
+            "--rate=22050",
+            "--channels=1",
+        ])
+        .args(["--device=one"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("pacat, which a desktop with sound has");
+    let mut feed = player.stdin.take().expect("its input");
+    let playing = thread::spawn(move || {
+        let second: Vec<u8> = (0..22_050)
+            .flat_map(|at: u32| {
+                let phase = 2.0 * std::f32::consts::PI * 1000.0 * at as f32 / 22_050.0;
+                (0.5 * phase.sin()).to_le_bytes()
+            })
+            .collect();
+        for _ in 0..20 {
+            if feed.write_all(&second).is_err() {
+                return;
+            }
+        }
+    });
+    until_colour(&session, bar, ACCENT);
+
+    // Muted as they move, the whole panel is drawn again, and each picture
+    // after shows the cross where the third wave was: none goes back to a
+    // buffer of before.
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let wave = (1273, 800 - 20);
+    until_colour(&session, wave, INK);
+    click(
+        &session,
+        panel,
+        (1280.0 - 15.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Left,
+    );
+    until_colour(&session, wave, BAR);
+    for _ in 0..20 {
+        assert_eq!(
+            colour_at(&session, wave.0, wave.1),
+            BAR,
+            "a picture of before came back"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    player.kill().ok();
+    player.wait().ok();
+    playing.join().ok();
+    until_colour(&session, bar, BAR);
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
 /// A program's status icon, served as a program serves one: a title, a
 /// picture of magenta, and a menu of one item, Quit. What it is asked is
 /// kept, to be waited for.

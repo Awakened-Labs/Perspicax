@@ -8,6 +8,10 @@
 //! with a monitor on its second jack, whose sink comes only once the
 //! profile that plays through that jack is set, as a server's does.
 //!
+//! It records, too: a record stream asked for gets a channel, and a test
+//! sends samples on it, or on any channel, as a server sends what it
+//! records.
+//!
 //! It answers what the client asks, one connection at a time, and keeps a
 //! line for each thing asked, to be counted. A change, made from a test or
 //! by what the client asked, is told the way a server tells it, as a
@@ -24,8 +28,9 @@ use std::{
 
 use pulseaudio::protocol::{
     self, AuthReply, CardInfo, CardPortInfo, CardProfileInfo, ChannelMap, ChannelVolume, Command,
-    MAX_VERSION, Props, PulseError, SampleSpec, ServerInfo, SetClientNameReply, SinkInfo,
-    SubscriptionEvent, SubscriptionEventFacility, SubscriptionEventType, SubscriptionMask, Volume,
+    CreateRecordStreamReply, MAX_VERSION, Props, PulseError, SampleSpec, ServerInfo,
+    SetClientNameReply, SinkInfo, SinkState, SubscriptionEvent, SubscriptionEventFacility,
+    SubscriptionEventType, SubscriptionMask, Volume,
     port_info::{PortAvailable, PortDirection, PortInfo, PortType},
 };
 
@@ -58,6 +63,10 @@ struct Shared {
     version: u16,
     /// What the client subscribed to: it is told of nothing else.
     mask: SubscriptionMask,
+    /// The channel of the record stream the client asked for, while it has
+    /// one, and the channel the next gets.
+    recording: Option<u32>,
+    channels: u32,
 }
 
 impl Fake {
@@ -85,6 +94,8 @@ impl Fake {
             writer: None,
             version: MAX_VERSION,
             mask: SubscriptionMask::empty(),
+            recording: None,
+            channels: 7,
         }));
         let serving = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -121,6 +132,38 @@ impl Fake {
         for _ in 0..times {
             shared.event(SubscriptionEventFacility::Sink, Some(index));
         }
+    }
+
+    /// Have something play through the sink of `index`, or stop.
+    pub(super) fn play(&self, index: u32, playing: bool) {
+        let mut shared = self.lock();
+        let sink = shared
+            .sinks
+            .iter_mut()
+            .find(|sink| sink.index == index)
+            .expect("a sink of that index");
+        sink.state = if playing {
+            SinkState::Running
+        } else {
+            SinkState::Idle
+        };
+        shared.event(SubscriptionEventFacility::Sink, Some(index));
+    }
+
+    /// The channel the client records on, while it does.
+    pub(super) fn recording(&self) -> Option<u32> {
+        self.lock().recording
+    }
+
+    /// Send `samples`, as recorded, on `channel`.
+    pub(super) fn send_samples(&self, channel: u32, samples: &[f32]) {
+        let bytes: Vec<u8> = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        let mut shared = self.lock();
+        let writer = shared.writer.as_mut().expect("a client");
+        protocol::write_memblock(writer, channel, &bytes, 0).expect("written");
     }
 
     /// Hang up on the client, as a server stopping does.
@@ -262,6 +305,8 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
             default,
             asked,
             writer,
+            recording,
+            channels,
             ..
         } = &mut *shared;
         let Some(writer) = writer.as_mut() else {
@@ -372,6 +417,30 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
                     None => protocol::write_error(writer, seq, &PulseError::NoEntity),
                 }
             }
+            Command::CreateRecordStream(record) => {
+                let source = record
+                    .source_name
+                    .as_ref()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                asked.push(format!("record {source}"));
+                *recording = Some(*channels);
+                let reply = CreateRecordStreamReply {
+                    channel: *channels,
+                    stream_index: *channels,
+                    sample_spec: record.sample_spec,
+                    channel_map: record.channel_map,
+                    buffer_attr: record.buffer_attr,
+                    ..CreateRecordStreamReply::default()
+                };
+                *channels += 1;
+                protocol::write_reply_message(writer, seq, &reply, version)
+            }
+            Command::DeleteRecordStream(channel) => {
+                asked.push(format!("unrecord {channel}"));
+                recording.take_if(|recording| *recording == channel);
+                protocol::write_ack_message(writer, seq)
+            }
             Command::SetDefaultSink(name) => {
                 asked.push(format!("default {}", name.to_string_lossy()));
                 *default = name;
@@ -413,6 +482,7 @@ fn sink(index: u32, name: &str, volume: u32) -> SinkInfo {
         index,
         name: CString::new(name).expect("a name"),
         description: Some(CString::new(name).expect("a name")),
+        monitor_source_name: Some(CString::new(format!("{name}.monitor")).expect("a name")),
         sample_spec: SampleSpec {
             channels: 2,
             ..SampleSpec::default()

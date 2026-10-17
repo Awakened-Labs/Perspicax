@@ -23,6 +23,13 @@
 //! moves the streams that follow the default; moving them here would pin
 //! them. A card that has no such sink within [`CHOOSE_WITHIN`] is given up
 //! on, and that is told.
+//!
+//! While the moving bars are wanted, and something plays through the
+//! default output, its monitor is recorded, one channel of floats, and its
+//! spectrum told (see `levels`). Recording is what a VU meter does to a
+//! monitor; the stream is marked not to keep the output from suspending,
+//! and it is let go of as soon as nothing plays, or another output becomes
+//! the default, so a quiet desktop records nothing.
 
 use std::{
     collections::HashSet,
@@ -34,11 +41,13 @@ use std::{
 };
 
 use pulseaudio::protocol::{
-    AuthParams, CardInfo, ChannelVolume, Command, GetCardInfo, GetSinkInfo, MAX_VERSION, Prop,
-    Props, PulseError, SetCardProfileParams, SetDeviceMuteParams, SetDeviceVolumeParams,
-    SetPortParams, SinkInfo, SubscriptionEvent, SubscriptionEventFacility, SubscriptionEventType,
+    AuthParams, CardInfo, ChannelMap, ChannelVolume, Command, GetCardInfo, GetSinkInfo,
+    MAX_VERSION, Prop, Props, PulseError, RecordStreamParams, SampleFormat, SampleSpec,
+    SetCardProfileParams, SetDeviceMuteParams, SetDeviceVolumeParams, SetPortParams, SinkInfo,
+    SinkState, SubscriptionEvent, SubscriptionEventFacility, SubscriptionEventType,
     SubscriptionMask, Volume,
     port_info::{PortAvailable, PortDirection, PortType},
+    stream::{BufferAttr, StreamFlags},
 };
 use smithay_client_toolkit::reexports::calloop::{
     Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken,
@@ -47,7 +56,8 @@ use smithay_client_toolkit::reexports::calloop::{
 };
 
 use super::{
-    Ask, News, Target,
+    Ask, BANDS, News, Target,
+    levels::{HOP, RATE, Spectrum},
     wire::{Expect, Incoming, Reply, Wire},
 };
 use crate::model::sound::{Card, Facts, Kind, Plan, Plugged, Port, Profile, Sink};
@@ -74,6 +84,8 @@ pub(super) struct Client {
     pause: Duration,
     /// That it is gone has been told since it was last there.
     told_gone: bool,
+    /// The moving bars are wanted.
+    levels: bool,
 }
 
 /// A connection, and what it has read.
@@ -99,6 +111,27 @@ struct Link {
     choosing: Option<(u32, String, u64)>,
     /// How many choices there have been.
     chosen: u64,
+    /// The moving bars are wanted.
+    levels: bool,
+    /// The record stream they are read from, while there is one.
+    recording: Option<Recording>,
+    /// How many record streams have been asked for.
+    recordings: u64,
+    spectrum: Spectrum,
+    /// The bands to tell, newest, since they were last told.
+    heard: Option<[f32; BANDS]>,
+}
+
+/// A record stream of the default output's monitor.
+struct Recording {
+    /// Which it is, to match the server's reply to.
+    id: u64,
+    /// The source it records, by name.
+    source: String,
+    /// Its channel, once the server has made it.
+    channel: Option<u32>,
+    /// What came of a sample short of whole.
+    leftover: Vec<u8>,
 }
 
 impl Client {
@@ -118,6 +151,7 @@ impl Client {
             link: None,
             pause: PAUSE_FIRST,
             told_gone: false,
+            levels: false,
         }
     }
 
@@ -187,6 +221,11 @@ impl Client {
             changed: false,
             choosing: None,
             chosen: 0,
+            levels: self.levels,
+            recording: None,
+            recordings: 0,
+            spectrum: Spectrum::new(),
+            heard: None,
         });
         Ok(())
     }
@@ -201,30 +240,54 @@ impl Client {
                 link.receive(message)?;
             }
             link.advance()?;
+            link.follow_levels()?;
             link.wire.flush()
         });
         if let Err(error) = result {
             self.lost(&error.to_string());
             return;
         }
-        if link.first == 0 {
-            if !std::mem::replace(&mut link.following, true) {
-                if let Some(deadline) = link.deadline.take() {
-                    self.handle.remove(deadline);
-                }
-                tracing::info!("following the sound server");
-                self.pause = PAUSE_FIRST;
-                self.told_gone = false;
+        if link.first > 0 {
+            return;
+        }
+        let met = !std::mem::replace(&mut link.following, true);
+        let deadline = met.then(|| link.deadline.take()).flatten();
+        let facts = std::mem::take(&mut link.changed).then(|| Box::new(link.facts.clone()));
+        let heard = link.heard.take();
+        if met {
+            if let Some(deadline) = deadline {
+                self.handle.remove(deadline);
             }
-            if std::mem::take(&mut link.changed) {
-                let facts = Box::new(link.facts.clone());
-                self.tell(News::Facts(facts));
-            }
+            tracing::info!("following the sound server");
+            self.pause = PAUSE_FIRST;
+            self.told_gone = false;
+        }
+        if let Some(facts) = facts {
+            self.tell(News::Facts(facts));
+        }
+        if let Some(bands) = heard {
+            self.tell(News::Levels(bands));
         }
     }
 
     /// Do what the shell asked.
     pub(super) fn ask(&mut self, ask: Ask) {
+        if let Ask::Levels(on) = ask {
+            self.levels = on;
+            if let Some(link) = &mut self.link {
+                link.levels = on;
+                let followed = link.follow_levels().and_then(|()| link.wire.flush());
+                if let Err(error) = followed {
+                    self.lost(&error.to_string());
+                    return;
+                }
+                let heard = link.heard.take();
+                if let Some(bands) = heard {
+                    self.tell(News::Levels(bands));
+                }
+            }
+            return;
+        }
         let Some(link) = self.link.as_mut().filter(|link| link.first == 0) else {
             tracing::debug!("no sound server to ask; {ask:?} is dropped");
             return;
@@ -255,7 +318,7 @@ impl Client {
                 device_name: CString::new(name).ok(),
                 volume: channels(&volume),
             }),
-            Ask::Choose(_) => return,
+            Ask::Choose(_) | Ask::Levels(_) => return,
         };
         if let Err(error) = link.wire.send(&command, Expect::Done) {
             self.lost(&error.to_string());
@@ -325,13 +388,100 @@ impl Link {
         match message {
             Incoming::Reply(expect, reply) => self.replied(expect, reply)?,
             Incoming::Refused(expect, error) => self.refused(expect, error),
-            Incoming::Event(command) => {
-                if let Command::SubscribeEvent(event) = *command {
-                    self.told(event)?;
+            Incoming::Event(command) => match *command {
+                Command::SubscribeEvent(event) => self.told(event)?,
+                Command::RecordStreamKilled(channel) => {
+                    self.recording
+                        .take_if(|recording| recording.channel == Some(channel));
                 }
-            }
+                _ => {}
+            },
+            Incoming::Data(channel, data) => self.recorded(channel, &data),
         }
         Ok(())
+    }
+
+    /// Record the default output's monitor if the bars are wanted and
+    /// something plays through it, and stop recording if not, or if another
+    /// output is the default now.
+    fn follow_levels(&mut self) -> io::Result<()> {
+        let wanted = self
+            .facts
+            .output()
+            .filter(|sink| self.levels && self.first == 0 && sink.running)
+            .and_then(|sink| sink.monitor.clone());
+        if self.recording.as_ref().map(|recording| &recording.source) == wanted.as_ref() {
+            return Ok(());
+        }
+        if let Some(recording) = self.recording.take() {
+            if let Some(channel) = recording.channel {
+                self.wire
+                    .send(&Command::DeleteRecordStream(channel), Expect::Done)?;
+            }
+            self.heard = Some([0.0; BANDS]);
+        }
+        let Some(source) = wanted else {
+            return Ok(());
+        };
+        self.recordings += 1;
+        let mut props = Props::new();
+        props.set(Prop::MediaName, c"Sound levels");
+        let record = RecordStreamParams {
+            sample_spec: SampleSpec {
+                format: SampleFormat::Float32Le,
+                channels: 1,
+                sample_rate: RATE,
+            },
+            channel_map: ChannelMap::mono(),
+            source_name: Some(cstring(source.clone())),
+            buffer_attr: BufferAttr {
+                max_length: u32::MAX,
+                target_length: u32::MAX,
+                pre_buffering: u32::MAX,
+                minimum_request_length: u32::MAX,
+                fragment_size: (HOP * 4) as u32,
+            },
+            flags: StreamFlags {
+                adjust_latency: true,
+                no_inhibit_auto_suspend: true,
+                no_move: true,
+                ..StreamFlags::default()
+            },
+            props,
+            ..RecordStreamParams::default()
+        };
+        self.wire.send(
+            &Command::CreateRecordStream(record),
+            Expect::Recording(self.recordings),
+        )?;
+        self.recording = Some(Recording {
+            id: self.recordings,
+            source,
+            channel: None,
+            leftover: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// What the stream of `channel` recorded.
+    fn recorded(&mut self, channel: u32, data: &[u8]) {
+        let Some(recording) = self
+            .recording
+            .as_mut()
+            .filter(|recording| recording.channel == Some(channel))
+        else {
+            return;
+        };
+        recording.leftover.extend_from_slice(data);
+        let whole = recording.leftover.len() / 4 * 4;
+        let samples: Vec<f32> = recording.leftover[..whole]
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .collect();
+        recording.leftover.drain(..whole);
+        if let Some(bands) = self.spectrum.feed(&samples) {
+            self.heard = Some(bands);
+        }
     }
 
     fn replied(&mut self, expect: Expect, reply: Reply) -> io::Result<()> {
@@ -354,6 +504,21 @@ impl Link {
                 false
             }
             Reply::Named | Reply::Done => false,
+            Reply::Recording(made) => {
+                let Expect::Recording(id) = expect else {
+                    return Ok(());
+                };
+                match &mut self.recording {
+                    Some(recording) if recording.id == id => {
+                        recording.channel = Some(made.channel);
+                    }
+                    // Let go of before the server made it.
+                    _ => self
+                        .wire
+                        .send(&Command::DeleteRecordStream(made.channel), Expect::Done)?,
+                }
+                false
+            }
             Reply::Server(server) => {
                 self.read_first();
                 let default = server.default_sink_name.as_deref().map(text);
@@ -548,6 +713,8 @@ fn sink(info: &SinkInfo) -> Sink {
             .map(|volume| volume.as_u32())
             .collect(),
         muted: info.muted,
+        running: info.state == SinkState::Running,
+        monitor: info.monitor_source_name.as_deref().map(text),
         card: info.card_index,
         port: ports.get(info.active_port).cloned(),
         ports,
@@ -692,6 +859,7 @@ mod tests {
     use super::*;
     use crate::audio::{
         fake::{EXTRA1, Fake, HDMI, HDMI_SINK, JACK, SPEAKERS},
+        levels::RATE,
         start,
     };
 
@@ -945,11 +1113,88 @@ mod tests {
         let failed = loop {
             match heard.next() {
                 News::Failed(why) => break why,
-                News::Facts(_) => {}
+                News::Facts(_) | News::Levels(_) => {}
                 News::Gone => panic!("the server went"),
             }
         };
         assert!(failed.contains(JACK), "{failed}");
+    }
+
+    /// A loud 1 kHz sine, `count` samples of it.
+    fn sine(count: usize) -> Vec<f32> {
+        (0..count)
+            .map(|at| {
+                let phase = 2.0 * std::f32::consts::PI * 1000.0 * at as f32 / RATE as f32;
+                0.5 * phase.sin()
+            })
+            .collect()
+    }
+
+    /// The next bands heard, past any facts.
+    fn levels(heard: &Heard) -> [f32; BANDS] {
+        loop {
+            match heard.next() {
+                News::Levels(bands) => return bands,
+                News::Facts(_) => {}
+                other => panic!("not the bands: {other:?}"),
+            }
+        }
+    }
+
+    /// Wait until `fake` is asked `line`.
+    fn until_asked(fake: &Fake, line: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !fake.asked().iter().any(|asked| asked == line) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "never asked {line}: {:?}",
+                fake.asked()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn the_default_outputs_monitor_is_recorded_only_while_wanted_and_playing() {
+        let fake = Fake::start("levels");
+        let (running, heard) = follow(&fake);
+        heard.facts();
+        running.ask(Ask::Levels(true));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(fake.recording(), None, "nothing plays");
+        fake.play(0, true);
+        until_asked(&fake, &format!("record {SPEAKERS}.monitor"));
+        let channel = fake.recording().expect("a channel");
+        fake.send_samples(channel, &sine(1024));
+        let bands = levels(&heard);
+        assert!(bands.iter().any(|&band| band > 0.8), "{bands:?}");
+        // It stops: let go of, and silence told, for the bars to fall.
+        fake.play(0, false);
+        until_asked(&fake, &format!("unrecord {channel}"));
+        assert_eq!(levels(&heard), [0.0; BANDS]);
+    }
+
+    #[test]
+    fn the_bars_unwanted_record_nothing_and_what_another_stream_sends_is_not_heard() {
+        let fake = Fake::start("unwanted");
+        let (running, heard) = follow(&fake);
+        heard.facts();
+        fake.play(0, true);
+        heard.facts();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(fake.recording(), None, "the bars not wanted");
+        running.ask(Ask::Levels(true));
+        until_asked(&fake, &format!("record {SPEAKERS}.monitor"));
+        let channel = fake.recording().expect("a channel");
+        fake.send_samples(channel + 1, &sine(2048));
+        fake.send_samples(channel, &[0.0; 1024]);
+        assert_eq!(
+            levels(&heard),
+            [0.0; BANDS],
+            "the other channel's sine unheard"
+        );
+        running.ask(Ask::Levels(false));
+        until_asked(&fake, &format!("unrecord {channel}"));
     }
 
     #[test]

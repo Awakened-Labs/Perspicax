@@ -7,6 +7,8 @@ pub(crate) mod clock;
 pub(crate) mod image;
 #[cfg(feature = "panel")]
 pub(crate) mod layouts;
+#[cfg(feature = "audio")]
+pub(crate) mod levels;
 #[cfg(any(feature = "panel", feature = "wallpaper"))]
 pub(crate) mod pager;
 #[cfg(feature = "audio")]

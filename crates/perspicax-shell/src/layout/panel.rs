@@ -12,7 +12,7 @@
 //! pieces but its volume, which is as wide as "100%" or what it shows,
 //! whichever is wider, so that it holds still as the volume moves, and its
 //! output, a slot for its glyph and room for its name, at most
-//! [`NAME_MOST`]. The
+//! [`NAME_MOST`], and its moving bars, [`LEVELS`] wide. The
 //! taskbar takes whatever room is left, and shares it among the windows it
 //! lists, each no wider than [`TASK_WIDTH`], or than [`TASK_LEAST`] when its
 //! tasks show their icons alone; a bar without one keeps its last item at
@@ -51,6 +51,33 @@ pub(crate) const PIECE: i32 = 30;
 /// one is cut short.
 #[cfg(feature = "audio")]
 pub(crate) const NAME_MOST: i32 = 120;
+/// The mixer's moving bars: how wide each bar is, and the gap between two,
+/// and the room around them all, either side and above and below.
+#[cfg(feature = "audio")]
+pub(crate) const BAR: i32 = 3;
+#[cfg(feature = "audio")]
+pub(crate) const BAR_GAP: i32 = 1;
+#[cfg(feature = "audio")]
+const BARS_AROUND: (i32, i32) = (6, 8);
+/// How wide the moving bars are, their room around them included.
+#[cfg(feature = "audio")]
+pub(crate) const LEVELS: i32 = {
+    let bands = crate::audio::BANDS as i32;
+    bands * BAR + (bands - 1) * BAR_GAP + 2 * BARS_AROUND.0
+};
+
+/// Where in the moving bars' slot at `place` the bars are drawn: clear of
+/// the panel's rules, which run along its edges.
+#[cfg(feature = "audio")]
+pub(crate) fn bars_in(place: Rect) -> Rect {
+    let (side, end) = BARS_AROUND;
+    Rect::new(
+        place.x + side,
+        place.y + end,
+        (place.w - 2 * side).max(0),
+        (place.h - 2 * end).max(1),
+    )
+}
 
 /// A window the taskbar lists, as it is shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,6 +281,7 @@ pub(crate) fn lay_out(
                         name => PIECE + name + CLOCK_PAD,
                     }
                 }
+                Piece::Levels => LEVELS,
                 Piece::Mute => PIECE,
             };
             (piece, wide)
@@ -870,6 +898,33 @@ mod tests {
         }
         assert_eq!(volume_shown(level(24)), "24%");
         assert_eq!(volume_shown(None), "\u{2013}");
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn the_moving_bars_take_their_width_and_draw_inside_their_slot() {
+        let mut holding = holding(0, &[]);
+        holding.mixer = Mixing {
+            pieces: &[Piece::Levels],
+            sound: Sounding::default(),
+        };
+        let placed = lay_out(&[Item::Mixer], holding, PANEL, FULL, &mut Monospace(8.0));
+        let slot = placed.mixer[0].1;
+        assert_eq!(slot, Rect::new(1280 - LEVELS, 0, LEVELS, 40));
+        let bars = bars_in(slot);
+        assert_eq!(
+            bars.w,
+            16 * BAR + 15 * BAR_GAP,
+            "sixteen bars and their gaps"
+        );
+        assert!(
+            bars.y > 0 && bars.bottom() < 40,
+            "clear of the rules: {bars:?}"
+        );
+        assert_eq!(
+            placed.at((f64::from(slot.x) + 1.0, 20.0)),
+            Some(Part::Mixer(Piece::Levels))
+        );
     }
 
     #[cfg(feature = "audio")]
