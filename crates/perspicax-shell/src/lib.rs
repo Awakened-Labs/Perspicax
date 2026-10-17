@@ -86,6 +86,10 @@ pub struct Options {
     /// `$PULSE_RUNTIME_PATH` or `$XDG_RUNTIME_DIR/pulse`. Unused by a shell
     /// built without `audio`.
     pub sound_server: Option<PathBuf>,
+    /// The file the mixer keeps what the person hid and renamed in. `None`
+    /// is `mixer.json` in perspicax's state folder,
+    /// `$XDG_STATE_HOME/perspicax`. Unused by a shell built without `audio`.
+    pub state: Option<PathBuf>,
 }
 
 /// Why the shell stopped.
@@ -145,12 +149,17 @@ pub fn run(options: Options) -> Result<(), Error> {
         Some(connection) => connection,
         None => Connection::connect_to_env()?,
     };
+    let state = options.state.or_else(|| {
+        perspicax_config::state_folder(|name| std::env::var(name).ok())
+            .map(|folder| folder.join("mixer.json"))
+    });
     wl::run(
         connection,
         shell,
         path,
         options.session_bus,
         options.sound_server,
+        state,
     )
 }
 

@@ -162,8 +162,15 @@ fn mixer_key(event: &KeyEvent) -> Option<crate::mixer::Key> {
         Keysym::Page_Down | Keysym::KP_Page_Down => Key::PageDown,
         Keysym::Home | Keysym::KP_Home => Key::Home,
         Keysym::End | Keysym::KP_End => Key::End,
-        Keysym::Return | Keysym::KP_Enter | Keysym::space => Key::Press,
-        _ => return None,
+        Keysym::Return | Keysym::KP_Enter => Key::Press,
+        Keysym::BackSpace => Key::Backspace,
+        // Space among it: a press, but in a name.
+        _ => Key::Text(
+            event
+                .utf8
+                .clone()
+                .filter(|text| text.chars().all(|c| !c.is_control()) && !text.is_empty())?,
+        ),
     })
 }
 

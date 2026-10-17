@@ -16,6 +16,8 @@ mod channel;
 mod desktop;
 #[cfg(any(feature = "menus", feature = "panel"))]
 mod installed;
+#[cfg(feature = "audio")]
+mod kept;
 #[cfg(feature = "menus")]
 mod menu;
 #[cfg(feature = "audio")]
@@ -56,13 +58,15 @@ use crate::Error;
 
 /// Run the shell on `connection` until the connection ends, with its tray
 /// on the bus at address `bus`, or the session's, and its mixer on the
-/// sound server at `sound`, or the one the environment names.
+/// sound server at `sound`, or the one the environment names, keeping what
+/// is hidden and named in it at `state`.
 pub(crate) fn run(
     connection: Connection,
     shell: Shell,
     config: Option<PathBuf>,
     bus: Option<String>,
     sound: Option<PathBuf>,
+    state: Option<PathBuf>,
 ) -> Result<(), Error> {
     let (globals, queue) =
         registry_queue_init::<App>(&connection).map_err(|error| wayland(&error))?;
@@ -130,7 +134,7 @@ pub(crate) fn run(
         sender
     };
     #[cfg(not(feature = "audio"))]
-    let _ = sound;
+    let _ = (sound, state);
     #[cfg(any(feature = "menus", feature = "panel"))]
     let installed = installed::Installed::new(crate::model::apps::Places::from_env());
     let mut app = App {
@@ -167,7 +171,7 @@ pub(crate) fn run(
         #[cfg(feature = "tray")]
         tray: tray::Tray::new(bus, news),
         #[cfg(feature = "audio")]
-        audio: audio::Audio::new(sound, heard),
+        audio: audio::Audio::new(sound, heard, kept::Keeper::load(state)),
         #[cfg(feature = "audio")]
         mixers: mixer::Mixers::new(actions.clone()),
         #[cfg(any(feature = "menus", feature = "panel"))]

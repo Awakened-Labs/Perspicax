@@ -160,6 +160,10 @@ pub(crate) struct Card {
     pub(crate) description: String,
     /// How it is attached, `device.bus`: "pci", "usb", "bluetooth".
     pub(crate) bus: Option<String>,
+    /// What tells it apart from another of its make, as the server says
+    /// it: where it is attached, its chip, its ALSA card, its Bluetooth
+    /// address.
+    pub(crate) details: Vec<(&'static str, String)>,
     pub(crate) ports: Vec<Port>,
     pub(crate) profiles: Vec<Profile>,
     /// The profile it plays by, by name.
@@ -239,6 +243,11 @@ pub(crate) struct Choice {
     pub(crate) kind: Kind,
     /// Whether it can be used now: nothing is known to be unplugged.
     pub(crate) connected: bool,
+    /// The card it is a jack of, by name, if it is one's.
+    pub(crate) card: Option<String>,
+    /// What tells it apart, line by line: its card's details, the profile
+    /// the card plays by, and its key.
+    pub(crate) details: Vec<(&'static str, String)>,
 }
 
 impl Choice {
@@ -296,6 +305,8 @@ impl Device<'_> {
                 Side::Input => Kind::Mic,
             },
             connected: true,
+            card: None,
+            details: vec![("Key", self.name.to_owned())],
         }
     }
 }
@@ -472,13 +483,19 @@ impl Card {
             (None, Some(_)) => self.description.clone(),
             (None, None) => port.description.clone(),
         };
+        let key = key(self, port);
+        let mut details = self.details.clone();
+        details.extend(self.profile.clone().map(|profile| ("Profile", profile)));
+        details.push(("Key", key.clone()));
         Choice {
-            key: key(self, port),
+            key,
             device: self.description.clone(),
             jack: Some(jack),
             short,
             kind: port.kind,
             connected: port.plugged != Plugged::No,
+            card: Some(self.name.clone()),
+            details,
         }
     }
 
@@ -688,6 +705,7 @@ mod tests {
             name: "alsa_card.pci-0000_00_1f.3".to_owned(),
             description: "Built-in Audio".to_owned(),
             bus: Some("pci".to_owned()),
+            details: Vec::new(),
             ports: vec![
                 port(
                     "analog-output-speaker",
@@ -737,6 +755,7 @@ mod tests {
             name: "alsa_card.pci-0000_01_00.1".to_owned(),
             description: "TU104 HD Audio Controller".to_owned(),
             bus: Some("pci".to_owned()),
+            details: Vec::new(),
             ports: vec![
                 port(
                     "hdmi-output-0",
@@ -775,6 +794,7 @@ mod tests {
             name: "bluez_card.FC_58_FA_A9_62_22".to_owned(),
             description: "E8".to_owned(),
             bus: Some("bluetooth".to_owned()),
+            details: Vec::new(),
             ports: vec![port(
                 "headset-output",
                 "Headphones",
@@ -989,6 +1009,25 @@ mod tests {
         );
         assert_eq!(icon(None, None, Some("paplay")).as_deref(), Some("paplay"));
         assert_eq!(icon(None, None, None), None);
+    }
+
+    #[test]
+    fn a_renamed_output_keeps_its_name_across_a_reconnect() {
+        let e8 = "bluez_card.FC_58_FA_A9_62_22/headset-output";
+        let mut kept = crate::model::kept::Kept::default();
+        kept.rename(e8, "Headset");
+        let before = laptop();
+        assert_eq!(kept.called(&output(&before, e8)), "Headset");
+        // Reconnected, the server numbers the card and its sink afresh.
+        let mut after = laptop();
+        for card in &mut after.cards {
+            card.index += 10;
+        }
+        for sink in &mut after.sinks {
+            sink.index += 100;
+            sink.card = sink.card.map(|card| card + 10);
+        }
+        assert_eq!(kept.called(&output(&after, e8)), "Headset");
     }
 
     #[test]

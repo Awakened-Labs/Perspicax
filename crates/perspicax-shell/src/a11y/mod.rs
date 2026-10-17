@@ -1503,7 +1503,7 @@ mod mixers {
     use crate::{
         layout::mixer::{Control, Listed},
         mixer::View,
-        model::sound::{Side, Whose},
+        model::sound::{self, Side, Whose},
     };
 
     /// The mixer itself, its sections, and the sides' lists of devices.
@@ -1516,30 +1516,45 @@ mod mixers {
     /// A side's control that is no device's: its place in
     /// [`Control::FIXED`] past this.
     const CONTROLS: u64 = 10;
-    /// Any other node says what it is in its top three bits, past `KIND`,
-    /// and which in the rest: a device's key's number, or a program's
-    /// stream's, so that each stays the same while others come and go.
-    const KIND: u32 = 61;
-    const OUTPUT_DEVICE: u64 = 1;
-    const INPUT_DEVICE: u64 = 2;
-    const PROGRAM_MUTE: u64 = 3;
-    const PROGRAM_VOLUME: u64 = 4;
-    const PROGRAM: u64 = 5;
+    /// Any other node says what it is in its top four bits, past `KIND`,
+    /// and which in the rest: a device's key's number, with `ON_INPUT` set for
+    /// an input's, or a program's stream's, so that each stays the same
+    /// while others come and go.
+    const KIND: u32 = 60;
+    const ON_INPUT: u64 = 1 << 59;
+    const DEVICE: u64 = 1;
+    const MORE: u64 = 2;
+    const RENAME: u64 = 3;
+    const HIDE: u64 = 4;
+    const HIDE_CARD: u64 = 5;
+    const PROGRAM_MUTE: u64 = 6;
+    const PROGRAM_VOLUME: u64 = 7;
+    const PROGRAM: u64 = 8;
     /// An output a program can be moved to: its stream's number, then the
     /// sink's in the low `SINK` bits.
-    const MOVE: u64 = 6;
-    const SINK: u32 = 29;
+    const MOVE: u64 = 9;
+    const SINK: u32 = 27;
     /// A program's list of the outputs it can be moved to.
-    const PROGRAM_OUTPUTS: u64 = 7;
+    const PROGRAM_OUTPUTS: u64 = 10;
 
     fn tagged(kind: u64, rest: u64) -> NodeId {
         NodeId(kind << KIND | rest)
     }
 
+    /// A device's control of `kind`, on `side`, of the device numbered
+    /// `number`.
+    fn of_device(kind: u64, side: Side, number: u64) -> NodeId {
+        let input = if side == Side::Input { ON_INPUT } else { 0 };
+        tagged(kind, input | number)
+    }
+
     fn id(control: Control) -> NodeId {
         match control {
-            Control::Choose(Side::Output, number) => tagged(OUTPUT_DEVICE, number),
-            Control::Choose(Side::Input, number) => tagged(INPUT_DEVICE, number),
+            Control::Choose(side, number) => of_device(DEVICE, side, number),
+            Control::More(side, number) => of_device(MORE, side, number),
+            Control::Rename(side, number) => of_device(RENAME, side, number),
+            Control::Hide(side, number) => of_device(HIDE, side, number),
+            Control::HideCard(side, number) => of_device(HIDE_CARD, side, number),
             Control::Mute(Whose::App(stream)) => tagged(PROGRAM_MUTE, stream.into()),
             Control::Volume(Whose::App(stream)) => tagged(PROGRAM_VOLUME, stream.into()),
             Control::Plays(stream) => tagged(PROGRAM, stream.into()),
@@ -1558,13 +1573,22 @@ mod mixers {
     pub(crate) fn control_of(id: NodeId) -> Option<Control> {
         let rest = id.0 & ((1 << KIND) - 1);
         let stream = u32::try_from(rest);
+        let side = if rest & ON_INPUT == 0 {
+            Side::Output
+        } else {
+            Side::Input
+        };
+        let number = rest & !ON_INPUT;
         match id.0 >> KIND {
             0 => {
                 let at = rest.checked_sub(CONTROLS)?;
                 Control::FIXED.get(usize::try_from(at).ok()?).copied()
             }
-            OUTPUT_DEVICE => Some(Control::Choose(Side::Output, rest)),
-            INPUT_DEVICE => Some(Control::Choose(Side::Input, rest)),
+            DEVICE => Some(Control::Choose(side, number)),
+            MORE => Some(Control::More(side, number)),
+            RENAME => Some(Control::Rename(side, number)),
+            HIDE => Some(Control::Hide(side, number)),
+            HIDE_CARD => Some(Control::HideCard(side, number)),
             PROGRAM_MUTE => Some(Control::Mute(Whose::App(stream.ok()?))),
             PROGRAM_VOLUME => Some(Control::Volume(Whose::App(stream.ok()?))),
             PROGRAM => Some(Control::Plays(stream.ok()?)),
@@ -1585,8 +1609,12 @@ mod mixers {
     /// Then a `RadioGroup`, "Outputs" or "Inputs", of a `RadioButton` for
     /// each device listed, named as drawn, on for the one the sound is on
     /// and described if nothing is plugged into it, that a click moves the
-    /// sound to; and the fold, a `Button` named as drawn, expanded while
-    /// what it holds is listed. While programs play, a `Group`,
+    /// sound to, with the button at the end of each row, "Details of" it;
+    /// for the device whose details are unfolded, that button again,
+    /// described by them, expanded; a `TextInput`, "Name of" it, that can
+    /// be set; and the buttons that hide it and its card, named as drawn;
+    /// and the folds, each a `Button` named as drawn, expanded while what
+    /// it holds is listed. While programs play, a `Group`,
     /// "Applications", holds for each a `Button` named for it, described by
     /// what it plays on, expanded while the outputs it can be moved to are
     /// listed; its `Switch` and its `Slider`, named for it; and those
@@ -1623,7 +1651,7 @@ mod mixers {
                     Side::Output => "Outputs",
                     Side::Input => "Inputs",
                 });
-                let mut fold = None;
+                let (mut details, mut folds) = (Vec::new(), Vec::new());
                 for &(control, place) in &view.placed.controls {
                     if control.side() != Some(side) {
                         continue;
@@ -1633,8 +1661,16 @@ mod mixers {
                     };
                     node.set_bounds(rect(place));
                     match control {
-                        Control::Choose(..) => list.push_child(id(control)),
-                        Control::Fold(_) => fold = Some(id(control)),
+                        Control::More(at, number)
+                            if view.placed.unfolded.more == Some((at, number)) =>
+                        {
+                            details.push(id(control));
+                        }
+                        Control::Choose(..) | Control::More(..) => list.push_child(id(control)),
+                        Control::Rename(..) | Control::Hide(..) | Control::HideCard(..) => {
+                            details.push(id(control));
+                        }
+                        Control::Fold(_) | Control::Hidden(_) => folds.push(id(control)),
                         _ => group.push_child(id(control)),
                     }
                     nodes.push((id(control), node));
@@ -1643,8 +1679,8 @@ mod mixers {
                     group.push_child(list_id);
                     nodes.push((list_id, list));
                 }
-                if let Some(fold) = fold {
-                    group.push_child(fold);
+                for child in details.into_iter().chain(folds) {
+                    group.push_child(child);
                 }
                 dialog.push_child(group_id);
                 nodes.push((group_id, group));
@@ -1751,8 +1787,67 @@ mod mixers {
             }
             Control::Fold(side) => {
                 let mut button = Node::new(Role::Button);
-                button.set_label(format!("Not connected ({})", view.placed.folded[side.at()]));
-                button.set_expanded(view.placed.unfolded.sides[side.at()]);
+                button.set_label(format!(
+                    "Not connected ({})",
+                    view.placed.unplugged[side.at()]
+                ));
+                button.set_expanded(view.placed.unfolded.unplugged[side.at()]);
+                button.add_action(Action::Click);
+                button
+            }
+            Control::Hidden(side) => {
+                let mut button = Node::new(Role::Button);
+                button.set_label(format!("Hidden ({})", view.placed.hidden[side.at()]));
+                button.set_expanded(view.placed.unfolded.hidden[side.at()]);
+                button.add_action(Action::Click);
+                button
+            }
+            Control::More(side, number) => {
+                let listed = view.mixed.find(side, number)?;
+                let mut button = Node::new(Role::Button);
+                button.set_label(format!("Details of {}", listed.label()));
+                let open = view.placed.unfolded.more == Some((side, number));
+                if open {
+                    let told: Vec<String> = listed
+                        .details
+                        .iter()
+                        .map(|(label, value)| format!("{label}: {value}"))
+                        .collect();
+                    button.set_description(told.join(", "));
+                }
+                button.set_expanded(open);
+                button.add_action(Action::Click);
+                button
+            }
+            Control::Rename(side, number) => {
+                let listed = view.mixed.find(side, number)?;
+                let mut field = Node::new(Role::TextInput);
+                let own = sound::long(&listed.device, listed.jack.as_deref());
+                field.set_label(format!("Name of {own}"));
+                let typed = view
+                    .naming
+                    .filter(|&(naming, _)| naming == control)
+                    .map(|(_, typed)| typed);
+                if let Some(value) = typed.or(listed.name.as_deref()) {
+                    field.set_value(value);
+                }
+                field.add_action(Action::Click);
+                field.add_action(Action::SetValue);
+                field
+            }
+            Control::Hide(side, number) => {
+                let listed = view.mixed.find(side, number)?;
+                let mut button = Node::new(Role::Button);
+                let does = if listed.hidden { "Unhide" } else { "Hide" };
+                button.set_label(format!("{does} {}", listed.label()));
+                button.add_action(Action::Click);
+                button
+            }
+            Control::HideCard(side, number) => {
+                let card = view.mixed.find(side, number)?.card.as_ref()?;
+                let mut button = Node::new(Role::Button);
+                let does = if card.hidden { "Unhide" } else { "Hide" };
+                button.set_label(format!("{does} all of {}", card.name));
                 button.add_action(Action::Click);
                 button
             }
@@ -1896,10 +1991,100 @@ mod mixers {
                 assert_eq!(control_of(id(control)), Some(control), "{control:?}");
             }
             assert_ne!(id(others[0]), id(others[1]), "a side apiece");
+            let number = number("speakers");
+            for side in [Side::Output, Side::Input] {
+                for control in [
+                    Control::More(side, number),
+                    Control::Rename(side, number),
+                    Control::Hide(side, number),
+                    Control::HideCard(side, number),
+                ] {
+                    assert_eq!(control_of(id(control)), Some(control), "{control:?}");
+                }
+            }
             assert_eq!(control_of(tagged(PROGRAM_OUTPUTS, 40)), None, "no control");
             assert_eq!(control_of(OUTPUT), None);
             let closed = mixer("perspicax-mixer-DP-1", None, None);
             assert_eq!(closed.nodes.len(), 1, "the window alone");
+        }
+
+        #[test]
+        fn a_devices_details_are_a_button_described_by_them_a_field_and_buttons_to_hide() {
+            let device = |key: &str, hidden| Listed {
+                key: key.to_owned(),
+                device: "TU104".to_owned(),
+                jack: Some(key.to_owned()),
+                short: key.to_owned(),
+                name: None,
+                kind: Kind::Display,
+                connected: true,
+                chosen: false,
+                hidden,
+                card: Some(crate::layout::mixer::Owner {
+                    key: "nvidia".to_owned(),
+                    name: "TU104".to_owned(),
+                    hidden: false,
+                }),
+                details: vec![("Chip", "GPU".to_owned()), ("Key", key.to_owned())],
+            };
+            let mut state = opened(Mixed {
+                outputs: vec![device("HDMI", false), device("HDMI 2", true)],
+                step: 5,
+                limit: 100,
+                ..Mixed::default()
+            });
+            let hdmi = number("HDMI");
+            let more = Control::More(Side::Output, hdmi);
+            state.update(Event::Act(more, crate::mixer::Act::Click));
+            state.update(Event::Act(
+                Control::Hidden(Side::Output),
+                crate::mixer::Act::Click,
+            ));
+            let view = state.view().expect("open");
+            let tree = mixer("perspicax-mixer-DP-1", Some((1280, 800)), Some(&view));
+            let button = node(&tree, id(more));
+            assert_eq!(
+                (button.label(), button.description(), button.is_expanded()),
+                (
+                    Some("Details of TU104 \u{2014} HDMI"),
+                    Some("Chip: GPU, Key: HDMI"),
+                    Some(true)
+                )
+            );
+            let field = node(&tree, id(Control::Rename(Side::Output, hdmi)));
+            assert_eq!(
+                (field.role(), field.label()),
+                (Role::TextInput, Some("Name of TU104 \u{2014} HDMI"))
+            );
+            assert!(field.supports_action(Action::SetValue));
+            assert_eq!(
+                node(&tree, id(Control::Hide(Side::Output, hdmi))).label(),
+                Some("Hide TU104 \u{2014} HDMI")
+            );
+            assert_eq!(
+                node(&tree, id(Control::HideCard(Side::Output, hdmi))).label(),
+                Some("Hide all of TU104")
+            );
+            let hidden = node(&tree, id(Control::Hidden(Side::Output)));
+            assert_eq!(
+                (hidden.label(), hidden.is_expanded()),
+                (Some("Hidden (1)"), Some(true))
+            );
+            let children = node(&tree, OUTPUT).children();
+            let at = |control| children.iter().position(|&child| child == id(control));
+            assert!(
+                at(more) < at(Control::Rename(Side::Output, hdmi))
+                    && at(Control::HideCard(Side::Output, hdmi))
+                        < at(Control::Hidden(Side::Output)),
+                "its button, what it unfolds, then the folds"
+            );
+            let other = number("HDMI 2");
+            assert!(
+                node(&tree, OUTPUTS)
+                    .children()
+                    .contains(&id(Control::More(Side::Output, other))),
+                "another's button on its row"
+            );
         }
 
         #[test]
@@ -1912,6 +2097,10 @@ mod mixers {
                 kind: Kind::Speaker,
                 connected: true,
                 chosen: false,
+                name: None,
+                hidden: false,
+                card: None,
+                details: Vec::new(),
             };
             let mut state = opened(Mixed {
                 programs: vec![Program {
@@ -1997,6 +2186,10 @@ mod mixers {
                 kind: Kind::Speaker,
                 connected,
                 chosen,
+                name: None,
+                hidden: false,
+                card: None,
+                details: Vec::new(),
             };
             let mixed = Mixed {
                 outputs: vec![
@@ -2024,9 +2217,10 @@ mod mixers {
                 (list.role(), list.label()),
                 (Role::RadioGroup, Some("Outputs"))
             );
+            let more = |key| id(Control::More(Side::Output, number(key)));
             assert_eq!(
                 list.children(),
-                [speakers, hdmi],
+                [speakers, more("Speakers"), hdmi, more("HDMI")],
                 "folded away, the headphones"
             );
             let chosen = node(&tree, speakers);
@@ -2057,7 +2251,11 @@ mod mixers {
             let tree = mixer("perspicax-mixer-DP-1", Some((1280, 800)), Some(&view));
             assert_eq!(node(&tree, fold).is_expanded(), Some(true));
             let headphones = id(Control::Choose(Side::Output, number("Headphones")));
-            assert_eq!(node(&tree, OUTPUTS).children()[2], headphones);
+            assert_eq!(
+                node(&tree, OUTPUTS).children()[4],
+                headphones,
+                "after the speakers and HDMI, and their buttons"
+            );
             assert_eq!(
                 node(&tree, headphones).description(),
                 Some("Nothing plugged in")

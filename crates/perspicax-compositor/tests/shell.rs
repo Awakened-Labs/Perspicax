@@ -51,6 +51,13 @@ use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_h
 struct Shell {
     thread: thread::JoinHandle<Result<(), perspicax_shell::Error>>,
     config: PathBuf,
+    /// The file its mixer keeps what is hidden and renamed in: one of the
+    /// test's own.
+    #[cfg_attr(
+        not(feature = "capture"),
+        expect(dead_code, reason = "the mixer's tests'")
+    )]
+    state: PathBuf,
     /// The session bus its tray is on.
     bus: Bus,
 }
@@ -85,15 +92,23 @@ impl Shell {
             "perspicax-shell-{name}-{}-no-sound",
             std::process::id()
         ));
+        // Never the person's own.
+        let state = std::env::temp_dir().join(format!(
+            "perspicax-shell-{name}-{}-mixer.json",
+            std::process::id()
+        ));
+        std::fs::remove_file(&state).ok();
         let options = perspicax_shell::Options {
             connection: Some(connection),
             config: Some(path.clone()),
             session_bus: Some(bus.address.clone()),
             sound_server: Some(sound.unwrap_or(nowhere)),
+            state: Some(state.clone()),
         };
         Self {
             thread: thread::spawn(move || perspicax_shell::run(options)),
             config: path,
+            state,
             bus,
         }
     }
@@ -2235,6 +2250,95 @@ fn a_click_on_the_output_switches_to_the_next_and_round() {
     until_default("one");
 
     drop(sound);
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn an_output_named_and_hidden_in_the_mixer_is_kept_for_the_person_alone_and_never_switched_to() {
+    use std::{os::unix::fs::PermissionsExt as _, time::Duration};
+
+    let sound = SoundServer::start("hide");
+    let session = Session::start("shell-hide", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "hide",
+        OUTPUT_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    until_colour(&session, (1258, 800 - 20), INK);
+    click(
+        &session,
+        panel,
+        (1280.0 - 15.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Right,
+    );
+    let facts = session.wait_for(|facts| mixer(facts).is_some());
+    let (surface, rect) = mixer(&facts).expect("waited for");
+    // "two" is the output's second row: under 1 of edge and 12 of room, a
+    // 22-pixel title, a 32-pixel row, and "one", 28; the button at its end
+    // is 28 square, against the room on the right.
+    let two = 13.0 + 22.0 + 32.0 + 28.0;
+    click(
+        &session,
+        surface,
+        (rect.x1 - 13.0 - 14.0, rect.y0 + two + 14.0),
+        PointerButton::Left,
+    );
+    // Unfolded under it: its key, a line of 20, its name's field, then
+    // Hide, rows of 28 set in by 28; it grows away from the panel.
+    let facts = session.wait_for(|facts| {
+        mixer(facts).is_some_and(|(_, grown)| grown.y0 <= rect.y0 - 20.0 - 2.0 * 28.0)
+    });
+    let (_, rect) = mixer(&facts).expect("waited for");
+    let set_in = rect.x0 + 13.0 + 28.0 + 20.0;
+    let field = rect.y0 + two + 28.0 + 20.0 + 14.0;
+    click(&session, surface, (set_in, field), PointerButton::Left);
+    Host::new(&session.facts, &session.requests)
+        .act(
+            surface,
+            &Verb::Type {
+                text: "Desk\n".to_owned(),
+            },
+        )
+        .expect("typed");
+    let kept = || std::fs::read_to_string(&shell.state).unwrap_or_default();
+    sound.until(|_| kept().contains("\"two\": \"Desk\""));
+    let mode = std::fs::metadata(&shell.state)
+        .expect("kept")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "for the person alone");
+    click(
+        &session,
+        surface,
+        (set_in, field + 28.0),
+        PointerButton::Left,
+    );
+    sound.until(|_| kept().contains("\"hidden\": [\n    \"two\""));
+    // Under "Hidden", folded, it and all it unfolded are gone from sight.
+    let tall = rect.y1 - rect.y0;
+    session.wait_for(|facts| {
+        mixer(facts).is_some_and(|(_, now)| now.y1 - now.y0 <= tall - 28.0 - 76.0 + 24.0)
+    });
+
+    // A press on the output, the mixer open, closes it and switches: to
+    // nothing but "one", with "two" hidden.
+    click(
+        &session,
+        panel,
+        (1280.0 - 30.0 - 5.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Left,
+    );
+    session.wait_for(|facts| mixer(facts).is_none());
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(sound.pactl(&["get-default-sink"]).trim(), "one");
+
+    drop(sound);
+    std::fs::remove_file(&shell.state).ok();
     shell.stop_with(session);
 }
 

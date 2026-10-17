@@ -67,6 +67,7 @@ zune-jpeg = { version = "0.5", optional = true }
 cosmic-text = { workspace = true, optional = true }
 # The menu file. Parse only, as the config crate reads the config file.
 serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 toml = { version = "1", default-features = false, features = ["std", "serde", "parse"], optional = true }
 # Icons drawn from SVG, as most icon themes ship them. Default features off:
 # an icon needs no text, no system fonts and no embedded photographs, and
@@ -152,6 +153,7 @@ pie = ["menus", "panel"]
 # The sound, on the panel: how loud the output is, and a click to mute it,
 # read from the sound server PipeWire or PulseAudio runs, on a thread of
 # its own. Its mixer opens over the desktop as a menu does, and takes the
-# keyboard as one does, so it takes the menus.
-audio = ["panel", "menus", "dep:pulseaudio"]
+# keyboard as one does, so it takes the menus; what a person hides and
+# names in it is kept as JSON.
+audio = ["panel", "menus", "dep:pulseaudio", "dep:serde_json"]
 full = ["wallpaper", "panel", "menus", "tray", "icons", "svg", "pie", "audio"]

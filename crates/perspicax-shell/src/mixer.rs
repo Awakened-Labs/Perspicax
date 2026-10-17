@@ -12,7 +12,11 @@
 //! server says it is there; a press on a device listed moves its side to
 //! it; a press on a side's fold unfolds what has nothing plugged in, or
 //! folds it away again; a press on a program's row unfolds the outputs it
-//! can be moved to, and a press on one of those moves it there. The wheel
+//! can be moved to, and a press on one of those moves it there. A press on
+//! the button at the end of a device's row unfolds what tells it apart, a
+//! field to name it, and buttons to hide it or its card, or folds them
+//! again; a press on the field starts naming it, Return keeps the name and
+//! Escape drops it, and a blank name gives it its own again. The wheel
 //! over a slider or its mute button steps the slider, and anywhere else on
 //! the mixer scrolls it, if it is too tall for the room it has. A press off
 //! the mixer closes it, as do Escape and losing the keyboard.
@@ -21,11 +25,12 @@
 //! arrows up and down, scrolling each into sight. On a slider, left and
 //! right step it, Page Up and Page Down move it ten at a time, and Home and
 //! End take it to silence or to the limit; on anything else, Space or
-//! Return presses it. The control the keyboard is on is ringed once a key
-//! is used, and not while the pointer is what is used.
+//! Return presses it. While a device is being named, what is typed is its
+//! name, and moving off the field drops it. The control the keyboard is on
+//! is ringed once a key is used, and not while the pointer is what is used.
 
 use crate::{
-    layout::mixer::{Anchor, Control, Mixed, Placed, Unfolded, lay_out, percent_at},
+    layout::mixer::{Anchor, Control, Listed, Mixed, Placed, Unfolded, lay_out, percent_at},
     model::{
         Button,
         sound::{Change, Side, Whose, stepped},
@@ -38,7 +43,7 @@ const PAGE: u32 = 10;
 const NOTCH: i32 = 40;
 
 /// A key pressed while the mixer has the keyboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Key {
     Escape,
     /// The next control, or with Shift, the one before.
@@ -52,18 +57,24 @@ pub(crate) enum Key {
     PageDown,
     Home,
     End,
-    /// Return or Space.
+    /// Return.
     Press,
+    /// Text typed, Space's among it: what is typed while naming a device,
+    /// and Space a press otherwise.
+    Text(String),
+    Backspace,
 }
 
 /// What an assistive technology asks of a control.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Act {
     Click,
     Increment,
     Decrement,
     /// Set a slider to this, in percent.
     Set(u32),
+    /// Name a device this.
+    Name(String),
     Focus,
 }
 
@@ -107,6 +118,10 @@ pub(crate) enum Effect {
     Choose(Side, String),
     /// Move the program playing this stream to the sink of this number.
     Move(u32, u32),
+    /// Hide the device, or the card, of this key, or bring it back.
+    Hide(String, bool),
+    /// Name the device of this key this; a blank name forgets its name.
+    Rename(String, String),
 }
 
 /// The mixer, if it is open.
@@ -132,6 +147,9 @@ struct Open {
     /// in place of the server's until the server says it.
     dragging: Option<Whose>,
     dragged: Option<(Whose, u32)>,
+    /// The device being named, by its side and number, and the name typed
+    /// so far.
+    naming: Option<(Side, u64, String)>,
 }
 
 /// The mixer as it is to be drawn.
@@ -146,6 +164,8 @@ pub(crate) struct View<'a> {
     pub(crate) ring: Option<Control>,
     /// A volume dragged to, shown in place of the server's.
     dragged: Option<(Whose, u32)>,
+    /// The field being typed in, and what is typed.
+    pub(crate) naming: Option<(Control, &'a str)>,
 }
 
 impl View<'_> {
@@ -175,6 +195,10 @@ impl State {
             focus: open.focus,
             ring: open.keyed.then_some(open.focus),
             dragged: open.dragged,
+            naming: open
+                .naming
+                .as_ref()
+                .map(|(side, number, name)| (Control::Rename(*side, *number), name.as_str())),
         })
     }
 
@@ -198,10 +222,22 @@ impl State {
                     pointer: None,
                     dragging: None,
                     dragged: None,
+                    naming: None,
                 });
                 vec![Effect::Redraw]
             }
             Event::Close | Event::KeyboardLost => self.close(),
+            // Escape while naming a device drops the name, and leaves the
+            // mixer open.
+            Event::Key(Key::Escape)
+                if self
+                    .open
+                    .as_mut()
+                    .and_then(|open| open.naming.take())
+                    .is_some() =>
+            {
+                vec![Effect::Redraw]
+            }
             Event::Key(Key::Escape) => self.close(),
             event => {
                 let Some(open) = &mut self.open else {
@@ -247,6 +283,8 @@ impl Open {
                 self.unfolded
                     .programs
                     .retain(|&stream| mixed.program(stream).is_some());
+                self.naming
+                    .take_if(|(side, number, _)| mixed.find(*side, *number).is_none());
                 self.mixed = mixed;
                 self.lay_out(self.placed.scroll);
                 vec![Effect::Redraw]
@@ -264,7 +302,16 @@ impl Open {
                     return None;
                 }
                 let ringed = std::mem::replace(&mut self.keyed, false);
-                let mut effects = match self.placed.at(at) {
+                let pressed = self.placed.at(at);
+                let mut effects = Vec::new();
+                if self
+                    .naming
+                    .take_if(|(side, number, _)| pressed != Some(Control::Rename(*side, *number)))
+                    .is_some()
+                {
+                    effects.push(Effect::Redraw);
+                }
+                effects.extend(match pressed {
                     Some(Control::Volume(whose)) => {
                         self.focus = Control::Volume(whose);
                         self.dragging = Some(whose);
@@ -277,7 +324,7 @@ impl Open {
                         self.press(control)
                     }
                     None => Vec::new(),
-                };
+                });
                 if ringed && !effects.contains(&Effect::Redraw) {
                     effects.push(Effect::Redraw);
                 }
@@ -307,7 +354,10 @@ impl Open {
             },
             Event::Key(key) => {
                 let shown = !std::mem::replace(&mut self.keyed, true);
-                let mut effects = self.key(key);
+                let mut effects = match self.naming.take() {
+                    Some(naming) => self.name(naming, key),
+                    None => self.key(key),
+                };
                 if shown && !effects.contains(&Effect::Redraw) {
                     effects.push(Effect::Redraw);
                 }
@@ -390,6 +440,33 @@ impl Open {
         vec![Effect::Redraw]
     }
 
+    /// The device listed on `side` numbered `number`.
+    fn device(&self, side: Side, number: u64) -> Option<&Listed> {
+        self.mixed.find(side, number)
+    }
+
+    /// `key`, typed while naming the device on `side` numbered `number`,
+    /// `name` typed so far.
+    fn name(&mut self, (side, number, mut name): (Side, u64, String), key: Key) -> Vec<Effect> {
+        match key {
+            Key::Text(text) => name.push_str(&text),
+            Key::Backspace => {
+                name.pop();
+            }
+            Key::Press => {
+                return match self.device(side, number) {
+                    Some(listed) => vec![Effect::Rename(listed.key.clone(), name), Effect::Redraw],
+                    None => vec![Effect::Redraw],
+                };
+            }
+            // Off the field, the name is dropped.
+            Key::Tab | Key::BackTab | Key::Up | Key::Down => return self.key(key),
+            _ => {}
+        }
+        self.naming = Some((side, number, name));
+        vec![Effect::Redraw]
+    }
+
     /// Press `control`, as a click, Return or an assistive technology does:
     /// a slider is not pressed.
     fn press(&mut self, control: Control) -> Vec<Effect> {
@@ -404,8 +481,36 @@ impl Open {
                 _ => Vec::new(),
             },
             Control::Fold(side) => self.toggle(|unfolded| {
-                unfolded.sides[side.at()] = !unfolded.sides[side.at()];
+                unfolded.unplugged[side.at()] = !unfolded.unplugged[side.at()];
             }),
+            Control::Hidden(side) => self.toggle(|unfolded| {
+                unfolded.hidden[side.at()] = !unfolded.hidden[side.at()];
+            }),
+            Control::More(side, number) => self.toggle(|unfolded| {
+                let more = Some((side, number));
+                unfolded.more = if unfolded.more == more { None } else { more };
+            }),
+            Control::Rename(side, number) => match self.device(side, number) {
+                Some(listed) => {
+                    let name = listed.name.clone().unwrap_or_default();
+                    self.naming = Some((side, number, name));
+                    vec![Effect::Redraw]
+                }
+                None => Vec::new(),
+            },
+            Control::Hide(side, number) => match self.device(side, number) {
+                Some(listed) => vec![Effect::Hide(listed.key.clone(), !listed.hidden)],
+                None => Vec::new(),
+            },
+            Control::HideCard(side, number) => {
+                match self
+                    .device(side, number)
+                    .and_then(|listed| listed.card.as_ref())
+                {
+                    Some(card) => vec![Effect::Hide(card.key.clone(), !card.hidden)],
+                    None => Vec::new(),
+                }
+            }
             Control::Plays(stream) => self.toggle(|unfolded| {
                 let programs = &mut unfolded.programs;
                 match programs.iter().position(|&had| had == stream) {
@@ -461,6 +566,7 @@ impl Open {
                 self.set(whose, limit)
             }
             (Key::Press, None) => self.press(self.focus),
+            (Key::Text(text), None) if text == " " => self.press(self.focus),
             _ => Vec::new(),
         }
     }
@@ -473,6 +579,10 @@ impl Open {
             (Control::Volume(whose), Act::Increment) => self.step(whose, 1),
             (Control::Volume(whose), Act::Decrement) => self.step(whose, -1),
             (Control::Volume(whose), Act::Set(percent)) => self.set(whose, percent),
+            (Control::Rename(side, number), Act::Name(name)) => match self.device(side, number) {
+                Some(listed) => vec![Effect::Rename(listed.key.clone(), name)],
+                None => Vec::new(),
+            },
             (control, Act::Click) => self.press(control),
             (control, Act::Focus) => {
                 self.focus = control;
@@ -533,6 +643,10 @@ mod tests {
             kind: Kind::Speaker,
             connected,
             chosen,
+            name: None,
+            hidden: false,
+            card: None,
+            details: Vec::new(),
         }
     }
 
@@ -576,6 +690,13 @@ mod tests {
             .iter()
             .map(|&(control, _)| control)
             .collect()
+    }
+
+    /// Its controls but the buttons at the ends of devices' rows.
+    fn rows(state: &State) -> Vec<Control> {
+        let mut controls = controls(state);
+        controls.retain(|control| !matches!(control, Control::More(..)));
+        controls
     }
 
     /// A point on `control`, a fraction `along` of its width from its left.
@@ -771,6 +892,12 @@ mod tests {
             "the sound is on it"
         );
         state.update(Event::Key(Key::Down));
+        assert_eq!(
+            state.view().expect("open").focus,
+            Control::More(Side::Output, number("speakers")),
+            "the button at its row's end"
+        );
+        state.update(Event::Key(Key::Down));
         assert_eq!(state.view().expect("open").focus, row("headset"));
         assert_eq!(
             state.update(Event::Key(Key::Press)),
@@ -787,7 +914,7 @@ mod tests {
     fn a_jack_with_nothing_in_it_is_folded_away_until_its_fold_is_pressed() {
         let mut state = opened(laptop());
         assert_eq!(
-            controls(&state)[..5],
+            rows(&state)[..5],
             [
                 Control::Mute(OUT),
                 Control::Volume(OUT),
@@ -797,19 +924,19 @@ mod tests {
             ],
             "what is plugged in, then the fold"
         );
-        assert_eq!(state.view().expect("open").placed.folded, [2, 0]);
+        assert_eq!(state.view().expect("open").placed.unplugged, [2, 0]);
         let fold = on(&state, Control::Fold(Side::Output), 0.5);
         assert_eq!(
             state.update(Event::Press(fold, Button::Left)),
             [Effect::Redraw]
         );
         assert_eq!(
-            controls(&state)[4..7],
+            rows(&state)[4..7],
             [Control::Fold(Side::Output), row("headphones"), row("hdmi")],
             "unfolded under it"
         );
         state.update(Event::Act(Control::Fold(Side::Output), Act::Click));
-        assert!(!controls(&state).contains(&row("hdmi")), "folded again");
+        assert!(!rows(&state).contains(&row("hdmi")), "folded again");
         assert!(
             state
                 .update(Event::Act(Control::Fold(Side::Input), Act::Click))
@@ -817,16 +944,149 @@ mod tests {
             "no input is folded away"
         );
         assert_eq!(
-            state.view().expect("open").placed.unfolded.sides,
+            state.view().expect("open").placed.unfolded.unplugged,
             [false; 2]
         );
         let mut plugged = laptop();
         plugged.outputs[2].connected = true;
         state.update(Event::Heard(plugged));
         assert_eq!(
-            controls(&state)[2..5],
+            rows(&state)[2..5],
             [row("speakers"), row("hdmi"), row("headset")],
             "a jack is listed once it is plugged in"
+        );
+    }
+
+    /// The laptop, the headset hidden, and the headphones' card.
+    fn kept() -> Mixed {
+        let mut mixed = laptop();
+        mixed.outputs[3].hidden = true;
+        mixed.outputs[1].card = Some(crate::layout::mixer::Owner {
+            key: "built-in".to_owned(),
+            name: "Built-in Audio".to_owned(),
+            hidden: false,
+        });
+        mixed.outputs[1].name = Some("Phones".to_owned());
+        mixed
+    }
+
+    #[test]
+    fn the_button_at_a_rows_end_unfolds_its_details_one_device_at_a_time() {
+        let mut state = opened(kept());
+        let more = |key| Control::More(Side::Output, number(key));
+        let at = on(&state, more("speakers"), 0.5);
+        assert_eq!(
+            state.update(Event::Press(at, Button::Left)),
+            [Effect::Redraw]
+        );
+        let unfolded = |state: &State| state.view().expect("open").placed.unfolded.more;
+        assert_eq!(unfolded(&state), Some((Side::Output, number("speakers"))));
+        assert!(controls(&state).contains(&Control::Rename(Side::Output, number("speakers"))));
+        state.update(Event::Act(Control::Fold(Side::Output), Act::Click));
+        state.update(Event::Act(more("headphones"), Act::Click));
+        assert_eq!(
+            unfolded(&state),
+            Some((Side::Output, number("headphones"))),
+            "the last one's folded"
+        );
+        state.update(Event::Act(more("headphones"), Act::Click));
+        assert_eq!(unfolded(&state), None, "folded again");
+    }
+
+    #[test]
+    fn hide_and_hide_all_ask_to_hide_or_bring_back() {
+        let mut state = opened(kept());
+        let phones = number("headphones");
+        state.update(Event::Act(Control::Fold(Side::Output), Act::Click));
+        state.update(Event::Act(Control::More(Side::Output, phones), Act::Click));
+        assert_eq!(
+            state.update(Event::Act(Control::Hide(Side::Output, phones), Act::Click)),
+            [Effect::Hide("headphones".to_owned(), true)]
+        );
+        assert_eq!(
+            state.update(Event::Act(
+                Control::HideCard(Side::Output, phones),
+                Act::Click
+            )),
+            [Effect::Hide("built-in".to_owned(), true)],
+            "its card, by the card's key"
+        );
+        let headset = number("headset");
+        state.update(Event::Act(Control::Hidden(Side::Output), Act::Click));
+        state.update(Event::Act(Control::More(Side::Output, headset), Act::Click));
+        assert_eq!(
+            state.update(Event::Act(Control::Hide(Side::Output, headset), Act::Click)),
+            [Effect::Hide("headset".to_owned(), false)],
+            "brought back"
+        );
+    }
+
+    #[test]
+    fn a_name_typed_is_kept_with_return_and_dropped_with_escape() {
+        let mut state = opened(kept());
+        let phones = number("headphones");
+        let field = Control::Rename(Side::Output, phones);
+        state.update(Event::Act(Control::Fold(Side::Output), Act::Click));
+        state.update(Event::Act(Control::More(Side::Output, phones), Act::Click));
+        let at = on(&state, field, 0.5);
+        assert_eq!(
+            state.update(Event::Press(at, Button::Left)),
+            [Effect::Redraw]
+        );
+        let typed = |state: &State| {
+            state
+                .view()
+                .expect("open")
+                .naming
+                .map(|(_, typed)| typed.to_owned())
+        };
+        assert_eq!(
+            typed(&state).as_deref(),
+            Some("Phones"),
+            "its name to start from"
+        );
+        for key in ["s", "x"]
+            .map(|text| Key::Text(text.to_owned()))
+            .into_iter()
+            .chain([Key::Backspace, Key::Text(" 2".to_owned())])
+        {
+            state.update(Event::Key(key));
+        }
+        assert_eq!(
+            typed(&state).as_deref(),
+            Some("Phoness 2"),
+            "a space typed, not pressed"
+        );
+        assert_eq!(
+            state.update(Event::Key(Key::Press)),
+            [
+                Effect::Rename("headphones".to_owned(), "Phoness 2".to_owned()),
+                Effect::Redraw
+            ]
+        );
+        assert_eq!(typed(&state), None, "done");
+        state.update(Event::Press(at, Button::Left));
+        state.update(Event::Key(Key::Text("x".to_owned())));
+        assert_eq!(state.update(Event::Key(Key::Escape)), [Effect::Redraw]);
+        assert_eq!(typed(&state), None, "dropped");
+        assert!(state.view().is_some(), "and the mixer still open");
+        state.update(Event::Press(at, Button::Left));
+        state.update(Event::Key(Key::Tab));
+        assert_eq!(typed(&state), None, "dropped, moving off it");
+        state.update(Event::Press(at, Button::Left));
+        let speakers = on(&state, row("speakers"), 0.5);
+        state.update(Event::Press(speakers, Button::Left));
+        assert_eq!(typed(&state), None, "dropped, pressing elsewhere");
+        assert_eq!(
+            state.update(Event::Act(field, Act::Name("Cans".to_owned()))),
+            [Effect::Rename("headphones".to_owned(), "Cans".to_owned())],
+            "as an assistive technology sets it"
+        );
+        state.update(Event::Act(Control::Hide(Side::Output, phones), Act::Focus));
+        assert_eq!(
+            state.update(Event::Key(Key::Text(" ".to_owned()))),
+            [Effect::Hide("headphones".to_owned(), true), Effect::Redraw],
+            "Space presses what is not a field, the ring now shown"
         );
     }
 

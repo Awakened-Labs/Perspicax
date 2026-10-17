@@ -614,6 +614,22 @@ pub fn default_path() -> Option<PathBuf> {
     Some(base.join("perspicax").join("config.toml"))
 }
 
+/// Where perspicax keeps what it remembers between sessions, which the
+/// person never writes: `$XDG_STATE_HOME/perspicax`, or
+/// `~/.local/state/perspicax` with no state folder set. `None` with neither
+/// variable set, or only relative ones. Both processes keep files there:
+/// the session's log and where windows last closed, and the mixer's.
+///
+/// `var` reads the environment.
+#[must_use]
+pub fn state_folder(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    // The XDG spec's rule: a relative folder is no folder at all.
+    let folder = |name: &str| var(name).map(PathBuf::from).filter(|dir| dir.is_absolute());
+    let state = folder("XDG_STATE_HOME")
+        .or_else(|| folder("HOME").map(|home| home.join(".local/state")))?;
+    Some(state.join("perspicax"))
+}
+
 /// Where a file `written` in the config file is: an image, a menu's icon
 /// folder. `~/` is the home folder, and a relative path is beside the config
 /// file, so a person can keep a wallpaper next to the config that names it.

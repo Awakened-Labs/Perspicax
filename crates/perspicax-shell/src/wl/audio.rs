@@ -22,12 +22,13 @@ use perspicax_config::{
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 use wayland_client::protocol::wl_surface;
 
-use super::App;
+use super::{App, kept::Keeper};
 use crate::{
     audio::{Ask, News, Running, Target},
     layout::panel::{Part, Playing},
     model::{
         Button,
+        kept::Kept,
         sound::{self, Change, Facts, Level, Side, Whose},
     },
 };
@@ -59,10 +60,12 @@ pub(super) struct Audio {
     /// The volume last asked of a device or a program, and when: what the
     /// next step is from, until the server says it is there.
     asked: Option<(Target, u32, Instant)>,
+    /// What the person hid and named in the mixer.
+    keeper: Keeper,
 }
 
 impl Audio {
-    pub(super) fn new(server: Option<PathBuf>, news: Sender<(u64, News)>) -> Self {
+    pub(super) fn new(server: Option<PathBuf>, news: Sender<(u64, News)>, keeper: Keeper) -> Self {
         Self {
             server,
             news,
@@ -73,6 +76,7 @@ impl Audio {
             mixer: Mixer::default(),
             wheel: 0.0,
             asked: None,
+            keeper,
         }
     }
 
@@ -145,6 +149,17 @@ impl Audio {
     /// The mixer, as `[shell.mixer]` writes it.
     pub(super) fn mixer(&self) -> &Mixer {
         &self.mixer
+    }
+
+    /// What the person hid and named.
+    pub(super) fn kept(&self) -> &Kept {
+        self.keeper.kept()
+    }
+
+    /// Change what the person hid and named with `change`, and keep it if
+    /// it changed. Whether it did.
+    pub(super) fn keep(&mut self, change: impl FnOnce(&mut Kept) -> bool) -> bool {
+        self.keeper.change(change)
     }
 
     /// What the server holds now, or that there is no server. A volume
@@ -267,7 +282,7 @@ impl App {
     }
 
     /// Show the panels what was last heard of the sound.
-    fn heard(&mut self) {
+    pub(super) fn heard(&mut self) {
         let facts = self.audio.facts.as_deref();
         let level = facts
             .and_then(|facts| facts.output())
@@ -281,7 +296,7 @@ impl App {
             Some(Playing {
                 kind: output.kind,
                 long: output.long(),
-                name: output.short,
+                name: self.audio.kept().called(&output),
             })
         });
         let mic = facts
@@ -319,7 +334,11 @@ impl App {
                 let Some(facts) = self.audio.facts() else {
                     return;
                 };
-                let outputs = facts.outputs();
+                // A hidden output is never moved to; hidden, the one in use
+                // moves on to the first that is not.
+                let kept = self.audio.kept();
+                let mut outputs = facts.outputs();
+                outputs.retain(|output| !kept.hides_choice(output));
                 let now = facts.output_key();
                 if let Some(next) = sound::next_choice(&outputs, now.as_deref()) {
                     self.audio.choose(Side::Output, &next.key);
@@ -371,7 +390,7 @@ mod tests {
     /// running.
     fn at(percent: u32) -> Audio {
         let (news, _) = channel::channel();
-        let mut audio = Audio::new(None, news);
+        let mut audio = Audio::new(None, news, Keeper::load(None));
         audio.hear(News::Facts(Box::new(facts(percent))));
         audio
     }
@@ -449,7 +468,7 @@ mod tests {
             muted: false,
         };
         let (news, _) = channel::channel();
-        let mut audio = Audio::new(None, news);
+        let mut audio = Audio::new(None, news, Keeper::load(None));
         audio.hear(News::Facts(Box::new(Facts {
             streams: vec![stream(40, 12), stream(41, 7)],
             client: Some(7),

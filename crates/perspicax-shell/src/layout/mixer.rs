@@ -6,7 +6,10 @@
 //! mutes, a slider for the volume, and the volume in percent, then a row
 //! for each device that side can be moved to. A device with nothing
 //! plugged into it is folded away, unless the sound is on it, under a row
-//! that counts what it holds and unfolds it. While programs play, a third
+//! that counts what it holds and unfolds it; one the person hid, under
+//! another. A device's row ends in a button that unfolds what tells it
+//! apart, a field to name it, and buttons to hide it or its whole card, set
+//! in under it, one device's at a time. While programs play, a third
 //! section holds each: a row of its name and where it plays, which unfolds
 //! the outputs it can be moved to, set in under it, then its own row of
 //! controls. A slider
@@ -30,12 +33,14 @@ pub(crate) const WIDE: i32 = 340;
 pub(crate) const BORDER: i32 = 1;
 const PAD: i32 = 12;
 const GAP: i32 = 8;
-/// How tall a section's title is, its row of controls, a device's row, and
-/// the row that unfolds what is folded away.
+/// How tall a section's title is, its row of controls, a device's row, the
+/// row that unfolds what is folded away, and a line of what tells a device
+/// apart.
 const TITLE: i32 = 22;
 const ROW: i32 = 32;
 const LISTED: i32 = 28;
 const FOLD: i32 = 24;
+const DETAIL: i32 = 20;
 /// A mute button is square, and the percentage this wide.
 pub(crate) const BUTTON: i32 = 28;
 pub(crate) const PERCENT: i32 = 48;
@@ -90,11 +95,41 @@ pub(crate) struct Listed {
     pub(crate) jack: Option<String>,
     /// What the panel calls it: "E8".
     pub(crate) short: String,
+    /// The person's name for it, listed in place of its own, if they gave
+    /// one.
+    pub(crate) name: Option<String>,
     pub(crate) kind: Kind,
     /// Whether nothing is known to be unplugged from it.
     pub(crate) connected: bool,
     /// Whether the sound is on it.
     pub(crate) chosen: bool,
+    /// Whether the person hid it, and the card it is a jack of, if it is
+    /// one's.
+    pub(crate) hidden: bool,
+    pub(crate) card: Option<Owner>,
+    /// What tells it apart, line by line.
+    pub(crate) details: Vec<(&'static str, String)>,
+}
+
+/// The card a device is a jack of, as far as hiding it goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Owner {
+    /// Its name, by which it is hidden.
+    pub(crate) key: String,
+    /// What it calls itself: "TU104 HD Audio Controller".
+    pub(crate) name: String,
+    pub(crate) hidden: bool,
+}
+
+/// Where a device is listed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shelf {
+    /// Among its side's devices.
+    Shown,
+    /// Under the fold of those with nothing plugged in.
+    Unplugged,
+    /// Under the fold of those the person hid.
+    Hidden,
 }
 
 /// A program playing, as the mixer shows it.
@@ -111,15 +146,33 @@ pub(crate) struct Program {
 }
 
 impl Listed {
-    /// Its whole name: "E8 — Headphones · Bluetooth".
+    /// Its whole name: the person's for it, or its own, "E8 — Headphones ·
+    /// Bluetooth".
     pub(crate) fn label(&self) -> String {
-        sound::long(&self.device, self.jack.as_deref())
+        match &self.name {
+            Some(name) => name.clone(),
+            None => sound::long(&self.device, self.jack.as_deref()),
+        }
     }
 
-    /// Whether it is folded away: nothing is plugged into it, and the sound
-    /// is not on it.
-    pub(crate) fn folded(&self) -> bool {
-        !self.connected && !self.chosen
+    /// Whether the person hid it, or its whole card.
+    pub(crate) fn concealed(&self) -> bool {
+        self.hidden || self.card.as_ref().is_some_and(|card| card.hidden)
+    }
+
+    /// Where it is listed: the one the sound is on among the rest, whatever
+    /// else is so of it; then one the person hid under "Hidden"; then one
+    /// with nothing plugged in under "Not connected".
+    pub(crate) fn shelf(&self) -> Shelf {
+        if self.chosen {
+            Shelf::Shown
+        } else if self.concealed() {
+            Shelf::Hidden
+        } else if self.connected {
+            Shelf::Shown
+        } else {
+            Shelf::Unplugged
+        }
     }
 }
 
@@ -178,13 +231,14 @@ impl Mixed {
     }
 }
 
-/// The number a listed device's control goes by: its key, hashed, which
-/// stays the same while others come and go beside it. Three bits short,
-/// for an accessibility node's id to say what kind of control it is.
+/// The number a listed device's controls go by: its key, hashed, which
+/// stays the same while others come and go beside it. Five bits short, for
+/// an accessibility node's id to say what kind of control it is, and on
+/// which side.
 pub(crate) fn number(key: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     key.hash(&mut hasher);
-    hasher.finish() >> 3
+    hasher.finish() >> 5
 }
 
 /// One of the mixer's controls.
@@ -200,6 +254,19 @@ pub(crate) enum Control {
     /// The row that unfolds what is folded away on this side, or folds it
     /// away again.
     Fold(Side),
+    /// The button at the end of a device's row, which unfolds what tells
+    /// it apart and what can be done with it, or folds them away again.
+    More(Side, u64),
+    /// The field a device is named in.
+    Rename(Side, u64),
+    /// The button that hides a device, or brings it back.
+    Hide(Side, u64),
+    /// The button that hides the whole card a device is a jack of, or
+    /// brings it back.
+    HideCard(Side, u64),
+    /// The row that unfolds what the person hid on this side, or folds it
+    /// away again.
+    Hidden(Side),
     /// The row of the program playing this stream, which unfolds the
     /// outputs it can be moved to, or folds them away again.
     Plays(u32),
@@ -210,13 +277,15 @@ pub(crate) enum Control {
 
 impl Control {
     /// The controls of the sides that are no device's.
-    pub(crate) const FIXED: [Self; 6] = [
+    pub(crate) const FIXED: [Self; 8] = [
         Self::Mute(Whose::Side(Side::Output)),
         Self::Volume(Whose::Side(Side::Output)),
         Self::Fold(Side::Output),
+        Self::Hidden(Side::Output),
         Self::Mute(Whose::Side(Side::Input)),
         Self::Volume(Whose::Side(Side::Input)),
         Self::Fold(Side::Input),
+        Self::Hidden(Side::Input),
     ];
 
     /// The side it is on, if it is a side's.
@@ -225,7 +294,12 @@ impl Control {
             Self::Mute(Whose::Side(side))
             | Self::Volume(Whose::Side(side))
             | Self::Choose(side, _)
-            | Self::Fold(side) => Some(side),
+            | Self::Fold(side)
+            | Self::More(side, _)
+            | Self::Rename(side, _)
+            | Self::Hide(side, _)
+            | Self::HideCard(side, _)
+            | Self::Hidden(side) => Some(side),
             Self::Mute(Whose::App(_))
             | Self::Volume(Whose::App(_))
             | Self::Plays(_)
@@ -235,11 +309,14 @@ impl Control {
 }
 
 /// What of the mixer is unfolded: each side's devices with nothing plugged
-/// in, the output's first, and the outputs of each program, by its
+/// in, and those hidden, the output's first; the device whose details are
+/// shown, by its side and number; and the outputs of each program, by its
 /// stream's number.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Unfolded {
-    pub(crate) sides: [bool; 2],
+    pub(crate) unplugged: [bool; 2],
+    pub(crate) hidden: [bool; 2],
+    pub(crate) more: Option<(Side, u64)>,
     pub(crate) programs: Vec<u32>,
 }
 
@@ -267,9 +344,12 @@ pub(crate) struct Placed {
     /// where a slider's percentage is written beside it.
     pub(crate) controls: Vec<(Control, Rect)>,
     pub(crate) percents: Vec<(Whose, Rect)>,
-    /// How many devices each side has folded away, the output's first, and
-    /// what is unfolded.
-    pub(crate) folded: [usize; 2],
+    /// Each line of what tells the device unfolded apart.
+    pub(crate) details: Vec<(String, Rect)>,
+    /// How many devices each side has with nothing plugged in, and hidden,
+    /// folded away, the output's first, and what is unfolded.
+    pub(crate) unplugged: [usize; 2],
+    pub(crate) hidden: [usize; 2],
     pub(crate) unfolded: Unfolded,
 }
 
@@ -278,9 +358,33 @@ enum Line {
     Title(Heading),
     /// The mute button, the slider and the percentage.
     Master(Whose),
+    /// A device's row, and the button at its end.
+    Device(Side, u64),
     Row(Control),
+    /// What tells a device apart.
+    Detail(String),
     /// The room between the sections.
     Gap,
+}
+
+/// The lines of `listed`, on `side`: its row, and what is unfolded of it.
+fn device(lines: &mut Vec<(Line, i32)>, side: Side, listed: &Listed, unfolded: &Unfolded) {
+    let number = number(&listed.key);
+    lines.push((Line::Device(side, number), LISTED));
+    if unfolded.more != Some((side, number)) {
+        return;
+    }
+    for (label, value) in &listed.details {
+        lines.push((Line::Detail(format!("{label}: {value}")), DETAIL));
+    }
+    lines.push((Line::Row(Control::Rename(side, number)), LISTED));
+    // Hidden with its card, it comes back with its card.
+    if !listed.card.as_ref().is_some_and(|card| card.hidden) {
+        lines.push((Line::Row(Control::Hide(side, number)), LISTED));
+    }
+    if listed.card.is_some() {
+        lines.push((Line::Row(Control::HideCard(side, number)), LISTED));
+    }
 }
 
 /// The mixer laid out, opened at `anchor`, showing `mixed`, with what is
@@ -289,40 +393,55 @@ enum Line {
 pub(crate) fn lay_out(anchor: &Anchor, mixed: &Mixed, unfolded: &Unfolded, scroll: i32) -> Placed {
     let Anchor { button, edge, area } = *anchor;
     let mut lines = Vec::new();
-    let mut line = |line, tall| lines.push((line, tall));
-    let mut folded = [0; 2];
+    let (mut unplugged, mut hidden) = ([0; 2], [0; 2]);
     for side in [Side::Output, Side::Input] {
         let listed = mixed.listed(side);
-        let device = |listed: &Listed| Line::Row(Control::Choose(side, number(&listed.key)));
-        line(Line::Title(Heading::Side(side)), TITLE);
-        line(Line::Master(Whose::Side(side)), ROW);
-        for one in listed.iter().filter(|one| !one.folded()) {
-            line(device(one), LISTED);
+        let shelf = |shelf| listed.iter().filter(move |one| one.shelf() == shelf);
+        lines.push((Line::Title(Heading::Side(side)), TITLE));
+        lines.push((Line::Master(Whose::Side(side)), ROW));
+        for one in shelf(Shelf::Shown) {
+            device(&mut lines, side, one, unfolded);
         }
-        folded[side.at()] = listed.iter().filter(|one| one.folded()).count();
-        if folded[side.at()] > 0 {
-            line(Line::Row(Control::Fold(side)), FOLD);
-            if unfolded.sides[side.at()] {
-                for one in listed.iter().filter(|one| one.folded()) {
-                    line(device(one), LISTED);
+        for (shelf, count, fold, open) in [
+            (
+                Shelf::Unplugged,
+                &mut unplugged,
+                Control::Fold(side),
+                unfolded.unplugged,
+            ),
+            (
+                Shelf::Hidden,
+                &mut hidden,
+                Control::Hidden(side),
+                unfolded.hidden,
+            ),
+        ] {
+            count[side.at()] = listed.iter().filter(|one| one.shelf() == shelf).count();
+            if count[side.at()] == 0 {
+                continue;
+            }
+            lines.push((Line::Row(fold), FOLD));
+            if open[side.at()] {
+                for one in listed.iter().filter(|one| one.shelf() == shelf) {
+                    device(&mut lines, side, one, unfolded);
                 }
             }
         }
         if side == Side::Output {
-            line(Line::Gap, GAP);
+            lines.push((Line::Gap, GAP));
         }
     }
     if !mixed.programs.is_empty() {
-        line(Line::Gap, GAP);
-        line(Line::Title(Heading::Programs), TITLE);
+        lines.push((Line::Gap, GAP));
+        lines.push((Line::Title(Heading::Programs), TITLE));
     }
     for program in &mixed.programs {
         let stream = program.stream;
-        line(Line::Row(Control::Plays(stream)), LISTED);
-        line(Line::Master(Whose::App(stream)), ROW);
+        lines.push((Line::Row(Control::Plays(stream)), LISTED));
+        lines.push((Line::Master(Whose::App(stream)), ROW));
         if unfolded.programs.contains(&stream) {
             for &(sink, _) in &mixed.sinks {
-                line(Line::Row(Control::Move(stream, sink)), LISTED);
+                lines.push((Line::Row(Control::Move(stream, sink)), LISTED));
             }
         }
     }
@@ -344,7 +463,9 @@ pub(crate) fn lay_out(anchor: &Anchor, mixed: &Mixed, unfolded: &Unfolded, scrol
     );
     let most = (y - inside.h).max(0);
     let scroll = scroll.clamp(0, most);
-    let (mut titles, mut controls, mut percents) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut titles, mut controls, mut percents, mut details) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let set_in = |row, tall| Rect::new(inside.x + BUTTON, row, inside.w - BUTTON, tall);
     let mut row = inside.y - scroll;
     for (line, tall) in lines {
         match line {
@@ -364,14 +485,24 @@ pub(crate) fn lay_out(anchor: &Anchor, mixed: &Mixed, unfolded: &Unfolded, scrol
                 controls.push((Control::Volume(whose), slider));
                 percents.push((whose, percent));
             }
-            // A program's outputs are its own, set in under it.
-            Line::Row(control @ Control::Move(..)) => {
-                let rect = Rect::new(inside.x + BUTTON, row, inside.w - BUTTON, tall);
-                controls.push((control, rect));
+            Line::Device(side, number) => {
+                let more = Rect::new(inside.right() - BUTTON, row, BUTTON, tall);
+                let choose = Rect::new(inside.x, row, inside.w - BUTTON, tall);
+                controls.push((Control::Choose(side, number), choose));
+                controls.push((Control::More(side, number), more));
             }
+            // A program's outputs are its own, and what can be done with a
+            // device its own, set in under it.
+            Line::Row(
+                control @ (Control::Move(..)
+                | Control::Rename(..)
+                | Control::Hide(..)
+                | Control::HideCard(..)),
+            ) => controls.push((control, set_in(row, tall))),
             Line::Row(control) => {
                 controls.push((control, Rect::new(inside.x, row, inside.w, tall)));
             }
+            Line::Detail(text) => details.push((text, set_in(row, tall))),
             Line::Gap => {}
         }
         row += tall;
@@ -384,7 +515,9 @@ pub(crate) fn lay_out(anchor: &Anchor, mixed: &Mixed, unfolded: &Unfolded, scrol
         titles,
         controls,
         percents,
-        folded,
+        details,
+        unplugged,
+        hidden,
         unfolded: unfolded.clone(),
     }
 }
@@ -426,7 +559,15 @@ impl Placed {
             Control::Mute(Whose::App(stream)) | Control::Volume(Whose::App(stream)) => {
                 self.of(Control::Plays(stream))
             }
-            Control::Choose(..) | Control::Fold(_) | Control::Plays(_) | Control::Move(..) => None,
+            Control::Choose(..)
+            | Control::Fold(_)
+            | Control::More(..)
+            | Control::Rename(..)
+            | Control::Hide(..)
+            | Control::HideCard(..)
+            | Control::Hidden(_)
+            | Control::Plays(_)
+            | Control::Move(..) => None,
         };
         let top = named.map_or(rect.y, |named| named.y);
         let above = self.inside.y - top;
@@ -496,6 +637,10 @@ mod tests {
             kind: Kind::Speaker,
             connected,
             chosen,
+            name: None,
+            hidden: false,
+            card: None,
+            details: Vec::new(),
         }
     }
 
@@ -581,10 +726,12 @@ mod tests {
                 Control::Mute(Whose::Side(Side::Output)),
                 Control::Volume(Whose::Side(Side::Output)),
                 speakers,
+                Control::More(Side::Output, number("speakers")),
                 Control::Fold(Side::Output),
                 Control::Mute(Whose::Side(Side::Input)),
                 Control::Volume(Whose::Side(Side::Input)),
                 mic,
+                Control::More(Side::Input, number("mic")),
             ]
         );
         let output = placed
@@ -602,7 +749,14 @@ mod tests {
         assert!(output.right() < percent.x, "the percentage right of it");
         let row = placed.of(speakers).expect("a row");
         assert_eq!(row.y, output.bottom(), "the devices under the slider");
-        assert_eq!(row.w, placed.inside.w, "the width of the mixer");
+        let more = placed
+            .of(Control::More(Side::Output, number("speakers")))
+            .expect("a button at its end");
+        assert_eq!(
+            (row.x, row.right(), more.right()),
+            (placed.inside.x, more.x, placed.inside.right()),
+            "the width of the mixer, the button at its end"
+        );
         assert_eq!(
             placed.at(point(output)),
             Some(Control::Volume(Whose::Side(Side::Output)))
@@ -625,7 +779,7 @@ mod tests {
     fn a_device_with_nothing_plugged_in_is_folded_away_unless_the_sound_is_on_it() {
         let headphones = Control::Choose(Side::Output, number("headphones"));
         let placed = at(ANCHOR);
-        assert_eq!(placed.folded, [1, 0]);
+        assert_eq!(placed.unplugged, [1, 0]);
         assert_eq!(placed.of(headphones), None, "folded away");
         assert_eq!(
             placed.of(Control::Fold(Side::Input)),
@@ -633,7 +787,7 @@ mod tests {
             "nothing to fold"
         );
         let sides = Unfolded {
-            sides: [true, false],
+            unplugged: [true, false],
             ..Unfolded::default()
         };
         let unfolded = lay_out(&ANCHOR, &mixed(), &sides, 0);
@@ -650,7 +804,149 @@ mod tests {
         chosen.outputs[1].chosen = true;
         let placed = lay_out(&ANCHOR, &chosen, &Unfolded::default(), 0);
         assert!(placed.of(headphones).is_some(), "the sound is on it");
-        assert_eq!(placed.folded, [0, 0]);
+        assert_eq!(placed.unplugged, [0, 0]);
+    }
+
+    /// The laptop's outputs: the speakers in use, a headset hidden, and the
+    /// NVIDIA card's jack, with nothing in it, hidden with its card.
+    fn hidden() -> Mixed {
+        let card = |hidden| Owner {
+            key: "nvidia".to_owned(),
+            name: "TU104 HD Audio Controller".to_owned(),
+            hidden,
+        };
+        Mixed {
+            outputs: vec![
+                listed("speakers", true, true),
+                Listed {
+                    hidden: true,
+                    ..listed("headset", true, false)
+                },
+                Listed {
+                    card: Some(card(true)),
+                    details: vec![
+                        ("Chip", "GPU".to_owned()),
+                        ("Key", "nvidia/hdmi".to_owned()),
+                    ],
+                    ..listed("hdmi", false, false)
+                },
+            ],
+            ..mixed()
+        }
+    }
+
+    #[test]
+    fn a_hidden_device_is_under_hidden_unless_the_sound_is_on_it() {
+        let placed = lay_out(&ANCHOR, &hidden(), &Unfolded::default(), 0);
+        assert_eq!(placed.hidden, [2, 0], "the headset, and the card's jack");
+        assert_eq!(placed.unplugged, [0, 0], "hidden first, plugged in or not");
+        assert_eq!(
+            controls(&placed)[4],
+            Control::Hidden(Side::Output),
+            "after the speakers"
+        );
+        let open = Unfolded {
+            hidden: [true, false],
+            ..Unfolded::default()
+        };
+        let placed = lay_out(&ANCHOR, &hidden(), &open, 0);
+        assert_eq!(
+            controls(&placed)[5..9],
+            [
+                Control::Choose(Side::Output, number("headset")),
+                Control::More(Side::Output, number("headset")),
+                Control::Choose(Side::Output, number("hdmi")),
+                Control::More(Side::Output, number("hdmi")),
+            ],
+            "unfolded under it"
+        );
+        let mut in_use = hidden();
+        in_use.outputs[1].chosen = true;
+        in_use.outputs[0].chosen = false;
+        let placed = lay_out(&ANCHOR, &in_use, &Unfolded::default(), 0);
+        assert!(
+            placed
+                .of(Control::Choose(Side::Output, number("headset")))
+                .is_some(),
+            "the sound is on it, so it stays in sight"
+        );
+        assert_eq!(placed.hidden, [1, 0]);
+    }
+
+    #[test]
+    fn a_devices_details_name_and_hiding_are_set_in_under_it() {
+        let hdmi = number("hdmi");
+        let open = Unfolded {
+            hidden: [true, false],
+            more: Some((Side::Output, hdmi)),
+            ..Unfolded::default()
+        };
+        let placed = lay_out(&ANCHOR, &hidden(), &open, 0);
+        let row = placed
+            .of(Control::Choose(Side::Output, hdmi))
+            .expect("listed");
+        let lines: Vec<&str> = placed
+            .details
+            .iter()
+            .map(|(line, _)| line.as_str())
+            .collect();
+        assert_eq!(lines, ["Chip: GPU", "Key: nvidia/hdmi"]);
+        let (_, first) = placed.details[0];
+        assert_eq!(
+            (first.x, first.y),
+            (placed.inside.x + BUTTON, row.bottom()),
+            "set in under it"
+        );
+        let after: Vec<Control> = controls(&placed)
+            .into_iter()
+            .skip_while(|&control| control != Control::More(Side::Output, hdmi))
+            .skip(1)
+            .take(2)
+            .collect();
+        assert_eq!(
+            after,
+            [
+                Control::Rename(Side::Output, hdmi),
+                Control::HideCard(Side::Output, hdmi)
+            ],
+            "hidden with its card, it comes back only with its card"
+        );
+        let field = placed
+            .of(Control::Rename(Side::Output, hdmi))
+            .expect("placed");
+        assert_eq!(
+            field.y,
+            placed.details[1].1.bottom(),
+            "under what tells it apart"
+        );
+        assert_eq!(field.x, placed.inside.x + BUTTON);
+        let headset = number("headset");
+        let open = Unfolded {
+            more: Some((Side::Output, headset)),
+            ..open
+        };
+        let placed = lay_out(&ANCHOR, &hidden(), &open, 0);
+        assert!(placed.of(Control::Hide(Side::Output, headset)).is_some());
+        assert_eq!(
+            placed.of(Control::HideCard(Side::Output, headset)),
+            None,
+            "a device of no card"
+        );
+        assert_eq!(
+            placed.of(Control::Rename(Side::Output, hdmi)),
+            None,
+            "one at a time"
+        );
+    }
+
+    #[test]
+    fn a_devices_own_name_gives_way_to_the_persons() {
+        let mut one = listed("speakers", true, false);
+        one.device = "Built-in Audio".to_owned();
+        one.jack = Some("Speakers".to_owned());
+        assert_eq!(one.label(), "Built-in Audio \u{2014} Speakers");
+        one.name = Some("Desk".to_owned());
+        assert_eq!(one.label(), "Desk");
     }
 
     #[test]
@@ -706,7 +1002,7 @@ mod tests {
         ];
         let placed = lay_out(&ANCHOR, &mixed, &Unfolded::default(), 0);
         assert_eq!(placed.titles[2].0, Heading::Programs);
-        let first = &controls(&placed)[7..];
+        let first = &controls(&placed)[9..];
         assert_eq!(
             first,
             [
@@ -729,7 +1025,7 @@ mod tests {
         };
         let placed = lay_out(&ANCHOR, &mixed, &unfolded, 0);
         assert_eq!(
-            controls(&placed)[10..12],
+            controls(&placed)[12..14],
             [Control::Move(40, 0), Control::Move(40, 1)],
             "an output apiece under its controls"
         );

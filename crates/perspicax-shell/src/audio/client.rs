@@ -6,10 +6,12 @@
 //! read of everything there is to show. Nothing is told until that read is
 //! whole. pipewire-pulse answers a new client's first reads before it has
 //! found what it holds, with no sinks and no cards, then tells each as new;
-//! so the first facts told may be empty, and the rest follow at once. From then on, a change the server tells is read again: the object
-//! it names, once however often it is told while that read is out. A change
-//! told before the reply to a read was sent before that reply, so the reply
-//! already holds it. An object removed is dropped.
+//! so the first facts told may be empty, and the rest follow at once.
+//!
+//! A change the server tells is read again, the first read whole or not:
+//! the object it names, once however often it is told while that read is
+//! out. The server answers in turn, so a read again comes after the first
+//! read of its kind, and is the newer. An object removed is dropped.
 //!
 //! A server that cannot be reached, or goes away, is told once, and tried
 //! again after a pause that doubles each time, from [`PAUSE_FIRST`] to
@@ -76,6 +78,14 @@ pub(super) const PAUSE_MOST: Duration = Duration::from_secs(10);
 const ANSWER_WITHIN: Duration = Duration::from_secs(5);
 /// How long a card has to give the sink an output chosen plays through.
 const CHOOSE_WITHIN: Duration = Duration::from_secs(3);
+/// What the first read reads: each kind's list, and the server's defaults.
+const LISTS: [Expect; 5] = [
+    Expect::Server,
+    Expect::Sinks,
+    Expect::Sources,
+    Expect::Cards,
+    Expect::Streams,
+];
 
 /// What the thread holds.
 pub(super) struct Client {
@@ -103,9 +113,9 @@ struct Link {
     /// The handshake's deadline, until the first read is whole.
     deadline: Option<RegistrationToken>,
     facts: Facts,
-    /// How many of the first read's replies are still to come: news waits
-    /// for none.
-    first: usize,
+    /// What of the first read is still to come, each kind's list, or the
+    /// handshake before them: news waits for none of it.
+    first: HashSet<Expect>,
     /// The first read is whole, and that has been acted on.
     following: bool,
     /// What is being read again, so that a change told meanwhile asks for
@@ -210,7 +220,7 @@ impl Client {
             .handle
             .insert_source(Timer::from_duration(ANSWER_WITHIN), |_, (), client| {
                 // This timer goes as it fires, so the link no longer holds it.
-                if let Some(link) = client.link.as_mut().filter(|link| link.first > 0) {
+                if let Some(link) = client.link.as_mut().filter(|link| !link.first.is_empty()) {
                     link.deadline = None;
                     client.lost("the server did not answer");
                 }
@@ -223,7 +233,7 @@ impl Client {
             source,
             deadline,
             facts: Facts::default(),
-            first: usize::MAX,
+            first: HashSet::from([Expect::Auth]),
             following: false,
             reading: HashSet::new(),
             changed: false,
@@ -255,7 +265,7 @@ impl Client {
             self.lost(&error.to_string());
             return;
         }
-        if link.first > 0 {
+        if !link.first.is_empty() {
             return;
         }
         let met = !std::mem::replace(&mut link.following, true);
@@ -296,7 +306,7 @@ impl Client {
             }
             return;
         }
-        let Some(link) = self.link.as_mut().filter(|link| link.first == 0) else {
+        let Some(link) = self.link.as_mut().filter(|link| link.first.is_empty()) else {
             tracing::debug!("no sound server to ask; {ask:?} is dropped");
             return;
         };
@@ -430,7 +440,7 @@ impl Link {
         let wanted = self
             .facts
             .output()
-            .filter(|sink| self.levels && self.first == 0 && sink.running)
+            .filter(|sink| self.levels && self.first.is_empty() && sink.running)
             .and_then(|sink| sink.monitor.clone());
         if self.recording.as_ref().map(|recording| &recording.source) == wanted.as_ref() {
             return Ok(());
@@ -522,7 +532,7 @@ impl Link {
                     | SubscriptionMask::SERVER
                     | SubscriptionMask::SINK_INPUT;
                 self.wire.send(&Command::Subscribe(mask), Expect::Done)?;
-                self.first = 5;
+                self.first = HashSet::from(LISTS);
                 self.wire.send(&Command::GetServerInfo, Expect::Server)?;
                 self.wire.send(&Command::GetSinkInfoList, Expect::Sinks)?;
                 self.wire
@@ -553,7 +563,7 @@ impl Link {
                 false
             }
             Reply::Server(server) => {
-                self.read_first();
+                self.read_first(Expect::Server);
                 let sink = server.default_sink_name.as_deref().map(text);
                 let source = server.default_source_name.as_deref().map(text);
                 let sink = std::mem::replace(&mut self.facts.default_sink, sink)
@@ -563,7 +573,7 @@ impl Link {
                 sink || source
             }
             Reply::Sources(sources) => {
-                self.read_first();
+                self.read_first(Expect::Sources);
                 self.facts.sources = sources.iter().map(source).collect();
                 true
             }
@@ -583,7 +593,7 @@ impl Link {
                 }
             }
             Reply::Sinks(sinks) => {
-                self.read_first();
+                self.read_first(Expect::Sinks);
                 self.facts.sinks = sinks.iter().map(sink).collect();
                 true
             }
@@ -603,7 +613,7 @@ impl Link {
                 }
             }
             Reply::Cards(cards) => {
-                self.read_first();
+                self.read_first(Expect::Cards);
                 self.facts.cards = cards.iter().map(card).collect();
                 true
             }
@@ -623,7 +633,7 @@ impl Link {
                 }
             }
             Reply::Streams(streams) => {
-                self.read_first();
+                self.read_first(Expect::Streams);
                 self.facts.streams = streams.iter().map(stream).collect();
                 true
             }
@@ -647,19 +657,16 @@ impl Link {
         Ok(())
     }
 
-    /// One of the first read's replies came.
-    fn read_first(&mut self) {
-        self.first = self.first.saturating_sub(1);
+    /// The first read's reply of `expect`, one of the [`LISTS`], came.
+    fn read_first(&mut self, expect: Expect) {
+        self.first.remove(&expect);
     }
 
     fn refused(&mut self, expect: Expect, error: PulseError) {
         self.reading.remove(&expect);
         // A list refused is read as empty: the rest is told all the same.
-        if matches!(
-            expect,
-            Expect::Server | Expect::Sinks | Expect::Sources | Expect::Cards | Expect::Streams
-        ) {
-            self.read_first();
+        if LISTS.contains(&expect) {
+            self.read_first(expect);
         }
         match expect {
             // Gone between the change told and the read.
@@ -812,9 +819,9 @@ impl Link {
         self.wire.send(&default(side, name), Expect::Done)
     }
 
-    /// Read again what `expect` is, unless it is being read already.
+    /// Read again what `expect` is, unless it is being read again already.
     fn read_again(&mut self, command: &Command, expect: Expect) -> io::Result<()> {
-        if self.first > 0 || !self.reading.insert(expect) {
+        if !self.reading.insert(expect) {
             return Ok(());
         }
         self.wire.send(command, expect)
@@ -937,10 +944,30 @@ fn card(info: &CardInfo) -> Card {
         name: text(&info.name),
         description: prop(&info.props, c"device.description").unwrap_or_else(|| text(&info.name)),
         bus: prop(&info.props, c"device.bus"),
+        details: details(&info.props),
         ports,
         profiles,
         profile: info.active_profile.as_deref().map(text),
     }
+}
+
+/// What tells a card apart from another of its make, of what its `props`
+/// say: where it is attached, its chip, its ALSA card, its Bluetooth
+/// address.
+fn details(props: &Props) -> Vec<(&'static str, String)> {
+    let alsa = match (prop(props, c"alsa.card"), prop(props, c"alsa.card_name")) {
+        (Some(card), Some(name)) => Some(format!("{card} \u{b7} {name}")),
+        (card, name) => card.or(name),
+    };
+    [
+        ("Attached at", prop(props, c"device.bus_path")),
+        ("Chip", prop(props, c"alsa.mixer_name")),
+        ("ALSA card", alsa),
+        ("Bluetooth", prop(props, c"api.bluez5.address")),
+    ]
+    .into_iter()
+    .filter_map(|(label, value)| Some((label, value?)))
+    .collect()
 }
 
 /// The direction of a jack that plays sound out. The crate names a port
@@ -1215,6 +1242,21 @@ mod tests {
     }
 
     #[test]
+    fn a_change_told_after_its_kinds_first_read_is_read_while_another_kind_is_still_out() {
+        let fake = Fake::start("between");
+        fake.hold_streams();
+        let (_running, heard) = follow(&fake);
+        until_asked(&fake, "streams");
+        // The sinks were read whole before this, and the streams are not
+        // yet: pipewire-pulse tells each sink it finds just so.
+        fake.change_sink(1, 1, |sink| sink.muted = true);
+        until_asked(&fake, "sink 1");
+        fake.answer_streams();
+        let muted = |facts: &Facts| facts.sinks.iter().any(|sink| sink.index == 1 && sink.muted);
+        until_heard(&heard, muted);
+    }
+
+    #[test]
     fn a_streams_mute_volume_and_move_reach_the_server_for_it_alone() {
         let fake = Fake::start("stream-asks");
         fake.plays(40, 12, Some("Firefox"), None);
@@ -1267,6 +1309,15 @@ mod tests {
         );
         assert_eq!(jack.monitor.as_deref(), Some("DELL U2720Q"));
         assert_eq!(jack.profiles, [EXTRA1]);
+        assert_eq!(
+            hdmi.details,
+            [
+                ("Attached at", "pci-0000:01:00.1".to_owned()),
+                ("Chip", "Nvidia GPU 99 HDMI/DP".to_owned()),
+                ("ALSA card", "1 \u{b7} HDA NVidia".to_owned()),
+            ],
+            "what tells it apart from another of its make"
+        );
         let built_in = &facts.cards[0];
         let jacks: Vec<(&str, bool)> = built_in
             .ports

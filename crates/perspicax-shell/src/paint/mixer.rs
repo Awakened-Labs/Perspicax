@@ -4,8 +4,11 @@
 //! then a row for each device listed: a round mark, filled in the accent
 //! for the one the sound is on, the device's glyph, and its name, faint if
 //! nothing is plugged into it, the card's part of it cut short before its
-//! jack's. A side's fold is an arrow, pointing down while it is unfolded,
-//! and how many it holds. Under "Applications", each program's row is such
+//! jack's, or the name the person gave it; at its end, three dots, which
+//! unfold under it, set in, what tells it apart, faint, a field with its
+//! name in, and the buttons that hide it and its card, in the accent. A
+//! side's folds, of what has nothing plugged in and of what is hidden, are
+//! each an arrow, pointing down while it is unfolded, and how many it holds. Under "Applications", each program's row is such
 //! an arrow, the program's icon and name, and, faint at its end, what it
 //! plays on; then its own button, slider and percentage; unfolded, a row
 //! for each output it can be moved to, marked for the one it plays on.
@@ -47,6 +50,8 @@ const ARROW: f32 = 4.0;
 /// device's name kept beside a long jack's.
 const SPACE: i32 = 8;
 const DEVICE: i32 = 64;
+/// How far apart the dots of the button at a device's row's end are.
+const DOTS: f32 = 5.0;
 
 /// The mixer's colours, from the theme, as fills take them.
 struct Colours {
@@ -56,6 +61,8 @@ struct Colours {
     rule: [u8; 4],
     faint: [u8; 4],
     accent: [u8; 4],
+    /// Behind a field typed in.
+    typed: [u8; 4],
 }
 
 impl Colours {
@@ -67,6 +74,7 @@ impl Colours {
             rule: colour(palette, Role::MenuRule),
             faint: colour(palette, Role::MenuHint),
             accent: colour(palette, Role::Accent),
+            typed: colour(palette, Role::MenuTyped),
         }
     }
 }
@@ -231,15 +239,43 @@ fn within_edge(view: &View<'_>, pen: &mut Pen<'_, '_>) {
                 }
             }
             Control::Fold(side) => {
-                arrow(view.placed.unfolded.sides[side.at()], place, pen);
-                let count = view.placed.folded[side.at()];
-                let words = Rect::new(
-                    place.x + BUTTON + SPACE / 2,
-                    place.y,
-                    place.w - BUTTON - SPACE / 2,
-                    place.h,
-                );
-                pen.write(&format!("Not connected ({count})"), words, faint);
+                let count = view.placed.unplugged[side.at()];
+                let open = view.placed.unfolded.unplugged[side.at()];
+                fold(&format!("Not connected ({count})"), open, place, pen);
+            }
+            Control::Hidden(side) => {
+                let count = view.placed.hidden[side.at()];
+                let open = view.placed.unfolded.hidden[side.at()];
+                fold(&format!("Hidden ({count})"), open, place, pen);
+            }
+            Control::More(side, number) => {
+                let open = view.placed.unfolded.more == Some((side, number));
+                dots(place, if open { ink } else { faint }, pen);
+            }
+            Control::Rename(side, number) => {
+                if let Some(listed) = view.mixed.find(side, number) {
+                    let typed = view
+                        .naming
+                        .filter(|&(naming, _)| naming == control)
+                        .map(|(_, typed)| typed);
+                    field(listed, typed, place, pen);
+                }
+            }
+            Control::Hide(side, number) => {
+                if let Some(listed) = view.mixed.find(side, number) {
+                    let words = if listed.hidden { "Unhide" } else { "Hide" };
+                    button(words, place, pen);
+                }
+            }
+            Control::HideCard(side, number) => {
+                let card = view
+                    .mixed
+                    .find(side, number)
+                    .and_then(|listed| listed.card.as_ref());
+                if let Some(card) = card {
+                    let does = if card.hidden { "Unhide" } else { "Hide" };
+                    button(&format!("{does} all of {}", card.name), place, pen);
+                }
             }
             Control::Plays(stream) => {
                 if let Some(program) = view.mixed.program(stream) {
@@ -257,6 +293,9 @@ fn within_edge(view: &View<'_>, pen: &mut Pen<'_, '_>) {
         if view.ring == Some(control) {
             ring(pen, place, accent);
         }
+    }
+    for (line, place) in &view.placed.details {
+        pen.write(line, *place, faint);
     }
     for &(whose, place) in &view.placed.percents {
         let Some(percent) = view.shown(whose) else {
@@ -377,7 +416,7 @@ fn device(listed: &Listed, chosen: bool, place: Rect, pen: &mut Pen<'_, '_>) {
     let Some(jack) = listed
         .jack
         .as_ref()
-        .filter(|_| pen.text.width(&label) > words.w as f32)
+        .filter(|_| listed.name.is_none() && pen.text.width(&label) > words.w as f32)
     else {
         pen.write(&label, words, ink);
         return;
@@ -398,6 +437,62 @@ fn device(listed: &Listed, chosen: bool, place: Rect, pen: &mut Pen<'_, '_>) {
         Rect::new(x, words.y, words.right() - x, words.h),
         ink,
     );
+}
+
+/// A fold, at `place`: its arrow, and `words`, faint.
+fn fold(words: &str, open: bool, place: Rect, pen: &mut Pen<'_, '_>) {
+    arrow(open, place, pen);
+    let words_at = Rect::new(
+        place.x + BUTTON + SPACE / 2,
+        place.y,
+        place.w - BUTTON - SPACE / 2,
+        place.h,
+    );
+    pen.write(words, words_at, pen.colours.faint);
+}
+
+/// Three dots across the middle of `place`, in `ink`.
+fn dots(place: Rect, ink: [u8; 4], pen: &mut Pen<'_, '_>) {
+    let middle = place.y as f32 + place.h as f32 / 2.0;
+    let centre = place.x as f32 + place.w as f32 / 2.0;
+    for at in [-1.0, 0.0, 1.0] {
+        pen.circle((centre + at * DOTS, middle), 1.5, ink, None);
+    }
+}
+
+/// The field `listed` is named in, at `place`: what is `typed` in it, with
+/// a caret, while it is being named; else its name, or faint, what the
+/// field is for.
+fn field(listed: &Listed, typed: Option<&str>, place: Rect, pen: &mut Pen<'_, '_>) {
+    let ground = Rect::new(place.x, place.y + 2, place.w, place.h - 4);
+    let at = pen.px(ground);
+    fill(&mut pen.canvas, at, pen.colours.typed);
+    let words = Rect::new(ground.x + SPACE / 2, ground.y, ground.w - SPACE, ground.h);
+    match (typed, &listed.name) {
+        (Some(typed), _) => {
+            let wide = pen.write(typed, words, pen.colours.ink);
+            let caret = Rect::new(
+                (words.x + wide + 1).min(words.right()),
+                words.y + 5,
+                1,
+                words.h - 10,
+            );
+            let caret = pen.px(caret);
+            fill(&mut pen.canvas, caret, pen.colours.ink);
+        }
+        (None, Some(name)) => {
+            pen.write(name, words, pen.colours.ink);
+        }
+        (None, None) => {
+            pen.write("Name it\u{2026}", words, pen.colours.faint);
+        }
+    }
+}
+
+/// A button of `words` alone, in the accent, at `place`.
+fn button(words: &str, place: Rect, pen: &mut Pen<'_, '_>) {
+    let words_at = Rect::new(place.x + SPACE / 2, place.y, place.w - SPACE / 2, place.h);
+    pen.write(words, words_at, pen.colours.accent);
 }
 
 /// An arrow at the start of `place`, faint, pointing down if what it
@@ -483,6 +578,10 @@ mod tests {
             kind: Kind::Speaker,
             connected: true,
             chosen,
+            name: None,
+            hidden: false,
+            card: None,
+            details: Vec::new(),
         }
     }
 
@@ -597,6 +696,44 @@ mod tests {
             pixel(&picture, x, y),
             colours.ground,
             "not where the sound is"
+        );
+    }
+
+    #[test]
+    fn a_field_being_typed_in_has_a_caret_and_the_ground_typed_on() {
+        let mut state = opened();
+        let speakers = number("speakers");
+        state.update(Event::Act(
+            Control::More(Side::Output, speakers),
+            Act::Click,
+        ));
+        let field = Control::Rename(Side::Output, speakers);
+        state.update(Event::Act(field, Act::Focus));
+        let colours = Colours::of(&Palette::default());
+        let place = |state: &State| {
+            state
+                .view()
+                .expect("open")
+                .placed
+                .of(field)
+                .expect("placed")
+        };
+        let at = place(&state);
+        let ground = (at.right() - 2, at.y + at.h / 2);
+        let caret = (at.x + SPACE / 2 + 1, at.y + at.h / 2);
+        let picture = drawn(&state, 1);
+        assert_eq!(pixel(&picture, ground.0, ground.1), colours.typed);
+        assert_eq!(
+            pixel(&picture, caret.0, caret.1),
+            colours.typed,
+            "no caret yet"
+        );
+        state.update(Event::Key(crate::mixer::Key::Press));
+        let picture = drawn(&state, 1);
+        assert_eq!(
+            pixel(&picture, caret.0, caret.1),
+            colours.ink,
+            "typing in it"
         );
     }
 

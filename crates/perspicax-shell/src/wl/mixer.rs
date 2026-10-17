@@ -31,9 +31,12 @@ use super::{
 };
 use crate::{
     a11y::{self, adapter::Served},
-    layout::mixer::{Anchor, Listed, Master, Mixed, Program},
+    layout::mixer::{Anchor, Listed, Master, Mixed, Owner, Program},
     mixer::{Act, Effect, Event, Key, State},
-    model::sound::{Choice, Side},
+    model::{
+        kept::Kept,
+        sound::{Choice, Side},
+    },
     paint::{self, Kit},
 };
 
@@ -244,9 +247,17 @@ impl Mixers {
     }
 }
 
-/// `choice` as the mixer lists it, `chosen` or not.
-fn listed(choice: Choice, chosen: bool) -> Listed {
+/// `choice` as the mixer lists it, `chosen` or not, named and hidden as
+/// `kept` says.
+fn listed(choice: Choice, chosen: bool, kept: &Kept) -> Listed {
+    let card = choice.card.map(|key| Owner {
+        hidden: kept.hidden.contains(&key),
+        name: choice.device.clone(),
+        key,
+    });
     Listed {
+        name: kept.name(&choice.key).map(str::to_owned),
+        hidden: kept.hidden.contains(&choice.key),
         key: choice.key,
         device: choice.device,
         jack: choice.jack,
@@ -254,6 +265,8 @@ fn listed(choice: Choice, chosen: bool) -> Listed {
         kind: choice.kind,
         connected: choice.connected,
         chosen,
+        card,
+        details: choice.details,
     }
 }
 
@@ -274,6 +287,7 @@ impl ActionHandler for Forward {
             (Action::SetValue, Some(ActionData::NumericValue(value))) if value.is_finite() => {
                 Act::Set(value.round().clamp(0.0, f64::from(u32::MAX)) as u32)
             }
+            (Action::SetValue, Some(ActionData::Value(name))) => Act::Name(name.into()),
             _ => return,
         };
         if self.0.send(Asked::Mixer(Event::Act(control, act))).is_err() {
@@ -333,6 +347,16 @@ impl App {
                 Effect::Mute(whose) => self.audio.mute(whose),
                 Effect::Volume(whose, change) => self.audio.change(change, whose),
                 Effect::Move(stream, sink) => self.audio.move_stream(stream, sink),
+                Effect::Hide(key, hidden) => {
+                    if self.audio.keep(|kept| kept.hide(&key, hidden)) {
+                        self.heard();
+                    }
+                }
+                Effect::Rename(key, name) => {
+                    if self.audio.keep(|kept| kept.rename(&key, &name)) {
+                        self.heard();
+                    }
+                }
                 Effect::Choose(side, key) => self.audio.choose(side, &key),
                 Effect::Redraw => {}
             }
@@ -341,6 +365,7 @@ impl App {
 
     /// What the mixer shows of the sound now.
     pub(super) fn mixed(&self) -> Mixed {
+        let kept = self.audio.kept();
         let facts = self.audio.facts();
         // Each side's default, named as the panel names it, and what the
         // side can be moved to.
@@ -360,14 +385,14 @@ impl App {
                 name: choices
                     .iter()
                     .find(|choice| Some(&choice.key) == chosen.as_ref())
-                    .map_or_else(|| description.clone(), |choice| choice.short.clone()),
+                    .map_or_else(|| description.clone(), |choice| kept.called(choice)),
                 level,
             });
             let listed = choices
                 .into_iter()
                 .map(|choice| {
                     let chosen = Some(&choice.key) == chosen.as_ref();
-                    listed(choice, chosen)
+                    listed(choice, chosen, kept)
                 })
                 .collect();
             (master, listed)
@@ -390,7 +415,7 @@ impl App {
             facts
                 .sink_choices()
                 .into_iter()
-                .map(|(sink, choice)| (sink, listed(choice, false)))
+                .map(|(sink, choice)| (sink, listed(choice, false, kept)))
                 .collect()
         });
         let mixer = self.audio.mixer();

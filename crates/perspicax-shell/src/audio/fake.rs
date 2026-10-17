@@ -953,12 +953,21 @@ fn hdmi() -> CardInfo {
     let mut jack = card_port(JACK, PortType::Hdmi, PortAvailable::Yes, &[EXTRA1]);
     jack.props
         .set_bytes(c"device.product.name", c"DELL U2720Q".to_bytes_with_nul());
-    card(
+    let mut card = card(
         1,
         HDMI,
         c"TU104 HD Audio Controller",
         vec![jack],
         vec![profile("off", 0), profile(EXTRA1, 1)],
         "off",
-    )
+    );
+    for (key, value) in [
+        (c"device.bus_path", c"pci-0000:01:00.1"),
+        (c"alsa.card", c"1"),
+        (c"alsa.card_name", c"HDA NVidia"),
+        (c"alsa.mixer_name", c"Nvidia GPU 99 HDMI/DP"),
+    ] {
+        card.props.set_bytes(key, value.to_bytes_with_nul());
+    }
+    card
 }
