@@ -14,7 +14,8 @@
 //! table says what it is made of: pieces side by side, in the order
 //! written, each a control of its own. With no table, it is a speaker that
 //! mutes. On any piece, the wheel moves the volume by `step`, to the next
-//! multiple of it, and a middle click mutes.
+//! multiple of it, and a middle click mutes: the output's, or on the
+//! microphone, the input's.
 
 use serde::Deserialize;
 
@@ -65,11 +66,20 @@ pub enum Piece {
     /// Bars moving with what plays, as winamp's did: how loud each band of
     /// pitch is, the deep ones at the left. Still when nothing plays.
     Levels,
+    /// A microphone, crossed out while it is muted. A click mutes it, or
+    /// brings it back; the wheel over it moves its volume.
+    Mic,
 }
 
 impl Piece {
     /// Every piece, in the order this crate lists them.
-    pub const ALL: [Self; 4] = [Self::Mute, Self::Volume, Self::Output, Self::Levels];
+    pub const ALL: [Self; 5] = [
+        Self::Mute,
+        Self::Volume,
+        Self::Output,
+        Self::Levels,
+        Self::Mic,
+    ];
 
     /// Its name as `panel` writes it.
     #[must_use]
@@ -79,6 +89,7 @@ impl Piece {
             Self::Volume => "volume",
             Self::Output => "output",
             Self::Levels => "levels",
+            Self::Mic => "mic",
         }
     }
 }
@@ -145,11 +156,17 @@ mod tests {
 
     #[test]
     fn a_mixer_is_read_with_its_pieces_and_the_compositor_reads_it_whatever_the_shell_has() {
-        let text = "[shell.panel]\nitems = [\"mixer\"]\n[shell.mixer]\npanel = [\"volume\", \"mute\", \"output\", \"levels\"]\nstep = 2\nlimit = 150";
+        let text = "[shell.panel]\nitems = [\"mixer\"]\n[shell.mixer]\npanel = [\"volume\", \"mute\", \"output\", \"levels\", \"mic\"]\nstep = 2\nlimit = 150";
         let read = mixer(text).unwrap();
         assert_eq!(
             read.panel,
-            [Piece::Volume, Piece::Mute, Piece::Output, Piece::Levels]
+            [
+                Piece::Volume,
+                Piece::Mute,
+                Piece::Output,
+                Piece::Levels,
+                Piece::Mic
+            ]
         );
         assert_eq!((read.step, read.limit), (2, 150));
         let panel = shell(text, ShellBuilt::FULL).unwrap().panel.unwrap();

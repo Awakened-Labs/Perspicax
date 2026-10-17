@@ -30,6 +30,22 @@ pub(crate) struct Facts {
     pub(crate) default_sink: Option<String>,
     pub(crate) sinks: Vec<Sink>,
     pub(crate) cards: Vec<Card>,
+    /// The input programs record from unless they say otherwise, by name.
+    pub(crate) default_source: Option<String>,
+    pub(crate) sources: Vec<Source>,
+}
+
+/// An input the server records from: a source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Source {
+    /// The server's number for it, while it lasts.
+    pub(crate) index: u32,
+    /// Its name, which stays its own:
+    /// `alsa_input.pci-0000_00_1f.3.analog-stereo`.
+    pub(crate) name: String,
+    /// Each channel's volume, as the server counts it.
+    pub(crate) volume: Vec<u32>,
+    pub(crate) muted: bool,
 }
 
 /// An output the server plays to: a sink.
@@ -199,6 +215,12 @@ impl Facts {
         jacks.chain(loose).collect()
     }
 
+    /// The default input's source, if the server has one it can name.
+    pub(crate) fn input(&self) -> Option<&Source> {
+        let name = self.default_source.as_deref()?;
+        self.sources.iter().find(|source| source.name == name)
+    }
+
     /// The key of the output the default sink plays to.
     pub(crate) fn output_key(&self) -> Option<String> {
         let sink = self.output()?;
@@ -310,6 +332,15 @@ pub(crate) fn next_output<'o>(outputs: &'o [Output], now: Option<&str>) -> Optio
 }
 
 impl Sink {
+    pub(crate) fn level(&self) -> Level {
+        Level {
+            percent: percent(&self.volume),
+            muted: self.muted,
+        }
+    }
+}
+
+impl Source {
     pub(crate) fn level(&self) -> Level {
         Level {
             percent: percent(&self.volume),
@@ -552,6 +583,8 @@ mod tests {
                 },
             ],
             cards: vec![builtin, nvidia, headset],
+            default_source: None,
+            sources: Vec::new(),
         }
     }
 
@@ -653,6 +686,8 @@ mod tests {
                 sink(2, "two", &[NORM], false),
             ],
             cards: Vec::new(),
+            default_source: None,
+            sources: Vec::new(),
         };
         let outputs = facts.outputs();
         assert_eq!(outputs.len(), 2);
@@ -807,6 +842,8 @@ mod tests {
                 sink(2, "two", &[NORM / 4], true),
             ],
             cards: Vec::new(),
+            default_source: None,
+            sources: Vec::new(),
         };
         let output = facts.output().expect("the default");
         assert_eq!(output.index, 2);

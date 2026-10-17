@@ -2333,6 +2333,76 @@ fn the_bars_rise_with_what_plays_and_fall_once_it_stops() {
     shell.stop_with(session);
 }
 
+/// A panel of the mixer's microphone alone, at the panel's right end.
+#[cfg(feature = "capture")]
+const MIC_ONLY: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"mixer\"]\n\
+    [shell.mixer]\npanel = [\"mic\"]\n";
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn a_click_on_the_microphone_mutes_the_default_input_and_the_wheel_moves_it() {
+    use std::time::{Duration, Instant};
+
+    use perspicax_policy::Mods;
+
+    let sound = SoundServer::start("mic");
+    sound.pactl(&[
+        "load-module",
+        "module-null-sink",
+        "sink_name=mic",
+        "media.class=Audio/Source/Virtual",
+    ]);
+    sound.until(|sound| sound.pactl(&["get-default-source"]).trim() == "mic");
+    sound.pactl(&["set-source-volume", "mic", "40%"]);
+    let session = Session::start("shell-mic", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "mic",
+        MIC_ONLY,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    // The capsule, in the ink once the shell has heard the server.
+    until_colour(&session, (1265, 800 - 25), INK);
+
+    let until = |args: &[&str], want: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !sound.pactl(args).contains(want) {
+            assert!(Instant::now() < deadline, "{args:?} never said {want}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    click(
+        &session,
+        panel,
+        (1265.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Left,
+    );
+    until(&["get-source-mute", "mic"], "Mute: yes");
+    click(
+        &session,
+        panel,
+        (1265.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Middle,
+    );
+    until(&["get-source-mute", "mic"], "Mute: no");
+    session.command(Command::Scroll {
+        at: (1265, 800 - 20),
+        v120: (0, -120),
+        mods: Mods::default(),
+    });
+    until(&["get-source-volume", "mic"], "/  45% /");
+    assert!(
+        sound.pactl(&["get-sink-mute", "one"]).contains("Mute: no"),
+        "the output is left alone"
+    );
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
 /// A program's status icon, served as a program serves one: a title, a
 /// picture of magenta, and a menu of one item, Quit. What it is asked is
 /// kept, to be waited for.

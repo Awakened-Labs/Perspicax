@@ -42,10 +42,10 @@ use std::{
 
 use pulseaudio::protocol::{
     AuthParams, CardInfo, ChannelMap, ChannelVolume, Command, GetCardInfo, GetSinkInfo,
-    MAX_VERSION, Prop, Props, PulseError, RecordStreamParams, SampleFormat, SampleSpec,
-    SetCardProfileParams, SetDeviceMuteParams, SetDeviceVolumeParams, SetPortParams, SinkInfo,
-    SinkState, SubscriptionEvent, SubscriptionEventFacility, SubscriptionEventType,
-    SubscriptionMask, Volume,
+    GetSourceInfo, MAX_VERSION, Prop, Props, PulseError, RecordStreamParams, SampleFormat,
+    SampleSpec, SetCardProfileParams, SetDeviceMuteParams, SetDeviceVolumeParams, SetPortParams,
+    SinkInfo, SinkState, SourceInfo, SubscriptionEvent, SubscriptionEventFacility,
+    SubscriptionEventType, SubscriptionMask, Volume,
     port_info::{PortAvailable, PortDirection, PortType},
     stream::{BufferAttr, StreamFlags},
 };
@@ -60,7 +60,7 @@ use super::{
     levels::{HOP, RATE, Spectrum},
     wire::{Expect, Incoming, Reply, Wire},
 };
-use crate::model::sound::{Card, Facts, Kind, Plan, Plugged, Port, Profile, Sink};
+use crate::model::sound::{Card, Facts, Kind, Plan, Plugged, Port, Profile, Sink, Source};
 
 /// The first pause before trying a server again, and the longest.
 pub(super) const PAUSE_FIRST: Duration = Duration::from_millis(500);
@@ -302,22 +302,38 @@ impl Client {
             return;
         }
         let command = match ask {
-            Ask::Mute {
-                target: Target::Sink(name),
-                on,
-            } => Command::SetSinkMute(SetDeviceMuteParams {
-                device_index: None,
-                device_name: CString::new(name).ok(),
-                mute: on,
-            }),
-            Ask::Volume {
-                target: Target::Sink(name),
-                volume,
-            } => Command::SetSinkVolume(SetDeviceVolumeParams {
-                device_index: None,
-                device_name: CString::new(name).ok(),
-                volume: channels(&volume),
-            }),
+            Ask::Mute { target, on } => {
+                let (name, sink) = match target {
+                    Target::Sink(name) => (name, true),
+                    Target::Source(name) => (name, false),
+                };
+                let mute = SetDeviceMuteParams {
+                    device_index: None,
+                    device_name: CString::new(name).ok(),
+                    mute: on,
+                };
+                if sink {
+                    Command::SetSinkMute(mute)
+                } else {
+                    Command::SetSourceMute(mute)
+                }
+            }
+            Ask::Volume { target, volume } => {
+                let (name, sink) = match target {
+                    Target::Sink(name) => (name, true),
+                    Target::Source(name) => (name, false),
+                };
+                let set = SetDeviceVolumeParams {
+                    device_index: None,
+                    device_name: CString::new(name).ok(),
+                    volume: channels(&volume),
+                };
+                if sink {
+                    Command::SetSinkVolume(set)
+                } else {
+                    Command::SetSourceVolume(set)
+                }
+            }
             Ask::Choose(_) | Ask::Levels(_) => return,
         };
         if let Err(error) = link.wire.send(&command, Expect::Done) {
@@ -494,12 +510,16 @@ impl Link {
                 props.set(Prop::ApplicationId, c"perspicax-shell");
                 self.wire
                     .send(&Command::SetClientName(props), Expect::Named)?;
-                let mask =
-                    SubscriptionMask::SINK | SubscriptionMask::CARD | SubscriptionMask::SERVER;
+                let mask = SubscriptionMask::SINK
+                    | SubscriptionMask::SOURCE
+                    | SubscriptionMask::CARD
+                    | SubscriptionMask::SERVER;
                 self.wire.send(&Command::Subscribe(mask), Expect::Done)?;
-                self.first = 3;
+                self.first = 4;
                 self.wire.send(&Command::GetServerInfo, Expect::Server)?;
                 self.wire.send(&Command::GetSinkInfoList, Expect::Sinks)?;
+                self.wire
+                    .send(&Command::GetSourceInfoList, Expect::Sources)?;
                 self.wire.send(&Command::GetCardInfoList, Expect::Cards)?;
                 false
             }
@@ -521,8 +541,33 @@ impl Link {
             }
             Reply::Server(server) => {
                 self.read_first();
-                let default = server.default_sink_name.as_deref().map(text);
-                std::mem::replace(&mut self.facts.default_sink, default) != self.facts.default_sink
+                let sink = server.default_sink_name.as_deref().map(text);
+                let source = server.default_source_name.as_deref().map(text);
+                let sink = std::mem::replace(&mut self.facts.default_sink, sink)
+                    != self.facts.default_sink;
+                let source = std::mem::replace(&mut self.facts.default_source, source)
+                    != self.facts.default_source;
+                sink || source
+            }
+            Reply::Sources(sources) => {
+                self.read_first();
+                self.facts.sources = sources.iter().map(source).collect();
+                true
+            }
+            Reply::Source(read) => {
+                let read = source(&read);
+                match self
+                    .facts
+                    .sources
+                    .iter_mut()
+                    .find(|had| had.index == read.index)
+                {
+                    Some(had) => std::mem::replace(had, read) != *had,
+                    None => {
+                        self.facts.sources.push(read);
+                        true
+                    }
+                }
             }
             Reply::Sinks(sinks) => {
                 self.read_first();
@@ -576,10 +621,21 @@ impl Link {
 
     fn refused(&mut self, expect: Expect, error: PulseError) {
         self.reading.remove(&expect);
+        // A list refused is read as empty: the rest is told all the same.
+        if matches!(
+            expect,
+            Expect::Server | Expect::Sinks | Expect::Sources | Expect::Cards
+        ) {
+            self.read_first();
+        }
         match expect {
             // Gone between the change told and the read.
             Expect::Sink(index) if error == PulseError::NoEntity => {
                 self.facts.sinks.retain(|sink| sink.index != index);
+                self.changed = true;
+            }
+            Expect::Source(index) if error == PulseError::NoEntity => {
+                self.facts.sources.retain(|source| source.index != index);
                 self.changed = true;
             }
             Expect::Card(index) if error == PulseError::NoEntity => {
@@ -605,6 +661,18 @@ impl Link {
                     name: None,
                 }),
                 Expect::Sink(index),
+            ),
+            (Facility::Source, SubscriptionEventType::Removed, Some(index)) => {
+                self.facts.sources.retain(|source| source.index != index);
+                self.changed = true;
+                return Ok(());
+            }
+            (Facility::Source, _, Some(index)) => (
+                Command::GetSourceInfo(GetSourceInfo {
+                    index: Some(index),
+                    name: None,
+                }),
+                Expect::Source(index),
             ),
             (Facility::Card, SubscriptionEventType::Removed, Some(index)) => {
                 self.facts.cards.retain(|card| card.index != index);
@@ -718,6 +786,21 @@ fn sink(info: &SinkInfo) -> Sink {
         card: info.card_index,
         port: ports.get(info.active_port).cloned(),
         ports,
+    }
+}
+
+/// A source, as the shell keeps it.
+fn source(info: &SourceInfo) -> Source {
+    Source {
+        index: info.index,
+        name: text(&info.name),
+        volume: info
+            .cvolume
+            .channels()
+            .iter()
+            .map(|volume| volume.as_u32())
+            .collect(),
+        muted: info.muted,
     }
 }
 
@@ -858,7 +941,7 @@ mod tests {
 
     use super::*;
     use crate::audio::{
-        fake::{EXTRA1, Fake, HDMI, HDMI_SINK, JACK, SPEAKERS},
+        fake::{EXTRA1, Fake, HDMI, HDMI_SINK, JACK, MIC, SPEAKERS},
         levels::RATE,
         start,
     };
@@ -1195,6 +1278,44 @@ mod tests {
         );
         running.ask(Ask::Levels(false));
         until_asked(&fake, &format!("unrecord {channel}"));
+    }
+
+    #[test]
+    fn the_default_input_is_read_and_muted_and_set() {
+        let fake = Fake::start("mic");
+        let (running, heard) = follow(&fake);
+        let facts = heard.facts();
+        let mic = facts.input().expect("the default input");
+        assert_eq!((mic.name.as_str(), mic.level().percent), (MIC, 50));
+        running.ask(Ask::Mute {
+            target: Target::Source(MIC.to_owned()),
+            on: true,
+        });
+        assert!(heard.facts().input().expect("the input").muted);
+        running.ask(Ask::Volume {
+            target: Target::Source(MIC.to_owned()),
+            volume: vec![0x4000],
+        });
+        assert_eq!(
+            heard.facts().input().expect("the input").level().percent,
+            25
+        );
+        assert!(
+            !fake
+                .asked()
+                .iter()
+                .any(|asked| asked.starts_with("mute Some(\"alsa_output"))
+        );
+    }
+
+    #[test]
+    fn a_list_the_server_refuses_is_read_as_empty_and_the_rest_told() {
+        let fake = Fake::start("refused");
+        fake.refuse_sources();
+        let (_running, heard) = follow(&fake);
+        let facts = heard.facts();
+        assert!(facts.sources.is_empty());
+        assert_eq!(facts.sinks.len(), 2);
     }
 
     #[test]

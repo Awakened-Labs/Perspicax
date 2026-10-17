@@ -17,7 +17,7 @@ use std::{
 use pulseaudio::protocol::{
     self, AuthReply, CardInfo, CardInfoList, Command, CreateRecordStreamReply, DESCRIPTOR_SIZE,
     MAX_VERSION, ProtocolError, PulseError, ServerInfo, SetClientNameReply, SinkInfo, SinkInfoList,
-    TagStructReader,
+    SourceInfo, SourceInfoList, TagStructReader,
 };
 
 /// The longest message read: past this it is not a message.
@@ -44,6 +44,10 @@ pub(super) enum Expect {
     Card(u32),
     /// The record stream of this number made: its channel.
     Recording(u64),
+    /// Every source.
+    Sources,
+    /// The source of this index.
+    Source(u32),
 }
 
 /// A reply, read as its command expected.
@@ -58,6 +62,8 @@ pub(super) enum Reply {
     Cards(CardInfoList),
     Card(Box<CardInfo>),
     Recording(Box<CreateRecordStreamReply>),
+    Sources(SourceInfoList),
+    Source(Box<SourceInfo>),
 }
 
 /// A message from the server.
@@ -216,6 +222,8 @@ impl Expect {
             Self::Cards => Reply::Cards(reader.read()?),
             Self::Card(_) => Reply::Card(Box::new(reader.read()?)),
             Self::Recording(_) => Reply::Recording(Box::new(reader.read()?)),
+            Self::Sources => Reply::Sources(reader.read()?),
+            Self::Source(_) => Reply::Source(Box::new(reader.read()?)),
         })
     }
 }

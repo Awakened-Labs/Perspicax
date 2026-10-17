@@ -154,6 +154,8 @@ pub(crate) struct Sounding {
     pub(crate) limit: u32,
     /// The output the sound plays from, if the server names one.
     pub(crate) output: Option<Playing>,
+    /// How loud the default input is, or `None` with none.
+    pub(crate) mic: Option<Level>,
 }
 
 /// The output the sound plays from, as the mixer shows it.
@@ -282,7 +284,7 @@ pub(crate) fn lay_out(
                     }
                 }
                 Piece::Levels => LEVELS,
-                Piece::Mute => PIECE,
+                Piece::Mute | Piece::Mic => PIECE,
             };
             (piece, wide)
         })
@@ -823,6 +825,7 @@ mod tests {
             step: 5,
             limit: 100,
             output: None,
+            mic: None,
         };
         let mut holding = holding(1, &[]);
         holding.mixer = Mixing {
@@ -868,6 +871,7 @@ mod tests {
                     step: 5,
                     limit: 150,
                     output: None,
+                    mic: None,
                 },
             };
             lay_out(&[Item::Mixer], holding, PANEL, FULL, &mut Monospace(8.0))

@@ -10,7 +10,8 @@
 //!
 //! An output is drawn as what it is: a speaker without its waves,
 //! headphones, headphones with a microphone at the end of a boom, or a
-//! screen on a stand.
+//! screen on a stand. The microphone is a capsule in a cradle on a stand,
+//! struck through while it is muted, and faint with none to record from.
 
 use std::f32::consts::FRAC_PI_4;
 
@@ -95,6 +96,45 @@ pub(crate) fn speaker(
             lines.move_to(right, top);
             lines.line_to(left, bottom);
         }
+    }
+    if let Some(lines) = lines.finish() {
+        canvas.stroke_path(&lines, &paint, &stroke, through, None);
+    }
+}
+
+/// A microphone filling `place`, a square in pixels, in `ink`, showing
+/// `level`: struck through while muted; with `None`, with no input, faint
+/// and struck through, in `faint`.
+pub(crate) fn mic(
+    canvas: &mut PixmapMut<'_>,
+    place: Rect,
+    level: Option<Level>,
+    ink: [u8; 4],
+    faint: [u8; 4],
+) {
+    let k = place.w as f32 / UNITS;
+    let through = Transform::from_row(k, 0.0, 0.0, k, place.x as f32, place.y as f32);
+    let paint = solid(if level.is_some() { ink } else { faint });
+    let stroke = Stroke {
+        width: LINE,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Stroke::default()
+    };
+    if let Some(capsule) = super::rounded(9.0, 2.5, 6.0, 11.5, 3.0) {
+        canvas.fill_path(&capsule, &paint, FillRule::Winding, through, None);
+    }
+    let mut lines = PathBuilder::new();
+    // The cradle under the capsule, its stand, and its foot.
+    lines.move_to(6.0, 10.0);
+    lines.cubic_to(6.0, 17.5, 18.0, 17.5, 18.0, 10.0);
+    lines.move_to(12.0, 16.0);
+    lines.line_to(12.0, 20.0);
+    lines.move_to(8.5, 20.5);
+    lines.line_to(15.5, 20.5);
+    if level.is_none_or(|level| level.muted) {
+        lines.move_to(4.0, 3.0);
+        lines.line_to(20.0, 21.0);
     }
     if let Some(lines) = lines.finish() {
         canvas.stroke_path(&lines, &paint, &stroke, through, None);
@@ -242,6 +282,32 @@ mod tests {
             speaker.data(),
             "anything else, as a speaker"
         );
+    }
+
+    #[test]
+    fn the_microphone_is_struck_through_while_muted_and_faint_with_none() {
+        let drawn = |level: Option<Level>| {
+            let mut picture = Pixmap::new(24, 24).expect("a picture");
+            mic(
+                &mut picture.as_mut(),
+                Rect::new(0, 0, 24, 24),
+                level,
+                INK,
+                FAINT,
+            );
+            picture
+        };
+        // Where the stroke crosses the cradle's left, clear of the capsule.
+        let struck = (6, 6);
+        let on = drawn(level(50, false));
+        assert!(inked(&on, 12, 6), "the capsule");
+        assert!(!inked(&on, struck.0, struck.1), "not struck through");
+        let muted = drawn(level(50, true));
+        assert!(inked(&muted, struck.0, struck.1), "struck through");
+        assert_eq!(muted.pixel(12, 6).expect("the capsule").red(), 0xff);
+        let none = drawn(None);
+        assert!(inked(&none, struck.0, struck.1));
+        assert_eq!(none.pixel(12, 6).expect("the capsule").red(), 0x80, "faint");
     }
 
     #[test]

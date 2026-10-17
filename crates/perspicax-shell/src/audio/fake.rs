@@ -29,16 +29,18 @@ use std::{
 use pulseaudio::protocol::{
     self, AuthReply, CardInfo, CardPortInfo, CardProfileInfo, ChannelMap, ChannelVolume, Command,
     CreateRecordStreamReply, MAX_VERSION, Props, PulseError, SampleSpec, ServerInfo,
-    SetClientNameReply, SinkInfo, SinkState, SubscriptionEvent, SubscriptionEventFacility,
-    SubscriptionEventType, SubscriptionMask, Volume,
+    SetClientNameReply, SinkInfo, SinkState, SourceInfo, SubscriptionEvent,
+    SubscriptionEventFacility, SubscriptionEventType, SubscriptionMask, Volume,
     port_info::{PortAvailable, PortDirection, PortInfo, PortType},
 };
 
 use super::client::PLAYS;
 use crate::model::sound::NORM;
 
-/// The built-in card's sink, the default.
+/// The built-in card's sink, the default, and its microphone's source, the
+/// default too.
 pub(super) const SPEAKERS: &str = "alsa_output.speakers";
+pub(super) const MIC: &str = "alsa_input.mic";
 /// The HDMI card's, the profile that plays through its second jack, the
 /// jack, and the sink that profile brings.
 pub(super) const HDMI: &str = "alsa_card.pci-0000_01_00.1";
@@ -54,6 +56,9 @@ pub(super) struct Fake {
 
 struct Shared {
     sinks: Vec<SinkInfo>,
+    sources: Vec<SourceInfo>,
+    /// The sources are refused, as a server with none to list might.
+    sources_refused: bool,
     cards: Vec<CardInfo>,
     default: CString,
     /// What was asked, in order: one line each.
@@ -88,6 +93,8 @@ impl Fake {
                 },
                 sink(1, "bluez_output.E8", NORM),
             ],
+            sources: vec![mic()],
+            sources_refused: false,
             cards: vec![built_in(), hdmi()],
             default: CString::new(SPEAKERS).expect("a name"),
             asked: Vec::new(),
@@ -166,6 +173,11 @@ impl Fake {
         protocol::write_memblock(writer, channel, &bytes, 0).expect("written");
     }
 
+    /// Refuse the client the sources.
+    pub(super) fn refuse_sources(&self) {
+        self.lock().sources_refused = true;
+    }
+
     /// Hang up on the client, as a server stopping does.
     pub(super) fn hang_up(&self) {
         if let Some(writer) = self.lock().writer.take() {
@@ -226,6 +238,7 @@ impl Shared {
         let version = self.version;
         let subscribed = match facility {
             SubscriptionEventFacility::Sink => SubscriptionMask::SINK,
+            SubscriptionEventFacility::Source => SubscriptionMask::SOURCE,
             SubscriptionEventFacility::Card => SubscriptionMask::CARD,
             SubscriptionEventFacility::Server => SubscriptionMask::SERVER,
             _ => SubscriptionMask::ALL,
@@ -299,8 +312,11 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
         let version = shared.version;
         let (mut changed, mut negotiated, mut profile, mut defaulted) = (None, None, None, false);
         let mut subscribed = None;
+        let mut changed_source = None;
         let Shared {
             sinks,
+            sources,
+            sources_refused,
             cards,
             default,
             asked,
@@ -341,6 +357,7 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
                 let info = ServerInfo {
                     server_name: Some(c"PulseAudio (on PipeWire 1.6.8)".to_owned()),
                     default_sink_name: Some(default.clone()),
+                    default_source_name: Some(CString::new(MIC).expect("a name")),
                     ..ServerInfo::default()
                 };
                 protocol::write_reply_message(writer, seq, &info, version)
@@ -353,6 +370,51 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
                 asked.push(format!("sink {}", get.index.unwrap_or(u32::MAX)));
                 match sinks.iter().find(|sink| Some(sink.index) == get.index) {
                     Some(sink) => protocol::write_reply_message(writer, seq, sink, version),
+                    None => protocol::write_error(writer, seq, &PulseError::NoEntity),
+                }
+            }
+            Command::GetSourceInfoList if *sources_refused => {
+                protocol::write_error(writer, seq, &PulseError::Command)
+            }
+            Command::GetSourceInfoList => {
+                asked.push("sources".to_owned());
+                protocol::write_reply_message(writer, seq, &sources.clone(), version)
+            }
+            Command::GetSourceInfo(get) => {
+                asked.push(format!("source {}", get.index.unwrap_or(u32::MAX)));
+                match sources
+                    .iter()
+                    .find(|source| Some(source.index) == get.index)
+                {
+                    Some(source) => protocol::write_reply_message(writer, seq, source, version),
+                    None => protocol::write_error(writer, seq, &PulseError::NoEntity),
+                }
+            }
+            Command::SetSourceMute(mute) => {
+                asked.push(format!("mute source {:?}", mute.device_name));
+                match sources
+                    .iter_mut()
+                    .find(|source| Some(&source.name) == mute.device_name.as_ref())
+                {
+                    Some(source) => {
+                        source.muted = mute.mute;
+                        changed_source = Some(source.index);
+                        protocol::write_ack_message(writer, seq)
+                    }
+                    None => protocol::write_error(writer, seq, &PulseError::NoEntity),
+                }
+            }
+            Command::SetSourceVolume(set) => {
+                asked.push(format!("volume source {:?}", set.device_name));
+                match sources
+                    .iter_mut()
+                    .find(|source| Some(&source.name) == set.device_name.as_ref())
+                {
+                    Some(source) => {
+                        source.cvolume = set.volume;
+                        changed_source = Some(source.index);
+                        protocol::write_ack_message(writer, seq)
+                    }
                     None => protocol::write_error(writer, seq, &PulseError::NoEntity),
                 }
             }
@@ -464,6 +526,9 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
         if let Some(index) = changed {
             shared.event(SubscriptionEventFacility::Sink, Some(index));
         }
+        if let Some(index) = changed_source {
+            shared.event(SubscriptionEventFacility::Source, Some(index));
+        }
         if let Some((index, profile)) = profile {
             shared.set_profile(index, &profile);
         }
@@ -490,6 +555,25 @@ fn sink(index: u32, name: &str, volume: u32) -> SinkInfo {
         channel_map: ChannelMap::stereo(),
         cvolume,
         ..SinkInfo::default()
+    }
+}
+
+/// The microphone's source, mono, at half volume.
+fn mic() -> SourceInfo {
+    let mut cvolume = ChannelVolume::empty();
+    cvolume.push(Volume::from_u32_clamped(NORM / 2));
+    SourceInfo {
+        index: 0,
+        name: CString::new(MIC).expect("a name"),
+        description: Some(c"Built-in Audio Analog Stereo".to_owned()),
+        sample_spec: SampleSpec {
+            channels: 1,
+            ..SampleSpec::default()
+        },
+        channel_map: ChannelMap::mono(),
+        cvolume,
+        card_index: Some(0),
+        ..SourceInfo::default()
     }
 }
 

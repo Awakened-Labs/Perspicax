@@ -349,6 +349,10 @@ impl Pen<'_, '_, '_> {
                 super::sound::speaker(self.canvas, at, level, ink, faint);
             }
             Piece::Levels => levels(self.canvas, place, bars, self.scale, &self.colours),
+            Piece::Mic => {
+                let at = self.px(middle(place, fitted(place.h)));
+                super::sound::mic(self.canvas, at, sound.mic, ink, faint);
+            }
             Piece::Output => {
                 use crate::layout::panel::PIECE;
 

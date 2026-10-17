@@ -123,6 +123,9 @@ pub(super) struct Panels {
     sound: Option<crate::model::sound::Level>,
     #[cfg(feature = "audio")]
     playing: Option<crate::layout::panel::Playing>,
+    /// How loud the default input is, or `None` with none.
+    #[cfg(feature = "audio")]
+    mic: Option<crate::model::sound::Level>,
     /// The mixer's moving bars, and when the monitor last showed them, by
     /// the compositor's clock, in milliseconds.
     #[cfg(feature = "audio")]
@@ -199,6 +202,8 @@ impl Panels {
             sound: None,
             #[cfg(feature = "audio")]
             playing: None,
+            #[cfg(feature = "audio")]
+            mic: None,
             #[cfg(feature = "audio")]
             bars: crate::model::levels::Bars::default(),
             #[cfg(feature = "audio")]
@@ -500,17 +505,19 @@ impl Panels {
             .then(|| crate::layout::panel::strip(panel.edge, panel.height as i32, monitor))
     }
 
-    /// Show the mixer `level`, and the output `playing`, or `None` with no
-    /// sound server. Whether that changed what it shows.
+    /// Show the mixer `level`, the output `playing` and the input's `mic`,
+    /// or `None` for none. Whether that changed what it shows.
     #[cfg(feature = "audio")]
     pub(super) fn hear(
         &mut self,
         level: Option<crate::model::sound::Level>,
         playing: Option<crate::layout::panel::Playing>,
+        mic: Option<crate::model::sound::Level>,
     ) -> bool {
         let level_changed = std::mem::replace(&mut self.sound, level) != self.sound;
         let playing_changed = std::mem::replace(&mut self.playing, playing) != self.playing;
-        level_changed || playing_changed
+        let mic_changed = std::mem::replace(&mut self.mic, mic) != self.mic;
+        level_changed || playing_changed || mic_changed
     }
 
     /// The status icon of `key`.
@@ -631,6 +638,7 @@ impl Panels {
                     step: self.mixer.step,
                     limit: self.mixer.limit,
                     output: self.playing.clone(),
+                    mic: self.mic,
                 },
             },
         };

@@ -64,6 +64,8 @@ pub(crate) enum Ask {
 pub(crate) enum Target {
     /// The sink of this name.
     Sink(String),
+    /// The source of this name.
+    Source(String),
 }
 
 /// The thread, while it runs. Dropping it ends it.

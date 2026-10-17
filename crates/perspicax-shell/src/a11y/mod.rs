@@ -670,7 +670,9 @@ mod panels {
     /// steps by `step` and can be set, described as muted while it is; the
     /// output is a `Button`, "Output", whose value is the output's name and
     /// whose description is its whole name, and a click switches to the
-    /// next; the moving bars are a `Meter`, "Sound levels", with no value,
+    /// next; the microphone is a `Switch`, "Mute microphone", as the
+    /// speaker is, and with no input to record from, disabled and described
+    /// so; the moving bars are a `Meter`, "Sound levels", with no value,
     /// since they move faster than a tree is worth sending. With no sound
     /// server, each is disabled, and described so. What takes no room on the
     /// panel is not in the tree.
@@ -840,6 +842,30 @@ mod panels {
                     }
                 }
                 slider
+            }
+            Piece::Mic => {
+                let mut switch = Node::new(Role::Switch);
+                switch.set_label("Mute microphone");
+                match sound.mic {
+                    Some(mic) => {
+                        switch.set_toggled(if mic.muted {
+                            Toggled::True
+                        } else {
+                            Toggled::False
+                        });
+                        switch.set_description(if mic.muted {
+                            "Muted".to_owned()
+                        } else {
+                            format!("{}%", mic.percent)
+                        });
+                        switch.add_action(Action::Click);
+                    }
+                    None => {
+                        switch.set_disabled();
+                        switch.set_description("No microphone");
+                    }
+                }
+                switch
             }
             Piece::Levels => {
                 let mut meter = Node::new(Role::Meter);
@@ -1027,12 +1053,13 @@ mod panels {
                         #[cfg(feature = "tray")]
                         tray: Vec::new(),
                         mixer: Mixing {
-                            pieces: &[Piece::Mute, Piece::Volume, Piece::Levels],
+                            pieces: &[Piece::Mute, Piece::Volume, Piece::Levels, Piece::Mic],
                             sound: Sounding {
                                 level,
                                 step: 5,
                                 limit: 100,
                                 output: None,
+                                mic: level,
                             },
                         },
                     },
@@ -1057,9 +1084,15 @@ mod panels {
             assert_eq!(node(&tree, TOOLBAR).children(), [START, MIXER, CLOCK]);
             let mixer = node(&tree, MIXER);
             assert_eq!((mixer.role(), mixer.label()), (Role::Group, Some("Sound")));
-            let [mute, volume, levels] = mixer.children() else {
-                panic!("three pieces: {:?}", mixer.children());
+            let [mute, volume, levels, mic] = mixer.children() else {
+                panic!("four pieces: {:?}", mixer.children());
             };
+            let switch = node(&tree, *mic);
+            assert_eq!(
+                (switch.role(), switch.label(), switch.toggled()),
+                (Role::Switch, Some("Mute microphone"), Some(Toggled::False))
+            );
+            assert_eq!(part_of(*mic), Some(Part::Mixer(Piece::Mic)));
             let meter = node(&tree, *levels);
             assert_eq!(
                 (meter.role(), meter.label()),
@@ -1178,6 +1211,9 @@ mod panels {
             assert!(switch.is_disabled());
             assert!(!switch.supports_action(Action::Click));
             assert_eq!(switch.description(), Some("No sound server"));
+            let microphone = node(&gone, *mic);
+            assert!(microphone.is_disabled());
+            assert_eq!(microphone.description(), Some("No microphone"));
             let slider = node(&gone, *volume);
             assert!(slider.is_disabled() && !slider.supports_action(Action::SetValue));
             assert_eq!(slider.numeric_value(), None);
