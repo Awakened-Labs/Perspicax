@@ -24,7 +24,7 @@ use wayland_client::protocol::wl_surface;
 use super::App;
 use crate::{
     audio::{Ask, News, Running, Target},
-    layout::panel::Part,
+    layout::panel::{Part, Playing},
     model::{
         Button,
         sound::{self, Facts},
@@ -119,6 +119,10 @@ impl Audio {
         self.facts = match news {
             News::Facts(facts) => Some(facts),
             News::Gone => None,
+            News::Failed(why) => {
+                tracing::warn!("the sound server did not do what was asked: {why}");
+                return;
+            }
         };
         let facts = self.facts.as_deref();
         self.asked.take_if(|(sink, asked, _)| {
@@ -187,13 +191,23 @@ impl App {
 
     /// Show the panels what was last heard of the sound.
     fn heard(&mut self) {
-        let level = self
-            .audio
-            .facts
-            .as_ref()
+        let facts = self.audio.facts.as_deref();
+        let level = facts
             .and_then(|facts| facts.output())
             .map(|output| output.level());
-        if self.panels.hear(level) {
+        let playing = facts.and_then(|facts| {
+            let key = facts.output_key()?;
+            let output = facts
+                .outputs()
+                .into_iter()
+                .find(|output| output.key == key)?;
+            Some(Playing {
+                kind: output.kind,
+                name: output.short,
+                long: output.long,
+            })
+        });
+        if self.panels.hear(level, playing) {
             self.panels_changed();
         }
     }
@@ -208,6 +222,19 @@ impl App {
                 target: Target::Sink(output.name.clone()),
                 on: !output.muted,
             },
+            (Piece::Output, Button::Left) => {
+                let Some(facts) = self.audio.facts.as_deref() else {
+                    return;
+                };
+                let outputs = facts.outputs();
+                let now = facts.output_key();
+                let Some(plan) = sound::next_output(&outputs, now.as_deref())
+                    .and_then(|next| facts.plan(&next.key))
+                else {
+                    return;
+                };
+                Ask::Choose(plan)
+            }
             _ => return,
         };
         self.audio.ask(ask);
@@ -258,9 +285,14 @@ mod tests {
             sinks: vec![Sink {
                 index: 0,
                 name: "speakers".to_owned(),
+                description: "Speakers".to_owned(),
                 volume: sound::scaled(&[NORM, NORM], percent),
                 muted: false,
+                card: None,
+                ports: Vec::new(),
+                port: None,
             }],
+            cards: Vec::new(),
         }
     }
 

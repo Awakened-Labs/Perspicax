@@ -15,8 +15,8 @@ use std::{
 };
 
 use pulseaudio::protocol::{
-    self, AuthReply, Command, DESCRIPTOR_SIZE, MAX_VERSION, ProtocolError, PulseError, ServerInfo,
-    SetClientNameReply, SinkInfo, SinkInfoList, TagStructReader,
+    self, AuthReply, CardInfo, CardInfoList, Command, DESCRIPTOR_SIZE, MAX_VERSION, ProtocolError,
+    PulseError, ServerInfo, SetClientNameReply, SinkInfo, SinkInfoList, TagStructReader,
 };
 
 /// The longest message read: past this it is not a message.
@@ -37,6 +37,10 @@ pub(super) enum Expect {
     Sinks,
     /// The sink of this index.
     Sink(u32),
+    /// Every card.
+    Cards,
+    /// The card of this index.
+    Card(u32),
 }
 
 /// A reply, read as its command expected.
@@ -48,6 +52,8 @@ pub(super) enum Reply {
     Server(Box<ServerInfo>),
     Sinks(SinkInfoList),
     Sink(Box<SinkInfo>),
+    Cards(CardInfoList),
+    Card(Box<CardInfo>),
 }
 
 /// A message from the server.
@@ -201,6 +207,8 @@ impl Expect {
             Self::Server => Reply::Server(Box::new(reader.read()?)),
             Self::Sinks => Reply::Sinks(reader.read()?),
             Self::Sink(_) => Reply::Sink(Box::new(reader.read()?)),
+            Self::Cards => Reply::Cards(reader.read()?),
+            Self::Card(_) => Reply::Card(Box::new(reader.read()?)),
         })
     }
 }

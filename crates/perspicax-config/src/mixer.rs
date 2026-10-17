@@ -5,7 +5,7 @@
 //! items = ["start", "taskbar", "mixer", "clock"]
 //!
 //! [shell.mixer]
-//! panel = ["mute", "volume"]
+//! panel = ["mute", "output"]
 //! step = 5       # percent a turn of the wheel moves the volume, 1 to 25
 //! limit = 100    # the most a turn takes it to, 1 to 150
 //! ```
@@ -59,11 +59,14 @@ pub enum Piece {
     Mute,
     /// How loud the sound is, in percent, faint while it is muted.
     Volume,
+    /// What the sound plays from, by its glyph and its name: "Speakers",
+    /// "E8". A click switches to the next output there is.
+    Output,
 }
 
 impl Piece {
     /// Every piece, in the order this crate lists them.
-    pub const ALL: [Self; 2] = [Self::Mute, Self::Volume];
+    pub const ALL: [Self; 3] = [Self::Mute, Self::Volume, Self::Output];
 
     /// Its name as `panel` writes it.
     #[must_use]
@@ -71,6 +74,7 @@ impl Piece {
         match self {
             Self::Mute => "mute",
             Self::Volume => "volume",
+            Self::Output => "output",
         }
     }
 }
@@ -137,9 +141,9 @@ mod tests {
 
     #[test]
     fn a_mixer_is_read_with_its_pieces_and_the_compositor_reads_it_whatever_the_shell_has() {
-        let text = "[shell.panel]\nitems = [\"mixer\"]\n[shell.mixer]\npanel = [\"volume\", \"mute\"]\nstep = 2\nlimit = 150";
+        let text = "[shell.panel]\nitems = [\"mixer\"]\n[shell.mixer]\npanel = [\"volume\", \"mute\", \"output\"]\nstep = 2\nlimit = 150";
         let read = mixer(text).unwrap();
-        assert_eq!(read.panel, [Piece::Volume, Piece::Mute]);
+        assert_eq!(read.panel, [Piece::Volume, Piece::Mute, Piece::Output]);
         assert_eq!((read.step, read.limit), (2, 150));
         let panel = shell(text, ShellBuilt::FULL).unwrap().panel.unwrap();
         assert_eq!(panel.items, [Item::Mixer]);

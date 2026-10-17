@@ -26,7 +26,7 @@ use smithay_client_toolkit::reexports::calloop::{
     channel::{self, Sender},
 };
 
-use crate::model::sound::Facts;
+use crate::model::sound::{Facts, Plan};
 
 /// What the thread read, for the shell to show.
 #[derive(Debug)]
@@ -36,6 +36,8 @@ pub(crate) enum News {
     /// There is no server to read: none could be reached, or the one there
     /// was went away. Told once, until one is reached again.
     Gone,
+    /// What was asked could not be done, and why.
+    Failed(String),
 }
 
 /// What a person asked of the sound.
@@ -45,6 +47,8 @@ pub(crate) enum Ask {
     Mute { target: Target, on: bool },
     /// Set `target`'s volume, each channel's, as the server counts it.
     Volume { target: Target, volume: Vec<u32> },
+    /// Make an output the one sound goes to, as its plan says.
+    Choose(Plan),
 }
 
 /// What an [`Ask`] is of.

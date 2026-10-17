@@ -667,9 +667,11 @@ mod panels {
     /// speaker that mutes is a `Switch`, "Mute", on while the sound is
     /// muted, described by how loud it is; the volume is a `Slider`,
     /// "Volume", from silence to the limit, or to where it is past it, that
-    /// steps by `step` and can be set, described as muted while it is. With
-    /// no sound server, each is disabled, and described so. What takes no
-    /// room on the panel is not in the tree.
+    /// steps by `step` and can be set, described as muted while it is; the
+    /// output is a `Button`, "Output", whose value is the output's name and
+    /// whose description is its whole name, and a click switches to the
+    /// next. With no sound server, each is disabled, and described so. What
+    /// takes no room on the panel is not in the tree.
     pub(crate) fn panel(
         namespace: &str,
         size: Option<(u32, u32)>,
@@ -837,6 +839,22 @@ mod panels {
                 }
                 slider
             }
+            Piece::Output => {
+                let mut button = Node::new(Role::Button);
+                button.set_label("Output");
+                match &sound.output {
+                    Some(playing) => {
+                        button.set_value(playing.name.as_str());
+                        button.set_description(playing.long.as_str());
+                        button.add_action(Action::Click);
+                    }
+                    None => {
+                        button.set_disabled();
+                        button.set_description("No sound server");
+                    }
+                }
+                button
+            }
         }
     }
 
@@ -982,8 +1000,8 @@ mod panels {
             use accesskit::Toggled;
 
             use crate::{
-                layout::panel::{Mixing, Sounding},
-                model::sound::Level,
+                layout::panel::{Mixing, Playing, Sounding},
+                model::sound::{Kind, Level},
             };
 
             let tree_of = |level: Option<Level>| {
@@ -1003,6 +1021,7 @@ mod panels {
                                 level,
                                 step: 5,
                                 limit: 100,
+                                output: None,
                             },
                         },
                     },
@@ -1082,6 +1101,59 @@ mod panels {
                 Some(120.0),
                 "past the limit, the slider reaches where it is"
             );
+
+            let output = |playing: Option<Playing>| {
+                let placed = lay_out(
+                    &[Item::Mixer],
+                    Holding {
+                        time: "14:05",
+                        layout: None,
+                        tasks: Vec::new(),
+                        task_titles: true,
+                        cells: Vec::new(),
+                        #[cfg(feature = "tray")]
+                        tray: Vec::new(),
+                        mixer: Mixing {
+                            pieces: &[Piece::Output],
+                            sound: Sounding {
+                                output: playing,
+                                ..Sounding::default()
+                            },
+                        },
+                    },
+                    (1280, 40),
+                    FULL,
+                    &mut Monospace(8.0),
+                );
+                let tree = panel(
+                    "perspicax-panel-DP-1",
+                    Some((1280, 40)),
+                    &placed,
+                    "14:05",
+                    false,
+                    None,
+                );
+                let id = node(&tree, MIXER).children()[0];
+                (part_of(id), node(&tree, id).clone())
+            };
+            let (part, button) = output(Some(Playing {
+                kind: Kind::Headset,
+                name: "E8".to_owned(),
+                long: "E8 \u{2014} Headphones \u{b7} Bluetooth".to_owned(),
+            }));
+            assert_eq!(part, Some(Part::Mixer(Piece::Output)));
+            assert_eq!(
+                (button.role(), button.label()),
+                (Role::Button, Some("Output"))
+            );
+            assert_eq!(button.value(), Some("E8"));
+            assert_eq!(
+                button.description(),
+                Some("E8 \u{2014} Headphones \u{b7} Bluetooth")
+            );
+            assert!(button.supports_action(Action::Click), "a click switches");
+            let (_, none) = output(None);
+            assert!(none.is_disabled() && !none.supports_action(Action::Click));
 
             let (_, gone) = tree_of(None);
             let switch = node(&gone, *mute);

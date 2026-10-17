@@ -2194,6 +2194,49 @@ fn the_wheel_over_the_mixer_steps_the_volume_to_the_limit_and_a_middle_click_mut
     shell.stop_with(session);
 }
 
+/// A panel of the mixer alone, its output then its speaker, the speaker at
+/// the panel's right end.
+#[cfg(feature = "capture")]
+const OUTPUT_AND_MUTE: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"mixer\"]\n\
+    [shell.mixer]\npanel = [\"output\", \"mute\"]\n";
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn a_click_on_the_output_switches_to_the_next_and_round() {
+    use std::time::{Duration, Instant};
+
+    let sound = SoundServer::start("output");
+    let session = Session::start("shell-output", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "output",
+        OUTPUT_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let default = || sound.pactl(&["get-default-sink"]).trim().to_owned();
+    let until_default = |want: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while default() != want {
+            assert!(Instant::now() < deadline, "the default never became {want}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    // The speaker's box, at the right end, in the ink once the shell has
+    // heard the server; and the output's room after its name, left of it.
+    until_colour(&session, (1258, 800 - 20), INK);
+    let output = (1280.0 - 30.0 - 5.0, PANEL_HEIGHT / 2.0);
+    click(&session, panel, output, PointerButton::Left);
+    until_default("two");
+    click(&session, panel, output, PointerButton::Left);
+    until_default("one");
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
 /// A program's status icon, served as a program serves one: a title, a
 /// picture of magenta, and a menu of one item, Quit. What it is asked is
 /// kept, to be waited for.

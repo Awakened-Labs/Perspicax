@@ -111,10 +111,12 @@ pub(super) struct Panels {
     /// The mixer, as `[shell.mixer]` writes it.
     #[cfg(feature = "audio")]
     mixer: perspicax_config::mixer::Mixer,
-    /// How loud the default output is, or `None` with no sound server to
-    /// ask.
+    /// How loud the default output is, and what it is, or `None` with no
+    /// sound server to ask.
     #[cfg(feature = "audio")]
     sound: Option<crate::model::sound::Level>,
+    #[cfg(feature = "audio")]
+    playing: Option<crate::layout::panel::Playing>,
     /// The panels are to be drawn again once the loop is idle.
     stale: bool,
     /// Where an assistive technology's press of something on a panel is
@@ -165,6 +167,8 @@ impl Panels {
             mixer: shell.mixer.clone(),
             #[cfg(feature = "audio")]
             sound: None,
+            #[cfg(feature = "audio")]
+            playing: None,
             stale: false,
             actions,
         }
@@ -460,11 +464,17 @@ impl Panels {
             .then(|| crate::layout::panel::strip(panel.edge, panel.height as i32, monitor))
     }
 
-    /// Show the mixer `level`, or `None` with no sound server. Whether that
-    /// changed what it shows.
+    /// Show the mixer `level`, and the output `playing`, or `None` with no
+    /// sound server. Whether that changed what it shows.
     #[cfg(feature = "audio")]
-    pub(super) fn hear(&mut self, level: Option<crate::model::sound::Level>) -> bool {
-        std::mem::replace(&mut self.sound, level) != self.sound
+    pub(super) fn hear(
+        &mut self,
+        level: Option<crate::model::sound::Level>,
+        playing: Option<crate::layout::panel::Playing>,
+    ) -> bool {
+        let level_changed = std::mem::replace(&mut self.sound, level) != self.sound;
+        let playing_changed = std::mem::replace(&mut self.playing, playing) != self.playing;
+        level_changed || playing_changed
     }
 
     /// The status icon of `key`.
@@ -584,6 +594,7 @@ impl Panels {
                     level: self.sound,
                     step: self.mixer.step,
                     limit: self.mixer.limit,
+                    output: self.playing.clone(),
                 },
             },
         };

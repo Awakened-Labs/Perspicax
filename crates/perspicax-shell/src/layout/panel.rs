@@ -10,7 +10,9 @@
 //! the layout indicator as wide as its label, while there is a choice of
 //! layouts to show, and the mixer a slot [`PIECE`] wide for each of its
 //! pieces but its volume, which is as wide as "100%" or what it shows,
-//! whichever is wider, so that it holds still as the volume moves. The
+//! whichever is wider, so that it holds still as the volume moves, and its
+//! output, a slot for its glyph and room for its name, at most
+//! [`NAME_MOST`]. The
 //! taskbar takes whatever room is left, and shares it among the windows it
 //! lists, each no wider than [`TASK_WIDTH`], or than [`TASK_LEAST`] when its
 //! tasks show their icons alone; a bar without one keeps its last item at
@@ -25,7 +27,7 @@ use perspicax_config::{Align, Edge, Item, PanelOutputs, PanelWidth};
 
 use super::{Measure, Rect};
 #[cfg(feature = "audio")]
-use crate::model::sound::Level;
+use crate::model::sound::{Kind, Level};
 
 /// Room either side of the clock's time.
 pub(crate) const CLOCK_PAD: i32 = 10;
@@ -45,6 +47,10 @@ pub(crate) const TRAY_SLOT: i32 = 30;
 /// status icon's slot.
 #[cfg(feature = "audio")]
 pub(crate) const PIECE: i32 = 30;
+/// The most room the mixer's output piece gives its output's name: a long
+/// one is cut short.
+#[cfg(feature = "audio")]
+pub(crate) const NAME_MOST: i32 = 120;
 
 /// A window the taskbar lists, as it is shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,7 +108,7 @@ pub(crate) struct Holding<'a> {
 
 /// The mixer: its pieces, and what they show.
 #[cfg(feature = "audio")]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Mixing<'a> {
     /// Its pieces, in order.
     pub(crate) pieces: &'a [Piece],
@@ -111,7 +117,7 @@ pub(crate) struct Mixing<'a> {
 
 /// What the mixer's pieces show, and how far a step of the volume goes.
 #[cfg(feature = "audio")]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Sounding {
     /// How loud the default output is, or `None` with no sound server to
     /// ask.
@@ -119,6 +125,19 @@ pub(crate) struct Sounding {
     /// `[shell.mixer] step` and `limit`.
     pub(crate) step: u32,
     pub(crate) limit: u32,
+    /// The output the sound plays from, if the server names one.
+    pub(crate) output: Option<Playing>,
+}
+
+/// The output the sound plays from, as the mixer shows it.
+#[cfg(feature = "audio")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Playing {
+    pub(crate) kind: Kind,
+    /// Its short name, "Speakers", and its whole one, "Built-in Audio —
+    /// Speakers".
+    pub(crate) name: String,
+    pub(crate) long: String,
 }
 
 /// What the mixer's `volume` piece shows of `level`: "24%", or a dash with
@@ -222,6 +241,18 @@ pub(crate) fn lay_out(
                     let shown = volume_shown(holding.mixer.sound.level);
                     let widest = measure.width("100%").max(measure.width(&shown));
                     widest.ceil() as i32 + 2 * CLOCK_PAD
+                }
+                Piece::Output => {
+                    let name = holding
+                        .mixer
+                        .sound
+                        .output
+                        .as_ref()
+                        .map_or(0.0, |playing| measure.width(&playing.name));
+                    match (name.ceil() as i32).min(NAME_MOST) {
+                        0 => PIECE,
+                        name => PIECE + name + CLOCK_PAD,
+                    }
                 }
                 Piece::Mute => PIECE,
             };
@@ -763,11 +794,12 @@ mod tests {
             level,
             step: 5,
             limit: 100,
+            output: None,
         };
         let mut holding = holding(1, &[]);
         holding.mixer = Mixing {
             pieces: &[Piece::Mute],
-            sound,
+            sound: sound.clone(),
         };
         let placed = lay_out(
             &[Item::Start, Item::Taskbar, Item::Mixer, Item::Clock],
@@ -807,6 +839,7 @@ mod tests {
                     level,
                     step: 5,
                     limit: 150,
+                    output: None,
                 },
             };
             lay_out(&[Item::Mixer], holding, PANEL, FULL, &mut Monospace(8.0))
@@ -837,6 +870,33 @@ mod tests {
         }
         assert_eq!(volume_shown(level(24)), "24%");
         assert_eq!(volume_shown(None), "\u{2013}");
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn the_output_piece_is_its_glyph_and_its_name_cut_short_if_long() {
+        let placed = |name: Option<&str>| {
+            let mut holding = holding(0, &[]);
+            holding.mixer = Mixing {
+                pieces: &[Piece::Output],
+                sound: Sounding {
+                    output: name.map(|name| Playing {
+                        kind: Kind::Speaker,
+                        name: name.to_owned(),
+                        long: format!("Built-in Audio \u{2014} {name}"),
+                    }),
+                    ..Sounding::default()
+                },
+            };
+            let placed = lay_out(&[Item::Mixer], holding, PANEL, FULL, &mut Monospace(8.0));
+            placed.mixer[0].1.w
+        };
+        assert_eq!(placed(Some("Speakers")), PIECE + 8 * 8 + CLOCK_PAD);
+        assert_eq!(
+            placed(Some("A name far too long for any panel to hold")),
+            PIECE + NAME_MOST + CLOCK_PAD
+        );
+        assert_eq!(placed(None), PIECE, "the glyph alone with no server");
     }
 
     #[test]

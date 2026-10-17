@@ -15,9 +15,10 @@
 //! slot, drawn from the icon its program names if it is found, otherwise
 //! from the picture its program sent nearest the size. The mixer's speaker
 //! sits in the middle of its slot, drawn in the panel's ink (see `sound`),
-//! and its volume is written in the middle of its slot, faint while it is
-//! muted. The clock is the time, in the panel's ink. Every pixel of the bar
-//! is opaque, and the rest of its strip clear.
+//! its volume is written in the middle of its slot, faint while it is
+//! muted, and its output is drawn as what it is, then named. The clock is
+//! the time, in the panel's ink. Every pixel of the bar is opaque, and the
+//! rest of its strip clear.
 
 use perspicax_config::{Edge, Item};
 use tiny_skia::{FillRule, LineCap, LineJoin, PathBuilder, PixmapMut, Stroke, Transform};
@@ -207,7 +208,7 @@ pub(crate) fn paint(
     }
     #[cfg(feature = "audio")]
     for &(piece, place) in &shown.placed.mixer {
-        pen.piece(piece, place, shown.placed.sound);
+        pen.piece(piece, place, &shown.placed.sound);
     }
     for rule in ends.into_iter().flatten().chain([along]) {
         fill(pen.canvas, px(rule), colours.rule);
@@ -331,7 +332,7 @@ impl Pen<'_, '_, '_> {
         &mut self,
         piece: perspicax_config::mixer::Piece,
         place: Rect,
-        sound: crate::layout::panel::Sounding,
+        sound: &crate::layout::panel::Sounding,
     ) {
         use perspicax_config::mixer::Piece;
 
@@ -341,6 +342,31 @@ impl Pen<'_, '_, '_> {
             Piece::Mute => {
                 let at = self.px(middle(place, fitted(place.h)));
                 super::sound::speaker(self.canvas, at, level, ink, faint);
+            }
+            Piece::Output => {
+                use crate::layout::panel::PIECE;
+
+                let slot = Rect::new(place.x, place.y, PIECE.min(place.w), place.h);
+                let at = self.px(middle(slot, fitted(place.h)));
+                let Some(playing) = &sound.output else {
+                    super::sound::device(
+                        self.canvas,
+                        at,
+                        crate::model::sound::Kind::Speaker,
+                        faint,
+                    );
+                    return;
+                };
+                super::sound::device(self.canvas, at, playing.kind, ink);
+                let room = Rect::new(
+                    slot.right(),
+                    place.y,
+                    place.right() - CLOCK_PAD - slot.right(),
+                    place.h,
+                );
+                let size = self.text.size() * self.scale as f32;
+                self.text
+                    .write(self.canvas, &playing.name, self.px(room), size, ink);
             }
             Piece::Volume => {
                 let words = crate::layout::panel::volume_shown(level);

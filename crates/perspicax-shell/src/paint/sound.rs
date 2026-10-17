@@ -7,13 +7,20 @@
 //! waves beyond it, more the louder the sound, and a cross in place of the
 //! waves while it is muted. With no sound server to ask, it is faint, and
 //! crossed out.
+//!
+//! An output is drawn as what it is: a speaker without its waves,
+//! headphones, headphones with a microphone at the end of a boom, or a
+//! screen on a stand.
 
 use std::f32::consts::FRAC_PI_4;
 
 use tiny_skia::{FillRule, LineCap, LineJoin, PathBuilder, PixmapMut, Stroke, Transform};
 
 use super::solid;
-use crate::{layout::Rect, model::sound::Level};
+use crate::{
+    layout::Rect,
+    model::sound::{Kind, Level},
+};
 
 /// The glyphs are drawn on a square this many units on a side, as a
 /// symbolic icon is.
@@ -27,6 +34,9 @@ const WAVES: [f32; 3] = [3.5, 6.5, 9.5];
 const CROSS: ((f32, f32), (f32, f32)) = ((15.0, 9.0), (21.0, 15.0));
 /// How heavy a wave and the cross are.
 const LINE: f32 = 1.75;
+/// How far right an output's speaker sits, to stand in the middle of its
+/// square without the waves beside it.
+const ALONE: f32 = 4.5;
 
 /// How many waves `percent` shows: none for silence, then one more each
 /// third of the way to 100%.
@@ -91,6 +101,62 @@ pub(crate) fn speaker(
     }
 }
 
+/// What an output of `kind` is, filling `place`, a square in pixels, in
+/// `ink`.
+pub(crate) fn device(canvas: &mut PixmapMut<'_>, place: Rect, kind: Kind, ink: [u8; 4]) {
+    let k = place.w as f32 / UNITS;
+    let through = Transform::from_row(k, 0.0, 0.0, k, place.x as f32, place.y as f32);
+    let paint = solid(ink);
+    let stroke = Stroke {
+        width: LINE,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Stroke::default()
+    };
+    let mut filled = PathBuilder::new();
+    let mut lines = PathBuilder::new();
+    match kind {
+        Kind::Speaker | Kind::Other => {
+            let (x, y, w, h) = BOX;
+            filled.push_rect(tiny_skia::Rect::from_xywh(x + ALONE, y, w, h).expect("a box"));
+            let [first, rest @ ..] = CONE;
+            filled.move_to(first.0 + ALONE, first.1);
+            for (x, y) in rest {
+                filled.line_to(x + ALONE, y);
+            }
+            filled.close();
+        }
+        Kind::Headphones | Kind::Headset => {
+            // The band over the head, and a cup at each ear.
+            lines.move_to(5.0, 14.0);
+            lines.cubic_to(5.0, 3.5, 19.0, 3.5, 19.0, 14.0);
+            for x in [3.0, 16.5] {
+                filled.push_rect(tiny_skia::Rect::from_xywh(x, 12.5, 4.5, 7.0).expect("a cup"));
+            }
+            if kind == Kind::Headset {
+                // A boom from the left cup, round to the mouth.
+                lines.move_to(5.5, 19.5);
+                lines.quad_to(6.5, 22.0, 11.0, 21.5);
+                filled.push_circle(12.0, 21.4, 1.4);
+            }
+        }
+        Kind::Display => {
+            // A screen, and its stand.
+            filled.push_rect(tiny_skia::Rect::from_xywh(3.0, 4.0, 18.0, 12.0).expect("a screen"));
+            lines.move_to(12.0, 16.0);
+            lines.line_to(12.0, 19.5);
+            lines.move_to(8.0, 19.5);
+            lines.line_to(16.0, 19.5);
+        }
+    }
+    if let Some(filled) = filled.finish() {
+        canvas.fill_path(&filled, &paint, FillRule::Winding, through, None);
+    }
+    if let Some(lines) = lines.finish() {
+        canvas.stroke_path(&lines, &paint, &stroke, through, None);
+    }
+}
+
 /// A quarter of a circle of `radius` about `centre`, facing right: from 45°
 /// above the middle to 45° below, as one cubic curve.
 fn arc(path: &mut PathBuilder, (cx, cy): (f32, f32), radius: f32) {
@@ -139,6 +205,43 @@ mod tests {
 
     fn level(percent: u32, muted: bool) -> Option<Level> {
         Some(Level { percent, muted })
+    }
+
+    /// A 24-pixel output of `kind`, as its pixels.
+    fn device_drawn(kind: Kind) -> Pixmap {
+        let mut picture = Pixmap::new(24, 24).expect("a picture");
+        device(&mut picture.as_mut(), Rect::new(0, 0, 24, 24), kind, INK);
+        picture
+    }
+
+    #[test]
+    fn each_kind_of_output_is_drawn_as_what_it_is() {
+        let speaker = device_drawn(Kind::Speaker);
+        assert!(
+            inked(&speaker, 10, 12) && !inked(&speaker, 3, 12),
+            "a speaker, moved right"
+        );
+        assert!(!inked(&speaker, 21, 12), "with no waves");
+        let headphones = device_drawn(Kind::Headphones);
+        assert!(
+            inked(&headphones, 4, 16) && inked(&headphones, 19, 16),
+            "a cup at each ear"
+        );
+        assert!(inked(&headphones, 12, 6), "the band over the head");
+        assert!(!inked(&headphones, 12, 21), "no microphone");
+        let headset = device_drawn(Kind::Headset);
+        assert!(inked(&headset, 12, 21), "a microphone");
+        let display = device_drawn(Kind::Display);
+        assert!(
+            inked(&display, 12, 10) && inked(&display, 12, 18),
+            "a screen on a stand"
+        );
+        assert!(!inked(&display, 4, 21));
+        assert_eq!(
+            device_drawn(Kind::Other).data(),
+            speaker.data(),
+            "anything else, as a speaker"
+        );
     }
 
     #[test]
