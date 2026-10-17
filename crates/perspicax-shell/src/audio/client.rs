@@ -24,9 +24,9 @@ use std::{
 };
 
 use pulseaudio::protocol::{
-    AuthParams, Command, GetSinkInfo, MAX_VERSION, Prop, Props, PulseError, SetDeviceMuteParams,
-    SinkInfo, SubscriptionEvent, SubscriptionEventFacility, SubscriptionEventType,
-    SubscriptionMask,
+    AuthParams, ChannelVolume, Command, GetSinkInfo, MAX_VERSION, Prop, Props, PulseError,
+    SetDeviceMuteParams, SetDeviceVolumeParams, SinkInfo, SubscriptionEvent,
+    SubscriptionEventFacility, SubscriptionEventType, SubscriptionMask, Volume,
 };
 use smithay_client_toolkit::reexports::calloop::{
     Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken,
@@ -216,6 +216,14 @@ impl Client {
                 device_name: CString::new(name).ok(),
                 mute: on,
             }),
+            Ask::Volume {
+                target: Target::Sink(name),
+                volume,
+            } => Command::SetSinkVolume(SetDeviceVolumeParams {
+                device_index: None,
+                device_name: CString::new(name).ok(),
+                volume: channels(&volume),
+            }),
         };
         if let Err(error) = link.wire.send(&command, Expect::Done) {
             self.lost(&error.to_string());
@@ -383,6 +391,15 @@ fn sink(info: &SinkInfo) -> Sink {
     }
 }
 
+/// Each channel's volume, as the protocol writes them.
+fn channels(volume: &[u32]) -> ChannelVolume {
+    let mut channels = ChannelVolume::empty();
+    for &channel in volume {
+        channels.push(Volume::from_u32_clamped(channel));
+    }
+    channels
+}
+
 /// The server's text, as text.
 fn text(written: &std::ffi::CStr) -> String {
     written.to_string_lossy().into_owned()
@@ -527,6 +544,21 @@ mod tests {
         });
         let facts = heard.facts();
         assert!(facts.output().expect("the default").muted);
+    }
+
+    #[test]
+    fn a_volume_asked_reaches_the_server_each_channel_as_given() {
+        let fake = Fake::start("volume");
+        let (running, heard) = follow(&fake);
+        heard.facts();
+        running.ask(Ask::Volume {
+            target: Target::Sink("alsa_output.speakers".to_owned()),
+            volume: vec![0x8000, 0x4000],
+        });
+        let facts = heard.facts();
+        let output = facts.output().expect("the default");
+        assert_eq!(output.volume, [0x8000, 0x4000]);
+        assert_eq!(output.level().percent, 50);
     }
 
     #[test]

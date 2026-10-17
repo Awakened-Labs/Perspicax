@@ -8,7 +8,7 @@
 //! person did.
 
 #[cfg(feature = "audio")]
-mod audio;
+pub(crate) mod audio;
 #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
 mod canvas;
 mod channel;
@@ -309,6 +309,9 @@ pub(crate) enum Asked {
     /// Something of the open pie: to choose a slot, or move to one.
     #[cfg(feature = "pie")]
     Pie(crate::pie::Event),
+    /// To change the default output's volume.
+    #[cfg(feature = "audio")]
+    Volume(audio::Change),
 }
 
 /// The icon theme named `theme`, looked for in the data folders of
@@ -505,6 +508,8 @@ impl App {
             }
             #[cfg(feature = "pie")]
             Asked::Pie(event) => self.pie_event(event),
+            #[cfg(feature = "audio")]
+            Asked::Volume(change) => self.change_volume(change),
         }
     }
 }

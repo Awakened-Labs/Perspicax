@@ -159,23 +159,25 @@ impl App {
             PointerEventKind::Leave { .. } => Pie::Leave,
             PointerEventKind::Press { button: code, .. } => Pie::Press(at, button(code)),
             PointerEventKind::Release { button: code, .. } => Pie::Release(at, button(code)),
-            PointerEventKind::Axis { vertical, .. } => {
-                // A wheel's notches, in 120ths or whole; a touchpad's
-                // pixels, fifteen a notch.
-                let notches = if vertical.value120 != 0 {
-                    f64::from(vertical.value120) / 120.0
-                } else if vertical.discrete != 0 {
-                    f64::from(vertical.discrete)
-                } else {
-                    vertical.absolute / 15.0
-                };
-                match self.pies.turned(notches) {
-                    0 => return,
-                    whole => Pie::Wheel(whole),
-                }
-            }
+            PointerEventKind::Axis { vertical, .. } => match self.pies.turned(notches(&vertical)) {
+                0 => return,
+                whole => Pie::Wheel(whole),
+            },
         };
         self.pie_event(pie);
+    }
+}
+
+/// How far the wheel turned, in notches, down positive: a wheel's, in
+/// 120ths or whole; a touchpad's pixels, fifteen a notch.
+#[cfg(any(feature = "pie", feature = "audio"))]
+fn notches(vertical: &smithay_client_toolkit::seat::pointer::AxisScroll) -> f64 {
+    if vertical.value120 != 0 {
+        f64::from(vertical.value120) / 120.0
+    } else if vertical.discrete != 0 {
+        f64::from(vertical.discrete)
+    } else {
+        vertical.absolute / 15.0
     }
 }
 
@@ -296,6 +298,10 @@ impl PointerHandler for App {
                     button: code, time, ..
                 } if !on_menus => {
                     self.press_elsewhere(&event.surface, at, button(code), time);
+                }
+                #[cfg(feature = "audio")]
+                PointerEventKind::Axis { vertical, .. } if !on_menus => {
+                    self.panel_turned(&event.surface, at, notches(&vertical));
                 }
                 _ => {}
             }

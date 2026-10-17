@@ -9,7 +9,8 @@
 //! each icon it shows, and the clock as wide as the time it shows, as is
 //! the layout indicator as wide as its label, while there is a choice of
 //! layouts to show, and the mixer a slot [`PIECE`] wide for each of its
-//! pieces. The
+//! pieces but its volume, which is as wide as "100%" or what it shows,
+//! whichever is wider, so that it holds still as the volume moves. The
 //! taskbar takes whatever room is left, and shares it among the windows it
 //! lists, each no wider than [`TASK_WIDTH`], or than [`TASK_LEAST`] when its
 //! tasks show their icons alone; a bar without one keeps its last item at
@@ -99,15 +100,35 @@ pub(crate) struct Holding<'a> {
     pub(crate) mixer: Mixing<'a>,
 }
 
-/// What the mixer shows.
+/// The mixer: its pieces, and what they show.
 #[cfg(feature = "audio")]
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Mixing<'a> {
     /// Its pieces, in order.
     pub(crate) pieces: &'a [Piece],
+    pub(crate) sound: Sounding,
+}
+
+/// What the mixer's pieces show, and how far a step of the volume goes.
+#[cfg(feature = "audio")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Sounding {
     /// How loud the default output is, or `None` with no sound server to
     /// ask.
     pub(crate) level: Option<Level>,
+    /// `[shell.mixer] step` and `limit`.
+    pub(crate) step: u32,
+    pub(crate) limit: u32,
+}
+
+/// What the mixer's `volume` piece shows of `level`: "24%", or a dash with
+/// no sound server.
+#[cfg(feature = "audio")]
+pub(crate) fn volume_shown(level: Option<Level>) -> String {
+    level.map_or_else(
+        || "\u{2013}".to_owned(),
+        |level| format!("{}%", level.percent),
+    )
 }
 
 /// A panel, laid out: its bar, each thing it holds, and where, in its own
@@ -126,7 +147,7 @@ pub(crate) struct Placed {
     pub(crate) mixer: Vec<(Piece, Rect)>,
     /// What the mixer's pieces show.
     #[cfg(feature = "audio")]
-    pub(crate) sound: Option<Level>,
+    pub(crate) sound: Sounding,
 }
 
 /// What on a panel a press can be on.
@@ -190,6 +211,23 @@ pub(crate) fn lay_out(
 ) -> Placed {
     let height = size.1;
     let grid = Grid::of(&holding.cells, height);
+    #[cfg(feature = "audio")]
+    let pieces: Vec<(Piece, i32)> = holding
+        .mixer
+        .pieces
+        .iter()
+        .map(|&piece| {
+            let wide = match piece {
+                Piece::Volume => {
+                    let shown = volume_shown(holding.mixer.sound.level);
+                    let widest = measure.width("100%").max(measure.width(&shown));
+                    widest.ceil() as i32 + 2 * CLOCK_PAD
+                }
+                Piece::Mute => PIECE,
+            };
+            (piece, wide)
+        })
+        .collect();
     let widths: Vec<i32> = items
         .iter()
         .map(|item| match item {
@@ -207,7 +245,7 @@ pub(crate) fn lay_out(
             #[cfg(not(feature = "tray"))]
             Item::Tray => 0,
             #[cfg(feature = "audio")]
-            Item::Mixer => holding.mixer.pieces.len() as i32 * PIECE,
+            Item::Mixer => pieces.iter().map(|&(_, wide)| wide).sum(),
             // Refused by the config without the sound to show.
             #[cfg(not(feature = "audio"))]
             Item::Mixer => 0,
@@ -292,14 +330,12 @@ pub(crate) fn lay_out(
     });
     #[cfg(feature = "audio")]
     let mixer = within(Item::Mixer).map_or_else(Vec::new, |mixer| {
-        holding
-            .mixer
-            .pieces
-            .iter()
-            .enumerate()
-            .map(|(at, &piece)| {
-                let x = mixer.x + at as i32 * PIECE;
-                (piece, Rect::new(x, 0, PIECE, height))
+        let mut x = mixer.x;
+        pieces
+            .into_iter()
+            .map(|(piece, wide)| {
+                x += wide;
+                (piece, Rect::new(x - wide, 0, wide, height))
             })
             .collect()
     });
@@ -313,7 +349,7 @@ pub(crate) fn lay_out(
         #[cfg(feature = "audio")]
         mixer,
         #[cfg(feature = "audio")]
-        sound: holding.mixer.level,
+        sound: holding.mixer.sound,
     }
 }
 
@@ -723,10 +759,15 @@ mod tests {
             percent: 24,
             muted: false,
         });
+        let sound = Sounding {
+            level,
+            step: 5,
+            limit: 100,
+        };
         let mut holding = holding(1, &[]);
         holding.mixer = Mixing {
             pieces: &[Piece::Mute],
-            level,
+            sound,
         };
         let placed = lay_out(
             &[Item::Start, Item::Taskbar, Item::Mixer, Item::Clock],
@@ -743,7 +784,7 @@ mod tests {
             "a slot for its one piece, against the clock"
         );
         assert_eq!(placed.mixer, [(Piece::Mute, Rect::new(left, 0, PIECE, 40))]);
-        assert_eq!(placed.sound, level, "what its pieces show");
+        assert_eq!(placed.sound, sound, "what its pieces show");
         assert_eq!(
             placed.at((f64::from(left) + 1.0, 20.0)),
             Some(Part::Mixer(Piece::Mute))
@@ -753,6 +794,49 @@ mod tests {
             None,
             "the taskbar's empty end, beside it"
         );
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn the_volume_piece_holds_still_as_wide_as_a_hundred_percent() {
+        let placed = |level: Option<Level>| {
+            let mut holding = holding(0, &[]);
+            holding.mixer = Mixing {
+                pieces: &[Piece::Volume, Piece::Mute],
+                sound: Sounding {
+                    level,
+                    step: 5,
+                    limit: 150,
+                },
+            };
+            lay_out(&[Item::Mixer], holding, PANEL, FULL, &mut Monospace(8.0))
+        };
+        let level = |percent| {
+            Some(Level {
+                percent,
+                muted: false,
+            })
+        };
+        // "100%" is four characters of eight pixels, and padded either side.
+        let wide = 4 * 8 + 2 * CLOCK_PAD;
+        for shown in [level(5), level(24), level(100), level(150), None] {
+            let placed = placed(shown);
+            let left = 1280 - wide - PIECE;
+            assert_eq!(
+                placed.mixer,
+                [
+                    (Piece::Volume, Rect::new(left, 0, wide, 40)),
+                    (Piece::Mute, Rect::new(left + wide, 0, PIECE, 40)),
+                ],
+                "{shown:?}"
+            );
+            assert_eq!(
+                placed.at((f64::from(left) + 1.0, 20.0)),
+                Some(Part::Mixer(Piece::Volume))
+            );
+        }
+        assert_eq!(volume_shown(level(24)), "24%");
+        assert_eq!(volume_shown(None), "\u{2013}");
     }
 
     #[test]

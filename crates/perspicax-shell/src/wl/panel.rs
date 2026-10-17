@@ -108,9 +108,9 @@ pub(super) struct Panels {
     tray: Vec<(u64, crate::model::tray::Item)>,
     /// The keyboard's layouts, as perspicax lists them.
     pub(super) layouts: Layouts,
-    /// The mixer's pieces, as `[shell.mixer]` lists them.
+    /// The mixer, as `[shell.mixer]` writes it.
     #[cfg(feature = "audio")]
-    pieces: Vec<perspicax_config::mixer::Piece>,
+    mixer: perspicax_config::mixer::Mixer,
     /// How loud the default output is, or `None` with no sound server to
     /// ask.
     #[cfg(feature = "audio")]
@@ -162,7 +162,7 @@ impl Panels {
             tray: Vec::new(),
             layouts: Layouts::default(),
             #[cfg(feature = "audio")]
-            pieces: shell.mixer.panel.clone(),
+            mixer: shell.mixer.clone(),
             #[cfg(feature = "audio")]
             sound: None,
             stale: false,
@@ -192,14 +192,14 @@ impl Panels {
             self.start = start;
             self.told = false;
         }
-        // Other pieces of the mixer are drawn in place, as another icon is.
+        // Another mixer is drawn in place, as another icon is.
         #[cfg(feature = "audio")]
         let restarted = {
-            let repieced = shell.mixer.panel != self.pieces;
-            if repieced {
-                self.pieces = shell.mixer.panel.clone();
+            let remixed = shell.mixer != self.mixer;
+            if remixed {
+                self.mixer = shell.mixer.clone();
             }
-            restarted || repieced
+            restarted || remixed
         };
         if shell.panel == self.panel {
             if restarted {
@@ -579,8 +579,12 @@ impl Panels {
             tray,
             #[cfg(feature = "audio")]
             mixer: crate::layout::panel::Mixing {
-                pieces: &self.pieces,
-                level: self.sound,
+                pieces: &self.mixer.panel,
+                sound: crate::layout::panel::Sounding {
+                    level: self.sound,
+                    step: self.mixer.step,
+                    limit: self.mixer.limit,
+                },
             },
         };
         let Kit {
@@ -739,7 +743,8 @@ impl App {
 }
 
 /// An assistive technology's click on a panel: on its start button, a task
-/// or a workspace, sent on to the shell's loop as a left click there.
+/// or a workspace, sent on to the shell's loop as a left click there; or a
+/// step or a setting of the mixer's volume.
 struct Press {
     output: String,
     actions: Sender<Asked>,
@@ -747,18 +752,114 @@ struct Press {
 
 impl accesskit::ActionHandler for Press {
     fn do_action(&mut self, request: accesskit::ActionRequest) {
-        if request.action != accesskit::Action::Click {
-            return;
-        }
+        use accesskit::Action;
+
         let Some(part) = a11y::part_of(request.target_node) else {
             return;
         };
-        let asked = Asked::Panel {
-            output: self.output.clone(),
-            part,
+        let asked = match request.action {
+            Action::Click => Asked::Panel {
+                output: self.output.clone(),
+                part,
+            },
+            #[cfg(feature = "audio")]
+            Action::Increment | Action::Decrement | Action::SetValue => {
+                match volume_asked(part, request.action, request.data) {
+                    Some(change) => Asked::Volume(change),
+                    None => return,
+                }
+            }
+            _ => return,
         };
         if self.actions.send(asked).is_err() {
             tracing::debug!("the shell is stopping; the press is dropped");
         }
+    }
+}
+
+/// The change to the volume `action` asks of `part` of a panel, if it is
+/// one: a step up or down, or a setting, in percent.
+#[cfg(feature = "audio")]
+fn volume_asked(
+    part: Part,
+    action: accesskit::Action,
+    data: Option<accesskit::ActionData>,
+) -> Option<crate::wl::audio::Change> {
+    use accesskit::{Action, ActionData};
+    use perspicax_config::mixer::Piece;
+
+    use crate::wl::audio::Change;
+
+    if part != Part::Mixer(Piece::Volume) {
+        return None;
+    }
+    match (action, data) {
+        (Action::Increment, _) => Some(Change::By(1)),
+        (Action::Decrement, _) => Some(Change::By(-1)),
+        (Action::SetValue, Some(ActionData::NumericValue(value))) if value.is_finite() => Some(
+            Change::To(value.round().clamp(0.0, f64::from(u32::MAX)) as u32),
+        ),
+        _ => None,
+    }
+}
+
+#[cfg(all(test, feature = "audio"))]
+mod tests {
+    use accesskit::{Action, ActionData};
+    use perspicax_config::mixer::Piece;
+
+    use super::*;
+    use crate::wl::audio::Change;
+
+    #[test]
+    fn the_volume_sliders_steps_and_setting_are_changes_to_the_volume() {
+        let volume = Part::Mixer(Piece::Volume);
+        assert_eq!(
+            volume_asked(volume, Action::Increment, None),
+            Some(Change::By(1))
+        );
+        assert_eq!(
+            volume_asked(volume, Action::Decrement, None),
+            Some(Change::By(-1))
+        );
+        assert_eq!(
+            volume_asked(
+                volume,
+                Action::SetValue,
+                Some(ActionData::NumericValue(41.6))
+            ),
+            Some(Change::To(42))
+        );
+        assert_eq!(
+            volume_asked(
+                volume,
+                Action::SetValue,
+                Some(ActionData::NumericValue(-3.0))
+            ),
+            Some(Change::To(0)),
+            "below silence is silence"
+        );
+        assert_eq!(
+            volume_asked(
+                volume,
+                Action::SetValue,
+                Some(ActionData::NumericValue(f64::NAN))
+            ),
+            None
+        );
+        assert_eq!(
+            volume_asked(
+                volume,
+                Action::SetValue,
+                Some(ActionData::Value("loud".into()))
+            ),
+            None
+        );
+        assert_eq!(
+            volume_asked(Part::Mixer(Piece::Mute), Action::Increment, None),
+            None,
+            "only the volume steps"
+        );
+        assert_eq!(volume_asked(Part::Start, Action::Increment, None), None);
     }
 }

@@ -65,6 +65,43 @@ pub(crate) fn percent(volume: &[u32]) -> u32 {
     u32::try_from((loudest * 100 + norm / 2) / norm).unwrap_or(u32::MAX)
 }
 
+/// The volume, in percent, that `notches` of the wheel (up positive) take
+/// `now` to, in steps of `step`: to the next multiple of it that way, so
+/// that 24 goes to 25 and then 30. Going up never passes `limit`, and never
+/// pulls down a volume already past it, as one set louder elsewhere; going
+/// down stops at silence.
+pub(crate) fn stepped(now: u32, notches: i32, step: u32, limit: u32) -> u32 {
+    let step = step.max(1);
+    let by = notches.unsigned_abs().saturating_mul(step);
+    if notches > 0 {
+        if now >= limit {
+            return now;
+        }
+        (now / step * step).saturating_add(by).min(limit)
+    } else {
+        now.div_ceil(step).saturating_mul(step).saturating_sub(by)
+    }
+}
+
+/// `volume`, each channel scaled so that the loudest is at `percent`,
+/// keeping the balance between them. A device silent on every channel is
+/// put at `percent` on each.
+pub(crate) fn scaled(volume: &[u32], percent: u32) -> Vec<u32> {
+    let norm = u64::from(NORM);
+    let target = (u64::from(percent) * norm + 50) / 100;
+    let loudest = u64::from(volume.iter().copied().max().unwrap_or(0));
+    volume
+        .iter()
+        .map(|&channel| {
+            let scaled = match loudest {
+                0 => target,
+                loudest => (u64::from(channel) * target + loudest / 2) / loudest,
+            };
+            u32::try_from(scaled).unwrap_or(u32::MAX)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +127,42 @@ mod tests {
         // percent, and 328 just over.
         assert_eq!(percent(&[327]), 0);
         assert_eq!(percent(&[328]), 1);
+    }
+
+    #[test]
+    fn a_notch_snaps_to_the_next_step_and_stops_at_the_limit() {
+        let up = |now, notches| stepped(now, notches, 5, 100);
+        assert_eq!(up(24, 1), 25, "a notch snaps 24 to 25");
+        assert_eq!(up(25, 1), 30);
+        assert_eq!(up(24, 2), 30);
+        assert_eq!(up(24, -1), 20);
+        assert_eq!(up(25, -1), 20);
+        assert_eq!(up(98, 1), 100, "a notch up from 98 stops at the limit");
+        assert_eq!(up(98, 2), 100, "and two do too");
+        assert_eq!(stepped(96, 1, 5, 98), 98, "a limit off the steps");
+        assert_eq!(up(100, 1), 100);
+        assert_eq!(up(120, 1), 120, "a notch up from 120 leaves it at 120");
+        assert_eq!(up(120, -1), 115, "and a notch down takes it down");
+        assert_eq!(up(3, -1), 0);
+        assert_eq!(up(0, -3), 0, "silence is as low as it goes");
+        assert_eq!(up(40, 0), 40);
+        assert_eq!(stepped(24, 1, 1, 100), 25);
+        assert_eq!(stepped(24, 1, 0, 100), 25, "a step of nothing is one");
+    }
+
+    #[test]
+    fn scaling_keeps_the_balance_and_puts_the_loudest_where_asked() {
+        assert_eq!(percent(&scaled(&[NORM, NORM / 2], 40)), 40);
+        let balanced = scaled(&[NORM, NORM / 2], 50);
+        assert_eq!(balanced, [NORM / 2, NORM / 4]);
+        assert_eq!(scaled(&[0, 0], 30), [19661, 19661], "silent, put level");
+        for percent_asked in [0, 1, 24, 99, 100, 150] {
+            assert_eq!(
+                percent(&scaled(&[0x3d71, 0x3d71], percent_asked)),
+                percent_asked
+            );
+        }
+        assert_eq!(scaled(&[], 50), Vec::<u32>::new());
     }
 
     #[test]

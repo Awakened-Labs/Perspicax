@@ -595,7 +595,7 @@ mod panels {
 
     use super::{ROOT, rect, window};
     #[cfg(feature = "audio")]
-    use crate::model::sound::Level;
+    use crate::layout::panel::Sounding;
     use crate::{
         layout::{
             Rect,
@@ -665,9 +665,11 @@ mod panels {
     /// description are the `layout` in use's name; a click moves to the
     /// next. The mixer is a `Group`, "Sound", of a node for each piece: the
     /// speaker that mutes is a `Switch`, "Mute", on while the sound is
-    /// muted, described by how loud it is; with no sound server, it is
-    /// disabled, and described so. What takes no room on the panel is not
-    /// in the tree.
+    /// muted, described by how loud it is; the volume is a `Slider`,
+    /// "Volume", from silence to the limit, or to where it is past it, that
+    /// steps by `step` and can be set, described as muted while it is. With
+    /// no sound server, each is disabled, and described so. What takes no
+    /// room on the panel is not in the tree.
     pub(crate) fn panel(
         namespace: &str,
         size: Option<(u32, u32)>,
@@ -754,7 +756,7 @@ mod panels {
                     let mut group = Node::new(Role::Group);
                     group.set_label("Sound");
                     for &(piece, place) in &placed.mixer {
-                        let mut node = sound(piece, placed.sound);
+                        let mut node = sound(piece, &placed.sound);
                         node.set_bounds(rect(place));
                         let at = Piece::ALL.iter().position(|&each| each == piece);
                         let id = node_of(PIECE, at.unwrap_or_default() as u64);
@@ -781,10 +783,10 @@ mod panels {
         }
     }
 
-    /// The node of a piece of the mixer, showing `level`, or with `None`,
-    /// no sound server to ask.
+    /// The node of a piece of the mixer, showing `sound`.
     #[cfg(feature = "audio")]
-    fn sound(piece: Piece, level: Option<Level>) -> Node {
+    fn sound(piece: Piece, sound: &Sounding) -> Node {
+        let level = sound.level;
         match piece {
             Piece::Mute => {
                 let mut switch = Node::new(Role::Switch);
@@ -809,6 +811,31 @@ mod panels {
                     }
                 }
                 switch
+            }
+            Piece::Volume => {
+                let mut slider = Node::new(Role::Slider);
+                slider.set_label("Volume");
+                match level {
+                    Some(level) => {
+                        let most = sound.limit.max(level.percent);
+                        slider.set_numeric_value(f64::from(level.percent));
+                        slider.set_min_numeric_value(0.0);
+                        slider.set_max_numeric_value(f64::from(most));
+                        slider.set_numeric_value_step(f64::from(sound.step));
+                        slider.set_value(format!("{}%", level.percent));
+                        if level.muted {
+                            slider.set_description("Muted");
+                        }
+                        for action in [Action::Increment, Action::Decrement, Action::SetValue] {
+                            slider.add_action(action);
+                        }
+                    }
+                    None => {
+                        slider.set_disabled();
+                        slider.set_description("No sound server");
+                    }
+                }
+                slider
             }
         }
     }
@@ -954,7 +981,10 @@ mod panels {
         fn the_mixer_is_a_group_whose_speaker_is_a_switch_that_mutes() {
             use accesskit::Toggled;
 
-            use crate::layout::panel::Mixing;
+            use crate::{
+                layout::panel::{Mixing, Sounding},
+                model::sound::Level,
+            };
 
             let tree_of = |level: Option<Level>| {
                 let placed = lay_out(
@@ -968,8 +998,12 @@ mod panels {
                         #[cfg(feature = "tray")]
                         tray: Vec::new(),
                         mixer: Mixing {
-                            pieces: &[Piece::Mute],
-                            level,
+                            pieces: &[Piece::Mute, Piece::Volume],
+                            sound: Sounding {
+                                level,
+                                step: 5,
+                                limit: 100,
+                            },
                         },
                     },
                     (1280, 40),
@@ -993,8 +1027,8 @@ mod panels {
             assert_eq!(node(&tree, TOOLBAR).children(), [START, MIXER, CLOCK]);
             let mixer = node(&tree, MIXER);
             assert_eq!((mixer.role(), mixer.label()), (Role::Group, Some("Sound")));
-            let [mute] = mixer.children() else {
-                panic!("one piece: {:?}", mixer.children());
+            let [mute, volume] = mixer.children() else {
+                panic!("two pieces: {:?}", mixer.children());
             };
             assert_eq!(
                 part_of(*mute),
@@ -1010,6 +1044,26 @@ mod panels {
             assert_eq!(switch.description(), Some("24%"));
             assert!(switch.supports_action(Action::Click));
             assert_eq!(switch.bounds(), Some(rect(placed.mixer[0].1)));
+            assert_eq!(part_of(*volume), Some(Part::Mixer(Piece::Volume)));
+            let slider = node(&tree, *volume);
+            assert_eq!(
+                (slider.role(), slider.label()),
+                (Role::Slider, Some("Volume"))
+            );
+            assert_eq!(
+                (
+                    slider.numeric_value(),
+                    slider.min_numeric_value(),
+                    slider.max_numeric_value(),
+                    slider.numeric_value_step()
+                ),
+                (Some(24.0), Some(0.0), Some(100.0), Some(5.0))
+            );
+            assert_eq!(slider.value(), Some("24%"));
+            for action in [Action::Increment, Action::Decrement, Action::SetValue] {
+                assert!(slider.supports_action(action), "{action:?}");
+            }
+            assert_eq!(slider.description(), None);
 
             let (_, muted) = tree_of(Some(Level {
                 percent: 24,
@@ -1018,12 +1072,25 @@ mod panels {
             let switch = node(&muted, *mute);
             assert_eq!(switch.toggled(), Some(Toggled::True));
             assert_eq!(switch.description(), Some("Muted"));
+            assert_eq!(node(&muted, *volume).description(), Some("Muted"));
+            let (_, loud) = tree_of(Some(Level {
+                percent: 120,
+                muted: false,
+            }));
+            assert_eq!(
+                node(&loud, *volume).max_numeric_value(),
+                Some(120.0),
+                "past the limit, the slider reaches where it is"
+            );
 
             let (_, gone) = tree_of(None);
             let switch = node(&gone, *mute);
             assert!(switch.is_disabled());
             assert!(!switch.supports_action(Action::Click));
             assert_eq!(switch.description(), Some("No sound server"));
+            let slider = node(&gone, *volume);
+            assert!(slider.is_disabled() && !slider.supports_action(Action::SetValue));
+            assert_eq!(slider.numeric_value(), None);
         }
 
         #[test]

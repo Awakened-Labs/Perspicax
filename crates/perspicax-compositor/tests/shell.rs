@@ -2110,6 +2110,90 @@ fn a_click_on_the_speaker_mutes_the_sound_servers_output_and_a_server_gone_is_fa
     shell.stop_with(session);
 }
 
+/// A panel of the mixer alone, its volume then its speaker, the speaker at
+/// the panel's right end.
+#[cfg(feature = "capture")]
+const VOLUME_AND_MUTE: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"mixer\"]\n\
+    [shell.mixer]\npanel = [\"volume\", \"mute\"]\n";
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn the_wheel_over_the_mixer_steps_the_volume_to_the_limit_and_a_middle_click_mutes() {
+    use std::time::{Duration, Instant};
+
+    use perspicax_policy::Mods;
+
+    let sound = SoundServer::start("wheel");
+    sound.pactl(&["set-sink-volume", "one", "24%"]);
+    let session = Session::start("shell-wheel", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "wheel",
+        VOLUME_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let (speaker, wave) = ((1258, 800 - 20), (1273, 800 - 20));
+    until_colour(&session, speaker, INK);
+
+    let volume = || {
+        let said = sound.pactl(&["get-sink-volume", "one"]);
+        said.split('/')
+            .nth(1)
+            .and_then(|percent| percent.trim().trim_end_matches('%').parse::<u32>().ok())
+            .unwrap_or_else(|| panic!("a volume in {said:?}"))
+    };
+    let until_volume = |want: u32| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while volume() != want {
+            assert!(
+                Instant::now() < deadline,
+                "the volume never reached {want}%"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    // Over the volume, left of the speaker.
+    let turn = |notches: i32| {
+        session.command(Command::Scroll {
+            at: (1240, 800 - 20),
+            v120: (0, notches * 120),
+            mods: Mods::default(),
+        });
+    };
+    turn(-1);
+    until_volume(25);
+    // Two notches before the server answers the first go two steps.
+    turn(-1);
+    turn(-1);
+    until_volume(35);
+    turn(1);
+    until_volume(30);
+
+    // Near the top, the next notch stops at the limit, and the one after
+    // asks nothing more.
+    sound.pactl(&["set-sink-volume", "one", "98%"]);
+    until_colour(&session, wave, INK);
+    turn(-1);
+    until_volume(100);
+    turn(-1);
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(volume(), 100);
+
+    // A middle click anywhere on it mutes, and brings the sound back.
+    let middle = (1240.0, PANEL_HEIGHT / 2.0);
+    click(&session, panel, middle, PointerButton::Middle);
+    until_colour(&session, wave, BAR);
+    assert_eq!(sound.pactl(&["get-sink-mute", "one"]).trim(), "Mute: yes");
+    click(&session, panel, middle, PointerButton::Middle);
+    until_colour(&session, wave, INK);
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
 /// A program's status icon, served as a program serves one: a title, a
 /// picture of magenta, and a menu of one item, Quit. What it is asked is
 /// kept, to be waited for.

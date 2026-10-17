@@ -43,6 +43,8 @@ pub(crate) enum News {
 pub(crate) enum Ask {
     /// Mute `target`, or bring its sound back.
     Mute { target: Target, on: bool },
+    /// Set `target`'s volume, each channel's, as the server counts it.
+    Volume { target: Target, volume: Vec<u32> },
 }
 
 /// What an [`Ask`] is of.

@@ -226,6 +226,21 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
                     None => protocol::write_error(writer, seq, &PulseError::NoEntity),
                 }
             }
+            Command::SetSinkVolume(set) => {
+                let volume: Vec<u32> = set.volume.channels().iter().map(Volume::as_u32).collect();
+                asked.push(format!("volume {:?} {volume:?}", set.device_name));
+                match sinks
+                    .iter_mut()
+                    .find(|sink| Some(&sink.name) == set.device_name.as_ref())
+                {
+                    Some(sink) => {
+                        sink.cvolume = set.volume;
+                        changed = Some(sink.index);
+                        protocol::write_ack_message(writer, seq)
+                    }
+                    None => protocol::write_error(writer, seq, &PulseError::NoEntity),
+                }
+            }
             Command::SetSinkMute(mute) => {
                 asked.push(format!("mute {:?}", mute.device_name));
                 match sinks

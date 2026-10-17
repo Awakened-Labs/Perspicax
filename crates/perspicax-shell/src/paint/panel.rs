@@ -13,10 +13,11 @@
 //! The pager is a grid of small screens, each with its workspace's name,
 //! the one showing lit. Each of the tray's icons sits in the middle of its
 //! slot, drawn from the icon its program names if it is found, otherwise
-//! from the picture its program sent nearest the size. Each of the mixer's
-//! pieces sits in the middle of its slot, drawn in the panel's ink (see
-//! `sound`). The clock is the time, in the panel's ink. Every pixel of the bar is opaque, and the rest
-//! of its strip clear.
+//! from the picture its program sent nearest the size. The mixer's speaker
+//! sits in the middle of its slot, drawn in the panel's ink (see `sound`),
+//! and its volume is written in the middle of its slot, faint while it is
+//! muted. The clock is the time, in the panel's ink. Every pixel of the bar
+//! is opaque, and the rest of its strip clear.
 
 use perspicax_config::{Edge, Item};
 use tiny_skia::{FillRule, LineCap, LineJoin, PathBuilder, PixmapMut, Stroke, Transform};
@@ -324,21 +325,36 @@ impl Pen<'_, '_, '_> {
         }
     }
 
-    /// A piece of the mixer, in the middle of its slot at `place`, showing
-    /// `sound`.
+    /// A piece of the mixer, in its slot at `place`, showing `sound`.
     #[cfg(feature = "audio")]
     fn piece(
         &mut self,
         piece: perspicax_config::mixer::Piece,
         place: Rect,
-        sound: Option<crate::model::sound::Level>,
+        sound: crate::layout::panel::Sounding,
     ) {
         use perspicax_config::mixer::Piece;
 
-        let at = self.px(middle(place, fitted(place.h)));
         let Colours { ink, faint, .. } = self.colours;
+        let level = sound.level;
         match piece {
-            Piece::Mute => super::sound::speaker(self.canvas, at, sound, ink, faint),
+            Piece::Mute => {
+                let at = self.px(middle(place, fitted(place.h)));
+                super::sound::speaker(self.canvas, at, level, ink, faint);
+            }
+            Piece::Volume => {
+                let words = crate::layout::panel::volume_shown(level);
+                let colour = match level {
+                    Some(level) if !level.muted => ink,
+                    _ => faint,
+                };
+                // In the middle of a slot as wide as "100%".
+                let wide = (self.text.width(&words).ceil() as i32 + 2).min(place.w);
+                let room = Rect::new(place.x + (place.w - wide) / 2, place.y, wide, place.h);
+                let size = self.text.size() * self.scale as f32;
+                self.text
+                    .write(self.canvas, &words, self.px(room), size, colour);
+            }
         }
     }
 
