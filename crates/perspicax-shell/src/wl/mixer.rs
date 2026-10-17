@@ -10,6 +10,14 @@
 //! What it shows is the sound as the panel's mixer item last heard it,
 //! sent again each time that changes, and what is done in it is asked of
 //! the sound server as the item's own presses are.
+//!
+//! While it is open it meters each output it lists, and the input whose
+//! details are shown, and nothing once it closes. Its meters move as the
+//! peaks come, drawn again whole, but no sooner than the compositor shows
+//! the last, and only once one has moved as far as can be seen: a quiet
+//! mixer is drawn no more than a still one.
+
+use std::collections::HashMap;
 
 use accesskit::{Action, ActionData, ActionHandler, ActionRequest};
 use perspicax_config::Edge;
@@ -35,7 +43,7 @@ use crate::{
     mixer::{Act, Effect, Event, Key, State},
     model::{
         kept::Kept,
-        sound::{Choice, Side},
+        sound::{Choice, Facts, Side, loudness},
     },
     paint::{self, Kit},
 };
@@ -51,6 +59,13 @@ pub(super) struct Mixers {
     wheel: f64,
     /// Where an assistive technology's requests are sent, to reach the loop.
     actions: Sender<Asked>,
+    /// The peak of each source metered, by name; how far along each meter
+    /// was last drawn, in fiftieths; whether the compositor has yet to show
+    /// the last drawn, and whether a meter moved since.
+    peaks: HashMap<String, f32>,
+    drawn: Vec<(String, u8)>,
+    waiting: bool,
+    stale: bool,
 }
 
 /// The mixer's surface.
@@ -73,6 +88,41 @@ impl Mixers {
             cut: None,
             wheel: 0.0,
             actions,
+            peaks: HashMap::new(),
+            drawn: Vec::new(),
+            waiting: false,
+            stale: false,
+        }
+    }
+
+    /// The meters' newest `peaks`: drawn, once the compositor has shown the
+    /// last, if one moved as far as can be seen.
+    fn peaks(&mut self, canvas: &mut Canvas, kit: &mut Kit, peaks: Vec<(String, f32)>) {
+        self.peaks.extend(peaks);
+        if reaches(&self.peaks) == self.drawn {
+            return;
+        }
+        if self.waiting {
+            self.stale = true;
+            return;
+        }
+        self.draw(canvas, kit, true);
+    }
+
+    /// The compositor showed what was drawn on `surface`: draw the meters
+    /// again if they moved meanwhile.
+    pub(super) fn frame(
+        &mut self,
+        canvas: &mut Canvas,
+        kit: &mut Kit,
+        surface: &wl_surface::WlSurface,
+    ) {
+        if !self.owns(surface) {
+            return;
+        }
+        self.waiting = false;
+        if std::mem::take(&mut self.stale) {
+            self.draw(canvas, kit, true);
         }
     }
 
@@ -131,6 +181,9 @@ impl Mixers {
     ) {
         let Some(view) = self.state.view() else {
             self.shown = None;
+            self.peaks.clear();
+            self.drawn.clear();
+            (self.waiting, self.stale) = (false, false);
             return;
         };
         if self
@@ -166,12 +219,12 @@ impl Mixers {
                 size: None,
             });
         }
-        self.draw(canvas, kit);
+        self.draw(canvas, kit, false);
     }
 
     /// Draw the mixer on the surface, once the compositor has given it a
-    /// size.
-    fn draw(&mut self, canvas: &mut Canvas, kit: &mut Kit) {
+    /// size; `paced`, asking the compositor to say when it shows it.
+    fn draw(&mut self, canvas: &mut Canvas, kit: &mut Kit, paced: bool) {
         let (Some(shown), Some(view)) = (self.shown.as_mut(), self.state.view()) else {
             return;
         };
@@ -188,13 +241,19 @@ impl Mixers {
         let started = std::time::Instant::now();
         canvas.take_clicks(&shown.layer, size, self.cut);
         let rect = view.placed.rect;
+        let peaks = &self.peaks;
+        if paced {
+            canvas.pace(&shown.layer);
+            self.waiting = true;
+        }
         canvas.show(
             &shown.layer,
             size,
             scale,
             &[(rect.x, rect.y, rect.w, rect.h)],
-            |picture| paint::mixer::paint(&view, picture, scale, text, images, palette),
+            |picture| paint::mixer::paint(&view, picture, (scale, palette), text, images, peaks),
         );
+        self.drawn = reaches(peaks);
         shown
             .a11y
             .show(a11y::mixer(&shown.namespace, Some(size), Some(&view)));
@@ -217,7 +276,7 @@ impl Mixers {
             return;
         }
         shown.size = Some((width, height));
-        self.draw(canvas, kit);
+        self.draw(canvas, kit, false);
     }
 
     /// The compositor took the surface away: the monitor went.
@@ -247,14 +306,30 @@ impl Mixers {
     }
 }
 
-/// `choice` as the mixer lists it, `chosen` or not, named and hidden as
-/// `kept` says.
-fn listed(choice: Choice, chosen: bool, kept: &Kept) -> Listed {
+/// How far along each meter `peaks` reach, in fiftieths: as far as can be
+/// seen to move.
+fn reaches(peaks: &HashMap<String, f32>) -> Vec<(String, u8)> {
+    let mut reaches: Vec<(String, u8)> = peaks
+        .iter()
+        .map(|(source, &peak)| (source.clone(), (loudness(peak) * 50.0).round() as u8))
+        .collect();
+    reaches.sort();
+    reaches
+}
+
+/// `choice` on `side` as the mixer lists it, `chosen` or not, named and
+/// hidden as `kept` says, live and metered as `facts` say.
+fn listed(side: Side, choice: Choice, chosen: bool, (kept, facts): (&Kept, &Facts)) -> Listed {
     let card = choice.card.map(|key| Owner {
         hidden: kept.hidden.contains(&key),
         name: choice.device.clone(),
         key,
     });
+    let live = match side {
+        Side::Output => facts.live_sink(&choice.key).map(|sink| sink.index),
+        Side::Input => None,
+    };
+    let meter = facts.meter(side, &choice.key);
     Listed {
         name: kept.name(&choice.key).map(str::to_owned),
         hidden: kept.hidden.contains(&choice.key),
@@ -267,6 +342,8 @@ fn listed(choice: Choice, chosen: bool, kept: &Kept) -> Listed {
         chosen,
         card,
         details: choice.details,
+        live,
+        meter,
     }
 }
 
@@ -342,11 +419,13 @@ impl App {
         if self.panels.mixer_open(open_on) {
             self.panels_changed();
         }
+        self.follow_meters();
         for effect in effects {
             match effect {
                 Effect::Mute(whose) => self.audio.mute(whose),
                 Effect::Volume(whose, change) => self.audio.change(change, whose),
                 Effect::Move(stream, sink) => self.audio.move_stream(stream, sink),
+                Effect::Test(sink) => self.audio.test(sink),
                 Effect::Hide(key, hidden) => {
                     if self.audio.keep(|kept| kept.hide(&key, hidden)) {
                         self.heard();
@@ -392,7 +471,7 @@ impl App {
                 .into_iter()
                 .map(|choice| {
                     let chosen = Some(&choice.key) == chosen.as_ref();
-                    listed(choice, chosen, kept)
+                    listed(side, choice, chosen, (kept, facts))
                 })
                 .collect();
             (master, listed)
@@ -415,7 +494,7 @@ impl App {
             facts
                 .sink_choices()
                 .into_iter()
-                .map(|(sink, choice)| (sink, listed(choice, false, kept)))
+                .map(|(sink, choice)| (sink, listed(Side::Output, choice, false, (kept, facts))))
                 .collect()
         });
         let mixer = self.audio.mixer();
@@ -462,5 +541,28 @@ impl App {
             let mixed = self.mixed();
             self.mixer_event(Event::Heard(mixed));
         }
+    }
+
+    /// How loud the sources metered were last: shown on the mixer's
+    /// meters, if it is open.
+    pub(super) fn mixer_peaks(&mut self, peaks: Vec<(String, f32)>) {
+        if self.mixers.open_on().is_some() {
+            self.mixers.peaks(&mut self.canvas, &mut self.kit, peaks);
+        }
+    }
+
+    /// Meter what the mixer shows, while it is open: each output it lists,
+    /// and the input whose details are shown; and nothing once it closes.
+    fn follow_meters(&mut self) {
+        let sources = self
+            .mixers
+            .state
+            .view()
+            .map(|view| view.metered())
+            .unwrap_or_default();
+        self.mixers
+            .peaks
+            .retain(|source, _| sources.contains(source));
+        self.audio.meter(sources);
     }
 }

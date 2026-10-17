@@ -4,14 +4,19 @@
 //! then a row for each device listed: a round mark, filled in the accent
 //! for the one the sound is on, the device's glyph, and its name, faint if
 //! nothing is plugged into it, the card's part of it cut short before its
-//! jack's, or the name the person gave it; at its end, three dots, which
-//! unfold under it, set in, what tells it apart, faint, a field with its
-//! name in, and the buttons that hide it and its card, in the accent. A
-//! side's folds, of what has nothing plugged in and of what is hidden, are
-//! each an arrow, pointing down while it is unfolded, and how many it holds. Under "Applications", each program's row is such
-//! an arrow, the program's icon and name, and, faint at its end, what it
-//! plays on; then its own button, slider and percentage; unfolded, a row
-//! for each output it can be moved to, marked for the one it plays on.
+//! jack's, or the name the person gave it. Along the foot of a device's row
+//! that is metered runs a thin faint track, the accent along it as far as
+//! it is loud. At
+//! the row's end, three dots unfold under it, set in, what tells it apart,
+//! faint; a field with its name in; for an output, a button that plays the
+//! test sound on it, faint and saying to choose it while it does not play;
+//! and the buttons that hide it and its card, in the accent. A side's
+//! folds, of what has nothing plugged in and of what is hidden, are each an
+//! arrow, pointing down while it is unfolded, and how many it holds. Under
+//! "Applications", each program's row is such an arrow, the program's icon
+//! and name, and, faint at its end, what it plays on; then its own button,
+//! slider and percentage; unfolded, a row for each output it can be moved
+//! to, marked for the one it plays on.
 //!
 //! A slider is a thin track, the accent along it as far as the volume, and
 //! a round knob there; muted, the accent and the knob are faint. The
@@ -19,6 +24,8 @@
 //! A side with no device says so in place of its slider. What is scrolled
 //! past the room inside the edge is cut off there. Every pixel of the box
 //! is opaque, and the rest of the surface clear.
+
+use std::collections::HashMap;
 
 use perspicax_config::{Palette, Role};
 use tiny_skia::{FillRule, Pixmap, PixmapMut, PixmapPaint, Stroke, Transform};
@@ -30,7 +37,7 @@ use crate::{
         mixer::{BORDER, BUTTON, Control, Heading, Listed, Program, knob_at, track},
     },
     mixer::View,
-    model::sound::{Side, Whose},
+    model::sound::{Side, Whose, loudness},
 };
 
 /// How thick a slider's track is, how big its knob, and the ring round the
@@ -52,6 +59,8 @@ const SPACE: i32 = 8;
 const DEVICE: i32 = 64;
 /// How far apart the dots of the button at a device's row's end are.
 const DOTS: f32 = 5.0;
+/// How thick a meter is.
+const METER: i32 = 2;
 
 /// The mixer's colours, from the theme, as fills take them.
 struct Colours {
@@ -88,6 +97,8 @@ struct Pen<'p, 't> {
     text: &'t mut Text,
     images: &'t mut Images,
     colours: Colours,
+    /// The peak of each source metered, by name.
+    peaks: &'t HashMap<String, f32>,
 }
 
 impl Pen<'_, '_> {
@@ -147,14 +158,14 @@ impl Pen<'_, '_> {
 }
 
 /// Draw `view` on `canvas`, a monitor's surface's pixels at `scale` times
-/// its size.
+/// its size, the sources metered at `peaks`.
 pub(crate) fn paint(
     view: &View<'_>,
     canvas: &mut PixmapMut<'_>,
-    scale: u32,
+    (scale, palette): (u32, &Palette),
     text: &mut Text,
     images: &mut Images,
-    palette: &Palette,
+    peaks: &HashMap<String, f32>,
 ) {
     let colours = Colours::of(palette);
     canvas.fill(tiny_skia::Color::TRANSPARENT);
@@ -181,6 +192,7 @@ pub(crate) fn paint(
         text,
         images,
         colours,
+        peaks,
     };
     within_edge(view, &mut pen);
     canvas.draw_pixmap(
@@ -259,6 +271,17 @@ fn within_edge(view: &View<'_>, pen: &mut Pen<'_, '_>) {
                         .filter(|&(naming, _)| naming == control)
                         .map(|(_, typed)| typed);
                     field(listed, typed, place, pen);
+                }
+            }
+            Control::Test(side, number) => {
+                match view.mixed.find(side, number).map(|listed| listed.live) {
+                    Some(Some(_)) => button("Test sound", place, pen),
+                    Some(None) => {
+                        let at =
+                            Rect::new(place.x + SPACE / 2, place.y, place.w - SPACE / 2, place.h);
+                        pen.write("Choose it to hear it", at, faint);
+                    }
+                    None => {}
                 }
             }
             Control::Hide(side, number) => {
@@ -406,6 +429,26 @@ fn device(listed: &Listed, chosen: bool, place: Rect, pen: &mut Pen<'_, '_>) {
     );
     let at = pen.px(glyph);
     super::sound::device(&mut pen.canvas, at, listed.kind, ink);
+    let peak = listed
+        .meter
+        .as_ref()
+        .and_then(|source| pen.peaks.get(source));
+    if let Some(&peak) = peak {
+        // A faint track the width of the name, the accent along it as far
+        // as it is loud.
+        let room = place.right() - SPACE - (glyph.right() + SPACE);
+        let reach = (loudness(peak) * room as f32).round() as i32;
+        let track = Rect::new(
+            glyph.right() + SPACE,
+            place.bottom() - METER - 1,
+            room,
+            METER,
+        );
+        let lit = pen.px(Rect { w: reach, ..track });
+        let track = pen.px(track);
+        fill(&mut pen.canvas, track, pen.colours.rule);
+        fill(&mut pen.canvas, lit, pen.colours.accent);
+    }
     let words = Rect::new(
         glyph.right() + SPACE,
         place.y,
@@ -576,6 +619,8 @@ mod tests {
             jack: None,
             short: key.to_owned(),
             kind: Kind::Speaker,
+            live: None,
+            meter: None,
             connected: true,
             chosen,
             name: None,
@@ -618,14 +663,18 @@ mod tests {
     }
 
     fn drawn(state: &State, scale: u32) -> Pixmap {
+        drawn_with(state, scale, &HashMap::new())
+    }
+
+    fn drawn_with(state: &State, scale: u32, peaks: &HashMap<String, f32>) -> Pixmap {
         let mut picture = Pixmap::new(400 * scale, 240 * scale).expect("a picture");
         paint(
             &state.view().expect("open"),
             &mut picture.as_mut(),
-            scale,
+            (scale, &Palette::default()),
             &mut Text::without_fonts(),
             &mut Images::default(),
-            &Palette::default(),
+            peaks,
         );
         picture
     }
@@ -734,6 +783,37 @@ mod tests {
             pixel(&picture, caret.0, caret.1),
             colours.ink,
             "typing in it"
+        );
+    }
+
+    #[test]
+    fn a_metered_devices_row_has_a_bar_along_its_foot_as_far_as_it_is_loud() {
+        let mut state = opened();
+        let view = state.view().expect("open");
+        let mut mixed = view.mixed.clone();
+        mixed.outputs[0].meter = Some("speakers.monitor".to_owned());
+        state.update(Event::Heard(mixed));
+        let view = state.view().expect("open");
+        let row = view
+            .placed
+            .of(Control::Choose(Side::Output, number("speakers")))
+            .expect("listed");
+        let colours = Colours::of(&Palette::default());
+        let foot = row.bottom() - 2;
+        let start = row.x + BUTTON + SPACE / 2 + MARK + SPACE + 1;
+        let end = row.right() - SPACE - 2;
+        let quiet = drawn(&state, 1);
+        assert_ne!(pixel(&quiet, start, foot), colours.accent, "nothing heard");
+        let peaks = |peak| HashMap::from([("speakers.monitor".to_owned(), peak)]);
+        let full = drawn_with(&state, 1, &peaks(1.0));
+        assert_eq!(pixel(&full, start, foot), colours.accent);
+        assert_eq!(pixel(&full, end, foot), colours.accent, "all the way");
+        let half = drawn_with(&state, 1, &peaks(0.1));
+        assert_eq!(pixel(&half, start, foot), colours.accent);
+        assert_eq!(
+            pixel(&half, end, foot),
+            colours.rule,
+            "20 dB down, two thirds, the track beyond"
         );
     }
 

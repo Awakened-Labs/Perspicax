@@ -14,6 +14,7 @@
 //! changed any of it, so a burst of changes is told once. Dropping the
 //! [`Running`] the shell holds ends the thread.
 
+mod chime;
 mod client;
 #[cfg(test)]
 mod fake;
@@ -44,6 +45,8 @@ pub(crate) enum News {
     /// What plays now, as the spectrum's bands, each 0 to 1: silence once
     /// it stops.
     Levels([f32; BANDS]),
+    /// How loud each source metered was last, by name, 0 to 1.
+    Peaks(Vec<(String, f32)>),
 }
 
 /// What a person asked of the sound.
@@ -57,8 +60,13 @@ pub(crate) enum Ask {
     Choose(Plan),
     /// Move the program's stream of this number to the sink of this one.
     Move { stream: u32, sink: u32 },
+    /// Play the test sound on the sink of this number, in place of one
+    /// playing.
+    Test(u32),
     /// Read what plays, for the moving bars, or stop.
     Levels(bool),
+    /// Meter these sources, by name, and no others.
+    Meters(Vec<String>),
 }
 
 /// What an [`Ask`] is of.

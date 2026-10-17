@@ -109,6 +109,10 @@ pub(crate) struct Listed {
     pub(crate) card: Option<Owner>,
     /// What tells it apart, line by line.
     pub(crate) details: Vec<(&'static str, String)>,
+    /// The sink playing to it now, by its number, an output's; and the
+    /// source that meters it, by name.
+    pub(crate) live: Option<u32>,
+    pub(crate) meter: Option<String>,
 }
 
 /// The card a device is a jack of, as far as hiding it goes.
@@ -259,6 +263,8 @@ pub(crate) enum Control {
     More(Side, u64),
     /// The field a device is named in.
     Rename(Side, u64),
+    /// The button that plays the test sound on an output.
+    Test(Side, u64),
     /// The button that hides a device, or brings it back.
     Hide(Side, u64),
     /// The button that hides the whole card a device is a jack of, or
@@ -297,6 +303,7 @@ impl Control {
             | Self::Fold(side)
             | Self::More(side, _)
             | Self::Rename(side, _)
+            | Self::Test(side, _)
             | Self::Hide(side, _)
             | Self::HideCard(side, _)
             | Self::Hidden(side) => Some(side),
@@ -378,6 +385,9 @@ fn device(lines: &mut Vec<(Line, i32)>, side: Side, listed: &Listed, unfolded: &
         lines.push((Line::Detail(format!("{label}: {value}")), DETAIL));
     }
     lines.push((Line::Row(Control::Rename(side, number)), LISTED));
+    if side == Side::Output {
+        lines.push((Line::Row(Control::Test(side, number)), LISTED));
+    }
     // Hidden with its card, it comes back with its card.
     if !listed.card.as_ref().is_some_and(|card| card.hidden) {
         lines.push((Line::Row(Control::Hide(side, number)), LISTED));
@@ -496,6 +506,7 @@ pub(crate) fn lay_out(anchor: &Anchor, mixed: &Mixed, unfolded: &Unfolded, scrol
             Line::Row(
                 control @ (Control::Move(..)
                 | Control::Rename(..)
+                | Control::Test(..)
                 | Control::Hide(..)
                 | Control::HideCard(..)),
             ) => controls.push((control, set_in(row, tall))),
@@ -563,6 +574,7 @@ impl Placed {
             | Control::Fold(_)
             | Control::More(..)
             | Control::Rename(..)
+            | Control::Test(..)
             | Control::Hide(..)
             | Control::HideCard(..)
             | Control::Hidden(_)
@@ -635,6 +647,8 @@ mod tests {
             jack: None,
             short: key.to_owned(),
             kind: Kind::Speaker,
+            live: None,
+            meter: None,
             connected,
             chosen,
             name: None,
@@ -901,15 +915,16 @@ mod tests {
             .into_iter()
             .skip_while(|&control| control != Control::More(Side::Output, hdmi))
             .skip(1)
-            .take(2)
+            .take(3)
             .collect();
         assert_eq!(
             after,
             [
                 Control::Rename(Side::Output, hdmi),
+                Control::Test(Side::Output, hdmi),
                 Control::HideCard(Side::Output, hdmi)
             ],
-            "hidden with its card, it comes back only with its card"
+            "an output's test, and hidden with its card, it comes back only with its card"
         );
         let field = placed
             .of(Control::Rename(Side::Output, hdmi))

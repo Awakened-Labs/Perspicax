@@ -122,6 +122,8 @@ pub(crate) enum Effect {
     Hide(String, bool),
     /// Name the device of this key this; a blank name forgets its name.
     Rename(String, String),
+    /// Play the test sound on the sink of this number.
+    Test(u32),
 }
 
 /// The mixer, if it is open.
@@ -169,6 +171,28 @@ pub(crate) struct View<'a> {
 }
 
 impl View<'_> {
+    /// The sources to meter, by name: each output's listed, and the
+    /// input's whose details are shown, if they can be.
+    pub(crate) fn metered(&self) -> Vec<String> {
+        let mut sources: Vec<String> = Vec::new();
+        for &(control, _) in &self.placed.controls {
+            let Control::Choose(side, number) = control else {
+                continue;
+            };
+            if side == Side::Input && self.placed.unfolded.more != Some((side, number)) {
+                continue;
+            }
+            let meter = self
+                .mixed
+                .find(side, number)
+                .and_then(|listed| listed.meter.clone());
+            if let Some(source) = meter.filter(|source| !sources.contains(source)) {
+                sources.push(source);
+            }
+        }
+        sources
+    }
+
     /// What the slider of `whose` shows: a volume dragged to, or the
     /// server's.
     pub(crate) fn shown(&self, whose: Whose) -> Option<u32> {
@@ -498,6 +522,12 @@ impl Open {
                 }
                 None => Vec::new(),
             },
+            Control::Test(side, number) => {
+                match self.device(side, number).and_then(|listed| listed.live) {
+                    Some(sink) => vec![Effect::Test(sink)],
+                    None => Vec::new(),
+                }
+            }
             Control::Hide(side, number) => match self.device(side, number) {
                 Some(listed) => vec![Effect::Hide(listed.key.clone(), !listed.hidden)],
                 None => Vec::new(),
@@ -641,6 +671,8 @@ mod tests {
             jack: None,
             short: key.to_owned(),
             kind: Kind::Speaker,
+            live: None,
+            meter: None,
             connected,
             chosen,
             name: None,
@@ -991,6 +1023,64 @@ mod tests {
         );
         state.update(Event::Act(more("headphones"), Act::Click));
         assert_eq!(unfolded(&state), None, "folded again");
+    }
+
+    #[test]
+    fn the_test_sound_plays_on_an_output_only_while_it_plays() {
+        let mut mixed = kept();
+        mixed.outputs[0].live = Some(51);
+        let mut state = opened(mixed);
+        let speakers = number("speakers");
+        state.update(Event::Act(
+            Control::More(Side::Output, speakers),
+            Act::Click,
+        ));
+        assert_eq!(
+            state.update(Event::Act(
+                Control::Test(Side::Output, speakers),
+                Act::Click
+            )),
+            [Effect::Test(51)],
+            "on the sink playing to it"
+        );
+        let phones = number("headphones");
+        state.update(Event::Act(Control::Fold(Side::Output), Act::Click));
+        state.update(Event::Act(Control::More(Side::Output, phones), Act::Click));
+        assert!(
+            state
+                .update(Event::Act(Control::Test(Side::Output, phones), Act::Click))
+                .is_empty(),
+            "no sink plays to it"
+        );
+    }
+
+    #[test]
+    fn every_output_listed_is_metered_and_an_input_only_with_its_details_shown() {
+        let mut mixed = kept();
+        mixed.outputs[0].meter = Some("speakers.monitor".to_owned());
+        mixed.outputs[3].meter = Some("headset.monitor".to_owned());
+        mixed.inputs = vec![Listed {
+            meter: Some("mic".to_owned()),
+            ..listed("mic", true, true)
+        }];
+        let mut state = opened(mixed);
+        let metered = |state: &State| state.view().expect("open").metered();
+        assert_eq!(
+            metered(&state),
+            ["speakers.monitor"],
+            "the headset is hidden"
+        );
+        state.update(Event::Act(Control::Hidden(Side::Output), Act::Click));
+        assert_eq!(metered(&state), ["speakers.monitor", "headset.monitor"]);
+        state.update(Event::Act(
+            Control::More(Side::Input, number("mic")),
+            Act::Click,
+        ));
+        assert_eq!(
+            metered(&state),
+            ["speakers.monitor", "headset.monitor", "mic"],
+            "the input, with its details shown"
+        );
     }
 
     #[test]

@@ -62,6 +62,8 @@ pub(super) struct Audio {
     asked: Option<(Target, u32, Instant)>,
     /// What the person hid and named in the mixer.
     keeper: Keeper,
+    /// The sources last asked to be metered.
+    metering: Vec<String>,
 }
 
 impl Audio {
@@ -77,6 +79,7 @@ impl Audio {
             wheel: 0.0,
             asked: None,
             keeper,
+            metering: Vec::new(),
         }
     }
 
@@ -96,6 +99,7 @@ impl Audio {
         match (wanted, &self.running) {
             (true, None) => {
                 self.started += 1;
+                self.metering.clear();
                 let (news, started) = (self.news.clone(), self.started);
                 let running = crate::audio::start(self.server.clone(), move |told| {
                     news.send((started, told)).is_ok()
@@ -127,6 +131,19 @@ impl Audio {
                 on: !level.muted,
             });
         }
+    }
+
+    /// Meter `sources`, by name, and no others.
+    pub(super) fn meter(&mut self, sources: Vec<String>) {
+        if sources != self.metering {
+            self.metering.clone_from(&sources);
+            self.ask(Ask::Meters(sources));
+        }
+    }
+
+    /// Play the test sound on the sink numbered `sink`.
+    pub(super) fn test(&self, sink: u32) {
+        self.ask(Ask::Test(sink));
     }
 
     /// Move the program playing `stream` to the sink numbered `sink`.
@@ -172,8 +189,8 @@ impl Audio {
                 tracing::warn!("the sound server did not do what was asked: {why}");
                 return;
             }
-            // Not facts: the bars move with them, on the panels.
-            News::Levels(_) => return,
+            // Not facts: the bars and the meters move with them.
+            News::Levels(_) | News::Peaks(_) => return,
         };
         let facts = self.facts.as_deref();
         self.asked.take_if(|(target, asked, _)| {
@@ -275,6 +292,10 @@ impl App {
         }
         if let News::Levels(bands) = news {
             self.panels.hear_levels(&mut self.canvas, &self.kit, bands);
+            return;
+        }
+        if let News::Peaks(peaks) = news {
+            self.mixer_peaks(peaks);
             return;
         }
         self.audio.hear(news);

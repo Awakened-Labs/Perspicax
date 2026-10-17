@@ -295,6 +295,13 @@ impl Canvas {
 }
 
 impl Canvas {
+    /// Ask the compositor to say when it shows what `layer` shows next.
+    #[cfg(feature = "audio")]
+    pub(super) fn pace(&self, layer: &LayerSurface) {
+        let surface = layer.wl_surface();
+        surface.frame(&self.qh, surface.clone());
+    }
+
     /// Show on `layer` the kept `picture`, premultiplied RGBA at `scale`, in
     /// one of `copies`' buffers that the compositor has let go of, or a new
     /// one: all of it, opaque in `opaque`, if `changed` is `None`; or with
@@ -516,6 +523,8 @@ impl CompositorHandler for App {
         #[cfg(feature = "audio")]
         self.panels
             .frame(&mut self.canvas, &mut self.kit, surface, time);
+        #[cfg(feature = "audio")]
+        self.mixers.frame(&mut self.canvas, &mut self.kit, surface);
         #[cfg(not(any(feature = "pie", feature = "audio")))]
         let _ = surface;
         #[cfg(not(feature = "audio"))]

@@ -2288,10 +2288,10 @@ fn an_output_named_and_hidden_in_the_mixer_is_kept_for_the_person_alone_and_neve
         (rect.x1 - 13.0 - 14.0, rect.y0 + two + 14.0),
         PointerButton::Left,
     );
-    // Unfolded under it: its key, a line of 20, its name's field, then
-    // Hide, rows of 28 set in by 28; it grows away from the panel.
+    // Unfolded under it: its key, a line of 20, its name's field, Test
+    // and Hide, rows of 28 set in by 28; it grows away from the panel.
     let facts = session.wait_for(|facts| {
-        mixer(facts).is_some_and(|(_, grown)| grown.y0 <= rect.y0 - 20.0 - 2.0 * 28.0)
+        mixer(facts).is_some_and(|(_, grown)| grown.y0 <= rect.y0 - 20.0 - 3.0 * 28.0)
     });
     let (_, rect) = mixer(&facts).expect("waited for");
     let set_in = rect.x0 + 13.0 + 28.0 + 20.0;
@@ -2315,14 +2315,15 @@ fn an_output_named_and_hidden_in_the_mixer_is_kept_for_the_person_alone_and_neve
     click(
         &session,
         surface,
-        (set_in, field + 28.0),
+        (set_in, field + 2.0 * 28.0),
         PointerButton::Left,
     );
     sound.until(|_| kept().contains("\"hidden\": [\n    \"two\""));
     // Under "Hidden", folded, it and all it unfolded are gone from sight.
     let tall = rect.y1 - rect.y0;
     session.wait_for(|facts| {
-        mixer(facts).is_some_and(|(_, now)| now.y1 - now.y0 <= tall - 28.0 - 76.0 + 24.0)
+        mixer(facts)
+            .is_some_and(|(_, now)| now.y1 - now.y0 <= tall - 28.0 - 20.0 - 3.0 * 28.0 + 24.0)
     });
 
     // A press on the output, the mixer open, closes it and switches: to
@@ -2750,6 +2751,92 @@ fn a_program_playing_is_set_and_moved_to_another_output_from_the_mixer() {
             .lines()
             .any(|line| line.split('\t').nth(1) == Some(index.as_str()))
     });
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn the_mixer_meters_what_plays_tests_an_output_and_stops_metering_once_closed() {
+    let mut sound = SoundServer::start("meters");
+    let silence = std::fs::File::open("/dev/zero").expect("/dev/zero");
+    let player = sound
+        .command("paplay")
+        .args(["--raw", "--device=one"])
+        .stdin(silence)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("paplay, which a desktop with sound has");
+    sound.daemons.push(player);
+    let session = Session::start("shell-meters", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "meters",
+        OPEN_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    until_colour(&session, (1258, 800 - 20), INK);
+    let button = (1280.0 - 30.0 - 15.0, PANEL_HEIGHT / 2.0);
+    click(&session, panel, button, PointerButton::Left);
+    let facts = session.wait_for(|facts| mixer(facts).is_some());
+    let (surface, rect) = mixer(&facts).expect("waited for");
+    let meters = |sound: &SoundServer| {
+        sound
+            .pactl(&["list", "source-outputs"])
+            .matches("media.name = \"Meter\"")
+            .count()
+    };
+    // "one", which plays, and not "two", which does not.
+    sound.until(|sound| meters(sound) == 1);
+
+    // "two"'s details: its key, a line of 20, its name's field, then Test.
+    let two = 13.0 + 22.0 + 32.0 + 28.0;
+    click(
+        &session,
+        surface,
+        (rect.x1 - 13.0 - 14.0, rect.y0 + two + 14.0),
+        PointerButton::Left,
+    );
+    let facts = session.wait_for(|facts| {
+        mixer(facts).is_some_and(|(_, grown)| grown.y0 <= rect.y0 - 20.0 - 3.0 * 28.0)
+    });
+    let (_, rect) = mixer(&facts).expect("waited for");
+    let test = rect.y0 + two + 28.0 + 20.0 + 28.0 + 14.0;
+    click(
+        &session,
+        surface,
+        (rect.x0 + 13.0 + 28.0 + 20.0, test),
+        PointerButton::Left,
+    );
+    let index = sound
+        .pactl(&["list", "short", "sinks"])
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split('\t');
+            let index = fields.next()?;
+            (fields.next()? == "two").then(|| index.to_owned())
+        })
+        .expect("two among the sinks");
+    // It sounds for a moment, on "two" and not the default: the one
+    // stream of one channel of floats at 44.1 kHz.
+    sound.until(|sound| {
+        sound
+            .pactl(&["list", "short", "sink-inputs"])
+            .lines()
+            .any(|line| {
+                line.split('\t').nth(1) == Some(index.as_str())
+                    && line.ends_with("float32le 1ch 44100Hz")
+            })
+    });
+
+    click(&session, panel, button, PointerButton::Left);
+    session.wait_for(|facts| mixer(facts).is_none());
+    sound.until(|sound| meters(sound) == 0);
 
     drop(sound);
     shell.stop_with(session);

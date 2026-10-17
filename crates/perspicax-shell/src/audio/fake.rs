@@ -28,9 +28,9 @@ use std::{
 
 use pulseaudio::protocol::{
     self, AuthReply, CardInfo, CardPortInfo, CardProfileInfo, ChannelMap, ChannelVolume, Command,
-    CreateRecordStreamReply, MAX_VERSION, Prop, Props, PulseError, SampleSpec, ServerInfo,
-    SetClientNameReply, SinkInfo, SinkInputInfo, SinkState, SourceInfo, SubscriptionEvent,
-    SubscriptionEventFacility, SubscriptionEventType, SubscriptionMask, Volume,
+    CreatePlaybackStreamReply, CreateRecordStreamReply, MAX_VERSION, Prop, Props, PulseError,
+    SampleSpec, ServerInfo, SetClientNameReply, SinkInfo, SinkInputInfo, SinkState, SourceInfo,
+    SubscriptionEvent, SubscriptionEventFacility, SubscriptionEventType, SubscriptionMask, Volume,
     port_info::{PortAvailable, PortDirection, PortInfo, PortType},
 };
 
@@ -83,6 +83,17 @@ struct Shared {
     /// one, and the channel the next gets.
     recording: Option<u32>,
     channels: u32,
+    /// The playback stream the client made, while it has one.
+    playback: Option<Playback>,
+}
+
+/// A playback stream: its channel, the sink it plays into, and how much
+/// was asked for of it and has come.
+struct Playback {
+    channel: u32,
+    sink: u32,
+    asked: usize,
+    came: usize,
 }
 
 impl Fake {
@@ -118,6 +129,7 @@ impl Fake {
             mask: SubscriptionMask::empty(),
             recording: None,
             channels: 7,
+            playback: None,
         }));
         let serving = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -253,6 +265,14 @@ impl Fake {
         );
     }
 
+    /// The sink the client last played into, and how much it sent.
+    pub(super) fn played(&self) -> Option<(u32, usize)> {
+        self.lock()
+            .playback
+            .as_ref()
+            .map(|playback| (playback.sink, playback.came))
+    }
+
     /// The channel the client records on, while it does.
     pub(super) fn recording(&self) -> Option<u32> {
         self.lock().recording
@@ -319,6 +339,30 @@ pub(super) struct Fixture {
 }
 
 impl Shared {
+    /// `length` bytes came for the stream of `channel`: once what was asked
+    /// for has come, ask for as much again.
+    fn played(&mut self, channel: u32, length: usize) {
+        let Some(playback) = self
+            .playback
+            .as_mut()
+            .filter(|playback| playback.channel == channel)
+        else {
+            return;
+        };
+        playback.came += length;
+        if playback.came < playback.asked {
+            return;
+        }
+        playback.asked += ASKED;
+        let request = Command::Request(protocol::Request {
+            channel,
+            length: ASKED as u32,
+        });
+        if let Some(writer) = self.writer.as_mut() {
+            protocol::write_command_message(writer, u32::MAX, &request, self.version).ok();
+        }
+    }
+
     /// Tell the client the object of `index` changed.
     fn event(&mut self, facility: SubscriptionEventFacility, index: Option<u32>) {
         self.told(facility, SubscriptionEventType::Changed, index);
@@ -391,6 +435,31 @@ impl Shared {
     }
 }
 
+/// How much of a playback stream the server asks for at a time.
+const ASKED: usize = 16 << 10;
+
+/// What the client sent next: a command, with its sequence number, or what
+/// it sent a stream of this channel, this long.
+enum Sent {
+    Command(u32, Box<Command>),
+    Data(u32, usize),
+}
+
+/// The next thing the client sent, or `None` once it has gone.
+fn read_sent(reader: &mut impl std::io::Read, version: u16) -> Option<Sent> {
+    let mut head = [0; protocol::DESCRIPTOR_SIZE];
+    reader.read_exact(&mut head).ok()?;
+    let descriptor = protocol::read_descriptor(&mut &head[..]).ok()?;
+    let mut payload = vec![0; descriptor.length as usize];
+    reader.read_exact(&mut payload).ok()?;
+    if descriptor.channel != u32::MAX {
+        return Some(Sent::Data(descriptor.channel, payload.len()));
+    }
+    let mut cursor = std::io::Cursor::new(&payload[..]);
+    let (seq, command) = Command::read_tag_prefixed(&mut cursor, version).ok()?;
+    Some(Sent::Command(seq, Box::new(command)))
+}
+
 /// Serve one client until it goes.
 fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
     let mut reader = BufReader::new(stream.try_clone().expect("a second handle"));
@@ -402,8 +471,13 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
     }
     loop {
         let version = shared.lock().expect("the state").version;
-        let Ok((seq, command)) = protocol::read_command_message(&mut reader, version) else {
-            return;
+        let (seq, command) = match read_sent(&mut reader, version) {
+            Some(Sent::Command(seq, command)) => (seq, *command),
+            Some(Sent::Data(channel, length)) => {
+                shared.lock().expect("the state").played(channel, length);
+                continue;
+            }
+            None => return,
         };
         let mut shared = shared.lock().expect("the state");
         let version = shared.version;
@@ -424,6 +498,7 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
             writer,
             recording,
             channels,
+            playback,
             ..
         } = &mut *shared;
         let Some(writer) = writer.as_mut() else {
@@ -610,7 +685,27 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
                     .as_ref()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                asked.push(format!("record {source}"));
+                if record.flags.peak_detect {
+                    let waking = if record.flags.no_inhibit_auto_suspend {
+                        ""
+                    } else {
+                        ", waking it"
+                    };
+                    asked.push(format!("record peaks of {source}{waking}"));
+                } else {
+                    asked.push(format!("record {source}"));
+                }
+                let known = sinks.iter().any(|sink| {
+                    sink.monitor_source_name
+                        .as_ref()
+                        .is_some_and(|name| name.to_bytes() == source.as_bytes())
+                }) || sources
+                    .iter()
+                    .any(|had| had.name.to_bytes() == source.as_bytes());
+                if !known {
+                    protocol::write_error(writer, seq, &PulseError::NoEntity).expect("written");
+                    continue;
+                }
                 *recording = Some(*channels);
                 let reply = CreateRecordStreamReply {
                     channel: *channels,
@@ -622,6 +717,36 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
                 };
                 *channels += 1;
                 protocol::write_reply_message(writer, seq, &reply, version)
+            }
+            Command::CreatePlaybackStream(play) => {
+                let sink = play.sink_index.unwrap_or(u32::MAX);
+                asked.push(format!("play on {sink}"));
+                *playback = Some(Playback {
+                    channel: *channels,
+                    sink,
+                    asked: ASKED,
+                    came: 0,
+                });
+                let reply = CreatePlaybackStreamReply {
+                    channel: *channels,
+                    stream_index: *channels,
+                    requested_bytes: ASKED as u32,
+                    buffer_attr: play.buffer_attr,
+                    sample_spec: play.sample_spec,
+                    channel_map: play.channel_map,
+                    sink_index: sink,
+                    ..CreatePlaybackStreamReply::default()
+                };
+                *channels += 1;
+                protocol::write_reply_message(writer, seq, &reply, version)
+            }
+            Command::DrainPlaybackStream(_) => {
+                asked.push("drain".to_owned());
+                protocol::write_ack_message(writer, seq)
+            }
+            Command::DeletePlaybackStream(_) => {
+                asked.push("unplay".to_owned());
+                protocol::write_ack_message(writer, seq)
             }
             Command::DeleteRecordStream(channel) => {
                 asked.push(format!("unrecord {channel}"));

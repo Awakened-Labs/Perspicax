@@ -1536,6 +1536,7 @@ mod mixers {
     const SINK: u32 = 27;
     /// A program's list of the outputs it can be moved to.
     const PROGRAM_OUTPUTS: u64 = 10;
+    const TEST: u64 = 11;
 
     fn tagged(kind: u64, rest: u64) -> NodeId {
         NodeId(kind << KIND | rest)
@@ -1553,6 +1554,7 @@ mod mixers {
             Control::Choose(side, number) => of_device(DEVICE, side, number),
             Control::More(side, number) => of_device(MORE, side, number),
             Control::Rename(side, number) => of_device(RENAME, side, number),
+            Control::Test(side, number) => of_device(TEST, side, number),
             Control::Hide(side, number) => of_device(HIDE, side, number),
             Control::HideCard(side, number) => of_device(HIDE_CARD, side, number),
             Control::Mute(Whose::App(stream)) => tagged(PROGRAM_MUTE, stream.into()),
@@ -1587,6 +1589,7 @@ mod mixers {
             DEVICE => Some(Control::Choose(side, number)),
             MORE => Some(Control::More(side, number)),
             RENAME => Some(Control::Rename(side, number)),
+            TEST => Some(Control::Test(side, number)),
             HIDE => Some(Control::Hide(side, number)),
             HIDE_CARD => Some(Control::HideCard(side, number)),
             PROGRAM_MUTE => Some(Control::Mute(Whose::App(stream.ok()?))),
@@ -1667,9 +1670,10 @@ mod mixers {
                             details.push(id(control));
                         }
                         Control::Choose(..) | Control::More(..) => list.push_child(id(control)),
-                        Control::Rename(..) | Control::Hide(..) | Control::HideCard(..) => {
-                            details.push(id(control));
-                        }
+                        Control::Rename(..)
+                        | Control::Test(..)
+                        | Control::Hide(..)
+                        | Control::HideCard(..) => details.push(id(control)),
                         Control::Fold(_) | Control::Hidden(_) => folds.push(id(control)),
                         _ => group.push_child(id(control)),
                     }
@@ -1835,6 +1839,18 @@ mod mixers {
                 field.add_action(Action::SetValue);
                 field
             }
+            Control::Test(side, number) => {
+                let listed = view.mixed.find(side, number)?;
+                let mut button = Node::new(Role::Button);
+                button.set_label(format!("Test sound on {}", listed.label()));
+                if listed.live.is_none() {
+                    button.set_description("Choose it to hear it");
+                    button.set_disabled();
+                    return Some(button);
+                }
+                button.add_action(Action::Click);
+                button
+            }
             Control::Hide(side, number) => {
                 let listed = view.mixed.find(side, number)?;
                 let mut button = Node::new(Role::Button);
@@ -1996,6 +2012,7 @@ mod mixers {
                 for control in [
                     Control::More(side, number),
                     Control::Rename(side, number),
+                    Control::Test(side, number),
                     Control::Hide(side, number),
                     Control::HideCard(side, number),
                 ] {
@@ -2017,6 +2034,8 @@ mod mixers {
                 short: key.to_owned(),
                 name: None,
                 kind: Kind::Display,
+                live: None,
+                meter: None,
                 connected: true,
                 chosen: false,
                 hidden,
@@ -2050,6 +2069,16 @@ mod mixers {
                     Some("Chip: GPU, Key: HDMI"),
                     Some(true)
                 )
+            );
+            let test = node(&tree, id(Control::Test(Side::Output, hdmi)));
+            assert_eq!(
+                (test.label(), test.description(), test.is_disabled()),
+                (
+                    Some("Test sound on TU104 \u{2014} HDMI"),
+                    Some("Choose it to hear it"),
+                    true
+                ),
+                "no sink plays to it"
             );
             let field = node(&tree, id(Control::Rename(Side::Output, hdmi)));
             assert_eq!(
@@ -2095,6 +2124,8 @@ mod mixers {
                 jack: None,
                 short: key.to_owned(),
                 kind: Kind::Speaker,
+                live: None,
+                meter: None,
                 connected: true,
                 chosen: false,
                 name: None,
@@ -2184,6 +2215,8 @@ mod mixers {
                 jack: Some(key.to_owned()),
                 short: key.to_owned(),
                 kind: Kind::Speaker,
+                live: None,
+                meter: None,
                 connected,
                 chosen,
                 name: None,

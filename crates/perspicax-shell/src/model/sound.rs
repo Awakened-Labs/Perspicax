@@ -121,6 +121,8 @@ pub(crate) struct Source {
     /// It hears what a sink plays: a monitor, which no one chooses as an
     /// input.
     pub(crate) monitor: bool,
+    /// What reads it, `device.api`: "alsa", "bluez5".
+    pub(crate) api: Option<String>,
 }
 
 /// An output the server plays to: a sink.
@@ -373,6 +375,44 @@ impl Facts {
             .collect()
     }
 
+    /// The sink or source on `side` playing or recording through the device
+    /// keyed `key` now, by name: its card's, playing through that jack, or
+    /// one of no card by that name.
+    fn live(&self, side: Side, key: &str) -> Option<&str> {
+        self.devices(side)
+            .into_iter()
+            .find(|device| match self.jack_of(device) {
+                Some((card, port)) => self::key(card, port) == key,
+                None => device.name == key,
+            })
+            .map(|device| device.name)
+    }
+
+    /// The sink playing to the output keyed `key` now, if one does.
+    pub(crate) fn live_sink(&self, key: &str) -> Option<&Sink> {
+        let name = self.live(Side::Output, key)?;
+        self.sinks.iter().find(|sink| sink.name == name)
+    }
+
+    /// The source to meter the device keyed `key` on `side` by: an
+    /// output's sink's monitor, while something plays through it; or an
+    /// input's own source, if ALSA reads it. A Bluetooth headset's
+    /// microphone recorded moves the headset to the poor sound of a call,
+    /// so it is never.
+    pub(crate) fn meter(&self, side: Side, key: &str) -> Option<String> {
+        match side {
+            Side::Output => {
+                let sink = self.live_sink(key).filter(|sink| sink.running)?;
+                sink.monitor.clone()
+            }
+            Side::Input => {
+                let name = self.live(Side::Input, key)?;
+                let source = self.sources.iter().find(|source| source.name == name)?;
+                (source.api.as_deref() == Some("alsa")).then(|| source.name.clone())
+            }
+        }
+    }
+
     /// What programs play, but what the shell plays itself.
     pub(crate) fn apps(&self) -> impl Iterator<Item = &Stream> {
         self.streams
@@ -599,6 +639,15 @@ impl Source {
             muted: self.muted,
         }
     }
+}
+
+/// How far along a meter a peak of `peak`, 0 to 1 of full scale, reaches:
+/// none at 60 dB below full scale or quieter, all of it at full scale, as
+/// the ear hears it, the panel's bars' range.
+pub(crate) fn loudness(peak: f32) -> f32 {
+    const RANGE: f32 = 60.0;
+    let decibels = 20.0 * peak.max(f32::MIN_POSITIVE).log10();
+    (1.0 + decibels / RANGE).clamp(0.0, 1.0)
 }
 
 /// How loud, in percent, a device whose channels are at `volume` is: its
@@ -950,6 +999,15 @@ mod tests {
     }
 
     #[test]
+    fn a_meter_reaches_as_far_as_the_ear_hears_a_peak() {
+        assert_eq!(loudness(1.0), 1.0);
+        assert_eq!(loudness(0.0), 0.0);
+        assert_eq!(loudness(0.000_5), 0.0, "below 60 dB down");
+        assert!((loudness(0.1) - 2.0 / 3.0).abs() < 1e-4, "20 dB down");
+        assert_eq!(loudness(2.0), 1.0, "never past the end");
+    }
+
+    #[test]
     fn a_stream_is_named_by_its_program_else_its_file_else_itself() {
         let named = |names| stream(1, None, names).name().to_owned();
         assert_eq!(named([Some("Firefox"), Some("firefox")]), "Firefox");
@@ -1100,6 +1158,61 @@ mod tests {
     }
 
     #[test]
+    fn an_output_is_metered_by_its_sinks_monitor_and_an_input_only_if_alsa_reads_it() {
+        let speakers = "alsa_card.pci-0000_00_1f.3/analog-output-speaker";
+        let mut facts = laptop();
+        facts.sinks[0].monitor = Some("speakers.monitor".to_owned());
+        assert_eq!(facts.live_sink(speakers).map(|sink| sink.index), Some(51));
+        assert_eq!(
+            facts.meter(Side::Output, speakers),
+            None,
+            "nothing plays through it"
+        );
+        facts.sinks[0].running = true;
+        assert_eq!(
+            facts.meter(Side::Output, speakers).as_deref(),
+            Some("speakers.monitor")
+        );
+        let headphones = "alsa_card.pci-0000_00_1f.3/analog-output-headphones";
+        assert_eq!(
+            facts.live_sink(headphones),
+            None,
+            "the sink plays elsewhere"
+        );
+        assert_eq!(facts.meter(Side::Output, headphones), None);
+        let source = |name: &str, card, port: Option<&str>, api: &str| Source {
+            index: 0,
+            name: name.to_owned(),
+            description: name.to_owned(),
+            volume: vec![NORM],
+            muted: false,
+            card,
+            ports: port.map(|port| vec![port.to_owned()]).unwrap_or_default(),
+            port: port.map(str::to_owned),
+            monitor: false,
+            api: Some(api.to_owned()),
+        };
+        facts.sources = vec![
+            source("mic", Some(0), Some("analog-input-internal-mic"), "alsa"),
+            source("bluez_input.E8", None, None, "bluez5"),
+        ];
+        assert_eq!(
+            facts
+                .meter(
+                    Side::Input,
+                    "alsa_card.pci-0000_00_1f.3/analog-input-internal-mic"
+                )
+                .as_deref(),
+            Some("mic")
+        );
+        assert_eq!(
+            facts.meter(Side::Input, "bluez_input.E8"),
+            None,
+            "a Bluetooth input is never metered"
+        );
+    }
+
+    #[test]
     fn inputs_are_a_cards_jacks_in_and_its_sources_but_never_a_monitor() {
         let source =
             |index: u32, name: &str, card: Option<u32>, port: Option<&str>, monitor| Source {
@@ -1112,6 +1225,7 @@ mod tests {
                 ports: port.map(|port| vec![port.to_owned()]).unwrap_or_default(),
                 port: port.map(str::to_owned),
                 monitor,
+                api: card.map(|_| "alsa".to_owned()),
             };
         let facts = Facts {
             default_source: Some("alsa_input.pci-0000_00_1f.3.analog-stereo".to_owned()),

@@ -15,9 +15,10 @@ use std::{
 };
 
 use pulseaudio::protocol::{
-    self, AuthReply, CardInfo, CardInfoList, Command, CreateRecordStreamReply, DESCRIPTOR_SIZE,
-    MAX_VERSION, ProtocolError, PulseError, ServerInfo, SetClientNameReply, SinkInfo, SinkInfoList,
-    SinkInputInfo, SinkInputInfoList, SourceInfo, SourceInfoList, TagStructReader,
+    self, AuthReply, CardInfo, CardInfoList, Command, CreatePlaybackStreamReply,
+    CreateRecordStreamReply, DESCRIPTOR_SIZE, MAX_VERSION, ProtocolError, PulseError, ServerInfo,
+    SetClientNameReply, SinkInfo, SinkInfoList, SinkInputInfo, SinkInputInfoList, SourceInfo,
+    SourceInfoList, TagStructReader,
 };
 
 /// The longest message read: past this it is not a message.
@@ -52,6 +53,13 @@ pub(super) enum Expect {
     Streams,
     /// The stream of this index.
     Stream(u32),
+    /// The test sound of this number made: its channel, and how much of
+    /// it to send.
+    Playback(u64),
+    /// The test sound of this number played out.
+    Drain(u64),
+    /// The meter of this number made: its channel.
+    Meter(u64),
 }
 
 /// A reply, read as its command expected.
@@ -71,6 +79,7 @@ pub(super) enum Reply {
     Source(Box<SourceInfo>),
     Streams(SinkInputInfoList),
     Stream(Box<SinkInputInfo>),
+    Playback(Box<CreatePlaybackStreamReply>),
 }
 
 /// A message from the server.
@@ -122,6 +131,12 @@ impl Wire {
         protocol::write_command_message(&mut self.outbox, seq, command, self.version)
             .map_err(broken)?;
         self.awaited.insert(seq, expect);
+        self.flush()
+    }
+
+    /// Send `data` to the stream of `channel`.
+    pub(super) fn send_data(&mut self, channel: u32, data: &[u8]) -> io::Result<()> {
+        protocol::write_memblock(&mut self.outbox, channel, data, 0).map_err(broken)?;
         self.flush()
     }
 
@@ -219,17 +234,18 @@ impl Expect {
         Ok(match self {
             Self::Auth => Reply::Auth(reader.read()?),
             Self::Named => Reply::Named(reader.read::<SetClientNameReply>()?.client_id),
-            Self::Done => Reply::Done,
+            Self::Done | Self::Drain(_) => Reply::Done,
             Self::Server => Reply::Server(Box::new(reader.read()?)),
             Self::Sinks => Reply::Sinks(reader.read()?),
             Self::Sink(_) => Reply::Sink(Box::new(reader.read()?)),
             Self::Cards => Reply::Cards(reader.read()?),
             Self::Card(_) => Reply::Card(Box::new(reader.read()?)),
-            Self::Recording(_) => Reply::Recording(Box::new(reader.read()?)),
+            Self::Recording(_) | Self::Meter(_) => Reply::Recording(Box::new(reader.read()?)),
             Self::Sources => Reply::Sources(reader.read()?),
             Self::Source(_) => Reply::Source(Box::new(reader.read()?)),
             Self::Streams => Reply::Streams(reader.read()?),
             Self::Stream(_) => Reply::Stream(Box::new(reader.read()?)),
+            Self::Playback(_) => Reply::Playback(Box::new(reader.read()?)),
         })
     }
 }
