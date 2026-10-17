@@ -44,7 +44,7 @@ use perspicax_policy::{
     Access, Action, Bindings, Chord, Colour, Context, Decorations, Direction, Drag, Flipping,
     Focus, FocusModel, Gesture, Grid, Keysym, Mods, MouseBindings, MouseChord, OPAQUE, Opacity,
     Place, Program, Protocol, Remembering, Resistance, Rule, Shape, Side, Snapping, Switching,
-    Towards,
+    Towards, VolumeKey,
 };
 use serde::Deserialize;
 
@@ -415,6 +415,21 @@ impl Config {
         bindings = bindings
             .bind(logo(Keysym::a), Action::ToggleAgent)
             .bind(logo_shift(Keysym::a), Action::RevokeAgents);
+
+        // The volume keys, in both profiles: the shell's to carry out, and
+        // dropped, with nothing said, when `[shell] enabled = false`.
+        for (key, volume) in [
+            (Keysym::XF86_AudioRaiseVolume, VolumeKey::Up),
+            (Keysym::XF86_AudioLowerVolume, VolumeKey::Down),
+            (Keysym::XF86_AudioMute, VolumeKey::Mute),
+            (Keysym::XF86_AudioMicMute, VolumeKey::MicMute),
+        ] {
+            let chord = Chord {
+                mods: Mods::default(),
+                key,
+            };
+            bindings = bindings.bind(chord, Action::Volume(volume));
+        }
 
         // Workspaces. Ctrl+Logo+arrows switches and, with Shift, takes the
         // focused window along, in both profiles: Plasma's keys, and Windows'
@@ -1253,11 +1268,17 @@ impl Raw {
             .as_ref()
             .map(RawShell::pie_names)
             .unwrap_or_default();
+        // The first key written to change the sound, to refuse with the
+        // shell off.
+        let mut volume_written = None;
         for (written, action) in self.keys {
             let trigger = keys::trigger(&written)
                 .map_err(|reason| invalid(format!("keys.{written}"), reason))?;
             let action = action_for(action, &pies)
                 .map_err(|reason| invalid(format!("keys.{written}"), reason))?;
+            if matches!(action, Some(Action::Volume(_))) && volume_written.is_none() {
+                volume_written = Some(format!("keys.{written}"));
+            }
             config.bindings = match (trigger, action) {
                 (keys::Trigger::Chord(chord), Some(action)) => config.bindings.bind(chord, action),
                 (keys::Trigger::Chord(chord), None) => config.bindings.unbind(chord),
@@ -1429,6 +1450,20 @@ impl Raw {
                 ShellBuilt::FULL,
                 count(config.workspaces.grid),
             )?;
+        }
+        // The volume is the shell's to change: with it off, a key written to
+        // change it is a mistake, and the profile's are given back to the
+        // programs.
+        if !config.shell.enabled {
+            if let Some(written) = volume_written {
+                return Err(invalid(
+                    written,
+                    "the volume is the shell's to change, and `[shell] enabled = false`".to_owned(),
+                ));
+            }
+            config.bindings = config
+                .bindings
+                .without(|action| matches!(action, Action::Volume(_)));
         }
         config.shell.double_click_ms = config.pointer.double_click_ms;
         config.shell.palette = config.theme.palette;
@@ -1989,6 +2024,10 @@ fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Actio
             "opacity-reset" => Action::OpacityReset,
             "toggle-agent" => Action::ToggleAgent,
             "revoke-agent-all" => Action::RevokeAgents,
+            "volume-up" => Action::Volume(VolumeKey::Up),
+            "volume-down" => Action::Volume(VolumeKey::Down),
+            "volume-mute" => Action::Volume(VolumeKey::Mute),
+            "mic-mute" => Action::Volume(VolumeKey::MicMute),
             other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
                 format!(
                     "`{other}` is not an action; use close, cycle-focus, reload, \
@@ -1998,6 +2037,7 @@ fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Actio
                          next-workspace, previous-workspace, \
                          opacity-up, opacity-down, opacity-reset, \
                          toggle-agent, revoke-agent-all, \
+                         volume-up, volume-down, volume-mute, mic-mute, \
                          move-to-next-output, move-to-previous-output, \
                          move-to-output-<side>, workspace-<side>, workspace-<number>, \
                          send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
@@ -3528,6 +3568,81 @@ mod tests {
             Some(&Action::StartMenu)
         );
         assert_eq!(Config::profile(Profile::Minimal, SEAT).bindings.tap(), None);
+    }
+
+    /// What the key `key`, pressed alone, does under `config`.
+    fn alone(config: &Config, key: Keysym) -> Option<&Action> {
+        config.bindings.resolve(Mods::default(), &[key])
+    }
+
+    #[test]
+    fn the_volume_keys_change_the_sound_in_both_profiles_and_a_persons_own_wins() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let config = Config::profile(profile, SEAT);
+            for (key, volume) in [
+                (Keysym::XF86_AudioRaiseVolume, VolumeKey::Up),
+                (Keysym::XF86_AudioLowerVolume, VolumeKey::Down),
+                (Keysym::XF86_AudioMute, VolumeKey::Mute),
+                (Keysym::XF86_AudioMicMute, VolumeKey::MicMute),
+            ] {
+                assert_eq!(
+                    alone(&config, key),
+                    Some(&Action::Volume(volume)),
+                    "{profile:?} {key:?}"
+                );
+            }
+        }
+        let own = parse(
+            "[keys]\nXF86AudioMute = { spawn = [\"wpctl\", \"set-mute\", \"@DEFAULT_SINK@\", \"toggle\"] }\n\"Logo+F9\" = \"mic-mute\"\n\"Logo+F10\" = \"volume-down\"\nXF86AudioMicMute = \"none\"",
+            SEAT,
+        )
+        .unwrap();
+        assert!(matches!(
+            alone(&own, Keysym::XF86_AudioMute),
+            Some(Action::Spawn { .. })
+        ));
+        assert_eq!(
+            alone(&own, Keysym::XF86_AudioMicMute),
+            None,
+            "given back, by name"
+        );
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            own.bindings.resolve(logo, &[Keysym::F9]),
+            Some(&Action::Volume(VolumeKey::MicMute))
+        );
+        assert_eq!(
+            own.bindings.resolve(logo, &[Keysym::F10]),
+            Some(&Action::Volume(VolumeKey::Down))
+        );
+    }
+
+    #[test]
+    fn with_the_shell_off_a_volume_key_written_is_refused_by_its_key_and_the_profiles_dropped() {
+        match parse(
+            "[shell]\nenabled = false\n[keys]\nXF86AudioRaiseVolume = \"volume-up\"",
+            SEAT,
+        ) {
+            Err(Error::Invalid { key, reason }) => {
+                assert_eq!(key, "keys.XF86AudioRaiseVolume");
+                assert!(reason.contains("enabled = false"), "{reason}");
+            }
+            other => panic!("not refused by key: {other:?}"),
+        }
+        let off = parse("[shell]\nenabled = false", SEAT).unwrap();
+        assert_eq!(
+            alone(&off, Keysym::XF86_AudioRaiseVolume),
+            None,
+            "given back"
+        );
+        assert_eq!(
+            off.bindings.resolve(Mods::alt(), &[Keysym::F4]),
+            Some(&Action::Close),
+            "the rest kept"
+        );
     }
 
     #[test]

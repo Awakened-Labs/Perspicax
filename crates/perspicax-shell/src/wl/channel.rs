@@ -5,7 +5,8 @@
 //! from the start button of the monitor the pointer is on, or each closes if
 //! it is the one open. The layouts, from version 2, are what the panel's
 //! indicator shows. A pie, from version 3, opens by name where perspicax
-//! says the pointer is.
+//! says the pointer is. A volume key, from version 4, changes the sound as
+//! the mixer would.
 
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 use wayland_client::{Connection, Dispatch, QueueHandle, globals::GlobalList, protocol::wl_output};
@@ -17,7 +18,7 @@ use super::{App, watch};
 /// this program out; the shell still draws, and its menus open only by
 /// pointer.
 pub(super) fn bind(globals: &GlobalList, qh: &QueueHandle<App>) -> Option<PerspicaxShellV1> {
-    let bound = globals.bind::<PerspicaxShellV1, _, _>(qh, 1..=3, ()).ok();
+    let bound = globals.bind::<PerspicaxShellV1, _, _>(qh, 1..=4, ()).ok();
     if bound.is_none() {
         tracing::info!("the compositor offers no perspicax_shell_v1; no menu will open on a key");
     }
@@ -143,6 +144,17 @@ impl Dispatch<PerspicaxShellV1, ()> for App {
             }
             Event::PieMenu { output, x, y, name } => {
                 watch::timed("opening a pie", || app.pie_menu(output, x, y, &name));
+            }
+            #[cfg(feature = "audio")]
+            Event::Volume {
+                key: wayland_client::WEnum::Value(key),
+            } => app.audio.key(key),
+            #[cfg(not(feature = "audio"))]
+            Event::Volume { key } => {
+                tracing::info!(
+                    ?key,
+                    "a volume key, and this shell was built without the sound"
+                );
             }
             Event::Reconfigure => watch::timed("taking up a changed config", || {
                 app.reconfigure(qh);

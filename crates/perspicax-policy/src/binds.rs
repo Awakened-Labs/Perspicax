@@ -117,6 +117,24 @@ pub enum Action {
     ToggleAgent,
     /// Take back everything an agent was granted, whoever granted it.
     RevokeAgents,
+    /// Ask the desktop shell to change the sound, as a volume key does:
+    /// the output's volume a step up or down, its sound muted or back, or
+    /// the microphone's. Nothing at the lock screen, where the shell is
+    /// told nothing.
+    Volume(VolumeKey),
+}
+
+/// What a volume key asks of the sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeKey {
+    /// The output's volume up a step.
+    Up,
+    /// Down a step.
+    Down,
+    /// The output muted, or its sound back.
+    Mute,
+    /// The microphone muted, or back.
+    MicMute,
 }
 
 impl Action {
@@ -164,7 +182,8 @@ impl Action {
             | Self::Pie(_)
             | Self::CycleLayout { .. }
             | Self::Layout(_)
-            | Self::RevokeAgents => false,
+            | Self::RevokeAgents
+            | Self::Volume(_) => false,
         }
     }
 }
@@ -241,6 +260,16 @@ impl Bindings {
     pub fn bind(mut self, chord: Chord, action: Action) -> Self {
         self.keys.retain(|(bound, _)| *bound != chord);
         self.keys.push((chord, action));
+        self
+    }
+
+    /// Remove every binding to an action `unwanted` says is unwanted, and
+    /// a tap to one, so the keys go to the client: a profile's bindings for
+    /// a part of the desktop that is off.
+    #[must_use]
+    pub fn without(mut self, unwanted: impl Fn(&Action) -> bool) -> Self {
+        self.keys.retain(|(_, action)| !unwanted(action));
+        self.tap.take_if(|action| unwanted(action));
         self
     }
 
@@ -597,6 +626,10 @@ mod tests {
             .while_locked()
         );
         assert!(!Action::Reload.while_locked());
+        assert!(
+            !Action::Volume(VolumeKey::Up).while_locked(),
+            "the shell is told nothing at the lock screen"
+        );
     }
 
     #[test]
@@ -634,6 +667,7 @@ mod tests {
             Action::CycleLayout { forward: true },
             Action::Layout(2),
             Action::RevokeAgents,
+            Action::Volume(VolumeKey::Up),
         ];
         for action in &on_it {
             assert!(action.on_focused_window(), "{action:?}");
@@ -648,6 +682,32 @@ mod tests {
                 "{action:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_part_of_the_desktop_turned_off_takes_its_bindings_and_its_tap_with_it() {
+        let up = Chord {
+            mods: Mods::default(),
+            key: Keysym::XF86_AudioRaiseVolume,
+        };
+        let bindings = Bindings::classic()
+            .bind(up, Action::Volume(VolumeKey::Up))
+            .bind_tap(Action::Volume(VolumeKey::Mute))
+            .without(|action| matches!(action, Action::Volume(_)));
+        assert_eq!(
+            bindings.resolve(Mods::default(), &[Keysym::XF86_AudioRaiseVolume]),
+            None
+        );
+        assert_eq!(bindings.tap(), None);
+        assert_eq!(
+            bindings.resolve(Mods::alt(), &[Keysym::F4]),
+            Some(&Action::Close),
+            "the rest kept"
+        );
+        let kept = Bindings::classic()
+            .bind_tap(Action::StartMenu)
+            .without(|action| matches!(action, Action::Volume(_)));
+        assert_eq!(kept.tap(), Some(&Action::StartMenu));
     }
 
     #[test]

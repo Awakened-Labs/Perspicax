@@ -2911,6 +2911,33 @@ fn a_change_from_elsewhere_shows_the_volume_a_moment_and_one_on_the_panel_does_n
 #[cfg(feature = "capture")]
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn a_volume_key_steps_the_volume_and_shows_it() {
+    let sound = SoundServer::start("keys");
+    sound.pactl(&["set-sink-volume", "one", "40%"]);
+    let session = Session::start("shell-keys", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "keys",
+        OPEN_AND_MUTE,
+        Some(sound.socket()),
+    );
+    session.wait_for(|facts| panels(facts).len() == 1);
+    until_colour(&session, (1258, 800 - 20), INK);
+    session.perform(Action::Volume(perspicax_policy::VolumeKey::Up));
+    sound.until(|sound| {
+        sound
+            .pactl(&["get-sink-volume", "one"])
+            .contains("/  45% /")
+    });
+    session.wait_for(|facts| osd(facts).is_some());
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
 fn with_no_mixer_on_the_panel_the_volume_is_still_shown_and_clicks_go_through_it() {
     use std::time::{Duration, Instant};
 

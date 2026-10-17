@@ -18,9 +18,9 @@
 
   <description summary="the compositor's channel to its desktop shell">
     What passes between perspicax and perspicax-shell that no standard
-    protocol carries: the person asked for a menu or a pie, the config
-    changed, the session should end, the keyboard's layouts and which is in
-    use.
+    protocol carries: the person asked for a menu or a pie, or pressed a
+    volume key, the config changed, the session should end, the keyboard's
+    layouts and which is in use.
 
     Everything else the shell does, it does as any other client would.
     Its wallpaper, panel and menus are layer-shell surfaces, its taskbar
@@ -34,7 +34,7 @@
     is locked the compositor sends nothing and ignores every request.
   </description>
 
-  <interface name="perspicax_shell_v1" version="3">
+  <interface name="perspicax_shell_v1" version="4">
     <description summary="a shell's binding to the compositor">
       Bound once by a shell. Several shells may bind it; each is told the
       same things.
@@ -152,6 +152,27 @@
       <arg name="x" type="int" summary="from the monitor's left edge"/>
       <arg name="y" type="int" summary="from the monitor's top edge"/>
       <arg name="name" type="string" summary="which pie, as [shell.pie.menus] names it"/>
+    </event>
+
+    <!-- Version 4: the volume keys. -->
+
+    <enum name="volume_key" since="4">
+      <description summary="what a volume key asks of the sound"/>
+      <entry name="up" value="0" summary="the output's volume up a step"/>
+      <entry name="down" value="1" summary="the output's volume down a step"/>
+      <entry name="mute" value="2" summary="the output muted, or its sound back"/>
+      <entry name="mic_mute" value="3" summary="the microphone muted, or back"/>
+    </enum>
+
+    <event name="volume" since="4">
+      <description summary="the person pressed a volume key">
+        A binding asked for the sound to change: XF86AudioRaiseVolume,
+        say. A shell changes the default output's volume by its step, or
+        mutes it or brings its sound back, or the default input's, as its
+        mixer would, and may show what it did. The compositor holds no
+        volume of its own; the sound server is the shell's to ask.
+      </description>
+      <arg name="key" type="uint" enum="volume_key" summary="what to change"/>
     </event>
   </interface>
 </protocol>

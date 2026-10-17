@@ -10,12 +10,13 @@
 //! because something else set the volume meanwhile, is believed again
 //! after [`ASKED_STANDS`].
 //!
-//! The thread runs while a panel holds the mixer, or while the volume is
-//! to be shown on the screen when it changes (`[shell.mixer] osd`): it is
-//! shown when the output, its volume or its muting is heard to change from
-//! what was last heard, but never for a change the shell itself asked for
-//! in the last [`QUIET_FOR`], which the panel or the mixer shows already,
-//! nor while the mixer is open.
+//! The thread runs while the shell does: the volume keys are bound in
+//! perspicax, out of the shell's sight, and are the shell's to carry out
+//! whatever it shows. The volume is shown on the screen when it changes
+//! (`[shell.mixer] osd`): when the output, its volume or its muting is
+//! heard to change from what was last heard, but never for a change the
+//! panel or the mixer asked for in the last [`QUIET_FOR`], which they show
+//! already, nor while the mixer is open. A volume key's change is shown.
 
 use std::{
     path::PathBuf,
@@ -28,6 +29,8 @@ use perspicax_config::{
 };
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 use wayland_client::protocol::wl_surface;
+
+use perspicax_protocols::shell::v1::client::perspicax_shell_v1::VolumeKey;
 
 use super::{App, kept::Keeper};
 use crate::{
@@ -102,39 +105,43 @@ impl Audio {
         }
     }
 
-    /// Run the thread if `shell`'s panel holds the mixer, or the volume is
-    /// to be shown, and stop it if not. Whether it stopped.
-    fn follow(&mut self, shell: &Shell) -> bool {
+    /// Follow the sound as `shell` says to show it, starting the thread
+    /// if it is not running.
+    fn follow(&mut self, shell: &Shell) {
         self.mixer = shell.mixer.clone();
         let held = shell
             .panel
             .as_ref()
             .is_some_and(|panel| panel.items.contains(&Item::Mixer));
-        let wanted = held || self.mixer.osd;
-        let levels = wanted && self.mixer.panel.contains(&Piece::Levels);
+        let levels = held && self.mixer.panel.contains(&Piece::Levels);
         if let Some(running) = self.running.as_ref().filter(|_| levels != self.levels) {
             running.ask(Ask::Levels(levels));
         }
         self.levels = levels;
-        match (wanted, &self.running) {
-            (true, None) => {
-                self.started += 1;
-                self.metering.clear();
-                let (news, started) = (self.news.clone(), self.started);
-                let running = crate::audio::start(self.server.clone(), move |told| {
-                    news.send((started, told)).is_ok()
-                });
-                running.ask(Ask::Levels(levels));
-                self.running = Some(running);
-                false
-            }
-            (false, Some(_)) => {
-                self.running = None;
-                self.facts = None;
-                true
-            }
-            _ => false,
+        if self.running.is_none() {
+            self.started += 1;
+            self.metering.clear();
+            let (news, started) = (self.news.clone(), self.started);
+            let running = crate::audio::start(self.server.clone(), move |told| {
+                news.send((started, told)).is_ok()
+            });
+            running.ask(Ask::Levels(levels));
+            self.running = Some(running);
         }
+    }
+
+    /// A volume key was pressed: change the sound as the mixer would, and
+    /// unlike a change the panel makes, show it.
+    pub(super) fn key(&mut self, key: VolumeKey) {
+        let output = Whose::Side(Side::Output);
+        match key {
+            VolumeKey::Up => self.change(Change::By(1), output),
+            VolumeKey::Down => self.change(Change::By(-1), output),
+            VolumeKey::Mute => self.mute(output),
+            VolumeKey::MicMute => self.mute(Whose::Side(Side::Input)),
+            other => tracing::info!(?other, "a volume key this shell does not know"),
+        }
+        self.asked_at = None;
     }
 
     fn ask(&self, ask: Ask) {
@@ -312,12 +319,9 @@ fn loudness(facts: &Facts, target: &Target) -> Option<Level> {
 }
 
 impl App {
-    /// Run the sound's thread if the panel `shell` describes holds the
-    /// mixer, and stop it if not.
+    /// Follow the sound as `shell` says to show it.
     pub(super) fn follow_audio(&mut self, shell: &Shell) {
-        if self.audio.follow(shell) {
-            self.heard();
-        }
+        self.audio.follow(shell);
     }
 
     /// News from start `started` of the sound's thread.
@@ -614,6 +618,28 @@ mod tests {
             audio.worth_showing(Some(shown(30, false))),
             None,
             "turned off"
+        );
+    }
+
+    #[test]
+    fn a_volume_key_steps_as_the_wheel_does_and_its_change_is_shown() {
+        let mut audio = at(24);
+        audio.worth_showing(Some(shown(24, false)));
+        audio.key(VolumeKey::Up);
+        assert_eq!(asked(&audio), Some(25), "to the next step");
+        audio.key(VolumeKey::Up);
+        assert_eq!(asked(&audio), Some(30), "from what was asked, held down");
+        audio.key(VolumeKey::Down);
+        assert_eq!(asked(&audio), Some(25));
+        assert_eq!(
+            audio.worth_showing(Some(shown(25, false))),
+            Some(shown(25, false)),
+            "shown, unlike the panel's own"
+        );
+        audio.key(VolumeKey::Mute);
+        assert_eq!(
+            audio.worth_showing(Some(shown(25, true))),
+            Some(shown(25, true))
         );
     }
 

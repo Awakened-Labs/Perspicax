@@ -605,6 +605,9 @@ pub enum Told {
     /// The pie of this name, on the monitor of this name, at this point on
     /// it.
     PieMenu(Option<String>, i32, i32, String),
+    /// A volume key, or one this client's protocol does not know, by its
+    /// number.
+    Volume(Result<perspicax_shell_v1::VolumeKey, u32>),
     Reconfigure,
 }
 
@@ -1892,6 +1895,12 @@ impl Desk {
     /// Bind the shell channel, as perspicax-shell does. Panics if it is not
     /// advertised.
     pub fn bind_shell(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.bind_shell_up_to(globals, qh, 4);
+    }
+
+    /// Bind the channel as a shell from before the volume keys were in it
+    /// would.
+    pub fn bind_shell_v3(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
         self.bind_shell_up_to(globals, qh, 3);
     }
 
@@ -2144,6 +2153,13 @@ impl Dispatch<PerspicaxShellV1, ()> for Desk {
             Event::PieMenu { output, x, y, name } => {
                 let output = output.and_then(|output| desk.output_name(&output));
                 desk.told.push(Told::PieMenu(output, x, y, name));
+            }
+            Event::Volume { key } => {
+                let key = match key {
+                    WEnum::Value(key) => Ok(key),
+                    WEnum::Unknown(number) => Err(number),
+                };
+                desk.told.push(Told::Volume(key));
             }
             Event::Reconfigure => desk.told.push(Told::Reconfigure),
             Event::Finished => desk.shell_finished = true,
