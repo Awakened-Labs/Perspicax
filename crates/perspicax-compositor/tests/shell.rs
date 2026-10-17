@@ -2565,6 +2565,92 @@ fn a_device_pressed_in_the_mixer_becomes_the_default_on_its_side() {
     shell.stop_with(session);
 }
 
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn a_program_playing_is_set_and_moved_to_another_output_from_the_mixer() {
+    let mut sound = SoundServer::start("mixer-program");
+    let silence = std::fs::File::open("/dev/zero").expect("/dev/zero");
+    let player = sound
+        .command("paplay")
+        .args(["--raw", "--client-name=Tune"])
+        .stdin(silence)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("paplay, which a desktop with sound has");
+    sound.daemons.push(player);
+    sound.until(|sound| sound.pactl(&["list", "sink-inputs"]).contains("Tune"));
+    let session = Session::start("shell-mixer-program", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "mixer-program",
+        OPEN_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    until_colour(&session, (1258, 800 - 20), INK);
+    click(
+        &session,
+        panel,
+        (1280.0 - 30.0 - 15.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Left,
+    );
+    // Its row is under the outputs' (a title, the controls, "one" and
+    // "two"), the input's (a title and the controls), and the programs'
+    // title, 8 between each section: 1 of edge and 12 of room, then 22,
+    // 32 and 28 twice, 8, 22 and 32, 8 and 22.
+    let row = 13.0 + 22.0 + 32.0 + 2.0 * 28.0 + 8.0 + 22.0 + 32.0 + 8.0 + 22.0;
+    let facts = session
+        .wait_for(|facts| mixer(facts).is_some_and(|(_, rect)| rect.y1 - rect.y0 > row + 60.0));
+    let (surface, rect) = mixer(&facts).expect("waited for");
+    let track = (rect.x0 + 49.0 + 7.0, rect.x1 - 13.0 - 48.0 - 8.0 - 7.0);
+    let slider = rect.y0 + row + 28.0 + 16.0;
+    click(
+        &session,
+        surface,
+        ((track.0 + track.1) / 2.0, slider),
+        PointerButton::Left,
+    );
+    sound.until(|sound| sound.pactl(&["list", "sink-inputs"]).contains("/  50% /"));
+    click(
+        &session,
+        surface,
+        (rect.x0 + 100.0, rect.y0 + row + 14.0),
+        PointerButton::Left,
+    );
+    // Unfolded, it grows away from the panel by an output apiece.
+    let facts = session
+        .wait_for(|facts| mixer(facts).is_some_and(|(_, grown)| grown.y0 <= rect.y0 - 2.0 * 28.0));
+    let (_, rect) = mixer(&facts).expect("waited for");
+    let two = rect.y0 + row + 28.0 + 32.0 + 28.0 + 14.0;
+    click(
+        &session,
+        surface,
+        (rect.x0 + 100.0, two),
+        PointerButton::Left,
+    );
+    let index = sound
+        .pactl(&["list", "short", "sinks"])
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split('\t');
+            let index = fields.next()?;
+            (fields.next()? == "two").then(|| index.to_owned())
+        })
+        .expect("two among the sinks");
+    sound.until(|sound| {
+        sound
+            .pactl(&["list", "short", "sink-inputs"])
+            .lines()
+            .any(|line| line.split('\t').nth(1) == Some(index.as_str()))
+    });
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
 /// A program's status icon, served as a program serves one: a title, a
 /// picture of magenta, and a menu of one item, Quit. What it is asked is
 /// kept, to be waited for.

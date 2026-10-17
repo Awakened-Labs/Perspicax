@@ -24,6 +24,10 @@
 //! them. A card that has no such sink within [`CHOOSE_WITHIN`] is given up
 //! on, and that is told.
 //!
+//! What programs play, their streams, is read and followed as the devices
+//! are, the shell's own among them: the shell leaves those out by the
+//! number the server gives its client.
+//!
 //! While the moving bars are wanted, and something plays through the
 //! default output, its monitor is recorded, one channel of floats, and its
 //! spectrum told (see `levels`). Recording is what a VU meter does to a
@@ -42,10 +46,11 @@ use std::{
 
 use pulseaudio::protocol::{
     AuthParams, CardInfo, ChannelMap, ChannelVolume, Command, GetCardInfo, GetSinkInfo,
-    GetSourceInfo, MAX_VERSION, Prop, Props, PulseError, RecordStreamParams, SampleFormat,
-    SampleSpec, SetCardProfileParams, SetDeviceMuteParams, SetDeviceVolumeParams, SetPortParams,
-    SinkInfo, SinkState, SourceInfo, SubscriptionEvent, SubscriptionEventFacility,
-    SubscriptionEventType, SubscriptionMask, Volume,
+    GetSourceInfo, MAX_VERSION, MoveStreamParams, Prop, Props, PulseError, RecordStreamParams,
+    SampleFormat, SampleSpec, SetCardProfileParams, SetDeviceMuteParams, SetDeviceVolumeParams,
+    SetPortParams, SetStreamMuteParams, SetStreamVolumeParams, SinkInfo, SinkInputInfo, SinkState,
+    SourceInfo, SubscriptionEvent, SubscriptionEventFacility, SubscriptionEventType,
+    SubscriptionMask, Volume,
     port_info::{PortAvailable, PortDirection, PortType},
     stream::{BufferAttr, StreamFlags},
 };
@@ -60,7 +65,9 @@ use super::{
     levels::{HOP, RATE, Spectrum},
     wire::{Expect, Incoming, Reply, Wire},
 };
-use crate::model::sound::{Card, Facts, Kind, Plan, Plugged, Port, Profile, Side, Sink, Source};
+use crate::model::sound::{
+    Card, Facts, Kind, Plan, Plugged, Port, Profile, Side, Sink, Source, Stream,
+};
 
 /// The first pause before trying a server again, and the longest.
 pub(super) const PAUSE_FIRST: Duration = Duration::from_millis(500);
@@ -302,39 +309,37 @@ impl Client {
             }
             return;
         }
+        let mute = |name: String, on| SetDeviceMuteParams {
+            device_index: None,
+            device_name: CString::new(name).ok(),
+            mute: on,
+        };
+        let set = |name: String, volume: &[u32]| SetDeviceVolumeParams {
+            device_index: None,
+            device_name: CString::new(name).ok(),
+            volume: channels(volume),
+        };
         let command = match ask {
-            Ask::Mute { target, on } => {
-                let (name, sink) = match target {
-                    Target::Sink(name) => (name, true),
-                    Target::Source(name) => (name, false),
-                };
-                let mute = SetDeviceMuteParams {
-                    device_index: None,
-                    device_name: CString::new(name).ok(),
-                    mute: on,
-                };
-                if sink {
-                    Command::SetSinkMute(mute)
-                } else {
-                    Command::SetSourceMute(mute)
+            Ask::Mute { target, on } => match target {
+                Target::Sink(name) => Command::SetSinkMute(mute(name, on)),
+                Target::Source(name) => Command::SetSourceMute(mute(name, on)),
+                Target::Stream(index) => {
+                    Command::SetSinkInputMute(SetStreamMuteParams { index, mute: on })
                 }
-            }
-            Ask::Volume { target, volume } => {
-                let (name, sink) = match target {
-                    Target::Sink(name) => (name, true),
-                    Target::Source(name) => (name, false),
-                };
-                let set = SetDeviceVolumeParams {
-                    device_index: None,
-                    device_name: CString::new(name).ok(),
+            },
+            Ask::Volume { target, volume } => match target {
+                Target::Sink(name) => Command::SetSinkVolume(set(name, &volume)),
+                Target::Source(name) => Command::SetSourceVolume(set(name, &volume)),
+                Target::Stream(index) => Command::SetSinkInputVolume(SetStreamVolumeParams {
+                    index,
                     volume: channels(&volume),
-                };
-                if sink {
-                    Command::SetSinkVolume(set)
-                } else {
-                    Command::SetSourceVolume(set)
-                }
-            }
+                }),
+            },
+            Ask::Move { stream, sink } => Command::MoveSinkInput(MoveStreamParams {
+                index: Some(stream),
+                device_index: Some(sink),
+                device_name: None,
+            }),
             Ask::Choose(_) | Ask::Levels(_) => return,
         };
         if let Err(error) = link.wire.send(&command, Expect::Done) {
@@ -514,17 +519,24 @@ impl Link {
                 let mask = SubscriptionMask::SINK
                     | SubscriptionMask::SOURCE
                     | SubscriptionMask::CARD
-                    | SubscriptionMask::SERVER;
+                    | SubscriptionMask::SERVER
+                    | SubscriptionMask::SINK_INPUT;
                 self.wire.send(&Command::Subscribe(mask), Expect::Done)?;
-                self.first = 4;
+                self.first = 5;
                 self.wire.send(&Command::GetServerInfo, Expect::Server)?;
                 self.wire.send(&Command::GetSinkInfoList, Expect::Sinks)?;
                 self.wire
                     .send(&Command::GetSourceInfoList, Expect::Sources)?;
                 self.wire.send(&Command::GetCardInfoList, Expect::Cards)?;
+                self.wire
+                    .send(&Command::GetSinkInputInfoList, Expect::Streams)?;
                 false
             }
-            Reply::Named | Reply::Done => false,
+            Reply::Named(client) => {
+                self.facts.client = Some(client);
+                true
+            }
+            Reply::Done => false,
             Reply::Recording(made) => {
                 let Expect::Recording(id) = expect else {
                     return Ok(());
@@ -610,6 +622,26 @@ impl Link {
                     }
                 }
             }
+            Reply::Streams(streams) => {
+                self.read_first();
+                self.facts.streams = streams.iter().map(stream).collect();
+                true
+            }
+            Reply::Stream(read) => {
+                let read = stream(&read);
+                match self
+                    .facts
+                    .streams
+                    .iter_mut()
+                    .find(|had| had.index == read.index)
+                {
+                    Some(had) => std::mem::replace(had, read) != *had,
+                    None => {
+                        self.facts.streams.push(read);
+                        true
+                    }
+                }
+            }
         };
         self.changed |= changed;
         Ok(())
@@ -625,7 +657,7 @@ impl Link {
         // A list refused is read as empty: the rest is told all the same.
         if matches!(
             expect,
-            Expect::Server | Expect::Sinks | Expect::Sources | Expect::Cards
+            Expect::Server | Expect::Sinks | Expect::Sources | Expect::Cards | Expect::Streams
         ) {
             self.read_first();
         }
@@ -641,6 +673,10 @@ impl Link {
             }
             Expect::Card(index) if error == PulseError::NoEntity => {
                 self.facts.cards.retain(|card| card.index != index);
+                self.changed = true;
+            }
+            Expect::Stream(index) if error == PulseError::NoEntity => {
+                self.facts.streams.retain(|stream| stream.index != index);
                 self.changed = true;
             }
             _ => tracing::warn!("the sound server refused {expect:?}: {error:?}"),
@@ -687,6 +723,14 @@ impl Link {
                 }),
                 Expect::Card(index),
             ),
+            (Facility::SinkInput, SubscriptionEventType::Removed, Some(index)) => {
+                self.facts.streams.retain(|stream| stream.index != index);
+                self.changed = true;
+                return Ok(());
+            }
+            (Facility::SinkInput, _, Some(index)) => {
+                (Command::GetSinkInputInfo(index), Expect::Stream(index))
+            }
             (Facility::Server, ..) => (Command::GetServerInfo, Expect::Server),
             _ => return Ok(()),
         };
@@ -831,6 +875,27 @@ fn source(info: &SourceInfo) -> Source {
         port: ports.get(info.active_port).cloned(),
         ports,
         monitor: info.monitor_of_sink_index.is_some(),
+    }
+}
+
+/// A program's stream, as the shell keeps it.
+fn stream(info: &SinkInputInfo) -> Stream {
+    Stream {
+        index: info.index,
+        client: info.client_index,
+        sink: info.sink_index,
+        application: prop(&info.props, c"application.name"),
+        binary: prop(&info.props, c"application.process.binary"),
+        media: text(&info.name),
+        icon: prop(&info.props, c"application.icon_name"),
+        id: prop(&info.props, c"application.id"),
+        volume: info
+            .cvolume
+            .channels()
+            .iter()
+            .map(|volume| volume.as_u32())
+            .collect(),
+        muted: info.muted,
     }
 }
 
@@ -1100,6 +1165,86 @@ mod tests {
         let output = facts.output().expect("the default");
         assert_eq!(output.volume, [0x8000, 0x4000]);
         assert_eq!(output.level().percent, 50);
+    }
+
+    /// The facts once `ready` says they are as awaited.
+    fn until_heard(heard: &Heard, ready: impl Fn(&Facts) -> bool) -> Facts {
+        loop {
+            let facts = heard.facts();
+            if ready(&facts) {
+                return facts;
+            }
+        }
+    }
+
+    #[test]
+    fn a_programs_stream_is_read_and_followed_and_the_shells_number_told() {
+        let fake = Fake::start("streams");
+        fake.plays(40, 12, Some("Firefox"), Some("firefox"));
+        let (_running, heard) = follow(&fake);
+        let facts = heard.facts();
+        assert_eq!(facts.client, Some(7), "the shell's own");
+        let firefox = &facts.streams[0];
+        assert_eq!(
+            (firefox.index, firefox.client, firefox.sink, firefox.name()),
+            (40, Some(12), 0, "Firefox")
+        );
+        assert_eq!(firefox.binary.as_deref(), Some("firefox"));
+        assert_eq!(firefox.level().percent, 100);
+        fake.plays(41, 13, None, Some("mpv"));
+        let facts = until_heard(&heard, |facts| facts.streams.len() == 2);
+        assert_eq!(facts.streams[1].name(), "mpv", "a new one read");
+        fake.stops(40);
+        let facts = until_heard(&heard, |facts| facts.streams.len() == 1);
+        assert_eq!(facts.streams[0].index, 41, "an ended one dropped");
+    }
+
+    #[test]
+    fn nothing_is_told_until_every_list_is_read() {
+        let fake = Fake::start("held");
+        fake.hold_streams();
+        fake.plays(40, 12, Some("Firefox"), None);
+        let (_running, heard) = follow(&fake);
+        until_asked(&fake, "streams");
+        assert!(
+            heard.0.recv_timeout(Duration::from_millis(200)).is_err(),
+            "nothing told while the streams are still to come"
+        );
+        fake.answer_streams();
+        assert_eq!(heard.facts().streams.len(), 1, "then everything at once");
+    }
+
+    #[test]
+    fn a_streams_mute_volume_and_move_reach_the_server_for_it_alone() {
+        let fake = Fake::start("stream-asks");
+        fake.plays(40, 12, Some("Firefox"), None);
+        fake.plays(41, 13, Some("mpv"), None);
+        let (running, heard) = follow(&fake);
+        heard.facts();
+        running.ask(Ask::Mute {
+            target: Target::Stream(40),
+            on: true,
+        });
+        running.ask(Ask::Volume {
+            target: Target::Stream(40),
+            volume: vec![0x8000, 0x8000],
+        });
+        running.ask(Ask::Move {
+            stream: 40,
+            sink: 1,
+        });
+        let facts = until_heard(&heard, |facts| facts.streams[0].sink == 1);
+        let (firefox, mpv) = (&facts.streams[0], &facts.streams[1]);
+        assert_eq!(
+            (firefox.muted, firefox.level().percent),
+            (true, 50),
+            "muted and set"
+        );
+        assert_eq!((mpv.sink, mpv.muted, mpv.level().percent), (0, false, 100));
+        let asked = fake.asked();
+        for line in ["mute stream 40", "volume stream 40", "move 40 to 1"] {
+            assert!(asked.iter().any(|asked| asked == line), "{line}: {asked:?}");
+        }
     }
 
     #[test]

@@ -28,8 +28,8 @@ use std::{
 
 use pulseaudio::protocol::{
     self, AuthReply, CardInfo, CardPortInfo, CardProfileInfo, ChannelMap, ChannelVolume, Command,
-    CreateRecordStreamReply, MAX_VERSION, Props, PulseError, SampleSpec, ServerInfo,
-    SetClientNameReply, SinkInfo, SinkState, SourceInfo, SubscriptionEvent,
+    CreateRecordStreamReply, MAX_VERSION, Prop, Props, PulseError, SampleSpec, ServerInfo,
+    SetClientNameReply, SinkInfo, SinkInputInfo, SinkState, SourceInfo, SubscriptionEvent,
     SubscriptionEventFacility, SubscriptionEventType, SubscriptionMask, Volume,
     port_info::{PortAvailable, PortDirection, PortInfo, PortType},
 };
@@ -64,6 +64,12 @@ struct Shared {
     /// The sources are refused, as a server with none to list might.
     sources_refused: bool,
     cards: Vec<CardInfo>,
+    /// What programs play.
+    streams: Vec<SinkInputInfo>,
+    /// The list of them is not answered until the test says, and the
+    /// request held, by its sequence number.
+    streams_held: bool,
+    held: Option<u32>,
     default: CString,
     default_source: CString,
     /// What was asked, in order: one line each.
@@ -101,6 +107,9 @@ impl Fake {
             sources: vec![mic()],
             sources_refused: false,
             cards: vec![built_in(), hdmi()],
+            streams: Vec::new(),
+            streams_held: false,
+            held: None,
             default: CString::new(SPEAKERS).expect("a name"),
             default_source: CString::new(MIC).expect("a name"),
             asked: Vec::new(),
@@ -161,6 +170,87 @@ impl Fake {
             SinkState::Idle
         };
         shared.event(SubscriptionEventFacility::Sink, Some(index));
+    }
+
+    /// Have the client numbered `client` play a stream of `index` into the
+    /// speakers, its program called `application`, its file `binary`.
+    pub(super) fn plays(
+        &self,
+        index: u32,
+        client: u32,
+        application: Option<&str>,
+        binary: Option<&str>,
+    ) {
+        let mut props = Props::new();
+        if let Some(application) = application {
+            props.set(
+                Prop::ApplicationName,
+                &*CString::new(application).expect("a name"),
+            );
+        }
+        if let Some(binary) = binary {
+            props.set(
+                Prop::ApplicationProcessBinary,
+                &*CString::new(binary).expect("a name"),
+            );
+        }
+        let mut cvolume = ChannelVolume::empty();
+        cvolume.push(Volume::from_u32_clamped(NORM));
+        cvolume.push(Volume::from_u32_clamped(NORM));
+        let mut shared = self.lock();
+        shared.streams.push(SinkInputInfo {
+            index,
+            name: c"AudioStream".to_owned(),
+            client_index: Some(client),
+            sink_index: 0,
+            sample_spec: SampleSpec {
+                channels: 2,
+                ..SampleSpec::default()
+            },
+            channel_map: ChannelMap::stereo(),
+            cvolume,
+            props,
+            has_volume: true,
+            volume_writable: true,
+            ..SinkInputInfo::default()
+        });
+        shared.told(
+            SubscriptionEventFacility::SinkInput,
+            SubscriptionEventType::New,
+            Some(index),
+        );
+    }
+
+    /// Answer no request for the list of streams until
+    /// [`Fake::answer_streams`].
+    pub(super) fn hold_streams(&self) {
+        self.lock().streams_held = true;
+    }
+
+    /// Answer the request for the list of streams held back.
+    pub(super) fn answer_streams(&self) {
+        let mut shared = self.lock();
+        let Shared {
+            streams,
+            held,
+            writer,
+            version,
+            ..
+        } = &mut *shared;
+        let seq = held.take().expect("a request held");
+        let writer = writer.as_mut().expect("a client");
+        protocol::write_reply_message(writer, seq, &streams.clone(), *version).expect("written");
+    }
+
+    /// End the stream of `index`.
+    pub(super) fn stops(&self, index: u32) {
+        let mut shared = self.lock();
+        shared.streams.retain(|stream| stream.index != index);
+        shared.told(
+            SubscriptionEventFacility::SinkInput,
+            SubscriptionEventType::Removed,
+            Some(index),
+        );
     }
 
     /// The channel the client records on, while it does.
@@ -247,6 +337,7 @@ impl Shared {
             SubscriptionEventFacility::Source => SubscriptionMask::SOURCE,
             SubscriptionEventFacility::Card => SubscriptionMask::CARD,
             SubscriptionEventFacility::Server => SubscriptionMask::SERVER,
+            SubscriptionEventFacility::SinkInput => SubscriptionMask::SINK_INPUT,
             _ => SubscriptionMask::ALL,
         };
         if !self.mask.contains(subscribed) {
@@ -318,12 +409,15 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
         let version = shared.version;
         let (mut changed, mut negotiated, mut profile, mut defaulted) = (None, None, None, false);
         let mut subscribed = None;
-        let mut changed_source = None;
+        let (mut changed_source, mut changed_stream) = (None, None);
         let Shared {
             sinks,
             sources,
             sources_refused,
             cards,
+            streams,
+            streams_held,
+            held,
             default,
             default_source,
             asked,
@@ -534,6 +628,60 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
                 recording.take_if(|recording| *recording == channel);
                 protocol::write_ack_message(writer, seq)
             }
+            Command::GetSinkInputInfoList if *streams_held => {
+                asked.push("streams".to_owned());
+                *held = Some(seq);
+                Ok(())
+            }
+            Command::GetSinkInputInfoList => {
+                asked.push("streams".to_owned());
+                protocol::write_reply_message(writer, seq, &streams.clone(), version)
+            }
+            Command::GetSinkInputInfo(index) => {
+                asked.push(format!("stream {index}"));
+                match streams.iter().find(|stream| stream.index == index) {
+                    Some(stream) => protocol::write_reply_message(writer, seq, stream, version),
+                    None => protocol::write_error(writer, seq, &PulseError::NoEntity),
+                }
+            }
+            Command::SetSinkInputMute(mute) => {
+                asked.push(format!("mute stream {}", mute.index));
+                match streams.iter_mut().find(|stream| stream.index == mute.index) {
+                    Some(stream) => {
+                        stream.muted = mute.mute;
+                        changed_stream = Some(stream.index);
+                        protocol::write_ack_message(writer, seq)
+                    }
+                    None => protocol::write_error(writer, seq, &PulseError::NoEntity),
+                }
+            }
+            Command::SetSinkInputVolume(set) => {
+                asked.push(format!("volume stream {}", set.index));
+                match streams.iter_mut().find(|stream| stream.index == set.index) {
+                    Some(stream) => {
+                        stream.cvolume = set.volume;
+                        changed_stream = Some(stream.index);
+                        protocol::write_ack_message(writer, seq)
+                    }
+                    None => protocol::write_error(writer, seq, &PulseError::NoEntity),
+                }
+            }
+            Command::MoveSinkInput(move_to) => {
+                let (index, sink) = (
+                    move_to.index.unwrap_or(u32::MAX),
+                    move_to.device_index.unwrap_or(u32::MAX),
+                );
+                asked.push(format!("move {index} to {sink}"));
+                let stream = streams.iter_mut().find(|stream| stream.index == index);
+                match stream.filter(|_| sinks.iter().any(|had| had.index == sink)) {
+                    Some(stream) => {
+                        stream.sink_index = sink;
+                        changed_stream = Some(index);
+                        protocol::write_ack_message(writer, seq)
+                    }
+                    None => protocol::write_error(writer, seq, &PulseError::NoEntity),
+                }
+            }
             Command::SetDefaultSource(name) => {
                 asked.push(format!("default source {}", name.to_string_lossy()));
                 *default_source = name;
@@ -565,6 +713,9 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
         }
         if let Some(index) = changed_source {
             shared.event(SubscriptionEventFacility::Source, Some(index));
+        }
+        if let Some(index) = changed_stream {
+            shared.event(SubscriptionEventFacility::SinkInput, Some(index));
         }
         if let Some((index, profile)) = profile {
             shared.set_profile(index, &profile);

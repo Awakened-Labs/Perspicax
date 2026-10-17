@@ -2,8 +2,9 @@
 //! what it reads, shown on the panels; and a press or a turn of the wheel
 //! on one of the mixer's pieces, asked of the server.
 //!
-//! The wheel moves the default output's volume a step a notch, from where
-//! it was last asked to be until the server says it is there, so that a
+//! The wheel moves the default output's volume a step a notch, or a
+//! program's in the mixer, from where it was last asked to be until the
+//! server says it is there, so that a
 //! quick turn of several notches goes as far as it was turned rather than
 //! one step from where the server last was. A server that never says so,
 //! because something else set the volume meanwhile, is believed again
@@ -27,7 +28,7 @@ use crate::{
     layout::panel::{Part, Playing},
     model::{
         Button,
-        sound::{self, Change, Facts, Side},
+        sound::{self, Change, Facts, Level, Side, Whose},
     },
 };
 
@@ -55,9 +56,9 @@ pub(super) struct Audio {
     mixer: Mixer,
     /// What the wheel turned short of a notch.
     wheel: f64,
-    /// The volume last asked of a sink, by its name, and when: what the
-    /// next step is from, until the server says the sink is there.
-    asked: Option<(String, u32, Instant)>,
+    /// The volume last asked of a device or a program, and when: what the
+    /// next step is from, until the server says it is there.
+    asked: Option<(Target, u32, Instant)>,
 }
 
 impl Audio {
@@ -114,6 +115,21 @@ impl Audio {
         }
     }
 
+    /// Mute `whose`, or bring its sound back.
+    pub(super) fn mute(&self, whose: Whose) {
+        if let Some((target, _, level)) = self.facts().and_then(|facts| target(facts, whose)) {
+            self.ask(Ask::Mute {
+                target,
+                on: !level.muted,
+            });
+        }
+    }
+
+    /// Move the program playing `stream` to the sink numbered `sink`.
+    pub(super) fn move_stream(&self, stream: u32, sink: u32) {
+        self.ask(Ask::Move { stream, sink });
+    }
+
     /// Move `side` to the device keyed `key`, as its plan says.
     pub(super) fn choose(&self, side: Side, key: &str) {
         if let Some(plan) = self.facts().and_then(|facts| facts.plan(side, key)) {
@@ -145,16 +161,9 @@ impl Audio {
             News::Levels(_) => return,
         };
         let facts = self.facts.as_deref();
-        self.asked.take_if(|(sink, asked, _)| {
+        self.asked.take_if(|(target, asked, _)| {
             facts.is_none_or(|facts| {
-                facts
-                    .sinks
-                    .iter()
-                    .any(|had| had.name == *sink && had.level().percent == *asked)
-                    || facts
-                        .sources
-                        .iter()
-                        .any(|had| had.name == *sink && had.level().percent == *asked)
+                loudness(facts, target).is_none_or(|level| level.percent == *asked)
             })
         });
     }
@@ -168,25 +177,15 @@ impl Audio {
         whole as i32
     }
 
-    /// Set the volume of the default on `side` to what `change` makes of
-    /// it.
-    pub(super) fn change(&mut self, change: Change, side: Side) {
-        let Some(facts) = self.facts.as_deref() else {
-            return;
-        };
-        let device = match side {
-            Side::Output => facts
-                .output()
-                .map(|sink| (&sink.name, &sink.volume, sink.level())),
-            Side::Input => facts
-                .input()
-                .map(|source| (&source.name, &source.volume, source.level())),
-        };
-        let Some((name, volume, level)) = device else {
+    /// Set the volume of `whose` to what `change` makes of it.
+    pub(super) fn change(&mut self, change: Change, whose: Whose) {
+        let Some((target, volume, level)) =
+            self.facts.as_deref().and_then(|facts| target(facts, whose))
+        else {
             return;
         };
         let now = match &self.asked {
-            Some((device, asked, at)) if device == name && at.elapsed() < ASKED_STANDS => *asked,
+            Some((of, asked, at)) if *of == target && at.elapsed() < ASKED_STANDS => *asked,
             _ => level.percent,
         };
         let percent = match change {
@@ -196,13 +195,52 @@ impl Audio {
         if percent == now {
             return;
         }
-        let (name, volume) = (name.clone(), sound::scaled(volume, percent));
-        self.asked = Some((name.clone(), percent, Instant::now()));
-        let target = match side {
-            Side::Output => Target::Sink(name),
-            Side::Input => Target::Source(name),
-        };
+        let volume = sound::scaled(volume, percent);
+        self.asked = Some((target.clone(), percent, Instant::now()));
         self.ask(Ask::Volume { target, volume });
+    }
+}
+
+/// What `whose` is among `facts`, to ask of: what to ask, each channel's
+/// volume, and how loud it is. The shell's own streams are no one's.
+fn target(facts: &Facts, whose: Whose) -> Option<(Target, &[u32], Level)> {
+    match whose {
+        Whose::Side(Side::Output) => facts.output().map(|sink| {
+            let target = Target::Sink(sink.name.clone());
+            (target, sink.volume.as_slice(), sink.level())
+        }),
+        Whose::Side(Side::Input) => facts.input().map(|source| {
+            let target = Target::Source(source.name.clone());
+            (target, source.volume.as_slice(), source.level())
+        }),
+        Whose::App(index) => facts
+            .apps()
+            .find(|stream| stream.index == index)
+            .map(|stream| {
+                let target = Target::Stream(index);
+                (target, stream.volume.as_slice(), stream.level())
+            }),
+    }
+}
+
+/// How loud `target` is among `facts`, if it is there.
+fn loudness(facts: &Facts, target: &Target) -> Option<Level> {
+    match target {
+        Target::Sink(name) => facts
+            .sinks
+            .iter()
+            .find(|sink| sink.name == *name)
+            .map(|sink| sink.level()),
+        Target::Source(name) => facts
+            .sources
+            .iter()
+            .find(|source| source.name == *name)
+            .map(|source| source.level()),
+        Target::Stream(index) => facts
+            .streams
+            .iter()
+            .find(|stream| stream.index == *index)
+            .map(|stream| stream.level()),
     }
 }
 
@@ -255,26 +293,6 @@ impl App {
         self.mixer_heard();
     }
 
-    /// Mute the default on `side`, or bring its sound back.
-    pub(super) fn mute_default(&mut self, side: Side) {
-        let Some(facts) = self.audio.facts() else {
-            return;
-        };
-        let ask = match side {
-            Side::Output => facts.output().map(|sink| Ask::Mute {
-                target: Target::Sink(sink.name.clone()),
-                on: !sink.muted,
-            }),
-            Side::Input => facts.input().map(|source| Ask::Mute {
-                target: Target::Source(source.name.clone()),
-                on: !source.muted,
-            }),
-        };
-        if let Some(ask) = ask {
-            self.audio.ask(ask);
-        }
-    }
-
     /// `button` went down on the mixer's `piece`, on the panel of the
     /// monitor named `name`; `was_open` says whether the mixer was open,
     /// which the press closed.
@@ -291,9 +309,11 @@ impl App {
             return;
         }
         match (piece, button) {
-            (Piece::Mic, Button::Left | Button::Middle) => self.mute_default(Side::Input),
+            (Piece::Mic, Button::Left | Button::Middle) => {
+                self.audio.mute(Whose::Side(Side::Input));
+            }
             (Piece::Mute, Button::Left) | (_, Button::Middle) => {
-                self.mute_default(Side::Output);
+                self.audio.mute(Whose::Side(Side::Output));
             }
             (Piece::Output, Button::Left) => {
                 let Some(facts) = self.audio.facts() else {
@@ -328,13 +348,13 @@ impl App {
         };
         match self.audio.turned(notches) {
             0 => {}
-            down => self.audio.change(Change::By(-down), side),
+            down => self.audio.change(Change::By(-down), Whose::Side(side)),
         }
     }
 
     /// Change the default output's volume.
     pub(super) fn change_volume(&mut self, change: Change) {
-        self.audio.change(change, Side::Output);
+        self.audio.change(change, Whose::Side(Side::Output));
     }
 }
 
@@ -343,7 +363,9 @@ mod tests {
     use smithay_client_toolkit::reexports::calloop::channel;
 
     use super::*;
-    use crate::model::sound::{NORM, Sink};
+    use crate::model::sound::{NORM, Sink, Stream};
+
+    const OUT: Whose = Whose::Side(Side::Output);
 
     /// The sound with a default output at `percent`, its thread not
     /// running.
@@ -372,6 +394,7 @@ mod tests {
             cards: Vec::new(),
             default_source: None,
             sources: Vec::new(),
+            ..Facts::default()
         }
     }
 
@@ -382,9 +405,9 @@ mod tests {
     #[test]
     fn two_notches_before_the_server_answers_go_two_steps() {
         let mut audio = at(24);
-        audio.change(Change::By(1), Side::Output);
+        audio.change(Change::By(1), OUT);
         assert_eq!(asked(&audio), Some(25));
-        audio.change(Change::By(1), Side::Output);
+        audio.change(Change::By(1), OUT);
         assert_eq!(asked(&audio), Some(30), "from what was asked, not from 24");
         audio.hear(News::Facts(Box::new(facts(25))));
         assert_eq!(asked(&audio), Some(30), "the first answer is not the last");
@@ -395,13 +418,13 @@ mod tests {
     #[test]
     fn an_asked_volume_gives_way_to_the_server_after_a_while_or_with_it_gone() {
         let mut audio = at(24);
-        audio.change(Change::By(1), Side::Output);
+        audio.change(Change::By(1), OUT);
         // Set elsewhere meanwhile: the server never says 25.
         audio.hear(News::Facts(Box::new(facts(60))));
         if let Some((_, _, when)) = &mut audio.asked {
             *when = Instant::now() - ASKED_STANDS;
         }
-        audio.change(Change::By(1), Side::Output);
+        audio.change(Change::By(1), OUT);
         assert_eq!(
             asked(&audio),
             Some(65),
@@ -412,13 +435,57 @@ mod tests {
     }
 
     #[test]
+    fn a_programs_volume_and_mute_are_asked_of_its_stream_but_never_the_shells_own() {
+        let stream = |index, client| Stream {
+            index,
+            client: Some(client),
+            sink: 0,
+            application: None,
+            binary: None,
+            media: "AudioStream".to_owned(),
+            icon: None,
+            id: None,
+            volume: sound::scaled(&[NORM, NORM], 30),
+            muted: false,
+        };
+        let (news, _) = channel::channel();
+        let mut audio = Audio::new(None, news);
+        audio.hear(News::Facts(Box::new(Facts {
+            streams: vec![stream(40, 12), stream(41, 7)],
+            client: Some(7),
+            ..facts(80)
+        })));
+        audio.change(Change::By(1), Whose::App(40));
+        assert_eq!(
+            audio
+                .asked
+                .as_ref()
+                .map(|(target, percent, _)| (target, *percent)),
+            Some((&Target::Stream(40), 35))
+        );
+        audio.asked = None;
+        audio.change(Change::By(1), Whose::App(41));
+        assert_eq!(asked(&audio), None, "the shell's own");
+        let facts = audio.facts().expect("heard");
+        assert_eq!(
+            target(facts, Whose::App(40)).map(|(target, _, level)| (target, level.muted)),
+            Some((Target::Stream(40), false))
+        );
+        assert_eq!(
+            loudness(facts, &Target::Stream(40)).map(|level| level.percent),
+            Some(30)
+        );
+        assert_eq!(loudness(facts, &Target::Stream(9)), None);
+    }
+
+    #[test]
     fn a_setting_or_a_step_that_changes_nothing_asks_nothing() {
         let mut audio = at(100);
-        audio.change(Change::By(1), Side::Output);
+        audio.change(Change::By(1), OUT);
         assert_eq!(asked(&audio), None, "at the limit");
-        audio.change(Change::To(100), Side::Output);
+        audio.change(Change::To(100), OUT);
         assert_eq!(asked(&audio), None);
-        audio.change(Change::To(40), Side::Output);
+        audio.change(Change::To(40), OUT);
         assert_eq!(asked(&audio), Some(40));
     }
 }

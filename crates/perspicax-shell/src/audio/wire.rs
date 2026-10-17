@@ -17,7 +17,7 @@ use std::{
 use pulseaudio::protocol::{
     self, AuthReply, CardInfo, CardInfoList, Command, CreateRecordStreamReply, DESCRIPTOR_SIZE,
     MAX_VERSION, ProtocolError, PulseError, ServerInfo, SetClientNameReply, SinkInfo, SinkInfoList,
-    SourceInfo, SourceInfoList, TagStructReader,
+    SinkInputInfo, SinkInputInfoList, SourceInfo, SourceInfoList, TagStructReader,
 };
 
 /// The longest message read: past this it is not a message.
@@ -48,13 +48,18 @@ pub(super) enum Expect {
     Sources,
     /// The source of this index.
     Source(u32),
+    /// Every program's stream.
+    Streams,
+    /// The stream of this index.
+    Stream(u32),
 }
 
 /// A reply, read as its command expected.
 #[derive(Debug)]
 pub(super) enum Reply {
     Auth(AuthReply),
-    Named,
+    /// The shell's number among the server's clients.
+    Named(u32),
     Done,
     Server(Box<ServerInfo>),
     Sinks(SinkInfoList),
@@ -64,6 +69,8 @@ pub(super) enum Reply {
     Recording(Box<CreateRecordStreamReply>),
     Sources(SourceInfoList),
     Source(Box<SourceInfo>),
+    Streams(SinkInputInfoList),
+    Stream(Box<SinkInputInfo>),
 }
 
 /// A message from the server.
@@ -211,10 +218,7 @@ impl Expect {
     fn read(self, reader: &mut TagStructReader<'_>) -> Result<Reply, ProtocolError> {
         Ok(match self {
             Self::Auth => Reply::Auth(reader.read()?),
-            Self::Named => {
-                reader.read::<SetClientNameReply>()?;
-                Reply::Named
-            }
+            Self::Named => Reply::Named(reader.read::<SetClientNameReply>()?.client_id),
             Self::Done => Reply::Done,
             Self::Server => Reply::Server(Box::new(reader.read()?)),
             Self::Sinks => Reply::Sinks(reader.read()?),
@@ -224,6 +228,8 @@ impl Expect {
             Self::Recording(_) => Reply::Recording(Box::new(reader.read()?)),
             Self::Sources => Reply::Sources(reader.read()?),
             Self::Source(_) => Reply::Source(Box::new(reader.read()?)),
+            Self::Streams => Reply::Streams(reader.read()?),
+            Self::Stream(_) => Reply::Stream(Box::new(reader.read()?)),
         })
     }
 }

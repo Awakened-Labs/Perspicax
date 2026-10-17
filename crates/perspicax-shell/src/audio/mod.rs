@@ -55,6 +55,8 @@ pub(crate) enum Ask {
     Volume { target: Target, volume: Vec<u32> },
     /// Make an output the one sound goes to, as its plan says.
     Choose(Plan),
+    /// Move the program's stream of this number to the sink of this one.
+    Move { stream: u32, sink: u32 },
     /// Read what plays, for the moving bars, or stop.
     Levels(bool),
 }
@@ -66,6 +68,8 @@ pub(crate) enum Target {
     Sink(String),
     /// The source of this name.
     Source(String),
+    /// The program's stream of this number.
+    Stream(u32),
 }
 
 /// The thread, while it runs. Dropping it ends it.

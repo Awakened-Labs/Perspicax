@@ -1,5 +1,5 @@
-//! The sound, as the sound server tells it: its cards, their outputs, and
-//! how loud each is.
+//! The sound, as the sound server tells it: its cards, their outputs and
+//! inputs, what programs play, and how loud each is.
 //!
 //! Kept apart from the protocol it is read in, so that what the panel shows
 //! of it is worked out, and tested, as plain values. The thread that talks
@@ -16,9 +16,14 @@
 //! that stays its own across reboots, its card's name and its port's,
 //! `alsa_card.pci-0000_01_00.1/hdmi-output-1`, or a sink's name.
 //!
+//! A program's stream is named as the program names itself, else for its
+//! file, else for what it plays; the shell's own are no program's.
+//!
 //! Choosing an output whose card plays something else is a change of the
 //! card's profile first, and its sink comes after: a [`Plan`] says what to
 //! do, and the thread does it as the server follows.
+
+use super::apps::{self, App};
 
 /// A volume of 100%, as the server counts it.
 pub(crate) const NORM: u32 = 0x10000;
@@ -36,6 +41,14 @@ impl Side {
     pub(crate) fn at(self) -> usize {
         usize::from(self == Self::Input)
     }
+}
+
+/// Whose volume a control is of: a side's default, or a program's stream,
+/// by its number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Whose {
+    Side(Side),
+    App(u32),
 }
 
 /// A change to a volume.
@@ -57,6 +70,33 @@ pub(crate) struct Facts {
     /// The input programs record from unless they say otherwise, by name.
     pub(crate) default_source: Option<String>,
     pub(crate) sources: Vec<Source>,
+    /// What programs play.
+    pub(crate) streams: Vec<Stream>,
+    /// The shell's own number among the server's clients, once it is told.
+    pub(crate) client: Option<u32>,
+}
+
+/// What a program plays: a stream into a sink.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Stream {
+    /// The server's number for it, while it lasts.
+    pub(crate) index: u32,
+    /// The client playing it, by the server's number for it.
+    pub(crate) client: Option<u32>,
+    /// The sink it plays into, by its number.
+    pub(crate) sink: u32,
+    /// The program's name for itself, its file's name, and the stream's own
+    /// name: "Firefox", "firefox", "AudioStream".
+    pub(crate) application: Option<String>,
+    pub(crate) binary: Option<String>,
+    pub(crate) media: String,
+    /// The icon the program names, and the ID it gives, by which an icon
+    /// can be found.
+    pub(crate) icon: Option<String>,
+    pub(crate) id: Option<String>,
+    /// Each channel's volume, as the server counts it.
+    pub(crate) volume: Vec<u32>,
+    pub(crate) muted: bool,
 }
 
 /// An input the server records from: a source.
@@ -243,6 +283,23 @@ struct Device<'f> {
     port: Option<&'f str>,
 }
 
+impl Device<'_> {
+    /// It, chosen as itself, on `side`: no card's jack.
+    fn loose(&self, side: Side) -> Choice {
+        Choice {
+            key: self.name.to_owned(),
+            device: self.description.to_owned(),
+            jack: None,
+            short: self.description.to_owned(),
+            kind: match side {
+                Side::Output => Kind::Other,
+                Side::Input => Kind::Mic,
+            },
+            connected: true,
+        }
+    }
+}
+
 /// How loud a device is, and whether it is muted: what the panel shows of
 /// it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,15 +342,31 @@ impl Facts {
             .devices(side)
             .into_iter()
             .filter(|device| self.jack_of(device).is_none())
-            .map(|device| Choice {
-                key: device.name.to_owned(),
-                device: device.description.to_owned(),
-                jack: None,
-                short: device.description.to_owned(),
-                kind: if out { Kind::Other } else { Kind::Mic },
-                connected: true,
-            });
+            .map(|device| device.loose(side));
         jacks.chain(loose).collect()
+    }
+
+    /// Each sink, by its number, as the output it plays to: where a
+    /// program's stream can be moved.
+    pub(crate) fn sink_choices(&self) -> Vec<(u32, Choice)> {
+        self.sinks
+            .iter()
+            .zip(self.devices(Side::Output))
+            .map(|(sink, device)| {
+                let choice = match self.jack_of(&device) {
+                    Some((card, port)) => card.choice(port),
+                    None => device.loose(Side::Output),
+                };
+                (sink.index, choice)
+            })
+            .collect()
+    }
+
+    /// What programs play, but what the shell plays itself.
+    pub(crate) fn apps(&self) -> impl Iterator<Item = &Stream> {
+        self.streams
+            .iter()
+            .filter(|stream| stream.client.is_none() || stream.client != self.client)
     }
 
     /// The sinks, or the sources but the monitors, as devices.
@@ -467,6 +540,38 @@ impl Sink {
             percent: percent(&self.volume),
             muted: self.muted,
         }
+    }
+}
+
+impl Stream {
+    /// What it is called: the program's name for itself, else its file's,
+    /// else the stream's own.
+    pub(crate) fn name(&self) -> &str {
+        self.application
+            .as_deref()
+            .or(self.binary.as_deref())
+            .unwrap_or(&self.media)
+    }
+
+    pub(crate) fn level(&self) -> Level {
+        Level {
+            percent: percent(&self.volume),
+            muted: self.muted,
+        }
+    }
+
+    /// The icon to show for it: the one its program names, else its
+    /// application's among `installed`, found by its ID or its file's name
+    /// as the taskbar finds a window's, else one named as its file is.
+    pub(crate) fn icon_from(&self, installed: &[App]) -> Option<String> {
+        if let Some(icon) = &self.icon {
+            return Some(icon.clone());
+        }
+        [self.id.as_deref(), self.binary.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(|id| apps::of_window(installed, id).and_then(|app| app.icon.clone()))
+            .or_else(|| self.binary.clone())
     }
 }
 
@@ -715,6 +820,7 @@ mod tests {
             cards: vec![builtin, nvidia, headset],
             default_source: None,
             sources: Vec::new(),
+            ..Facts::default()
         }
     }
 
@@ -807,6 +913,123 @@ mod tests {
         );
     }
 
+    fn stream(index: u32, client: Option<u32>, named: [Option<&str>; 2]) -> Stream {
+        let [application, binary] = named.map(|name| name.map(str::to_owned));
+        Stream {
+            index,
+            client,
+            sink: 51,
+            application,
+            binary,
+            media: "AudioStream".to_owned(),
+            icon: None,
+            id: None,
+            volume: vec![NORM / 2, NORM / 2],
+            muted: false,
+        }
+    }
+
+    #[test]
+    fn a_stream_is_named_by_its_program_else_its_file_else_itself() {
+        let named = |names| stream(1, None, names).name().to_owned();
+        assert_eq!(named([Some("Firefox"), Some("firefox")]), "Firefox");
+        assert_eq!(named([None, Some("firefox")]), "firefox");
+        assert_eq!(named([None, None]), "AudioStream");
+        assert_eq!(
+            stream(1, None, [None, None]).level(),
+            Level {
+                percent: 50,
+                muted: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_streams_icon_is_its_own_else_its_applications_else_named_for_its_file() {
+        let app = |id: &str, icon: &str| App {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            comment: None,
+            icon: Some(icon.to_owned()),
+            run: apps::Run {
+                argv: vec![id.to_owned()],
+                terminal: false,
+                dir: None,
+            },
+            categories: Vec::new(),
+            keywords: Vec::new(),
+            wm_class: None,
+        };
+        let installed = [
+            app("org.mozilla.firefox", "firefox-icon"),
+            app("mpv", "mpv-icon"),
+        ];
+        let icon = |icon: Option<&str>, id: Option<&str>, binary: Option<&str>| {
+            let stream = Stream {
+                icon: icon.map(str::to_owned),
+                id: id.map(str::to_owned),
+                binary: binary.map(str::to_owned),
+                ..stream(1, None, [None, None])
+            };
+            stream.icon_from(&installed)
+        };
+        assert_eq!(
+            icon(Some("its-own"), Some("mpv"), None).as_deref(),
+            Some("its-own")
+        );
+        assert_eq!(
+            icon(None, Some("org.mozilla.firefox"), Some("mpv")).as_deref(),
+            Some("firefox-icon"),
+            "by its ID first"
+        );
+        assert_eq!(
+            icon(None, None, Some("firefox")).as_deref(),
+            Some("firefox-icon"),
+            "by its file, as a window's app id is matched"
+        );
+        assert_eq!(icon(None, None, Some("paplay")).as_deref(), Some("paplay"));
+        assert_eq!(icon(None, None, None), None);
+    }
+
+    #[test]
+    fn the_shells_own_streams_are_not_listed() {
+        let facts = Facts {
+            streams: vec![
+                stream(1, Some(7), [Some("Firefox"), None]),
+                stream(2, Some(9), [Some("perspicax-shell"), None]),
+                stream(3, None, [None, None]),
+            ],
+            client: Some(9),
+            ..laptop()
+        };
+        let apps: Vec<u32> = facts.apps().map(|stream| stream.index).collect();
+        assert_eq!(apps, [1, 3]);
+        let unknown = Facts {
+            client: None,
+            ..facts
+        };
+        assert_eq!(unknown.apps().count(), 3, "none left out before it is told");
+    }
+
+    #[test]
+    fn each_sink_is_listed_as_the_output_it_plays_to() {
+        let listed: Vec<(u32, String)> = laptop()
+            .sink_choices()
+            .into_iter()
+            .map(|(sink, choice)| (sink, choice.short))
+            .collect();
+        assert_eq!(
+            listed,
+            [(51, "Speakers".to_owned()), (566, "E8".to_owned())]
+        );
+        let loose = Facts {
+            sinks: vec![sink(4, "one", &[NORM], false)],
+            ..Facts::default()
+        };
+        let (sink, one) = &loose.sink_choices()[0];
+        assert_eq!((*sink, one.key.as_str(), one.kind), (4, "one", Kind::Other));
+    }
+
     #[test]
     fn a_sink_of_no_card_is_an_output_by_its_name() {
         let facts = Facts {
@@ -818,6 +1041,7 @@ mod tests {
             cards: Vec::new(),
             default_source: None,
             sources: Vec::new(),
+            ..Facts::default()
         };
         let outputs = facts.outputs();
         assert_eq!(outputs.len(), 2);
@@ -1055,6 +1279,7 @@ mod tests {
             cards: Vec::new(),
             default_source: None,
             sources: Vec::new(),
+            ..Facts::default()
         };
         let output = facts.output().expect("the default");
         assert_eq!(output.index, 2);

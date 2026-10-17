@@ -31,9 +31,9 @@ use super::{
 };
 use crate::{
     a11y::{self, adapter::Served},
-    layout::mixer::{Anchor, Listed, Master, Mixed},
+    layout::mixer::{Anchor, Listed, Master, Mixed, Program},
     mixer::{Act, Effect, Event, Key, State},
-    model::sound::Side,
+    model::sound::{Choice, Side},
     paint::{self, Kit},
 };
 
@@ -175,7 +175,11 @@ impl Mixers {
         let Some(size) = shown.size else {
             return;
         };
-        let Kit { fonts, palette, .. } = kit;
+        let Kit {
+            fonts,
+            palette,
+            images,
+        } = kit;
         let text = fonts.get();
         let scale = shown.scale;
         let started = std::time::Instant::now();
@@ -186,7 +190,7 @@ impl Mixers {
             size,
             scale,
             &[(rect.x, rect.y, rect.w, rect.h)],
-            |picture| paint::mixer::paint(&view, picture, scale, text, palette),
+            |picture| paint::mixer::paint(&view, picture, scale, text, images, palette),
         );
         shown
             .a11y
@@ -240,6 +244,19 @@ impl Mixers {
     }
 }
 
+/// `choice` as the mixer lists it, `chosen` or not.
+fn listed(choice: Choice, chosen: bool) -> Listed {
+    Listed {
+        key: choice.key,
+        device: choice.device,
+        jack: choice.jack,
+        short: choice.short,
+        kind: choice.kind,
+        connected: choice.connected,
+        chosen,
+    }
+}
+
 /// An assistive technology's requests of the mixer, sent on to the shell's
 /// loop.
 struct Forward(Sender<Asked>);
@@ -278,6 +295,8 @@ impl App {
         };
         let area = self.area(&output);
         let edge = self.panels.edge().unwrap_or(Edge::Bottom);
+        // The programs playing are shown with their applications' icons.
+        self.installed.refresh();
         self.mixers.cut = self
             .panels
             .strip(name, monitor)
@@ -311,8 +330,9 @@ impl App {
         }
         for effect in effects {
             match effect {
-                Effect::Mute(side) => self.mute_default(side),
-                Effect::Volume(side, change) => self.audio.change(change, side),
+                Effect::Mute(whose) => self.audio.mute(whose),
+                Effect::Volume(whose, change) => self.audio.change(change, whose),
+                Effect::Move(stream, sink) => self.audio.move_stream(stream, sink),
                 Effect::Choose(side, key) => self.audio.choose(side, &key),
                 Effect::Redraw => {}
             }
@@ -345,25 +365,42 @@ impl App {
             });
             let listed = choices
                 .into_iter()
-                .map(|choice| Listed {
-                    chosen: Some(&choice.key) == chosen.as_ref(),
-                    key: choice.key,
-                    device: choice.device,
-                    jack: choice.jack,
-                    kind: choice.kind,
-                    connected: choice.connected,
+                .map(|choice| {
+                    let chosen = Some(&choice.key) == chosen.as_ref();
+                    listed(choice, chosen)
                 })
                 .collect();
             (master, listed)
         };
         let (output, outputs) = side(Side::Output);
         let (input, inputs) = side(Side::Input);
+        let programs = facts.map_or_else(Vec::new, |facts| {
+            facts
+                .apps()
+                .map(|stream| Program {
+                    stream: stream.index,
+                    name: stream.name().to_owned(),
+                    icon: stream.icon_from(self.installed.apps()),
+                    level: stream.level(),
+                    sink: stream.sink,
+                })
+                .collect()
+        });
+        let sinks = facts.map_or_else(Vec::new, |facts| {
+            facts
+                .sink_choices()
+                .into_iter()
+                .map(|(sink, choice)| (sink, listed(choice, false)))
+                .collect()
+        });
         let mixer = self.audio.mixer();
         Mixed {
             output,
             input,
             outputs,
             inputs,
+            programs,
+            sinks,
             step: mixer.step,
             limit: mixer.limit,
         }

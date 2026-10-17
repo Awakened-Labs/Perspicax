@@ -4,8 +4,11 @@
 //! then a row for each device listed: a round mark, filled in the accent
 //! for the one the sound is on, the device's glyph, and its name, faint if
 //! nothing is plugged into it, the card's part of it cut short before its
-//! jack's. A side's fold is an arrow, pointing down
-//! while it is unfolded, and how many it holds.
+//! jack's. A side's fold is an arrow, pointing down while it is unfolded,
+//! and how many it holds. Under "Applications", each program's row is such
+//! an arrow, the program's icon and name, and, faint at its end, what it
+//! plays on; then its own button, slider and percentage; unfolded, a row
+//! for each output it can be moved to, marked for the one it plays on.
 //!
 //! A slider is a thin track, the accent along it as far as the volume, and
 //! a round knob there; muted, the accent and the knob are faint. The
@@ -17,14 +20,14 @@
 use perspicax_config::{Palette, Role};
 use tiny_skia::{FillRule, Pixmap, PixmapMut, PixmapPaint, Stroke, Transform};
 
-use super::{colour, fill, rounded, scaled, solid, text::Text};
+use super::{colour, fill, icons::Images, rounded, scaled, solid, text::Text};
 use crate::{
     layout::{
         Measure as _, Rect,
-        mixer::{BORDER, BUTTON, Control, Listed, knob_at, track},
+        mixer::{BORDER, BUTTON, Control, Heading, Listed, Program, knob_at, track},
     },
     mixer::View,
-    model::sound::Side,
+    model::sound::{Side, Whose},
 };
 
 /// How thick a slider's track is, how big its knob, and the ring round the
@@ -32,7 +35,7 @@ use crate::{
 const TRACK: i32 = 4;
 const KNOB: f32 = 7.0;
 const RING: f32 = 2.0;
-/// How big a mute button's glyph is, and a listed device's.
+/// How big a mute button's glyph is, and a listed device's or program's.
 const GLYPH: i32 = 22;
 const MARK: i32 = 18;
 /// How big a listed device's round mark is, its dot when chosen, and the
@@ -75,6 +78,7 @@ struct Pen<'p, 't> {
     origin: (i32, i32),
     scale: u32,
     text: &'t mut Text,
+    images: &'t mut Images,
     colours: Colours,
 }
 
@@ -141,6 +145,7 @@ pub(crate) fn paint(
     canvas: &mut PixmapMut<'_>,
     scale: u32,
     text: &mut Text,
+    images: &mut Images,
     palette: &Palette,
 ) {
     let colours = Colours::of(palette);
@@ -166,6 +171,7 @@ pub(crate) fn paint(
         origin: (inside.x, inside.y),
         scale,
         text,
+        images,
         colours,
     };
     within_edge(view, &mut pen);
@@ -183,51 +189,77 @@ pub(crate) fn paint(
 /// percentages.
 fn within_edge(view: &View<'_>, pen: &mut Pen<'_, '_>) {
     let (ink, faint, accent) = (pen.colours.ink, pen.colours.faint, pen.colours.accent);
-    for &(side, title) in &view.placed.titles {
-        let device = view.mixed.on(side).map(|master| master.name.as_str());
-        let words = match (side, device) {
-            (Side::Output, Some(name)) => format!("Output \u{2014} {name}"),
-            (Side::Input, Some(name)) => format!("Input \u{2014} {name}"),
-            (Side::Output, None) => "Output".to_owned(),
-            (Side::Input, None) => "Input".to_owned(),
+    for &(heading, title) in &view.placed.titles {
+        let words = match heading {
+            Heading::Side(side) => {
+                let named = match side {
+                    Side::Output => "Output",
+                    Side::Input => "Input",
+                };
+                match view.mixed.on(side) {
+                    Some(master) => format!("{named} \u{2014} {}", master.name),
+                    None => named.to_owned(),
+                }
+            }
+            Heading::Programs => "Applications".to_owned(),
         };
         pen.write(&words, title, ink);
     }
     for &(control, place) in &view.placed.controls {
         match control {
-            Control::Mute(side) => {
-                let level = view.mixed.on(side).map(|master| master.level);
+            Control::Mute(whose) => {
+                let level = view.mixed.level(whose);
                 let at = pen.px(Rect::new(
                     place.x + (place.w - GLYPH) / 2,
                     place.y + (place.h - GLYPH) / 2,
                     GLYPH,
                     GLYPH,
                 ));
-                match side {
-                    Side::Output => super::sound::speaker(&mut pen.canvas, at, level, ink, faint),
-                    Side::Input => super::sound::mic(&mut pen.canvas, at, level, ink, faint),
+                match whose {
+                    Whose::Side(Side::Input) => {
+                        super::sound::mic(&mut pen.canvas, at, level, ink, faint);
+                    }
+                    Whose::Side(Side::Output) | Whose::App(_) => {
+                        super::sound::speaker(&mut pen.canvas, at, level, ink, faint);
+                    }
                 }
             }
-            Control::Volume(side) => slider(view, side, place, pen),
+            Control::Volume(whose) => slider(view, whose, place, pen),
             Control::Choose(side, number) => {
                 if let Some(listed) = view.mixed.find(side, number) {
-                    device(listed, place, pen);
+                    device(listed, listed.chosen, place, pen);
                 }
             }
             Control::Fold(side) => {
-                let (count, open) = (
-                    view.placed.folded[side.at()],
-                    view.placed.unfolded[side.at()],
+                arrow(view.placed.unfolded.sides[side.at()], place, pen);
+                let count = view.placed.folded[side.at()];
+                let words = Rect::new(
+                    place.x + BUTTON + SPACE / 2,
+                    place.y,
+                    place.w - BUTTON - SPACE / 2,
+                    place.h,
                 );
-                fold(count, open, place, pen);
+                pen.write(&format!("Not connected ({count})"), words, faint);
+            }
+            Control::Plays(stream) => {
+                if let Some(program) = view.mixed.program(stream) {
+                    plays(view, program, place, pen);
+                }
+            }
+            Control::Move(stream, sink) => {
+                let program = view.mixed.program(stream);
+                let listed = view.mixed.sinks.iter().find(|&&(had, _)| had == sink);
+                if let (Some(program), Some((_, listed))) = (program, listed) {
+                    device(listed, program.sink == sink, place, pen);
+                }
             }
         }
         if view.ring == Some(control) {
             ring(pen, place, accent);
         }
     }
-    for &(side, place) in &view.placed.percents {
-        let Some(percent) = view.shown[side.at()] else {
+    for &(whose, place) in &view.placed.percents {
+        let Some(percent) = view.shown(whose) else {
             continue;
         };
         let words = format!("{percent}%");
@@ -237,13 +269,15 @@ fn within_edge(view: &View<'_>, pen: &mut Pen<'_, '_>) {
     }
 }
 
-/// `side`'s slider at `place`: its track, the accent as far as its volume,
-/// and its knob there; or, with no device on that side, words saying so.
-fn slider(view: &View<'_>, side: Side, place: Rect, pen: &mut Pen<'_, '_>) {
-    let (Some(master), Some(percent)) = (view.mixed.on(side), view.shown[side.at()]) else {
-        let words = match side {
-            Side::Output => "No sound server",
-            Side::Input => "No microphone",
+/// The slider of `whose` at `place`: its track, the accent as far as its
+/// volume, and its knob there; or, with no device on a side, words saying
+/// so.
+fn slider(view: &View<'_>, whose: Whose, place: Rect, pen: &mut Pen<'_, '_>) {
+    let (Some(level), Some(percent)) = (view.mixed.level(whose), view.shown(whose)) else {
+        let words = match whose {
+            Whose::Side(Side::Output) => "No sound server",
+            Whose::Side(Side::Input) => "No microphone",
+            Whose::App(_) => return,
         };
         pen.write(words, place, pen.colours.faint);
         return;
@@ -252,8 +286,8 @@ fn slider(view: &View<'_>, side: Side, place: Rect, pen: &mut Pen<'_, '_>) {
     let middle = along.y + along.h / 2;
     let line = pen.px(Rect::new(along.x, middle - TRACK / 2, along.w, TRACK));
     fill(&mut pen.canvas, line, pen.colours.rule);
-    let knob = knob_at(place, percent, view.mixed.most(side));
-    let lit = if master.level.muted {
+    let knob = knob_at(place, percent, view.mixed.most(whose));
+    let lit = if level.muted {
         pen.colours.faint
     } else {
         pen.colours.accent
@@ -268,9 +302,50 @@ fn slider(view: &View<'_>, side: Side, place: Rect, pen: &mut Pen<'_, '_>) {
     pen.circle((knob as f32, middle as f32), KNOB, lit, None);
 }
 
-/// A device listed, at `place`: its round mark, filled if the sound is on
-/// it, its glyph, and its name.
-fn device(listed: &Listed, place: Rect, pen: &mut Pen<'_, '_>) {
+/// A program's row, at `place`: its arrow, its icon, if it has one, its
+/// name, and, faint at the end, what it plays on.
+fn plays(view: &View<'_>, program: &Program, place: Rect, pen: &mut Pen<'_, '_>) {
+    let open = view.placed.unfolded.programs.contains(&program.stream);
+    arrow(open, place, pen);
+    let icon = Rect::new(
+        place.x + BUTTON + SPACE / 2,
+        place.y + (place.h - MARK) / 2,
+        MARK,
+        MARK,
+    );
+    let at = pen.px(icon);
+    let found = program
+        .icon
+        .as_deref()
+        .and_then(|name| pen.images.get(name, MARK as u32, pen.scale));
+    if let Some(image) = found {
+        super::icons::draw(&mut pen.canvas, image, at);
+    }
+    let words = Rect::new(
+        icon.right() + SPACE,
+        place.y,
+        place.right() - icon.right() - SPACE,
+        place.h,
+    );
+    let on = view
+        .mixed
+        .playing_on(program)
+        .map_or("", |listed| listed.short.as_str());
+    // What it plays on keeps to the end, in at most half the room.
+    let wide = (pen.text.width(on).ceil() as i32).min(words.w / 2);
+    let start = words.right() - wide;
+    pen.write(
+        on,
+        Rect::new(start, words.y, wide, words.h),
+        pen.colours.faint,
+    );
+    let name = Rect::new(words.x, words.y, start - SPACE - words.x, words.h);
+    pen.write(&program.name, name, pen.colours.ink);
+}
+
+/// A device listed, at `place`: its round mark, filled if it is `chosen`,
+/// its glyph, and its name.
+fn device(listed: &Listed, chosen: bool, place: Rect, pen: &mut Pen<'_, '_>) {
     let ink = if listed.connected {
         pen.colours.ink
     } else {
@@ -278,7 +353,7 @@ fn device(listed: &Listed, place: Rect, pen: &mut Pen<'_, '_>) {
     };
     let middle = place.y as f32 + place.h as f32 / 2.0;
     let centre = (place.x as f32 + BUTTON as f32 / 2.0, middle);
-    if listed.chosen {
+    if chosen {
         pen.circle(centre, DOT, pen.colours.accent, Some(1.5));
         pen.circle(centre, CHOSEN, pen.colours.accent, None);
     } else {
@@ -325,10 +400,9 @@ fn device(listed: &Listed, place: Rect, pen: &mut Pen<'_, '_>) {
     );
 }
 
-/// A side's fold, at `place`: an arrow, pointing right while what it
-/// holds is folded away and down while it is not, and how many it holds.
-fn fold(count: usize, open: bool, place: Rect, pen: &mut Pen<'_, '_>) {
-    let faint = pen.colours.faint;
+/// An arrow at the start of `place`, faint, pointing down if what it
+/// unfolds is `open`, and right if it is folded away.
+fn arrow(open: bool, place: Rect, pen: &mut Pen<'_, '_>) {
     let (x, y) = (
         place.x as f32 + BUTTON as f32 / 2.0,
         place.y as f32 + place.h as f32 / 2.0,
@@ -359,19 +433,12 @@ fn fold(count: usize, open: bool, place: Rect, pen: &mut Pen<'_, '_>) {
     if let Some(arrow) = arrow.finish() {
         pen.canvas.fill_path(
             &arrow,
-            &solid(faint),
+            &solid(pen.colours.faint),
             FillRule::Winding,
             Transform::identity(),
             None,
         );
     }
-    let words = Rect::new(
-        place.x + BUTTON + SPACE / 2,
-        place.y,
-        place.w - BUTTON - SPACE / 2,
-        place.h,
-    );
-    pen.write(&format!("Not connected ({count})"), words, faint);
 }
 
 /// A ring just inside `place`, for the control the keyboard is on.
@@ -403,7 +470,7 @@ mod tests {
     use super::*;
     use crate::{
         layout::mixer::{Anchor, Master, Mixed, number},
-        mixer::{Event, State},
+        mixer::{Act, Event, State},
         model::sound::{Kind, Level},
     };
 
@@ -412,6 +479,7 @@ mod tests {
             key: key.to_owned(),
             device: key.to_owned(),
             jack: None,
+            short: key.to_owned(),
             kind: Kind::Speaker,
             connected: true,
             chosen,
@@ -457,6 +525,7 @@ mod tests {
             &mut picture.as_mut(),
             scale,
             &mut Text::without_fonts(),
+            &mut Images::default(),
             &Palette::default(),
         );
         picture
@@ -485,6 +554,53 @@ mod tests {
     }
 
     #[test]
+    fn a_programs_outputs_mark_the_one_it_plays_on() {
+        let mut state = State::default();
+        state.update(Event::Open {
+            output: "DP-1".to_owned(),
+            anchor: Anchor {
+                button: Rect::new(300, 200, 100, 40),
+                edge: Edge::Bottom,
+                area: Rect::new(0, 0, 400, 200),
+            },
+            mixed: Mixed {
+                programs: vec![Program {
+                    stream: 40,
+                    name: "Firefox".to_owned(),
+                    icon: None,
+                    level: Level {
+                        percent: 30,
+                        muted: false,
+                    },
+                    sink: 1,
+                }],
+                sinks: vec![(0, listed("speakers", true)), (1, listed("headset", false))],
+                step: 5,
+                limit: 100,
+                ..Mixed::default()
+            },
+        });
+        state.update(Event::Act(Control::Plays(40), Act::Click));
+        // Scrolled to, at the foot of a mixer too tall for the room.
+        state.update(Event::Act(Control::Move(40, 1), Act::Focus));
+        let picture = drawn(&state, 1);
+        let view = state.view().expect("open");
+        let colours = Colours::of(&Palette::default());
+        let centre = |sink| {
+            let row = view.placed.of(Control::Move(40, sink)).expect("unfolded");
+            (row.x + BUTTON / 2, row.y + row.h / 2)
+        };
+        let (x, y) = centre(1);
+        assert_eq!(pixel(&picture, x, y), colours.accent, "where it plays");
+        let (x, y) = centre(0);
+        assert_eq!(
+            pixel(&picture, x, y),
+            colours.ground,
+            "not where the sound is"
+        );
+    }
+
+    #[test]
     fn what_is_scrolled_past_the_edge_is_cut_off_there() {
         let mut state = opened();
         let view = state.view().expect("open");
@@ -497,7 +613,10 @@ mod tests {
         let view = state.view().expect("open");
         let (inside, rect) = (view.placed.inside, view.placed.rect);
         assert!(view.placed.scroll > 0, "scrolled");
-        let mute = view.placed.of(Control::Mute(Side::Output)).expect("placed");
+        let mute = view
+            .placed
+            .of(Control::Mute(Whose::Side(Side::Output)))
+            .expect("placed");
         assert!(
             mute.y < inside.y && mute.bottom() > inside.y,
             "the speaker cut across the top"
