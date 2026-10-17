@@ -414,6 +414,7 @@ impl Panel {
             Item::Pager,
             Item::Layout,
             Item::Tray,
+            Item::Mixer,
             Item::Clock,
         ];
         Self {
@@ -429,6 +430,7 @@ impl Panel {
                 .filter(|item| match item {
                     Item::Start => built.menus,
                     Item::Tray => built.tray,
+                    Item::Mixer => built.audio,
                     _ => true,
                 })
                 .collect(),
@@ -1050,6 +1052,7 @@ mod tests {
                 Item::Pager,
                 Item::Layout,
                 Item::Tray,
+                Item::Mixer,
                 Item::Clock
             ]
         );
@@ -1150,6 +1153,7 @@ mod tests {
                 Item::Taskbar,
                 Item::Pager,
                 Item::Layout,
+                Item::Mixer,
                 Item::Clock
             ],
             "the profile's panel leaves the tray out instead"

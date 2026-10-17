@@ -880,6 +880,9 @@ autoraise = false
 "Alt+F4" = "none"              # hand a profile's chord back to the client
 "Alt+F1" = "root-menu"         # or "start-menu": the desktop shell's menus;
                                # { pie = "<name>" } opens a pie, see Pies
+"Logo+F12" = "volume-up"       # or "volume-down", "volume-mute", "mic-mute":
+                               # the shell's; both profiles bind the XF86Audio
+                               # keys to them, see The mixer
 "Logo" = "none"                # Logo alone is a tap: pressed, let go, nothing
                                # in between; no other modifier can be tapped
 
@@ -976,7 +979,7 @@ their own windows: a taskbar's list of windows (`foreign-toplevel-list`, and
 `foreign-toplevel-management` to activate and close them), a pager
 (`workspace`), a screenshot tool (`screencopy`), a display tool
 (`output-management`) and the desktop shell (`shell`), which is told when a
-key asks for a menu or a pie and may end the session. Listing windows and workspaces
+key asks for a menu or a pie or changes the volume, and may end the session. Listing windows and workspaces
 is open by default; reading pixels, moving monitors and speaking for the shell
 are for the usual programs, by name. A name is
 whatever the kernel says the client is running, which any program can be
@@ -1198,7 +1201,8 @@ them; none is on by default. The profiles turn on what the build has:
 | Taskbar | `panel` | each monitor's own windows | — | the panel's | a `TabList` "Taskbar", the window in use selected |
 | Pager | `panel` | the workspaces | — | the panel's | a `TabList` "Workspaces", the one showing selected |
 | Keyboard layout | `panel` | before the tray, with two layouts or more | — | the panel's | a `Button` "Keyboard layout", the layout's name its value |
-| Tray | `tray` (with `panel`, `menus`) | before the clock | — | the panel's; its menus as the root menu's | a `Group` "Tray" of a `Button` for each icon, named by its tooltip |
+| Tray | `tray` (with `panel`, `menus`) | before the mixer | — | the panel's; its menus as the root menu's | a `Group` "Tray" of a `Button` for each icon, named by its tooltip |
+| Mixer | `audio` (with `panel`, `menus`) | before the clock; the volume keys | the volume keys | the panel's; overlay, `perspicax-mixer-<output>`, while open; the volume shown, overlay, `perspicax-osd`, a moment | a `Group` "Sound" of a node for each piece; a `Dialog` "Sound"; a `Status` "Volume" |
 | Clock | `panel` | the time, last | — | the panel's | a `Status` "Clock", the time its value |
 | Pies | `pie` (with `menus`, `panel`) | a key or button bound to `{ pie = "<name>" }` | the same | overlay, `perspicax-pie-<output>`, while open | a `Menu` named for the pie of a `MenuItem` for each slot, the one pointed at selected |
 
@@ -1253,7 +1257,7 @@ taskbar = "all"                # every window on every panel; "this-output"
                                # lists each monitor's own
 task-titles = false            # each task its icon alone; true, by default,
                                # writes its window's title beside it
-items = ["start", "taskbar", "pager", "layout", "tray", "clock"]
+items = ["start", "taskbar", "pager", "layout", "tray", "mixer", "clock"]
 clock = "%a %e %b %H:%M"       # as strftime writes it
 ```
 
@@ -1351,6 +1355,107 @@ registry the programs look for, or shows what another program's lists if one
 was there first. A left click activates the icon, a middle click activates it
 the other way, and a right click opens its menu at the icon, as the start menu
 opens at its button.
+
+### The mixer
+
+The panel's `mixer` item shows the sound, and opens a mixer beside it, as the
+start button opens its menu. It speaks PulseAudio's protocol, which
+PipeWire's `pipewire-pulse` speaks too, to the server `PULSE_SERVER` names,
+or else the one in `$XDG_RUNTIME_DIR/pulse`. With none there it is crossed
+out and disabled, and it comes back within ten seconds of one starting.
+
+It is made of pieces, side by side, in the order `[shell.mixer] panel`
+writes them:
+
+- **`mute`.** A speaker, with as many waves as the sound is loud, crossed out
+  while it is muted. A click mutes the sound, or brings it back.
+- **`volume`.** How loud the sound is, in percent.
+- **`output`.** What the sound plays from: a glyph of its kind and a short
+  name, the one you gave it, or the monitor's on HDMI, or an attached
+  device's own, or the jack's: "Speakers", "E8", "DELL U2720Q". A click moves
+  the sound to the next output, past those you hid.
+- **`levels`.** Bars moving with what plays, as winamp's did, the deep notes
+  at the left. Still, and costing nothing, when nothing plays.
+- **`mic`.** A microphone, crossed out while it is muted. A click mutes it,
+  and the wheel and the middle button over it are the microphone's.
+- **`open`.** Three sliders. A click opens the mixer.
+
+On any piece the right button opens the mixer, as a click on `volume` or
+`levels` does. The wheel moves the volume to the next multiple of `step`, no
+louder than `limit`, and the middle button mutes it. With no table, the item
+is a speaker, the output and the mixer's button:
+
+```toml
+[shell.panel]
+items = ["start", "taskbar", "pager", "layout", "tray", "mixer", "clock"]
+
+[shell.mixer]
+panel = ["mute", "levels", "output", "open"]   # in order; by default
+                               # ["mute", "output", "open"]
+step = 5                       # percent a notch of the wheel or a volume key
+                               # moves the volume, 1 to 25
+limit = 100                    # the loudest a notch or a key takes it, 1 to
+                               # 150; one set louder elsewhere is left there
+osd = true                     # show the volume a moment when it changes
+```
+
+The mixer has, for the output, a button that mutes it and a slider, and
+under them every output, the one the sound is on marked, each by its whole
+name: its card, its jack, and the monitor plugged into it or how it is
+attached, "Built-in Audio — Speakers", "E8 — Headphones · Bluetooth", "TU104
+HD Audio Controller — HDMI / DisplayPort 2 · DELL U2720Q". A click on one
+moves the sound there, switching its card's profile first if it must. A jack with nothing plugged
+into it is folded under "Not connected". The inputs follow, the same way.
+Then, while programs play, "Applications": each program's icon and name, a
+button that mutes it and a slider of its own, and the output it plays on; a
+click on its row lists the outputs it could, and a click on one moves that
+program alone. While the mixer is open, each output that plays has a meter
+along its row. Tab and the arrows move through it, left and right step a
+slider, Page Up and Page Down move it ten, Home and End take it to silence
+or to `limit`, Space and Return press, and Escape closes it, as a click off
+it does.
+
+The three dots at a row's end unfold what tells that device apart: where it
+is attached, its chip, its ALSA card or its Bluetooth address, its card's
+profile and its key. Under them, a field to name it: a name kept with Return
+is what the mixer, the `output` piece and the volume shown call it from then
+on, and a blank one gives it its own back. Test sound plays a short chime on
+that output alone, wherever the sound is; on one that would need its card's
+profile or jack switched, it asks you to choose it first. Hide folds the
+device under "Hidden", and the `output` piece never moves to it; hiding the
+one the sound is on leaves the sound there. "Hide all of" its card hides each
+of the card's jacks, those it gains later too: the four HDMI outputs of a
+graphics card go at one click, and Unhide, under "Hidden", brings them back.
+An input is metered while its details are open, if ALSA reads it, and so
+never a Bluetooth headset's: recording one switches the headset to a call's
+poorer sound.
+
+What you hid and named is yours, not the config's: the shell keeps it in
+`$XDG_STATE_HOME/perspicax/mixer.json` (`~/.local/state` without it),
+readable by you alone, by each device's key, a jack's `<card>/<port>`
+(`alsa_card.pci-0000_01_00.1/hdmi-output-1`) or a card's name. A Bluetooth
+card's name is made of its address, so a headset keeps its name across
+reconnecting. A file that cannot be read is warned of in the log and started
+afresh.
+
+With `osd` on, a change to the output's volume, its muting or which output it
+is, made anywhere but the panel and the mixer, a volume key or `wpctl` or
+another mixer, shows the volume for a second and a half, above the panel of
+the monitor the pointer is on: the speaker, the output's name, the percent
+and a bar. It takes
+no clicks. The sound is followed for it even with no mixer on a panel, so
+`minimal`, which has none, shows its volume keys working.
+
+Both profiles bind the volume keys: XF86AudioRaiseVolume and
+XF86AudioLowerVolume to `volume-up` and `volume-down`, which step as the
+wheel does, XF86AudioMute to `volume-mute` and XF86AudioMicMute to
+`mic-mute`. A binding of your own for one of the keys wins. perspicax holds
+no volume of its own: it tells the shell, which asks the sound server, so at
+the lock screen, where the shell is told nothing, they do nothing. With
+`[shell] enabled = false` the keys are left to the programs, and a binding
+to one of the four is refused. A shell built without `audio` refuses
+`"mixer"` in `items` and the `[shell.mixer]` table, but for `osd = false`
+alone.
 
 ### Pies
 
