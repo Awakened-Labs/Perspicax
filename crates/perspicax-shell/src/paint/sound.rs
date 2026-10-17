@@ -12,6 +12,7 @@
 //! headphones, headphones with a microphone at the end of a boom, or a
 //! screen on a stand. The microphone is a capsule in a cradle on a stand,
 //! struck through while it is muted, and faint with none to record from.
+//! The mixer's button is three sliders, each knob at another place.
 
 use std::f32::consts::FRAC_PI_4;
 
@@ -138,6 +139,32 @@ pub(crate) fn mic(
     }
     if let Some(lines) = lines.finish() {
         canvas.stroke_path(&lines, &paint, &stroke, through, None);
+    }
+}
+
+/// Three sliders filling `place`, a square in pixels, in `ink`: the
+/// mixer's button.
+pub(crate) fn sliders(canvas: &mut PixmapMut<'_>, place: Rect, ink: [u8; 4]) {
+    let k = place.w as f32 / UNITS;
+    let through = Transform::from_row(k, 0.0, 0.0, k, place.x as f32, place.y as f32);
+    let paint = solid(ink);
+    let stroke = Stroke {
+        width: LINE,
+        line_cap: LineCap::Round,
+        ..Stroke::default()
+    };
+    let mut lines = PathBuilder::new();
+    let mut knobs = PathBuilder::new();
+    for (y, knob) in [(6.0, 8.0), (12.0, 16.0), (18.0, 11.0)] {
+        lines.move_to(3.0, y);
+        lines.line_to(21.0, y);
+        knobs.push_circle(knob, y, 2.6);
+    }
+    if let Some(lines) = lines.finish() {
+        canvas.stroke_path(&lines, &paint, &stroke, through, None);
+    }
+    if let Some(knobs) = knobs.finish() {
+        canvas.fill_path(&knobs, &paint, FillRule::Winding, through, None);
     }
 }
 
@@ -308,6 +335,26 @@ mod tests {
         let none = drawn(None);
         assert!(inked(&none, struck.0, struck.1));
         assert_eq!(none.pixel(12, 6).expect("the capsule").red(), 0x80, "faint");
+    }
+
+    #[test]
+    fn the_mixers_button_is_three_sliders_with_their_knobs_apart() {
+        let mut picture = Pixmap::new(24, 24).expect("a picture");
+        sliders(&mut picture.as_mut(), Rect::new(0, 0, 24, 24), INK);
+        for y in [6, 12, 18] {
+            assert!(
+                inked(&picture, 4, y) && inked(&picture, 20, y),
+                "a line at {y}"
+            );
+        }
+        assert!(
+            inked(&picture, 8, 8) && !inked(&picture, 16, 8),
+            "the first knob left"
+        );
+        assert!(
+            inked(&picture, 16, 14) && !inked(&picture, 8, 14),
+            "the second right"
+        );
     }
 
     #[test]

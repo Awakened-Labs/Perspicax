@@ -17,8 +17,8 @@
 //! sits in the middle of its slot, drawn in the panel's ink (see `sound`),
 //! its volume is written in the middle of its slot, faint while it is
 //! muted, and its output is drawn as what it is, then named. Its moving
-//! bars rise from the bottom of their slot in the accent, each with a cap in
-//! the panel's ink. The clock is the time, in the panel's ink. Every pixel
+//! bars rise from a faint floor along the bottom of their slot in the
+//! accent, each with a cap in the panel's ink. The clock is the time, in the panel's ink. Every pixel
 //! of the bar is opaque, and the rest of its strip clear.
 
 use perspicax_config::{Edge, Item};
@@ -353,6 +353,13 @@ impl Pen<'_, '_, '_> {
                 let at = self.px(middle(place, fitted(place.h)));
                 super::sound::mic(self.canvas, at, sound.mic, ink, faint);
             }
+            Piece::Open => {
+                if sound.open {
+                    fill(self.canvas, self.px(place), self.colours.open);
+                }
+                let at = self.px(middle(place, fitted(place.h)));
+                super::sound::sliders(self.canvas, at, ink);
+            }
             Piece::Output => {
                 use crate::layout::panel::PIECE;
 
@@ -432,6 +439,9 @@ pub(crate) fn levels(
 
     let within = bars_in(place);
     fill(canvas, scaled(within, scale), colours.bar);
+    // The floor, so that the bars can be found with nothing playing.
+    let floor = Rect::new(within.x, within.bottom() - 1, within.w, 1);
+    fill(canvas, scaled(floor, scale), colours.faint);
     let tall = within.h as f32;
     let top = |height: f32| within.bottom() - (height.clamp(0.0, 1.0) * tall).round() as i32;
     for (band, (height, cap)) in bars.shown().enumerate() {

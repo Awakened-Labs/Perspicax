@@ -5,7 +5,7 @@
 //! items = ["start", "taskbar", "mixer", "clock"]
 //!
 //! [shell.mixer]
-//! panel = ["mute", "output"]
+//! panel = ["mute", "output", "open"]
 //! step = 5       # percent a turn of the wheel moves the volume, 1 to 25
 //! limit = 100    # the most a turn takes it to, 1 to 150
 //! ```
@@ -13,9 +13,11 @@
 //! The item is listed among the panel's `items` as `"mixer"`, and this
 //! table says what it is made of: pieces side by side, in the order
 //! written, each a control of its own. With no table, it is a speaker that
-//! mutes. On any piece, the wheel moves the volume by `step`, to the next
-//! multiple of it, and a middle click mutes: the output's, or on the
-//! microphone, the input's.
+//! mutes, the output it plays from, and a button that opens the mixer. A
+//! right click on any piece opens the mixer beside the panel, as a left
+//! click on "open", or on the volume or the bars, does. On any piece, the
+//! wheel moves the volume by `step`, to the next multiple of it, and a
+//! middle click mutes: the output's, or on the microphone, the input's.
 
 use serde::Deserialize;
 
@@ -24,8 +26,9 @@ use crate::{Error, invalid, shell::twice};
 /// The mixer, as written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mixer {
-    /// What the panel's `mixer` item shows, in order from the left. Never
-    /// empty: an item of nothing is one left out of `items`.
+    /// What the panel's `mixer` item shows, in order from the left: by
+    /// default, a speaker, the output and the mixer's button. Never empty:
+    /// an item of nothing is one left out of `items`.
     pub panel: Vec<Piece>,
     /// How far, in percent, a notch of the wheel moves a volume: to the
     /// next multiple of it.
@@ -38,7 +41,7 @@ pub struct Mixer {
 impl Default for Mixer {
     fn default() -> Self {
         Self {
-            panel: vec![Piece::Mute],
+            panel: vec![Piece::Mute, Piece::Output, Piece::Open],
             step: 5,
             limit: 100,
         }
@@ -69,16 +72,19 @@ pub enum Piece {
     /// A microphone, crossed out while it is muted. A click mutes it, or
     /// brings it back; the wheel over it moves its volume.
     Mic,
+    /// Three sliders: a click opens the mixer beside the panel.
+    Open,
 }
 
 impl Piece {
     /// Every piece, in the order this crate lists them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Mute,
         Self::Volume,
         Self::Output,
         Self::Levels,
         Self::Mic,
+        Self::Open,
     ];
 
     /// Its name as `panel` writes it.
@@ -90,6 +96,7 @@ impl Piece {
             Self::Output => "output",
             Self::Levels => "levels",
             Self::Mic => "mic",
+            Self::Open => "open",
         }
     }
 }
@@ -175,10 +182,14 @@ mod tests {
     }
 
     #[test]
-    fn with_no_table_the_mixer_is_a_speaker_that_mutes_in_either_profile() {
+    fn with_no_table_the_mixer_mutes_shows_the_output_and_opens_in_either_profile() {
         for profile in [Profile::Classic, Profile::Minimal] {
             let shell = Shell::profile(profile, ShellBuilt::FULL);
-            assert_eq!(shell.mixer.panel, [Piece::Mute], "{profile:?}");
+            assert_eq!(
+                shell.mixer.panel,
+                [Piece::Mute, Piece::Output, Piece::Open],
+                "{profile:?}"
+            );
             assert_eq!((shell.mixer.step, shell.mixer.limit), (5, 100));
         }
         assert_eq!(mixer("").unwrap(), Mixer::default());
@@ -257,6 +268,7 @@ mod tests {
     #[test]
     fn a_changed_mixer_is_a_changed_shell_so_the_shell_is_told() {
         let one = shell("[shell.mixer]\npanel = [\"mute\"]", ShellBuilt::FULL).unwrap();
+        assert_ne!(one, shell("", ShellBuilt::FULL).unwrap(), "not the default");
         let two = shell(
             "[shell.mixer]\npanel = [\"mute\", \"volume\"]",
             ShellBuilt::FULL,

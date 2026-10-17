@@ -126,6 +126,9 @@ pub(super) struct Panels {
     /// How loud the default input is, or `None` with none.
     #[cfg(feature = "audio")]
     mic: Option<crate::model::sound::Level>,
+    /// The monitor the mixer is open on, for its item there to show it.
+    #[cfg(feature = "audio")]
+    mixer_open_on: Option<String>,
     /// The mixer's moving bars, and when the monitor last showed them, by
     /// the compositor's clock, in milliseconds.
     #[cfg(feature = "audio")]
@@ -204,6 +207,8 @@ impl Panels {
             playing: None,
             #[cfg(feature = "audio")]
             mic: None,
+            #[cfg(feature = "audio")]
+            mixer_open_on: None,
             #[cfg(feature = "audio")]
             bars: crate::model::levels::Bars::default(),
             #[cfg(feature = "audio")]
@@ -520,6 +525,23 @@ impl Panels {
         level_changed || playing_changed || mic_changed
     }
 
+    /// Show the mixer open on the monitor named `on`, or on none. Whether
+    /// that changed what the panels show.
+    #[cfg(feature = "audio")]
+    pub(super) fn mixer_open(&mut self, on: Option<String>) -> bool {
+        std::mem::replace(&mut self.mixer_open_on, on) != self.mixer_open_on
+    }
+
+    /// Where on `monitor` the mixer item of the panel on the monitor named
+    /// `name` is, if it has one.
+    #[cfg(feature = "audio")]
+    pub(super) fn mixer_at(&self, name: &str, monitor: Rect) -> Option<Rect> {
+        let strip = self.strip(name, monitor)?;
+        let bar = self.each.iter().find(|bar| bar.name == name)?;
+        let at = bar.placed.item(Item::Mixer)?;
+        Some(Rect::new(strip.x + at.x, strip.y + at.y, at.w, at.h))
+    }
+
     /// The status icon of `key`.
     #[cfg(feature = "tray")]
     pub(super) fn status(&self, key: u64) -> Option<&crate::model::tray::Item> {
@@ -639,6 +661,7 @@ impl Panels {
                     limit: self.mixer.limit,
                     output: self.playing.clone(),
                     mic: self.mic,
+                    open: self.mixer_open_on.as_deref() == Some(bar.name.as_str()),
                 },
             },
         };
@@ -912,6 +935,9 @@ impl App {
     /// A button went down on the panel of the monitor named `name`, on
     /// `part` of it, or on none.
     pub(super) fn panel_pressed(&mut self, name: &str, part: Option<Part>, button: Button) {
+        // Any press on a panel closes the mixer, as one off it does.
+        #[cfg(feature = "audio")]
+        let mixer_was_open = self.close_mixer();
         #[cfg(feature = "menus")]
         {
             if (part, button) == (Some(Part::Start), Button::Left) {
@@ -941,7 +967,7 @@ impl App {
             #[cfg(feature = "tray")]
             Some(Part::Tray(key)) => self.press_status(name, key, button),
             #[cfg(feature = "audio")]
-            Some(Part::Mixer(piece)) => self.press_mixer(piece, button),
+            Some(Part::Mixer(piece)) => self.press_mixer(name, piece, button, mixer_was_open),
             Some(Part::Layout) if button == Button::Left => self.next_layout(),
             Some(Part::Start | Part::Layout) | None => {}
         }
@@ -1001,11 +1027,11 @@ fn volume_asked(
     part: Part,
     action: accesskit::Action,
     data: Option<accesskit::ActionData>,
-) -> Option<crate::wl::audio::Change> {
+) -> Option<crate::model::sound::Change> {
     use accesskit::{Action, ActionData};
     use perspicax_config::mixer::Piece;
 
-    use crate::wl::audio::Change;
+    use crate::model::sound::Change;
 
     if part != Part::Mixer(Piece::Volume) {
         return None;
@@ -1026,7 +1052,7 @@ mod tests {
     use perspicax_config::mixer::Piece;
 
     use super::*;
-    use crate::wl::audio::Change;
+    use crate::model::sound::Change;
 
     #[test]
     fn the_volume_sliders_steps_and_setting_are_changes_to_the_volume() {

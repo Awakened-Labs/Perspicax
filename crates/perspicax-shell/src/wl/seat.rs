@@ -58,9 +58,9 @@ pub(super) struct Seat {
     /// Only the menus and the pie take keys.
     #[cfg(feature = "menus")]
     keyboard: Option<wl_keyboard::WlKeyboard>,
-    /// The surface of ours the keyboard is on, to tell the pie's keys from
-    /// the menus'.
-    #[cfg(feature = "pie")]
+    /// The surface of ours the keyboard is on, to tell the pie's keys and
+    /// the mixer's from the menus'.
+    #[cfg(any(feature = "pie", feature = "audio"))]
     keyboard_on: Option<wl_surface::WlSurface>,
 }
 
@@ -71,7 +71,7 @@ impl Seat {
             pointer: None,
             #[cfg(feature = "menus")]
             keyboard: None,
-            #[cfg(feature = "pie")]
+            #[cfg(any(feature = "pie", feature = "audio"))]
             keyboard_on: None,
         }
     }
@@ -79,8 +79,20 @@ impl Seat {
 
 #[cfg(feature = "menus")]
 impl App {
-    /// A key pressed, or repeating, on the menus or the pie.
+    /// A key pressed, or repeating, on the menus, the pie or the mixer.
     fn key(&mut self, event: &KeyEvent) {
+        #[cfg(feature = "audio")]
+        if self
+            .seat
+            .keyboard_on
+            .as_ref()
+            .is_some_and(|surface| self.mixers.owns(surface))
+        {
+            if let Some(key) = mixer_key(event) {
+                self.mixer_key(key);
+            }
+            return;
+        }
         #[cfg(feature = "pie")]
         if self
             .seat
@@ -134,6 +146,27 @@ fn key(event: &KeyEvent) -> Option<Key> {
     })
 }
 
+/// What a key is to the mixer, if anything.
+#[cfg(feature = "audio")]
+fn mixer_key(event: &KeyEvent) -> Option<crate::mixer::Key> {
+    use crate::mixer::Key;
+    Some(match event.keysym {
+        Keysym::Escape => Key::Escape,
+        Keysym::Tab => Key::Tab,
+        Keysym::ISO_Left_Tab => Key::BackTab,
+        Keysym::Up | Keysym::KP_Up => Key::Up,
+        Keysym::Down | Keysym::KP_Down => Key::Down,
+        Keysym::Left | Keysym::KP_Left => Key::Left,
+        Keysym::Right | Keysym::KP_Right => Key::Right,
+        Keysym::Page_Up | Keysym::KP_Page_Up => Key::PageUp,
+        Keysym::Page_Down | Keysym::KP_Page_Down => Key::PageDown,
+        Keysym::Home | Keysym::KP_Home => Key::Home,
+        Keysym::End | Keysym::KP_End => Key::End,
+        Keysym::Return | Keysym::KP_Enter | Keysym::space => Key::Press,
+        _ => return None,
+    })
+}
+
 /// What a key is to a pie, if anything.
 #[cfg(feature = "pie")]
 fn pie_key(event: &KeyEvent) -> Option<crate::pie::Key> {
@@ -171,7 +204,7 @@ impl App {
 /// How far the wheel turned, in notches, down positive: a wheel's, in
 /// 120ths or whole; a touchpad's pixels, fifteen a notch.
 #[cfg(any(feature = "pie", feature = "audio"))]
-fn notches(vertical: &smithay_client_toolkit::seat::pointer::AxisScroll) -> f64 {
+pub(super) fn notches(vertical: &smithay_client_toolkit::seat::pointer::AxisScroll) -> f64 {
     if vertical.value120 != 0 {
         f64::from(vertical.value120) / 120.0
     } else if vertical.discrete != 0 {
@@ -181,7 +214,7 @@ fn notches(vertical: &smithay_client_toolkit::seat::pointer::AxisScroll) -> f64 
     }
 }
 
-fn button(code: u32) -> Button {
+pub(super) fn button(code: u32) -> Button {
     match code {
         BTN_LEFT => Button::Left,
         BTN_RIGHT => Button::Right,
@@ -283,6 +316,11 @@ impl PointerHandler for App {
                 self.pie_pointer(event);
                 continue;
             }
+            #[cfg(feature = "audio")]
+            if self.mixers.owns(&event.surface) {
+                self.mixer_pointer(event);
+                continue;
+            }
             let on_menus = self.on_menus(&event.surface);
             let at = event.position;
             match event.kind {
@@ -376,11 +414,14 @@ impl KeyboardHandler for App {
         _: &[u32],
         _: &[Keysym],
     ) {
-        #[cfg(feature = "pie")]
+        #[cfg(any(feature = "pie", feature = "audio"))]
         {
             self.seat.keyboard_on = Some(surface.clone());
-            self.pies.keyboard(surface, true);
         }
+        #[cfg(feature = "pie")]
+        self.pies.keyboard(surface, true);
+        #[cfg(feature = "audio")]
+        self.mixers.keyboard(surface, true);
         self.menus.keyboard(surface, true);
     }
 
@@ -394,15 +435,18 @@ impl KeyboardHandler for App {
     ) {
         // Something else took the keyboard: a window an agent focused, a
         // screen locker. A menu without it closes, as a menu does, and so
-        // does a pie.
+        // do a pie and the mixer.
+        #[cfg(any(feature = "pie", feature = "audio"))]
+        if self.seat.keyboard_on.as_ref() == Some(surface) {
+            self.seat.keyboard_on = None;
+        }
         #[cfg(feature = "pie")]
-        {
-            if self.seat.keyboard_on.as_ref() == Some(surface) {
-                self.seat.keyboard_on = None;
-            }
-            if self.pies.keyboard(surface, false) {
-                self.pie_event(crate::pie::Event::KeyboardLost);
-            }
+        if self.pies.keyboard(surface, false) {
+            self.pie_event(crate::pie::Event::KeyboardLost);
+        }
+        #[cfg(feature = "audio")]
+        if self.mixers.keyboard(surface, false) {
+            self.mixer_event(crate::mixer::Event::KeyboardLost);
         }
         if self.menus.keyboard(surface, false) {
             self.menu_event(Event::KeyboardLost);

@@ -448,6 +448,8 @@ impl LayerShellHandler for App {
         self.menus.closed(&mut self.kit.fonts, layer);
         #[cfg(feature = "pie")]
         self.pies.closed(layer);
+        #[cfg(feature = "audio")]
+        self.mixers.closed(layer);
     }
 
     fn configure(
@@ -474,6 +476,9 @@ impl LayerShellHandler for App {
             .configure(&mut self.canvas, &mut self.kit, layer, &configure);
         #[cfg(feature = "pie")]
         self.pies
+            .configure(&mut self.canvas, &mut self.kit, layer, &configure);
+        #[cfg(feature = "audio")]
+        self.mixers
             .configure(&mut self.canvas, &mut self.kit, layer, &configure);
     }
 }

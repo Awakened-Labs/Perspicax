@@ -156,6 +156,8 @@ pub(crate) struct Sounding {
     pub(crate) output: Option<Playing>,
     /// How loud the default input is, or `None` with none.
     pub(crate) mic: Option<Level>,
+    /// The mixer is open from this panel.
+    pub(crate) open: bool,
 }
 
 /// The output the sound plays from, as the mixer shows it.
@@ -284,7 +286,7 @@ pub(crate) fn lay_out(
                     }
                 }
                 Piece::Levels => LEVELS,
-                Piece::Mute | Piece::Mic => PIECE,
+                Piece::Mute | Piece::Mic | Piece::Open => PIECE,
             };
             (piece, wide)
         })
@@ -826,6 +828,7 @@ mod tests {
             limit: 100,
             output: None,
             mic: None,
+            open: false,
         };
         let mut holding = holding(1, &[]);
         holding.mixer = Mixing {
@@ -872,6 +875,7 @@ mod tests {
                     limit: 150,
                     output: None,
                     mic: None,
+                    open: false,
                 },
             };
             lay_out(&[Item::Mixer], holding, PANEL, FULL, &mut Monospace(8.0))

@@ -7,6 +7,8 @@ pub(crate) mod folder;
 pub(crate) mod icons;
 #[cfg(feature = "menus")]
 pub(crate) mod menu;
+#[cfg(feature = "audio")]
+pub(crate) mod mixer;
 #[cfg(feature = "panel")]
 pub(crate) mod panel;
 #[cfg(feature = "pie")]

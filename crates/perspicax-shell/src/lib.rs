@@ -34,6 +34,8 @@ mod audio;
 mod launch;
 #[cfg(any(feature = "menus", feature = "panel"))]
 mod layout;
+#[cfg(feature = "audio")]
+mod mixer;
 #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
 mod model;
 #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]

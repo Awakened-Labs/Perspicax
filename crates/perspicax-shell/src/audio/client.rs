@@ -794,6 +794,10 @@ fn source(info: &SourceInfo) -> Source {
     Source {
         index: info.index,
         name: text(&info.name),
+        description: info
+            .description
+            .as_deref()
+            .map_or_else(|| text(&info.name), text),
         volume: info
             .cvolume
             .channels()

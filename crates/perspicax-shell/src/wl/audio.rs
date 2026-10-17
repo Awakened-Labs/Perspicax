@@ -27,29 +27,13 @@ use crate::{
     layout::panel::{Part, Playing},
     model::{
         Button,
-        sound::{self, Facts},
+        sound::{self, Change, Facts, Side},
     },
 };
 
 /// The longest a volume asked for stands for the server's, waiting for the
 /// server to say it took.
 const ASKED_STANDS: Duration = Duration::from_secs(1);
-
-/// Which default a change is to: the output's, or the input's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Side {
-    Output,
-    Input,
-}
-
-/// A change to the volume, from an assistive technology.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Change {
-    /// This many steps, up positive.
-    By(i32),
-    /// To this, in percent.
-    To(u32),
-}
 
 /// The sound, as the loop knows it.
 pub(super) struct Audio {
@@ -130,6 +114,16 @@ impl Audio {
         }
     }
 
+    /// What the server holds, as last told: `None` with no server.
+    pub(super) fn facts(&self) -> Option<&Facts> {
+        self.facts.as_deref()
+    }
+
+    /// The mixer, as `[shell.mixer]` writes it.
+    pub(super) fn mixer(&self) -> &Mixer {
+        &self.mixer
+    }
+
     /// What the server holds now, or that there is no server. A volume
     /// asked for that the server now says stands for it no longer.
     fn hear(&mut self, news: News) {
@@ -169,7 +163,7 @@ impl Audio {
 
     /// Set the volume of the default on `side` to what `change` makes of
     /// it.
-    fn change(&mut self, change: Change, side: Side) {
+    pub(super) fn change(&mut self, change: Change, side: Side) {
         let Some(facts) = self.facts.as_deref() else {
             return;
         };
@@ -251,33 +245,57 @@ impl App {
         if self.panels.hear(level, playing, mic) {
             self.panels_changed();
         }
+        self.mixer_heard();
     }
 
-    /// `button` went down on the mixer's `piece`.
-    pub(super) fn press_mixer(&mut self, piece: Piece, button: Button) {
-        let Some(facts) = self.audio.facts.as_deref() else {
+    /// Mute the default on `side`, or bring its sound back.
+    pub(super) fn mute_default(&mut self, side: Side) {
+        let Some(facts) = self.audio.facts() else {
             return;
         };
+        let ask = match side {
+            Side::Output => facts.output().map(|sink| Ask::Mute {
+                target: Target::Sink(sink.name.clone()),
+                on: !sink.muted,
+            }),
+            Side::Input => facts.input().map(|source| Ask::Mute {
+                target: Target::Source(source.name.clone()),
+                on: !source.muted,
+            }),
+        };
+        if let Some(ask) = ask {
+            self.audio.ask(ask);
+        }
+    }
+
+    /// `button` went down on the mixer's `piece`, on the panel of the
+    /// monitor named `name`; `was_open` says whether the mixer was open,
+    /// which the press closed.
+    pub(super) fn press_mixer(&mut self, name: &str, piece: Piece, button: Button, was_open: bool) {
+        let opens = matches!(
+            (piece, button),
+            (Piece::Open | Piece::Volume | Piece::Levels, Button::Left) | (_, Button::Right)
+        );
+        if opens {
+            // A press on what opened it closes it, as a menu's button does.
+            if !was_open {
+                self.open_mixer(name);
+            }
+            return;
+        }
         let ask = match (piece, button) {
             (Piece::Mic, Button::Left | Button::Middle) => {
-                let Some(input) = facts.input() else {
-                    return;
-                };
-                Ask::Mute {
-                    target: Target::Source(input.name.clone()),
-                    on: !input.muted,
-                }
+                self.mute_default(Side::Input);
+                return;
             }
             (Piece::Mute, Button::Left) | (_, Button::Middle) => {
-                let Some(output) = facts.output() else {
-                    return;
-                };
-                Ask::Mute {
-                    target: Target::Sink(output.name.clone()),
-                    on: !output.muted,
-                }
+                self.mute_default(Side::Output);
+                return;
             }
             (Piece::Output, Button::Left) => {
+                let Some(facts) = self.audio.facts.as_deref() else {
+                    return;
+                };
                 let outputs = facts.outputs();
                 let now = facts.output_key();
                 let Some(plan) = sound::next_output(&outputs, now.as_deref())

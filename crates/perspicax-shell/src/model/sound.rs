@@ -23,6 +23,22 @@
 /// A volume of 100%, as the server counts it.
 pub(crate) const NORM: u32 = 0x10000;
 
+/// Which default a change is to: the output's, or the input's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Side {
+    Output,
+    Input,
+}
+
+/// A change to a volume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Change {
+    /// This many steps, up positive.
+    By(i32),
+    /// To this, in percent.
+    To(u32),
+}
+
 /// What the server holds, as last read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Facts {
@@ -43,6 +59,8 @@ pub(crate) struct Source {
     /// Its name, which stays its own:
     /// `alsa_input.pci-0000_00_1f.3.analog-stereo`.
     pub(crate) name: String,
+    /// What it calls itself: "Built-in Audio Analog Stereo".
+    pub(crate) description: String,
     /// Each channel's volume, as the server counts it.
     pub(crate) volume: Vec<u32>,
     pub(crate) muted: bool,

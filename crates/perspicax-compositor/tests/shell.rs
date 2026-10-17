@@ -2046,9 +2046,10 @@ fn a_tray_menu_choice_is_sent_back() {
     shell.stop_with(session);
 }
 
-/// A panel of the mixer alone, its speaker at the panel's right end.
+/// A panel of the mixer's speaker alone, at the panel's right end.
 #[cfg(feature = "capture")]
-const MIXER_ONLY: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"mixer\"]\n";
+const MIXER_ONLY: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"mixer\"]\n\
+    [shell.mixer]\npanel = [\"mute\"]\n";
 
 /// The panel's ink, and its faint ink.
 #[cfg(feature = "capture")]
@@ -2398,6 +2399,114 @@ fn a_click_on_the_microphone_mutes_the_default_input_and_the_wheel_moves_it() {
         sound.pactl(&["get-sink-mute", "one"]).contains("Mute: no"),
         "the output is left alone"
     );
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
+/// A panel of the mixer's button and its speaker, the speaker at the
+/// panel's right end and the button left of it.
+#[cfg(feature = "capture")]
+const OPEN_AND_MUTE: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"mixer\"]\n\
+    [shell.mixer]\npanel = [\"open\", \"mute\"]\n";
+
+/// The mixer, if it is open: its surface and its box.
+#[cfg(feature = "capture")]
+fn mixer(facts: &HostFacts) -> Option<(SurfaceId, Rect)> {
+    facts
+        .surfaces()
+        .iter()
+        .find_map(|surface| match &surface.kind {
+            SurfaceKind::Layer {
+                layer: Layer::Overlay,
+                namespace,
+            } if surface.mapped && namespace.starts_with("perspicax-mixer-") => {
+                Some((surface.id, *surface.opaque.first()?))
+            }
+            _ => None,
+        })
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn the_mixer_opens_from_its_button_mutes_and_sets_the_volume_and_closes() {
+    use std::time::{Duration, Instant};
+
+    let sound = SoundServer::start("mixer");
+    sound.pactl(&["set-sink-volume", "one", "30%"]);
+    let session = Session::start("shell-mixer", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "mixer",
+        OPEN_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    until_colour(&session, (1258, 800 - 20), INK);
+    let until = |args: &[&str], want: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !sound.pactl(args).contains(want) {
+            assert!(Instant::now() < deadline, "{args:?} never said {want}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    // Its button opens it, standing on the panel at the item's right end.
+    let button = (1280.0 - 30.0 - 15.0, PANEL_HEIGHT / 2.0);
+    click(&session, panel, button, PointerButton::Left);
+    let facts = session.wait_for(|facts| mixer(facts).is_some());
+    let (surface, rect) = mixer(&facts).expect("waited for");
+    assert_eq!((rect.x1, rect.y1), (1280.0, 800.0 - PANEL_HEIGHT));
+    // The output's row: its mute button, then its slider. The layout's
+    // numbers: 1 of edge and 12 of room, a 22-pixel title, a 32-pixel row,
+    // a 28-pixel button and 8 between; the slider's track 7 in from each
+    // of its ends, and 48 for the percentage, 8 from it.
+    let row = rect.y0 + 13.0 + 22.0 + 16.0;
+    click(
+        &session,
+        surface,
+        (rect.x0 + 13.0 + 14.0, row),
+        PointerButton::Left,
+    );
+    until(&["get-sink-mute", "one"], "Mute: yes");
+    let track = (rect.x0 + 49.0 + 7.0, rect.x1 - 13.0 - 48.0 - 8.0 - 7.0);
+    let half = (track.0 + track.1) / 2.0;
+    click(&session, surface, (half, row), PointerButton::Left);
+    until(&["get-sink-volume", "one"], "/  50% /");
+
+    // Its button closes it again, for good, and a press off it does too.
+    click(&session, panel, button, PointerButton::Left);
+    session.wait_for(|facts| mixer(facts).is_none());
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        mixer(&session.wait_for(|_| true)).is_none(),
+        "not opened again"
+    );
+    click(
+        &session,
+        panel,
+        (1280.0 - 15.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Right,
+    );
+    let facts = session.wait_for(|facts| mixer(facts).is_some());
+    let (surface, _) = mixer(&facts).expect("open");
+    click(&session, surface, (100.0, 100.0), PointerButton::Left);
+    session.wait_for(|facts| mixer(facts).is_none());
+
+    // Open, the panel is still the panel's to a person's hand, which goes
+    // by what is under it, not an agent's, which names its surface: a press
+    // on its speaker closes the mixer and brings the sound back.
+    click(&session, panel, button, PointerButton::Left);
+    session.wait_for(|facts| mixer(facts).is_some());
+    session.command(Command::Click {
+        at: (1280 - 15, 800 - 20),
+        button: perspicax_policy::Button::Left,
+        mods: perspicax_policy::Mods::default(),
+    });
+    session.wait_for(|facts| mixer(facts).is_none());
+    until(&["get-sink-mute", "one"], "Mute: no");
 
     drop(sound);
     shell.stop_with(session);

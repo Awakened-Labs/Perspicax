@@ -8,7 +8,7 @@
 //! person did.
 
 #[cfg(feature = "audio")]
-pub(crate) mod audio;
+mod audio;
 #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
 mod canvas;
 mod channel;
@@ -18,6 +18,8 @@ mod desktop;
 mod installed;
 #[cfg(feature = "menus")]
 mod menu;
+#[cfg(feature = "audio")]
+mod mixer;
 #[cfg(any(feature = "panel", feature = "wallpaper"))]
 mod pager;
 #[cfg(feature = "panel")]
@@ -166,6 +168,8 @@ pub(crate) fn run(
         tray: tray::Tray::new(bus, news),
         #[cfg(feature = "audio")]
         audio: audio::Audio::new(sound, heard),
+        #[cfg(feature = "audio")]
+        mixers: mixer::Mixers::new(actions.clone()),
         #[cfg(any(feature = "menus", feature = "panel"))]
         seat: seat::Seat::new(&globals, &qh),
         #[cfg(feature = "pie")]
@@ -260,6 +264,9 @@ pub(crate) struct App {
     /// The sound, from the sound server.
     #[cfg(feature = "audio")]
     audio: audio::Audio,
+    /// The mixer, opened from the panel.
+    #[cfg(feature = "audio")]
+    mixers: mixer::Mixers,
     #[cfg(any(feature = "menus", feature = "panel"))]
     seat: seat::Seat,
     #[cfg(feature = "menus")]
@@ -311,7 +318,10 @@ pub(crate) enum Asked {
     Pie(crate::pie::Event),
     /// To change the default output's volume.
     #[cfg(feature = "audio")]
-    Volume(audio::Change),
+    Volume(crate::model::sound::Change),
+    /// Something of the open mixer.
+    #[cfg(feature = "audio")]
+    Mixer(crate::mixer::Event),
 }
 
 /// The icon theme named `theme`, looked for in the data folders of
@@ -510,6 +520,8 @@ impl App {
             Asked::Pie(event) => self.pie_event(event),
             #[cfg(feature = "audio")]
             Asked::Volume(change) => self.change_volume(change),
+            #[cfg(feature = "audio")]
+            Asked::Mixer(event) => self.mixer_event(event),
         }
     }
 }
