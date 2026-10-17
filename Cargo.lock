@@ -1658,6 +1658,7 @@ dependencies = [
  "pulseaudio",
  "resvg",
  "serde",
+ "serde_json",
  "smithay-client-toolkit",
  "thiserror 2.0.20",
  "tiny-skia",
