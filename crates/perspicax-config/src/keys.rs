@@ -57,6 +57,7 @@ const NAMED: &[(&str, Keysym)] = &[
     ("XF86AudioRaiseVolume", Keysym::XF86_AudioRaiseVolume),
     ("XF86AudioLowerVolume", Keysym::XF86_AudioLowerVolume),
     ("XF86AudioMute", Keysym::XF86_AudioMute),
+    ("XF86AudioMicMute", Keysym::XF86_AudioMicMute),
     ("XF86AudioPlay", Keysym::XF86_AudioPlay),
     ("XF86AudioPause", Keysym::XF86_AudioPause),
     ("XF86AudioStop", Keysym::XF86_AudioStop),

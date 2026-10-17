@@ -13,9 +13,13 @@
 //! The pager is a grid of small screens, each with its workspace's name,
 //! the one showing lit. Each of the tray's icons sits in the middle of its
 //! slot, drawn from the icon its program names if it is found, otherwise
-//! from the picture its program sent nearest the size. The clock is the
-//! time, in the panel's ink. Every pixel of the bar is opaque, and the rest
-//! of its strip clear.
+//! from the picture its program sent nearest the size. The mixer's speaker
+//! sits in the middle of its slot, drawn in the panel's ink (see `sound`),
+//! its volume is written in the middle of its slot, faint while it is
+//! muted, and its output is drawn as what it is, then named. Its moving
+//! bars rise from a faint floor along the bottom of their slot in the
+//! accent, each with a cap in the panel's ink. The clock is the time, in the panel's ink. Every pixel
+//! of the bar is opaque, and the rest of its strip clear.
 
 use perspicax_config::{Edge, Item};
 use tiny_skia::{FillRule, LineCap, LineJoin, PathBuilder, PixmapMut, Stroke, Transform};
@@ -126,6 +130,9 @@ pub(crate) struct Shown<'a> {
     /// The status icons, by key, to draw those `placed` holds.
     #[cfg(feature = "tray")]
     pub(crate) tray: &'a [(u64, crate::model::tray::Item)],
+    /// The mixer's moving bars, as they stand.
+    #[cfg(feature = "audio")]
+    pub(crate) bars: &'a crate::model::levels::Bars,
 }
 
 /// Draw `shown` on `canvas`, a surface's pixels at `scale` times its size.
@@ -182,7 +189,7 @@ pub(crate) fn paint(
                 let size = text.size() * scale as f32;
                 text.write(canvas, words, px(room), size, colours.ink);
             }
-            Item::Taskbar | Item::Pager | Item::Tray => {}
+            Item::Taskbar | Item::Pager | Item::Tray | Item::Mixer => {}
         }
     }
     let mut pen = Pen {
@@ -202,6 +209,10 @@ pub(crate) fn paint(
         if let Some((_, item)) = shown.tray.iter().find(|(key, _)| *key == icon.key) {
             pen.status(item, *place, images);
         }
+    }
+    #[cfg(feature = "audio")]
+    for &(piece, place) in &shown.placed.mixer {
+        pen.piece(piece, place, &shown.placed.sound, shown.bars);
     }
     for rule in ends.into_iter().flatten().chain([along]) {
         fill(pen.canvas, px(rule), colours.rule);
@@ -319,6 +330,77 @@ impl Pen<'_, '_, '_> {
         }
     }
 
+    /// A piece of the mixer, in its slot at `place`, showing `sound`.
+    #[cfg(feature = "audio")]
+    fn piece(
+        &mut self,
+        piece: perspicax_config::mixer::Piece,
+        place: Rect,
+        sound: &crate::layout::panel::Sounding,
+        bars: &crate::model::levels::Bars,
+    ) {
+        use perspicax_config::mixer::Piece;
+
+        let Colours { ink, faint, .. } = self.colours;
+        let level = sound.level;
+        match piece {
+            Piece::Mute => {
+                let at = self.px(middle(place, fitted(place.h)));
+                super::sound::speaker(self.canvas, at, level, ink, faint);
+            }
+            Piece::Levels => levels(self.canvas, place, bars, self.scale, &self.colours),
+            Piece::Mic => {
+                let at = self.px(middle(place, fitted(place.h)));
+                super::sound::mic(self.canvas, at, sound.mic, ink, faint);
+            }
+            Piece::Open => {
+                if sound.open {
+                    fill(self.canvas, self.px(place), self.colours.open);
+                }
+                let at = self.px(middle(place, fitted(place.h)));
+                super::sound::sliders(self.canvas, at, ink);
+            }
+            Piece::Output => {
+                use crate::layout::panel::PIECE;
+
+                let slot = Rect::new(place.x, place.y, PIECE.min(place.w), place.h);
+                let at = self.px(middle(slot, fitted(place.h)));
+                let Some(playing) = &sound.output else {
+                    super::sound::device(
+                        self.canvas,
+                        at,
+                        crate::model::sound::Kind::Speaker,
+                        faint,
+                    );
+                    return;
+                };
+                super::sound::device(self.canvas, at, playing.kind, ink);
+                let room = Rect::new(
+                    slot.right(),
+                    place.y,
+                    place.right() - CLOCK_PAD - slot.right(),
+                    place.h,
+                );
+                let size = self.text.size() * self.scale as f32;
+                self.text
+                    .write(self.canvas, &playing.name, self.px(room), size, ink);
+            }
+            Piece::Volume => {
+                let words = crate::layout::panel::volume_shown(level);
+                let colour = match level {
+                    Some(level) if !level.muted => ink,
+                    _ => faint,
+                };
+                // In the middle of a slot as wide as "100%".
+                let wide = (self.text.width(&words).ceil() as i32 + 2).min(place.w);
+                let room = Rect::new(place.x + (place.w - wide) / 2, place.y, wide, place.h);
+                let size = self.text.size() * self.scale as f32;
+                self.text
+                    .write(self.canvas, &words, self.px(room), size, colour);
+            }
+        }
+    }
+
     /// A workspace's cell, at `place`: a small screen with its name in the
     /// middle, where there is room for it.
     fn cell(&mut self, cell: &Cell, place: Rect) {
@@ -339,6 +421,40 @@ impl Pen<'_, '_, '_> {
         let size = self.text.size() * self.scale as f32;
         self.text
             .write(self.canvas, &cell.name, self.px(words), size, colours.ink);
+    }
+}
+
+/// The mixer's moving `bars`, in their slot at `place`, at `scale`: the
+/// ground under them laid first, so that they can be drawn again alone,
+/// over what they were.
+#[cfg(feature = "audio")]
+pub(crate) fn levels(
+    canvas: &mut PixmapMut<'_>,
+    place: Rect,
+    bars: &crate::model::levels::Bars,
+    scale: u32,
+    colours: &Colours,
+) {
+    use crate::layout::panel::{BAR, BAR_GAP, bars_in};
+
+    let within = bars_in(place);
+    fill(canvas, scaled(within, scale), colours.bar);
+    // The floor, so that the bars can be found with nothing playing.
+    let floor = Rect::new(within.x, within.bottom() - 1, within.w, 1);
+    fill(canvas, scaled(floor, scale), colours.faint);
+    let tall = within.h as f32;
+    let top = |height: f32| within.bottom() - (height.clamp(0.0, 1.0) * tall).round() as i32;
+    for (band, (height, cap)) in bars.shown().enumerate() {
+        let x = within.x + band as i32 * (BAR + BAR_GAP);
+        let rise = top(height);
+        if rise < within.bottom() {
+            let bar = Rect::new(x, rise, BAR, within.bottom() - rise);
+            fill(canvas, scaled(bar, scale), colours.highlight);
+        }
+        if cap > 0.0 {
+            let at = top(cap).min(within.bottom() - 1).max(within.y);
+            fill(canvas, scaled(Rect::new(x, at, BAR, 1), scale), colours.ink);
+        }
     }
 }
 
@@ -471,6 +587,8 @@ mod tests {
                 start: None,
                 #[cfg(feature = "tray")]
                 tray: &[],
+                #[cfg(feature = "audio")]
+                bars: &crate::model::levels::Bars::default(),
             },
             &mut picture.as_mut(),
             1,
@@ -518,6 +636,8 @@ mod tests {
                 cells: vec![cell(10, 0), cell(11, 1)],
                 #[cfg(feature = "tray")]
                 tray: Vec::new(),
+                #[cfg(feature = "audio")]
+                mixer: crate::layout::panel::Mixing::default(),
             },
             (600, 40),
             shape,
@@ -550,6 +670,8 @@ mod tests {
                 start,
                 #[cfg(feature = "tray")]
                 tray: &[],
+                #[cfg(feature = "audio")]
+                bars: &crate::model::levels::Bars::default(),
             },
             &mut picture.as_mut(),
             scale,
@@ -687,6 +809,8 @@ mod tests {
                 start: None,
                 #[cfg(feature = "tray")]
                 tray: &[],
+                #[cfg(feature = "audio")]
+                bars: &crate::model::levels::Bars::default(),
             },
             &mut picture.as_mut(),
             1,
@@ -907,6 +1031,8 @@ mod tests {
                 start: None,
                 #[cfg(feature = "tray")]
                 tray: &[],
+                #[cfg(feature = "audio")]
+                bars: &crate::model::levels::Bars::default(),
             },
             &mut picture.as_mut(),
             1,

@@ -27,7 +27,10 @@
 //! `XDG_RUNTIME_DIR`, and is `#[ignore]`d for `ci/live-tests.sh` to run.
 //!
 //! Each shell has a session bus of its own, a `dbus-daemon` the test starts,
-//! so that its tray meets no program of the machine running the test.
+//! so that its tray meets no program of the machine running the test, and
+//! no sound server unless the test starts one of its own: PipeWire, its
+//! PulseAudio server and WirePlumber's policy, meeting no sound card. A
+//! click on the panel's speaker mutes that server's output.
 //!
 //! The menus here are a menu file's, so that what they hold does not hang
 //! on what is installed on the machine running the test.
@@ -48,6 +51,13 @@ use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_h
 struct Shell {
     thread: thread::JoinHandle<Result<(), perspicax_shell::Error>>,
     config: PathBuf,
+    /// The file its mixer keeps what is hidden and renamed in: one of the
+    /// test's own.
+    #[cfg_attr(
+        not(feature = "capture"),
+        expect(dead_code, reason = "the mixer's tests'")
+    )]
+    state: PathBuf,
     /// The session bus its tray is on.
     bus: Bus,
 }
@@ -61,20 +71,44 @@ impl Shell {
 
     /// The same, on a connection of the test's own.
     fn start_on(connection: Connection, name: &str, config: &str) -> Self {
+        Self::start_with(connection, name, config, None)
+    }
+
+    /// The same, its mixer on the sound server at `sound`, or with `None`,
+    /// on a socket where none listens.
+    fn start_with(
+        connection: Connection,
+        name: &str,
+        config: &str,
+        sound: Option<PathBuf>,
+    ) -> Self {
         let path = std::env::temp_dir().join(format!(
             "perspicax-shell-{name}-{}.toml",
             std::process::id()
         ));
         std::fs::write(&path, config).expect("a config file");
         let bus = Bus::start();
+        let nowhere = std::env::temp_dir().join(format!(
+            "perspicax-shell-{name}-{}-no-sound",
+            std::process::id()
+        ));
+        // Never the person's own.
+        let state = std::env::temp_dir().join(format!(
+            "perspicax-shell-{name}-{}-mixer.json",
+            std::process::id()
+        ));
+        std::fs::remove_file(&state).ok();
         let options = perspicax_shell::Options {
             connection: Some(connection),
             config: Some(path.clone()),
             session_bus: Some(bus.address.clone()),
+            sound_server: Some(sound.unwrap_or(nowhere)),
+            state: Some(state.clone()),
         };
         Self {
             thread: thread::spawn(move || perspicax_shell::run(options)),
             config: path,
+            state,
             bus,
         }
     }
@@ -137,6 +171,113 @@ impl Drop for Bus {
     fn drop(&mut self) {
         self.daemon.kill().ok();
         self.daemon.wait().ok();
+    }
+}
+
+/// A sound server of the test's own, as a desktop runs one: PipeWire, its
+/// PulseAudio server, and WirePlumber's policy alone, so that it meets no
+/// sound card and no other program; with two outputs that play nowhere,
+/// "one", the default, and "two". Everything it keeps is in a folder of its
+/// own under the runtime folder, short enough for a socket's path, and goes
+/// with it.
+#[cfg(feature = "capture")]
+struct SoundServer {
+    folder: PathBuf,
+    daemons: Vec<std::process::Child>,
+}
+
+#[cfg(feature = "capture")]
+impl SoundServer {
+    fn start(name: &str) -> Self {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR");
+        let folder =
+            PathBuf::from(runtime).join(format!("pspx-sound-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&folder).ok();
+        for inside in ["run", "state", "config"] {
+            std::fs::create_dir_all(folder.join(inside)).expect("the sound server's folder");
+        }
+        let mut server = Self {
+            folder,
+            daemons: Vec::new(),
+        };
+        server.daemon(&["pipewire"]);
+        server.until(|server| server.folder.join("run/pipewire-0").exists());
+        server.daemon(&["pipewire", "-c", "pipewire-pulse.conf"]);
+        server.daemon(&["wireplumber", "-p", "policy"]);
+        server.until(|server| server.socket().exists());
+        for sink in ["one", "two"] {
+            server.pactl(&[
+                "load-module",
+                "module-null-sink",
+                &format!("sink_name={sink}"),
+            ]);
+        }
+        server.until(|server| server.pactl(&["get-default-sink"]).trim() == "one");
+        server
+    }
+
+    /// Its PulseAudio server's socket.
+    fn socket(&self) -> PathBuf {
+        self.folder.join("run/pulse/native")
+    }
+
+    /// `program` with the server's folders, and no session bus.
+    fn command(&self, program: &str) -> std::process::Command {
+        let mut command = std::process::Command::new(program);
+        command
+            .env("XDG_RUNTIME_DIR", self.folder.join("run"))
+            .env("XDG_STATE_HOME", self.folder.join("state"))
+            .env("XDG_CONFIG_HOME", self.folder.join("config"))
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .env_remove("PIPEWIRE_REMOTE")
+            .env_remove("PULSE_SERVER");
+        command
+    }
+
+    fn daemon(&mut self, argv: &[&str]) {
+        let daemon = self
+            .command(argv[0])
+            .args(&argv[1..])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap_or_else(|error| panic!("{}, which a desktop with sound has: {error}", argv[0]));
+        self.daemons.push(daemon);
+    }
+
+    /// What `pactl` says to `args`.
+    fn pactl(&self, args: &[&str]) -> String {
+        let said = self
+            .command("pactl")
+            .args(args)
+            .output()
+            .expect("pactl, which a desktop with sound has");
+        String::from_utf8_lossy(&said.stdout).into_owned()
+    }
+
+    /// Wait until `ready` holds.
+    fn until(&self, ready: impl Fn(&Self) -> bool) {
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready(self) {
+            assert!(
+                Instant::now() < deadline,
+                "the sound server never got ready"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+#[cfg(feature = "capture")]
+impl Drop for SoundServer {
+    fn drop(&mut self) {
+        for daemon in self.daemons.iter_mut().rev() {
+            daemon.kill().ok();
+            daemon.wait().ok();
+        }
+        std::fs::remove_dir_all(&self.folder).ok();
     }
 }
 
@@ -1917,6 +2058,922 @@ fn a_tray_menu_choice_is_sent_back() {
     session.wait_for(|facts| menu(facts).is_none());
 
     notifier.leave();
+    shell.stop_with(session);
+}
+
+/// A panel of the mixer's speaker alone, at the panel's right end.
+#[cfg(feature = "capture")]
+const MIXER_ONLY: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"mixer\"]\n\
+    [shell.mixer]\npanel = [\"mute\"]\n";
+
+/// The panel's ink, and its faint ink.
+#[cfg(feature = "capture")]
+const INK: [u8; 4] = [0xfc, 0xfc, 0xfc, 0xff];
+#[cfg(feature = "capture")]
+const FAINT: [u8; 4] = [0x9a, 0xa0, 0xa6, 0xff];
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn a_click_on_the_speaker_mutes_the_sound_servers_output_and_a_server_gone_is_faint() {
+    use std::time::{Duration, Instant};
+
+    let sound = SoundServer::start("mute");
+    let session = Session::start("shell-mute", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "mute",
+        MIXER_ONLY,
+        Some(sound.socket()),
+    );
+    sound.pactl(&["set-sink-volume", "one", "100%"]);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    // The speaker, in the 30 pixels at the panel's right end: its box, in
+    // the ink once the shell has heard the server; and where its third wave
+    // crosses the middle, in the ink while the sound is loud and on, and the
+    // bar's colour while it is muted.
+    let speaker = (1258, 800 - 20);
+    let wave = (1273, 800 - 20);
+    until_colour(&session, speaker, INK);
+    until_colour(&session, wave, INK);
+
+    let muted = |yes: bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let want = if yes { "Mute: yes" } else { "Mute: no" };
+        while sound.pactl(&["get-sink-mute", "one"]).trim() != want {
+            assert!(Instant::now() < deadline, "the output never said {want}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let middle = (1280.0 - 15.0, PANEL_HEIGHT / 2.0);
+    click(&session, panel, middle, PointerButton::Left);
+    muted(true);
+    until_colour(&session, wave, BAR);
+    // Brought back elsewhere, as by a key bound to wpctl, it is heard: the
+    // next click mutes it again, rather than bringing back what is on.
+    sound.pactl(&["set-sink-mute", "one", "0"]);
+    until_colour(&session, wave, INK);
+    click(&session, panel, middle, PointerButton::Left);
+    muted(true);
+    until_colour(&session, wave, BAR);
+    click(&session, panel, middle, PointerButton::Left);
+    muted(false);
+
+    // The server goes: the speaker is faint, with no one to ask.
+    drop(sound);
+    until_colour(&session, speaker, FAINT);
+    shell.stop_with(session);
+}
+
+/// A panel of the mixer alone, its volume then its speaker, the speaker at
+/// the panel's right end.
+#[cfg(feature = "capture")]
+const VOLUME_AND_MUTE: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"mixer\"]\n\
+    [shell.mixer]\npanel = [\"volume\", \"mute\"]\n";
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn the_wheel_over_the_mixer_steps_the_volume_to_the_limit_and_a_middle_click_mutes() {
+    use std::time::{Duration, Instant};
+
+    use perspicax_policy::Mods;
+
+    let sound = SoundServer::start("wheel");
+    sound.pactl(&["set-sink-volume", "one", "24%"]);
+    let session = Session::start("shell-wheel", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "wheel",
+        VOLUME_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let (speaker, wave) = ((1258, 800 - 20), (1273, 800 - 20));
+    until_colour(&session, speaker, INK);
+
+    let volume = || {
+        let said = sound.pactl(&["get-sink-volume", "one"]);
+        said.split('/')
+            .nth(1)
+            .and_then(|percent| percent.trim().trim_end_matches('%').parse::<u32>().ok())
+            .unwrap_or_else(|| panic!("a volume in {said:?}"))
+    };
+    let until_volume = |want: u32| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while volume() != want {
+            assert!(
+                Instant::now() < deadline,
+                "the volume never reached {want}%"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    // Over the volume, left of the speaker.
+    let turn = |notches: i32| {
+        session.command(Command::Scroll {
+            at: (1240, 800 - 20),
+            v120: (0, notches * 120),
+            mods: Mods::default(),
+        });
+    };
+    turn(-1);
+    until_volume(25);
+    // Two notches before the server answers the first go two steps.
+    turn(-1);
+    turn(-1);
+    until_volume(35);
+    turn(1);
+    until_volume(30);
+
+    // Near the top, the next notch stops at the limit, and the one after
+    // asks nothing more.
+    sound.pactl(&["set-sink-volume", "one", "98%"]);
+    until_colour(&session, wave, INK);
+    turn(-1);
+    until_volume(100);
+    turn(-1);
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(volume(), 100);
+
+    // A middle click anywhere on it mutes, and brings the sound back.
+    let middle = (1240.0, PANEL_HEIGHT / 2.0);
+    click(&session, panel, middle, PointerButton::Middle);
+    until_colour(&session, wave, BAR);
+    assert_eq!(sound.pactl(&["get-sink-mute", "one"]).trim(), "Mute: yes");
+    click(&session, panel, middle, PointerButton::Middle);
+    until_colour(&session, wave, INK);
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
+/// A panel of the mixer alone, its output then its speaker, the speaker at
+/// the panel's right end.
+#[cfg(feature = "capture")]
+const OUTPUT_AND_MUTE: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"mixer\"]\n\
+    [shell.mixer]\npanel = [\"output\", \"mute\"]\n";
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn a_click_on_the_output_switches_to_the_next_and_round() {
+    use std::time::{Duration, Instant};
+
+    let sound = SoundServer::start("output");
+    let session = Session::start("shell-output", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "output",
+        OUTPUT_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let default = || sound.pactl(&["get-default-sink"]).trim().to_owned();
+    let until_default = |want: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while default() != want {
+            assert!(Instant::now() < deadline, "the default never became {want}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    // The speaker's box, at the right end, in the ink once the shell has
+    // heard the server; and the output's room after its name, left of it.
+    until_colour(&session, (1258, 800 - 20), INK);
+    let output = (1280.0 - 30.0 - 5.0, PANEL_HEIGHT / 2.0);
+    click(&session, panel, output, PointerButton::Left);
+    until_default("two");
+    click(&session, panel, output, PointerButton::Left);
+    until_default("one");
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn an_output_named_and_hidden_in_the_mixer_is_kept_for_the_person_alone_and_never_switched_to() {
+    use std::{os::unix::fs::PermissionsExt as _, time::Duration};
+
+    let sound = SoundServer::start("hide");
+    let session = Session::start("shell-hide", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "hide",
+        OUTPUT_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    until_colour(&session, (1258, 800 - 20), INK);
+    click(
+        &session,
+        panel,
+        (1280.0 - 15.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Right,
+    );
+    let facts = session.wait_for(|facts| mixer(facts).is_some());
+    let (surface, rect) = mixer(&facts).expect("waited for");
+    // "two" is the output's second row: under 1 of edge and 12 of room, a
+    // 22-pixel title, a 32-pixel row, and "one", 28; the button at its end
+    // is 28 square, against the room on the right.
+    let two = 13.0 + 22.0 + 32.0 + 28.0;
+    click(
+        &session,
+        surface,
+        (rect.x1 - 13.0 - 14.0, rect.y0 + two + 14.0),
+        PointerButton::Left,
+    );
+    // Unfolded under it: its key, a line of 20, its name's field, Test
+    // and Hide, rows of 28 set in by 28; it grows away from the panel.
+    let facts = session.wait_for(|facts| {
+        mixer(facts).is_some_and(|(_, grown)| grown.y0 <= rect.y0 - 20.0 - 3.0 * 28.0)
+    });
+    let (_, rect) = mixer(&facts).expect("waited for");
+    let set_in = rect.x0 + 13.0 + 28.0 + 20.0;
+    let field = rect.y0 + two + 28.0 + 20.0 + 14.0;
+    click(&session, surface, (set_in, field), PointerButton::Left);
+    Host::new(&session.facts, &session.requests)
+        .act(
+            surface,
+            &Verb::Type {
+                text: "Desk\n".to_owned(),
+            },
+        )
+        .expect("typed");
+    let kept = || std::fs::read_to_string(&shell.state).unwrap_or_default();
+    sound.until(|_| kept().contains("\"two\": \"Desk\""));
+    let mode = std::fs::metadata(&shell.state)
+        .expect("kept")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "for the person alone");
+    click(
+        &session,
+        surface,
+        (set_in, field + 2.0 * 28.0),
+        PointerButton::Left,
+    );
+    sound.until(|_| kept().contains("\"hidden\": [\n    \"two\""));
+    // Under "Hidden", folded, it and all it unfolded are gone from sight.
+    let tall = rect.y1 - rect.y0;
+    session.wait_for(|facts| {
+        mixer(facts)
+            .is_some_and(|(_, now)| now.y1 - now.y0 <= tall - 28.0 - 20.0 - 3.0 * 28.0 + 24.0)
+    });
+
+    // A press on the output, the mixer open, closes it and switches: to
+    // nothing but "one", with "two" hidden.
+    click(
+        &session,
+        panel,
+        (1280.0 - 30.0 - 5.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Left,
+    );
+    session.wait_for(|facts| mixer(facts).is_none());
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(sound.pactl(&["get-default-sink"]).trim(), "one");
+
+    drop(sound);
+    std::fs::remove_file(&shell.state).ok();
+    shell.stop_with(session);
+}
+
+/// A panel of the mixer alone, its moving bars then its speaker, the
+/// speaker at the panel's right end.
+#[cfg(feature = "capture")]
+const LEVELS_AND_MUTE: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"mixer\"]\n\
+    [shell.mixer]\npanel = [\"levels\", \"mute\"]\n";
+
+/// The theme's accent, which the moving bars are drawn in.
+#[cfg(feature = "capture")]
+const ACCENT: [u8; 4] = [0x3d, 0xae, 0xe9, 0xff];
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn the_bars_rise_with_what_plays_and_fall_once_it_stops() {
+    use std::{io::Write as _, time::Duration};
+
+    let sound = SoundServer::start("levels");
+    sound.pactl(&["set-sink-volume", "one", "100%"]);
+    let session = Session::start("shell-levels", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "levels",
+        LEVELS_AND_MUTE,
+        Some(sound.socket()),
+    );
+    until_colour(&session, (1258, 800 - 20), INK);
+    // The bar of the band holding 1 kHz, the ninth of sixteen, low in the
+    // slot left of the speaker: 75 wide, its bars 6 in, each 3 and a gap.
+    let bar = (1280 - 30 - 75 + 6 + 8 * 4 + 1, 800 - 10);
+    assert_eq!(
+        colour_at(&session, bar.0, bar.1),
+        BAR,
+        "still with nothing playing"
+    );
+
+    // A loud 1 kHz sine, played into the default output.
+    let mut player = sound
+        .command("pacat")
+        .args([
+            "--raw",
+            "--format=float32le",
+            "--rate=22050",
+            "--channels=1",
+        ])
+        .args(["--device=one"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("pacat, which a desktop with sound has");
+    let mut feed = player.stdin.take().expect("its input");
+    let playing = thread::spawn(move || {
+        let second: Vec<u8> = (0..22_050)
+            .flat_map(|at: u32| {
+                let phase = 2.0 * std::f32::consts::PI * 1000.0 * at as f32 / 22_050.0;
+                (0.5 * phase.sin()).to_le_bytes()
+            })
+            .collect();
+        for _ in 0..20 {
+            if feed.write_all(&second).is_err() {
+                return;
+            }
+        }
+    });
+    until_colour(&session, bar, ACCENT);
+
+    // Muted as they move, the whole panel is drawn again, and each picture
+    // after shows the cross where the third wave was: none goes back to a
+    // buffer of before.
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let wave = (1273, 800 - 20);
+    until_colour(&session, wave, INK);
+    click(
+        &session,
+        panel,
+        (1280.0 - 15.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Left,
+    );
+    until_colour(&session, wave, BAR);
+    for _ in 0..20 {
+        assert_eq!(
+            colour_at(&session, wave.0, wave.1),
+            BAR,
+            "a picture of before came back"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    player.kill().ok();
+    player.wait().ok();
+    playing.join().ok();
+    until_colour(&session, bar, BAR);
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
+/// A panel of the mixer's microphone alone, at the panel's right end.
+#[cfg(feature = "capture")]
+const MIC_ONLY: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"mixer\"]\n\
+    [shell.mixer]\npanel = [\"mic\"]\n";
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn a_click_on_the_microphone_mutes_the_default_input_and_the_wheel_moves_it() {
+    use std::time::{Duration, Instant};
+
+    use perspicax_policy::Mods;
+
+    let sound = SoundServer::start("mic");
+    sound.pactl(&[
+        "load-module",
+        "module-null-sink",
+        "sink_name=mic",
+        "media.class=Audio/Source/Virtual",
+    ]);
+    sound.until(|sound| sound.pactl(&["get-default-source"]).trim() == "mic");
+    sound.pactl(&["set-source-volume", "mic", "40%"]);
+    let session = Session::start("shell-mic", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "mic",
+        MIC_ONLY,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    // The capsule, in the ink once the shell has heard the server.
+    until_colour(&session, (1265, 800 - 25), INK);
+
+    let until = |args: &[&str], want: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !sound.pactl(args).contains(want) {
+            assert!(Instant::now() < deadline, "{args:?} never said {want}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    click(
+        &session,
+        panel,
+        (1265.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Left,
+    );
+    until(&["get-source-mute", "mic"], "Mute: yes");
+    click(
+        &session,
+        panel,
+        (1265.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Middle,
+    );
+    until(&["get-source-mute", "mic"], "Mute: no");
+    session.command(Command::Scroll {
+        at: (1265, 800 - 20),
+        v120: (0, -120),
+        mods: Mods::default(),
+    });
+    until(&["get-source-volume", "mic"], "/  45% /");
+    assert!(
+        sound.pactl(&["get-sink-mute", "one"]).contains("Mute: no"),
+        "the output is left alone"
+    );
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
+/// A panel of the mixer's button and its speaker, the speaker at the
+/// panel's right end and the button left of it.
+#[cfg(feature = "capture")]
+const OPEN_AND_MUTE: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"mixer\"]\n\
+    [shell.mixer]\npanel = [\"open\", \"mute\"]\n";
+
+/// The mixer, if it is open: its surface and its box.
+#[cfg(feature = "capture")]
+fn mixer(facts: &HostFacts) -> Option<(SurfaceId, Rect)> {
+    facts
+        .surfaces()
+        .iter()
+        .find_map(|surface| match &surface.kind {
+            SurfaceKind::Layer {
+                layer: Layer::Overlay,
+                namespace,
+            } if surface.mapped && namespace.starts_with("perspicax-mixer-") => {
+                Some((surface.id, *surface.opaque.first()?))
+            }
+            _ => None,
+        })
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn the_mixer_opens_from_its_button_mutes_and_sets_the_volume_and_closes() {
+    use std::time::{Duration, Instant};
+
+    let sound = SoundServer::start("mixer");
+    sound.pactl(&["set-sink-volume", "one", "30%"]);
+    let session = Session::start("shell-mixer", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "mixer",
+        OPEN_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    until_colour(&session, (1258, 800 - 20), INK);
+    let until = |args: &[&str], want: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !sound.pactl(args).contains(want) {
+            assert!(Instant::now() < deadline, "{args:?} never said {want}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    // Its button opens it, standing on the panel at the item's right end.
+    let button = (1280.0 - 30.0 - 15.0, PANEL_HEIGHT / 2.0);
+    click(&session, panel, button, PointerButton::Left);
+    let facts = session.wait_for(|facts| mixer(facts).is_some());
+    let (surface, rect) = mixer(&facts).expect("waited for");
+    assert_eq!((rect.x1, rect.y1), (1280.0, 800.0 - PANEL_HEIGHT));
+    // The output's row: its mute button, then its slider. The layout's
+    // numbers: 1 of edge and 12 of room, a 22-pixel title, a 32-pixel row,
+    // a 28-pixel button and 8 between; the slider's track 7 in from each
+    // of its ends, and 48 for the percentage, 8 from it.
+    let row = rect.y0 + 13.0 + 22.0 + 16.0;
+    click(
+        &session,
+        surface,
+        (rect.x0 + 13.0 + 14.0, row),
+        PointerButton::Left,
+    );
+    until(&["get-sink-mute", "one"], "Mute: yes");
+    let track = (rect.x0 + 49.0 + 7.0, rect.x1 - 13.0 - 48.0 - 8.0 - 7.0);
+    let half = (track.0 + track.1) / 2.0;
+    click(&session, surface, (half, row), PointerButton::Left);
+    until(&["get-sink-volume", "one"], "/  50% /");
+
+    // Its button closes it again, for good, and a press off it does too.
+    click(&session, panel, button, PointerButton::Left);
+    session.wait_for(|facts| mixer(facts).is_none());
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        mixer(&session.wait_for(|_| true)).is_none(),
+        "not opened again"
+    );
+    click(
+        &session,
+        panel,
+        (1280.0 - 15.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Right,
+    );
+    let facts = session.wait_for(|facts| mixer(facts).is_some());
+    let (surface, _) = mixer(&facts).expect("open");
+    click(&session, surface, (100.0, 100.0), PointerButton::Left);
+    session.wait_for(|facts| mixer(facts).is_none());
+
+    // Open, the panel is still the panel's to a person's hand, which goes
+    // by what is under it, not an agent's, which names its surface: a press
+    // on its speaker closes the mixer and brings the sound back.
+    click(&session, panel, button, PointerButton::Left);
+    session.wait_for(|facts| mixer(facts).is_some());
+    session.command(Command::Click {
+        at: (1280 - 15, 800 - 20),
+        button: perspicax_policy::Button::Left,
+        mods: perspicax_policy::Mods::default(),
+    });
+    session.wait_for(|facts| mixer(facts).is_none());
+    until(&["get-sink-mute", "one"], "Mute: no");
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn a_device_pressed_in_the_mixer_becomes_the_default_on_its_side() {
+    let sound = SoundServer::start("mixer-list");
+    for source in ["first", "second"] {
+        sound.pactl(&[
+            "load-module",
+            "module-null-sink",
+            &format!("sink_name={source}"),
+            "media.class=Audio/Source/Virtual",
+        ]);
+    }
+    sound.pactl(&["set-default-source", "first"]);
+    sound.until(|sound| sound.pactl(&["get-default-source"]).trim() == "first");
+    let session = Session::start("shell-mixer-list", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "mixer-list",
+        OPEN_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    until_colour(&session, (1258, 800 - 20), INK);
+    click(
+        &session,
+        panel,
+        (1280.0 - 30.0 - 15.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Left,
+    );
+    let facts = session.wait_for(|facts| mixer(facts).is_some());
+    let (surface, rect) = mixer(&facts).expect("waited for");
+    // Under each side's title and its row of controls, 22 and 32 pixels, a
+    // row of 28 for each device, in the order the server lists them; 8
+    // between the sides, and 1 of edge and 12 of room round them all.
+    let x = rect.x0 + 13.0 + 100.0;
+    let one = rect.y0 + 13.0 + 22.0 + 32.0 + 14.0;
+    let two = one + 28.0;
+    // A device's round mark, filled in the accent for the one in use.
+    let mark = |y: f64| ((rect.x0 + 13.0 + 14.0) as usize, y as usize);
+    until_colour(&session, mark(one), ACCENT);
+    click(&session, surface, (x, two), PointerButton::Left);
+    sound.until(|sound| sound.pactl(&["get-default-sink"]).trim() == "two");
+    until_colour(&session, mark(two), ACCENT);
+    let second = rect.y0 + 13.0 + 2.0 * (22.0 + 32.0) + 3.0 * 28.0 + 8.0 + 14.0;
+    click(&session, surface, (x, second), PointerButton::Left);
+    sound.until(|sound| sound.pactl(&["get-default-source"]).trim() == "second");
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn a_program_playing_is_set_and_moved_to_another_output_from_the_mixer() {
+    let mut sound = SoundServer::start("mixer-program");
+    let silence = std::fs::File::open("/dev/zero").expect("/dev/zero");
+    let player = sound
+        .command("paplay")
+        .args(["--raw", "--client-name=Tune"])
+        .stdin(silence)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("paplay, which a desktop with sound has");
+    sound.daemons.push(player);
+    sound.until(|sound| sound.pactl(&["list", "sink-inputs"]).contains("Tune"));
+    let session = Session::start("shell-mixer-program", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "mixer-program",
+        OPEN_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    until_colour(&session, (1258, 800 - 20), INK);
+    click(
+        &session,
+        panel,
+        (1280.0 - 30.0 - 15.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Left,
+    );
+    // Its row is under the outputs' (a title, the controls, "one" and
+    // "two"), the input's (a title and the controls), and the programs'
+    // title, 8 between each section: 1 of edge and 12 of room, then 22,
+    // 32 and 28 twice, 8, 22 and 32, 8 and 22.
+    let row = 13.0 + 22.0 + 32.0 + 2.0 * 28.0 + 8.0 + 22.0 + 32.0 + 8.0 + 22.0;
+    let facts = session
+        .wait_for(|facts| mixer(facts).is_some_and(|(_, rect)| rect.y1 - rect.y0 > row + 60.0));
+    let (surface, rect) = mixer(&facts).expect("waited for");
+    let track = (rect.x0 + 49.0 + 7.0, rect.x1 - 13.0 - 48.0 - 8.0 - 7.0);
+    let slider = rect.y0 + row + 28.0 + 16.0;
+    click(
+        &session,
+        surface,
+        ((track.0 + track.1) / 2.0, slider),
+        PointerButton::Left,
+    );
+    sound.until(|sound| sound.pactl(&["list", "sink-inputs"]).contains("/  50% /"));
+    click(
+        &session,
+        surface,
+        (rect.x0 + 100.0, rect.y0 + row + 14.0),
+        PointerButton::Left,
+    );
+    // Unfolded, it grows away from the panel by an output apiece.
+    let facts = session
+        .wait_for(|facts| mixer(facts).is_some_and(|(_, grown)| grown.y0 <= rect.y0 - 2.0 * 28.0));
+    let (_, rect) = mixer(&facts).expect("waited for");
+    let two = rect.y0 + row + 28.0 + 32.0 + 28.0 + 14.0;
+    click(
+        &session,
+        surface,
+        (rect.x0 + 100.0, two),
+        PointerButton::Left,
+    );
+    let index = sound
+        .pactl(&["list", "short", "sinks"])
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split('\t');
+            let index = fields.next()?;
+            (fields.next()? == "two").then(|| index.to_owned())
+        })
+        .expect("two among the sinks");
+    sound.until(|sound| {
+        sound
+            .pactl(&["list", "short", "sink-inputs"])
+            .lines()
+            .any(|line| line.split('\t').nth(1) == Some(index.as_str()))
+    });
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn the_mixer_meters_what_plays_tests_an_output_and_stops_metering_once_closed() {
+    let mut sound = SoundServer::start("meters");
+    let silence = std::fs::File::open("/dev/zero").expect("/dev/zero");
+    let player = sound
+        .command("paplay")
+        .args(["--raw", "--device=one"])
+        .stdin(silence)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("paplay, which a desktop with sound has");
+    sound.daemons.push(player);
+    let session = Session::start("shell-meters", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "meters",
+        OPEN_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    until_colour(&session, (1258, 800 - 20), INK);
+    let button = (1280.0 - 30.0 - 15.0, PANEL_HEIGHT / 2.0);
+    click(&session, panel, button, PointerButton::Left);
+    let facts = session.wait_for(|facts| mixer(facts).is_some());
+    let (surface, rect) = mixer(&facts).expect("waited for");
+    let meters = |sound: &SoundServer| {
+        sound
+            .pactl(&["list", "source-outputs"])
+            .matches("media.name = \"Meter\"")
+            .count()
+    };
+    // "one", which plays, and not "two", which does not.
+    sound.until(|sound| meters(sound) == 1);
+
+    // "two"'s details: its key, a line of 20, its name's field, then Test.
+    let two = 13.0 + 22.0 + 32.0 + 28.0;
+    click(
+        &session,
+        surface,
+        (rect.x1 - 13.0 - 14.0, rect.y0 + two + 14.0),
+        PointerButton::Left,
+    );
+    let facts = session.wait_for(|facts| {
+        mixer(facts).is_some_and(|(_, grown)| grown.y0 <= rect.y0 - 20.0 - 3.0 * 28.0)
+    });
+    let (_, rect) = mixer(&facts).expect("waited for");
+    let test = rect.y0 + two + 28.0 + 20.0 + 28.0 + 14.0;
+    click(
+        &session,
+        surface,
+        (rect.x0 + 13.0 + 28.0 + 20.0, test),
+        PointerButton::Left,
+    );
+    let index = sound
+        .pactl(&["list", "short", "sinks"])
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split('\t');
+            let index = fields.next()?;
+            (fields.next()? == "two").then(|| index.to_owned())
+        })
+        .expect("two among the sinks");
+    // It sounds for a moment, on "two" and not the default: the one
+    // stream of one channel of floats at 44.1 kHz.
+    sound.until(|sound| {
+        sound
+            .pactl(&["list", "short", "sink-inputs"])
+            .lines()
+            .any(|line| {
+                line.split('\t').nth(1) == Some(index.as_str())
+                    && line.ends_with("float32le 1ch 44100Hz")
+            })
+    });
+
+    click(&session, panel, button, PointerButton::Left);
+    session.wait_for(|facts| mixer(facts).is_none());
+    sound.until(|sound| meters(sound) == 0);
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
+/// The volume shown on the screen, if it is: its surface and where it is.
+#[cfg(feature = "capture")]
+fn osd(facts: &HostFacts) -> Option<(SurfaceId, Rect)> {
+    facts
+        .surfaces()
+        .iter()
+        .find_map(|surface| match &surface.kind {
+            SurfaceKind::Layer {
+                layer: Layer::Overlay,
+                namespace,
+            } if surface.mapped && namespace == "perspicax-osd" => {
+                Some((surface.id, surface.geometry))
+            }
+            _ => None,
+        })
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn a_change_from_elsewhere_shows_the_volume_a_moment_and_one_on_the_panel_does_not() {
+    use std::time::{Duration, Instant};
+
+    let sound = SoundServer::start("osd");
+    let session = Session::start("shell-osd", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "osd",
+        OPEN_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    until_colour(&session, (1258, 800 - 20), INK);
+
+    // Set elsewhere: shown in the middle, 48 above the panel, a moment.
+    sound.pactl(&["set-sink-volume", "one", "40%"]);
+    let facts = session.wait_for(|facts| osd(facts).is_some());
+    let (_, rect) = osd(&facts).expect("waited for");
+    assert_eq!(
+        (rect.x0, rect.x1, rect.y1),
+        (500.0, 780.0, 800.0 - PANEL_HEIGHT - 48.0),
+        "{rect:?}"
+    );
+    let shown = Instant::now();
+    session.wait_for(|facts| osd(facts).is_none());
+    assert!(shown.elapsed() < Duration::from_secs(3), "gone again");
+
+    // Muted on the panel, which shows it itself: nothing more.
+    click(
+        &session,
+        panel,
+        (1280.0 - 15.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Left,
+    );
+    sound.until(|sound| sound.pactl(&["get-sink-mute", "one"]).contains("yes"));
+    thread::sleep(Duration::from_millis(500));
+    assert!(
+        osd(&session.wait_for(|_| true)).is_none(),
+        "not for the panel's own"
+    );
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn a_volume_key_steps_the_volume_and_shows_it() {
+    let sound = SoundServer::start("keys");
+    sound.pactl(&["set-sink-volume", "one", "40%"]);
+    let session = Session::start("shell-keys", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "keys",
+        OPEN_AND_MUTE,
+        Some(sound.socket()),
+    );
+    session.wait_for(|facts| panels(facts).len() == 1);
+    until_colour(&session, (1258, 800 - 20), INK);
+    session.perform(Action::Volume(perspicax_policy::VolumeKey::Up));
+    sound.until(|sound| {
+        sound
+            .pactl(&["get-sink-volume", "one"])
+            .contains("/  45% /")
+    });
+    session.wait_for(|facts| osd(facts).is_some());
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn with_no_mixer_on_the_panel_the_volume_is_still_shown_and_clicks_go_through_it() {
+    use std::time::{Duration, Instant};
+
+    let sound = SoundServer::start("osd-alone");
+    let session = Session::start("shell-osd-alone", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "osd-alone",
+        "profile = \"classic\"\n[shell.panel]\nitems = [\"clock\"]\n",
+        Some(sound.socket()),
+    );
+    session.wait_for(|facts| panels(facts).len() == 1);
+    // Nothing shows when the shell has first heard the server, which a
+    // panel of no mixer does not show: set it until it is a change.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut loud = 30;
+    let (_, rect) = loop {
+        sound.pactl(&["set-sink-volume", "one", &format!("{loud}%")]);
+        thread::sleep(Duration::from_millis(300));
+        if let Some(shown) = osd(&session.wait_for(|_| true)) {
+            break shown;
+        }
+        assert!(Instant::now() < deadline, "never shown");
+        loud = 70 - loud;
+    };
+    // A person's right click on it reaches the desktop under it, which
+    // opens its menu.
+    let middle = ((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0);
+    session.command(Command::Click {
+        at: (middle.0 as i32, middle.1 as i32),
+        button: perspicax_policy::Button::Right,
+        mods: perspicax_policy::Mods::default(),
+    });
+    session.wait_for(|facts| menu(facts).is_some());
+
+    drop(sound);
     shell.stop_with(session);
 }
 

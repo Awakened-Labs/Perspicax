@@ -8,6 +8,10 @@
 pub(crate) mod folder;
 #[cfg(feature = "menus")]
 pub(crate) mod menu;
+#[cfg(feature = "audio")]
+pub(crate) mod mixer;
+#[cfg(feature = "audio")]
+pub(crate) mod osd;
 #[cfg(feature = "panel")]
 pub(crate) mod panel;
 #[cfg(feature = "pie")]

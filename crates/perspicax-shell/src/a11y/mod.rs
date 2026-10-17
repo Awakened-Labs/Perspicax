@@ -588,7 +588,14 @@ mod panels {
     use accesskit::{Action, HasPopup, Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate};
     use perspicax_config::Item;
 
+    #[cfg(feature = "audio")]
+    use accesskit::Toggled;
+    #[cfg(feature = "audio")]
+    use perspicax_config::mixer::Piece;
+
     use super::{ROOT, rect, window};
+    #[cfg(feature = "audio")]
+    use crate::layout::panel::Sounding;
     use crate::{
         layout::{
             Rect,
@@ -606,6 +613,8 @@ mod panels {
     #[cfg(feature = "tray")]
     const TRAY: NodeId = NodeId(6);
     const LAYOUT: NodeId = NodeId(7);
+    #[cfg(feature = "audio")]
+    const MIXER: NodeId = NodeId(8);
     /// A task's node, a workspace's and a status icon's: the serial of its
     /// window or its workspace, or the icon's key, which stays its own
     /// while it lasts, above one of these.
@@ -613,6 +622,9 @@ mod panels {
     const WORKSPACE: u64 = 2;
     #[cfg(feature = "tray")]
     const STATUS: u64 = 3;
+    /// A piece of the mixer's node: its place in [`Piece::ALL`] above this.
+    #[cfg(feature = "audio")]
+    const PIECE: u64 = 4;
     const SERIAL_BITS: u32 = 40;
 
     /// What on a panel the node `id` is, if it is something to press.
@@ -625,6 +637,11 @@ mod panels {
             (_, WORKSPACE) => Some(Part::Workspace(serial)),
             #[cfg(feature = "tray")]
             (_, STATUS) => Some(Part::Tray(serial)),
+            #[cfg(feature = "audio")]
+            (_, PIECE) => usize::try_from(serial)
+                .ok()
+                .and_then(|at| Piece::ALL.get(at))
+                .map(|&piece| Part::Mixer(piece)),
             _ => None,
         }
     }
@@ -646,7 +663,20 @@ mod panels {
     /// and descriptions alone (as perspicax is, for now). The layout
     /// indicator is a `Button`, "Keyboard layout", whose value and
     /// description are the `layout` in use's name; a click moves to the
-    /// next. What takes no room on the panel is not in the tree.
+    /// next. The mixer is a `Group`, "Sound", of a node for each piece: the
+    /// speaker that mutes is a `Switch`, "Mute", on while the sound is
+    /// muted, described by how loud it is; the volume is a `Slider`,
+    /// "Volume", from silence to the limit, or to where it is past it, that
+    /// steps by `step` and can be set, described as muted while it is; the
+    /// output is a `Button`, "Output", whose value is the output's name and
+    /// whose description is its whole name, and a click switches to the
+    /// next; the mixer's button is a `Button`, "Mixer", that opens a
+    /// dialog, expanded while it is open; the microphone is a `Switch`,
+    /// "Mute microphone", as the speaker is, and with no input to record
+    /// from, disabled and described so; the moving bars are a `Meter`,
+    /// "Sound levels", with no value, since they move faster than a tree is
+    /// worth sending. With no sound server, each is disabled, and described
+    /// so. What takes no room on the panel is not in the tree.
     pub(crate) fn panel(
         namespace: &str,
         size: Option<(u32, u32)>,
@@ -728,6 +758,22 @@ mod panels {
                 }
                 #[cfg(not(feature = "tray"))]
                 Item::Tray => continue,
+                #[cfg(feature = "audio")]
+                Item::Mixer => {
+                    let mut group = Node::new(Role::Group);
+                    group.set_label("Sound");
+                    for &(piece, place) in &placed.mixer {
+                        let mut node = sound(piece, &placed.sound);
+                        node.set_bounds(rect(place));
+                        let at = Piece::ALL.iter().position(|&each| each == piece);
+                        let id = node_of(PIECE, at.unwrap_or_default() as u64);
+                        group.push_child(id);
+                        nodes.push((id, node));
+                    }
+                    (MIXER, group)
+                }
+                #[cfg(not(feature = "audio"))]
+                Item::Mixer => continue,
             };
             node.set_bounds(rect(place));
             bar.push_child(id);
@@ -741,6 +787,120 @@ mod panels {
             tree: Some(TreeInfo::new(ROOT)),
             tree_id: TreeId::ROOT,
             focus: ROOT,
+        }
+    }
+
+    /// The node of a piece of the mixer, showing `sound`.
+    #[cfg(feature = "audio")]
+    fn sound(piece: Piece, sound: &Sounding) -> Node {
+        let level = sound.level;
+        match piece {
+            Piece::Mute => {
+                let mut switch = Node::new(Role::Switch);
+                switch.set_label("Mute");
+                match level {
+                    Some(level) => {
+                        switch.set_toggled(if level.muted {
+                            Toggled::True
+                        } else {
+                            Toggled::False
+                        });
+                        switch.set_description(if level.muted {
+                            "Muted".to_owned()
+                        } else {
+                            format!("{}%", level.percent)
+                        });
+                        switch.add_action(Action::Click);
+                    }
+                    None => {
+                        switch.set_disabled();
+                        switch.set_description("No sound server");
+                    }
+                }
+                switch
+            }
+            Piece::Volume => {
+                let mut slider = Node::new(Role::Slider);
+                slider.set_label("Volume");
+                match level {
+                    Some(level) => {
+                        let most = sound.limit.max(level.percent);
+                        slider.set_numeric_value(f64::from(level.percent));
+                        slider.set_min_numeric_value(0.0);
+                        slider.set_max_numeric_value(f64::from(most));
+                        slider.set_numeric_value_step(f64::from(sound.step));
+                        slider.set_value(format!("{}%", level.percent));
+                        if level.muted {
+                            slider.set_description("Muted");
+                        }
+                        for action in [Action::Increment, Action::Decrement, Action::SetValue] {
+                            slider.add_action(action);
+                        }
+                    }
+                    None => {
+                        slider.set_disabled();
+                        slider.set_description("No sound server");
+                    }
+                }
+                slider
+            }
+            Piece::Mic => {
+                let mut switch = Node::new(Role::Switch);
+                switch.set_label("Mute microphone");
+                match sound.mic {
+                    Some(mic) => {
+                        switch.set_toggled(if mic.muted {
+                            Toggled::True
+                        } else {
+                            Toggled::False
+                        });
+                        switch.set_description(if mic.muted {
+                            "Muted".to_owned()
+                        } else {
+                            format!("{}%", mic.percent)
+                        });
+                        switch.add_action(Action::Click);
+                    }
+                    None => {
+                        switch.set_disabled();
+                        switch.set_description("No microphone");
+                    }
+                }
+                switch
+            }
+            Piece::Open => {
+                let mut button = Node::new(Role::Button);
+                button.set_label("Mixer");
+                button.set_has_popup(HasPopup::Dialog);
+                button.set_expanded(sound.open);
+                button.add_action(Action::Click);
+                button
+            }
+            Piece::Levels => {
+                let mut meter = Node::new(Role::Meter);
+                meter.set_label("Sound levels");
+                if level.is_none() {
+                    meter.set_disabled();
+                    meter.set_description("No sound server");
+                }
+                meter
+            }
+            Piece::Output => {
+                let mut button = Node::new(Role::Button);
+                button.set_label("Output");
+                match &sound.output {
+                    Some(playing) => {
+                        button.set_value(playing.name.as_str());
+                        button.set_description(playing.long.as_str());
+                        button.add_action(Action::Click);
+                    }
+                    None => {
+                        button.set_disabled();
+                        button.set_description("No sound server");
+                    }
+                }
+                button
+            }
         }
     }
 
@@ -806,6 +966,8 @@ mod panels {
                 cells,
                 #[cfg(feature = "tray")]
                 tray: Vec::new(),
+                #[cfg(feature = "audio")]
+                mixer: crate::layout::panel::Mixing::default(),
             };
             lay_out(&items, holding, (1280, 40), FULL, &mut Monospace(8.0))
         }
@@ -829,6 +991,8 @@ mod panels {
                     task_titles: true,
                     cells: Vec::new(),
                     tray: vec![icon(3, "Network", true), icon(8, "Updates", false)],
+                    #[cfg(feature = "audio")]
+                    mixer: crate::layout::panel::Mixing::default(),
                 },
                 (1280, 40),
                 FULL,
@@ -876,6 +1040,195 @@ mod panels {
             assert_eq!(second.bounds(), Some(rect(placed.tray[1].1)));
         }
 
+        #[cfg(feature = "audio")]
+        #[test]
+        fn the_mixer_is_a_group_whose_speaker_is_a_switch_that_mutes() {
+            use accesskit::Toggled;
+
+            use crate::{
+                layout::panel::{Mixing, Playing, Sounding},
+                model::sound::{Kind, Level},
+            };
+
+            let tree_of = |level: Option<Level>| {
+                let placed = lay_out(
+                    &[Item::Start, Item::Mixer, Item::Clock],
+                    Holding {
+                        time: "14:05",
+                        layout: None,
+                        tasks: Vec::new(),
+                        task_titles: true,
+                        cells: Vec::new(),
+                        #[cfg(feature = "tray")]
+                        tray: Vec::new(),
+                        mixer: Mixing {
+                            pieces: &[Piece::Mute, Piece::Volume, Piece::Levels, Piece::Mic],
+                            sound: Sounding {
+                                level,
+                                step: 5,
+                                limit: 100,
+                                output: None,
+                                mic: level,
+                                open: false,
+                            },
+                        },
+                    },
+                    (1280, 40),
+                    FULL,
+                    &mut Monospace(8.0),
+                );
+                let tree = panel(
+                    "perspicax-panel-DP-1",
+                    Some((1280, 40)),
+                    &placed,
+                    "14:05",
+                    false,
+                    None,
+                );
+                (placed, tree)
+            };
+            let (placed, tree) = tree_of(Some(Level {
+                percent: 24,
+                muted: false,
+            }));
+            assert_eq!(node(&tree, TOOLBAR).children(), [START, MIXER, CLOCK]);
+            let mixer = node(&tree, MIXER);
+            assert_eq!((mixer.role(), mixer.label()), (Role::Group, Some("Sound")));
+            let [mute, volume, levels, mic] = mixer.children() else {
+                panic!("four pieces: {:?}", mixer.children());
+            };
+            let switch = node(&tree, *mic);
+            assert_eq!(
+                (switch.role(), switch.label(), switch.toggled()),
+                (Role::Switch, Some("Mute microphone"), Some(Toggled::False))
+            );
+            assert_eq!(part_of(*mic), Some(Part::Mixer(Piece::Mic)));
+            let meter = node(&tree, *levels);
+            assert_eq!(
+                (meter.role(), meter.label()),
+                (Role::Meter, Some("Sound levels"))
+            );
+            assert_eq!(meter.numeric_value(), None, "it moves too fast to tell");
+            assert_eq!(part_of(*levels), Some(Part::Mixer(Piece::Levels)));
+            assert_eq!(
+                part_of(*mute),
+                Some(Part::Mixer(Piece::Mute)),
+                "a click on it is a press"
+            );
+            let switch = node(&tree, *mute);
+            assert_eq!(
+                (switch.role(), switch.label()),
+                (Role::Switch, Some("Mute"))
+            );
+            assert_eq!(switch.toggled(), Some(Toggled::False));
+            assert_eq!(switch.description(), Some("24%"));
+            assert!(switch.supports_action(Action::Click));
+            assert_eq!(switch.bounds(), Some(rect(placed.mixer[0].1)));
+            assert_eq!(part_of(*volume), Some(Part::Mixer(Piece::Volume)));
+            let slider = node(&tree, *volume);
+            assert_eq!(
+                (slider.role(), slider.label()),
+                (Role::Slider, Some("Volume"))
+            );
+            assert_eq!(
+                (
+                    slider.numeric_value(),
+                    slider.min_numeric_value(),
+                    slider.max_numeric_value(),
+                    slider.numeric_value_step()
+                ),
+                (Some(24.0), Some(0.0), Some(100.0), Some(5.0))
+            );
+            assert_eq!(slider.value(), Some("24%"));
+            for action in [Action::Increment, Action::Decrement, Action::SetValue] {
+                assert!(slider.supports_action(action), "{action:?}");
+            }
+            assert_eq!(slider.description(), None);
+
+            let (_, muted) = tree_of(Some(Level {
+                percent: 24,
+                muted: true,
+            }));
+            let switch = node(&muted, *mute);
+            assert_eq!(switch.toggled(), Some(Toggled::True));
+            assert_eq!(switch.description(), Some("Muted"));
+            assert_eq!(node(&muted, *volume).description(), Some("Muted"));
+            let (_, loud) = tree_of(Some(Level {
+                percent: 120,
+                muted: false,
+            }));
+            assert_eq!(
+                node(&loud, *volume).max_numeric_value(),
+                Some(120.0),
+                "past the limit, the slider reaches where it is"
+            );
+
+            let output = |playing: Option<Playing>| {
+                let placed = lay_out(
+                    &[Item::Mixer],
+                    Holding {
+                        time: "14:05",
+                        layout: None,
+                        tasks: Vec::new(),
+                        task_titles: true,
+                        cells: Vec::new(),
+                        #[cfg(feature = "tray")]
+                        tray: Vec::new(),
+                        mixer: Mixing {
+                            pieces: &[Piece::Output],
+                            sound: Sounding {
+                                output: playing,
+                                ..Sounding::default()
+                            },
+                        },
+                    },
+                    (1280, 40),
+                    FULL,
+                    &mut Monospace(8.0),
+                );
+                let tree = panel(
+                    "perspicax-panel-DP-1",
+                    Some((1280, 40)),
+                    &placed,
+                    "14:05",
+                    false,
+                    None,
+                );
+                let id = node(&tree, MIXER).children()[0];
+                (part_of(id), node(&tree, id).clone())
+            };
+            let (part, button) = output(Some(Playing {
+                kind: Kind::Headset,
+                name: "E8".to_owned(),
+                long: "E8 \u{2014} Headphones \u{b7} Bluetooth".to_owned(),
+            }));
+            assert_eq!(part, Some(Part::Mixer(Piece::Output)));
+            assert_eq!(
+                (button.role(), button.label()),
+                (Role::Button, Some("Output"))
+            );
+            assert_eq!(button.value(), Some("E8"));
+            assert_eq!(
+                button.description(),
+                Some("E8 \u{2014} Headphones \u{b7} Bluetooth")
+            );
+            assert!(button.supports_action(Action::Click), "a click switches");
+            let (_, none) = output(None);
+            assert!(none.is_disabled() && !none.supports_action(Action::Click));
+
+            let (_, gone) = tree_of(None);
+            let switch = node(&gone, *mute);
+            assert!(switch.is_disabled());
+            assert!(!switch.supports_action(Action::Click));
+            assert_eq!(switch.description(), Some("No sound server"));
+            let microphone = node(&gone, *mic);
+            assert!(microphone.is_disabled());
+            assert_eq!(microphone.description(), Some("No microphone"));
+            let slider = node(&gone, *volume);
+            assert!(slider.is_disabled() && !slider.supports_action(Action::SetValue));
+            assert_eq!(slider.numeric_value(), None);
+        }
+
         #[test]
         fn a_narrow_panels_toolbar_is_its_bar_and_its_window_the_strip() {
             let holding = Holding {
@@ -886,6 +1239,8 @@ mod panels {
                 cells: Vec::new(),
                 #[cfg(feature = "tray")]
                 tray: Vec::new(),
+                #[cfg(feature = "audio")]
+                mixer: crate::layout::panel::Mixing::default(),
             };
             let placed = lay_out(
                 &[Item::Start, Item::Clock],
@@ -973,6 +1328,8 @@ mod panels {
                 cells: Vec::new(),
                 #[cfg(feature = "tray")]
                 tray: Vec::new(),
+                #[cfg(feature = "audio")]
+                mixer: crate::layout::panel::Mixing::default(),
             };
             let russian = Layout {
                 name: "Russian".to_owned(),
@@ -1131,6 +1488,894 @@ mod panels {
                 ],
                 "what a person no longer reads, a screen reader still does"
             );
+        }
+    }
+}
+
+#[cfg(feature = "audio")]
+pub(crate) use mixers::{control_of, mixer};
+
+#[cfg(feature = "audio")]
+mod mixers {
+    use accesskit::{Action, Node, NodeId, Role, Toggled, TreeId, TreeInfo, TreeUpdate};
+
+    use super::{ROOT, rect, window};
+    use crate::{
+        layout::mixer::{Control, Listed},
+        mixer::View,
+        model::sound::{self, Side, Whose},
+    };
+
+    /// The mixer itself, its sections, and the sides' lists of devices.
+    const DIALOG: NodeId = NodeId(1);
+    const OUTPUT: NodeId = NodeId(2);
+    const INPUT: NodeId = NodeId(3);
+    const OUTPUTS: NodeId = NodeId(4);
+    const INPUTS: NodeId = NodeId(5);
+    const PROGRAMS: NodeId = NodeId(6);
+    /// A side's control that is no device's: its place in
+    /// [`Control::FIXED`] past this.
+    const CONTROLS: u64 = 10;
+    /// Any other node says what it is in its top four bits, past `KIND`,
+    /// and which in the rest: a device's key's number, with `ON_INPUT` set for
+    /// an input's, or a program's stream's, so that each stays the same
+    /// while others come and go.
+    const KIND: u32 = 60;
+    const ON_INPUT: u64 = 1 << 59;
+    const DEVICE: u64 = 1;
+    const MORE: u64 = 2;
+    const RENAME: u64 = 3;
+    const HIDE: u64 = 4;
+    const HIDE_CARD: u64 = 5;
+    const PROGRAM_MUTE: u64 = 6;
+    const PROGRAM_VOLUME: u64 = 7;
+    const PROGRAM: u64 = 8;
+    /// An output a program can be moved to: its stream's number, then the
+    /// sink's in the low `SINK` bits.
+    const MOVE: u64 = 9;
+    const SINK: u32 = 27;
+    /// A program's list of the outputs it can be moved to.
+    const PROGRAM_OUTPUTS: u64 = 10;
+    const TEST: u64 = 11;
+
+    fn tagged(kind: u64, rest: u64) -> NodeId {
+        NodeId(kind << KIND | rest)
+    }
+
+    /// A device's control of `kind`, on `side`, of the device numbered
+    /// `number`.
+    fn of_device(kind: u64, side: Side, number: u64) -> NodeId {
+        let input = if side == Side::Input { ON_INPUT } else { 0 };
+        tagged(kind, input | number)
+    }
+
+    fn id(control: Control) -> NodeId {
+        match control {
+            Control::Choose(side, number) => of_device(DEVICE, side, number),
+            Control::More(side, number) => of_device(MORE, side, number),
+            Control::Rename(side, number) => of_device(RENAME, side, number),
+            Control::Test(side, number) => of_device(TEST, side, number),
+            Control::Hide(side, number) => of_device(HIDE, side, number),
+            Control::HideCard(side, number) => of_device(HIDE_CARD, side, number),
+            Control::Mute(Whose::App(stream)) => tagged(PROGRAM_MUTE, stream.into()),
+            Control::Volume(Whose::App(stream)) => tagged(PROGRAM_VOLUME, stream.into()),
+            Control::Plays(stream) => tagged(PROGRAM, stream.into()),
+            Control::Move(stream, sink) => tagged(
+                MOVE,
+                u64::from(stream) << SINK | u64::from(sink) & ((1 << SINK) - 1),
+            ),
+            fixed => {
+                let at = Control::FIXED.iter().position(|&had| had == fixed);
+                NodeId(CONTROLS + at.unwrap_or_default() as u64)
+            }
+        }
+    }
+
+    /// The control the node `id` is, if it is one.
+    pub(crate) fn control_of(id: NodeId) -> Option<Control> {
+        let rest = id.0 & ((1 << KIND) - 1);
+        let stream = u32::try_from(rest);
+        let side = if rest & ON_INPUT == 0 {
+            Side::Output
+        } else {
+            Side::Input
+        };
+        let number = rest & !ON_INPUT;
+        match id.0 >> KIND {
+            0 => {
+                let at = rest.checked_sub(CONTROLS)?;
+                Control::FIXED.get(usize::try_from(at).ok()?).copied()
+            }
+            DEVICE => Some(Control::Choose(side, number)),
+            MORE => Some(Control::More(side, number)),
+            RENAME => Some(Control::Rename(side, number)),
+            TEST => Some(Control::Test(side, number)),
+            HIDE => Some(Control::Hide(side, number)),
+            HIDE_CARD => Some(Control::HideCard(side, number)),
+            PROGRAM_MUTE => Some(Control::Mute(Whose::App(stream.ok()?))),
+            PROGRAM_VOLUME => Some(Control::Volume(Whose::App(stream.ok()?))),
+            PROGRAM => Some(Control::Plays(stream.ok()?)),
+            MOVE => Some(Control::Move(
+                u32::try_from(rest >> SINK).ok()?,
+                (rest & ((1 << SINK) - 1)) as u32,
+            )),
+            _ => None,
+        }
+    }
+
+    /// The mixer: a window named `namespace` covering its monitor, holding a
+    /// `Dialog`, "Sound", of a `Group` for the output and one for the
+    /// input, each named for its device. In each, the button that mutes is
+    /// a `Switch`, on while it is muted, and the volume a `Slider`, from
+    /// silence to the limit, or to where it is past it, that steps by
+    /// `step` and can be set; a side with no device has them disabled.
+    /// Then a `RadioGroup`, "Outputs" or "Inputs", of a `RadioButton` for
+    /// each device listed, named as drawn, on for the one the sound is on
+    /// and described if nothing is plugged into it, that a click moves the
+    /// sound to, with the button at the end of each row, "Details of" it;
+    /// for the device whose details are unfolded, that button again,
+    /// described by them, expanded; a `TextInput`, "Name of" it, that can
+    /// be set; and the buttons that hide it and its card, named as drawn;
+    /// and the folds, each a `Button` named as drawn, expanded while what
+    /// it holds is listed. While programs play, a `Group`,
+    /// "Applications", holds for each a `Button` named for it, described by
+    /// what it plays on, expanded while the outputs it can be moved to are
+    /// listed; its `Switch` and its `Slider`, named for it; and those
+    /// outputs, a `RadioGroup` of a `RadioButton` each, on for the one it
+    /// plays on. The control the keyboard is on has the focus. Closed, the
+    /// window alone.
+    pub(crate) fn mixer(
+        namespace: &str,
+        size: Option<(u32, u32)>,
+        view: Option<&View<'_>>,
+    ) -> TreeUpdate {
+        let mut root = window(namespace, size);
+        let mut nodes = Vec::new();
+        let mut focus = ROOT;
+        if let Some(view) = view {
+            let mut dialog = Node::new(Role::Dialog);
+            dialog.set_label("Sound");
+            dialog.set_bounds(rect(view.placed.rect));
+            for (group_id, list_id, side) in [
+                (OUTPUT, OUTPUTS, Side::Output),
+                (INPUT, INPUTS, Side::Input),
+            ] {
+                let mut group = Node::new(Role::Group);
+                let named = match side {
+                    Side::Output => "Output",
+                    Side::Input => "Input",
+                };
+                group.set_label(match view.mixed.on(side) {
+                    Some(master) => format!("{named} \u{2014} {}", master.name),
+                    None => named.to_owned(),
+                });
+                let mut list = Node::new(Role::RadioGroup);
+                list.set_label(match side {
+                    Side::Output => "Outputs",
+                    Side::Input => "Inputs",
+                });
+                let (mut details, mut folds) = (Vec::new(), Vec::new());
+                for &(control, place) in &view.placed.controls {
+                    if control.side() != Some(side) {
+                        continue;
+                    }
+                    let Some(mut node) = node(view, control) else {
+                        continue;
+                    };
+                    node.set_bounds(rect(place));
+                    match control {
+                        Control::More(at, number)
+                            if view.placed.unfolded.more == Some((at, number)) =>
+                        {
+                            details.push(id(control));
+                        }
+                        Control::Choose(..) | Control::More(..) => list.push_child(id(control)),
+                        Control::Rename(..)
+                        | Control::Test(..)
+                        | Control::Hide(..)
+                        | Control::HideCard(..) => details.push(id(control)),
+                        Control::Fold(_) | Control::Hidden(_) => folds.push(id(control)),
+                        _ => group.push_child(id(control)),
+                    }
+                    nodes.push((id(control), node));
+                }
+                if !list.children().is_empty() {
+                    group.push_child(list_id);
+                    nodes.push((list_id, list));
+                }
+                for child in details.into_iter().chain(folds) {
+                    group.push_child(child);
+                }
+                dialog.push_child(group_id);
+                nodes.push((group_id, group));
+            }
+            if !view.mixed.programs.is_empty() {
+                let mut group = Node::new(Role::Group);
+                group.set_label("Applications");
+                for program in &view.mixed.programs {
+                    let stream = program.stream;
+                    let mut outputs = Node::new(Role::RadioGroup);
+                    outputs.set_label(format!("{} plays on", program.name));
+                    for &(control, place) in &view.placed.controls {
+                        let of = match control {
+                            Control::Plays(of)
+                            | Control::Mute(Whose::App(of))
+                            | Control::Volume(Whose::App(of))
+                            | Control::Move(of, _) => of,
+                            _ => continue,
+                        };
+                        let Some(mut node) = node(view, control).filter(|_| of == stream) else {
+                            continue;
+                        };
+                        node.set_bounds(rect(place));
+                        match control {
+                            Control::Move(..) => outputs.push_child(id(control)),
+                            _ => group.push_child(id(control)),
+                        }
+                        nodes.push((id(control), node));
+                    }
+                    if !outputs.children().is_empty() {
+                        let outputs_id = tagged(PROGRAM_OUTPUTS, stream.into());
+                        group.push_child(outputs_id);
+                        nodes.push((outputs_id, outputs));
+                    }
+                }
+                dialog.push_child(PROGRAMS);
+                nodes.push((PROGRAMS, group));
+            }
+            focus = id(view.focus);
+            root.push_child(DIALOG);
+            nodes.insert(0, (DIALOG, dialog));
+        }
+        nodes.insert(0, (ROOT, root));
+        TreeUpdate {
+            nodes,
+            tree: Some(TreeInfo::new(ROOT)),
+            tree_id: TreeId::ROOT,
+            focus,
+        }
+    }
+
+    /// The node of `control` as `view` shows it, but for where it is; or
+    /// `None` for a device or a program no longer there. What can be used
+    /// can be focused, and a side's mute button and slider with no device
+    /// are disabled.
+    fn node(view: &View<'_>, control: Control) -> Option<Node> {
+        let named = |whose| match whose {
+            Whose::App(stream) => view
+                .mixed
+                .program(stream)
+                .map(|program| program.name.as_str()),
+            Whose::Side(_) => Some(""),
+        };
+        let mut node = match control {
+            Control::Mute(whose) => {
+                let mut switch = Node::new(Role::Switch);
+                switch.set_label(match whose {
+                    Whose::Side(Side::Output) => "Mute".to_owned(),
+                    Whose::Side(Side::Input) => "Mute microphone".to_owned(),
+                    Whose::App(_) => format!("Mute {}", named(whose)?),
+                });
+                let Some(level) = view.mixed.level(whose) else {
+                    switch.set_disabled();
+                    return Some(switch);
+                };
+                switch.set_toggled(toggled(level.muted));
+                switch.add_action(Action::Click);
+                switch
+            }
+            Control::Volume(whose) => {
+                let mut slider = Node::new(Role::Slider);
+                slider.set_label(match whose {
+                    Whose::Side(Side::Output) => "Volume".to_owned(),
+                    Whose::Side(Side::Input) => "Microphone volume".to_owned(),
+                    Whose::App(_) => format!("{} volume", named(whose)?),
+                });
+                let (Some(_), Some(percent)) = (view.mixed.level(whose), view.shown(whose)) else {
+                    slider.set_disabled();
+                    return Some(slider);
+                };
+                slider.set_numeric_value(f64::from(percent));
+                slider.set_min_numeric_value(0.0);
+                slider.set_max_numeric_value(f64::from(view.mixed.most(whose)));
+                slider.set_numeric_value_step(f64::from(view.mixed.step));
+                slider.set_value(format!("{percent}%"));
+                for action in [Action::Increment, Action::Decrement, Action::SetValue] {
+                    slider.add_action(action);
+                }
+                slider
+            }
+            Control::Choose(side, number) => {
+                let listed = view.mixed.find(side, number)?;
+                radio(listed, listed.chosen)
+            }
+            Control::Fold(side) => {
+                let mut button = Node::new(Role::Button);
+                button.set_label(format!(
+                    "Not connected ({})",
+                    view.placed.unplugged[side.at()]
+                ));
+                button.set_expanded(view.placed.unfolded.unplugged[side.at()]);
+                button.add_action(Action::Click);
+                button
+            }
+            Control::Hidden(side) => {
+                let mut button = Node::new(Role::Button);
+                button.set_label(format!("Hidden ({})", view.placed.hidden[side.at()]));
+                button.set_expanded(view.placed.unfolded.hidden[side.at()]);
+                button.add_action(Action::Click);
+                button
+            }
+            Control::More(side, number) => {
+                let listed = view.mixed.find(side, number)?;
+                let mut button = Node::new(Role::Button);
+                button.set_label(format!("Details of {}", listed.label()));
+                let open = view.placed.unfolded.more == Some((side, number));
+                if open {
+                    let told: Vec<String> = listed
+                        .details
+                        .iter()
+                        .map(|(label, value)| format!("{label}: {value}"))
+                        .collect();
+                    button.set_description(told.join(", "));
+                }
+                button.set_expanded(open);
+                button.add_action(Action::Click);
+                button
+            }
+            Control::Rename(side, number) => {
+                let listed = view.mixed.find(side, number)?;
+                let mut field = Node::new(Role::TextInput);
+                let own = sound::long(&listed.device, listed.jack.as_deref());
+                field.set_label(format!("Name of {own}"));
+                let typed = view
+                    .naming
+                    .filter(|&(naming, _)| naming == control)
+                    .map(|(_, typed)| typed);
+                if let Some(value) = typed.or(listed.name.as_deref()) {
+                    field.set_value(value);
+                }
+                field.add_action(Action::Click);
+                field.add_action(Action::SetValue);
+                field
+            }
+            Control::Test(side, number) => {
+                let listed = view.mixed.find(side, number)?;
+                let mut button = Node::new(Role::Button);
+                button.set_label(format!("Test sound on {}", listed.label()));
+                if listed.live.is_none() {
+                    button.set_description("Choose it to hear it");
+                    button.set_disabled();
+                    return Some(button);
+                }
+                button.add_action(Action::Click);
+                button
+            }
+            Control::Hide(side, number) => {
+                let listed = view.mixed.find(side, number)?;
+                let mut button = Node::new(Role::Button);
+                let does = if listed.hidden { "Unhide" } else { "Hide" };
+                button.set_label(format!("{does} {}", listed.label()));
+                button.add_action(Action::Click);
+                button
+            }
+            Control::HideCard(side, number) => {
+                let card = view.mixed.find(side, number)?.card.as_ref()?;
+                let mut button = Node::new(Role::Button);
+                let does = if card.hidden { "Unhide" } else { "Hide" };
+                button.set_label(format!("{does} all of {}", card.name));
+                button.add_action(Action::Click);
+                button
+            }
+            Control::Plays(stream) => {
+                let program = view.mixed.program(stream)?;
+                let mut button = Node::new(Role::Button);
+                button.set_label(program.name.as_str());
+                if let Some(on) = view.mixed.playing_on(program) {
+                    button.set_description(format!("Plays on {}", on.short));
+                }
+                button.set_expanded(view.placed.unfolded.programs.contains(&stream));
+                button.add_action(Action::Click);
+                button
+            }
+            Control::Move(stream, sink) => {
+                let program = view.mixed.program(stream)?;
+                let (_, listed) = view.mixed.sinks.iter().find(|&&(had, _)| had == sink)?;
+                radio(listed, program.sink == sink)
+            }
+        };
+        node.add_action(Action::Focus);
+        Some(node)
+    }
+
+    fn toggled(on: bool) -> Toggled {
+        if on { Toggled::True } else { Toggled::False }
+    }
+
+    /// A device listed, as a `RadioButton`, on if it is `chosen`.
+    fn radio(listed: &Listed, chosen: bool) -> Node {
+        let mut radio = Node::new(Role::RadioButton);
+        radio.set_label(listed.label());
+        radio.set_toggled(toggled(chosen));
+        if !listed.connected {
+            radio.set_description("Nothing plugged in");
+        }
+        radio.add_action(Action::Click);
+        radio
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use perspicax_config::Edge;
+
+        use super::*;
+        use crate::{
+            layout::{
+                Rect,
+                mixer::{Anchor, Master, Mixed, Program, number},
+            },
+            mixer::{Event, State},
+            model::sound::{Kind, Level},
+        };
+
+        fn opened(mixed: Mixed) -> State {
+            let mut state = State::default();
+            state.update(Event::Open {
+                output: "DP-1".to_owned(),
+                anchor: Anchor {
+                    button: Rect::new(1180, 760, 100, 40),
+                    edge: Edge::Bottom,
+                    area: Rect::new(0, 0, 1280, 760),
+                },
+                mixed,
+            });
+            state
+        }
+
+        fn node(tree: &TreeUpdate, id: NodeId) -> &Node {
+            &tree
+                .nodes
+                .iter()
+                .find(|(at, _)| *at == id)
+                .expect("in the tree")
+                .1
+        }
+
+        #[test]
+        fn the_mixer_is_a_dialog_of_a_switch_and_a_slider_for_each_side() {
+            let state = opened(Mixed {
+                output: Some(Master {
+                    name: "Speakers".to_owned(),
+                    level: Level {
+                        percent: 40,
+                        muted: true,
+                    },
+                }),
+                input: None,
+                step: 5,
+                limit: 100,
+                ..Mixed::default()
+            });
+            let view = state.view().expect("open");
+            let tree = mixer("perspicax-mixer-DP-1", Some((1280, 800)), Some(&view));
+            let dialog = node(&tree, DIALOG);
+            assert_eq!(
+                (dialog.role(), dialog.label()),
+                (Role::Dialog, Some("Sound"))
+            );
+            assert_eq!(dialog.children(), [OUTPUT, INPUT]);
+            assert_eq!(
+                node(&tree, OUTPUT).label(),
+                Some("Output \u{2014} Speakers")
+            );
+            let mute = node(&tree, id(Control::Mute(Whose::Side(Side::Output))));
+            assert_eq!(mute.role(), Role::Switch);
+            assert_eq!(mute.toggled(), Some(Toggled::True));
+            let volume = node(&tree, id(Control::Volume(Whose::Side(Side::Output))));
+            assert_eq!(volume.role(), Role::Slider);
+            assert_eq!(
+                (volume.numeric_value(), volume.max_numeric_value()),
+                (Some(40.0), Some(100.0))
+            );
+            assert!(volume.supports_action(Action::SetValue));
+            assert_eq!(
+                tree.focus,
+                id(Control::Volume(Whose::Side(Side::Output))),
+                "the keyboard's"
+            );
+            let input = node(&tree, id(Control::Volume(Whose::Side(Side::Input))));
+            assert!(input.is_disabled() && !input.supports_action(Action::SetValue));
+            assert_eq!(node(&tree, INPUT).label(), Some("Input"));
+            assert_eq!(
+                node(&tree, OUTPUT).children(),
+                [
+                    id(Control::Mute(Whose::Side(Side::Output))),
+                    id(Control::Volume(Whose::Side(Side::Output)))
+                ],
+                "no list with nothing in it"
+            );
+            let others = [
+                Control::Choose(Side::Output, number("speakers")),
+                Control::Choose(Side::Input, number("speakers")),
+                Control::Mute(Whose::App(u32::MAX)),
+                Control::Volume(Whose::App(40)),
+                Control::Plays(40),
+                Control::Move(u32::MAX, (1 << SINK) - 1),
+                Control::Move(40, 0),
+            ];
+            for control in Control::FIXED.into_iter().chain(others) {
+                assert_eq!(control_of(id(control)), Some(control), "{control:?}");
+            }
+            assert_ne!(id(others[0]), id(others[1]), "a side apiece");
+            let number = number("speakers");
+            for side in [Side::Output, Side::Input] {
+                for control in [
+                    Control::More(side, number),
+                    Control::Rename(side, number),
+                    Control::Test(side, number),
+                    Control::Hide(side, number),
+                    Control::HideCard(side, number),
+                ] {
+                    assert_eq!(control_of(id(control)), Some(control), "{control:?}");
+                }
+            }
+            assert_eq!(control_of(tagged(PROGRAM_OUTPUTS, 40)), None, "no control");
+            assert_eq!(control_of(OUTPUT), None);
+            let closed = mixer("perspicax-mixer-DP-1", None, None);
+            assert_eq!(closed.nodes.len(), 1, "the window alone");
+        }
+
+        #[test]
+        fn a_devices_details_are_a_button_described_by_them_a_field_and_buttons_to_hide() {
+            let device = |key: &str, hidden| Listed {
+                key: key.to_owned(),
+                device: "TU104".to_owned(),
+                jack: Some(key.to_owned()),
+                short: key.to_owned(),
+                name: None,
+                kind: Kind::Display,
+                live: None,
+                meter: None,
+                connected: true,
+                chosen: false,
+                hidden,
+                card: Some(crate::layout::mixer::Owner {
+                    key: "nvidia".to_owned(),
+                    name: "TU104".to_owned(),
+                    hidden: false,
+                }),
+                details: vec![("Chip", "GPU".to_owned()), ("Key", key.to_owned())],
+            };
+            let mut state = opened(Mixed {
+                outputs: vec![device("HDMI", false), device("HDMI 2", true)],
+                step: 5,
+                limit: 100,
+                ..Mixed::default()
+            });
+            let hdmi = number("HDMI");
+            let more = Control::More(Side::Output, hdmi);
+            state.update(Event::Act(more, crate::mixer::Act::Click));
+            state.update(Event::Act(
+                Control::Hidden(Side::Output),
+                crate::mixer::Act::Click,
+            ));
+            let view = state.view().expect("open");
+            let tree = mixer("perspicax-mixer-DP-1", Some((1280, 800)), Some(&view));
+            let button = node(&tree, id(more));
+            assert_eq!(
+                (button.label(), button.description(), button.is_expanded()),
+                (
+                    Some("Details of TU104 \u{2014} HDMI"),
+                    Some("Chip: GPU, Key: HDMI"),
+                    Some(true)
+                )
+            );
+            let test = node(&tree, id(Control::Test(Side::Output, hdmi)));
+            assert_eq!(
+                (test.label(), test.description(), test.is_disabled()),
+                (
+                    Some("Test sound on TU104 \u{2014} HDMI"),
+                    Some("Choose it to hear it"),
+                    true
+                ),
+                "no sink plays to it"
+            );
+            let field = node(&tree, id(Control::Rename(Side::Output, hdmi)));
+            assert_eq!(
+                (field.role(), field.label()),
+                (Role::TextInput, Some("Name of TU104 \u{2014} HDMI"))
+            );
+            assert!(field.supports_action(Action::SetValue));
+            assert_eq!(
+                node(&tree, id(Control::Hide(Side::Output, hdmi))).label(),
+                Some("Hide TU104 \u{2014} HDMI")
+            );
+            assert_eq!(
+                node(&tree, id(Control::HideCard(Side::Output, hdmi))).label(),
+                Some("Hide all of TU104")
+            );
+            let hidden = node(&tree, id(Control::Hidden(Side::Output)));
+            assert_eq!(
+                (hidden.label(), hidden.is_expanded()),
+                (Some("Hidden (1)"), Some(true))
+            );
+            let children = node(&tree, OUTPUT).children();
+            let at = |control| children.iter().position(|&child| child == id(control));
+            assert!(
+                at(more) < at(Control::Rename(Side::Output, hdmi))
+                    && at(Control::HideCard(Side::Output, hdmi))
+                        < at(Control::Hidden(Side::Output)),
+                "its button, what it unfolds, then the folds"
+            );
+            let other = number("HDMI 2");
+            assert!(
+                node(&tree, OUTPUTS)
+                    .children()
+                    .contains(&id(Control::More(Side::Output, other))),
+                "another's button on its row"
+            );
+        }
+
+        #[test]
+        fn each_program_is_a_button_a_switch_a_slider_and_unfolded_its_outputs() {
+            let device = |key: &str| Listed {
+                key: key.to_owned(),
+                device: key.to_owned(),
+                jack: None,
+                short: key.to_owned(),
+                kind: Kind::Speaker,
+                live: None,
+                meter: None,
+                connected: true,
+                chosen: false,
+                name: None,
+                hidden: false,
+                card: None,
+                details: Vec::new(),
+            };
+            let mut state = opened(Mixed {
+                programs: vec![Program {
+                    stream: 40,
+                    name: "Firefox".to_owned(),
+                    icon: None,
+                    level: Level {
+                        percent: 30,
+                        muted: true,
+                    },
+                    sink: 1,
+                }],
+                sinks: vec![(0, device("Speakers")), (1, device("E8"))],
+                step: 5,
+                limit: 100,
+                ..Mixed::default()
+            });
+            let view = state.view().expect("open");
+            let tree = mixer("perspicax-mixer-DP-1", Some((1280, 800)), Some(&view));
+            assert_eq!(node(&tree, DIALOG).children(), [OUTPUT, INPUT, PROGRAMS]);
+            let group = node(&tree, PROGRAMS);
+            assert_eq!(group.label(), Some("Applications"));
+            let firefox = Whose::App(40);
+            assert_eq!(
+                group.children(),
+                [
+                    id(Control::Plays(40)),
+                    id(Control::Mute(firefox)),
+                    id(Control::Volume(firefox))
+                ],
+                "its outputs folded away"
+            );
+            let plays = node(&tree, id(Control::Plays(40)));
+            assert_eq!(
+                (plays.role(), plays.label(), plays.description()),
+                (Role::Button, Some("Firefox"), Some("Plays on E8"))
+            );
+            assert_eq!(plays.is_expanded(), Some(false));
+            let mute = node(&tree, id(Control::Mute(firefox)));
+            assert_eq!(
+                (mute.label(), mute.toggled()),
+                (Some("Mute Firefox"), Some(Toggled::True))
+            );
+            let volume = node(&tree, id(Control::Volume(firefox)));
+            assert_eq!(
+                (volume.label(), volume.numeric_value()),
+                (Some("Firefox volume"), Some(30.0))
+            );
+            state.update(Event::Act(Control::Plays(40), crate::mixer::Act::Click));
+            let view = state.view().expect("open");
+            let tree = mixer("perspicax-mixer-DP-1", Some((1280, 800)), Some(&view));
+            assert_eq!(
+                node(&tree, id(Control::Plays(40))).is_expanded(),
+                Some(true)
+            );
+            let outputs = node(&tree, tagged(PROGRAM_OUTPUTS, 40));
+            assert_eq!(
+                (outputs.role(), outputs.label()),
+                (Role::RadioGroup, Some("Firefox plays on"))
+            );
+            assert_eq!(
+                outputs.children(),
+                [id(Control::Move(40, 0)), id(Control::Move(40, 1))]
+            );
+            assert_eq!(
+                node(&tree, id(Control::Move(40, 1))).toggled(),
+                Some(Toggled::True),
+                "where it plays"
+            );
+            assert_eq!(
+                node(&tree, id(Control::Move(40, 0))).toggled(),
+                Some(Toggled::False)
+            );
+        }
+
+        #[test]
+        fn each_sides_devices_are_a_radio_group_and_its_fold_a_button_that_expands() {
+            let device = |key: &str, connected, chosen| Listed {
+                key: key.to_owned(),
+                device: "Built-in Audio".to_owned(),
+                jack: Some(key.to_owned()),
+                short: key.to_owned(),
+                kind: Kind::Speaker,
+                live: None,
+                meter: None,
+                connected,
+                chosen,
+                name: None,
+                hidden: false,
+                card: None,
+                details: Vec::new(),
+            };
+            let mixed = Mixed {
+                outputs: vec![
+                    device("Speakers", true, true),
+                    device("Headphones", false, false),
+                    device("HDMI", true, false),
+                ],
+                step: 5,
+                limit: 100,
+                ..Mixed::default()
+            };
+            let mut state = opened(mixed);
+            let speakers = id(Control::Choose(Side::Output, number("Speakers")));
+            let hdmi = id(Control::Choose(Side::Output, number("HDMI")));
+            let fold = id(Control::Fold(Side::Output));
+            let view = state.view().expect("open");
+            let tree = mixer("perspicax-mixer-DP-1", Some((1280, 800)), Some(&view));
+            assert_eq!(
+                node(&tree, OUTPUT).children()[2..],
+                [OUTPUTS, fold],
+                "the list, then its fold"
+            );
+            let list = node(&tree, OUTPUTS);
+            assert_eq!(
+                (list.role(), list.label()),
+                (Role::RadioGroup, Some("Outputs"))
+            );
+            let more = |key| id(Control::More(Side::Output, number(key)));
+            assert_eq!(
+                list.children(),
+                [speakers, more("Speakers"), hdmi, more("HDMI")],
+                "folded away, the headphones"
+            );
+            let chosen = node(&tree, speakers);
+            assert_eq!(
+                (chosen.role(), chosen.label(), chosen.toggled()),
+                (
+                    Role::RadioButton,
+                    Some("Built-in Audio \u{2014} Speakers"),
+                    Some(Toggled::True)
+                )
+            );
+            assert_eq!(node(&tree, hdmi).toggled(), Some(Toggled::False));
+            assert!(node(&tree, hdmi).supports_action(Action::Click));
+            let button = node(&tree, fold);
+            assert_eq!(
+                (button.role(), button.label(), button.is_expanded()),
+                (Role::Button, Some("Not connected (1)"), Some(false))
+            );
+            assert!(
+                !node(&tree, INPUT).children().contains(&INPUTS),
+                "no inputs, no list"
+            );
+            state.update(Event::Act(
+                Control::Fold(Side::Output),
+                crate::mixer::Act::Click,
+            ));
+            let view = state.view().expect("open");
+            let tree = mixer("perspicax-mixer-DP-1", Some((1280, 800)), Some(&view));
+            assert_eq!(node(&tree, fold).is_expanded(), Some(true));
+            let headphones = id(Control::Choose(Side::Output, number("Headphones")));
+            assert_eq!(
+                node(&tree, OUTPUTS).children()[4],
+                headphones,
+                "after the speakers and HDMI, and their buttons"
+            );
+            assert_eq!(
+                node(&tree, headphones).description(),
+                Some("Nothing plugged in")
+            );
+        }
+    }
+}
+
+#[cfg(feature = "audio")]
+pub(crate) use osds::osd;
+
+#[cfg(feature = "audio")]
+mod osds {
+    use accesskit::{Live, Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate};
+
+    use super::{ROOT, window};
+    use crate::layout::osd::Indicator;
+
+    const STATUS: NodeId = NodeId(1);
+
+    /// The volume shown on the screen: a window named `namespace`, holding
+    /// a `Status`, "Volume", whose value is how loud the output is and
+    /// which it is, "40%, Speakers" or "Muted, Speakers", read out politely
+    /// as it changes. With nothing shown, the window alone.
+    pub(crate) fn osd(
+        namespace: &str,
+        size: Option<(u32, u32)>,
+        indicator: Option<&Indicator>,
+    ) -> TreeUpdate {
+        let mut root = window(namespace, size);
+        let mut nodes = Vec::new();
+        if let Some(indicator) = indicator {
+            let mut status = Node::new(Role::Status);
+            status.set_label("Volume");
+            let level = &indicator.level;
+            let loud = if level.muted {
+                "Muted".to_owned()
+            } else {
+                format!("{}%", level.percent)
+            };
+            status.set_value(format!("{loud}, {}", indicator.name));
+            status.set_live(Live::Polite);
+            root.push_child(STATUS);
+            nodes.push((STATUS, status));
+        }
+        nodes.insert(0, (ROOT, root));
+        TreeUpdate {
+            nodes,
+            tree: Some(TreeInfo::new(ROOT)),
+            tree_id: TreeId::ROOT,
+            focus: ROOT,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::model::sound::Level;
+
+        #[test]
+        fn the_volume_shown_is_a_polite_status_of_how_loud_and_where() {
+            let shown = |percent, muted| {
+                let indicator = Indicator {
+                    name: "Speakers".to_owned(),
+                    level: Level { percent, muted },
+                };
+                let tree = osd("perspicax-osd", Some((280, 64)), Some(&indicator));
+                let (_, status) = tree
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| *id == STATUS)
+                    .expect("a status")
+                    .clone();
+                status
+            };
+            let status = shown(40, false);
+            assert_eq!(
+                (status.role(), status.label(), status.value(), status.live()),
+                (
+                    Role::Status,
+                    Some("Volume"),
+                    Some("40%, Speakers"),
+                    Some(Live::Polite)
+                )
+            );
+            assert_eq!(shown(40, true).value(), Some("Muted, Speakers"));
+            assert_eq!(osd("perspicax-osd", None, None).nodes.len(), 1);
         }
     }
 }

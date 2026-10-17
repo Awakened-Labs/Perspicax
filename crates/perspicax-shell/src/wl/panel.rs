@@ -25,6 +25,12 @@
 //! what perspicax tells the shell channel (see `channel`). News of any draws
 //! the panels again once the loop has nothing else to do, so a batch of it
 //! is drawn once.
+//!
+//! A panel showing the mixer's moving bars keeps its last picture, and
+//! moves the bars by drawing them alone over it, once each time the monitor
+//! shows the last: the compositor takes in their slot and nothing else, and
+//! is asked to say when it has shown it. With nothing playing, the bars come
+//! to rest and nothing more is drawn.
 
 use std::{
     collections::HashMap,
@@ -108,6 +114,27 @@ pub(super) struct Panels {
     tray: Vec<(u64, crate::model::tray::Item)>,
     /// The keyboard's layouts, as perspicax lists them.
     pub(super) layouts: Layouts,
+    /// The mixer, as `[shell.mixer]` writes it.
+    #[cfg(feature = "audio")]
+    mixer: perspicax_config::mixer::Mixer,
+    /// How loud the default output is, and what it is, or `None` with no
+    /// sound server to ask.
+    #[cfg(feature = "audio")]
+    sound: Option<crate::model::sound::Level>,
+    #[cfg(feature = "audio")]
+    playing: Option<crate::layout::panel::Playing>,
+    /// How loud the default input is, or `None` with none.
+    #[cfg(feature = "audio")]
+    mic: Option<crate::model::sound::Level>,
+    /// The monitor the mixer is open on, for its item there to show it.
+    #[cfg(feature = "audio")]
+    mixer_open_on: Option<String>,
+    /// The mixer's moving bars, and when the monitor last showed them, by
+    /// the compositor's clock, in milliseconds.
+    #[cfg(feature = "audio")]
+    bars: crate::model::levels::Bars,
+    #[cfg(feature = "audio")]
+    shown_at: Option<u32>,
     /// The panels are to be drawn again once the loop is idle.
     stale: bool,
     /// Where an assistive technology's press of something on a panel is
@@ -128,6 +155,24 @@ struct Bar {
     size: Option<(u32, u32)>,
     /// What it holds, where it was last drawn.
     placed: Placed,
+    /// Its last picture, while it shows the mixer's moving bars.
+    #[cfg(feature = "audio")]
+    kept: Option<Kept>,
+}
+
+/// A panel's last picture, kept to draw the moving bars over.
+#[cfg(feature = "audio")]
+struct Kept {
+    picture: tiny_skia::Pixmap,
+    copies: super::canvas::Copies,
+    /// How many whole pictures have been drawn.
+    generation: u64,
+    /// The bars' slot, where they were last placed.
+    place: crate::layout::Rect,
+    /// The compositor has yet to show the bars last drawn.
+    waiting: bool,
+    /// The bars moved while the compositor had yet to.
+    stale: bool,
 }
 
 impl Panels {
@@ -154,6 +199,20 @@ impl Panels {
             #[cfg(feature = "tray")]
             tray: Vec::new(),
             layouts: Layouts::default(),
+            #[cfg(feature = "audio")]
+            mixer: shell.mixer.clone(),
+            #[cfg(feature = "audio")]
+            sound: None,
+            #[cfg(feature = "audio")]
+            playing: None,
+            #[cfg(feature = "audio")]
+            mic: None,
+            #[cfg(feature = "audio")]
+            mixer_open_on: None,
+            #[cfg(feature = "audio")]
+            bars: crate::model::levels::Bars::default(),
+            #[cfg(feature = "audio")]
+            shown_at: None,
             stale: false,
             actions,
         }
@@ -181,6 +240,15 @@ impl Panels {
             self.start = start;
             self.told = false;
         }
+        // Another mixer is drawn in place, as another icon is.
+        #[cfg(feature = "audio")]
+        let restarted = {
+            let remixed = shell.mixer != self.mixer;
+            if remixed {
+                self.mixer = shell.mixer.clone();
+            }
+            restarted || remixed
+        };
         if shell.panel == self.panel {
             if restarted {
                 self.redraw(canvas, kit, workspaces);
@@ -244,7 +312,7 @@ impl Panels {
         for (output, name, _, scale) in monitors {
             if wanted.contains(&name) && !self.each.iter().any(|bar| bar.name == name) {
                 let namespace = format!("{NAMESPACE}{name}");
-                let layer = canvas.layer(qh, Layer::Top, &namespace, &output);
+                let layer = canvas.layer(qh, Layer::Top, &namespace, Some(&output));
                 place(&layer, panel);
                 layer.set_keyboard_interactivity(KeyboardInteractivity::None);
                 layer.commit();
@@ -257,6 +325,8 @@ impl Panels {
                     scale: whole(scale),
                     size: None,
                     placed: Placed::default(),
+                    #[cfg(feature = "audio")]
+                    kept: None,
                 });
             }
         }
@@ -440,6 +510,38 @@ impl Panels {
             .then(|| crate::layout::panel::strip(panel.edge, panel.height as i32, monitor))
     }
 
+    /// Show the mixer `level`, the output `playing` and the input's `mic`,
+    /// or `None` for none. Whether that changed what it shows.
+    #[cfg(feature = "audio")]
+    pub(super) fn hear(
+        &mut self,
+        level: Option<crate::model::sound::Level>,
+        playing: Option<crate::layout::panel::Playing>,
+        mic: Option<crate::model::sound::Level>,
+    ) -> bool {
+        let level_changed = std::mem::replace(&mut self.sound, level) != self.sound;
+        let playing_changed = std::mem::replace(&mut self.playing, playing) != self.playing;
+        let mic_changed = std::mem::replace(&mut self.mic, mic) != self.mic;
+        level_changed || playing_changed || mic_changed
+    }
+
+    /// Show the mixer open on the monitor named `on`, or on none. Whether
+    /// that changed what the panels show.
+    #[cfg(feature = "audio")]
+    pub(super) fn mixer_open(&mut self, on: Option<String>) -> bool {
+        std::mem::replace(&mut self.mixer_open_on, on) != self.mixer_open_on
+    }
+
+    /// Where on `monitor` the mixer item of the panel on the monitor named
+    /// `name` is, if it has one.
+    #[cfg(feature = "audio")]
+    pub(super) fn mixer_at(&self, name: &str, monitor: Rect) -> Option<Rect> {
+        let strip = self.strip(name, monitor)?;
+        let bar = self.each.iter().find(|bar| bar.name == name)?;
+        let at = bar.placed.item(Item::Mixer)?;
+        Some(Rect::new(strip.x + at.x, strip.y + at.y, at.w, at.h))
+    }
+
     /// The status icon of `key`.
     #[cfg(feature = "tray")]
     pub(super) fn status(&self, key: u64) -> Option<&crate::model::tray::Item> {
@@ -550,6 +652,18 @@ impl Panels {
             cells,
             #[cfg(feature = "tray")]
             tray,
+            #[cfg(feature = "audio")]
+            mixer: crate::layout::panel::Mixing {
+                pieces: &self.mixer.panel,
+                sound: crate::layout::panel::Sounding {
+                    level: self.sound,
+                    step: self.mixer.step,
+                    limit: self.mixer.limit,
+                    output: self.playing.clone(),
+                    mic: self.mic,
+                    open: self.mixer_open_on.as_deref() == Some(bar.name.as_str()),
+                },
+            },
         };
         let Kit {
             fonts,
@@ -586,6 +700,8 @@ impl Panels {
             start: self.start.as_deref(),
             #[cfg(feature = "tray")]
             tray: &self.tray,
+            #[cfg(feature = "audio")]
+            bars: &self.bars,
         };
         let drawn = bar.placed.bar;
         let area = (drawn.x, drawn.y, drawn.w, drawn.h);
@@ -594,6 +710,36 @@ impl Panels {
         // The bar wholly opaque, which lets the compositor skip what is under
         // it, and the rest of the strip clear. Clear is not uncovered: to an
         // agent the whole strip covers what is under it.
+        #[cfg(feature = "audio")]
+        let levels = bar
+            .placed
+            .mixer
+            .iter()
+            .find(|(piece, _)| *piece == perspicax_config::mixer::Piece::Levels)
+            .map(|&(_, place)| place);
+        #[cfg(feature = "audio")]
+        match levels {
+            Some(place) => {
+                let scale = bar.scale;
+                keep(
+                    canvas,
+                    (&bar.layer, &mut bar.kept),
+                    (size, scale),
+                    area,
+                    place,
+                    |picture| {
+                        paint::panel::paint(&shown, picture, scale, text, images, palette);
+                    },
+                );
+            }
+            None => {
+                bar.kept = None;
+                canvas.show(&bar.layer, size, bar.scale, &[area], |picture| {
+                    paint::panel::paint(&shown, picture, bar.scale, text, images, palette);
+                });
+            }
+        }
+        #[cfg(not(feature = "audio"))]
         canvas.show(&bar.layer, size, bar.scale, &[area], |picture| {
             paint::panel::paint(&shown, picture, bar.scale, text, images, palette);
         });
@@ -607,6 +753,136 @@ impl Panels {
             layout,
         ));
         watch::slow("drawing a panel", started.elapsed());
+    }
+}
+
+/// Draw a panel's whole picture, `size` logical pixels at `scale`, with
+/// `paint`, into the picture `kept` for its moving bars, at `place`, and show
+/// it on `layer`, opaque in `area`.
+#[cfg(feature = "audio")]
+fn keep(
+    canvas: &mut Canvas,
+    (layer, kept): (&LayerSurface, &mut Option<Kept>),
+    (size, scale): ((u32, u32), u32),
+    area: super::canvas::Area,
+    place: crate::layout::Rect,
+    paint: impl FnOnce(&mut tiny_skia::PixmapMut<'_>),
+) {
+    let (wide, high) = (size.0 * scale, size.1 * scale);
+    let fits = |kept: &Kept| (kept.picture.width(), kept.picture.height()) == (wide, high);
+    if !kept.as_ref().is_some_and(fits) {
+        *kept = tiny_skia::Pixmap::new(wide, high).map(|picture| Kept {
+            picture,
+            copies: super::canvas::Copies::default(),
+            generation: 0,
+            place,
+            waiting: false,
+            stale: false,
+        });
+    }
+    let Some(kept) = kept else {
+        return;
+    };
+    kept.picture.fill(tiny_skia::Color::TRANSPARENT);
+    paint(&mut kept.picture.as_mut());
+    kept.generation += 1;
+    kept.place = place;
+    // A whole picture asks for no frame, so the bars wait on none.
+    kept.waiting = false;
+    canvas.show_kept(
+        layer,
+        &mut kept.copies,
+        &kept.picture,
+        scale,
+        (&[area], None),
+        kept.generation,
+    );
+}
+
+#[cfg(feature = "audio")]
+impl Panels {
+    /// The spectrum heard now: move the bars to it, on every panel that
+    /// shows them.
+    pub(super) fn hear_levels(
+        &mut self,
+        canvas: &mut Canvas,
+        kit: &Kit,
+        bands: [f32; crate::audio::BANDS],
+    ) {
+        self.bars.hear(bands);
+        for at in 0..self.each.len() {
+            self.move_bars(canvas, kit, at);
+        }
+    }
+
+    /// The compositor showed what was drawn on `surface` at `time`, by its
+    /// clock: let the bars fall for the time since they were last shown,
+    /// and draw them again if they are still moving.
+    pub(super) fn frame(
+        &mut self,
+        canvas: &mut Canvas,
+        kit: &mut Kit,
+        surface: &wl_surface::WlSurface,
+        time: u32,
+    ) {
+        let Some(at) = self
+            .each
+            .iter()
+            .position(|bar| bar.layer.wl_surface() == surface)
+        else {
+            return;
+        };
+        let Some(kept) = &mut self.each[at].kept else {
+            return;
+        };
+        kept.waiting = false;
+        let since = self
+            .shown_at
+            .map_or(0, |shown| time.wrapping_sub(shown).min(100));
+        self.shown_at = Some(time);
+        let moving = self.bars.step(Duration::from_millis(u64::from(since)));
+        let stale = self.each[at]
+            .kept
+            .as_mut()
+            .is_some_and(|kept| std::mem::take(&mut kept.stale));
+        if moving || stale {
+            self.move_bars(canvas, kit, at);
+        } else {
+            // At rest: the next to be heard starts the clock afresh.
+            self.shown_at = None;
+        }
+    }
+
+    /// Draw panel `at`'s bars alone, as they stand, over its kept picture,
+    /// unless the compositor has yet to show the last.
+    fn move_bars(&mut self, canvas: &mut Canvas, kit: &Kit, at: usize) {
+        let bar = &mut self.each[at];
+        let Some(kept) = &mut bar.kept else {
+            return;
+        };
+        if kept.waiting {
+            kept.stale = true;
+            return;
+        }
+        let colours = paint::panel::Colours::of(&kit.palette);
+        let place = kept.place;
+        paint::panel::levels(
+            &mut kept.picture.as_mut(),
+            place,
+            &self.bars,
+            bar.scale,
+            &colours,
+        );
+        let within = crate::layout::panel::bars_in(place);
+        let changed = (within.x, within.y, within.w, within.h);
+        kept.waiting = canvas.show_kept(
+            &bar.layer,
+            &mut kept.copies,
+            &kept.picture,
+            bar.scale,
+            (&[], Some(changed)),
+            kept.generation,
+        );
     }
 }
 
@@ -659,6 +935,9 @@ impl App {
     /// A button went down on the panel of the monitor named `name`, on
     /// `part` of it, or on none.
     pub(super) fn panel_pressed(&mut self, name: &str, part: Option<Part>, button: Button) {
+        // Any press on a panel closes the mixer, as one off it does.
+        #[cfg(feature = "audio")]
+        let mixer_was_open = self.close_mixer();
         #[cfg(feature = "menus")]
         {
             if (part, button) == (Some(Part::Start), Button::Left) {
@@ -687,6 +966,8 @@ impl App {
             Some(Part::Workspace(serial)) => self.press_workspace(serial, button),
             #[cfg(feature = "tray")]
             Some(Part::Tray(key)) => self.press_status(name, key, button),
+            #[cfg(feature = "audio")]
+            Some(Part::Mixer(piece)) => self.press_mixer(name, piece, button, mixer_was_open),
             Some(Part::Layout) if button == Button::Left => self.next_layout(),
             Some(Part::Start | Part::Layout) | None => {}
         }
@@ -705,7 +986,8 @@ impl App {
 }
 
 /// An assistive technology's click on a panel: on its start button, a task
-/// or a workspace, sent on to the shell's loop as a left click there.
+/// or a workspace, sent on to the shell's loop as a left click there; or a
+/// step or a setting of the mixer's volume.
 struct Press {
     output: String,
     actions: Sender<Asked>,
@@ -713,18 +995,114 @@ struct Press {
 
 impl accesskit::ActionHandler for Press {
     fn do_action(&mut self, request: accesskit::ActionRequest) {
-        if request.action != accesskit::Action::Click {
-            return;
-        }
+        use accesskit::Action;
+
         let Some(part) = a11y::part_of(request.target_node) else {
             return;
         };
-        let asked = Asked::Panel {
-            output: self.output.clone(),
-            part,
+        let asked = match request.action {
+            Action::Click => Asked::Panel {
+                output: self.output.clone(),
+                part,
+            },
+            #[cfg(feature = "audio")]
+            Action::Increment | Action::Decrement | Action::SetValue => {
+                match volume_asked(part, request.action, request.data) {
+                    Some(change) => Asked::Volume(change),
+                    None => return,
+                }
+            }
+            _ => return,
         };
         if self.actions.send(asked).is_err() {
             tracing::debug!("the shell is stopping; the press is dropped");
         }
+    }
+}
+
+/// The change to the volume `action` asks of `part` of a panel, if it is
+/// one: a step up or down, or a setting, in percent.
+#[cfg(feature = "audio")]
+fn volume_asked(
+    part: Part,
+    action: accesskit::Action,
+    data: Option<accesskit::ActionData>,
+) -> Option<crate::model::sound::Change> {
+    use accesskit::{Action, ActionData};
+    use perspicax_config::mixer::Piece;
+
+    use crate::model::sound::Change;
+
+    if part != Part::Mixer(Piece::Volume) {
+        return None;
+    }
+    match (action, data) {
+        (Action::Increment, _) => Some(Change::By(1)),
+        (Action::Decrement, _) => Some(Change::By(-1)),
+        (Action::SetValue, Some(ActionData::NumericValue(value))) if value.is_finite() => Some(
+            Change::To(value.round().clamp(0.0, f64::from(u32::MAX)) as u32),
+        ),
+        _ => None,
+    }
+}
+
+#[cfg(all(test, feature = "audio"))]
+mod tests {
+    use accesskit::{Action, ActionData};
+    use perspicax_config::mixer::Piece;
+
+    use super::*;
+    use crate::model::sound::Change;
+
+    #[test]
+    fn the_volume_sliders_steps_and_setting_are_changes_to_the_volume() {
+        let volume = Part::Mixer(Piece::Volume);
+        assert_eq!(
+            volume_asked(volume, Action::Increment, None),
+            Some(Change::By(1))
+        );
+        assert_eq!(
+            volume_asked(volume, Action::Decrement, None),
+            Some(Change::By(-1))
+        );
+        assert_eq!(
+            volume_asked(
+                volume,
+                Action::SetValue,
+                Some(ActionData::NumericValue(41.6))
+            ),
+            Some(Change::To(42))
+        );
+        assert_eq!(
+            volume_asked(
+                volume,
+                Action::SetValue,
+                Some(ActionData::NumericValue(-3.0))
+            ),
+            Some(Change::To(0)),
+            "below silence is silence"
+        );
+        assert_eq!(
+            volume_asked(
+                volume,
+                Action::SetValue,
+                Some(ActionData::NumericValue(f64::NAN))
+            ),
+            None
+        );
+        assert_eq!(
+            volume_asked(
+                volume,
+                Action::SetValue,
+                Some(ActionData::Value("loud".into()))
+            ),
+            None
+        );
+        assert_eq!(
+            volume_asked(Part::Mixer(Piece::Mute), Action::Increment, None),
+            None,
+            "only the volume steps"
+        );
+        assert_eq!(volume_asked(Part::Start, Action::Increment, None), None);
     }
 }

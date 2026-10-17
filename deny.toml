@@ -22,6 +22,13 @@
 # The `capture` feature brought pixman-sys (MIT): its build script is one
 # `rustc-link-lib=pixman-1` against the system libpixman-1 (MIT), and it
 # vendors no C. Read 2026-10-01.
+#
+# perspicax-shell's `audio` feature brought the `pulseaudio` crate (MIT),
+# with byteorder (Unlicense OR MIT) and enum-primitive-derive (MIT) new to
+# the tree. It is the PulseAudio protocol in pure Rust: it links no C
+# library and vendors none, so the mixer runs on PipeWire or PulseAudio
+# without libpulse, which is LGPL-2.1-or-later and would have been the
+# first copyleft library this binary links. Read 2026-10-16.
 
 [licenses]
 # Exhaustive rather than permissive-by-pattern, and deliberately short. A new

@@ -5,10 +5,16 @@
 pub(crate) mod clock;
 #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
 pub(crate) mod image;
+#[cfg(feature = "audio")]
+pub(crate) mod kept;
 #[cfg(feature = "panel")]
 pub(crate) mod layouts;
+#[cfg(feature = "audio")]
+pub(crate) mod levels;
 #[cfg(any(feature = "panel", feature = "wallpaper"))]
 pub(crate) mod pager;
+#[cfg(feature = "audio")]
+pub(crate) mod sound;
 #[cfg(feature = "panel")]
 pub(crate) mod tasks;
 #[cfg(feature = "tray")]

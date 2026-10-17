@@ -95,6 +95,7 @@ impl Compositor {
             Action::StartMenu => self.ask_shell(crate::shell_protocol::Menu::Start),
             Action::RootMenu => self.ask_shell(crate::shell_protocol::Menu::Root),
             Action::Pie(name) => self.ask_shell(crate::shell_protocol::Menu::Pie(name.clone())),
+            Action::Volume(key) => self.tell_shell_volume(*key),
             Action::CycleLayout { forward } => self.cycle_layout(*forward),
             Action::Layout(number) => self.go_to_layout(*number),
             Action::OpacityUp | Action::OpacityDown => {

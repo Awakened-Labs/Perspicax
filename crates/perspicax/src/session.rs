@@ -341,7 +341,7 @@ pub async fn bus_daemon(connection: &Connection) -> Result<u32> {
 /// `var` reads the environment, as [`has_bus`]'s does.
 #[must_use]
 pub fn log_path(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    Some(state_folder(var)?.join("perspicax.log"))
+    Some(perspicax_config::state_folder(var)?.join("perspicax.log"))
 }
 
 /// Where a seat keeps where each program's last window closed, for its next
@@ -350,16 +350,7 @@ pub fn log_path(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
 /// from its `config.toml`.
 #[must_use]
 pub fn windows_path(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    Some(state_folder(var)?.join("windows.json"))
-}
-
-/// `$XDG_STATE_HOME/perspicax`, or `~/.local/state/perspicax`.
-fn state_folder(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    // The XDG spec's rule: a relative folder is no folder at all.
-    let folder = |name: &str| var(name).map(PathBuf::from).filter(|dir| dir.is_absolute());
-    let state = folder("XDG_STATE_HOME")
-        .or_else(|| folder("HOME").map(|home| home.join(".local/state")))?;
-    Some(state.join("perspicax"))
+    Some(perspicax_config::state_folder(var)?.join("windows.json"))
 }
 
 /// Open a fresh log at `path`, keeping the last one beside it as

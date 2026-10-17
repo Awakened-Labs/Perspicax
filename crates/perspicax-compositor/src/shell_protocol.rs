@@ -12,6 +12,10 @@
 //! at an earlier version is not told: an event it does not know would break
 //! it, and wayland-backend sends whatever it is asked to.
 //!
+//! From version 4 a volume key, bound to change the sound, is told to the
+//! shell, which holds the sound server's ear: perspicax has no volume of
+//! its own. A shell bound earlier is not told, as for a pie.
+//!
 //! When a save changes the config's `[shell]` table, every shell is told to
 //! read it again, and applies it in place.
 //!
@@ -29,7 +33,7 @@
 //! request from a client no longer admitted, or made while locked, is
 //! ignored.
 
-use perspicax_policy::Protocol;
+use perspicax_policy::{Protocol, VolumeKey};
 use perspicax_protocols::shell::v1::server::perspicax_shell_v1::{self, PerspicaxShellV1};
 use smithay::{
     reexports::wayland_server::{
@@ -66,7 +70,7 @@ impl Shells {
     /// Advertise the global, filtered by `gate`.
     pub(crate) fn new(display: &DisplayHandle, gate: &Gate) -> Self {
         display.create_global::<Compositor, PerspicaxShellV1, _>(
-            3,
+            4,
             Filtered {
                 gate: gate.clone(),
                 protocol: Protocol::Shell,
@@ -77,6 +81,34 @@ impl Shells {
 }
 
 impl Compositor {
+    /// A binding pressed a volume key: tell every shell that knows them.
+    /// Nothing at the lock screen.
+    pub(crate) fn tell_shell_volume(&mut self, key: VolumeKey) {
+        if self.lock.is_some() {
+            return;
+        }
+        if self.shells.bound.is_empty() {
+            tracing::info!(?key, "a volume key was pressed, and no shell is listening");
+            return;
+        }
+        let key = match key {
+            VolumeKey::Up => perspicax_shell_v1::VolumeKey::Up,
+            VolumeKey::Down => perspicax_shell_v1::VolumeKey::Down,
+            VolumeKey::Mute => perspicax_shell_v1::VolumeKey::Mute,
+            VolumeKey::MicMute => perspicax_shell_v1::VolumeKey::MicMute,
+        };
+        for shell in &self.shells.bound {
+            if shell.version() >= perspicax_shell_v1::EVT_VOLUME_SINCE {
+                shell.volume(key);
+            } else {
+                tracing::info!(
+                    version = shell.version(),
+                    "a volume key was pressed, and this shell is too old to hear of it"
+                );
+            }
+        }
+    }
+
     /// A binding asked for a menu: tell every shell, on the monitor under
     /// the pointer. Nothing while the session is locked.
     pub(crate) fn ask_shell(&mut self, menu: Menu) {
