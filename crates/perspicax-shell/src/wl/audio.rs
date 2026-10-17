@@ -114,6 +114,13 @@ impl Audio {
         }
     }
 
+    /// Move `side` to the device keyed `key`, as its plan says.
+    pub(super) fn choose(&self, side: Side, key: &str) {
+        if let Some(plan) = self.facts().and_then(|facts| facts.plan(side, key)) {
+            self.ask(Ask::Choose(plan));
+        }
+    }
+
     /// What the server holds, as last told: `None` with no server.
     pub(super) fn facts(&self) -> Option<&Facts> {
         self.facts.as_deref()
@@ -235,8 +242,8 @@ impl App {
                 .find(|output| output.key == key)?;
             Some(Playing {
                 kind: output.kind,
+                long: output.long(),
                 name: output.short,
-                long: output.long,
             })
         });
         let mic = facts
@@ -283,31 +290,23 @@ impl App {
             }
             return;
         }
-        let ask = match (piece, button) {
-            (Piece::Mic, Button::Left | Button::Middle) => {
-                self.mute_default(Side::Input);
-                return;
-            }
+        match (piece, button) {
+            (Piece::Mic, Button::Left | Button::Middle) => self.mute_default(Side::Input),
             (Piece::Mute, Button::Left) | (_, Button::Middle) => {
                 self.mute_default(Side::Output);
-                return;
             }
             (Piece::Output, Button::Left) => {
-                let Some(facts) = self.audio.facts.as_deref() else {
+                let Some(facts) = self.audio.facts() else {
                     return;
                 };
                 let outputs = facts.outputs();
                 let now = facts.output_key();
-                let Some(plan) = sound::next_output(&outputs, now.as_deref())
-                    .and_then(|next| facts.plan(&next.key))
-                else {
-                    return;
-                };
-                Ask::Choose(plan)
+                if let Some(next) = sound::next_choice(&outputs, now.as_deref()) {
+                    self.audio.choose(Side::Output, &next.key);
+                }
             }
-            _ => return,
-        };
-        self.audio.ask(ask);
+            _ => {}
+        }
     }
 
     /// The wheel turned `notches`, down positive, at `at` on `surface`: on

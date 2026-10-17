@@ -31,8 +31,9 @@ use super::{
 };
 use crate::{
     a11y::{self, adapter::Served},
-    layout::mixer::{Master, Mixed},
+    layout::mixer::{Anchor, Listed, Master, Mixed},
     mixer::{Act, Effect, Event, Key, State},
+    model::sound::Side,
     paint::{self, Kit},
 };
 
@@ -284,9 +285,7 @@ impl App {
         let mixed = self.mixed();
         self.mixer_event(Event::Open {
             output: name.to_owned(),
-            area,
-            button,
-            edge,
+            anchor: Anchor { button, edge, area },
             mixed,
         });
     }
@@ -314,6 +313,7 @@ impl App {
             match effect {
                 Effect::Mute(side) => self.mute_default(side),
                 Effect::Volume(side, change) => self.audio.change(change, side),
+                Effect::Choose(side, key) => self.audio.choose(side, &key),
                 Effect::Redraw => {}
             }
         }
@@ -322,30 +322,48 @@ impl App {
     /// What the mixer shows of the sound now.
     pub(super) fn mixed(&self) -> Mixed {
         let facts = self.audio.facts();
-        let output = facts.and_then(|facts| {
-            let sink = facts.output()?;
-            let key = facts.output_key();
-            let name = facts
-                .outputs()
+        // Each side's default, named as the panel names it, and what the
+        // side can be moved to.
+        let side = |side| {
+            let Some(facts) = facts else {
+                return (None, Vec::new());
+            };
+            let chosen = facts.chosen(side);
+            let choices = facts.choices(side);
+            let master = match side {
+                Side::Output => facts.output().map(|sink| (&sink.description, sink.level())),
+                Side::Input => facts
+                    .input()
+                    .map(|source| (&source.description, source.level())),
+            }
+            .map(|(description, level)| Master {
+                name: choices
+                    .iter()
+                    .find(|choice| Some(&choice.key) == chosen.as_ref())
+                    .map_or_else(|| description.clone(), |choice| choice.short.clone()),
+                level,
+            });
+            let listed = choices
                 .into_iter()
-                .find(|output| Some(&output.key) == key.as_ref())
-                .map_or_else(|| sink.description.clone(), |output| output.short);
-            Some(Master {
-                name,
-                level: sink.level(),
-            })
-        });
-        let input = facts.and_then(|facts| {
-            let source = facts.input()?;
-            Some(Master {
-                name: source.description.clone(),
-                level: source.level(),
-            })
-        });
+                .map(|choice| Listed {
+                    chosen: Some(&choice.key) == chosen.as_ref(),
+                    key: choice.key,
+                    device: choice.device,
+                    jack: choice.jack,
+                    kind: choice.kind,
+                    connected: choice.connected,
+                })
+                .collect();
+            (master, listed)
+        };
+        let (output, outputs) = side(Side::Output);
+        let (input, inputs) = side(Side::Input);
         let mixer = self.audio.mixer();
         Mixed {
             output,
             input,
+            outputs,
+            inputs,
             step: mixer.step,
             limit: mixer.limit,
         }

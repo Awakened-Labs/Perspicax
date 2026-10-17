@@ -41,6 +41,10 @@ use crate::model::sound::NORM;
 /// default too.
 pub(super) const SPEAKERS: &str = "alsa_output.speakers";
 pub(super) const MIC: &str = "alsa_input.mic";
+/// The built-in card, and the jack of its source a headset's microphone is
+/// plugged into.
+pub(super) const BUILT_IN: &str = "alsa_card.pci-0000_00_1f.3";
+pub(super) const HEADSET_MIC: &str = "analog-input-headset-mic";
 /// The HDMI card's, the profile that plays through its second jack, the
 /// jack, and the sink that profile brings.
 pub(super) const HDMI: &str = "alsa_card.pci-0000_01_00.1";
@@ -61,6 +65,7 @@ struct Shared {
     sources_refused: bool,
     cards: Vec<CardInfo>,
     default: CString,
+    default_source: CString,
     /// What was asked, in order: one line each.
     asked: Vec<String>,
     /// The connection being served, to write on.
@@ -97,6 +102,7 @@ impl Fake {
             sources_refused: false,
             cards: vec![built_in(), hdmi()],
             default: CString::new(SPEAKERS).expect("a name"),
+            default_source: CString::new(MIC).expect("a name"),
             asked: Vec::new(),
             writer: None,
             version: MAX_VERSION,
@@ -319,6 +325,7 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
             sources_refused,
             cards,
             default,
+            default_source,
             asked,
             writer,
             recording,
@@ -357,7 +364,7 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
                 let info = ServerInfo {
                     server_name: Some(c"PulseAudio (on PipeWire 1.6.8)".to_owned()),
                     default_sink_name: Some(default.clone()),
-                    default_source_name: Some(CString::new(MIC).expect("a name")),
+                    default_source_name: Some(default_source.clone()),
                     ..ServerInfo::default()
                 };
                 protocol::write_reply_message(writer, seq, &info, version)
@@ -378,7 +385,7 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
             }
             Command::GetSourceInfoList => {
                 asked.push("sources".to_owned());
-                protocol::write_reply_message(writer, seq, &sources.clone(), version)
+                protocol::write_reply_message(writer, seq, &Sources(sources.clone()), version)
             }
             Command::GetSourceInfo(get) => {
                 asked.push(format!("source {}", get.index.unwrap_or(u32::MAX)));
@@ -386,7 +393,10 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
                     .iter()
                     .find(|source| Some(source.index) == get.index)
                 {
-                    Some(source) => protocol::write_reply_message(writer, seq, source, version),
+                    Some(source) => {
+                        let one = Sources(vec![source.clone()]);
+                        protocol::write_reply_message(writer, seq, &one, version)
+                    }
                     None => protocol::write_error(writer, seq, &PulseError::NoEntity),
                 }
             }
@@ -479,6 +489,27 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
                     None => protocol::write_error(writer, seq, &PulseError::NoEntity),
                 }
             }
+            Command::SetSourcePort(set) => {
+                asked.push(format!("source port {}", set.port_name.to_string_lossy()));
+                let source = sources
+                    .iter_mut()
+                    .find(|source| Some(&source.name) == set.name.as_ref());
+                let port = source.and_then(|source| {
+                    let at = source
+                        .ports
+                        .iter()
+                        .position(|port| port.name == set.port_name)?;
+                    Some((source, at))
+                });
+                match port {
+                    Some((source, at)) => {
+                        source.active_port = at;
+                        changed_source = Some(source.index);
+                        protocol::write_ack_message(writer, seq)
+                    }
+                    None => protocol::write_error(writer, seq, &PulseError::NoEntity),
+                }
+            }
             Command::CreateRecordStream(record) => {
                 let source = record
                     .source_name
@@ -501,6 +532,12 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
             Command::DeleteRecordStream(channel) => {
                 asked.push(format!("unrecord {channel}"));
                 recording.take_if(|recording| *recording == channel);
+                protocol::write_ack_message(writer, seq)
+            }
+            Command::SetDefaultSource(name) => {
+                asked.push(format!("default source {}", name.to_string_lossy()));
+                *default_source = name;
+                defaulted = true;
                 protocol::write_ack_message(writer, seq)
             }
             Command::SetDefaultSink(name) => {
@@ -558,7 +595,71 @@ fn sink(index: u32, name: &str, volume: u32) -> SinkInfo {
     }
 }
 
-/// The microphone's source, mono, at half volume.
+/// Sources as a server writes them, one after another. The crate's own
+/// writer leaves out a port's availability group and type, which its
+/// reader, as a real server, has from version 34 on.
+struct Sources(Vec<SourceInfo>);
+
+impl protocol::CommandReply for Sources {}
+
+impl protocol::TagStructRead for Sources {
+    fn read(
+        ts: &mut protocol::TagStructReader<'_>,
+        version: u16,
+    ) -> Result<Self, protocol::ProtocolError> {
+        protocol::SourceInfoList::read(ts, version).map(Self)
+    }
+}
+
+impl protocol::TagStructWrite for Sources {
+    fn write(
+        &self,
+        w: &mut protocol::TagStructWriter<'_>,
+        version: u16,
+    ) -> Result<(), protocol::ProtocolError> {
+        for source in &self.0 {
+            w.write_index(Some(source.index))?;
+            w.write_string(Some(&source.name))?;
+            w.write_string(source.description.as_ref())?;
+            w.write(source.sample_spec)?;
+            w.write(source.channel_map)?;
+            w.write_index(source.owner_module_index)?;
+            w.write(source.cvolume)?;
+            w.write_bool(source.muted)?;
+            w.write_index(source.monitor_of_sink_index)?;
+            w.write_string(source.monitor_of_sink_name.as_ref())?;
+            w.write_usec(source.actual_latency)?;
+            w.write_string(source.driver.as_ref())?;
+            w.write_u32(source.flags.bits())?;
+            w.write(&source.props)?;
+            w.write_usec(source.configured_latency)?;
+            w.write(source.base_volume)?;
+            w.write_u32(source.state as u32)?;
+            w.write_u32(source.volume_steps.unwrap_or(0))?;
+            w.write_index(source.card_index)?;
+            w.write_u32(source.ports.len() as u32)?;
+            for port in &source.ports {
+                w.write_string(Some(&port.name))?;
+                w.write_string(port.description.as_ref())?;
+                w.write_u32(port.priority)?;
+                w.write_u32(port.available as u32)?;
+                if version >= 34 {
+                    w.write_string(port.availability_group.as_ref())?;
+                    w.write_u32(port.port_type as u32)?;
+                }
+            }
+            w.write_string(source.ports.get(source.active_port).map(|port| &port.name))?;
+            w.write_u8(source.formats.len() as u8)?;
+            for format in &source.formats {
+                w.write(format)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The microphone's source, mono, at half volume, recording from the
+/// built-in microphone, or a headset's.
 fn mic() -> SourceInfo {
     let mut cvolume = ChannelVolume::empty();
     cvolume.push(Volume::from_u32_clamped(NORM / 2));
@@ -573,6 +674,12 @@ fn mic() -> SourceInfo {
         channel_map: ChannelMap::mono(),
         cvolume,
         card_index: Some(0),
+        ports: ["analog-input-internal-mic", HEADSET_MIC]
+            .map(|name| PortInfo {
+                dir: PortDirection::Output,
+                ..sink_port(name, PortType::Mic)
+            })
+            .into(),
         ..SourceInfo::default()
     }
 }
@@ -656,7 +763,7 @@ fn built_in() -> CardInfo {
     const DUPLEX: &str = "output:analog-stereo+input:analog-stereo";
     card(
         0,
-        "alsa_card.pci-0000_00_1f.3",
+        BUILT_IN,
         c"Built-in Audio",
         vec![
             card_port(
@@ -680,6 +787,10 @@ fn built_in() -> CardInfo {
                     PortAvailable::Unknown,
                     &[DUPLEX],
                 )
+            },
+            CardPortInfo {
+                dir: PortDirection::Output,
+                ..card_port(HEADSET_MIC, PortType::Headset, PortAvailable::No, &[DUPLEX])
             },
         ],
         vec![profile("off", 0), profile(DUPLEX, 1)],

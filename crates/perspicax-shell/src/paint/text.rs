@@ -146,7 +146,7 @@ impl Text {
 
     /// Write `text` in `ink` into `place`, a rectangle of `canvas` in its
     /// pixels, `size` pixels high, vertically centred, cut short with an
-    /// ellipsis if it does not fit.
+    /// ellipsis if it does not fit. How wide it came to, in pixels.
     pub(crate) fn write(
         &mut self,
         canvas: &mut PixmapMut<'_>,
@@ -154,11 +154,11 @@ impl Text {
         place: Rect,
         size: f32,
         ink: [u8; 4],
-    ) {
+    ) -> f32 {
         // cosmic-text panics shaping with no font at all: a machine with
         // none gets menus without text rather than no shell.
         if place.w <= 0 || place.h <= 0 || self.fonts.db().is_empty() {
-            return;
+            return 0.0;
         }
         let line = place.h as f32;
         let mut buffer = Buffer::new(&mut self.fonts, Metrics::new(size, line));
@@ -190,6 +190,10 @@ impl Text {
                 }
             },
         );
+        buffer
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0, f32::max)
     }
 }
 

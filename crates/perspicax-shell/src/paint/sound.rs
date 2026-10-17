@@ -9,8 +9,8 @@
 //! crossed out.
 //!
 //! An output is drawn as what it is: a speaker without its waves,
-//! headphones, headphones with a microphone at the end of a boom, or a
-//! screen on a stand. The microphone is a capsule in a cradle on a stand,
+//! headphones, headphones with a microphone at the end of a boom, a screen
+//! on a stand, or a microphone. The microphone is a capsule in a cradle on a stand,
 //! struck through while it is muted, and faint with none to record from.
 //! The mixer's button is three sliders, each knob at another place.
 
@@ -171,6 +171,14 @@ pub(crate) fn sliders(canvas: &mut PixmapMut<'_>, place: Rect, ink: [u8; 4]) {
 /// What an output of `kind` is, filling `place`, a square in pixels, in
 /// `ink`.
 pub(crate) fn device(canvas: &mut PixmapMut<'_>, place: Rect, kind: Kind, ink: [u8; 4]) {
+    if kind == Kind::Mic {
+        let on = Level {
+            percent: 100,
+            muted: false,
+        };
+        mic(canvas, place, Some(on), ink, ink);
+        return;
+    }
     let k = place.w as f32 / UNITS;
     let through = Transform::from_row(k, 0.0, 0.0, k, place.x as f32, place.y as f32);
     let paint = solid(ink);
@@ -183,7 +191,7 @@ pub(crate) fn device(canvas: &mut PixmapMut<'_>, place: Rect, kind: Kind, ink: [
     let mut filled = PathBuilder::new();
     let mut lines = PathBuilder::new();
     match kind {
-        Kind::Speaker | Kind::Other => {
+        Kind::Speaker | Kind::Other | Kind::Mic => {
             let (x, y, w, h) = BOX;
             filled.push_rect(tiny_skia::Rect::from_xywh(x + ALONE, y, w, h).expect("a box"));
             let [first, rest @ ..] = CONE;

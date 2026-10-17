@@ -9,23 +9,22 @@
 //! mute button mutes, or brings the sound back; a press on a slider sets
 //! the volume where it is pressed, and a drag from there follows the
 //! pointer, the slider showing where it was dragged to until the sound
-//! server says it is there; the wheel over a slider steps it. A press off
-//! the mixer closes it, as do Escape and losing the keyboard.
+//! server says it is there; a press on a device listed moves its side to
+//! it; a press on a side's fold unfolds what has nothing plugged in, or
+//! folds it away again. The wheel over a slider or its mute button steps
+//! the slider, and anywhere else on the mixer scrolls it, if it is too tall
+//! for the room it has. A press off the mixer closes it, as do Escape and
+//! losing the keyboard.
 //!
 //! The keyboard moves through the controls with Tab and Shift+Tab, or the
-//! arrows up and down. On a slider, left and right step it, Page Up and
-//! Page Down move it ten at a time, and Home and End take it to silence or
-//! to the limit; on a mute button, Space or Return presses it. The control
-//! the keyboard is on is ringed once a key is used, and not while the
-//! pointer is what is used.
-
-use perspicax_config::Edge;
+//! arrows up and down, scrolling each into sight. On a slider, left and
+//! right step it, Page Up and Page Down move it ten at a time, and Home and
+//! End take it to silence or to the limit; on anything else, Space or
+//! Return presses it. The control the keyboard is on is ringed once a key
+//! is used, and not while the pointer is what is used.
 
 use crate::{
-    layout::{
-        Rect,
-        mixer::{Control, Mixed, Placed, lay_out, percent_at},
-    },
+    layout::mixer::{Anchor, Control, Mixed, Placed, lay_out, percent_at},
     model::{
         Button,
         sound::{Change, Side, stepped},
@@ -34,6 +33,8 @@ use crate::{
 
 /// How far Page Up and Page Down move a slider, in percent.
 const PAGE: u32 = 10;
+/// How far a notch of the wheel scrolls the mixer, in pixels.
+const NOTCH: i32 = 40;
 
 /// A key pressed while the mixer has the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,14 +69,11 @@ pub(crate) enum Act {
 /// Something that happened.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Event {
-    /// The mixer was asked for on the monitor named `output`, from its
-    /// panel item at `button`, on a panel along `edge`, with `area` the
-    /// room beside the panel: open it, showing `mixed`.
+    /// The mixer was asked for on the monitor named `output`, to open at
+    /// `anchor`: open it, showing `mixed`.
     Open {
         output: String,
-        area: Rect,
-        button: Rect,
-        edge: Edge,
+        anchor: Anchor,
         mixed: Mixed,
     },
     /// Close it: asked for again, or a press elsewhere on the panel.
@@ -104,6 +102,8 @@ pub(crate) enum Effect {
     Mute(Side),
     /// Change the volume of the default on this side.
     Volume(Side, Change),
+    /// Move this side to the device with this key.
+    Choose(Side, String),
 }
 
 /// The mixer, if it is open.
@@ -115,8 +115,11 @@ pub(crate) struct State {
 #[derive(Debug)]
 struct Open {
     output: String,
+    anchor: Anchor,
     placed: Placed,
     mixed: Mixed,
+    /// Whether each side's devices with nothing plugged in are unfolded.
+    unfolded: [bool; 2],
     /// The control the keyboard is on, and whether a key has been used
     /// since the pointer was, so that it is shown.
     focus: Control,
@@ -169,15 +172,16 @@ impl State {
         match event {
             Event::Open {
                 output,
-                area,
-                button,
-                edge,
+                anchor,
                 mixed,
             } => {
+                let unfolded = [false; 2];
                 self.open = Some(Open {
                     output,
-                    placed: lay_out(button, edge, area),
+                    anchor,
+                    placed: lay_out(&anchor, &mixed, unfolded, 0),
                     mixed,
+                    unfolded,
                     focus: Control::Volume(Side::Output),
                     keyed: false,
                     pointer: None,
@@ -230,6 +234,7 @@ impl Open {
                         .is_none_or(|master| master.level.percent == percent)
                 });
                 self.mixed = mixed;
+                self.lay_out(self.placed.scroll);
                 vec![Effect::Redraw]
             }
             Event::Motion(at) => {
@@ -244,12 +249,8 @@ impl Open {
                 if !self.placed.rect.contains(at) {
                     return None;
                 }
-                self.keyed = false;
-                match self.placed.at(at) {
-                    Some(Control::Mute(side)) => {
-                        self.focus = Control::Mute(side);
-                        self.mute(side)
-                    }
+                let ringed = std::mem::replace(&mut self.keyed, false);
+                let mut effects = match self.placed.at(at) {
                     Some(Control::Volume(side)) => {
                         self.focus = Control::Volume(side);
                         self.dragging = Some(side);
@@ -257,8 +258,16 @@ impl Open {
                         effects.push(Effect::Redraw);
                         effects
                     }
+                    Some(control) => {
+                        self.focus = control;
+                        self.press(control)
+                    }
                     None => Vec::new(),
+                };
+                if ringed && !effects.contains(&Effect::Redraw) {
+                    effects.push(Effect::Redraw);
                 }
+                effects
             }
             Event::Press(at, _) => {
                 if self.placed.rect.contains(at) {
@@ -272,13 +281,14 @@ impl Open {
                 Vec::new()
             }
             Event::Release(..) => Vec::new(),
-            Event::Wheel(notches) => {
-                let control = self.pointer.and_then(|at| self.placed.at(at));
-                match control {
+            Event::Wheel(notches) => match self.pointer {
+                Some(at) => match self.placed.at(at) {
                     Some(Control::Volume(side) | Control::Mute(side)) => self.step(side, -notches),
-                    None => Vec::new(),
-                }
-            }
+                    _ if self.placed.rect.contains(at) => self.scroll_by(notches * NOTCH),
+                    _ => Vec::new(),
+                },
+                None => Vec::new(),
+            },
             Event::Key(key) => {
                 let shown = !std::mem::replace(&mut self.keyed, true);
                 let mut effects = self.key(key);
@@ -290,6 +300,43 @@ impl Open {
             Event::Act(control, act) => self.act(control, act),
             Event::Open { .. } | Event::Close | Event::KeyboardLost => Vec::new(),
         })
+    }
+
+    /// Lay the mixer out again as it now is, scrolled `scroll` down, or as
+    /// near as it goes. The keyboard stays on its control, or if that has
+    /// gone, moves to the one now where it was.
+    fn lay_out(&mut self, scroll: i32) {
+        let was = self
+            .placed
+            .controls
+            .iter()
+            .position(|&(control, _)| control == self.focus);
+        self.placed = lay_out(&self.anchor, &self.mixed, self.unfolded, scroll);
+        let controls = &self.placed.controls;
+        if self.placed.of(self.focus).is_none()
+            && let Some(&(control, _)) = was.and_then(|at| controls.get(at).or(controls.last()))
+        {
+            self.focus = control;
+        }
+    }
+
+    /// Scroll so that the control the keyboard is on is in sight.
+    fn reveal(&mut self) {
+        let scroll = self.placed.reveal(self.focus);
+        if scroll != self.placed.scroll {
+            self.lay_out(scroll);
+        }
+    }
+
+    /// Scroll `by` pixels, down positive, as far as it goes.
+    fn scroll_by(&mut self, by: i32) -> Vec<Effect> {
+        let was = self.placed.scroll;
+        self.lay_out(was + by);
+        if self.placed.scroll == was {
+            Vec::new()
+        } else {
+            vec![Effect::Redraw]
+        }
     }
 
     /// Set `side`'s volume where `x` is along its slider.
@@ -320,30 +367,45 @@ impl Open {
         self.set(side, to)
     }
 
-    /// Mute `side`'s device, if it has one.
-    fn mute(&self, side: Side) -> Vec<Effect> {
-        match self.mixed.on(side) {
-            Some(_) => vec![Effect::Mute(side)],
-            None => Vec::new(),
+    /// Press `control`, as a click, Return or an assistive technology does:
+    /// a slider is not pressed.
+    fn press(&mut self, control: Control) -> Vec<Effect> {
+        match control {
+            Control::Mute(side) => match self.mixed.on(side) {
+                Some(_) => vec![Effect::Mute(side)],
+                None => Vec::new(),
+            },
+            Control::Volume(_) => Vec::new(),
+            Control::Choose(side, number) => match self.mixed.find(side, number) {
+                Some(listed) if !listed.chosen => vec![Effect::Choose(side, listed.key.clone())],
+                _ => Vec::new(),
+            },
+            Control::Fold(side) => {
+                self.unfolded[side.at()] = !self.unfolded[side.at()];
+                self.lay_out(self.placed.scroll);
+                vec![Effect::Redraw]
+            }
         }
     }
 
-    /// The control `by` places on from the focused one, round the ends.
+    /// The control `by` places on from the focused one, round the ends,
+    /// scrolled into sight.
     fn move_focus(&mut self, by: isize) -> Vec<Effect> {
-        let all = Control::ALL;
+        let all = &self.placed.controls;
         let at = all
             .iter()
-            .position(|&control| control == self.focus)
+            .position(|&(control, _)| control == self.focus)
             .unwrap_or(0);
         let next = (at as isize + by).rem_euclid(all.len() as isize) as usize;
-        self.focus = all[next];
+        self.focus = all[next].0;
+        self.reveal();
         vec![Effect::Redraw]
     }
 
     fn key(&mut self, key: Key) -> Vec<Effect> {
         let slider = match self.focus {
             Control::Volume(side) => Some(side),
-            Control::Mute(_) => None,
+            _ => None,
         };
         match (key, slider) {
             (Key::Tab | Key::Down, _) => self.move_focus(1),
@@ -364,22 +426,23 @@ impl Open {
                 let limit = self.mixed.limit;
                 self.set(side, limit)
             }
-            (Key::Press, None) => match self.focus {
-                Control::Mute(side) => self.mute(side),
-                Control::Volume(_) => Vec::new(),
-            },
+            (Key::Press, None) => self.press(self.focus),
             _ => Vec::new(),
         }
     }
 
     fn act(&mut self, control: Control, act: Act) -> Vec<Effect> {
+        if self.placed.of(control).is_none() {
+            return Vec::new();
+        }
         match (control, act) {
-            (Control::Mute(side), Act::Click) => self.mute(side),
             (Control::Volume(side), Act::Increment) => self.step(side, 1),
             (Control::Volume(side), Act::Decrement) => self.step(side, -1),
             (Control::Volume(side), Act::Set(percent)) => self.set(side, percent),
+            (control, Act::Click) => self.press(control),
             (control, Act::Focus) => {
                 self.focus = control;
+                self.reveal();
                 vec![Effect::Redraw]
             }
             _ => Vec::new(),
@@ -389,8 +452,22 @@ impl Open {
 
 #[cfg(test)]
 mod tests {
+    use perspicax_config::Edge;
+
     use super::*;
-    use crate::{layout::mixer::Master, model::sound::Level};
+    use crate::{
+        layout::{
+            Rect,
+            mixer::{Listed, Master, number},
+        },
+        model::sound::{Kind, Level},
+    };
+
+    const ANCHOR: Anchor = Anchor {
+        button: Rect::new(1180, 760, 100, 40),
+        edge: Edge::Bottom,
+        area: Rect::new(0, 0, 1280, 760),
+    };
 
     fn mixed(output: u32, input: Option<u32>) -> Mixed {
         let master = |name: &str, percent| Master {
@@ -405,20 +482,62 @@ mod tests {
             input: input.map(|percent| master("Microphone", percent)),
             step: 5,
             limit: 100,
+            ..Mixed::default()
+        }
+    }
+
+    /// An output listed: plugged in, or not, and chosen, or not.
+    fn listed(key: &str, connected: bool, chosen: bool) -> Listed {
+        Listed {
+            key: key.to_owned(),
+            device: key.to_owned(),
+            jack: None,
+            kind: Kind::Speaker,
+            connected,
+            chosen,
+        }
+    }
+
+    /// Speakers with the sound on them, a headset plugged in, and two
+    /// jacks with nothing in them.
+    fn laptop() -> Mixed {
+        Mixed {
+            outputs: vec![
+                listed("speakers", true, true),
+                listed("headphones", false, false),
+                listed("hdmi", false, false),
+                listed("headset", true, false),
+            ],
+            ..mixed(40, Some(60))
         }
     }
 
     fn opened(mixed: Mixed) -> State {
+        opened_at(ANCHOR, mixed)
+    }
+
+    fn opened_at(anchor: Anchor, mixed: Mixed) -> State {
         let mut state = State::default();
         let effects = state.update(Event::Open {
             output: "DP-1".to_owned(),
-            area: Rect::new(0, 0, 1280, 760),
-            button: Rect::new(1180, 760, 100, 40),
-            edge: Edge::Bottom,
+            anchor,
             mixed,
         });
         assert_eq!(effects, [Effect::Redraw]);
         state
+    }
+
+    fn row(key: &str) -> Control {
+        Control::Choose(Side::Output, number(key))
+    }
+
+    fn controls(state: &State) -> Vec<Control> {
+        let view = state.view().expect("open");
+        view.placed
+            .controls
+            .iter()
+            .map(|&(control, _)| control)
+            .collect()
     }
 
     /// A point on `control`, a fraction `along` of its width from its left.
@@ -577,6 +696,13 @@ mod tests {
             state.view().expect("open").focus,
             Control::Volume(Side::Input)
         );
+        state.update(Event::Key(Key::Up));
+        let at = on(&state, Control::Mute(Side::Output), 0.5);
+        assert_eq!(
+            state.update(Event::Press(at, Button::Left)),
+            [Effect::Mute(Side::Output), Effect::Redraw],
+            "the ring taken away"
+        );
     }
 
     #[test]
@@ -614,6 +740,148 @@ mod tests {
         assert_eq!(
             state.view().expect("open").focus,
             Control::Mute(Side::Input)
+        );
+    }
+
+    #[test]
+    fn a_press_on_a_device_listed_moves_to_it_unless_the_sound_is_on_it() {
+        let mut state = opened(laptop());
+        let at = on(&state, row("headset"), 0.5);
+        assert_eq!(
+            state.update(Event::Press(at, Button::Left)),
+            [Effect::Choose(Side::Output, "headset".to_owned())]
+        );
+        assert_eq!(state.view().expect("open").focus, row("headset"));
+        let at = on(&state, row("speakers"), 0.5);
+        assert!(
+            state.update(Event::Press(at, Button::Left)).is_empty(),
+            "the sound is on it"
+        );
+        state.update(Event::Key(Key::Down));
+        assert_eq!(state.view().expect("open").focus, row("headset"));
+        assert_eq!(
+            state.update(Event::Key(Key::Press)),
+            [Effect::Choose(Side::Output, "headset".to_owned())],
+            "Return chooses it too"
+        );
+        assert_eq!(
+            state.update(Event::Act(row("headset"), Act::Click)),
+            [Effect::Choose(Side::Output, "headset".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_jack_with_nothing_in_it_is_folded_away_until_its_fold_is_pressed() {
+        let mut state = opened(laptop());
+        assert_eq!(
+            controls(&state)[..5],
+            [
+                Control::Mute(Side::Output),
+                Control::Volume(Side::Output),
+                row("speakers"),
+                row("headset"),
+                Control::Fold(Side::Output),
+            ],
+            "what is plugged in, then the fold"
+        );
+        assert_eq!(state.view().expect("open").placed.folded, [2, 0]);
+        let fold = on(&state, Control::Fold(Side::Output), 0.5);
+        assert_eq!(
+            state.update(Event::Press(fold, Button::Left)),
+            [Effect::Redraw]
+        );
+        assert_eq!(
+            controls(&state)[4..7],
+            [Control::Fold(Side::Output), row("headphones"), row("hdmi")],
+            "unfolded under it"
+        );
+        state.update(Event::Act(Control::Fold(Side::Output), Act::Click));
+        assert!(!controls(&state).contains(&row("hdmi")), "folded again");
+        assert!(
+            state
+                .update(Event::Act(Control::Fold(Side::Input), Act::Click))
+                .is_empty(),
+            "no input is folded away"
+        );
+        assert_eq!(state.view().expect("open").placed.unfolded, [false; 2]);
+        let mut plugged = laptop();
+        plugged.outputs[2].connected = true;
+        state.update(Event::Heard(plugged));
+        assert_eq!(
+            controls(&state)[2..5],
+            [row("speakers"), row("hdmi"), row("headset")],
+            "a jack is listed once it is plugged in"
+        );
+    }
+
+    #[test]
+    fn a_device_that_goes_leaves_the_keyboard_on_the_control_now_where_it_was() {
+        let mut state = opened(laptop());
+        state.update(Event::Act(row("headset"), Act::Focus));
+        let mut unplugged = laptop();
+        unplugged.outputs.pop();
+        state.update(Event::Heard(unplugged));
+        assert_eq!(
+            state.view().expect("open").focus,
+            Control::Fold(Side::Output)
+        );
+    }
+
+    /// The laptop's outputs in a mixer with room for little more than its
+    /// outputs.
+    fn cramped() -> State {
+        let mut mixed = laptop();
+        mixed
+            .outputs
+            .extend((0..6).map(|at| listed(&format!("usb {at}"), true, false)));
+        opened_at(
+            Anchor {
+                area: Rect::new(0, 560, 1280, 200),
+                ..ANCHOR
+            },
+            mixed,
+        )
+    }
+
+    #[test]
+    fn the_focused_control_is_scrolled_into_view() {
+        let mut state = cramped();
+        let view = state.view().expect("open");
+        assert_eq!(view.placed.rect.h, 200, "cut to fit");
+        assert!(view.placed.most > 0);
+        state.update(Event::Key(Key::BackTab));
+        let view = state.view().expect("open");
+        assert_eq!(view.focus, Control::Mute(Side::Output));
+        let back = Control::Volume(Side::Input);
+        state.update(Event::Key(Key::BackTab));
+        let view = state.view().expect("open");
+        assert_eq!(view.focus, back, "round to the last");
+        let rect = view.placed.of(back).expect("there");
+        assert_eq!(rect.bottom(), view.placed.inside.bottom(), "just in sight");
+        assert_eq!(view.placed.scroll, view.placed.most);
+        state.update(Event::Key(Key::Tab));
+        let view = state.view().expect("open");
+        let most = view.placed.most;
+        assert_eq!(view.placed.scroll, 0, "back at the top");
+        state.update(Event::Act(back, Act::Focus));
+        assert_eq!(state.view().expect("open").placed.scroll, most);
+    }
+
+    #[test]
+    fn the_wheel_off_a_slider_scrolls_and_never_past_the_ends() {
+        let mut state = cramped();
+        let at = on(&state, row("speakers"), 0.5);
+        state.update(Event::Motion(at));
+        assert!(state.update(Event::Wheel(-1)).is_empty(), "at the top");
+        assert_eq!(state.update(Event::Wheel(1)), [Effect::Redraw]);
+        assert_eq!(state.view().expect("open").placed.scroll, NOTCH);
+        state.update(Event::Wheel(100));
+        let view = state.view().expect("open");
+        assert_eq!(view.placed.scroll, view.placed.most, "the bottom");
+        state.update(Event::Motion((5.0, 5.0)));
+        assert!(
+            state.update(Event::Wheel(-1)).is_empty(),
+            "off the mixer, nothing"
         );
     }
 

@@ -30,6 +30,14 @@ pub(crate) enum Side {
     Input,
 }
 
+impl Side {
+    /// Its place in a pair of things, one for each side: the output's
+    /// first.
+    pub(crate) fn at(self) -> usize {
+        usize::from(self == Self::Input)
+    }
+}
+
 /// A change to a volume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Change {
@@ -64,6 +72,15 @@ pub(crate) struct Source {
     /// Each channel's volume, as the server counts it.
     pub(crate) volume: Vec<u32>,
     pub(crate) muted: bool,
+    /// The number of the card it is of, if it is of one.
+    pub(crate) card: Option<u32>,
+    /// Its card's ports it can record from, by name, and the one it
+    /// records from.
+    pub(crate) ports: Vec<String>,
+    pub(crate) port: Option<String>,
+    /// It hears what a sink plays: a monitor, which no one chooses as an
+    /// input.
+    pub(crate) monitor: bool,
 }
 
 /// An output the server plays to: a sink.
@@ -146,6 +163,8 @@ pub(crate) enum Kind {
     Headset,
     /// A monitor or a television, over HDMI or DisplayPort.
     Display,
+    /// A microphone, built in or plugged in.
+    Mic,
     Other,
 }
 
@@ -162,36 +181,66 @@ pub(crate) struct Profile {
     pub(crate) sources: u32,
 }
 
-/// An output a person can choose: a card's jack, or a sink of no card.
+/// A device a person can choose, on either side: a card's jack, or a sink
+/// or a source of no card.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Output {
-    /// What it is known by, across reboots: `<card>/<port>`, or a sink's
-    /// name.
+pub(crate) struct Choice {
+    /// What it is known by, across reboots: `<card>/<port>`, or a sink's or
+    /// a source's name.
     pub(crate) key: String,
-    /// Its card and its jack, and the monitor or the way it is attached:
-    /// "E8 — Headphones · Bluetooth".
-    pub(crate) long: String,
+    /// Its card, or the sink or source of no card: "E8".
+    pub(crate) device: String,
+    /// Its jack, and the monitor or the way it is attached, if it is a
+    /// card's: "Headphones · Bluetooth".
+    pub(crate) jack: Option<String>,
     /// What the panel calls it: the monitor's name, or an attached device's
     /// own, or the jack's: "DELL U2720Q", "E8", "Speakers".
     pub(crate) short: String,
     pub(crate) kind: Kind,
-    /// Whether it can be heard now: nothing is known to be unplugged.
+    /// Whether it can be used now: nothing is known to be unplugged.
     pub(crate) connected: bool,
 }
 
-/// How to make an output the one sound goes to.
+impl Choice {
+    /// Its card and its jack, and the monitor or the way it is attached:
+    /// "E8 — Headphones · Bluetooth"; or a sink's or a source's name.
+    pub(crate) fn long(&self) -> String {
+        long(&self.device, self.jack.as_deref())
+    }
+}
+
+/// A device's whole name: `device`, and its `jack`, if it has one, after a
+/// dash.
+pub(crate) fn long(device: &str, jack: Option<&str>) -> String {
+    match jack {
+        Some(jack) => format!("{device} \u{2014} {jack}"),
+        None => device.to_owned(),
+    }
+}
+
+/// How to make a device the default on its side.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Plan {
-    /// Make this sink, of no card, the default.
-    Sink(String),
+    /// Make this sink or source, of no card, the default on `side`.
+    Device(Side, String),
     /// Set `profile` on the card, if it is given, then make the card's sink
-    /// that plays through `port` the default, playing through it.
+    /// or source on `side` that plays or records through `port` the
+    /// default, playing or recording through it.
     Port {
+        side: Side,
         card: u32,
         card_name: String,
         profile: Option<String>,
         port: String,
     },
+}
+
+/// A sink or a source, as far as choosing it goes.
+struct Device<'f> {
+    name: &'f str,
+    description: &'f str,
+    card: Option<u32>,
+    port: Option<&'f str>,
 }
 
 /// How loud a device is, and whether it is muted: what the panel shows of
@@ -210,60 +259,114 @@ impl Facts {
         self.sinks.iter().find(|sink| sink.name == name)
     }
 
-    /// Every output, each card's jacks in the card's order, the likeliest
-    /// first, then each sink of no card, or of no jack of its card's.
-    pub(crate) fn outputs(&self) -> Vec<Output> {
-        let jacks = self.cards.iter().flat_map(|card| {
-            card.ports
-                .iter()
-                .filter(|port| port.output)
-                .map(move |port| card.output(port))
-        });
-        let loose = self
-            .sinks
-            .iter()
-            .filter(|sink| self.jack_of(sink).is_none())
-            .map(|sink| Output {
-                key: sink.name.clone(),
-                long: sink.description.clone(),
-                short: sink.description.clone(),
-                kind: Kind::Other,
-                connected: true,
-            });
-        jacks.chain(loose).collect()
-    }
-
     /// The default input's source, if the server has one it can name.
     pub(crate) fn input(&self) -> Option<&Source> {
         let name = self.default_source.as_deref()?;
         self.sources.iter().find(|source| source.name == name)
     }
 
+    /// Every output.
+    pub(crate) fn outputs(&self) -> Vec<Choice> {
+        self.choices(Side::Output)
+    }
+
+    /// Every device on `side`: each card's jacks that way, in the card's
+    /// order, then each sink or source of no card, or of no jack of its
+    /// card's; never a monitor.
+    pub(crate) fn choices(&self, side: Side) -> Vec<Choice> {
+        let out = side == Side::Output;
+        let jacks = self.cards.iter().flat_map(|card| {
+            card.ports
+                .iter()
+                .filter(move |port| port.output == out)
+                .map(move |port| card.choice(port))
+        });
+        let loose = self
+            .devices(side)
+            .into_iter()
+            .filter(|device| self.jack_of(device).is_none())
+            .map(|device| Choice {
+                key: device.name.to_owned(),
+                device: device.description.to_owned(),
+                jack: None,
+                short: device.description.to_owned(),
+                kind: if out { Kind::Other } else { Kind::Mic },
+                connected: true,
+            });
+        jacks.chain(loose).collect()
+    }
+
+    /// The sinks, or the sources but the monitors, as devices.
+    fn devices(&self, side: Side) -> Vec<Device<'_>> {
+        match side {
+            Side::Output => self
+                .sinks
+                .iter()
+                .map(|sink| Device {
+                    name: &sink.name,
+                    description: &sink.description,
+                    card: sink.card,
+                    port: sink.port.as_deref(),
+                })
+                .collect(),
+            Side::Input => self
+                .sources
+                .iter()
+                .filter(|source| !source.monitor)
+                .map(|source| Device {
+                    name: &source.name,
+                    description: &source.description,
+                    card: source.card,
+                    port: source.port.as_deref(),
+                })
+                .collect(),
+        }
+    }
+
     /// The key of the output the default sink plays to.
     pub(crate) fn output_key(&self) -> Option<String> {
-        let sink = self.output()?;
-        Some(match self.jack_of(sink) {
+        self.chosen(Side::Output)
+    }
+
+    /// The key of the default on `side`.
+    pub(crate) fn chosen(&self, side: Side) -> Option<String> {
+        let name = match side {
+            Side::Output => self.default_sink.as_deref(),
+            Side::Input => self.default_source.as_deref(),
+        }?;
+        let device = self
+            .devices(side)
+            .into_iter()
+            .find(|device| device.name == name)?;
+        Some(match self.jack_of(&device) {
             Some((card, port)) => key(card, port),
-            None => sink.name.clone(),
+            None => device.name.to_owned(),
         })
     }
 
-    /// The card and the jack `sink` plays through, if it plays through one.
-    fn jack_of(&self, sink: &Sink) -> Option<(&Card, &Port)> {
+    /// The card and the jack `device` plays or records through, if it does
+    /// through one.
+    fn jack_of(&self, device: &Device<'_>) -> Option<(&Card, &Port)> {
         let card = self
             .cards
             .iter()
-            .find(|card| Some(card.index) == sink.card)?;
-        let port = sink.port.as_deref()?;
+            .find(|card| Some(card.index) == device.card)?;
+        let port = device.port?;
         let port = card.ports.iter().find(|had| had.name == port)?;
         Some((card, port))
     }
 
-    /// How to make the output of `key` the one sound goes to.
-    pub(crate) fn plan(&self, key: &str) -> Option<Plan> {
+    /// How to make the device of `key` the default on `side`.
+    pub(crate) fn plan(&self, side: Side, key: &str) -> Option<Plan> {
+        let out = side == Side::Output;
         for card in &self.cards {
-            if let Some(port) = card.ports.iter().find(|port| self::key(card, port) == key) {
+            if let Some(port) = card
+                .ports
+                .iter()
+                .find(|port| port.output == out && self::key(card, port) == key)
+            {
                 return Some(Plan::Port {
+                    side,
                     card: card.index,
                     card_name: card.name.clone(),
                     profile: card.profile_for(port),
@@ -271,47 +374,56 @@ impl Facts {
                 });
             }
         }
-        self.sinks
-            .iter()
-            .find(|sink| sink.name == key)
-            .map(|sink| Plan::Sink(sink.name.clone()))
+        self.devices(side)
+            .into_iter()
+            .find(|device| device.name == key)
+            .map(|device| Plan::Device(side, device.name.to_owned()))
     }
 }
 
 impl Card {
-    /// `port`, as an output of this card.
-    fn output(&self, port: &Port) -> Output {
+    /// `port`, as a device of this card.
+    fn choice(&self, port: &Port) -> Choice {
         let attached = match self.bus.as_deref() {
             Some("bluetooth") => Some("Bluetooth"),
             Some("usb") => Some("USB"),
             _ => None,
         };
         let extra = port.monitor.as_deref().or(attached);
-        let mut long = format!("{} \u{2014} {}", self.description, port.description);
-        if let Some(extra) = extra {
-            long.push_str(" \u{b7} ");
-            long.push_str(extra);
-        }
+        let jack = match extra {
+            Some(extra) => format!("{} \u{b7} {extra}", port.description),
+            None => port.description.clone(),
+        };
         let short = match (&port.monitor, attached) {
             (Some(monitor), _) => monitor.clone(),
             (None, Some(_)) => self.description.clone(),
             (None, None) => port.description.clone(),
         };
-        Output {
+        Choice {
             key: key(self, port),
-            long,
+            device: self.description.clone(),
+            jack: Some(jack),
             short,
             kind: port.kind,
             connected: port.plugged != Plugged::No,
         }
     }
 
-    /// The profile to set for `port` to play, or `None` if the card's own
-    /// plays through it already. Of the profiles that play through it, one
-    /// that can play now, then one that keeps the card's microphone, then
-    /// the card's own choice.
+    /// The profile to set for `port` to play or record, or `None` if the
+    /// card's own does through it already. Of the profiles that do, one that
+    /// can now, then one that keeps the card's other side (its microphone,
+    /// choosing an output; its speakers, choosing an input), then the card's
+    /// own choice.
     fn profile_for(&self, port: &Port) -> Option<String> {
-        let plays = |profile: &&Profile| profile.sinks > 0 && port.profiles.contains(&profile.name);
+        let ways = |profile: &Profile| {
+            if port.output {
+                (profile.sinks, profile.sources)
+            } else {
+                (profile.sources, profile.sinks)
+            }
+        };
+        let plays =
+            |profile: &&Profile| ways(profile).0 > 0 && port.profiles.contains(&profile.name);
         if self
             .profiles
             .iter()
@@ -323,7 +435,7 @@ impl Card {
         self.profiles
             .iter()
             .filter(plays)
-            .max_by_key(|profile| (profile.available, profile.sources > 0, profile.priority))
+            .max_by_key(|profile| (profile.available, ways(profile).1 > 0, profile.priority))
             .map(|profile| profile.name.clone())
     }
 }
@@ -333,14 +445,14 @@ fn key(card: &Card, port: &Port) -> String {
     format!("{}/{}", card.name, port.name)
 }
 
-/// The output to switch to after the one of key `now`, of `outputs`: the
+/// The device to switch to after the one of key `now`, of `choices`: the
 /// next that is connected, round to the first. `None` when there is no
 /// other.
-pub(crate) fn next_output<'o>(outputs: &'o [Output], now: Option<&str>) -> Option<&'o Output> {
-    let shown: Vec<&Output> = outputs.iter().filter(|output| output.connected).collect();
+pub(crate) fn next_choice<'c>(choices: &'c [Choice], now: Option<&str>) -> Option<&'c Choice> {
+    let shown: Vec<&Choice> = choices.iter().filter(|choice| choice.connected).collect();
     let at = shown
         .iter()
-        .position(|output| Some(output.key.as_str()) == now);
+        .position(|choice| Some(choice.key.as_str()) == now);
     match at {
         Some(at) => {
             Some(shown[(at + 1) % shown.len()]).filter(|next| Some(next.key.as_str()) != now)
@@ -607,7 +719,7 @@ mod tests {
     }
 
     /// The output of `key` among `facts`'.
-    fn output(facts: &Facts, key: &str) -> Output {
+    fn output(facts: &Facts, key: &str) -> Choice {
         facts
             .outputs()
             .into_iter()
@@ -638,7 +750,7 @@ mod tests {
         let speakers = output(&facts, "alsa_card.pci-0000_00_1f.3/analog-output-speaker");
         assert_eq!(
             (
-                speakers.long.as_str(),
+                speakers.long().as_str(),
                 speakers.short.as_str(),
                 speakers.kind
             ),
@@ -650,13 +762,13 @@ mod tests {
         );
         let e8 = output(&facts, "bluez_card.FC_58_FA_A9_62_22/headset-output");
         assert_eq!(
-            (e8.long.as_str(), e8.short.as_str()),
+            (e8.long().as_str(), e8.short.as_str()),
             ("E8 \u{2014} Headphones \u{b7} Bluetooth", "E8"),
             "the E8 reads as E8 \u{2014} Headphones \u{b7} Bluetooth"
         );
         let dell = output(&facts, "alsa_card.pci-0000_01_00.1/hdmi-output-1");
         assert_eq!(
-            (dell.long.as_str(), dell.short.as_str(), dell.kind),
+            (dell.long().as_str(), dell.short.as_str(), dell.kind),
             (
                 "TU104 HD Audio Controller \u{2014} HDMI / DisplayPort 2 \u{b7} DELL U2720Q",
                 "DELL U2720Q",
@@ -718,15 +830,95 @@ mod tests {
             ("two", "two", true)
         );
         assert_eq!(facts.output_key().as_deref(), Some("one"));
-        assert_eq!(facts.plan("two"), Some(Plan::Sink("two".to_owned())));
+        assert_eq!(
+            facts.plan(Side::Output, "two"),
+            Some(Plan::Device(Side::Output, "two".to_owned()))
+        );
+    }
+
+    #[test]
+    fn inputs_are_a_cards_jacks_in_and_its_sources_but_never_a_monitor() {
+        let source =
+            |index: u32, name: &str, card: Option<u32>, port: Option<&str>, monitor| Source {
+                index,
+                name: name.to_owned(),
+                description: name.to_owned(),
+                volume: vec![NORM],
+                muted: false,
+                card,
+                ports: port.map(|port| vec![port.to_owned()]).unwrap_or_default(),
+                port: port.map(str::to_owned),
+                monitor,
+            };
+        let facts = Facts {
+            default_source: Some("alsa_input.pci-0000_00_1f.3.analog-stereo".to_owned()),
+            sources: vec![
+                source(
+                    60,
+                    "alsa_input.pci-0000_00_1f.3.analog-stereo",
+                    Some(0),
+                    Some("analog-input-internal-mic"),
+                    false,
+                ),
+                source(61, "alsa_output.speakers.monitor", None, None, true),
+                source(62, "a virtual microphone", None, None, false),
+            ],
+            ..laptop()
+        };
+        let keys: Vec<String> = facts
+            .choices(Side::Input)
+            .into_iter()
+            .map(|choice| choice.key)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "alsa_card.pci-0000_00_1f.3/analog-input-internal-mic",
+                "a virtual microphone"
+            ],
+            "the jack, not its source again, and no monitor"
+        );
+        let mic = &facts.choices(Side::Input)[0];
+        assert_eq!(mic.long(), "Built-in Audio \u{2014} Internal Microphone");
+        assert_eq!(
+            facts.chosen(Side::Input).as_deref(),
+            Some("alsa_card.pci-0000_00_1f.3/analog-input-internal-mic")
+        );
+        let Some(Plan::Port { side, profile, .. }) = facts.plan(
+            Side::Input,
+            "alsa_card.pci-0000_00_1f.3/analog-input-internal-mic",
+        ) else {
+            panic!("a port's plan");
+        };
+        assert_eq!(
+            (side, profile),
+            (Side::Input, None),
+            "the card's own records from it"
+        );
+        assert_eq!(
+            facts.plan(Side::Input, "a virtual microphone"),
+            Some(Plan::Device(Side::Input, "a virtual microphone".to_owned()))
+        );
+        assert_eq!(
+            facts.plan(
+                Side::Input,
+                "alsa_card.pci-0000_00_1f.3/analog-output-speaker"
+            ),
+            None,
+            "an output is no input"
+        );
     }
 
     #[test]
     fn a_port_of_the_active_profile_needs_no_profile_change() {
         let facts = laptop();
         assert_eq!(
-            facts.plan("alsa_card.pci-0000_00_1f.3/analog-output-speaker"),
+            facts.plan(
+                Side::Output,
+                "alsa_card.pci-0000_00_1f.3/analog-output-speaker"
+            ),
             Some(Plan::Port {
+                side: Side::Output,
                 card: 0,
                 card_name: "alsa_card.pci-0000_00_1f.3".to_owned(),
                 profile: None,
@@ -738,9 +930,10 @@ mod tests {
     #[test]
     fn the_profile_chosen_keeps_the_microphone_where_one_can() {
         let facts = laptop();
-        let Some(Plan::Port { profile, .. }) =
-            facts.plan("alsa_card.pci-0000_00_1f.3/iec958-stereo-output")
-        else {
+        let Some(Plan::Port { profile, .. }) = facts.plan(
+            Side::Output,
+            "alsa_card.pci-0000_00_1f.3/iec958-stereo-output",
+        ) else {
             panic!("a port's plan");
         };
         assert_eq!(
@@ -753,7 +946,7 @@ mod tests {
     fn a_profile_that_can_play_is_chosen_before_the_cards_own_choice() {
         let facts = laptop();
         let Some(Plan::Port { card, profile, .. }) =
-            facts.plan("alsa_card.pci-0000_01_00.1/hdmi-output-1")
+            facts.plan(Side::Output, "alsa_card.pci-0000_01_00.1/hdmi-output-1")
         else {
             panic!("a port's plan");
         };
@@ -761,14 +954,14 @@ mod tests {
             (card, profile.as_deref()),
             (1, Some("output:hdmi-stereo-extra1"))
         );
-        assert_eq!(facts.plan("nothing/at-all"), None);
+        assert_eq!(facts.plan(Side::Output, "nothing/at-all"), None);
     }
 
     #[test]
     fn the_next_output_goes_round_the_connected_ones() {
         let facts = laptop();
         let outputs = facts.outputs();
-        let next = |now: Option<&str>| next_output(&outputs, now).map(|output| output.key.as_str());
+        let next = |now: Option<&str>| next_choice(&outputs, now).map(|output| output.key.as_str());
         assert_eq!(
             next(Some("bluez_card.FC_58_FA_A9_62_22/headset-output")),
             Some("alsa_card.pci-0000_00_1f.3/analog-output-speaker"),
@@ -795,7 +988,7 @@ mod tests {
         );
         let alone = [outputs[0].clone()];
         assert_eq!(
-            next_output(&alone, Some(alone[0].key.as_str())),
+            next_choice(&alone, Some(alone[0].key.as_str())),
             None,
             "nothing else to switch to"
         );

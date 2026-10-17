@@ -60,7 +60,7 @@ use super::{
     levels::{HOP, RATE, Spectrum},
     wire::{Expect, Incoming, Reply, Wire},
 };
-use crate::model::sound::{Card, Facts, Kind, Plan, Plugged, Port, Profile, Sink, Source};
+use crate::model::sound::{Card, Facts, Kind, Plan, Plugged, Port, Profile, Side, Sink, Source};
 
 /// The first pause before trying a server again, and the longest.
 pub(super) const PAUSE_FIRST: Duration = Duration::from_millis(500);
@@ -106,9 +106,10 @@ struct Link {
     reading: HashSet<Expect>,
     /// The facts changed since they were last told.
     changed: bool,
-    /// The output being chosen: its card's number, its port, and which
-    /// choice it is, to be made the default once a sink plays through it.
-    choosing: Option<(u32, String, u64)>,
+    /// The device being chosen: its side, its card's number, its port, and
+    /// which choice it is, to be made the default once a sink or a source
+    /// plays or records through it.
+    choosing: Option<(Side, u32, String, u64)>,
     /// How many choices there have been.
     chosen: u64,
     /// The moving bars are wanted.
@@ -351,9 +352,9 @@ impl Client {
                         .link
                         .as_mut()
                         .and_then(|link| link.choosing.take_if(|&mut (.., at)| at == choice));
-                    if let Some((card, port, _)) = given_up {
-                        let why = format!("card {card} gave no sink that plays through {port}");
-                        tracing::warn!("the output was not chosen: {why}");
+                    if let Some((_, card, port, _)) = given_up {
+                        let why = format!("card {card} gave nothing that goes through {port}");
+                        tracing::warn!("the device was not chosen: {why}");
                         client.tell(News::Failed(why));
                     }
                     TimeoutAction::Drop
@@ -692,17 +693,17 @@ impl Link {
         self.read_again(&read.0, read.1)
     }
 
-    /// Start making the output `plan` names the one sound goes to. The
+    /// Start making the device `plan` names the default on its side. The
     /// choice, if it waits on the card.
     fn choose(&mut self, plan: Plan) -> io::Result<Option<u64>> {
         match plan {
-            Plan::Sink(name) => {
+            Plan::Device(side, name) => {
                 self.choosing = None;
-                self.wire
-                    .send(&Command::SetDefaultSink(cstring(name)), Expect::Done)?;
+                self.wire.send(&default(side, name), Expect::Done)?;
                 Ok(None)
             }
             Plan::Port {
+                side,
                 card,
                 card_name,
                 profile,
@@ -719,28 +720,37 @@ impl Link {
                         .send(&Command::SetCardProfile(set), Expect::Done)?;
                 }
                 self.chosen += 1;
-                self.choosing = Some((card, port, self.chosen));
+                self.choosing = Some((side, card, port, self.chosen));
                 self.advance()?;
                 Ok(self.choosing.as_ref().map(|&(.., choice)| choice))
             }
         }
     }
 
-    /// Make the output being chosen the default, once a sink of its card
-    /// plays through its port.
+    /// Make the device being chosen the default, once a sink or a source
+    /// of its card plays or records through its port.
     fn advance(&mut self) -> io::Result<()> {
-        let Some((card, port, _)) = &self.choosing else {
+        let Some((side, card, port, _)) = &self.choosing else {
             return Ok(());
         };
-        let Some(sink) = self
-            .facts
-            .sinks
-            .iter()
-            .find(|sink| sink.card == Some(*card) && sink.ports.contains(port))
-        else {
+        let (side, at) = (*side, Some(*card));
+        let found = match side {
+            Side::Output => self
+                .facts
+                .sinks
+                .iter()
+                .find(|sink| sink.card == at && sink.ports.contains(port))
+                .map(|sink| (sink.name.clone(), sink.port.as_ref() != Some(port))),
+            Side::Input => self
+                .facts
+                .sources
+                .iter()
+                .find(|source| source.card == at && source.ports.contains(port))
+                .map(|source| (source.name.clone(), source.port.as_ref() != Some(port))),
+        };
+        let Some((name, elsewhere)) = found else {
             return Ok(());
         };
-        let (name, elsewhere) = (sink.name.clone(), sink.port.as_ref() != Some(port));
         let port = port.clone();
         self.choosing = None;
         if elsewhere {
@@ -749,10 +759,13 @@ impl Link {
                 name: Some(cstring(name.clone())),
                 port_name: cstring(port),
             };
-            self.wire.send(&Command::SetSinkPort(set), Expect::Done)?;
+            let command = match side {
+                Side::Output => Command::SetSinkPort(set),
+                Side::Input => Command::SetSourcePort(set),
+            };
+            self.wire.send(&command, Expect::Done)?;
         }
-        self.wire
-            .send(&Command::SetDefaultSink(cstring(name)), Expect::Done)
+        self.wire.send(&default(side, name), Expect::Done)
     }
 
     /// Read again what `expect` is, unless it is being read already.
@@ -789,8 +802,17 @@ fn sink(info: &SinkInfo) -> Sink {
     }
 }
 
+/// The command that makes `name` the default on `side`.
+fn default(side: Side, name: String) -> Command {
+    match side {
+        Side::Output => Command::SetDefaultSink(cstring(name)),
+        Side::Input => Command::SetDefaultSource(cstring(name)),
+    }
+}
+
 /// A source, as the shell keeps it.
 fn source(info: &SourceInfo) -> Source {
+    let ports: Vec<String> = info.ports.iter().map(|port| text(&port.name)).collect();
     Source {
         index: info.index,
         name: text(&info.name),
@@ -805,6 +827,10 @@ fn source(info: &SourceInfo) -> Source {
             .map(|volume| volume.as_u32())
             .collect(),
         muted: info.muted,
+        card: info.card_index,
+        port: ports.get(info.active_port).cloned(),
+        ports,
+        monitor: info.monitor_of_sink_index.is_some(),
     }
 }
 
@@ -865,6 +891,7 @@ fn kind(port_type: PortType, name: &str) -> Kind {
         PortType::Headphones => Kind::Headphones,
         PortType::Headset | PortType::Handset | PortType::Handsfree => Kind::Headset,
         PortType::Hdmi | PortType::Tv | PortType::Video => Kind::Display,
+        PortType::Mic => Kind::Mic,
         PortType::Unknown => {
             let named = |part: &str| name.contains(part);
             if named("speaker") {
@@ -875,6 +902,8 @@ fn kind(port_type: PortType, name: &str) -> Kind {
                 Kind::Headset
             } else if named("hdmi") {
                 Kind::Display
+            } else if named("mic") {
+                Kind::Mic
             } else {
                 Kind::Other
             }
@@ -945,7 +974,7 @@ mod tests {
 
     use super::*;
     use crate::audio::{
-        fake::{EXTRA1, Fake, HDMI, HDMI_SINK, JACK, MIC, SPEAKERS},
+        fake::{BUILT_IN, EXTRA1, Fake, HDMI, HDMI_SINK, HEADSET_MIC, JACK, MIC, SPEAKERS},
         levels::RATE,
         start,
     };
@@ -1105,6 +1134,7 @@ mod tests {
                 ("analog-output-speaker", true),
                 ("analog-output-headphones", true),
                 ("analog-input-internal-mic", false),
+                (HEADSET_MIC, false),
             ],
             "a sink's jacks play out, a source's do not"
         );
@@ -1123,7 +1153,7 @@ mod tests {
         let (running, heard) = follow(&fake);
         let facts = heard.facts();
         let plan = facts
-            .plan(&format!("{HDMI}/{JACK}"))
+            .plan(Side::Output, &format!("{HDMI}/{JACK}"))
             .expect("a plan for the HDMI jack");
         running.ask(Ask::Choose(plan));
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -1164,7 +1194,10 @@ mod tests {
         let (running, heard) = follow(&fake);
         let facts = heard.facts();
         let plan = facts
-            .plan("alsa_card.pci-0000_00_1f.3/analog-output-headphones")
+            .plan(
+                Side::Output,
+                "alsa_card.pci-0000_00_1f.3/analog-output-headphones",
+            )
             .expect("a plan for the headphones");
         running.ask(Ask::Choose(plan));
         let facts = heard.facts();
@@ -1192,6 +1225,7 @@ mod tests {
         let (running, heard) = follow(&fake);
         heard.facts();
         running.ask(Ask::Choose(Plan::Port {
+            side: Side::Output,
             card: 1,
             card_name: HDMI.to_owned(),
             profile: Some("off".to_owned()),
@@ -1310,6 +1344,45 @@ mod tests {
                 .iter()
                 .any(|asked| asked.starts_with("mute Some(\"alsa_output"))
         );
+    }
+
+    #[test]
+    fn an_input_of_no_card_is_made_the_default_source() {
+        let fake = Fake::start("choose-input");
+        let (running, heard) = follow(&fake);
+        heard.facts();
+        running.ask(Ask::Choose(Plan::Device(Side::Input, MIC.to_owned())));
+        until_asked(&fake, &format!("default source {MIC}"));
+        assert!(
+            !fake
+                .asked()
+                .iter()
+                .any(|asked| asked.starts_with("default alsa")),
+            "the output left alone"
+        );
+    }
+
+    #[test]
+    fn a_cards_input_jack_is_set_on_its_source_then_made_the_default() {
+        let fake = Fake::start("choose-headset-mic");
+        let (running, heard) = follow(&fake);
+        let facts = heard.facts();
+        let key = format!("{BUILT_IN}/{HEADSET_MIC}");
+        let plan = facts.plan(Side::Input, &key).expect("a plan for the jack");
+        running.ask(Ask::Choose(plan));
+        until_asked(&fake, &format!("default source {MIC}"));
+        let asked = fake.asked();
+        let at = |line: &str| asked.iter().position(|asked| asked == line);
+        let port = at(&format!("source port {HEADSET_MIC}")).expect("the port set");
+        assert!(port < at(&format!("default source {MIC}")).expect("the default"));
+        assert!(
+            !asked.iter().any(|asked| asked.starts_with("profile")),
+            "the card's profile has the jack"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while heard.facts().chosen(Side::Input).as_deref() != Some(key.as_str()) {
+            assert!(std::time::Instant::now() < deadline, "never read again");
+        }
     }
 
     #[test]

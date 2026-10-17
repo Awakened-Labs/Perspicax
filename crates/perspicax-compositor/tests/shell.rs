@@ -2512,6 +2512,59 @@ fn the_mixer_opens_from_its_button_mutes_and_sets_the_volume_and_closes() {
     shell.stop_with(session);
 }
 
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn a_device_pressed_in_the_mixer_becomes_the_default_on_its_side() {
+    let sound = SoundServer::start("mixer-list");
+    for source in ["first", "second"] {
+        sound.pactl(&[
+            "load-module",
+            "module-null-sink",
+            &format!("sink_name={source}"),
+            "media.class=Audio/Source/Virtual",
+        ]);
+    }
+    sound.pactl(&["set-default-source", "first"]);
+    sound.until(|sound| sound.pactl(&["get-default-source"]).trim() == "first");
+    let session = Session::start("shell-mixer-list", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "mixer-list",
+        OPEN_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    until_colour(&session, (1258, 800 - 20), INK);
+    click(
+        &session,
+        panel,
+        (1280.0 - 30.0 - 15.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Left,
+    );
+    let facts = session.wait_for(|facts| mixer(facts).is_some());
+    let (surface, rect) = mixer(&facts).expect("waited for");
+    // Under each side's title and its row of controls, 22 and 32 pixels, a
+    // row of 28 for each device, in the order the server lists them; 8
+    // between the sides, and 1 of edge and 12 of room round them all.
+    let x = rect.x0 + 13.0 + 100.0;
+    let one = rect.y0 + 13.0 + 22.0 + 32.0 + 14.0;
+    let two = one + 28.0;
+    // A device's round mark, filled in the accent for the one in use.
+    let mark = |y: f64| ((rect.x0 + 13.0 + 14.0) as usize, y as usize);
+    until_colour(&session, mark(one), ACCENT);
+    click(&session, surface, (x, two), PointerButton::Left);
+    sound.until(|sound| sound.pactl(&["get-default-sink"]).trim() == "two");
+    until_colour(&session, mark(two), ACCENT);
+    let second = rect.y0 + 13.0 + 2.0 * (22.0 + 32.0) + 3.0 * 28.0 + 8.0 + 14.0;
+    click(&session, surface, (x, second), PointerButton::Left);
+    sound.until(|sound| sound.pactl(&["get-default-source"]).trim() == "second");
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
 /// A program's status icon, served as a program serves one: a title, a
 /// picture of magenta, and a menu of one item, Quit. What it is asked is
 /// kept, to be waited for.
