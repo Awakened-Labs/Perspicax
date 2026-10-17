@@ -22,6 +22,8 @@ mod kept;
 mod menu;
 #[cfg(feature = "audio")]
 mod mixer;
+#[cfg(feature = "audio")]
+mod osd;
 #[cfg(any(feature = "panel", feature = "wallpaper"))]
 mod pager;
 #[cfg(feature = "panel")]
@@ -174,6 +176,8 @@ pub(crate) fn run(
         audio: audio::Audio::new(sound, heard, kept::Keeper::load(state)),
         #[cfg(feature = "audio")]
         mixers: mixer::Mixers::new(actions.clone()),
+        #[cfg(feature = "audio")]
+        osd: osd::Osd::default(),
         #[cfg(any(feature = "menus", feature = "panel"))]
         seat: seat::Seat::new(&globals, &qh),
         #[cfg(feature = "pie")]
@@ -271,6 +275,9 @@ pub(crate) struct App {
     /// The mixer, opened from the panel.
     #[cfg(feature = "audio")]
     mixers: mixer::Mixers,
+    /// The volume shown on the screen when it changes.
+    #[cfg(feature = "audio")]
+    osd: osd::Osd,
     #[cfg(any(feature = "menus", feature = "panel"))]
     seat: seat::Seat,
     #[cfg(feature = "menus")]

@@ -9,6 +9,13 @@
 //! one step from where the server last was. A server that never says so,
 //! because something else set the volume meanwhile, is believed again
 //! after [`ASKED_STANDS`].
+//!
+//! The thread runs while a panel holds the mixer, or while the volume is
+//! to be shown on the screen when it changes (`[shell.mixer] osd`): it is
+//! shown when the output, its volume or its muting is heard to change from
+//! what was last heard, but never for a change the shell itself asked for
+//! in the last [`QUIET_FOR`], which the panel or the mixer shows already,
+//! nor while the mixer is open.
 
 use std::{
     path::PathBuf,
@@ -25,7 +32,10 @@ use wayland_client::protocol::wl_surface;
 use super::{App, kept::Keeper};
 use crate::{
     audio::{Ask, News, Running, Target},
-    layout::panel::{Part, Playing},
+    layout::{
+        osd::{self, Indicator},
+        panel::{Part, Playing},
+    },
     model::{
         Button,
         kept::Kept,
@@ -36,6 +46,9 @@ use crate::{
 /// The longest a volume asked for stands for the server's, waiting for the
 /// server to say it took.
 const ASKED_STANDS: Duration = Duration::from_secs(1);
+/// How long after the shell itself asks for a change to the sound the
+/// volume is not shown on the screen for one.
+const QUIET_FOR: Duration = Duration::from_secs(1);
 
 /// The sound, as the loop knows it.
 pub(super) struct Audio {
@@ -64,6 +77,10 @@ pub(super) struct Audio {
     keeper: Keeper,
     /// The sources last asked to be metered.
     metering: Vec<String>,
+    /// When the shell last asked for a change to the sound, and what was
+    /// last heard of the output, to show a change to it on the screen.
+    asked_at: Option<Instant>,
+    indicated: Option<Indicator>,
 }
 
 impl Audio {
@@ -80,17 +97,20 @@ impl Audio {
             asked: None,
             keeper,
             metering: Vec::new(),
+            asked_at: None,
+            indicated: None,
         }
     }
 
-    /// Run the thread if `shell`'s panel holds the mixer, and stop it if
-    /// not. Whether it stopped.
+    /// Run the thread if `shell`'s panel holds the mixer, or the volume is
+    /// to be shown, and stop it if not. Whether it stopped.
     fn follow(&mut self, shell: &Shell) -> bool {
         self.mixer = shell.mixer.clone();
-        let wanted = shell
+        let held = shell
             .panel
             .as_ref()
             .is_some_and(|panel| panel.items.contains(&Item::Mixer));
+        let wanted = held || self.mixer.osd;
         let levels = wanted && self.mixer.panel.contains(&Piece::Levels);
         if let Some(running) = self.running.as_ref().filter(|_| levels != self.levels) {
             running.ask(Ask::Levels(levels));
@@ -124,7 +144,8 @@ impl Audio {
     }
 
     /// Mute `whose`, or bring its sound back.
-    pub(super) fn mute(&self, whose: Whose) {
+    pub(super) fn mute(&mut self, whose: Whose) {
+        self.asked_at = Some(Instant::now());
         if let Some((target, _, level)) = self.facts().and_then(|facts| target(facts, whose)) {
             self.ask(Ask::Mute {
                 target,
@@ -152,7 +173,8 @@ impl Audio {
     }
 
     /// Move `side` to the device keyed `key`, as its plan says.
-    pub(super) fn choose(&self, side: Side, key: &str) {
+    pub(super) fn choose(&mut self, side: Side, key: &str) {
+        self.asked_at = Some(Instant::now());
         if let Some(plan) = self.facts().and_then(|facts| facts.plan(side, key)) {
             self.ask(Ask::Choose(plan));
         }
@@ -200,6 +222,18 @@ impl Audio {
         });
     }
 
+    /// Whether `now`, what is heard of the output, is a change worth
+    /// showing on the screen; it is kept as what was last heard.
+    fn worth_showing(&mut self, now: Option<Indicator>) -> Option<Indicator> {
+        let before = std::mem::replace(&mut self.indicated, now.clone());
+        let quiet = self
+            .asked_at
+            .is_some_and(|asked| asked.elapsed() < QUIET_FOR);
+        (self.mixer.osd && !quiet && osd::changed(before.as_ref(), now.as_ref()))
+            .then_some(now)
+            .flatten()
+    }
+
     /// The wheel turned `notches`, down positive, in fractions of one: the
     /// whole notches it comes to with what was left over before.
     fn turned(&mut self, notches: f64) -> i32 {
@@ -229,6 +263,7 @@ impl Audio {
         }
         let volume = sound::scaled(volume, percent);
         self.asked = Some((target.clone(), percent, Instant::now()));
+        self.asked_at = Some(Instant::now());
         self.ask(Ask::Volume { target, volume });
     }
 }
@@ -323,10 +358,22 @@ impl App {
         let mic = facts
             .and_then(|facts| facts.input())
             .map(|input| input.level());
+        let indicator = playing
+            .as_ref()
+            .zip(level)
+            .map(|(playing, level)| Indicator {
+                name: playing.name.clone(),
+                level,
+            });
         if self.panels.hear(level, playing, mic) {
             self.panels_changed();
         }
         self.mixer_heard();
+        // The mixer, open, shows the change itself.
+        let shown = self.audio.worth_showing(indicator);
+        if let Some(indicator) = shown.filter(|_| self.mixers.open_on().is_none()) {
+            self.indicate(indicator);
+        }
     }
 
     /// `button` went down on the mixer's `piece`, on the panel of the
@@ -516,6 +563,58 @@ mod tests {
             Some(30)
         );
         assert_eq!(loudness(facts, &Target::Stream(9)), None);
+    }
+
+    fn shown(percent: u32, muted: bool) -> Indicator {
+        Indicator {
+            name: "Speakers".to_owned(),
+            level: sound::Level { percent, muted },
+        }
+    }
+
+    #[test]
+    fn a_change_from_elsewhere_is_shown_and_one_the_shell_made_is_not() {
+        let mut audio = at(24);
+        assert_eq!(
+            audio.worth_showing(Some(shown(24, false))),
+            None,
+            "first heard"
+        );
+        assert_eq!(
+            audio.worth_showing(Some(shown(40, false))),
+            Some(shown(40, false)),
+            "set elsewhere"
+        );
+        assert_eq!(
+            audio.worth_showing(Some(shown(40, false))),
+            None,
+            "no change"
+        );
+        audio.change(Change::By(1), OUT);
+        assert_eq!(
+            audio.worth_showing(Some(shown(45, false))),
+            None,
+            "the panel shows its own"
+        );
+        audio.asked_at = None;
+        audio.mute(OUT);
+        assert_eq!(
+            audio.worth_showing(Some(shown(45, true))),
+            None,
+            "nor its muting"
+        );
+        audio.asked_at = audio.asked_at.map(|at| at - QUIET_FOR);
+        assert_eq!(
+            audio.worth_showing(Some(shown(45, false))),
+            Some(shown(45, false)),
+            "a second on, from elsewhere again"
+        );
+        audio.mixer.osd = false;
+        assert_eq!(
+            audio.worth_showing(Some(shown(30, false))),
+            None,
+            "turned off"
+        );
     }
 
     #[test]

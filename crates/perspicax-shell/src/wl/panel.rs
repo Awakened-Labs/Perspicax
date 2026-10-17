@@ -312,7 +312,7 @@ impl Panels {
         for (output, name, _, scale) in monitors {
             if wanted.contains(&name) && !self.each.iter().any(|bar| bar.name == name) {
                 let namespace = format!("{NAMESPACE}{name}");
-                let layer = canvas.layer(qh, Layer::Top, &namespace, &output);
+                let layer = canvas.layer(qh, Layer::Top, &namespace, Some(&output));
                 place(&layer, panel);
                 layer.set_keyboard_interactivity(KeyboardInteractivity::None);
                 layer.commit();

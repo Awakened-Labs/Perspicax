@@ -2842,6 +2842,114 @@ fn the_mixer_meters_what_plays_tests_an_output_and_stops_metering_once_closed() 
     shell.stop_with(session);
 }
 
+/// The volume shown on the screen, if it is: its surface and where it is.
+#[cfg(feature = "capture")]
+fn osd(facts: &HostFacts) -> Option<(SurfaceId, Rect)> {
+    facts
+        .surfaces()
+        .iter()
+        .find_map(|surface| match &surface.kind {
+            SurfaceKind::Layer {
+                layer: Layer::Overlay,
+                namespace,
+            } if surface.mapped && namespace == "perspicax-osd" => {
+                Some((surface.id, surface.geometry))
+            }
+            _ => None,
+        })
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn a_change_from_elsewhere_shows_the_volume_a_moment_and_one_on_the_panel_does_not() {
+    use std::time::{Duration, Instant};
+
+    let sound = SoundServer::start("osd");
+    let session = Session::start("shell-osd", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "osd",
+        OPEN_AND_MUTE,
+        Some(sound.socket()),
+    );
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    until_colour(&session, (1258, 800 - 20), INK);
+
+    // Set elsewhere: shown in the middle, 48 above the panel, a moment.
+    sound.pactl(&["set-sink-volume", "one", "40%"]);
+    let facts = session.wait_for(|facts| osd(facts).is_some());
+    let (_, rect) = osd(&facts).expect("waited for");
+    assert_eq!(
+        (rect.x0, rect.x1, rect.y1),
+        (500.0, 780.0, 800.0 - PANEL_HEIGHT - 48.0),
+        "{rect:?}"
+    );
+    let shown = Instant::now();
+    session.wait_for(|facts| osd(facts).is_none());
+    assert!(shown.elapsed() < Duration::from_secs(3), "gone again");
+
+    // Muted on the panel, which shows it itself: nothing more.
+    click(
+        &session,
+        panel,
+        (1280.0 - 15.0, PANEL_HEIGHT / 2.0),
+        PointerButton::Left,
+    );
+    sound.until(|sound| sound.pactl(&["get-sink-mute", "one"]).contains("yes"));
+    thread::sleep(Duration::from_millis(500));
+    assert!(
+        osd(&session.wait_for(|_| true)).is_none(),
+        "not for the panel's own"
+    );
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn with_no_mixer_on_the_panel_the_volume_is_still_shown_and_clicks_go_through_it() {
+    use std::time::{Duration, Instant};
+
+    let sound = SoundServer::start("osd-alone");
+    let session = Session::start("shell-osd-alone", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "osd-alone",
+        "profile = \"classic\"\n[shell.panel]\nitems = [\"clock\"]\n",
+        Some(sound.socket()),
+    );
+    session.wait_for(|facts| panels(facts).len() == 1);
+    // Nothing shows when the shell has first heard the server, which a
+    // panel of no mixer does not show: set it until it is a change.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut loud = 30;
+    let (_, rect) = loop {
+        sound.pactl(&["set-sink-volume", "one", &format!("{loud}%")]);
+        thread::sleep(Duration::from_millis(300));
+        if let Some(shown) = osd(&session.wait_for(|_| true)) {
+            break shown;
+        }
+        assert!(Instant::now() < deadline, "never shown");
+        loud = 70 - loud;
+    };
+    // A person's right click on it reaches the desktop under it, which
+    // opens its menu.
+    let middle = ((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0);
+    session.command(Command::Click {
+        at: (middle.0 as i32, middle.1 as i32),
+        button: perspicax_policy::Button::Right,
+        mods: perspicax_policy::Mods::default(),
+    });
+    session.wait_for(|facts| menu(facts).is_some());
+
+    drop(sound);
+    shell.stop_with(session);
+}
+
 /// A program's status icon, served as a program serves one: a title, a
 /// picture of magenta, and a menu of one item, Quit. What it is asked is
 /// kept, to be waited for.

@@ -25,7 +25,7 @@ pub(crate) struct Served {
 
 impl Served {
     /// Serve `tree`, once the bus asks for it, with nothing on it to act on.
-    #[cfg(all(feature = "wallpaper", not(feature = "icons")))]
+    #[cfg(any(all(feature = "wallpaper", not(feature = "icons")), feature = "audio"))]
     pub(crate) fn new(tree: TreeUpdate) -> Self {
         Self::acting(tree, Inert)
     }

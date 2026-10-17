@@ -249,7 +249,7 @@ impl Desktops {
             .clone()
             .unwrap_or_else(|| output.id().protocol_id().to_string());
         let namespace = format!("{NAMESPACE}{name}");
-        let layer = canvas.layer(qh, Layer::Background, &namespace, &output);
+        let layer = canvas.layer(qh, Layer::Background, &namespace, Some(&output));
         layer.set_anchor(Anchor::all());
         layer.set_exclusive_zone(-1);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);

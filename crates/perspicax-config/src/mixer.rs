@@ -1,4 +1,5 @@
-//! `[shell.mixer]`: what the panel's `mixer` item shows of the sound.
+//! `[shell.mixer]`: what the panel's `mixer` item shows of the sound, and
+//! whether a change to it is shown on the screen.
 //!
 //! ```toml
 //! [shell.panel]
@@ -8,6 +9,7 @@
 //! panel = ["mute", "output", "open"]
 //! step = 5       # percent a turn of the wheel moves the volume, 1 to 25
 //! limit = 100    # the most a turn takes it to, 1 to 150
+//! osd = true     # show the volume a moment when it changes
 //! ```
 //!
 //! The item is listed among the panel's `items` as `"mixer"`, and this
@@ -18,6 +20,13 @@
 //! click on "open", or on the volume or the bars, does. On any piece, the
 //! wheel moves the volume by `step`, to the next multiple of it, and a
 //! middle click mutes: the output's, or on the microphone, the input's.
+//!
+//! With `osd` on, as it is unless written off, a change to the output's
+//! volume, or its muting, or which output it is, made anywhere but the
+//! shell's own panel, shows the volume a moment where the pointer is:
+//! with or without a panel, so a desktop of no panel sees its volume keys
+//! work. A shell built without the sound refuses the table, but for
+//! `osd = false` alone: turning something off is never refused.
 
 use serde::Deserialize;
 
@@ -36,6 +45,8 @@ pub struct Mixer {
     /// The loudest, in percent, a turn of the wheel takes a volume to. A
     /// volume set louder elsewhere is left there.
     pub limit: u32,
+    /// Whether a change to the output's volume is shown on the screen.
+    pub osd: bool,
 }
 
 impl Default for Mixer {
@@ -44,6 +55,7 @@ impl Default for Mixer {
             panel: vec![Piece::Mute, Piece::Output, Piece::Open],
             step: 5,
             limit: 100,
+            osd: true,
         }
     }
 }
@@ -107,9 +119,19 @@ pub(crate) struct RawMixer {
     panel: Option<Vec<Piece>>,
     step: Option<u32>,
     limit: Option<u32>,
+    osd: Option<bool>,
 }
 
 impl RawMixer {
+    /// Whether it only turns the volume shown on the screen off, which a
+    /// shell built without the sound has nothing to refuse of.
+    pub(crate) fn only_turns_off(&self) -> bool {
+        self.panel.is_none()
+            && self.step.is_none()
+            && self.limit.is_none()
+            && self.osd == Some(false)
+    }
+
     /// The written keys, laid over `mixer`.
     pub(crate) fn apply(self, mut mixer: Mixer) -> Result<Mixer, Error> {
         if let Some(panel) = self.panel {
@@ -135,6 +157,9 @@ impl RawMixer {
         }
         if let Some(limit) = self.limit {
             mixer.limit = within("shell.mixer.limit", limit, LIMIT)?;
+        }
+        if let Some(osd) = self.osd {
+            mixer.osd = osd;
         }
         Ok(mixer)
     }
@@ -176,6 +201,8 @@ mod tests {
             ]
         );
         assert_eq!((read.step, read.limit), (2, 150));
+        assert!(read.osd, "shown, unless written off");
+        assert!(!mixer("[shell.mixer]\nosd = false").unwrap().osd);
         let panel = shell(text, ShellBuilt::FULL).unwrap().panel.unwrap();
         assert_eq!(panel.items, [Item::Mixer]);
         assert!(parse(text, Built::default()).is_ok());
@@ -263,6 +290,20 @@ mod tests {
         }
         let classic = Shell::profile(Profile::Classic, without).panel.unwrap();
         assert!(!classic.items.contains(&Item::Mixer));
+        assert!(
+            !shell("[shell.mixer]\nosd = false", without)
+                .unwrap()
+                .mixer
+                .osd,
+            "turning it off is never refused"
+        );
+        assert!(matches!(
+            shell("[shell.mixer]\nosd = true", without),
+            Err(Error::ShellNotBuilt {
+                key: "shell.mixer",
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -2297,6 +2297,89 @@ mod mixers {
     }
 }
 
+#[cfg(feature = "audio")]
+pub(crate) use osds::osd;
+
+#[cfg(feature = "audio")]
+mod osds {
+    use accesskit::{Live, Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate};
+
+    use super::{ROOT, window};
+    use crate::layout::osd::Indicator;
+
+    const STATUS: NodeId = NodeId(1);
+
+    /// The volume shown on the screen: a window named `namespace`, holding
+    /// a `Status`, "Volume", whose value is how loud the output is and
+    /// which it is, "40%, Speakers" or "Muted, Speakers", read out politely
+    /// as it changes. With nothing shown, the window alone.
+    pub(crate) fn osd(
+        namespace: &str,
+        size: Option<(u32, u32)>,
+        indicator: Option<&Indicator>,
+    ) -> TreeUpdate {
+        let mut root = window(namespace, size);
+        let mut nodes = Vec::new();
+        if let Some(indicator) = indicator {
+            let mut status = Node::new(Role::Status);
+            status.set_label("Volume");
+            let level = &indicator.level;
+            let loud = if level.muted {
+                "Muted".to_owned()
+            } else {
+                format!("{}%", level.percent)
+            };
+            status.set_value(format!("{loud}, {}", indicator.name));
+            status.set_live(Live::Polite);
+            root.push_child(STATUS);
+            nodes.push((STATUS, status));
+        }
+        nodes.insert(0, (ROOT, root));
+        TreeUpdate {
+            nodes,
+            tree: Some(TreeInfo::new(ROOT)),
+            tree_id: TreeId::ROOT,
+            focus: ROOT,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::model::sound::Level;
+
+        #[test]
+        fn the_volume_shown_is_a_polite_status_of_how_loud_and_where() {
+            let shown = |percent, muted| {
+                let indicator = Indicator {
+                    name: "Speakers".to_owned(),
+                    level: Level { percent, muted },
+                };
+                let tree = osd("perspicax-osd", Some((280, 64)), Some(&indicator));
+                let (_, status) = tree
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| *id == STATUS)
+                    .expect("a status")
+                    .clone();
+                status
+            };
+            let status = shown(40, false);
+            assert_eq!(
+                (status.role(), status.label(), status.value(), status.live()),
+                (
+                    Role::Status,
+                    Some("Volume"),
+                    Some("40%, Speakers"),
+                    Some(Live::Polite)
+                )
+            );
+            assert_eq!(shown(40, true).value(), Some("Muted, Speakers"));
+            assert_eq!(osd("perspicax-osd", None, None).nodes.len(), 1);
+        }
+    }
+}
+
 #[cfg(feature = "pie")]
 pub(crate) use pies::{pie, slot_of};
 

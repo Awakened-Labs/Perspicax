@@ -736,7 +736,14 @@ impl RawShell {
                 built.audio,
                 "audio",
             ),
-            (self.mixer.is_some(), "shell.mixer", built.audio, "audio"),
+            (
+                self.mixer
+                    .as_ref()
+                    .is_some_and(|mixer| !mixer.only_turns_off()),
+                "shell.mixer",
+                built.audio,
+                "audio",
+            ),
             (self.pie.is_some(), "shell.pie", built.pie, "pie"),
             (
                 self.start_menu.is_some(),

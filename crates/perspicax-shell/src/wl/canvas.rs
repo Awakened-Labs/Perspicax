@@ -76,16 +76,21 @@ impl Canvas {
         qh: &QueueHandle<App>,
         layer: Layer,
         namespace: &str,
-        output: &wl_output::WlOutput,
+        output: Option<&wl_output::WlOutput>,
     ) -> LayerSurface {
         let surface = self.compositor.create_surface(qh);
-        self.layers.create_layer_surface(
-            qh,
-            surface,
-            layer,
-            Some(namespace.to_owned()),
-            Some(output),
-        )
+        self.layers
+            .create_layer_surface(qh, surface, layer, Some(namespace.to_owned()), output)
+    }
+
+    /// Have `layer` take no clicks at all: they go to what is under it.
+    #[cfg(feature = "audio")]
+    pub(super) fn take_no_clicks(&self, layer: &LayerSurface) {
+        if let Ok(nowhere) = Region::new(&self.compositor) {
+            layer
+                .wl_surface()
+                .set_input_region(Some(nowhere.wl_region()));
+        }
     }
 
     /// A clear surface over the whole of `output`, over everything, that
@@ -99,7 +104,7 @@ impl Canvas {
         namespace: &str,
         output: &wl_output::WlOutput,
     ) -> LayerSurface {
-        let layer = self.layer(qh, Layer::Overlay, namespace, output);
+        let layer = self.layer(qh, Layer::Overlay, namespace, Some(output));
         layer.set_anchor(Anchor::all());
         layer.set_exclusive_zone(-1);
         layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
@@ -457,6 +462,8 @@ impl LayerShellHandler for App {
         self.pies.closed(layer);
         #[cfg(feature = "audio")]
         self.mixers.closed(layer);
+        #[cfg(feature = "audio")]
+        self.osd.closed(layer);
     }
 
     fn configure(
@@ -486,6 +493,9 @@ impl LayerShellHandler for App {
             .configure(&mut self.canvas, &mut self.kit, layer, &configure);
         #[cfg(feature = "audio")]
         self.mixers
+            .configure(&mut self.canvas, &mut self.kit, layer, &configure);
+        #[cfg(feature = "audio")]
+        self.osd
             .configure(&mut self.canvas, &mut self.kit, layer, &configure);
     }
 }
@@ -535,9 +545,20 @@ impl CompositorHandler for App {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: &wl_output::WlOutput,
+        surface: &wl_surface::WlSurface,
+        output: &wl_output::WlOutput,
     ) {
+        // The volume shown is the one surface not put on a monitor of its
+        // choosing, so the one whose scale is learned here.
+        #[cfg(feature = "audio")]
+        self.osd.entered(
+            &mut self.canvas,
+            &mut self.kit,
+            &self.outputs,
+            (surface, output),
+        );
+        #[cfg(not(feature = "audio"))]
+        let _ = (surface, output);
     }
 
     fn surface_leave(
