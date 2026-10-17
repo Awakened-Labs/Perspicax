@@ -7,6 +7,8 @@
 //! there is to show it on, hands over the pixels, and passes on what the
 //! person did.
 
+#[cfg(feature = "audio")]
+mod audio;
 #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
 mod canvas;
 mod channel;
@@ -51,12 +53,14 @@ use wayland_client::{
 use crate::Error;
 
 /// Run the shell on `connection` until the connection ends, with its tray
-/// on the bus at address `bus`, or the session's.
+/// on the bus at address `bus`, or the session's, and its mixer on the
+/// sound server at `sound`, or the one the environment names.
 pub(crate) fn run(
     connection: Connection,
     shell: Shell,
     config: Option<PathBuf>,
     bus: Option<String>,
+    sound: Option<PathBuf>,
 ) -> Result<(), Error> {
     let (globals, queue) =
         registry_queue_init::<App>(&connection).map_err(|error| wayland(&error))?;
@@ -109,6 +113,22 @@ pub(crate) fn run(
     };
     #[cfg(not(feature = "tray"))]
     let _ = bus;
+    #[cfg(feature = "audio")]
+    let heard = {
+        // What the sound's thread reads arrives there, and is shown here.
+        let (sender, receiver) = calloop::channel::channel();
+        event_loop
+            .handle()
+            .insert_source(receiver, |event, (), app: &mut App| {
+                if let calloop::channel::Event::Msg((started, news)) = event {
+                    watch::timed("showing the sound's news", || app.audio_news(started, news));
+                }
+            })
+            .map_err(|error| wayland(&error.error))?;
+        sender
+    };
+    #[cfg(not(feature = "audio"))]
+    let _ = sound;
     #[cfg(any(feature = "menus", feature = "panel"))]
     let installed = installed::Installed::new(crate::model::apps::Places::from_env());
     let mut app = App {
@@ -144,6 +164,8 @@ pub(crate) fn run(
         ticking: None,
         #[cfg(feature = "tray")]
         tray: tray::Tray::new(bus, news),
+        #[cfg(feature = "audio")]
+        audio: audio::Audio::new(sound, heard),
         #[cfg(any(feature = "menus", feature = "panel"))]
         seat: seat::Seat::new(&globals, &qh),
         #[cfg(feature = "pie")]
@@ -171,6 +193,8 @@ pub(crate) fn run(
     app.watch_folder();
     #[cfg(feature = "tray")]
     app.follow_tray(&shell);
+    #[cfg(feature = "audio")]
+    app.follow_audio(&shell);
     #[cfg(not(any(feature = "wallpaper", feature = "menus", feature = "panel")))]
     let _ = shell;
     loop {
@@ -233,6 +257,9 @@ pub(crate) struct App {
     /// Other programs' status icons, from the session bus.
     #[cfg(feature = "tray")]
     tray: tray::Tray,
+    /// The sound, from the sound server.
+    #[cfg(feature = "audio")]
+    audio: audio::Audio,
     #[cfg(any(feature = "menus", feature = "panel"))]
     seat: seat::Seat,
     #[cfg(feature = "menus")]
@@ -376,6 +403,8 @@ impl App {
         }
         #[cfg(feature = "tray")]
         self.follow_tray(&shell);
+        #[cfg(feature = "audio")]
+        self.follow_audio(&shell);
         #[cfg(feature = "menus")]
         self.menus.reconfigure(&shell, self.config.as_deref());
         #[cfg(feature = "pie")]

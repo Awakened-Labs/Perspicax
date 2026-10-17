@@ -108,6 +108,13 @@ pub(super) struct Panels {
     tray: Vec<(u64, crate::model::tray::Item)>,
     /// The keyboard's layouts, as perspicax lists them.
     pub(super) layouts: Layouts,
+    /// The mixer's pieces, as `[shell.mixer]` lists them.
+    #[cfg(feature = "audio")]
+    pieces: Vec<perspicax_config::mixer::Piece>,
+    /// How loud the default output is, or `None` with no sound server to
+    /// ask.
+    #[cfg(feature = "audio")]
+    sound: Option<crate::model::sound::Level>,
     /// The panels are to be drawn again once the loop is idle.
     stale: bool,
     /// Where an assistive technology's press of something on a panel is
@@ -154,6 +161,10 @@ impl Panels {
             #[cfg(feature = "tray")]
             tray: Vec::new(),
             layouts: Layouts::default(),
+            #[cfg(feature = "audio")]
+            pieces: shell.mixer.panel.clone(),
+            #[cfg(feature = "audio")]
+            sound: None,
             stale: false,
             actions,
         }
@@ -181,6 +192,15 @@ impl Panels {
             self.start = start;
             self.told = false;
         }
+        // Other pieces of the mixer are drawn in place, as another icon is.
+        #[cfg(feature = "audio")]
+        let restarted = {
+            let repieced = shell.mixer.panel != self.pieces;
+            if repieced {
+                self.pieces = shell.mixer.panel.clone();
+            }
+            restarted || repieced
+        };
         if shell.panel == self.panel {
             if restarted {
                 self.redraw(canvas, kit, workspaces);
@@ -440,6 +460,13 @@ impl Panels {
             .then(|| crate::layout::panel::strip(panel.edge, panel.height as i32, monitor))
     }
 
+    /// Show the mixer `level`, or `None` with no sound server. Whether that
+    /// changed what it shows.
+    #[cfg(feature = "audio")]
+    pub(super) fn hear(&mut self, level: Option<crate::model::sound::Level>) -> bool {
+        std::mem::replace(&mut self.sound, level) != self.sound
+    }
+
     /// The status icon of `key`.
     #[cfg(feature = "tray")]
     pub(super) fn status(&self, key: u64) -> Option<&crate::model::tray::Item> {
@@ -550,6 +577,11 @@ impl Panels {
             cells,
             #[cfg(feature = "tray")]
             tray,
+            #[cfg(feature = "audio")]
+            mixer: crate::layout::panel::Mixing {
+                pieces: &self.pieces,
+                level: self.sound,
+            },
         };
         let Kit {
             fonts,
@@ -687,6 +719,8 @@ impl App {
             Some(Part::Workspace(serial)) => self.press_workspace(serial, button),
             #[cfg(feature = "tray")]
             Some(Part::Tray(key)) => self.press_status(name, key, button),
+            #[cfg(feature = "audio")]
+            Some(Part::Mixer(piece)) => self.press_mixer(piece, button),
             Some(Part::Layout) if button == Button::Left => self.next_layout(),
             Some(Part::Start | Part::Layout) | None => {}
         }

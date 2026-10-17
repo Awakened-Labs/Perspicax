@@ -588,7 +588,14 @@ mod panels {
     use accesskit::{Action, HasPopup, Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate};
     use perspicax_config::Item;
 
+    #[cfg(feature = "audio")]
+    use accesskit::Toggled;
+    #[cfg(feature = "audio")]
+    use perspicax_config::mixer::Piece;
+
     use super::{ROOT, rect, window};
+    #[cfg(feature = "audio")]
+    use crate::model::sound::Level;
     use crate::{
         layout::{
             Rect,
@@ -606,6 +613,8 @@ mod panels {
     #[cfg(feature = "tray")]
     const TRAY: NodeId = NodeId(6);
     const LAYOUT: NodeId = NodeId(7);
+    #[cfg(feature = "audio")]
+    const MIXER: NodeId = NodeId(8);
     /// A task's node, a workspace's and a status icon's: the serial of its
     /// window or its workspace, or the icon's key, which stays its own
     /// while it lasts, above one of these.
@@ -613,6 +622,9 @@ mod panels {
     const WORKSPACE: u64 = 2;
     #[cfg(feature = "tray")]
     const STATUS: u64 = 3;
+    /// A piece of the mixer's node: its place in [`Piece::ALL`] above this.
+    #[cfg(feature = "audio")]
+    const PIECE: u64 = 4;
     const SERIAL_BITS: u32 = 40;
 
     /// What on a panel the node `id` is, if it is something to press.
@@ -625,6 +637,11 @@ mod panels {
             (_, WORKSPACE) => Some(Part::Workspace(serial)),
             #[cfg(feature = "tray")]
             (_, STATUS) => Some(Part::Tray(serial)),
+            #[cfg(feature = "audio")]
+            (_, PIECE) => usize::try_from(serial)
+                .ok()
+                .and_then(|at| Piece::ALL.get(at))
+                .map(|&piece| Part::Mixer(piece)),
             _ => None,
         }
     }
@@ -646,7 +663,11 @@ mod panels {
     /// and descriptions alone (as perspicax is, for now). The layout
     /// indicator is a `Button`, "Keyboard layout", whose value and
     /// description are the `layout` in use's name; a click moves to the
-    /// next. What takes no room on the panel is not in the tree.
+    /// next. The mixer is a `Group`, "Sound", of a node for each piece: the
+    /// speaker that mutes is a `Switch`, "Mute", on while the sound is
+    /// muted, described by how loud it is; with no sound server, it is
+    /// disabled, and described so. What takes no room on the panel is not
+    /// in the tree.
     pub(crate) fn panel(
         namespace: &str,
         size: Option<(u32, u32)>,
@@ -728,6 +749,22 @@ mod panels {
                 }
                 #[cfg(not(feature = "tray"))]
                 Item::Tray => continue,
+                #[cfg(feature = "audio")]
+                Item::Mixer => {
+                    let mut group = Node::new(Role::Group);
+                    group.set_label("Sound");
+                    for &(piece, place) in &placed.mixer {
+                        let mut node = sound(piece, placed.sound);
+                        node.set_bounds(rect(place));
+                        let at = Piece::ALL.iter().position(|&each| each == piece);
+                        let id = node_of(PIECE, at.unwrap_or_default() as u64);
+                        group.push_child(id);
+                        nodes.push((id, node));
+                    }
+                    (MIXER, group)
+                }
+                #[cfg(not(feature = "audio"))]
+                Item::Mixer => continue,
             };
             node.set_bounds(rect(place));
             bar.push_child(id);
@@ -741,6 +778,38 @@ mod panels {
             tree: Some(TreeInfo::new(ROOT)),
             tree_id: TreeId::ROOT,
             focus: ROOT,
+        }
+    }
+
+    /// The node of a piece of the mixer, showing `level`, or with `None`,
+    /// no sound server to ask.
+    #[cfg(feature = "audio")]
+    fn sound(piece: Piece, level: Option<Level>) -> Node {
+        match piece {
+            Piece::Mute => {
+                let mut switch = Node::new(Role::Switch);
+                switch.set_label("Mute");
+                match level {
+                    Some(level) => {
+                        switch.set_toggled(if level.muted {
+                            Toggled::True
+                        } else {
+                            Toggled::False
+                        });
+                        switch.set_description(if level.muted {
+                            "Muted".to_owned()
+                        } else {
+                            format!("{}%", level.percent)
+                        });
+                        switch.add_action(Action::Click);
+                    }
+                    None => {
+                        switch.set_disabled();
+                        switch.set_description("No sound server");
+                    }
+                }
+                switch
+            }
         }
     }
 
@@ -806,6 +875,8 @@ mod panels {
                 cells,
                 #[cfg(feature = "tray")]
                 tray: Vec::new(),
+                #[cfg(feature = "audio")]
+                mixer: crate::layout::panel::Mixing::default(),
             };
             lay_out(&items, holding, (1280, 40), FULL, &mut Monospace(8.0))
         }
@@ -829,6 +900,8 @@ mod panels {
                     task_titles: true,
                     cells: Vec::new(),
                     tray: vec![icon(3, "Network", true), icon(8, "Updates", false)],
+                    #[cfg(feature = "audio")]
+                    mixer: crate::layout::panel::Mixing::default(),
                 },
                 (1280, 40),
                 FULL,
@@ -876,6 +949,83 @@ mod panels {
             assert_eq!(second.bounds(), Some(rect(placed.tray[1].1)));
         }
 
+        #[cfg(feature = "audio")]
+        #[test]
+        fn the_mixer_is_a_group_whose_speaker_is_a_switch_that_mutes() {
+            use accesskit::Toggled;
+
+            use crate::layout::panel::Mixing;
+
+            let tree_of = |level: Option<Level>| {
+                let placed = lay_out(
+                    &[Item::Start, Item::Mixer, Item::Clock],
+                    Holding {
+                        time: "14:05",
+                        layout: None,
+                        tasks: Vec::new(),
+                        task_titles: true,
+                        cells: Vec::new(),
+                        #[cfg(feature = "tray")]
+                        tray: Vec::new(),
+                        mixer: Mixing {
+                            pieces: &[Piece::Mute],
+                            level,
+                        },
+                    },
+                    (1280, 40),
+                    FULL,
+                    &mut Monospace(8.0),
+                );
+                let tree = panel(
+                    "perspicax-panel-DP-1",
+                    Some((1280, 40)),
+                    &placed,
+                    "14:05",
+                    false,
+                    None,
+                );
+                (placed, tree)
+            };
+            let (placed, tree) = tree_of(Some(Level {
+                percent: 24,
+                muted: false,
+            }));
+            assert_eq!(node(&tree, TOOLBAR).children(), [START, MIXER, CLOCK]);
+            let mixer = node(&tree, MIXER);
+            assert_eq!((mixer.role(), mixer.label()), (Role::Group, Some("Sound")));
+            let [mute] = mixer.children() else {
+                panic!("one piece: {:?}", mixer.children());
+            };
+            assert_eq!(
+                part_of(*mute),
+                Some(Part::Mixer(Piece::Mute)),
+                "a click on it is a press"
+            );
+            let switch = node(&tree, *mute);
+            assert_eq!(
+                (switch.role(), switch.label()),
+                (Role::Switch, Some("Mute"))
+            );
+            assert_eq!(switch.toggled(), Some(Toggled::False));
+            assert_eq!(switch.description(), Some("24%"));
+            assert!(switch.supports_action(Action::Click));
+            assert_eq!(switch.bounds(), Some(rect(placed.mixer[0].1)));
+
+            let (_, muted) = tree_of(Some(Level {
+                percent: 24,
+                muted: true,
+            }));
+            let switch = node(&muted, *mute);
+            assert_eq!(switch.toggled(), Some(Toggled::True));
+            assert_eq!(switch.description(), Some("Muted"));
+
+            let (_, gone) = tree_of(None);
+            let switch = node(&gone, *mute);
+            assert!(switch.is_disabled());
+            assert!(!switch.supports_action(Action::Click));
+            assert_eq!(switch.description(), Some("No sound server"));
+        }
+
         #[test]
         fn a_narrow_panels_toolbar_is_its_bar_and_its_window_the_strip() {
             let holding = Holding {
@@ -886,6 +1036,8 @@ mod panels {
                 cells: Vec::new(),
                 #[cfg(feature = "tray")]
                 tray: Vec::new(),
+                #[cfg(feature = "audio")]
+                mixer: crate::layout::panel::Mixing::default(),
             };
             let placed = lay_out(
                 &[Item::Start, Item::Clock],
@@ -973,6 +1125,8 @@ mod panels {
                 cells: Vec::new(),
                 #[cfg(feature = "tray")]
                 tray: Vec::new(),
+                #[cfg(feature = "audio")]
+                mixer: crate::layout::panel::Mixing::default(),
             };
             let russian = Layout {
                 name: "Russian".to_owned(),

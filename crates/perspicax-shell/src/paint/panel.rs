@@ -13,8 +13,9 @@
 //! The pager is a grid of small screens, each with its workspace's name,
 //! the one showing lit. Each of the tray's icons sits in the middle of its
 //! slot, drawn from the icon its program names if it is found, otherwise
-//! from the picture its program sent nearest the size. The clock is the
-//! time, in the panel's ink. Every pixel of the bar is opaque, and the rest
+//! from the picture its program sent nearest the size. Each of the mixer's
+//! pieces sits in the middle of its slot, drawn in the panel's ink (see
+//! `sound`). The clock is the time, in the panel's ink. Every pixel of the bar is opaque, and the rest
 //! of its strip clear.
 
 use perspicax_config::{Edge, Item};
@@ -182,7 +183,7 @@ pub(crate) fn paint(
                 let size = text.size() * scale as f32;
                 text.write(canvas, words, px(room), size, colours.ink);
             }
-            Item::Taskbar | Item::Pager | Item::Tray => {}
+            Item::Taskbar | Item::Pager | Item::Tray | Item::Mixer => {}
         }
     }
     let mut pen = Pen {
@@ -202,6 +203,10 @@ pub(crate) fn paint(
         if let Some((_, item)) = shown.tray.iter().find(|(key, _)| *key == icon.key) {
             pen.status(item, *place, images);
         }
+    }
+    #[cfg(feature = "audio")]
+    for &(piece, place) in &shown.placed.mixer {
+        pen.piece(piece, place, shown.placed.sound);
     }
     for rule in ends.into_iter().flatten().chain([along]) {
         fill(pen.canvas, px(rule), colours.rule);
@@ -316,6 +321,24 @@ impl Pen<'_, '_, '_> {
             icons::draw(self.canvas, picture, at);
         } else if let Some(image) = images.get(GENERIC, size, scale) {
             icons::draw(self.canvas, image, at);
+        }
+    }
+
+    /// A piece of the mixer, in the middle of its slot at `place`, showing
+    /// `sound`.
+    #[cfg(feature = "audio")]
+    fn piece(
+        &mut self,
+        piece: perspicax_config::mixer::Piece,
+        place: Rect,
+        sound: Option<crate::model::sound::Level>,
+    ) {
+        use perspicax_config::mixer::Piece;
+
+        let at = self.px(middle(place, fitted(place.h)));
+        let Colours { ink, faint, .. } = self.colours;
+        match piece {
+            Piece::Mute => super::sound::speaker(self.canvas, at, sound, ink, faint),
         }
     }
 
@@ -518,6 +541,8 @@ mod tests {
                 cells: vec![cell(10, 0), cell(11, 1)],
                 #[cfg(feature = "tray")]
                 tray: Vec::new(),
+                #[cfg(feature = "audio")]
+                mixer: crate::layout::panel::Mixing::default(),
             },
             (600, 40),
             shape,

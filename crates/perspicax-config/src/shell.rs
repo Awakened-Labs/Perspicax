@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 use crate::{
     Error, Profile, invalid,
+    mixer::{Mixer, RawMixer},
     pie::{Pie, RawPie},
     start_menu::{RawStartMenu, StartMenu},
     swaylock,
@@ -35,6 +36,8 @@ pub struct ShellBuilt {
     pub icons: bool,
     /// Pie menus.
     pub pie: bool,
+    /// The sound: the panel's mixer.
+    pub audio: bool,
 }
 
 impl ShellBuilt {
@@ -47,6 +50,7 @@ impl ShellBuilt {
         tray: true,
         icons: true,
         pie: true,
+        audio: true,
     };
 }
 
@@ -108,6 +112,8 @@ pub struct Shell {
     /// or `None` for every application, then the ways to leave, behind
     /// Perspicax's mark.
     pub start_menu: Option<StartMenu>,
+    /// What the panel's mixer shows, as `[shell.mixer]` writes it.
+    pub mixer: Mixer,
     /// The colours everything is drawn in: `[theme]`'s, read here so that a
     /// change to the theme reaches the shell as one to `[shell]` does.
     pub palette: Palette,
@@ -248,6 +254,8 @@ pub enum Item {
     /// The keyboard layout in use, which a click moves to the next. Takes
     /// no room while the keyboard has only one.
     Layout,
+    /// The sound, as `[shell.mixer]` says to show it.
+    Mixer,
 }
 
 impl Item {
@@ -261,6 +269,7 @@ impl Item {
             Self::Tray => "tray",
             Self::Clock => "clock",
             Self::Layout => "layout",
+            Self::Mixer => "mixer",
         }
     }
 }
@@ -356,6 +365,7 @@ impl Shell {
             panel: panel.filter(|_| built.panel),
             pie: None,
             start_menu: None,
+            mixer: Mixer::default(),
             palette: Palette::default(),
             font: Font::default(),
         }
@@ -448,6 +458,7 @@ pub(crate) struct RawShell {
     panel: Option<RawPanel>,
     pie: Option<RawPie>,
     start_menu: Option<RawStartMenu>,
+    mixer: Option<RawMixer>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -607,6 +618,9 @@ impl RawShell {
         if let Some(start_menu) = self.start_menu {
             shell.start_menu = Some(start_menu.apply()?);
         }
+        if let Some(mixer) = self.mixer {
+            shell.mixer = mixer.apply(shell.mixer)?;
+        }
         Ok(shell)
     }
 
@@ -716,6 +730,13 @@ impl RawShell {
                 built.tray,
                 "tray",
             ),
+            (
+                items.contains(&Item::Mixer),
+                "shell.panel.items",
+                built.audio,
+                "audio",
+            ),
+            (self.mixer.is_some(), "shell.mixer", built.audio, "audio"),
             (self.pie.is_some(), "shell.pie", built.pie, "pie"),
             (
                 self.start_menu.is_some(),
@@ -976,7 +997,7 @@ fn picture(key: &str, written: String, had: Wallpaper) -> Result<Wallpaper, Erro
 }
 
 /// The first of `list` that is in it twice.
-fn twice<T: PartialEq>(list: &[T]) -> Option<&T> {
+pub(crate) fn twice<T: PartialEq>(list: &[T]) -> Option<&T> {
     list.iter()
         .enumerate()
         .find_map(|(at, item)| list[..at].contains(item).then_some(item))
@@ -1006,6 +1027,7 @@ mod tests {
         tray: false,
         icons: false,
         pie: false,
+        audio: false,
     };
 
     #[test]

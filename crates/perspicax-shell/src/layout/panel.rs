@@ -8,7 +8,8 @@
 //! wide as its grid of workspaces, the tray a slot [`TRAY_SLOT`] wide for
 //! each icon it shows, and the clock as wide as the time it shows, as is
 //! the layout indicator as wide as its label, while there is a choice of
-//! layouts to show. The
+//! layouts to show, and the mixer a slot [`PIECE`] wide for each of its
+//! pieces. The
 //! taskbar takes whatever room is left, and shares it among the windows it
 //! lists, each no wider than [`TASK_WIDTH`], or than [`TASK_LEAST`] when its
 //! tasks show their icons alone; a bar without one keeps its last item at
@@ -17,9 +18,13 @@
 //! grows as wide as it needs to be, up to the monitor's width; there, its
 //! tasks shrink further.
 
+#[cfg(feature = "audio")]
+use perspicax_config::mixer::Piece;
 use perspicax_config::{Align, Edge, Item, PanelOutputs, PanelWidth};
 
 use super::{Measure, Rect};
+#[cfg(feature = "audio")]
+use crate::model::sound::Level;
 
 /// Room either side of the clock's time.
 pub(crate) const CLOCK_PAD: i32 = 10;
@@ -35,6 +40,10 @@ pub(crate) const PAGER_GAP: i32 = 2;
 /// How wide each of the tray's icons is, with the room around it.
 #[cfg(feature = "tray")]
 pub(crate) const TRAY_SLOT: i32 = 30;
+/// How wide each of the mixer's pieces is, with the room around it: a
+/// status icon's slot.
+#[cfg(feature = "audio")]
+pub(crate) const PIECE: i32 = 30;
 
 /// A window the taskbar lists, as it is shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +95,19 @@ pub(crate) struct Holding<'a> {
     pub(crate) cells: Vec<Cell>,
     #[cfg(feature = "tray")]
     pub(crate) tray: Vec<TrayIcon>,
+    #[cfg(feature = "audio")]
+    pub(crate) mixer: Mixing<'a>,
+}
+
+/// What the mixer shows.
+#[cfg(feature = "audio")]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Mixing<'a> {
+    /// Its pieces, in order.
+    pub(crate) pieces: &'a [Piece],
+    /// How loud the default output is, or `None` with no sound server to
+    /// ask.
+    pub(crate) level: Option<Level>,
 }
 
 /// A panel, laid out: its bar, each thing it holds, and where, in its own
@@ -100,6 +122,11 @@ pub(crate) struct Placed {
     pub(crate) cells: Vec<(Cell, Rect)>,
     #[cfg(feature = "tray")]
     pub(crate) tray: Vec<(TrayIcon, Rect)>,
+    #[cfg(feature = "audio")]
+    pub(crate) mixer: Vec<(Piece, Rect)>,
+    /// What the mixer's pieces show.
+    #[cfg(feature = "audio")]
+    pub(crate) sound: Option<Level>,
 }
 
 /// What on a panel a press can be on.
@@ -115,6 +142,9 @@ pub(crate) enum Part {
     /// The tray's icon of this key.
     #[cfg(feature = "tray")]
     Tray(u64),
+    /// This piece of the mixer.
+    #[cfg(feature = "audio")]
+    Mixer(Piece),
 }
 
 /// Which of `monitors`, each a connector name and where its top-left corner
@@ -176,6 +206,11 @@ pub(crate) fn lay_out(
             // Refused by the config without a tray to show.
             #[cfg(not(feature = "tray"))]
             Item::Tray => 0,
+            #[cfg(feature = "audio")]
+            Item::Mixer => holding.mixer.pieces.len() as i32 * PIECE,
+            // Refused by the config without the sound to show.
+            #[cfg(not(feature = "audio"))]
+            Item::Mixer => 0,
         })
         .collect();
     let fixed = widths.iter().sum::<i32>();
@@ -255,6 +290,19 @@ pub(crate) fn lay_out(
             })
             .collect()
     });
+    #[cfg(feature = "audio")]
+    let mixer = within(Item::Mixer).map_or_else(Vec::new, |mixer| {
+        holding
+            .mixer
+            .pieces
+            .iter()
+            .enumerate()
+            .map(|(at, &piece)| {
+                let x = mixer.x + at as i32 * PIECE;
+                (piece, Rect::new(x, 0, PIECE, height))
+            })
+            .collect()
+    });
     Placed {
         bar,
         items,
@@ -262,6 +310,10 @@ pub(crate) fn lay_out(
         cells,
         #[cfg(feature = "tray")]
         tray,
+        #[cfg(feature = "audio")]
+        mixer,
+        #[cfg(feature = "audio")]
+        sound: holding.mixer.level,
     }
 }
 
@@ -368,7 +420,19 @@ impl Placed {
         };
         #[cfg(not(feature = "tray"))]
         let tray = || None;
-        task.or_else(cell).or_else(item).or_else(tray)
+        #[cfg(feature = "audio")]
+        let mixer = || {
+            self.mixer
+                .iter()
+                .find(|(_, rect)| rect.contains(point))
+                .map(|&(piece, _)| Part::Mixer(piece))
+        };
+        #[cfg(not(feature = "audio"))]
+        let mixer = || None;
+        task.or_else(cell)
+            .or_else(item)
+            .or_else(tray)
+            .or_else(mixer)
     }
 
     /// Where the tray's icon of `key` is, if the panel shows it.
@@ -402,6 +466,8 @@ mod tests {
         Holding {
             #[cfg(feature = "tray")]
             tray: Vec::new(),
+            #[cfg(feature = "audio")]
+            mixer: Mixing::default(),
             time: "14:05",
             layout: None,
             tasks: (0..tasks as u64)
@@ -648,6 +714,45 @@ mod tests {
             &mut Monospace(8.0),
         );
         assert_eq!(empty.items[1].1.w, 0, "no icons, no room taken");
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn the_mixer_holds_a_slot_for_each_piece_and_a_press_finds_it() {
+        let level = Some(Level {
+            percent: 24,
+            muted: false,
+        });
+        let mut holding = holding(1, &[]);
+        holding.mixer = Mixing {
+            pieces: &[Piece::Mute],
+            level,
+        };
+        let placed = lay_out(
+            &[Item::Start, Item::Taskbar, Item::Mixer, Item::Clock],
+            holding,
+            PANEL,
+            FULL,
+            &mut Monospace(8.0),
+        );
+        let clock = 5 * 8 + 2 * CLOCK_PAD;
+        let left = 1280 - clock - PIECE;
+        assert_eq!(
+            placed.items[2],
+            (Item::Mixer, Rect::new(left, 0, PIECE, 40)),
+            "a slot for its one piece, against the clock"
+        );
+        assert_eq!(placed.mixer, [(Piece::Mute, Rect::new(left, 0, PIECE, 40))]);
+        assert_eq!(placed.sound, level, "what its pieces show");
+        assert_eq!(
+            placed.at((f64::from(left) + 1.0, 20.0)),
+            Some(Part::Mixer(Piece::Mute))
+        );
+        assert_eq!(
+            placed.at((f64::from(left) - 1.0, 20.0)),
+            None,
+            "the taskbar's empty end, beside it"
+        );
     }
 
     #[test]

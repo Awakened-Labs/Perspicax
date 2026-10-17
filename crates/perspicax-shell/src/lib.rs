@@ -2,10 +2,10 @@
 //!
 //! A wallpaper on every monitor, a menu of the installed applications on a
 //! right-click, a panel with a start menu, a taskbar, a pager, other
-//! programs' status icons and a clock, and the desktop folder's icons: each
-//! a cargo feature, and each a key in the `[shell]` table of perspicax's own
-//! config file. Icons drawn in SVG, as most icon themes draw them, are a
-//! feature of their own, `svg`.
+//! programs' status icons, the sound and a clock, and the desktop folder's
+//! icons: each a cargo feature, and each a key in the `[shell]` table of
+//! perspicax's own config file. Icons drawn in SVG, as most icon themes
+//! draw them, are a feature of their own, `svg`.
 //!
 //! perspicax starts it, but it is an ordinary Wayland client: its surfaces
 //! are layer-shell surfaces, its taskbar speaks
@@ -28,6 +28,8 @@
 
 #[cfg(any(feature = "wallpaper", feature = "menus", feature = "panel"))]
 mod a11y;
+#[cfg(feature = "audio")]
+mod audio;
 #[cfg(feature = "menus")]
 mod launch;
 #[cfg(any(feature = "menus", feature = "panel"))]
@@ -58,6 +60,7 @@ pub const BUILT: ShellBuilt = ShellBuilt {
     tray: cfg!(feature = "tray"),
     icons: cfg!(feature = "icons"),
     pie: cfg!(feature = "pie"),
+    audio: cfg!(feature = "audio"),
 };
 
 /// How to run.
@@ -75,6 +78,12 @@ pub struct Options {
     /// shell built without `tray`; what agents read is on the session's
     /// accessibility bus whatever this says.
     pub session_bus: Option<String>,
+    /// The sound server's socket, which the panel's mixer reads and
+    /// changes. `None` is the one the environment names, as libpulse finds
+    /// it: `PULSE_SERVER`, or `native` in the runtime folder,
+    /// `$PULSE_RUNTIME_PATH` or `$XDG_RUNTIME_DIR/pulse`. Unused by a shell
+    /// built without `audio`.
+    pub sound_server: Option<PathBuf>,
 }
 
 /// Why the shell stopped.
@@ -134,7 +143,13 @@ pub fn run(options: Options) -> Result<(), Error> {
         Some(connection) => connection,
         None => Connection::connect_to_env()?,
     };
-    wl::run(connection, shell, path, options.session_bus)
+    wl::run(
+        connection,
+        shell,
+        path,
+        options.session_bus,
+        options.sound_server,
+    )
 }
 
 /// The `[shell]` table of the config file at `path`, as this build reads it,

@@ -181,6 +181,11 @@ test:
     # `xwayland` is the W1 addition: the Xwayland provenance test starts one
     # under a headless compositor. Its X client is the test itself (x11rb), so
     # no X11 application is needed beside it.
+    #
+    # The sound server is #59's: the shell's mixer is tested against a
+    # PipeWire of the test's own, with its PulseAudio server and
+    # WirePlumber's policy, meeting no sound card, and `pactl` to check what
+    # the shell changed.
     - >
       apt-get install -y --no-install-recommends
       xvfb
@@ -193,5 +198,9 @@ test:
       xwayland
       libxkbcommon-dev
       libpixman-1-dev
+      pipewire
+      pipewire-pulse
+      wireplumber
+      pulseaudio-utils
   script:
     - xvfb-run -a dbus-run-session -- ci/live-tests.sh

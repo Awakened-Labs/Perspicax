@@ -39,6 +39,7 @@ fn main() -> ExitCode {
         connection: None,
         config: cli.config,
         session_bus: None,
+        sound_server: None,
     }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

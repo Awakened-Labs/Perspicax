@@ -27,7 +27,10 @@
 //! `XDG_RUNTIME_DIR`, and is `#[ignore]`d for `ci/live-tests.sh` to run.
 //!
 //! Each shell has a session bus of its own, a `dbus-daemon` the test starts,
-//! so that its tray meets no program of the machine running the test.
+//! so that its tray meets no program of the machine running the test, and
+//! no sound server unless the test starts one of its own: PipeWire, its
+//! PulseAudio server and WirePlumber's policy, meeting no sound card. A
+//! click on the panel's speaker mutes that server's output.
 //!
 //! The menus here are a menu file's, so that what they hold does not hang
 //! on what is installed on the machine running the test.
@@ -61,16 +64,32 @@ impl Shell {
 
     /// The same, on a connection of the test's own.
     fn start_on(connection: Connection, name: &str, config: &str) -> Self {
+        Self::start_with(connection, name, config, None)
+    }
+
+    /// The same, its mixer on the sound server at `sound`, or with `None`,
+    /// on a socket where none listens.
+    fn start_with(
+        connection: Connection,
+        name: &str,
+        config: &str,
+        sound: Option<PathBuf>,
+    ) -> Self {
         let path = std::env::temp_dir().join(format!(
             "perspicax-shell-{name}-{}.toml",
             std::process::id()
         ));
         std::fs::write(&path, config).expect("a config file");
         let bus = Bus::start();
+        let nowhere = std::env::temp_dir().join(format!(
+            "perspicax-shell-{name}-{}-no-sound",
+            std::process::id()
+        ));
         let options = perspicax_shell::Options {
             connection: Some(connection),
             config: Some(path.clone()),
             session_bus: Some(bus.address.clone()),
+            sound_server: Some(sound.unwrap_or(nowhere)),
         };
         Self {
             thread: thread::spawn(move || perspicax_shell::run(options)),
@@ -137,6 +156,113 @@ impl Drop for Bus {
     fn drop(&mut self) {
         self.daemon.kill().ok();
         self.daemon.wait().ok();
+    }
+}
+
+/// A sound server of the test's own, as a desktop runs one: PipeWire, its
+/// PulseAudio server, and WirePlumber's policy alone, so that it meets no
+/// sound card and no other program; with two outputs that play nowhere,
+/// "one", the default, and "two". Everything it keeps is in a folder of its
+/// own under the runtime folder, short enough for a socket's path, and goes
+/// with it.
+#[cfg(feature = "capture")]
+struct SoundServer {
+    folder: PathBuf,
+    daemons: Vec<std::process::Child>,
+}
+
+#[cfg(feature = "capture")]
+impl SoundServer {
+    fn start(name: &str) -> Self {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR");
+        let folder =
+            PathBuf::from(runtime).join(format!("pspx-sound-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&folder).ok();
+        for inside in ["run", "state", "config"] {
+            std::fs::create_dir_all(folder.join(inside)).expect("the sound server's folder");
+        }
+        let mut server = Self {
+            folder,
+            daemons: Vec::new(),
+        };
+        server.daemon(&["pipewire"]);
+        server.until(|server| server.folder.join("run/pipewire-0").exists());
+        server.daemon(&["pipewire", "-c", "pipewire-pulse.conf"]);
+        server.daemon(&["wireplumber", "-p", "policy"]);
+        server.until(|server| server.socket().exists());
+        for sink in ["one", "two"] {
+            server.pactl(&[
+                "load-module",
+                "module-null-sink",
+                &format!("sink_name={sink}"),
+            ]);
+        }
+        server.until(|server| server.pactl(&["get-default-sink"]).trim() == "one");
+        server
+    }
+
+    /// Its PulseAudio server's socket.
+    fn socket(&self) -> PathBuf {
+        self.folder.join("run/pulse/native")
+    }
+
+    /// `program` with the server's folders, and no session bus.
+    fn command(&self, program: &str) -> std::process::Command {
+        let mut command = std::process::Command::new(program);
+        command
+            .env("XDG_RUNTIME_DIR", self.folder.join("run"))
+            .env("XDG_STATE_HOME", self.folder.join("state"))
+            .env("XDG_CONFIG_HOME", self.folder.join("config"))
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .env_remove("PIPEWIRE_REMOTE")
+            .env_remove("PULSE_SERVER");
+        command
+    }
+
+    fn daemon(&mut self, argv: &[&str]) {
+        let daemon = self
+            .command(argv[0])
+            .args(&argv[1..])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap_or_else(|error| panic!("{}, which a desktop with sound has: {error}", argv[0]));
+        self.daemons.push(daemon);
+    }
+
+    /// What `pactl` says to `args`.
+    fn pactl(&self, args: &[&str]) -> String {
+        let said = self
+            .command("pactl")
+            .args(args)
+            .output()
+            .expect("pactl, which a desktop with sound has");
+        String::from_utf8_lossy(&said.stdout).into_owned()
+    }
+
+    /// Wait until `ready` holds.
+    fn until(&self, ready: impl Fn(&Self) -> bool) {
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready(self) {
+            assert!(
+                Instant::now() < deadline,
+                "the sound server never got ready"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+#[cfg(feature = "capture")]
+impl Drop for SoundServer {
+    fn drop(&mut self) {
+        for daemon in self.daemons.iter_mut().rev() {
+            daemon.kill().ok();
+            daemon.wait().ok();
+        }
+        std::fs::remove_dir_all(&self.folder).ok();
     }
 }
 
@@ -1917,6 +2043,70 @@ fn a_tray_menu_choice_is_sent_back() {
     session.wait_for(|facts| menu(facts).is_none());
 
     notifier.leave();
+    shell.stop_with(session);
+}
+
+/// A panel of the mixer alone, its speaker at the panel's right end.
+#[cfg(feature = "capture")]
+const MIXER_ONLY: &str = "profile = \"classic\"\n[shell.panel]\nitems = [\"mixer\"]\n";
+
+/// The panel's ink, and its faint ink.
+#[cfg(feature = "capture")]
+const INK: [u8; 4] = [0xfc, 0xfc, 0xfc, 0xff];
+#[cfg(feature = "capture")]
+const FAINT: [u8; 4] = [0x9a, 0xa0, 0xa6, 0xff];
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR, and PipeWire"]
+fn a_click_on_the_speaker_mutes_the_sound_servers_output_and_a_server_gone_is_faint() {
+    use std::time::{Duration, Instant};
+
+    let sound = SoundServer::start("mute");
+    let session = Session::start("shell-mute", Backend::headless((1280, 800)));
+    let shell = Shell::start_with(
+        connect(session.socket()),
+        "mute",
+        MIXER_ONLY,
+        Some(sound.socket()),
+    );
+    sound.pactl(&["set-sink-volume", "one", "100%"]);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    // The speaker, in the 30 pixels at the panel's right end: its box, in
+    // the ink once the shell has heard the server; and where its third wave
+    // crosses the middle, in the ink while the sound is loud and on, and the
+    // bar's colour while it is muted.
+    let speaker = (1258, 800 - 20);
+    let wave = (1273, 800 - 20);
+    until_colour(&session, speaker, INK);
+    until_colour(&session, wave, INK);
+
+    let muted = |yes: bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let want = if yes { "Mute: yes" } else { "Mute: no" };
+        while sound.pactl(&["get-sink-mute", "one"]).trim() != want {
+            assert!(Instant::now() < deadline, "the output never said {want}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let middle = (1280.0 - 15.0, PANEL_HEIGHT / 2.0);
+    click(&session, panel, middle, PointerButton::Left);
+    muted(true);
+    until_colour(&session, wave, BAR);
+    // Brought back elsewhere, as by a key bound to wpctl, it is heard: the
+    // next click mutes it again, rather than bringing back what is on.
+    sound.pactl(&["set-sink-mute", "one", "0"]);
+    until_colour(&session, wave, INK);
+    click(&session, panel, middle, PointerButton::Left);
+    muted(true);
+    until_colour(&session, wave, BAR);
+    click(&session, panel, middle, PointerButton::Left);
+    muted(false);
+
+    // The server goes: the speaker is faint, with no one to ask.
+    drop(sound);
+    until_colour(&session, speaker, FAINT);
     shell.stop_with(session);
 }
 

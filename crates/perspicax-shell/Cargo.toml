@@ -84,6 +84,12 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 # its own, as AccessKit has.
 zbus = { version = "5", default-features = false, features = ["tokio"], optional = true }
 tokio = { version = "1", default-features = false, features = ["rt", "sync"], optional = true }
+# The sound: the PulseAudio protocol, which PipeWire serves through
+# pipewire-pulse as PulseAudio itself does, so one client covers both.
+# Pure Rust and MIT, linking no C library. Only its protocol is used: its
+# commands, written and read as it encodes them. The client around them,
+# which follows the server's changes, is the shell's own (see `audio`).
+pulseaudio = { version = "0.3", optional = true }
 
 [dev-dependencies]
 # A wallpaper's colour, written as the config writes it.
@@ -143,4 +149,9 @@ svg = ["dep:resvg"]
 # the taskbar does, from the list a panel keeps, so it takes both. A pie
 # needs no panel shown: the list is kept whether or not one is.
 pie = ["menus", "panel"]
-full = ["wallpaper", "panel", "menus", "tray", "icons", "svg", "pie"]
+# The sound, on the panel: how loud the output is, and a click to mute it,
+# read from the sound server PipeWire or PulseAudio runs, on a thread of
+# its own. Its mixer opens over the desktop as a menu does, and takes the
+# keyboard as one does, so it takes the menus.
+audio = ["panel", "menus", "dep:pulseaudio"]
+full = ["wallpaper", "panel", "menus", "tray", "icons", "svg", "pie", "audio"]

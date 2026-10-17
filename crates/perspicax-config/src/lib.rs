@@ -29,6 +29,7 @@ pub mod autostart;
 pub mod desktop;
 mod keys;
 pub mod menu;
+pub mod mixer;
 pub mod pie;
 mod shell;
 pub mod start_menu;
