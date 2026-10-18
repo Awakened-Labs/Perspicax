@@ -1,0 +1,53 @@
+# Keep strangers' comments off the issues and pull requests being worked.
+#
+# This repository is public, so anyone on GitHub can comment on an open issue
+# or pull request, and an agent working one reads those comments beside dave's
+# own text. A locked thread takes comments from collaborators only. So a thread
+# dave opens is locked while it is open, and unlocked once it closes, when
+# nothing is worked from it and anyone may comment again.
+#
+# `project3301` is the whole list of people who write here. Widen the two
+# checks below when that changes.
+#
+# Nothing a stranger wrote reaches a shell: the jobs read only the event's
+# number, author and lock state, and a stranger's thread skips both jobs.
+name: Lock while open
+
+on:
+  issues:
+    types: [opened, reopened, closed]
+  pull_request:
+    types: [opened, reopened, closed]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  lock:
+    if: >-
+      (github.event.action == 'opened' || github.event.action == 'reopened')
+      && (github.event.issue.user.login || github.event.pull_request.user.login) == 'project3301'
+      && !(github.event.issue.locked || github.event.pull_request.locked)
+    runs-on: ubuntu-24.04
+    steps:
+      # The issues endpoint locks a pull request too: on GitHub, every pull
+      # request is an issue with the same number.
+      - run: gh api -X PUT "repos/$REPO/issues/$NUMBER/lock"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+
+  unlock:
+    if: >-
+      github.event.action == 'closed'
+      && (github.event.issue.user.login || github.event.pull_request.user.login) == 'project3301'
+      && (github.event.issue.locked || github.event.pull_request.locked)
+    runs-on: ubuntu-24.04
+    steps:
+      - run: gh api -X DELETE "repos/$REPO/issues/$NUMBER/lock"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
