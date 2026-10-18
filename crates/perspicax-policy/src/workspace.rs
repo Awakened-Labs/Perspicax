@@ -154,6 +154,23 @@ pub struct WorkspaceView {
     pub active: bool,
 }
 
+/// A monitor changed workspace: what a seat draws a transition for (see
+/// [`crate::Transition`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Switched<W, O> {
+    /// The monitor that switched, or `None` for every one of them, in
+    /// spanning mode.
+    pub on: Option<O>,
+    pub from: Cell,
+    pub to: Cell,
+    /// The way the person went, for a switch that had one: a key, an edge.
+    /// A switch by number, by a pager or by a scroll has none.
+    pub heading: Option<Direction>,
+    /// The window the person took with them, which stays in front of them
+    /// while the workspaces change around it.
+    pub carrying: Option<W>,
+}
+
 /// Every window's workspace and every monitor's current one.
 ///
 /// Generic over the window handle `W` and the monitor key `O`, so the
@@ -169,6 +186,8 @@ pub struct Workspaces<W, O> {
     /// Per-output mode: what each monitor shows, once it has been switched.
     per_output: Vec<(O, Cell)>,
     windows: Vec<(W, Home)>,
+    /// Every switch since the compositor last took them.
+    switches: Vec<Switched<W, O>>,
 }
 
 impl<W: Copy + PartialEq, O: Clone + PartialEq> Workspaces<W, O> {
@@ -180,6 +199,7 @@ impl<W: Copy + PartialEq, O: Clone + PartialEq> Workspaces<W, O> {
             spanning: Cell(0),
             per_output: Vec::new(),
             windows: Vec::new(),
+            switches: Vec::new(),
         }
     }
 
@@ -213,6 +233,9 @@ impl<W: Copy + PartialEq, O: Clone + PartialEq> Workspaces<W, O> {
         }
         self.mode = mode;
         self.grid = grid;
+        // A workspace that went with the old shape is not one the person
+        // went to.
+        self.switches.clear();
     }
 
     /// The workspace `output` is showing.
@@ -267,22 +290,53 @@ impl<W: Copy + PartialEq, O: Clone + PartialEq> Workspaces<W, O> {
     /// switched to.
     pub fn switch(&mut self, output: &O, direction: Direction) -> Option<Cell> {
         let to = self.grid.step(self.current(output), direction)?;
-        self.go_to(output, to)
+        self.go(output, to, Some(direction), None)
     }
 
     /// Show workspace `to` on `output` (every monitor, in spanning mode).
     /// `None` if there is no such workspace, or it is already showing.
     pub fn go_to(&mut self, output: &O, to: Cell) -> Option<Cell> {
-        if to.0 >= self.grid.len() || to == self.current(output) {
+        self.go(output, to, None, None)
+    }
+
+    /// Every switch since the last time they were taken, oldest first.
+    pub fn take_switches(&mut self) -> Vec<Switched<W, O>> {
+        std::mem::take(&mut self.switches)
+    }
+
+    /// [`Self::go_to`], noting the switch with the way the person went and
+    /// the window they took along, if any.
+    fn go(
+        &mut self,
+        output: &O,
+        to: Cell,
+        heading: Option<Direction>,
+        carrying: Option<W>,
+    ) -> Option<Cell> {
+        let from = self.current(output);
+        if to.0 >= self.grid.len() || to == from {
             return None;
         }
-        match self.mode {
-            Mode::Spanning => self.spanning = to,
-            Mode::PerOutput => match self.per_output.iter_mut().find(|(key, _)| key == output) {
-                Some((_, cell)) => *cell = to,
-                None => self.per_output.push((output.clone(), to)),
-            },
-        }
+        let on = match self.mode {
+            Mode::Spanning => {
+                self.spanning = to;
+                None
+            }
+            Mode::PerOutput => {
+                match self.per_output.iter_mut().find(|(key, _)| key == output) {
+                    Some((_, cell)) => *cell = to,
+                    None => self.per_output.push((output.clone(), to)),
+                }
+                Some(output.clone())
+            }
+        };
+        self.switches.push(Switched {
+            on,
+            from,
+            to,
+            heading,
+            carrying,
+        });
         Some(to)
     }
 
@@ -303,7 +357,7 @@ impl<W: Copy + PartialEq, O: Clone + PartialEq> Workspaces<W, O> {
     /// in front of the person on the workspace they arrive at.
     pub fn carry(&mut self, window: W, output: &O, direction: Direction) -> Option<Cell> {
         let to = self.send(window, output, direction)?;
-        self.go_to(output, to);
+        self.go(output, to, Some(direction), Some(window));
         Some(to)
     }
 
@@ -349,6 +403,8 @@ impl<W: Copy + PartialEq, O: Clone + PartialEq> Workspaces<W, O> {
     /// plugged in under the same name starts on the default.
     pub fn forget_output(&mut self, output: &O) {
         self.per_output.retain(|(key, _)| key != output);
+        self.switches
+            .retain(|switched| switched.on.as_ref() != Some(output));
     }
 
     /// The workspaces as a pager is told them, given the monitors there are:
@@ -663,5 +719,104 @@ mod tests {
             .map(|view| view.coordinates)
             .collect();
         assert_eq!(coordinates, [[0, 0], [1, 0], [0, 1], [1, 1]]);
+    }
+
+    fn switched(
+        on: Option<&'static str>,
+        from: u16,
+        to: u16,
+        heading: Option<Direction>,
+        carrying: Option<u32>,
+    ) -> Switched<u32, &'static str> {
+        Switched {
+            on,
+            from: Cell(from),
+            to: Cell(to),
+            heading,
+            carrying,
+        }
+    }
+
+    #[test]
+    fn a_switch_is_recorded_with_its_direction() {
+        let mut desk = Workspaces::<u32, &str>::new(Shape {
+            mode: Mode::Spanning,
+            grid: Grid {
+                wrap: true,
+                ..TWO_BY_TWO
+            },
+        });
+        desk.switch(&"DP-1", Direction::Right);
+        desk.switch(&"DP-1", Direction::Right);
+        assert_eq!(
+            desk.take_switches(),
+            [
+                switched(None, 0, 1, Some(Direction::Right), None),
+                switched(None, 1, 0, Some(Direction::Right), None),
+            ],
+            "across the wrap too, still going right"
+        );
+        assert_eq!(desk.take_switches(), [], "taken once");
+    }
+
+    #[test]
+    fn a_jump_is_recorded_with_none() {
+        let mut desk = spanning();
+        desk.go_to(&"DP-1", Cell(3));
+        assert_eq!(desk.take_switches(), [switched(None, 0, 3, None, None)]);
+    }
+
+    #[test]
+    fn a_carry_is_recorded_with_the_window_it_carries() {
+        let mut desk = spanning();
+        desk.add(1, &"DP-1");
+        desk.send(1, &"DP-1", Direction::Right);
+        assert_eq!(desk.take_switches(), [], "a window sent leaves the person");
+        desk.carry(1, &"DP-1", Direction::Down);
+        assert_eq!(
+            desk.take_switches(),
+            [switched(None, 0, 3, Some(Direction::Down), Some(1))]
+        );
+    }
+
+    #[test]
+    fn going_nowhere_records_nothing() {
+        let mut desk = spanning();
+        desk.go_to(&"DP-1", Cell(0));
+        desk.go_to(&"DP-1", Cell(9));
+        desk.switch(&"DP-1", Direction::Left);
+        assert_eq!(desk.take_switches(), []);
+    }
+
+    #[test]
+    fn a_reshape_forgets_the_switches() {
+        let mut desk = spanning();
+        desk.go_to(&"DP-1", Cell(3));
+        desk.reshape(Shape {
+            mode: Mode::Spanning,
+            grid: Grid {
+                columns: 2,
+                rows: 1,
+                wrap: false,
+            },
+        });
+        assert_eq!(desk.current(&"DP-1"), Cell(1), "clamped");
+        assert_eq!(desk.take_switches(), [], "not a switch the person made");
+    }
+
+    #[test]
+    fn per_output_records_the_monitor_and_spanning_none() {
+        let mut desk = per_output();
+        desk.switch(&"right", Direction::Down);
+        desk.go_to(&"left", Cell(1));
+        desk.forget_output(&"left");
+        assert_eq!(
+            desk.take_switches(),
+            [switched(Some("right"), 0, 2, Some(Direction::Down), None)],
+            "an unplugged monitor's switch is forgotten with it"
+        );
+        let mut desk = spanning();
+        desk.switch(&"left", Direction::Right);
+        assert_eq!(desk.take_switches()[0].on, None, "every monitor");
     }
 }

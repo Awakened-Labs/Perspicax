@@ -44,7 +44,7 @@ use perspicax_policy::{
     Access, Action, Bindings, Chord, Colour, Context, Decorations, Direction, Drag, Flipping,
     Focus, FocusModel, Gesture, Grid, Keysym, Mods, MouseBindings, MouseChord, OPAQUE, Opacity,
     Place, Program, Protocol, Remembering, Resistance, Rule, Shape, Side, Snapping, Switching,
-    Towards, VolumeKey,
+    Towards, Transitioning, VolumeKey,
 };
 use serde::Deserialize;
 
@@ -170,6 +170,10 @@ pub struct Config {
     /// Changing workspace with the pointer: resting it on an edge of the
     /// desk, or scrolling over the desktop.
     pub flipping: Flipping,
+    /// How a workspace switch is drawn while it happens: a slide, a
+    /// crossfade, a wipe, a carousel, or nothing. Not part of `workspaces`,
+    /// whose every change reshapes them.
+    pub transitioning: Transitioning,
     /// Dragging a window to an edge of the desk to give it half or a quarter
     /// of a monitor.
     pub snapping: Snapping,
@@ -551,6 +555,9 @@ impl Config {
                     scroll: true,
                 },
             },
+            // Both slide: a switch that shows which way it went is the more
+            // use where minimal's grid wraps and its edges flip.
+            transitioning: Transitioning::default(),
             decorations: Decorations::default(),
             theme: Theme::default(),
             splash: built.seat,
@@ -974,6 +981,7 @@ struct RawWorkspaces {
     grid: Option<[u16; 2]>,
     wrap: Option<bool>,
     flip: Option<RawFlip>,
+    transition: Option<RawTransition>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -987,6 +995,26 @@ struct RawFlip {
 
 /// Longer than this and a person would think edge flipping was broken.
 const FLIP_DELAY_MAX_MS: u64 = 5000;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawTransition {
+    effect: Option<RawEffect>,
+    duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawEffect {
+    None,
+    Slide,
+    Crossfade,
+    Wipe,
+    Carousel,
+}
+
+/// Longer than this and a switch would feel stuck rather than shown.
+const TRANSITION_MAX_MS: u64 = 2000;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1384,6 +1412,33 @@ impl Raw {
                 flipping.edge = flip.edge.unwrap_or(flipping.edge);
                 flipping.while_dragging = flip.while_dragging.unwrap_or(flipping.while_dragging);
                 flipping.scroll = flip.scroll.unwrap_or(flipping.scroll);
+            }
+            if let Some(transition) = workspaces.transition {
+                if let Some(effect) = transition.effect {
+                    config.transitioning.effect = match effect {
+                        RawEffect::None => perspicax_policy::Effect::None,
+                        RawEffect::Slide => perspicax_policy::Effect::Slide,
+                        RawEffect::Crossfade => perspicax_policy::Effect::Crossfade,
+                        RawEffect::Wipe => perspicax_policy::Effect::Wipe,
+                        RawEffect::Carousel => perspicax_policy::Effect::Carousel,
+                    };
+                }
+                if let Some(length) = transition.duration_ms {
+                    let key = "workspaces.transition.duration-ms".to_owned();
+                    if length == 0 {
+                        return Err(invalid(
+                            key,
+                            "0 is no transition: write effect = \"none\"".to_owned(),
+                        ));
+                    }
+                    if length > TRANSITION_MAX_MS {
+                        return Err(invalid(
+                            key,
+                            format!("{length} is more than {TRANSITION_MAX_MS} milliseconds"),
+                        ));
+                    }
+                    config.transitioning.duration_ms = Some(length);
+                }
             }
         }
 
@@ -2797,6 +2852,102 @@ mod tests {
         assert!(
             error.to_string().contains("workspaces.flip.delay-ms"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn both_profiles_slide_workspaces_by_default() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let transitioning = Config::profile(profile, SEAT).transitioning;
+            assert_eq!(
+                transitioning.effect,
+                perspicax_policy::Effect::Slide,
+                "{profile:?}"
+            );
+            assert_eq!(transitioning.length_ms(), 200, "{profile:?}");
+        }
+    }
+
+    #[test]
+    fn a_transition_takes_its_effect_and_its_length() {
+        let config = parse(
+            "[workspaces.transition]\neffect = \"carousel\"\nduration-ms = 650",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(
+            config.transitioning.effect,
+            perspicax_policy::Effect::Carousel
+        );
+        assert_eq!(config.transitioning.length_ms(), 650);
+        for (word, effect) in [
+            ("slide", perspicax_policy::Effect::Slide),
+            ("crossfade", perspicax_policy::Effect::Crossfade),
+            ("wipe", perspicax_policy::Effect::Wipe),
+            ("none", perspicax_policy::Effect::None),
+        ] {
+            let text = format!("[workspaces.transition]\neffect = \"{word}\"");
+            assert_eq!(parse(&text, SEAT).unwrap().transitioning.effect, effect);
+        }
+    }
+
+    #[test]
+    fn an_effect_takes_its_own_length_unless_one_is_written() {
+        let config = parse("[workspaces.transition]\neffect = \"wipe\"", SEAT).unwrap();
+        assert_eq!(config.transitioning.duration_ms, None);
+        assert_eq!(config.transitioning.length_ms(), 300, "a wipe's own");
+        let config = parse("[workspaces.transition]\nduration-ms = 120", SEAT).unwrap();
+        assert_eq!(
+            config.transitioning.effect,
+            perspicax_policy::Effect::Slide,
+            "the profile's, untouched"
+        );
+        assert_eq!(config.transitioning.length_ms(), 120);
+    }
+
+    #[test]
+    fn a_transition_of_no_time_or_of_seconds_is_refused_by_name() {
+        for text in [
+            "[workspaces.transition]\nduration-ms = 0",
+            "[workspaces.transition]\nduration-ms = 2001",
+        ] {
+            let error = parse(text, SEAT).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("workspaces.transition.duration-ms"),
+                "{text}: {error}"
+            );
+        }
+        let error = parse("[workspaces.transition]\nduration-ms = 0", SEAT).unwrap_err();
+        assert!(error.to_string().contains("effect = \"none\""), "{error}");
+        assert!(parse("[workspaces.transition]\nduration-ms = 2000", SEAT).is_ok());
+    }
+
+    #[test]
+    fn an_effect_not_known_is_refused() {
+        assert!(matches!(
+            parse("[workspaces.transition]\neffect = \"dissolve\"", SEAT),
+            Err(Error::Parse(_))
+        ));
+        assert!(
+            parse("[workspaces.transition]\nspeed = 2", SEAT).is_err(),
+            "nor a key it does not have"
+        );
+    }
+
+    #[test]
+    fn no_effect_keeps_its_length() {
+        let config = parse(
+            "[workspaces.transition]\neffect = \"none\"\nduration-ms = 500",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(config.transitioning.effect, perspicax_policy::Effect::None);
+        assert_eq!(
+            config.transitioning.duration_ms,
+            Some(500),
+            "kept, for when an effect is turned on again"
         );
     }
 

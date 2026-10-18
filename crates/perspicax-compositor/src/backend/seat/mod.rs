@@ -53,11 +53,12 @@ use smithay::{
         renderer::{
             ImportDma as _, ImportMemWl as _,
             element::{
-                Kind,
+                Id, Kind,
                 memory::MemoryRenderBufferRenderElement,
                 render_elements,
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+                utils::CropRenderElement,
             },
             gles::GlesRenderer,
         },
@@ -91,6 +92,7 @@ use crate::{
 };
 
 mod input;
+mod moving;
 mod overdue;
 mod settings;
 mod supervise;
@@ -105,12 +107,16 @@ render_elements! {
     /// What one output shows, front to back: the pointer, a snap preview,
     /// the windows or the lock, then the backdrop's logo. An `Image` is one
     /// the compositor made: the pointer's, or the logo. A client's cursor
-    /// surface, and the lock's, are a `CursorSurface`.
+    /// surface, and the lock's, are a `CursorSurface`. A `Preview` is a
+    /// colour the compositor fills: the snap preview, or a wipe's bar. A
+    /// window's part `Moving` is cut to a workspace that a switch is moving
+    /// ([`moving`]).
     Elements<=GlesRenderer>;
     Space=SpaceRenderElements<GlesRenderer, crate::framed::FramedElement<GlesRenderer>>,
     Image=MemoryRenderBufferRenderElement<GlesRenderer>,
     CursorSurface=WaylandSurfaceRenderElement<GlesRenderer>,
     Preview=SolidColorRenderElement,
+    Moving=CropRenderElement<crate::framed::FramedElement<GlesRenderer>>,
 }
 
 /// Where a dragged window would snap: a wash of the theme's `snap-preview`
@@ -238,6 +244,13 @@ struct Head {
     scheduled: bool,
     /// A frame is on the CRTC, awaiting its vblank.
     queued: bool,
+    /// A workspace switch being drawn here. See [`moving`].
+    moving: Option<moving::Moving>,
+    /// A wipe's bar, by the id it keeps from frame to frame, so the damage
+    /// tracker sees one bar moving down rather than a new one each time.
+    bar: Id,
+    /// A timer will draw the next frame of a transition, as no vblank will.
+    ticking: bool,
 }
 
 impl Session {
@@ -910,6 +923,9 @@ fn light(
         dirty: true,
         scheduled: false,
         queued: false,
+        moving: None,
+        bar: Id::new(),
+        ticking: false,
     }))
 }
 
@@ -932,6 +948,13 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         })
         .collect();
     let now = state.started_at().elapsed();
+    // A switch being drawn, gathered while the compositor can still be
+    // asked which windows are where.
+    let prepared = moving::prepare(
+        state,
+        crtc,
+        u64::try_from(now.as_millis()).unwrap_or(u64::MAX),
+    );
     let pointer_at = state
         .pointer
         .as_ref()
@@ -952,6 +975,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     let Session {
         renderer,
         heads,
+        handle,
         active,
         cursor,
         preview,
@@ -970,6 +994,10 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         return;
     }
     head.dirty = false;
+    if prepared.frame.is_none() {
+        // Over, or none begun: the settled workspace, drawn as it is.
+        head.moving = None;
+    }
 
     // Titles before the windows are drawn: writing one needs the fonts,
     // which drawing a window has no way to reach.
@@ -1031,7 +1059,15 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         ),
         Some(None) => {}
         None => match crate::shell::stack(space, &head.output) {
-            Some(stack) => elements.extend(scene(renderer, &stack, scale)),
+            Some(stack) => match &prepared.frame {
+                Some(frame) => {
+                    elements.extend(moving::elements(
+                        renderer, head, &stack, &prepared, frame, scale,
+                    ));
+                    moving::drawn(head);
+                }
+                None => elements.extend(scene(renderer, &stack, scale)),
+            },
             None => {
                 tracing::warn!(output = head.output.name(), "output is not mapped");
                 return;
@@ -1065,6 +1101,9 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         Ok(_) => {}
         Err(error) => tracing::warn!(output = head.output.name(), %error, "frame not rendered"),
     }
+    if prepared.frame.is_some() && lock.is_none() {
+        moving::keep_moving(head, handle);
+    }
 
     // Whether or not anything changed: a client waiting on a callback for a
     // commit that damaged nothing still has to be told it may draw again. An
@@ -1091,54 +1130,71 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
 /// What `stack` shows, front to back, at `scale`: each layer surface and
 /// window where the stack puts it.
 fn scene(renderer: &mut GlesRenderer, stack: &crate::shell::Stack, scale: f64) -> Vec<Elements> {
-    use smithay::{
-        backend::renderer::element::{AsRenderElements, Wrap},
-        desktop::LayerSurface,
-        utils::{Logical, Point},
-    };
+    let mut elements = layer_elements(renderer, &stack.overlay, scale);
+    elements.extend(window_elements(renderer, &stack.raised, scale));
+    elements.extend(layer_elements(renderer, &stack.top, scale));
+    elements.extend(window_elements(renderer, &stack.windows, scale));
+    elements.extend(layer_elements(renderer, &stack.lower, scale));
+    elements
+}
 
-    use crate::framed::{Framed, FramedElement};
+/// Layer surfaces, each where the stack puts it.
+fn layer_elements(
+    renderer: &mut GlesRenderer,
+    pieces: &[(
+        smithay::desktop::LayerSurface,
+        smithay::utils::Point<i32, smithay::utils::Logical>,
+    )],
+    scale: f64,
+) -> Vec<Elements> {
+    use smithay::backend::renderer::element::AsRenderElements;
 
     let at_scale = smithay::utils::Scale::from(scale);
-    let layers = |renderer: &mut GlesRenderer, pieces: &[(LayerSurface, Point<i32, Logical>)]| {
-        pieces
-            .iter()
-            .flat_map(|(surface, at)| {
-                AsRenderElements::<GlesRenderer>::render_elements::<
-                    WaylandSurfaceRenderElement<GlesRenderer>,
-                >(
-                    surface,
-                    renderer,
-                    at.to_physical_precise_round(scale),
-                    at_scale,
-                    1.0,
-                )
-            })
-            .map(|element| Elements::Space(SpaceRenderElements::Surface(element)))
-            .collect::<Vec<_>>()
-    };
-    let windows = |renderer: &mut GlesRenderer, pieces: &[(Framed, Point<i32, Logical>)]| {
-        pieces
-            .iter()
-            .flat_map(|(window, at)| {
-                // Read before drawing, which holds the same dress.
-                let alpha = window.alpha();
-                window.render_elements::<FramedElement<GlesRenderer>>(
-                    renderer,
-                    at.to_physical_precise_round(scale),
-                    at_scale,
-                    alpha,
-                )
-            })
-            .map(|element| Elements::Space(SpaceRenderElements::Element(Wrap::from(element))))
-            .collect::<Vec<_>>()
-    };
-    let mut elements = layers(renderer, &stack.overlay);
-    elements.extend(windows(renderer, &stack.raised));
-    elements.extend(layers(renderer, &stack.top));
-    elements.extend(windows(renderer, &stack.windows));
-    elements.extend(layers(renderer, &stack.lower));
-    elements
+    pieces
+        .iter()
+        .flat_map(|(surface, at)| {
+            AsRenderElements::<GlesRenderer>::render_elements::<
+                WaylandSurfaceRenderElement<GlesRenderer>,
+            >(
+                surface,
+                renderer,
+                at.to_physical_precise_round(scale),
+                at_scale,
+                1.0,
+            )
+        })
+        .map(|element| Elements::Space(SpaceRenderElements::Surface(element)))
+        .collect()
+}
+
+/// Windows, each where the stack puts it, at the alpha it is dressed in.
+fn window_elements(
+    renderer: &mut GlesRenderer,
+    pieces: &[(
+        crate::framed::Framed,
+        smithay::utils::Point<i32, smithay::utils::Logical>,
+    )],
+    scale: f64,
+) -> Vec<Elements> {
+    use smithay::backend::renderer::element::{AsRenderElements, Wrap};
+
+    use crate::framed::FramedElement;
+
+    let at_scale = smithay::utils::Scale::from(scale);
+    pieces
+        .iter()
+        .flat_map(|(window, at)| {
+            // Read before drawing, which holds the same dress.
+            let alpha = window.alpha();
+            window.render_elements::<FramedElement<GlesRenderer>>(
+                renderer,
+                at.to_physical_precise_round(scale),
+                at_scale,
+                alpha,
+            )
+        })
+        .map(|element| Elements::Space(SpaceRenderElements::Element(Wrap::from(element))))
+        .collect()
 }
 
 /// A frame reached the screen. Draw again if anything was committed since.

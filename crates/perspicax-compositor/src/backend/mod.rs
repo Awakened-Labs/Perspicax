@@ -438,6 +438,35 @@ impl Running {
         }
     }
 
+    /// Draw the workspace switches just made over a moment, from `now`
+    /// (milliseconds on the compositor's clock), as the person's
+    /// `[workspaces.transition]` says. Headless draws nothing.
+    pub(crate) fn begin_transitions(
+        &mut self,
+        #[cfg_attr(not(feature = "seat"), expect(unused_variables, reason = "the seat's"))]
+        switches: Vec<perspicax_policy::Switched<perspicax_node::SurfaceId, String>>,
+        #[cfg_attr(not(feature = "seat"), expect(unused_variables, reason = "the seat's"))]
+        grid: perspicax_policy::Grid,
+        #[cfg_attr(not(feature = "seat"), expect(unused_variables, reason = "the seat's"))]
+        now: u64,
+    ) {
+        match self {
+            Self::Headless { .. } => {}
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.begin_transitions(switches, grid, now),
+        }
+    }
+
+    /// End every transition being drawn at once: what is drawn is what is
+    /// there.
+    pub(crate) fn settle_transitions(&mut self) {
+        match self {
+            Self::Headless { .. } => {}
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => session.settle_transitions(),
+        }
+    }
+
     /// Light the keyboards' lock keys as xkb has them. Headless has no
     /// keyboard with lights.
     pub(crate) fn light(
