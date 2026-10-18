@@ -2064,6 +2064,9 @@ fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Actio
             "toggle-sticky" => Action::ToggleSticky,
             "toggle-maximize" => Action::ToggleMaximize,
             "minimize" => Action::Minimize,
+            "shade" => Action::Shade,
+            "unshade" => Action::Unshade,
+            "toggle-shade" => Action::ToggleShade,
             "next-tab" => Action::CycleTab { forward: true },
             "previous-tab" => Action::CycleTab { forward: false },
             "tab-with-previous" => Action::TabWithPrevious,
@@ -2086,7 +2089,8 @@ fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Actio
             other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
                 format!(
                     "`{other}` is not an action; use close, cycle-focus, reload, \
-                         toggle-sticky, toggle-maximize, minimize, next-tab, previous-tab, \
+                         toggle-sticky, toggle-maximize, minimize, \
+                         shade, unshade, toggle-shade, next-tab, previous-tab, \
                          tab-with-previous, detach-tab, start-menu, root-menu, \
                          next-layout, previous-layout, layout-<1-4>, \
                          next-workspace, previous-workspace, \
@@ -3642,6 +3646,46 @@ mod tests {
         assert_eq!(
             config.bindings.resolve(logo, &[Keysym::n]),
             Some(&Action::Minimize)
+        );
+    }
+
+    #[test]
+    fn shading_is_three_actions_a_key_can_have_and_neither_profile_binds_a_key_to() {
+        let config = parse(
+            "[keys]\n\"Logo+u\" = \"shade\"\n\
+             \"Logo+d\" = \"unshade\"\n\"Logo+s\" = \"toggle-shade\"",
+            SEAT,
+        )
+        .unwrap();
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        for (key, action) in [
+            (Keysym::u, Action::Shade),
+            (Keysym::d, Action::Unshade),
+            (Keysym::s, Action::ToggleShade),
+        ] {
+            assert_eq!(config.bindings.resolve(logo, &[key]), Some(&action));
+        }
+        let shading = |action: &Action| {
+            matches!(
+                action,
+                Action::Shade | Action::Unshade | Action::ToggleShade
+            )
+        };
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let bindings = Config::profile(profile, SEAT).bindings;
+            assert!(
+                !bindings.iter().any(|(_, action)| shading(action)),
+                "{profile:?} binds one"
+            );
+            assert!(!bindings.tap().is_some_and(shading), "{profile:?}'s tap");
+        }
+        let error = parse("[keys]\n\"Logo+x\" = \"roll-up\"", SEAT).unwrap_err();
+        assert!(
+            error.to_string().contains("shade, unshade, toggle-shade"),
+            "the refusal lists them: {error}"
         );
     }
 

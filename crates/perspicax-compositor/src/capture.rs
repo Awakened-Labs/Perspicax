@@ -141,6 +141,9 @@ mod taking {
         /// the person sees, translucency included, though an agent is still
         /// told what is behind a translucent window is covered.
         alpha: f32,
+        /// Drawn rolled up to its titlebar, as the monitor shows it: its
+        /// frame alone. A picture of the window by itself draws it whole.
+        rolled: bool,
     }
 
     pub(super) fn take(state: &mut Compositor, target: &ShotTarget) -> Result<Shot, ActError> {
@@ -273,15 +276,25 @@ mod taking {
             };
             let id = id_of(window);
             let hidden = id.is_some_and(|id| !origin(state, id).1);
-            let client = Rectangle::new(location - area.loc, window.geometry().size);
-            account(id, client, hidden);
+            let cover = Rectangle::new(bbox.loc - area.loc, bbox.size);
+            // Rolled up, its client is not in the picture, and the bar is
+            // this compositor's; the block over a redacted one's bar still
+            // says whose it is.
+            let rolled = crate::shell::is_shaded(window);
+            if !rolled {
+                let client = Rectangle::new(location - area.loc, window.geometry().size);
+                account(id, client, hidden);
+            } else if hidden {
+                account(id, cover, true);
+            }
             windows.push(Placed {
                 window: window.clone(),
                 at: *at,
-                cover: Rectangle::new(bbox.loc - area.loc, bbox.size),
+                cover,
                 redacted: hidden,
                 raised,
                 alpha: crate::shell::alpha(state.opacity_of(window, in_use)),
+                rolled,
             });
         }
         for (layer, at) in &stack.lower {
@@ -323,7 +336,11 @@ mod taking {
                 "the agent holds no consent for this window's process".to_owned(),
             ));
         }
-        let bbox = SpaceElement::bbox(&window);
+        // All of it, rolled up to its titlebar or not, as a picture of a
+        // minimized window is: a picture is a reading, and the agent may
+        // already read the window's tree. What the monitor shows of it is a
+        // picture of the monitor's.
+        let bbox = window.whole_bbox();
         if bbox.size.w <= 0 || bbox.size.h <= 0 {
             return Err(ActError::Capture(
                 "the window has drawn nothing yet".to_owned(),
@@ -346,6 +363,7 @@ mod taking {
                 // A picture of the window alone: nothing is behind it to
                 // show through, so it is drawn whole.
                 alpha: 1.0,
+                rolled: false,
             }],
             lower: Vec::new(),
             drawn: vec![Drawn {
@@ -446,11 +464,12 @@ mod taking {
                     elements.extend(
                         placed
                             .window
-                            .render_elements::<FramedElement<R>>(
+                            .elements::<R, FramedElement<R>>(
                                 renderer,
                                 placed.at.to_physical_precise_round(scale),
                                 scale,
                                 placed.alpha,
+                                placed.rolled,
                             )
                             .into_iter()
                             .map(Scene::Window),

@@ -22,12 +22,24 @@
 //! of the window to press on, and in the bbox it would tell a maximized
 //! window it is on the next monitor too, which only the line reaches.
 //!
+//! # Rolled up
+//!
+//! A window rolled up to its titlebar (`crate::shell::is_shaded`) keeps its
+//! geometry, by the rule above: its client keeps its size and its place, and
+//! an agent's click is still aimed from there. What changes is everything
+//! else. It is drawn as its frame alone, measured from a client of no height
+//! ([`rolled_up`]); its [`bbox`] and its input region are that frame and no
+//! more, so a click where the client was falls through to whatever is
+//! under it, and a picture of the monitor shows that. A picture of the
+//! window alone draws all of it, as one of a minimized window does
+//! ([`Framed::elements`]).
+//!
 //! [`Space`]: smithay::desktop::Space
 //! [`bbox`]: SpaceElement::bbox
 
 use std::{cell::RefCell, ops::Deref};
 
-use perspicax_policy::{Insets, Rect, frame_rects, outline_rects, outset};
+use perspicax_policy::{Insets, Rect, frame_rects, outline_rects, outset, rolled_up};
 use smithay::{
     backend::renderer::{
         ImportAll, ImportMem, Renderer,
@@ -40,8 +52,10 @@ use smithay::{
     },
     desktop::{PopupManager, Window, space::SpaceElement},
     output::Output,
-    utils::{IsAlive, Logical, Physical, Point, Rectangle, Scale},
+    utils::{IsAlive, Logical, Physical, Point, Rectangle, Scale, Size},
 };
+
+use crate::shell::is_shaded;
 
 smithay::backend::renderer::element::render_elements! {
     /// What a framed window draws as: the client's surfaces, the title, and
@@ -222,14 +236,34 @@ impl Framed {
         });
     }
 
+    /// The window's bounds as if it were not rolled up: its client, its
+    /// menus and the frame round it. A picture of the window alone is this
+    /// big, rolled up or not.
+    pub(crate) fn whole_bbox(&self) -> Rectangle<i32, Logical> {
+        let window = SpaceElement::bbox(&self.0);
+        self.outer_as(false)
+            .map_or(window, |outer| window.merge(outer))
+    }
+
     /// The frame's outside, and the grip beyond it, in the same coordinates
     /// as the window's own geometry. Nothing for a window with no frame.
     fn outer(&self) -> Option<Rectangle<i32, Logical>> {
+        self.outer_as(is_shaded(self))
+    }
+
+    /// [`Self::outer`], `rolled` up to its titlebar or not: rolled up, the
+    /// frame of a client of no height, with no grip, since nothing resizes
+    /// a window rolled up.
+    fn outer_as(&self, rolled: bool) -> Option<Rectangle<i32, Logical>> {
         let (insets, grip) = self.dress(|dress| (dress.insets, dress.grip));
         if insets.is_none() {
             return None;
         }
+        let grip = if rolled { 0 } else { grip };
         let mut outer = self.0.geometry();
+        if rolled {
+            outer.size.h = 0;
+        }
         outer.loc -= Point::from((insets.left + grip, insets.top + grip));
         outer.size += (
             insets.left + insets.right + 2 * grip,
@@ -265,16 +299,24 @@ impl SpaceElement for Framed {
         SpaceElement::geometry(&self.0)
     }
 
+    /// The client's, its menus included, and the frame round it. Rolled up
+    /// to its titlebar, the frame alone, which is all that is drawn: nothing,
+    /// headless, where no frame is worn.
     fn bbox(&self) -> Rectangle<i32, Logical> {
-        let window = SpaceElement::bbox(&self.0);
-        self.outer().map_or(window, |outer| window.merge(outer))
+        if is_shaded(self) {
+            return self
+                .outer_as(true)
+                .unwrap_or_else(|| Rectangle::new(self.0.geometry().loc, Size::default()));
+        }
+        self.whole_bbox()
     }
 
     /// The client's input region, and the frame: a press on the titlebar is
     /// the compositor's to handle, and must not fall through to whatever is
-    /// under the window.
+    /// under the window. Rolled up, the frame alone: a press where the
+    /// client was goes to whatever is under it.
     fn is_in_input_region(&self, point: &Point<f64, Logical>) -> bool {
-        SpaceElement::is_in_input_region(&self.0, point)
+        (!is_shaded(self) && SpaceElement::is_in_input_region(&self.0, point))
             || self
                 .outer()
                 .is_some_and(|outer| outer.to_f64().contains(*point))
@@ -301,13 +343,7 @@ impl SpaceElement for Framed {
     }
 }
 
-impl<R> AsRenderElements<R> for Framed
-where
-    R: Renderer + ImportAll + ImportMem,
-    R::TextureId: Send + Clone + 'static,
-{
-    type RenderElement = FramedElement<R>;
-
+impl Framed {
     /// The client's menus, then the agent's outline, then the client's own
     /// surfaces, then the title, then the bars: front to back, as smithay
     /// draws a window but for the outline between. The outline is in front
@@ -316,18 +352,29 @@ where
     /// it, as they are of the titlebar: the index stacks them directly above
     /// their window (#112), and what is drawn is what it describes. The title
     /// is over the bar it is written on.
-    fn render_elements<C: From<Self::RenderElement>>(
+    ///
+    /// `rolled` up to its titlebar, the frame alone, measured from a client
+    /// of no height, and nothing of the client: what is drawn of a window
+    /// rolled up. A picture of the window alone draws it whole.
+    pub(crate) fn elements<R, C>(
         &self,
         renderer: &mut R,
         location: Point<i32, Physical>,
         scale: Scale<f64>,
         alpha: f32,
-    ) -> Vec<C> {
+        rolled: bool,
+    ) -> Vec<C>
+    where
+        R: Renderer + ImportAll + ImportMem,
+        R::TextureId: Send + Clone + 'static,
+        C: From<FramedElement<R>>,
+    {
         // `location` is where the surface's own origin goes; the client
         // geometry, which the frame is measured from, is offset within it.
         let geometry = self.0.geometry();
         let origin = location + geometry.loc.to_physical_precise_round(scale);
         let client = Rect::new(0, 0, geometry.size.w, geometry.size.h);
+        let client = if rolled { rolled_up(client) } else { client };
         let solid = |strip: &Rect, buffer: &mut SolidColorBuffer, colour: [f32; 4]| {
             buffer.update((strip.w, strip.h), colour);
             let at = origin + Point::from((strip.x, strip.y)).to_physical_precise_round(scale);
@@ -347,6 +394,9 @@ where
             Vec<WaylandSurfaceRenderElement<R>>,
             Vec<WaylandSurfaceRenderElement<R>>,
         ) = match self.0.toplevel() {
+            // Rolled up, nothing of the client is drawn, nor its menus,
+            // which it has none of then.
+            _ if rolled => (Vec::new(), Vec::new()),
             Some(toplevel) => {
                 let root = toplevel.wl_surface();
                 let mut menus = Vec::new();
@@ -426,5 +476,24 @@ where
             }
         });
         elements
+    }
+}
+
+impl<R> AsRenderElements<R> for Framed
+where
+    R: Renderer + ImportAll + ImportMem,
+    R::TextureId: Send + Clone + 'static,
+{
+    type RenderElement = FramedElement<R>;
+
+    /// The window as it is drawn: see [`Framed::elements`].
+    fn render_elements<C: From<Self::RenderElement>>(
+        &self,
+        renderer: &mut R,
+        location: Point<i32, Physical>,
+        scale: Scale<f64>,
+        alpha: f32,
+    ) -> Vec<C> {
+        self.elements(renderer, location, scale, alpha, is_shaded(self))
     }
 }

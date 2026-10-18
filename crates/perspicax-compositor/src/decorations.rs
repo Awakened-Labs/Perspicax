@@ -84,6 +84,16 @@ fn is_server_side(surface: &WlSurface) -> bool {
     })
 }
 
+/// The client rect `window`'s frame is drawn round: `client`, or, rolled up
+/// to its titlebar, a client of no height there (`perspicax_policy::rolled_up`).
+fn drawn_client(window: &Framed, client: perspicax_policy::Rect) -> perspicax_policy::Rect {
+    if crate::shell::is_shaded(window) {
+        perspicax_policy::rolled_up(client)
+    } else {
+        client
+    }
+}
+
 /// The protocols' globals, created once with the compositor.
 pub(crate) struct DecorationStates {
     /// Held for the life of the compositor; its handler needs no access.
@@ -241,7 +251,7 @@ impl Compositor {
             let size = crate::shell::extent_size(window);
             let client = perspicax_policy::Rect::new(0, 0, size.w, size.h);
             let title_at = perspicax_policy::titlebar(client, insets, &decorations);
-            let grip = if Self::look(window) == Look::Normal {
+            let grip = if Self::look(window) == Look::Normal && !crate::shell::is_shaded(window) {
                 perspicax_policy::GRIP
             } else {
                 0
@@ -253,18 +263,20 @@ impl Compositor {
     }
 
     /// What part of `window`'s frame the pointer at `at` is on, if any.
+    /// Rolled up to its titlebar, the frame has no edge to resize by.
     pub(crate) fn frame_part(
         &self,
         window: &Framed,
         at: smithay::utils::Point<f64, Logical>,
     ) -> Option<perspicax_policy::Part> {
         let client = self.extent(window)?;
+        let shaded = crate::shell::is_shaded(window);
         perspicax_policy::part_at(
             (at.x, at.y),
-            rect(client),
+            drawn_client(window, rect(client)),
             self.insets(window),
             &self.backend.decorations(),
-            Self::look(window) == Look::Normal,
+            Self::look(window) == Look::Normal && !shaded,
             crate::shell::id_of(window)
                 .and_then(|id| self.tabs.tabs(id))
                 .map_or(1, <[_]>::len),
@@ -273,13 +285,14 @@ impl Compositor {
 
     /// What this compositor draws round `window`, in global space, for the
     /// facts: its frame's strips, if it frames it, and the line round it, if
-    /// an agent may act on it.
+    /// an agent may act on it. Rolled up to its titlebar, the frame of a
+    /// client of no height, which is what is drawn.
     pub(crate) fn frame_facts(
         &self,
         window: &Framed,
         client: Rectangle<i32, Logical>,
     ) -> Vec<NodeRect> {
-        let (client, insets) = (rect(client), self.insets(window));
+        let (client, insets) = (drawn_client(window, rect(client)), self.insets(window));
         frame_rects(client, insets)
             .into_iter()
             .chain(outline_rects(
@@ -354,11 +367,18 @@ impl Compositor {
     /// room for its frame and the panels as they are now, and keep any other
     /// one's titlebar on screen. Only for a window on screen: a parked one
     /// is refitted when it comes back.
+    ///
+    /// A window rolled up to its titlebar that no longer has one of ours,
+    /// its client having asked to draw its own frame, or the config having
+    /// said every client does, is unrolled: nothing of it would be drawn.
     pub(crate) fn refit(&mut self, window: &Framed) {
         if self.space.element_location(window).is_none() {
             return;
         }
         let window = window.clone();
+        if crate::shell::is_shaded(&window) && !Self::is_server_decorated(&window) {
+            self.shade(&window, false);
+        }
         if let Some(fill) = Self::filling(&window) {
             self.fill(&window, fill, None);
         } else if let Some(zone) = placement(&window, |placement| placement.snapped) {

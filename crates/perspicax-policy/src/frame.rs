@@ -230,6 +230,16 @@ pub fn frame_rects(client: Rect, insets: Insets) -> Vec<Rect> {
     .collect()
 }
 
+/// The client rect a window rolled up to its titlebar is framed as: where
+/// its client is, as wide, and of no height. Its frame is then the titlebar,
+/// with the border above it, and the bottom border just under the bar
+/// ([`frame_rects`]); the side borders, as tall as the client, are gone.
+/// Its client keeps its own size, and is simply not drawn.
+#[must_use]
+pub fn rolled_up(client: Rect) -> Rect {
+    Rect::new(client.x, client.y, client.w, 0)
+}
+
 /// The rectangles a line `width` wide round `around` is drawn as, just
 /// outside it: [`frame_rects`] of a frame as wide on every side. No
 /// rectangles for a width of 0.
@@ -335,8 +345,11 @@ pub fn tab_rects(bar: Rect, count: usize) -> Vec<Rect> {
 /// or `None` if it is on the client or off the frame altogether.
 ///
 /// `resizable` is false for a maximized window: it keeps its titlebar, and
-/// has no edge to drag. `tabs` is how many tabs its group has, one for a
-/// window in no group, which has a title and no tabs. Otherwise every edge can be grabbed from the border
+/// has no edge to drag. It is false too for a window rolled up to its
+/// titlebar, which is asked about as its [`rolled_up`] client: then any of
+/// its frame is its titlebar, to move it by, or a button. `tabs` is how many
+/// tabs its group has, one for a window in no group, which has a title and
+/// no tabs. Otherwise every edge can be grabbed from the border
 /// and up to [`GRIP`] pixels outside it, and a corner from [`CORNER`] pixels
 /// along either side of it, so the titlebar's two ends resize diagonally.
 #[must_use]
@@ -498,6 +511,44 @@ mod tests {
         let area: i32 = strips.iter().map(|strip| strip.w * strip.h).sum();
         let outer = outset(client, framed());
         assert_eq!(area, outer.w * outer.h - client.w * client.h);
+    }
+
+    /// Rolled up, the frame is the bar, with the border above it and the
+    /// border under it, and nothing beside a client that is not drawn.
+    /// Maximized, it has no border, and is the bar alone.
+    #[test]
+    fn a_window_rolled_up_is_framed_by_its_titlebar_and_the_border_round_it() {
+        let client = Rect::new(100, 100, 400, 300);
+        assert_eq!(
+            frame_rects(rolled_up(client), framed()),
+            vec![Rect::new(98, 74, 404, 26), Rect::new(98, 100, 404, 2)]
+        );
+        let decorations = Decorations::default();
+        let maximized = Insets::of(&decorations, Look::Maximized);
+        assert_eq!(
+            frame_rects(rolled_up(Rect::new(0, 24, 1920, 1056)), maximized),
+            vec![Rect::new(0, 0, 1920, 24)]
+        );
+    }
+
+    /// Nothing is under the bar to press on, and no edge to drag: every
+    /// pixel of the frame moves the window, but its buttons.
+    #[test]
+    fn a_rolled_up_window_has_no_edges_and_nothing_under_its_titlebar() {
+        let decorations = Decorations::default();
+        let client = rolled_up(Rect::new(100, 100, 400, 300));
+        let at = |x: f64, y: f64| part_at((x, y), client, framed(), &decorations, false, 1);
+        assert_eq!(
+            at(300.0, 101.0),
+            Some(Part::Title),
+            "the border under the bar"
+        );
+        assert_eq!(at(300.0, 103.0), None, "where the client was");
+        assert_eq!(at(300.0, 250.0), None);
+        assert_eq!(at(99.0, 80.0), Some(Part::Title), "not an edge");
+        assert_eq!(at(99.0, 101.0), Some(Part::Title), "nor a corner");
+        assert_eq!(at(95.0, 80.0), None, "and no grip outside it");
+        assert_eq!(at(488.0, 88.0), Some(Part::Button(FrameButton::Close)));
     }
 
     #[test]

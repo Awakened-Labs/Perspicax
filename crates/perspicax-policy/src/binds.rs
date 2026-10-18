@@ -75,6 +75,15 @@ pub enum Action {
     ToggleMaximize,
     /// Take the focused window off the screen until it is cycled back to.
     Minimize,
+    /// Roll the focused window up to its titlebar: it keeps its place and
+    /// its size, and only the bar is drawn. Rolled up already, it stays so,
+    /// so a second notch of a wheel bound to this does nothing more. Only a
+    /// window whose frame the compositor draws has a titlebar to roll up to.
+    Shade,
+    /// Unroll the focused window, as it was. Nothing for one not rolled up.
+    Unshade,
+    /// Roll the focused window up to its titlebar, or unroll it.
+    ToggleShade,
     /// Bring the next tab of the focused window's group to the front, or the
     /// previous one. See [`crate::Groups`].
     CycleTab { forward: bool },
@@ -165,6 +174,9 @@ impl Action {
             | Self::Snap(_)
             | Self::ToggleMaximize
             | Self::Minimize
+            | Self::Shade
+            | Self::Unshade
+            | Self::ToggleShade
             | Self::CycleTab { .. }
             | Self::TabWithPrevious
             | Self::DetachTab
@@ -644,6 +656,9 @@ mod tests {
             Action::Snap(Direction::Left),
             Action::ToggleMaximize,
             Action::Minimize,
+            Action::Shade,
+            Action::Unshade,
+            Action::ToggleShade,
             Action::CycleTab { forward: true },
             Action::TabWithPrevious,
             Action::DetachTab,

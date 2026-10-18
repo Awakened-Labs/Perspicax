@@ -24,6 +24,7 @@ mod grabs;
 mod opacity;
 mod remember;
 mod resist;
+mod shade;
 mod snap;
 mod stacking;
 mod tabs;
@@ -106,6 +107,9 @@ pub(crate) struct Placement {
     /// program's last window closed instead. See
     /// [`Compositor::place_remembered`].
     pub(crate) cascaded: Option<u32>,
+    /// Rolled up to its titlebar by the person: in its place, at its size,
+    /// with only its frame drawn. See `shade`.
+    pub(crate) shaded: bool,
 }
 
 /// How a window fills its monitor.
@@ -146,6 +150,10 @@ pub(crate) struct Resize {
 }
 
 /// This window's placement record, created on first use.
+///
+/// `f` reads and writes the record and does nothing else: it never reaches
+/// the space, or draws. [`is_shaded`] reads the record while smithay
+/// measures a window and draws it, and would find it borrowed.
 pub(crate) fn placement<T>(window: &Framed, f: impl FnOnce(&mut Placement) -> T) -> T {
     window
         .user_data()
@@ -155,6 +163,16 @@ pub(crate) fn placement<T>(window: &Framed, f: impl FnOnce(&mut Placement) -> T)
         .get::<RefCell<Placement>>()
         .expect("inserted on the line above");
     f(&mut cell.borrow_mut())
+}
+
+/// Whether the person rolled this window up to its titlebar. Asked while a
+/// window is measured, hit and drawn, so it only looks: a window with no
+/// record was never rolled up.
+pub(crate) fn is_shaded(window: &Framed) -> bool {
+    window
+        .user_data()
+        .get::<RefCell<Placement>>()
+        .is_some_and(|cell| cell.borrow().shaded)
 }
 
 /// The resize arrow for dragging `edges`.
@@ -316,7 +334,14 @@ impl Compositor {
     /// A parked window -- minimized, or on a workspace not showing -- is only
     /// told. It stays parked, and fills its monitor when it comes back (see
     /// `unpark_window`).
+    ///
+    /// Going fullscreen unrolls a window rolled up to its titlebar, however
+    /// it is asked: a fullscreen window has no titlebar to be rolled up to.
+    /// Maximized, it stays rolled up, as a bar across the top of the monitor.
     pub(crate) fn fill(&mut self, window: &Framed, fill: Fill, on: Option<&WlOutput>) {
+        if fill == Fill::Fullscreen {
+            self.shade(window, false);
+        }
         let Some(surface) = window.toplevel().cloned() else {
             let shown = self.space.element_location(window).is_some();
             match fill {
@@ -641,7 +666,8 @@ impl Compositor {
         let Some(pointer) = self.pointer.clone() else {
             return;
         };
-        if Self::filling(window).is_some() {
+        // A window rolled up to its titlebar has no client's edge to drag.
+        if Self::filling(window).is_some() || is_shaded(window) {
             return;
         }
         let Some(bounds) = self.space.element_geometry(window) else {
@@ -683,12 +709,13 @@ impl Compositor {
 
     /// Route the keyboard and pointer to a popup chain (a menu, say) until it
     /// is dismissed, so a click outside closes it the way every desktop does.
+    /// Not for a window rolled up to its titlebar, which has no menus.
     pub(crate) fn grab_popup(&mut self, popup: PopupSurface, seat: &Seat<Self>, serial: Serial) {
         let kind = PopupKind::Xdg(popup);
-        let Some(root) = find_popup_root_surface(&kind)
-            .ok()
-            .filter(|root| self.window_for(root).is_some())
-        else {
+        let Some(root) = find_popup_root_surface(&kind).ok().filter(|root| {
+            self.window_for(root)
+                .is_some_and(|window| !is_shaded(&window))
+        }) else {
             return;
         };
         let Ok(mut grab) = self
