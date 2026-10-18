@@ -244,7 +244,8 @@ impl Compositor {
     pub(crate) fn dress_frames(&self) {
         let decorations = self.backend.decorations();
         let in_use = self.window_in_use();
-        let lit = self.backend.lit();
+        let now = self.clock_ms();
+        let (lit, fading) = (self.backend.lit(now), self.backend.fading(now));
         for window in self.space.elements() {
             let (colour, ink) = perspicax_policy::frame_colours(
                 &decorations,
@@ -274,18 +275,32 @@ impl Compositor {
             window.cast(casts.then_some(decorations.shadow));
             window.fade(crate::shell::alpha(self.opacity_of(window, in_use)));
             let shades = Self::is_server_decorated(window);
-            window.light(
-                lit.filter(|(lit, ..)| *lit == window)
-                    .and_then(|(_, lit, light)| {
-                        let buttons =
-                            perspicax_policy::buttons(client, insets, &decorations, shades);
-                        let (_, at) = buttons.into_iter().find(|(button, _)| *button == lit)?;
-                        let colour = perspicax_policy::wash(&decorations, lit, light, ink);
-                        Some(crate::framed::Wash { at, colour })
-                    }),
-            );
+            let wash = |lighting: Option<crate::backend::Lighting<'_>>| {
+                let (_, lit, light, share) = lighting.filter(|(lit, ..)| *lit == window)?;
+                let buttons = perspicax_policy::buttons(client, insets, &decorations, shades);
+                let (_, at) = buttons.into_iter().find(|(button, _)| *button == lit)?;
+                let colour = perspicax_policy::wash(&decorations, lit, light, ink);
+                #[expect(clippy::cast_possible_truncation, reason = "a share between 0 and 1")]
+                let alpha = share as f32;
+                Some(crate::framed::Wash { at, colour, alpha })
+            };
+            window.light(wash(lit));
+            window.fade_light(wash(fading));
+            window.rolling(crate::shell::rolling(window, now));
         }
         self.dress_marks();
+    }
+
+    /// Whether anything on the desk is moving at `now_ms`, for the seat to
+    /// keep drawing: a window rolling, or a button's light coming up or
+    /// going out.
+    #[cfg(feature = "seat")]
+    pub(crate) fn animating(&self, now_ms: u64) -> bool {
+        self.backend.lighting(now_ms)
+            || self
+                .space
+                .elements()
+                .any(|window| crate::shell::rolling(window, now_ms).is_some())
     }
 
     /// What part of `window`'s frame the pointer at `at` is on, if any.

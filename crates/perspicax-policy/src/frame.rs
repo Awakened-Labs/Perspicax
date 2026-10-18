@@ -82,6 +82,18 @@ pub struct Decorations {
     pub radius: i32,
     /// The soft shadow cast under a window with a frame of ours.
     pub shadow: Shadow,
+    /// How long its moves take.
+    pub animation: Animation,
+}
+
+/// How long a frame's moves take: the `[decorations.animation]` table, each
+/// in milliseconds, 0 for none, at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Animation {
+    /// Rolling a window up to its titlebar, or down from it, the whole way.
+    pub shade_ms: u32,
+    /// A titlebar button's light coming up under the pointer, or going out.
+    pub hover_ms: u32,
 }
 
 impl Default for Decorations {
@@ -99,6 +111,7 @@ impl Default for Decorations {
             close_hover: Colour::rgb(0xda, 0x44, 0x53),
             radius: 0,
             shadow: Shadow::default(),
+            animation: Animation::default(),
         }
     }
 }

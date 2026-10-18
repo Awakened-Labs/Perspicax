@@ -475,8 +475,11 @@ mod taking {
                                 placed.at.to_physical_precise_round(scale),
                                 scale,
                                 placed.alpha,
-                                placed.rolled,
-                                placed.shadow,
+                                crate::framed::Drawn {
+                                    rolled: placed.rolled,
+                                    rolling: None,
+                                    shadow: placed.shadow,
+                                },
                             )
                             .into_iter()
                             .map(Scene::Window),

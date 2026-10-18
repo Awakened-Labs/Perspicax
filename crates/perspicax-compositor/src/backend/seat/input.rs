@@ -70,7 +70,7 @@ use super::{
         Running,
         hatch::{self, Hatch},
     },
-    Session, settings,
+    Lit, Session, settings,
 };
 use crate::{
     framed::Framed,
@@ -421,6 +421,7 @@ pub(super) fn relight(state: &mut Compositor, at: Point<f64, Logical>, hit: Opti
         Some(Part::Button(button)) => Some(button),
         _ => None,
     };
+    let now = state.clock_ms();
     let lit = match &session.button_press {
         _ if state.lock.is_some() => None,
         // Asked of the window pressed on, as the release asks, and not of
@@ -441,15 +442,35 @@ pub(super) fn relight(state: &mut Compositor, at: Point<f64, Logical>, hit: Opti
             perspicax_policy::light(None, button_at(hit.frame))
                 .map(|(button, light)| (window, button, light))
         }),
-    };
+    }
+    .map(|(window, button, light)| Lit {
+        window,
+        button,
+        light,
+        since: now,
+    });
+    // How lit the one lit now is, for its light to go out from there.
+    let share = state.backend.lit(now).map_or(0.0, |(.., share)| share);
     let Running::Seat(session) = &mut state.backend else {
         return;
     };
-    if session.lit == lit {
+    let unchanged = match (&session.lit, &lit) {
+        (Some(was), Some(now)) => was.is(now),
+        (was, now) => was.is_none() && now.is_none(),
+    };
+    if unchanged {
         return;
     }
-    if let Some((window, ..)) = session.lit.take() {
-        window.light(None);
+    let mut lit = lit;
+    if let Some(old) = session.lit.take() {
+        old.window.light(None);
+        match &mut lit {
+            // The same button, pressed now or let go: its light carries on.
+            Some(new) if new.window == old.window && new.button == old.button => {
+                new.since = old.since;
+            }
+            _ => session.fading = Some((Lit { since: now, ..old }, share)),
+        }
     }
     session.lit = lit;
     state.backend.redraw();

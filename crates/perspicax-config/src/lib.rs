@@ -41,10 +41,10 @@ use std::{
 };
 
 use perspicax_policy::{
-    Access, Action, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction, Drag, Face,
-    Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Keysym, Mods, MouseBindings,
-    MouseChord, OPAQUE, Opacity, Place, Program, Protocol, Remembering, Resistance, Rule, Shadow,
-    Shape, Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
+    Access, Action, Animation, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction,
+    Drag, Effect, Face, Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Keysym, Mods,
+    MouseBindings, MouseChord, OPAQUE, Opacity, Place, Program, Protocol, Remembering, Resistance,
+    Rule, Shadow, Shape, Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
 };
 use serde::Deserialize;
 
@@ -57,7 +57,8 @@ pub use crate::shell::{
 pub use perspicax_policy::DOUBLE_CLICK_MS;
 /// The theme's types, as the shell reads them from [`Shell`].
 pub use perspicax_policy::{
-    Appearance, Builtin, ColorScheme, Contrast, Family, Font, Logo, Palette, Rgba, Role, Theme,
+    Appearance, Builtin, ColorScheme, Contrast, Family, Font, Logo, Motion, Palette, Rgba, Role,
+    Theme,
 };
 
 /// Which cargo features this binary was built with, as far as config cares.
@@ -627,6 +628,12 @@ fn decorations(profile: Profile) -> Decorations {
                 opacity: 50,
                 colour: Colour::rgb(0, 0, 0),
             },
+            // A roll the eye can follow, and a light that comes up rather
+            // than snapping on.
+            animation: Animation {
+                shade_ms: 150,
+                hover_ms: 80,
+            },
             ..Decorations::default()
         },
         // Fluxbox's own titlebar, Stick at the left and the rest at the
@@ -960,6 +967,13 @@ enum RawContrast {
     High,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawMotion {
+    Normal,
+    Reduced,
+}
+
 /// The `[splash]` table.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -978,6 +992,7 @@ struct RawTheme {
     cursor_size: Option<u32>,
     color_scheme: Option<RawColorScheme>,
     contrast: Option<RawContrast>,
+    motion: Option<RawMotion>,
     /// By role, checked against [`Role`] rather than by serde, so that a
     /// misspelled role is named with the table it is in.
     palette: Option<std::collections::BTreeMap<String, String>>,
@@ -1016,6 +1031,15 @@ struct RawDecorations {
     agent: Option<RawAgentLook>,
     icons: Option<RawIcons>,
     shadow: Option<RawShadow>,
+    animation: Option<RawAnimation>,
+}
+
+/// The `[decorations.animation]` table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawAnimation {
+    shade_ms: Option<u32>,
+    hover_ms: Option<u32>,
 }
 
 /// The `[decorations.shadow]` table.
@@ -1682,6 +1706,13 @@ impl Raw {
         config.decorations.unfocused = palette[Role::TitleUnfocused].colour();
         config.decorations.unfocused_ink = palette[Role::TitleUnfocusedInk].colour();
         config.decorations.close_hover = palette[Role::TitleCloseHover].colour();
+        // Less motion is every animation at once, whatever each one's own
+        // table says: a person troubled by motion should not have to find
+        // them all.
+        if config.theme.motion == Motion::Reduced {
+            config.transitioning.effect = Effect::None;
+            config.decorations.animation = Animation::default();
+        }
 
         if let Some(protocols) = self.protocols {
             config.protocols = protocols.apply(config.protocols, built)?;
@@ -1822,6 +1853,24 @@ impl RawDecorations {
         }
         if let Some(radius) = self.corner_radius {
             decorations.radius = pixels("corner-radius", radius, 0..=16)?;
+        }
+        if let Some(written) = self.animation {
+            let length = |key: &str, ms: u32| {
+                if ms <= 1000 {
+                    Ok(ms)
+                } else {
+                    Err(invalid(
+                        format!("decorations.animation.{key}"),
+                        format!("{ms} is more than 1000 milliseconds; 0 is none"),
+                    ))
+                }
+            };
+            if let Some(ms) = written.shade_ms {
+                decorations.animation.shade_ms = length("shade-ms", ms)?;
+            }
+            if let Some(ms) = written.hover_ms {
+                decorations.animation.hover_ms = length("hover-ms", ms)?;
+            }
         }
         if let Some(written) = self.shadow {
             let shadow = &mut decorations.shadow;
@@ -2074,6 +2123,10 @@ fn theme(written: Option<RawTheme>, decorations: Option<&RawDecorations>) -> Res
         cursor_size: written.cursor_size,
         apps,
         logo,
+        motion: match written.motion {
+            None | Some(RawMotion::Normal) => Motion::Normal,
+            Some(RawMotion::Reduced) => Motion::Reduced,
+        },
     })
 }
 
@@ -3798,6 +3851,52 @@ mod tests {
                 other => panic!("{text}: {other:?}"),
             }
         }
+    }
+
+    /// classic rolls a window up as the eye can follow and brings a
+    /// button's light up; minimal, flat, does both at once.
+    #[test]
+    fn classic_animates_its_frames_and_minimal_does_not() {
+        let classic = Config::profile(Profile::Classic, SEAT)
+            .decorations
+            .animation;
+        assert_eq!((classic.shade_ms, classic.hover_ms), (150, 80));
+        assert_eq!(
+            Config::profile(Profile::Minimal, SEAT)
+                .decorations
+                .animation,
+            Animation::default()
+        );
+        let config = parse(
+            "profile = \"minimal\"\n[decorations.animation]\nshade-ms = 200",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(config.decorations.animation.shade_ms, 200);
+        assert_eq!(config.decorations.animation.hover_ms, 0);
+        match parse("[decorations.animation]\nhover-ms = 1001", SEAT) {
+            Err(Error::Invalid { key, .. }) => assert_eq!(key, "decorations.animation.hover-ms"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Less motion is every animation at once, a workspace switch's among
+    /// them, whatever their own tables say.
+    #[test]
+    fn reduced_motion_makes_every_switch_and_roll_instant() {
+        let config = parse(
+            "[theme]\nmotion = \"reduced\"\n[workspaces.transition]\neffect = \"carousel\"\n\
+             [decorations.animation]\nshade-ms = 400",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(config.theme.motion, Motion::Reduced);
+        assert_eq!(config.transitioning.effect, Effect::None);
+        assert_eq!(config.decorations.animation, Animation::default());
+        let config = parse("[theme]\nmotion = \"normal\"", SEAT).unwrap();
+        assert_ne!(config.transitioning.effect, Effect::None, "classic's slide");
+        assert_eq!(config.decorations.animation.shade_ms, 150);
+        assert!(parse("[theme]\nmotion = \"none\"", SEAT).is_err());
     }
 
     #[test]

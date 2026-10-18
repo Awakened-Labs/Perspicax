@@ -28,11 +28,17 @@
 //! geometry, by the rule above: its client keeps its size and its place, and
 //! an agent's click is still aimed from there. What changes is everything
 //! else. It is drawn as its frame alone, measured from a client of no height
-//! ([`rolled_up`]); its [`bbox`] and its input region are that frame and no
-//! more, so a click where the client was falls through to whatever is
+//! (`perspicax_policy::rolled_up`); its [`bbox`] and its input region are
+//! that frame and no more, so a click where the client was falls through to whatever is
 //! under it, and a picture of the monitor shows that. A picture of the
 //! window alone draws all of it, as one of a minimized window does
 //! ([`Framed::elements`]).
+//!
+//! Rolling up or down, as the person asks, it is drawn as a client cut short
+//! at the bottom, with the frame round what is left, for as long as the roll
+//! takes. Rolling up, its bbox is what is still drawn; rolling down, all of
+//! it at once, as its input region is, for it is unrolled already and the
+//! facts say so.
 //!
 //! [`Space`]: smithay::desktop::Space
 //! [`bbox`]: SpaceElement::bbox
@@ -40,8 +46,8 @@
 use std::{cell::RefCell, ops::Deref};
 
 use perspicax_policy::{
-    Insets, Rect, Rgba, Shadow, Stretch, outset, rolled_up, rounded_outline, rounded_rects,
-    shadow_at, shadow_pieces,
+    Insets, Rect, Rgba, Shadow, Stretch, outset, rounded_outline, rounded_rects, shadow_at,
+    shadow_pieces,
 };
 use smithay::{
     backend::{
@@ -53,6 +59,7 @@ use smithay::{
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+                utils::CropRenderElement,
             },
         },
     },
@@ -70,6 +77,20 @@ smithay::backend::renderer::element::render_elements! {
     Surface=WaylandSurfaceRenderElement<R>,
     Text=MemoryRenderBufferRenderElement<R>,
     Bar=SolidColorRenderElement,
+    /// The client's own surfaces, cut short while it rolls.
+    Cropped=CropRenderElement<WaylandSurfaceRenderElement<R>>,
+}
+
+/// How a window is drawn, beyond where and how opaque.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Drawn {
+    /// Rolled up to its titlebar: its frame alone.
+    pub(crate) rolled: bool,
+    /// Rolling up or down: how much of its client is drawn, from 1, all of
+    /// it, to 0, none, in place of `rolled`.
+    pub(crate) rolling: Option<f32>,
+    /// With the shadow it casts, if it casts one.
+    pub(crate) shadow: bool,
 }
 
 /// A titlebar's title and buttons, rasterised, and what they were rasterised
@@ -111,10 +132,12 @@ pub(crate) struct TitleKey {
 
 /// A titlebar button lit under the pointer: where it is, relative to the
 /// client's geometry, and what it is lit in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Wash {
     pub(crate) at: Rect,
     pub(crate) colour: Rgba,
+    /// How far its light has come up, or still is as it goes out, out of 1.
+    pub(crate) alpha: f32,
 }
 
 /// What a wash's disc was drawn from: its side, its colour, and the whole
@@ -170,6 +193,63 @@ struct Drawing {
     alpha: f32,
 }
 
+/// A lit button's disc, drawn from a buffer kept in `kept` by what it was
+/// drawn from, at the window's alpha times how lit it is.
+fn washed<R>(
+    renderer: &mut R,
+    kept: &mut Vec<(WashKey, MemoryRenderBuffer)>,
+    wash: Wash,
+    drawing: &Drawing,
+) -> Option<MemoryRenderBufferRenderElement<R>>
+where
+    R: Renderer + ImportMem,
+    R::TextureId: Send + Clone + 'static,
+{
+    let whole = whole_scale(drawing.scale.x);
+    let key = WashKey {
+        side: wash.at.h,
+        colour: wash.colour,
+        scale: whole,
+    };
+    if !kept.iter().any(|(drawn, _)| *drawn == key) {
+        let side = key.side * whole;
+        let pixels = crate::raster::disc(side, key.colour);
+        let buffer = MemoryRenderBuffer::from_slice(
+            &pixels,
+            Fourcc::Argb8888,
+            (side, side),
+            whole,
+            Transform::Normal,
+            None,
+        );
+        kept.retain(|(drawn, _)| drawn.scale != whole);
+        kept.insert(0, (key, buffer));
+        kept.truncate(WASHES);
+    }
+    let at = drawing.origin
+        + Point::from((wash.at.x, wash.at.y)).to_physical_precise_round(drawing.scale);
+    let (_, buffer) = kept.iter().find(|(drawn, _)| *drawn == key)?;
+    MemoryRenderBufferRenderElement::from_buffer(
+        renderer,
+        at.to_f64(),
+        buffer,
+        Some(drawing.alpha * wash.alpha),
+        None,
+        Some((wash.at.w, wash.at.h).into()),
+        Kind::Unspecified,
+    )
+    .ok()
+}
+
+/// How tall a window's client is drawn with `share` of it shown.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a share between 0 and 1 of a window's height"
+)]
+fn drawn_height(window: &Framed, share: f32) -> i32 {
+    (window.geometry().size.h as f32 * share.clamp(0.0, 1.0)).round() as i32
+}
+
 /// A colour as the renderer takes it, back in bytes, for drawing by hand.
 fn bytes(colour: [f32; 4]) -> Rgba {
     let byte = |channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -208,6 +288,8 @@ struct Dress {
     radius: i32,
     /// Those corners, drawn, by what they were drawn from.
     corners: Vec<(CornerKey, MemoryRenderBuffer)>,
+    /// How much of its client is drawn while it rolls, if it is rolling.
+    rolling: Option<f32>,
     /// The shadow it casts, if it casts one.
     shadow: Option<Shadow>,
     /// Its pieces, drawn, by what they were drawn from.
@@ -232,6 +314,12 @@ struct Dress {
     wash: Option<Wash>,
     /// Its disc, drawn, by what it was drawn from.
     washes: Vec<(WashKey, MemoryRenderBuffer)>,
+    /// The one lit before it, if it is one of this window's and its light
+    /// is still going out.
+    fading: Option<Wash>,
+    /// Its disc, kept apart: one buffer drawn twice in a frame would give
+    /// two elements one id.
+    faded: Vec<(WashKey, MemoryRenderBuffer)>,
     /// The line round a window an agent may act on: how wide, 0 for none.
     outline: i32,
     /// The frame it goes round, which is the compositor's word on it rather
@@ -301,6 +389,13 @@ impl Framed {
         });
     }
 
+    /// Draw the window rolling, `share` of its client drawn, or settled.
+    #[cfg(feature = "seat")]
+    pub(crate) fn rolling(&self, share: Option<f64>) {
+        #[expect(clippy::cast_possible_truncation, reason = "a share between 0 and 1")]
+        self.dress(|dress| dress.rolling = share.map(|share| share as f32));
+    }
+
     /// Cast a shadow under the window, or none.
     #[cfg(feature = "seat")]
     pub(crate) fn cast(&self, shadow: Option<Shadow>) {
@@ -311,6 +406,12 @@ impl Framed {
     #[cfg(feature = "seat")]
     pub(crate) fn light(&self, wash: Option<Wash>) {
         self.dress(|dress| dress.wash = wash);
+    }
+
+    /// Show the light of a button lit before going out, or none.
+    #[cfg(feature = "seat")]
+    pub(crate) fn fade_light(&self, wash: Option<Wash>) {
+        self.dress(|dress| dress.fading = wash);
     }
 
     /// Set the alpha the whole window is drawn at.
@@ -360,28 +461,33 @@ impl Framed {
     /// big, rolled up or not.
     pub(crate) fn whole_bbox(&self) -> Rectangle<i32, Logical> {
         let window = SpaceElement::bbox(&self.0);
-        self.outer_as(false)
+        self.outer_as(None)
             .map_or(window, |outer| window.merge(outer))
     }
 
     /// The frame's outside, and the grip beyond it, in the same coordinates
     /// as the window's own geometry. Nothing for a window with no frame.
     fn outer(&self) -> Option<Rectangle<i32, Logical>> {
-        self.outer_as(is_shaded(self))
+        self.outer_as(is_shaded(self).then_some(0))
     }
 
-    /// [`Self::outer`], `rolled` up to its titlebar or not: rolled up, the
-    /// frame of a client of no height, with no grip, since nothing resizes
-    /// a window rolled up.
-    fn outer_as(&self, rolled: bool) -> Option<Rectangle<i32, Logical>> {
+    /// How much of its client is drawn while it rolls, if it is rolling.
+    fn rolling_share(&self) -> Option<f32> {
+        self.dress(|dress| dress.rolling)
+    }
+
+    /// [`Self::outer`], round a client cut to `height`, or whole: cut, as a
+    /// window rolled up or rolling is, with no grip, since nothing resizes
+    /// it then.
+    fn outer_as(&self, height: Option<i32>) -> Option<Rectangle<i32, Logical>> {
         let (insets, grip) = self.dress(|dress| (dress.insets, dress.grip));
         if insets.is_none() {
             return None;
         }
-        let grip = if rolled { 0 } else { grip };
+        let grip = if height.is_some() { 0 } else { grip };
         let mut outer = self.0.geometry();
-        if rolled {
-            outer.size.h = 0;
+        if let Some(height) = height {
+            outer.size.h = height;
         }
         outer.loc -= Point::from((insets.left + grip, insets.top + grip));
         outer.size += (
@@ -420,11 +526,15 @@ impl SpaceElement for Framed {
 
     /// The client's, its menus included, and the frame round it. Rolled up
     /// to its titlebar, the frame alone, which is all that is drawn: nothing,
-    /// headless, where no frame is worn.
+    /// headless, where no frame is worn. Rolling up, the frame round what is
+    /// still drawn of the client.
     fn bbox(&self) -> Rectangle<i32, Logical> {
         if is_shaded(self) {
+            let height = self
+                .rolling_share()
+                .map_or(0, |share| drawn_height(self, share));
             return self
-                .outer_as(true)
+                .outer_as(Some(height))
                 .unwrap_or_else(|| Rectangle::new(self.0.geometry().loc, Size::default()));
         }
         self.whole_bbox()
@@ -485,8 +595,7 @@ impl Framed {
         location: Point<i32, Physical>,
         scale: Scale<f64>,
         alpha: f32,
-        rolled: bool,
-        shadow: bool,
+        drawn: Drawn,
     ) -> Vec<C>
     where
         R: Renderer + ImportAll + ImportMem,
@@ -497,8 +606,12 @@ impl Framed {
         // geometry, which the frame is measured from, is offset within it.
         let geometry = self.0.geometry();
         let origin = location + geometry.loc.to_physical_precise_round(scale);
-        let client = Rect::new(0, 0, geometry.size.w, geometry.size.h);
-        let client = if rolled { rolled_up(client) } else { client };
+        let height = match drawn.rolling {
+            Some(share) => drawn_height(self, share),
+            None if drawn.rolled => 0,
+            None => geometry.size.h,
+        };
+        let client = Rect::new(0, 0, geometry.size.w, height);
         let solid = |strip: &Rect, buffer: &mut SolidColorBuffer, colour: [f32; 4]| {
             buffer.update((strip.w, strip.h), colour);
             let at = origin + Point::from((strip.x, strip.y)).to_physical_precise_round(scale);
@@ -520,7 +633,7 @@ impl Framed {
         ) = match self.0.toplevel() {
             // Rolled up, nothing of the client is drawn, nor its menus,
             // which it has none of then.
-            _ if rolled => (Vec::new(), Vec::new()),
+            _ if height == 0 => (Vec::new(), Vec::new()),
             Some(toplevel) => {
                 let root = toplevel.wl_surface();
                 let mut menus = Vec::new();
@@ -581,10 +694,26 @@ impl Framed {
                 )
                 .collect::<Vec<_>>()
         }));
-        elements.extend(
-            own.into_iter()
-                .map(|element| C::from(FramedElement::Surface(element))),
-        );
+        if height < geometry.size.h {
+            // Rolling: cut short at the foot of what is drawn of it.
+            let down: Point<i32, Physical> =
+                Point::<i32, Logical>::from((0, height)).to_physical_precise_round(scale);
+            let foot = origin.y + down.y;
+            let kept = Rectangle::<i32, Physical>::from_extremities(
+                (i32::MIN / 2, i32::MIN / 2),
+                (i32::MAX / 2, foot),
+            );
+            elements.extend(
+                own.into_iter()
+                    .filter_map(|element| CropRenderElement::from_element(element, scale, kept))
+                    .map(|element| C::from(FramedElement::Cropped(element))),
+            );
+        } else {
+            elements.extend(
+                own.into_iter()
+                    .map(|element| C::from(FramedElement::Surface(element))),
+            );
+        }
 
         self.dress(|dress| {
             let whole = whole_scale(scale.x);
@@ -604,46 +733,11 @@ impl Framed {
                 }
             }
 
-            if let Some(wash) = dress.wash {
-                let whole = whole_scale(scale.x);
-                let key = WashKey {
-                    side: wash.at.h,
-                    colour: wash.colour,
-                    scale: whole,
-                };
-                if !dress.washes.iter().any(|(drawn, _)| *drawn == key) {
-                    let side = key.side * whole;
-                    let pixels = crate::raster::disc(side, key.colour);
-                    let buffer = MemoryRenderBuffer::from_slice(
-                        &pixels,
-                        Fourcc::Argb8888,
-                        (side, side),
-                        whole,
-                        Transform::Normal,
-                        None,
-                    );
-                    dress.washes.retain(|(drawn, _)| drawn.scale != whole);
-                    dress.washes.insert(0, (key, buffer));
-                    dress.washes.truncate(WASHES);
-                }
-                let at =
-                    origin + Point::from((wash.at.x, wash.at.y)).to_physical_precise_round(scale);
-                let buffer = dress
-                    .washes
-                    .iter()
-                    .find(|(drawn, _)| *drawn == key)
-                    .map(|(_, buffer)| buffer);
-                if let Some(Ok(lit)) = buffer.map(|buffer| {
-                    MemoryRenderBufferRenderElement::from_buffer(
-                        renderer,
-                        at.to_f64(),
-                        buffer,
-                        Some(alpha),
-                        None,
-                        Some((wash.at.w, wash.at.h).into()),
-                        Kind::Unspecified,
-                    )
-                }) {
+            for (wash, kept) in [
+                (dress.wash, &mut dress.washes),
+                (dress.fading, &mut dress.faded),
+            ] {
+                if let Some(lit) = wash.and_then(|wash| washed(renderer, kept, wash, &drawing)) {
                     elements.push(C::from(FramedElement::Text(lit)));
                 }
             }
@@ -665,7 +759,7 @@ impl Framed {
                     .into_iter()
                     .map(|corner| C::from(FramedElement::Text(corner))),
             );
-            if shadow {
+            if drawn.shadow {
                 let outer = outset(client, dress.insets);
                 elements.extend(
                     dress
@@ -852,6 +946,11 @@ where
         scale: Scale<f64>,
         alpha: f32,
     ) -> Vec<C> {
-        self.elements(renderer, location, scale, alpha, is_shaded(self), true)
+        let drawn = Drawn {
+            rolled: is_shaded(self),
+            rolling: self.rolling_share(),
+            shadow: true,
+        };
+        self.elements(renderer, location, scale, alpha, drawn)
     }
 }

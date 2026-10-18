@@ -341,6 +341,68 @@ fn the_long_way(len: u16, from: Cell, to: Cell) -> (Vec<Cell>, (i8, i8)) {
     (path, toward)
 }
 
+/// A value on its way from one place to another, eased out: how much of a
+/// window is still drawn as it rolls up, or how lit a titlebar button is as
+/// its light comes up. Fed times from outside, as a [`Transition`] is, and
+/// in milliseconds from any origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tween {
+    from: f64,
+    to: f64,
+    since_ms: u64,
+    length_ms: u64,
+}
+
+impl Tween {
+    /// From `from` to `to`, setting off at `now_ms`, `length_ms` long for
+    /// the whole way from 0 to 1: a shorter way takes as much less, so a
+    /// move turned round midway goes back at the pace it came.
+    #[must_use]
+    pub fn new(from: f64, to: f64, now_ms: u64, length_ms: u64) -> Self {
+        let share = (to - from).abs().min(1.0);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "a length of at most a few seconds, times a share of at most one"
+        )]
+        let length_ms = (length_ms as f64 * share).round() as u64;
+        Self {
+            from,
+            to,
+            since_ms: now_ms,
+            length_ms,
+        }
+    }
+
+    /// Where it is at `now_ms`, or `None` once it has arrived.
+    #[must_use]
+    pub fn at(&self, now_ms: u64) -> Option<f64> {
+        let gone = now_ms.saturating_sub(self.since_ms);
+        if gone >= self.length_ms {
+            return None;
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "milliseconds of a move a few seconds long at most"
+        )]
+        let t = gone as f64 / self.length_ms as f64;
+        Some(self.from + (self.to - self.from) * ease_out(t))
+    }
+
+    /// Where it is at `now_ms`, arrived or not: its end, once there.
+    #[must_use]
+    pub fn value(&self, now_ms: u64) -> f64 {
+        self.at(now_ms).unwrap_or(self.to)
+    }
+
+    /// Where it is going.
+    #[must_use]
+    pub fn to(&self) -> f64 {
+        self.to
+    }
+}
+
 /// Fast, then settling: a move that arrives.
 #[must_use]
 pub fn ease_out(t: f64) -> f64 {
@@ -369,6 +431,50 @@ pub fn smoothstep(t: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Eased out from where it set off, it arrives on time, and stays.
+    #[test]
+    fn a_tween_eases_from_where_it_started_and_ends_on_time() {
+        let tween = Tween::new(1.0, 0.0, 1000, 150);
+        assert_eq!(tween.at(1000), Some(1.0), "where it set off");
+        let halfway = tween.at(1075).unwrap();
+        assert!(
+            halfway < 0.5,
+            "eased out: past halfway at half the time, {halfway}"
+        );
+        assert!(tween.at(1100).unwrap() < halfway, "and on");
+        assert_eq!(tween.at(1150), None, "there, on time");
+        assert!(tween.value(5000).abs() < f64::EPSILON, "and staying");
+        assert_eq!(
+            tween.at(500),
+            Some(1.0),
+            "a clock before it set off is its start"
+        );
+        assert_eq!(
+            Tween::new(0.0, 1.0, 0, 0).at(0),
+            None,
+            "no time at all is there at once"
+        );
+    }
+
+    /// A roll turned round midway goes back from where it was, not from
+    /// where it would have ended, and takes as long as it took to get there.
+    #[test]
+    fn a_roll_turned_round_starts_from_where_it_was() {
+        let up = Tween::new(1.0, 0.0, 0, 200);
+        let there = up.value(60);
+        let down = Tween::new(there, 1.0, 60, 200);
+        assert!(
+            (down.at(60).unwrap() - there).abs() < f64::EPSILON,
+            "from where it was"
+        );
+        let back = (200.0 * (1.0 - there)).round() as u64;
+        assert!(
+            down.at(60 + back - 1).is_some() && down.at(60 + back).is_none(),
+            "{back} ms"
+        );
+        assert!((down.to() - 1.0).abs() < f64::EPSILON);
+    }
 
     const TWO_BY_TWO: Grid = Grid {
         columns: 2,

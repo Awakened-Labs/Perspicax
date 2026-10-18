@@ -208,13 +208,10 @@ pub(crate) struct Session {
     pub(super) title_press: Option<(Option<perspicax_node::SurfaceId>, perspicax_policy::Press)>,
     /// A titlebar button pressed and not yet let go.
     pub(super) button_press: Option<(crate::framed::Framed, perspicax_policy::FrameButton)>,
-    /// The titlebar button lit under the pointer: which window's, which, and
-    /// how. See [`input::relight`].
-    pub(super) lit: Option<(
-        crate::framed::Framed,
-        perspicax_policy::FrameButton,
-        perspicax_policy::Light,
-    )>,
+    /// The titlebar button lit under the pointer. See [`input::relight`].
+    pub(super) lit: Option<Lit>,
+    /// The one lit before it, its light going out from how lit it was.
+    pub(super) fading: Option<(Lit, f64)>,
     /// The snap preview's colour and size, kept so the damage tracker can
     /// tell a preview that moved from one that did not.
     preview: SolidColorBuffer,
@@ -434,6 +431,7 @@ impl Session {
             title_press: None,
             button_press: None,
             lit: None,
+            fading: None,
             preview,
             dwell,
             dwell_armed: None,
@@ -955,6 +953,23 @@ fn light(
     }))
 }
 
+/// A titlebar button lit: which window's, which, how, and since when, by
+/// the compositor's clock, for its light to come up.
+#[derive(Debug, Clone)]
+pub(super) struct Lit {
+    pub(super) window: crate::framed::Framed,
+    pub(super) button: perspicax_policy::FrameButton,
+    pub(super) light: perspicax_policy::Light,
+    pub(super) since: u64,
+}
+
+impl Lit {
+    /// Whether it is the same button lit the same way, whenever it was lit.
+    pub(super) fn is(&self, other: &Self) -> bool {
+        (&self.window, self.button, self.light) == (&other.window, other.button, other.light)
+    }
+}
+
 /// Render one output, queue it for scanout if anything changed, and let the
 /// clients on it draw again.
 fn render(state: &mut Compositor, crtc: crtc::Handle) {
@@ -990,6 +1005,9 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         })
         .collect();
     let now = state.started_at().elapsed();
+    // Anything rolling, or a light coming up or going out, is drawn again
+    // at the next chance, as a workspace switch is.
+    let animating = state.animating(u64::try_from(now.as_millis()).unwrap_or(u64::MAX));
     // A switch being drawn, gathered while the compositor can still be
     // asked which windows are where.
     let prepared = moving::prepare(
@@ -1149,7 +1167,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         Ok(_) => {}
         Err(error) => tracing::warn!(output = head.output.name(), %error, "frame not rendered"),
     }
-    if prepared.frame.is_some() && lock.is_none() {
+    if (prepared.frame.is_some() || animating) && lock.is_none() {
         moving::keep_moving(head, handle);
     }
 

@@ -293,15 +293,18 @@ impl Compositor {
         let size = extent_size(place);
         // The shade is taken, not copied, so that no tab behind keeps one,
         // and is given back below when `front` is `place`.
-        let (zone, restore, opacity, shaded) = placement(place, |placement| {
+        let (zone, restore, opacity, shaded, roll) = placement(place, |placement| {
             (
                 placement.snapped,
                 placement.restore,
                 placement.opacity,
                 std::mem::take(&mut placement.shaded),
+                placement.roll.take(),
             )
         });
         let shaded = shaded && Self::is_server_decorated(front);
+        // A roll under way goes on, on the tab now in front.
+        let roll = roll.filter(|_| Self::is_server_decorated(front));
         let maximized = place.toplevel().is_some_and(|toplevel| {
             toplevel.with_pending_state(|pending| {
                 pending.states.contains(xdg_toplevel::State::Maximized)
@@ -318,6 +321,7 @@ impl Compositor {
             placement.snapped = None;
             placement.opacity = opacity;
             placement.shaded = shaded;
+            placement.roll = roll;
         });
 
         let toplevel = front.toplevel().cloned();

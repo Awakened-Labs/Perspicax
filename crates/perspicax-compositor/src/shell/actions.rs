@@ -64,7 +64,7 @@ impl Compositor {
             }
             Action::Shade | Action::Unshade => {
                 if let Some(window) = focused {
-                    self.shade(&window, *action == Action::Shade);
+                    self.roll(&window, *action == Action::Shade);
                 }
             }
             Action::ToggleShade => {

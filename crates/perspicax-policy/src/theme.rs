@@ -475,6 +475,16 @@ pub enum ColorScheme {
     Light = 2,
 }
 
+/// How much perspicax moves what it draws: `[theme] motion`. Reduced, every
+/// animation is instant, workspace switches and rolling a window up among
+/// them, for a person whom motion on the screen troubles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Motion {
+    #[default]
+    Normal,
+    Reduced,
+}
+
 /// Whether applications are asked for more contrast: the portal's
 /// `contrast`, in its numbering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -548,6 +558,8 @@ pub struct Theme {
     pub apps: Appearance,
     /// What the lock screen and the splash show over their colour.
     pub logo: Logo,
+    /// How much it moves.
+    pub motion: Motion,
 }
 
 impl Default for Palette {

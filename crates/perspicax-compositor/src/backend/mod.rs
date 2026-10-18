@@ -210,6 +210,15 @@ impl Backend {
 /// differ in a handful of places -- where outputs come from, when clients are
 /// told to draw, whether a buffer is kept after commit -- and a generic would
 /// thread a parameter through every protocol handler to express that.
+/// A titlebar button lit: which window's, which, how, and how lit, out of 1.
+#[cfg(feature = "seat")]
+pub(crate) type Lighting<'a> = (
+    &'a crate::framed::Framed,
+    perspicax_policy::FrameButton,
+    perspicax_policy::Light,
+    f64,
+);
+
 pub(crate) enum Running {
     /// Virtual outputs, each held with its placement and its global until
     /// it is unplugged: dropping the global would withdraw the `wl_output`
@@ -384,22 +393,37 @@ impl Running {
     }
 
     /// The titlebar button lit under the pointer, on a seat: which window's,
-    /// which, and how. Headless lights none, for nothing points there.
+    /// which, how, and how far its light has come up at `now_ms`, out of 1.
+    /// Headless lights none, for nothing points there.
     #[cfg(feature = "seat")]
-    pub(crate) fn lit(
-        &self,
-    ) -> Option<(
-        &crate::framed::Framed,
-        perspicax_policy::FrameButton,
-        perspicax_policy::Light,
-    )> {
-        match self {
-            Self::Headless { .. } => None,
-            Self::Seat(session) => session
-                .lit
-                .as_ref()
-                .map(|(window, button, light)| (window, *button, *light)),
-        }
+    pub(crate) fn lit(&self, now_ms: u64) -> Option<Lighting<'_>> {
+        let Self::Seat(session) = self else {
+            return None;
+        };
+        let lit = session.lit.as_ref()?;
+        let length = u64::from(session.settings.decorations.animation.hover_ms);
+        let up = perspicax_policy::Tween::new(0.0, 1.0, lit.since, length);
+        Some((&lit.window, lit.button, lit.light, up.value(now_ms)))
+    }
+
+    /// The button lit before the one lit now, while its light goes out:
+    /// which window's, which, how, and how lit it still is at `now_ms`.
+    #[cfg(feature = "seat")]
+    pub(crate) fn fading(&self, now_ms: u64) -> Option<Lighting<'_>> {
+        let Self::Seat(session) = self else {
+            return None;
+        };
+        let (lit, from) = session.fading.as_ref()?;
+        let length = u64::from(session.settings.decorations.animation.hover_ms);
+        let out = perspicax_policy::Tween::new(*from, 0.0, lit.since, length);
+        out.at(now_ms)
+            .map(|share| (&lit.window, lit.button, lit.light, share))
+    }
+
+    /// Whether a button's light is still coming up or going out at `now_ms`.
+    #[cfg(feature = "seat")]
+    pub(crate) fn lighting(&self, now_ms: u64) -> bool {
+        self.fading(now_ms).is_some() || self.lit(now_ms).is_some_and(|(.., share)| share < 1.0)
     }
 
     /// The focus policy: the person's `[focus]` on a seat. Headless has

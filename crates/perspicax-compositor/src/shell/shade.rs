@@ -32,9 +32,17 @@
 //!
 //! An agent is told the window is `shaded`, and is refused its nodes
 //! (`perspicax_index::host`): what the person rolled up, the person unrolls.
+//!
+//! Rolled up or down by the person, it is drawn rolling, over
+//! `[decorations.animation] shade-ms`, unless that is none or motion is
+//! reduced ([`Compositor::roll`]). That is for the eye alone: it is rolled
+//! up or down at once, and the facts say so at once, so an agent is never
+//! told of a window halfway. Going fullscreen, or a frame becoming its
+//! client's, unrolls it at once.
 
 use super::{Fill, id_of, is_shaded, placement, surface_of};
 use crate::{framed::Framed, state::Compositor};
+use perspicax_policy::Tween;
 
 impl Compositor {
     /// Roll `window` up to its titlebar, or unroll it. Nothing if it is so
@@ -63,7 +71,10 @@ impl Compositor {
             // And every other popup of it, with nothing to hang from.
             crate::popup::dismiss_all(&surface);
         }
-        placement(window, |placement| placement.shaded = rolled);
+        placement(window, |placement| {
+            placement.shaded = rolled;
+            placement.roll = None;
+        });
         // The pointer, to what the client uncovered, or back to the client;
         // and a game rolled up lets go of it.
         self.repoint();
@@ -72,8 +83,26 @@ impl Compositor {
         self.publish_facts();
     }
 
+    /// Roll `window` up to its titlebar, or unroll it, as the person asks:
+    /// at once, as [`Self::shade`] does, and drawn rolling from as much of
+    /// it as is drawn now. A roll turned round midway goes back from where
+    /// it was, at the pace it came.
+    pub(crate) fn roll(&mut self, window: &Framed, rolled: bool) {
+        let was = is_shaded(window);
+        let now = self.clock_ms();
+        let drawn = super::rolling(window, now).unwrap_or(if was { 0.0 } else { 1.0 });
+        self.shade(window, rolled);
+        let length = self.backend.decorations().animation.shade_ms;
+        if is_shaded(window) == was || length == 0 {
+            return;
+        }
+        let to = if rolled { 0.0 } else { 1.0 };
+        let roll = Tween::new(drawn, to, now, u64::from(length));
+        placement(window, |placement| placement.roll = Some(roll));
+    }
+
     /// Roll `window` up to its titlebar, or unroll it if it is rolled up.
     pub(crate) fn toggle_shade(&mut self, window: &Framed) {
-        self.shade(window, !is_shaded(window));
+        self.roll(window, !is_shaded(window));
     }
 }
