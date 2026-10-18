@@ -436,6 +436,8 @@ impl Compositor {
             damage: self.damage_history(id),
             off_workspace: hidden.0,
             behind_tab: hidden.1,
+            // Rolled up, its frame is the bar alone, and covers only that.
+            shaded: crate::shell::is_shaded(window),
             // A parked window draws nothing, frame included.
             frame: if parked {
                 Vec::new()
@@ -596,6 +598,7 @@ impl Compositor {
             damage: self.damage_history(id),
             off_workspace: None,
             behind_tab: None,
+            shaded: false,
             frame: Vec::new(),
             // Layers and lock covers are drawn as their clients drew them.
             drawn_opacity: None,
@@ -642,6 +645,7 @@ impl Compositor {
         } else {
             facts.frame = self.frame_facts(window, placed);
         }
+        facts.shaded = crate::shell::is_shaded(window);
         facts.origin = Self::x11_origin(window);
         facts.title = Some(x11.title()).filter(|title| !title.is_empty());
         Some(facts)

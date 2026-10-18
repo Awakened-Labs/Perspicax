@@ -6,13 +6,15 @@
 //! frame is the one a person sees: the client's own geometry, without a
 //! client-drawn shadow, and the titlebar and border this compositor draws
 //! around it. Not [`Framed`]'s bounding box, which also takes in the
-//! invisible margin a resize can be started from.
+//! invisible margin a resize can be started from. Rolled up to its
+//! titlebar, the frame is the titlebar alone, and it is the bar that stops
+//! at the bottom of a screen, not the client it hides.
 
 use perspicax_policy::{Rect, outset, resist};
 use smithay::utils::{Logical, Point};
 
 use super::rect;
-use crate::{framed::Framed, state::Compositor};
+use crate::{decorations::drawn_client, framed::Framed, state::Compositor};
 
 impl Compositor {
     /// Where a window being moved goes when the pointer would put it at
@@ -33,7 +35,7 @@ impl Compositor {
             return free;
         };
         let insets = self.insets(window);
-        let placed = outset(rect(extent), insets);
+        let placed = outset(drawn_client(window, rect(extent)), insets);
         // The same frame, following the pointer.
         let following = Rect {
             x: free.x - insets.left,

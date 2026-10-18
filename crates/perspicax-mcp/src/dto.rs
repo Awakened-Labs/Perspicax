@@ -215,10 +215,10 @@ impl From<Rect> for Bounds {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Refused {
     /// One of `occluded`, `clipped`, `unmapped`, `off_screen`,
-    /// `other_workspace`, `inactive_tab`, `not_showing`, `unjudged`,
-    /// `menu_unplaced`, `unplaced`, `unattributed`, `stale`, `no_capability`,
-    /// `ambiguous_selector`, `not_found`, `not_a_window`, `focus_elsewhere`,
-    /// `pointer_captured`.
+    /// `other_workspace`, `inactive_tab`, `rolled_up`, `not_showing`,
+    /// `unjudged`, `menu_unplaced`, `unplaced`, `unattributed`, `stale`,
+    /// `no_capability`, `ambiguous_selector`, `not_found`, `not_a_window`,
+    /// `focus_elsewhere`, `pointer_captured`.
     pub kind: &'static str,
     /// The refusal in words.
     pub message: String,
@@ -270,6 +270,7 @@ impl From<&Refusal> for Refused {
                 Refusal::OffScreen => "off_screen",
                 Refusal::OtherWorkspace { .. } => "other_workspace",
                 Refusal::InactiveTab { .. } => "inactive_tab",
+                Refusal::RolledUp => "rolled_up",
                 Refusal::NotShowing => "not_showing",
                 Refusal::Unjudged => "unjudged",
                 Refusal::MenuUnplaced { .. } => "menu_unplaced",
@@ -546,6 +547,11 @@ pub struct Window {
     /// and `act` treat the window as solid, by the person's decision.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opacity: Option<u8>,
+    /// Rolled up to its titlebar by the person: only the bar is drawn, along
+    /// the top of `bounds`, and it covers only that. Its nodes are refused as
+    /// `rolled_up` until the person unrolls it. Absent when it is not.
+    #[serde(skip_serializing_if = "core::ops::Not::not")]
+    pub shaded: bool,
 }
 
 /// A window's tab group: every tab, and which is in front.
@@ -626,6 +632,7 @@ impl Window {
                 front: facts.behind_tab.unwrap_or(facts.id).0,
             }),
             opacity: facts.drawn_opacity,
+            shaded: facts.shaded,
         }
     }
 }
@@ -1018,6 +1025,18 @@ mod tests {
         );
     }
 
+    /// Issue #60. The person rolled the window up, and only the person unrolls
+    /// it: there is nothing to name and nothing to wait for.
+    #[test]
+    fn rolled_up_goes_on_the_wire_as_its_kind_and_its_message_alone() {
+        assert_eq!(
+            serde_json::to_value(Refused::from(&Refusal::RolledUp)).unwrap(),
+            serde_json::json!({"kind": "rolled_up",
+            "message": "node's window is rolled up to its titlebar, \
+                        and only the person can unroll it"})
+        );
+    }
+
     /// Issue #51. A node its application will not place is not one that has
     /// not been judged *yet*, and the wire says so, so that an agent stops
     /// waiting for a verdict that cannot come.
@@ -1199,6 +1218,21 @@ mod tests {
         let wire = serde_json::to_value(&windows).unwrap();
         assert_eq!(wire[0]["opacity"], 77);
         assert!(wire[1].get("opacity").is_none(), "{}", wire[1]);
+    }
+
+    #[test]
+    fn a_rolled_up_window_says_so_and_any_other_is_silent() {
+        let facts = HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(WINDOW, Rect::new(0.0, 0.0, 400.0, 300.0)).rolled_up(),
+                SurfaceFacts::new(OVERLAY, Rect::new(100.0, 100.0, 300.0, 250.0)),
+            ],
+            1,
+        );
+        let windows = Window::all(&index(), &facts);
+        let wire = serde_json::to_value(&windows).unwrap();
+        assert_eq!(wire[0]["shaded"], true);
+        assert!(wire[1].get("shaded").is_none(), "{}", wire[1]);
     }
 
     /// The window node is the shallowest node on its surface, and finding it

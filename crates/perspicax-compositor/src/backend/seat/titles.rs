@@ -32,7 +32,10 @@ use smithay::{
     utils::Transform,
 };
 
-use crate::framed::{Framed, Title, TitleKey};
+use crate::{
+    framed::{Framed, Title, TitleKey},
+    state::Compositor,
+};
 
 /// Room left either side of the title, in logical pixels.
 const PADDING: i32 = 8;
@@ -60,7 +63,8 @@ impl Titles {
 
     /// Make sure `window` has its titlebar drawn at the whole scale `scale`
     /// in its ink and the theme's `family`: `labels`, one per tab, with
-    /// `front` the one in front. Does nothing if it already has.
+    /// `front` the one in front, and its buttons, the shade button showing
+    /// whether it is rolled up. Does nothing if it already has.
     pub(super) fn prepare(
         &mut self,
         window: &Framed,
@@ -79,6 +83,8 @@ impl Titles {
             ink,
             family: family.clone(),
             scale,
+            shades: Compositor::is_server_decorated(window),
+            shaded: crate::shell::is_shaded(window),
         };
         if window.has_title(&key) {
             return;
@@ -111,7 +117,7 @@ impl Titles {
 
         // The buttons, in pixels: the same places the pointer finds them.
         let bar = Rect::new(0, 0, key.size.0, key.size.1);
-        let buttons = buttons_in(bar);
+        let buttons = buttons_in(bar, key.shades);
         for (button, place) in &buttons {
             let place = Rect::new(
                 place.x * key.scale,
@@ -119,13 +125,21 @@ impl Titles {
                 place.w * key.scale,
                 place.h * key.scale,
             );
-            draw_button(&mut pixels, width, *button, place, ink, key.scale);
+            draw_button(
+                &mut pixels,
+                width,
+                *button,
+                place,
+                ink,
+                key.scale,
+                key.shaded,
+            );
         }
 
         // One label per tab, in the same places the pointer finds the tabs.
         // With more than one, the tabs behind are written fainter, the one in
         // front is underlined, and a thin rule parts each from the next.
-        let tabs = tab_rects(bar, key.labels.len());
+        let tabs = tab_rects(bar, key.labels.len(), key.shades);
         let grouped = tabs.len() > 1;
         for (n, (place, label)) in tabs.iter().zip(&key.labels).enumerate() {
             let place = Rect::new(
@@ -269,9 +283,11 @@ fn family(family: &perspicax_policy::Family) -> Family<'_> {
 }
 
 /// Draw `button`'s symbol, centred in `place`, in pixels of a buffer
-/// `width` wide: a cross to close, a square to maximize, a bar to minimize.
-/// Each pixel is inked by how much of it the shape covers, so the diagonals
-/// of the cross are smooth.
+/// `width` wide: a cross to close, a square to maximize, a bar along the
+/// bottom to minimize, and one along the top to roll up. For a window
+/// `shaded`, rolled up already, a chevron under that bar points down, the
+/// way it unrolls. Each pixel is inked by how much of it the shape covers,
+/// so the diagonals of the cross and the chevron are smooth.
 fn draw_button(
     pixels: &mut [u8],
     width: i32,
@@ -279,6 +295,7 @@ fn draw_button(
     place: Rect,
     ink: Color,
     scale: i32,
+    shaded: bool,
 ) {
     let half = place.h as f32 * 0.2;
     let stroke = 1.5 * scale as f32;
@@ -286,6 +303,8 @@ fn draw_button(
         place.x as f32 + place.w as f32 / 2.0,
         place.y as f32 + place.h as f32 / 2.0,
     );
+    // The chevron's arms, from either side of it down to its point.
+    let (arm, point) = ((half * 0.7, -half * 0.25), (0.0, half * 0.6));
     // How far a pixel's centre is from the shape's line, as `x, y` from the
     // middle of the button.
     let distance = |x: f32, y: f32| match button {
@@ -294,6 +313,11 @@ fn draw_button(
         }
         FrameButton::Maximize if x.abs() <= half && y.abs() <= half => half - x.abs().max(y.abs()),
         FrameButton::Minimize if x.abs() <= half => (y - half).abs(),
+        FrameButton::Shade if x.abs() <= half && shaded => (y + half)
+            .abs()
+            .min(segment((x, y), (-arm.0, arm.1), point))
+            .min(segment((x, y), arm, point)),
+        FrameButton::Shade if x.abs() <= half => (y + half).abs(),
         _ => f32::INFINITY,
     };
     for row in place.y..place.y + place.h {
@@ -310,6 +334,14 @@ fn draw_button(
             }
         }
     }
+}
+
+/// How far `at` is from the line from `from` to `to`, ends and all.
+fn segment(at: (f32, f32), from: (f32, f32), to: (f32, f32)) -> f32 {
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let along = ((at.0 - from.0) * dx + (at.1 - from.1) * dy) / (dx * dx + dy * dy);
+    let along = along.clamp(0.0, 1.0);
+    (at.0 - from.0 - along * dx).hypot(at.1 - from.1 - along * dy)
 }
 
 /// Lay `colour` over every pixel of `place`.
@@ -356,6 +388,8 @@ mod tests {
             ink: perspicax_policy::Colour::rgb(0xff, 0xff, 0xff),
             family: perspicax_policy::Family::SansSerif,
             scale: 2,
+            shades: true,
+            shaded: false,
         };
         let (pixels, (width, height)) = titles.pixels(&key("Terminal — foot"));
         assert_eq!((width, height), (400, 48), "drawn at twice the size");
@@ -368,9 +402,9 @@ mod tests {
             "nothing in the left padding"
         );
 
-        // Three buttons of the bar's height at the right, and the padding
+        // Four buttons of the bar's height at the right, and the padding
         // before them, which a long title stops short of.
-        let buttons = 3 * height;
+        let buttons = 4 * height;
         let (long, _) = titles.pixels(&key(&"a very long title ".repeat(20)));
         let column_inked = |pixels: &[u8], column: i32| {
             (0..height).any(|row| pixels[((row * width + column) * 4 + 3) as usize] > 0)
@@ -418,12 +452,14 @@ mod tests {
             ink: perspicax_policy::Colour::rgb(0xff, 0xff, 0xff),
             family: perspicax_policy::Family::SansSerif,
             scale: 1,
+            shades: true,
+            shaded: false,
         };
         let (pixels, (width, height)) = titles.pixels(&key);
         let inked = |column: i32| {
             (0..height).any(|row| pixels[((row * width + column) * 4 + 3) as usize] > 0)
         };
-        let buttons = 3 * height;
+        let buttons = 4 * height;
         assert!((0..width - buttons).all(|column| !inked(column)), "no text");
         assert!(
             ((width - height)..width).any(inked),
@@ -442,9 +478,11 @@ mod tests {
             ink: perspicax_policy::Colour::rgb(0xff, 0xff, 0xff),
             family: perspicax_policy::Family::SansSerif,
             scale: 1,
+            shades: true,
+            shaded: false,
         };
         let (pixels, (width, height)) = titles.pixels(&key);
-        let tabs = tab_rects(Rect::new(0, 0, 200, 24), 2);
+        let tabs = tab_rects(Rect::new(0, 0, 200, 24), 2, true);
         let underlined = |tab: Rect| {
             let row = height - 1;
             (tab.x + PADDING..tab.x + tab.w - PADDING)
@@ -452,6 +490,85 @@ mod tests {
         };
         assert!(underlined(tabs[1]), "the front tab");
         assert!(!underlined(tabs[0]), "not the one behind");
+    }
+
+    /// The shade button is a bar along the top, the other way up from
+    /// minimize's. Rolled up, a chevron under it points down, and nothing
+    /// else on the bar changes. Buttons need no fonts, so this runs anywhere.
+    #[test]
+    fn the_shade_button_is_a_bar_along_the_top_and_points_down_while_rolled_up() {
+        let mut titles = Titles {
+            fonts: Fonts {
+                finding: None,
+                found: none(),
+            },
+            glyphs: SwashCache::new(),
+        };
+        let key = |shaded| TitleKey {
+            labels: vec!["Terminal — foot".to_owned()],
+            front: 0,
+            size: (200, 24),
+            ink: perspicax_policy::Colour::rgb(0xff, 0xff, 0xff),
+            family: perspicax_policy::Family::SansSerif,
+            scale: 1,
+            shades: true,
+            shaded,
+        };
+        let (unrolled, (width, _)) = titles.pixels(&key(false));
+        let (rolled, _) = titles.pixels(&key(true));
+        let (_, place) = buttons_in(Rect::new(0, 0, 200, 24), true)
+            .into_iter()
+            .find(|(button, _)| *button == FrameButton::Shade)
+            .expect("a shade button");
+        let inked = |pixels: &[u8], row: i32| -> Vec<i32> {
+            (place.x..place.x + place.w)
+                .filter(|column| pixels[((row * width + column) * 4 + 3) as usize] > 0)
+                .collect()
+        };
+        let middle = place.y + place.h / 2;
+        let (top, bottom) = (place.y..middle, middle..place.y + place.h);
+        assert!(top.clone().any(|row| !inked(&unrolled, row).is_empty()));
+        assert!(
+            bottom.clone().all(|row| inked(&unrolled, row).is_empty()),
+            "a bar along the top, and nothing under it"
+        );
+        let lowest = bottom
+            .rev()
+            .find(|row| !inked(&rolled, *row).is_empty())
+            .expect("rolled up, something under the bar");
+        let centre = place.x + place.w / 2;
+        assert!(
+            inked(&rolled, lowest)
+                .iter()
+                .all(|column| (column - centre).abs() <= 2),
+            "its point at the bottom, in the middle: {:?}",
+            inked(&rolled, lowest)
+        );
+        let outside = |pixels: &[u8]| -> Vec<u8> {
+            pixels
+                .chunks(4)
+                .enumerate()
+                .filter(|(n, _)| {
+                    let column = i32::try_from(*n).unwrap() % width;
+                    column < place.x || column >= place.x + place.w
+                })
+                .flat_map(|(_, pixel)| pixel.to_vec())
+                .collect()
+        };
+        assert!(
+            outside(&rolled) == outside(&unrolled),
+            "the rest is as it was"
+        );
+
+        // A strip of tabs over a frame its client draws has no shade button.
+        let (strip, _) = titles.pixels(&TitleKey {
+            shades: false,
+            ..key(false)
+        });
+        assert!(
+            (place.y..place.y + place.h).all(|row| inked(&strip, row).is_empty()),
+            "no shade button on a strip of tabs"
+        );
     }
 
     #[test]

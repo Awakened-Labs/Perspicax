@@ -140,7 +140,7 @@ impl Compositor {
     /// was opened from the window whose surface is `surface`. Not one that
     /// has let go of them: letting go of the pointer then would end another
     /// window's drag.
-    fn menu_opened_from(&self, surface: &WlSurface) -> bool {
+    pub(super) fn menu_opened_from(&self, surface: &WlSurface) -> bool {
         self.held_menu_root().as_ref() == Some(surface)
     }
 }

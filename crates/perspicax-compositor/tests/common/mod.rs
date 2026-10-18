@@ -1140,7 +1140,12 @@ impl Desk {
     /// Open a window, drawn white, that asks for its frame to be drawn for
     /// it, as Qt and foot do.
     pub fn open_framed(&mut self, qh: &QueueHandle<Self>, title: &str) {
-        self.colours.push(0xffff_ffff);
+        self.open_framed_coloured(qh, title, 0xffff_ffff);
+    }
+
+    /// [`Self::open_framed`], drawn all in one colour, ARGB.
+    pub fn open_framed_coloured(&mut self, qh: &QueueHandle<Self>, title: &str, colour: u32) {
+        self.colours.push(colour);
         let surface = self.compositor.create_surface(qh);
         let window = self
             .xdg

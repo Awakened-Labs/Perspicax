@@ -106,9 +106,10 @@ impl Compositor {
     }
 
     /// The window whose titlebar a tab dragged to `at` would join, and the
-    /// whole of that window's frame, to outline while it is the target. Not
-    /// the dragged window itself, which is under the pointer as it moves, and
-    /// not another tab of its own group.
+    /// whole of that window's frame as it is drawn (its titlebar alone,
+    /// rolled up), to outline while it is the target. Not the dragged window
+    /// itself, which is under the pointer as it moves, and not another tab of
+    /// its own group.
     #[cfg(feature = "seat")]
     pub(crate) fn tab_target(
         &self,
@@ -135,8 +136,8 @@ impl Compositor {
         if self.tabs.front(dragged_id) == self.tabs.front(target) {
             return None;
         }
-        let client = self.extent(window)?;
-        let outer = perspicax_policy::outset(super::rect(client), self.insets(window));
+        let client = crate::decorations::drawn_client(window, super::rect(self.extent(window)?));
+        let outer = perspicax_policy::outset(client, self.insets(window));
         Some((
             target,
             smithay::utils::Rectangle::new((outer.x, outer.y).into(), (outer.w, outer.h).into()),
@@ -271,10 +272,16 @@ impl Compositor {
     ///
     /// A group has one state, and the tab coming forward takes all of it,
     /// dropping its own: the rect it would be restored to, whether it is
-    /// maximized or tiled, and how opaque the person's keys made it. With
-    /// none from the keys, each tab follows its own application's rule. A tab that was maximized while it was in front
-    /// otherwise came back maximized into a group that had since been
-    /// restored, and restoring it went back to its own stale rect.
+    /// maximized or tiled, how opaque the person's keys made it, and whether
+    /// it is rolled up to its titlebar. With none from the keys, each tab
+    /// follows its own application's rule. A tab that was maximized while it
+    /// was in front otherwise came back maximized into a group that had
+    /// since been restored, and restoring it went back to its own stale rect.
+    ///
+    /// The tab going behind keeps no shade, so one taken out of the group
+    /// comes out unrolled, as in Fluxbox. One that draws its own frame has
+    /// no titlebar of ours to roll up to, and comes forward unrolled, and the
+    /// group with it.
     fn bring_forward(&mut self, front: &Framed, place: &Framed) {
         let (Some(id), Some(from)) = (id_of(front), id_of(place)) else {
             return;
@@ -284,9 +291,17 @@ impl Compositor {
             .element_location(place)
             .or_else(|| placement(place, |placement| placement.parked));
         let size = extent_size(place);
-        let (zone, restore, opacity) = placement(place, |placement| {
-            (placement.snapped, placement.restore, placement.opacity)
+        // The shade is taken, not copied, so that no tab behind keeps one,
+        // and is given back below when `front` is `place`.
+        let (zone, restore, opacity, shaded) = placement(place, |placement| {
+            (
+                placement.snapped,
+                placement.restore,
+                placement.opacity,
+                std::mem::take(&mut placement.shaded),
+            )
         });
+        let shaded = shaded && Self::is_server_decorated(front);
         let maximized = place.toplevel().is_some_and(|toplevel| {
             toplevel.with_pending_state(|pending| {
                 pending.states.contains(xdg_toplevel::State::Maximized)
@@ -295,12 +310,14 @@ impl Compositor {
 
         self.workspaces.share(id, from);
         self.show_what_belongs();
-        // Before the zone or the fill below, which keep a restore rect that is
-        // already there rather than taking the tab's own size.
+        // After it is shown, for unparking refits it by its own state, and
+        // before the zone or the fill below, which keep a restore rect that
+        // is already there rather than taking the tab's own size.
         placement(front, |placement| {
             placement.restore = restore;
             placement.snapped = None;
             placement.opacity = opacity;
+            placement.shaded = shaded;
         });
 
         let toplevel = front.toplevel().cloned();

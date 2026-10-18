@@ -591,13 +591,18 @@ impl Compositor {
     /// says the argument means.
     ///
     /// Every window in the space is told, counted on a monitor or not, but
-    /// each is counted first, as the seat counts before it tells: so a window
-    /// is told which monitor it is on as soon as it is told it may draw.
+    /// one rolled up to its titlebar, whose client is not drawn. Each is
+    /// counted first, as the seat counts before it tells: so a window is
+    /// told which monitor it is on as soon as it is told it may draw.
     pub(crate) fn send_frames(&mut self) {
         self.settle_outputs();
         let elapsed = u32::try_from(self.started.elapsed().as_millis() % u128::from(u32::MAX))
             .unwrap_or(u32::MAX);
-        let windows = self.space.elements().filter_map(shell::surface_of);
+        let windows = self
+            .space
+            .elements()
+            .filter(|window| !shell::is_shaded(window))
+            .filter_map(shell::surface_of);
         let layers = self
             .layers_in(&crate::layers::ALL)
             .into_iter()
@@ -1293,10 +1298,17 @@ impl XdgShellHandler for Compositor {
         // A popup needs its window on screen: one opened from a window its
         // client unmapped is dismissed at once, rather than kept to come back
         // with it. So is a submenu of a panel's menu, the panel unmapped; a
-        // panel's own menu is given to it later (see `layers`).
-        if find_popup_root_surface(&PopupKind::Xdg(surface.clone()))
-            .is_ok_and(|root| self.is_withdrawn(&root) || self.is_withdrawn_layer(&root))
-        {
+        // panel's own menu is given to it later (see `layers`). And so is one
+        // from a window rolled up to its titlebar, which keeps the keyboard,
+        // so that a key can ask for one: nothing of it is drawn to hang it
+        // from.
+        if find_popup_root_surface(&PopupKind::Xdg(surface.clone())).is_ok_and(|root| {
+            self.is_withdrawn(&root)
+                || self.is_withdrawn_layer(&root)
+                || self
+                    .window_for(&root)
+                    .is_some_and(|window| shell::is_shaded(&window))
+        }) {
             surface.send_popup_done();
             return;
         }

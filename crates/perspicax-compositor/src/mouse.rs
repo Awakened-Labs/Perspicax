@@ -98,9 +98,11 @@ pub(crate) fn under(state: &Compositor, at: Point<f64, Logical>) -> Option<Hit> 
         // One that places itself is its client's alone (#181).
         let managed = (!crate::shell::places_itself(window)).then(|| window.clone());
         // The client first, so a popup hanging over the titlebar gets its
-        // clicks; then the frame around it.
-        if let Some((surface, offset)) =
-            window.surface_under(at - location.to_f64(), WindowSurfaceType::ALL)
+        // clicks; then the frame around it. Rolled up to its titlebar, the
+        // frame alone: nothing of the client is drawn to be pressed on.
+        if !crate::shell::is_shaded(window)
+            && let Some((surface, offset)) =
+                window.surface_under(at - location.to_f64(), WindowSurfaceType::ALL)
         {
             return Some(Hit {
                 window: managed,

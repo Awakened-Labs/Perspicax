@@ -17,7 +17,7 @@ use std::{
 };
 
 use perspicax_compositor::{Backend, Command, Config, Facts, Requests, Stop};
-use perspicax_index::{HostFacts, SurfaceFacts, judge};
+use perspicax_index::{HostFacts, Refusal, SurfaceFacts, WindowVerb, check_window, judge};
 use perspicax_node::{Rect, Visibility};
 use perspicax_policy::Action;
 use smithay_client_toolkit::{
@@ -228,6 +228,98 @@ fn a_tab_coming_forward_takes_the_groups_state_not_its_own() {
     perform(Action::ToggleMaximize);
     until(&mut queue, &mut desk, |desk| !desk.maximized[1]);
     wait_for(&facts, |facts| window(facts, "second").geometry == place);
+
+    stop.request();
+    drop((desk, queue));
+    compositor
+        .join()
+        .expect("the compositor thread panicked")
+        .expect("the compositor failed");
+}
+
+/// Issue #60: a group rolls up as one. Its shade goes with the tab coming
+/// forward, and stays with none behind, so a tab taken out of the group
+/// comes out unrolled; and an agent is not let bring a tab forward into a
+/// group the person rolled up.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_tab_group_rolls_up_as_one_and_a_tab_coming_forward_comes_rolled_up() {
+    let socket = format!("perspicax-tabshade-{}", std::process::id());
+    let facts = Facts::new();
+    let requests = Requests::new();
+    let stop = Stop::new();
+    let compositor = {
+        let (facts, requests, stop, socket) = (
+            facts.clone(),
+            requests.clone(),
+            stop.clone(),
+            socket.clone(),
+        );
+        thread::spawn(move || {
+            let config = Config {
+                backend: Backend::headless((1280, 1024)),
+                spawn: Vec::new(),
+                env: Vec::new(),
+                run_for: Some(Duration::from_secs(30)),
+                config: None,
+                places: None,
+                socket: Some(socket),
+                xwayland: false,
+            };
+            perspicax_compositor::run(&config, &facts, &requests, &stop)
+        })
+    };
+    let perform = |action| {
+        requests
+            .command(Command::Perform(action))
+            .expect("the compositor is listening");
+    };
+
+    let client = connect(&socket);
+    let (globals, mut queue) = registry_queue_init(&client).expect("the registry");
+    let qh = queue.handle();
+    let mut desk = Desk::new(&globals, &qh);
+    desk.open_window(&qh, WindowDecorations::RequestServer, "first");
+    until(&mut queue, &mut desk, |desk| {
+        desk.drawn == 1 && desk.modes[0] == DecorationMode::Server
+    });
+    desk.open_window(&qh, WindowDecorations::RequestServer, "second");
+    until(&mut queue, &mut desk, |desk| {
+        desk.drawn == 2 && desk.modes[1] == DecorationMode::Server
+    });
+    wait_for(&facts, |facts| mapped(facts) == 2);
+
+    // Grouped, the second in front, and rolled up.
+    perform(Action::TabWithPrevious);
+    wait_for(&facts, |facts| !window(facts, "first").mapped);
+    perform(Action::ToggleShade);
+    wait_for(&facts, |facts| window(facts, "second").shaded);
+
+    // The first comes forward rolled up, as the group is, and the second
+    // goes behind unrolled.
+    perform(Action::CycleTab { forward: true });
+    let cycled = wait_for(&facts, |facts| {
+        window(facts, "first").mapped && !window(facts, "second").mapped
+    });
+    assert!(window(&cycled, "first").shaded, "the group is rolled up");
+    assert!(
+        !window(&cycled, "second").shaded,
+        "no tab behind keeps a shade"
+    );
+    assert_eq!(
+        check_window(&cycled, window(&cycled, "second").id, WindowVerb::Forward).unwrap_err(),
+        Refusal::RolledUp,
+        "an agent may not bring it forward into view"
+    );
+
+    // Unrolled, the group's next tab comes forward unrolled.
+    perform(Action::Unshade);
+    wait_for(&facts, |facts| !window(facts, "first").shaded);
+    perform(Action::CycleTab { forward: true });
+    let back = wait_for(&facts, |facts| {
+        window(facts, "second").mapped && !window(facts, "first").mapped
+    });
+    assert!(!window(&back, "second").shaded);
 
     stop.request();
     drop((desk, queue));

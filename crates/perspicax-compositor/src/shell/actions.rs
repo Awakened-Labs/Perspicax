@@ -62,6 +62,16 @@ impl Compositor {
                     self.minimize(&window);
                 }
             }
+            Action::Shade | Action::Unshade => {
+                if let Some(window) = focused {
+                    self.shade(&window, *action == Action::Shade);
+                }
+            }
+            Action::ToggleShade => {
+                if let Some(window) = focused {
+                    self.toggle_shade(&window);
+                }
+            }
             Action::Spawn {
                 command,
                 agent: false,

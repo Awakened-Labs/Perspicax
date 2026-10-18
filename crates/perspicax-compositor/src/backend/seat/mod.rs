@@ -25,8 +25,9 @@
 //! has drawn since (#99).
 //!
 //! The one timer is a safety net, once a second ([`overdue`]): a window no
-//! render told -- parked, or on a monitor whose frame never came back -- is
-//! told anyway once it has waited that long, so no client waits forever.
+//! render told -- parked, rolled up to its titlebar, or on a monitor whose
+//! frame never came back -- is told anyway once it has waited that long, so
+//! no client waits forever.
 //!
 //! # What is not here yet
 //!
@@ -1107,9 +1108,14 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
 
     // Whether or not anything changed: a client waiting on a callback for a
     // commit that damaged nothing still has to be told it may draw again. An
-    // animated client cursor is a client drawing too.
+    // animated client cursor is a client drawing too. Not a window rolled up
+    // to its titlebar, whose client is not drawn: it is told once a second,
+    // as a parked one is.
     let output = head.output.clone();
-    for window in space.elements_for_output(&output) {
+    for window in space
+        .elements_for_output(&output)
+        .filter(|window| !crate::shell::is_shaded(window))
+    {
         window.send_frame(&output, now, Some(overdue::OVERDUE), |_, _| {
             Some(output.clone())
         });

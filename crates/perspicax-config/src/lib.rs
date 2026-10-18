@@ -146,8 +146,10 @@ pub struct Config {
     pub focus: Focus,
     pub bindings: Bindings,
     /// What a mouse button or the wheel does, by where the pointer is: the
-    /// `[mouse]` tables. No profile binds any; what a press on a frame, a
-    /// middle-drag of a title and the drag modifier do is built in, and a
+    /// `[mouse]` tables, over what the profile binds. Minimal binds the
+    /// wheel over a titlebar, up to roll the window up and down to unroll
+    /// it, as Openbox does; classic binds nothing. What a press on a frame,
+    /// a middle-drag of a title and the drag modifier do is built in, and a
     /// binding here comes before them.
     pub mouse: MouseBindings,
     pub keyboard: Keyboard,
@@ -518,7 +520,7 @@ impl Config {
             profile,
             focus,
             bindings,
-            mouse: MouseBindings::default(),
+            mouse: mouse(profile),
             keyboard: Keyboard::default(),
             pointer: Pointer::default(),
             outputs: Vec::new(),
@@ -566,6 +568,32 @@ impl Config {
             agent: Agent::default(),
             shell: Shell::profile(profile, ShellBuilt::FULL),
         }
+    }
+}
+
+/// What a profile binds the mouse to, before the `[mouse]` tables.
+fn mouse(profile: Profile) -> MouseBindings {
+    let wheel = |wheel| MouseChord {
+        mods: Mods::default(),
+        gesture: Gesture::Wheel(wheel),
+    };
+    match profile {
+        // Plasma and Windows do nothing with the wheel over a titlebar.
+        Profile::Classic => MouseBindings::default(),
+        // Openbox rolls a window up with the wheel over its titlebar, and
+        // down again. A double-click on the title still maximizes, which is
+        // built in, not bound.
+        Profile::Minimal => MouseBindings::default()
+            .bind(
+                Context::Titlebar,
+                wheel(perspicax_policy::Wheel::Up),
+                Action::Shade,
+            )
+            .bind(
+                Context::Titlebar,
+                wheel(perspicax_policy::Wheel::Down),
+                Action::Unshade,
+            ),
     }
 }
 
@@ -2064,6 +2092,9 @@ fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Actio
             "toggle-sticky" => Action::ToggleSticky,
             "toggle-maximize" => Action::ToggleMaximize,
             "minimize" => Action::Minimize,
+            "shade" => Action::Shade,
+            "unshade" => Action::Unshade,
+            "toggle-shade" => Action::ToggleShade,
             "next-tab" => Action::CycleTab { forward: true },
             "previous-tab" => Action::CycleTab { forward: false },
             "tab-with-previous" => Action::TabWithPrevious,
@@ -2086,7 +2117,8 @@ fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Actio
             other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
                 format!(
                     "`{other}` is not an action; use close, cycle-focus, reload, \
-                         toggle-sticky, toggle-maximize, minimize, next-tab, previous-tab, \
+                         toggle-sticky, toggle-maximize, minimize, \
+                         shade, unshade, toggle-shade, next-tab, previous-tab, \
                          tab-with-previous, detach-tab, start-menu, root-menu, \
                          next-layout, previous-layout, layout-<1-4>, \
                          next-workspace, previous-workspace, \
@@ -2346,14 +2378,73 @@ mod tests {
         );
     }
 
+    /// As Openbox does, and over the titlebar alone: over the window the
+    /// wheel is its client's, and over the desktop the person's to bind. A
+    /// double-click on the title is left unbound, so it still maximizes,
+    /// which is built in. Classic binds nothing.
     #[test]
-    fn no_profile_binds_a_mouse_button() {
-        for profile in [Profile::Classic, Profile::Minimal] {
-            assert_eq!(
-                Config::profile(profile, SEAT).mouse,
-                MouseBindings::default()
-            );
+    fn minimal_rolls_a_window_up_and_down_with_the_wheel_over_its_titlebar_and_classic_does_not() {
+        let none = Mods::default();
+        let up = Gesture::Wheel(perspicax_policy::Wheel::Up);
+        let down = Gesture::Wheel(perspicax_policy::Wheel::Down);
+        let minimal = Config::profile(Profile::Minimal, SEAT).mouse;
+        assert_eq!(
+            minimal.resolve(Context::Titlebar, none, up),
+            Some(&Action::Shade)
+        );
+        assert_eq!(
+            minimal.resolve(Context::Titlebar, none, down),
+            Some(&Action::Unshade)
+        );
+        for context in [Context::Window, Context::Desktop, Context::Anywhere] {
+            assert_eq!(minimal.resolve(context, none, up), None, "{context:?}");
+            assert_eq!(minimal.resolve(context, none, down), None, "{context:?}");
         }
+        assert_eq!(
+            minimal.resolve(Context::Titlebar, Mods::alt(), up),
+            None,
+            "the wheel alone, with nothing held"
+        );
+        assert_eq!(
+            minimal.resolve(
+                Context::Titlebar,
+                none,
+                Gesture::Double(perspicax_policy::Button::Left)
+            ),
+            None,
+            "a double-click is maximize's"
+        );
+        assert_eq!(
+            Config::profile(Profile::Classic, SEAT).mouse,
+            MouseBindings::default()
+        );
+    }
+
+    #[test]
+    fn minimals_wheel_over_a_titlebar_can_be_handed_back_or_bound_otherwise() {
+        let config = parse(
+            "profile = \"minimal\"\n[mouse.titlebar]\n\
+             \"WheelUp\" = \"none\"\n\"WheelDown\" = \"toggle-shade\"",
+            SEAT,
+        )
+        .unwrap();
+        let none = Mods::default();
+        assert_eq!(
+            config.mouse.resolve(
+                Context::Titlebar,
+                none,
+                Gesture::Wheel(perspicax_policy::Wheel::Up)
+            ),
+            None
+        );
+        assert_eq!(
+            config.mouse.resolve(
+                Context::Titlebar,
+                none,
+                Gesture::Wheel(perspicax_policy::Wheel::Down)
+            ),
+            Some(&Action::ToggleShade)
+        );
     }
 
     #[test]
@@ -3642,6 +3733,46 @@ mod tests {
         assert_eq!(
             config.bindings.resolve(logo, &[Keysym::n]),
             Some(&Action::Minimize)
+        );
+    }
+
+    #[test]
+    fn shading_is_three_actions_a_key_can_have_and_neither_profile_binds_a_key_to() {
+        let config = parse(
+            "[keys]\n\"Logo+u\" = \"shade\"\n\
+             \"Logo+d\" = \"unshade\"\n\"Logo+s\" = \"toggle-shade\"",
+            SEAT,
+        )
+        .unwrap();
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        for (key, action) in [
+            (Keysym::u, Action::Shade),
+            (Keysym::d, Action::Unshade),
+            (Keysym::s, Action::ToggleShade),
+        ] {
+            assert_eq!(config.bindings.resolve(logo, &[key]), Some(&action));
+        }
+        let shading = |action: &Action| {
+            matches!(
+                action,
+                Action::Shade | Action::Unshade | Action::ToggleShade
+            )
+        };
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let bindings = Config::profile(profile, SEAT).bindings;
+            assert!(
+                !bindings.iter().any(|(_, action)| shading(action)),
+                "{profile:?} binds one"
+            );
+            assert!(!bindings.tap().is_some_and(shading), "{profile:?}'s tap");
+        }
+        let error = parse("[keys]\n\"Logo+x\" = \"roll-up\"", SEAT).unwrap_err();
+        assert!(
+            error.to_string().contains("shade, unshade, toggle-shade"),
+            "the refusal lists them: {error}"
         );
     }
 
