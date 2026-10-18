@@ -286,7 +286,8 @@ menu is `kind: layer`, with the `layer` it stacks in and the
 `kind: popup`, with `from` naming the window or panel it hangs from: drawn
 over it, and covering what is under it (see "A menu covers what is under it",
 below). An agent can read and click a panel or a menu as it would a window; a
-window verb aimed at one is refused as `not_a_window`.
+window verb aimed at one is refused as `not_a_window`. A window rolled up to
+its titlebar is `shaded: true`.
 
 An agent names a control and never a coordinate — the rectangle comes from the
 index and turning it into anything global is the compositor's job, so an agent
@@ -328,7 +329,10 @@ agent sees an occlusion before it spends a call discovering one. A window on a
 workspace that is not showing is refused as `other_workspace`, naming the
 workspace, a window that is a tab behind another as `inactive_tab`, naming the
 tab in front, and a node hanging off the edge of every monitor as `off_screen`.
-None is cleared by the agent switching the person's screen on its own.
+A node of a window rolled up to its titlebar is refused as `rolled_up`, and
+so is `tab_forward` into a group rolled up, though `window_close` still
+closes one. None is cleared by the agent switching the person's screen on its
+own, or unrolling what the person rolled up.
 
 A control its own application says is not being shown is refused as
 `not_showing`: Firefox's menu bar, hidden until Alt is pressed, and the page of
@@ -408,7 +412,8 @@ under a titlebar is refused as `occluded`, naming the window the titlebar
 belongs to, and the verdict is proof rather than policy: the frame is solid
 to an agent, even drawn see-through for a person (see [See-through
 windows](#see-through-windows)). A window's own frame sits outside it and
-never covers its own nodes.
+never covers its own nodes. A window rolled up covers by its titlebar alone:
+where its client was, what is under it is uncovered, as the person sees it.
 One cost of drawing the frame: a toolkit that would have drawn close and
 maximize buttons no longer does, so they are not in its accessibility tree;
 `window_close` and `tab_forward` are the agent's way to do what they did.
@@ -509,7 +514,10 @@ trigger for a pixel path. A picture comes with an account of every surface in
 it and the process that drew it, so no pixel is anonymous, and a window drawn
 by a process the agent holds no consent for is painted over in grey and listed
 as redacted rather than shown: a picture is a way of reading, and the gate on
-reading applies to it.
+reading applies to it. A picture of the monitor shows a window rolled up as
+the person sees it, its titlebar and what is under the rest. A picture of
+that window alone shows it whole, as one of a minimized window does: it is
+a reading of the window, which the agent may read already.
 
 ## An agent inside the session
 
@@ -831,8 +839,8 @@ profile, which is Plasma's and Windows' habits:
 - a tap of Logo on its own asks the desktop shell for its start menu;
 - a titlebar drawn by the compositor for a client that asks for one (Qt, foot,
   GTK 3 without a headerbar, and X11 applications): drag it to move,
-  double-click it to maximize, and minimize, maximize and close at its right;
-  drag an edge or a corner, or just outside one, to resize;
+  double-click it to maximize, and roll up, minimize, maximize and close at
+  its right; drag an edge or a corner, or just outside one, to resize;
 - tabs, as Fluxbox has them: drag a titlebar with the middle button onto
   another window's to make the two tabs of one window, and a tab away to part
   them. Logo+G does the same from the keyboard with the window focused before,
@@ -846,7 +854,9 @@ scrolling over the desktop. A window being moved stops at the edge of a
 screen or a panel until it is pushed 20 pixels further. The pointer itself
 stops at the edge of the desk, so a window grabbed nearer than that to the
 side it is pushed towards, as a titlebar is to the top, stays on screen.
-It does not snap. In both, a window being dragged stays in hand: switching
+It does not snap. The wheel over a titlebar rolls its window up to it, and
+down again, as Openbox does.
+In both, a window being dragged stays in hand: switching
 workspace by a key, a number, a pager or an edge takes it along, sending it
 to another workspace takes the person with it, and one minimized while held
 stays minimized. In both, a window's own menu, a right-click menu say, holds
@@ -865,6 +875,20 @@ are its own: resting the pointer against one does not flip, so a game turning
 its camera stays where it is. So are a window's that holds the pointer,
 fullscreen or not ([see Mouse](#a-game-holding-the-pointer)). Nor does an edge
 flip behind the lock screen.
+
+In both, a window can be rolled up to its titlebar and back, as Fluxbox and
+Openbox shade one: by the button left of minimize, or by `shade`, `unshade`
+and `toggle-shade` bound to a key or a button. Rolled up, it keeps its size
+and its place, and is put back exactly as it was, for its client is neither
+told nor resized. A click where it was lands on what is under it. It moves
+by its bar, has no edge to resize by, and its menus close. It keeps the
+keyboard, so what is typed still reaches it, and focusing it does not unroll
+it. Going fullscreen unrolls it; maximized, snapped, minimized or on another
+workspace, it stays rolled up. A tab group rolls up as one, and a tab taken
+out of it comes out unrolled. Only a window whose frame perspicax draws can
+roll up: one that draws its own has no titlebar of perspicax's to roll up to,
+and no button. An X11 window rolls up too, but is not told it has
+(`_NET_WM_STATE_SHADED`).
 
 In both, a workspace switch slides: the new workspace comes in from the side
 the person went towards, across a wrap too, and along the grid for a switch by
@@ -1810,6 +1834,18 @@ tab picked up with the middle button, the drag modifier, scroll flipping -- so
 release reaches an application. `"none"` hands a button back where it is
 written: `[mouse.window] "Mouse8" = "none"` keeps Back for the browser while
 `[mouse.anywhere]` flips workspaces with it everywhere else.
+
+`minimal` binds two of its own, as Openbox does: over a titlebar, `WheelUp`
+rolls the window up to it and `WheelDown` rolls it down again, and a second
+notch the same way does nothing more. `classic` binds none. A table of your
+own goes over the profile's, so `"none"` hands either back, and a binding
+replaces it:
+
+```toml
+[mouse.titlebar]
+"WheelUp" = "none"                # minimal's rolling up, handed back
+"Double+Mouse1" = "toggle-shade"  # roll up, as Fluxbox does, not maximize
+```
 
 A button is written by name -- `left`, `middle`, `right`, `side` and `extra`
 (the two thumb buttons, which browsers take as Back and Forward), `forward`,
