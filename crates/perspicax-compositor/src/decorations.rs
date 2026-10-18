@@ -283,6 +283,7 @@ impl Compositor {
             crate::shell::id_of(window)
                 .and_then(|id| self.tabs.tabs(id))
                 .map_or(1, <[_]>::len),
+            Self::is_server_decorated(window),
         )
     }
 

@@ -261,6 +261,8 @@ pub enum FrameButton {
     Minimize,
     Maximize,
     Close,
+    /// Roll the window up to its titlebar, or back.
+    Shade,
 }
 
 /// What part of a frame a point is on.
@@ -290,29 +292,34 @@ pub fn titlebar(client: Rect, insets: Insets, decorations: &Decorations) -> Opti
     (height > 0 && client.w > 0).then(|| Rect::new(client.x, client.y - height, client.w, height))
 }
 
-/// The titlebar's buttons, square, at its right-hand end: minimize, maximize,
-/// close, with close in the corner. As many as fit, close first, so a narrow
-/// window can still be closed.
+/// The titlebar's buttons, square, at its right-hand end: shade, minimize,
+/// maximize, close, with close in the corner. As many as fit, close first,
+/// so a narrow window can still be closed, and shade the first to go.
+/// `shades` is false for a strip of tabs over a frame its client draws,
+/// which has no titlebar of ours to roll up to, and no shade button.
 #[must_use]
 pub fn buttons(
     client: Rect,
     insets: Insets,
     decorations: &Decorations,
+    shades: bool,
 ) -> Vec<(FrameButton, Rect)> {
-    titlebar(client, insets, decorations).map_or_else(Vec::new, buttons_in)
+    titlebar(client, insets, decorations).map_or_else(Vec::new, |bar| buttons_in(bar, shades))
 }
 
 /// The buttons on a titlebar that is `bar`, as [`buttons`] places them.
 #[must_use]
-pub fn buttons_in(bar: Rect) -> Vec<(FrameButton, Rect)> {
+pub fn buttons_in(bar: Rect, shades: bool) -> Vec<(FrameButton, Rect)> {
     let side = bar.h;
     let fit = usize::try_from(bar.w / side.max(1)).unwrap_or(0);
     [
         FrameButton::Close,
         FrameButton::Maximize,
         FrameButton::Minimize,
+        FrameButton::Shade,
     ]
     .into_iter()
+    .filter(|button| shades || *button != FrameButton::Shade)
     .take(fit)
     .enumerate()
     .map(|(n, button)| {
@@ -327,10 +334,13 @@ pub fn buttons_in(bar: Rect) -> Vec<(FrameButton, Rect)> {
 
 /// The tabs on a titlebar that is `bar`, for a group of `count`: the room
 /// the buttons leave, shared out evenly, left to right. One tab, the whole
-/// room, for a window in no group.
+/// room, for a window in no group. `shades` as for [`buttons`].
 #[must_use]
-pub fn tab_rects(bar: Rect, count: usize) -> Vec<Rect> {
-    let taken: i32 = buttons_in(bar).iter().map(|(_, button)| button.w).sum();
+pub fn tab_rects(bar: Rect, count: usize, shades: bool) -> Vec<Rect> {
+    let taken: i32 = buttons_in(bar, shades)
+        .iter()
+        .map(|(_, button)| button.w)
+        .sum();
     let room = (bar.w - taken).max(0);
     let count = i32::try_from(count.max(1)).unwrap_or(1);
     (0..count)
@@ -349,9 +359,10 @@ pub fn tab_rects(bar: Rect, count: usize) -> Vec<Rect> {
 /// titlebar, which is asked about as its [`rolled_up`] client: then any of
 /// its frame is its titlebar, to move it by, or a button. `tabs` is how many
 /// tabs its group has, one for a window in no group, which has a title and
-/// no tabs. Otherwise every edge can be grabbed from the border
-/// and up to [`GRIP`] pixels outside it, and a corner from [`CORNER`] pixels
-/// along either side of it, so the titlebar's two ends resize diagonally.
+/// no tabs, and `shades` is as for [`buttons`]. Otherwise every edge can be
+/// grabbed from the border and up to [`GRIP`] pixels outside it, and a
+/// corner from [`CORNER`] pixels along either side of it, so the titlebar's
+/// two ends resize diagonally.
 #[must_use]
 pub fn part_at(
     point: (f64, f64),
@@ -360,6 +371,7 @@ pub fn part_at(
     decorations: &Decorations,
     resizable: bool,
     tabs: usize,
+    shades: bool,
 ) -> Option<Part> {
     if insets.is_none() {
         return None;
@@ -398,7 +410,7 @@ pub fn part_at(
         }
     }
     let on = |rect: Rect| within(rect, 0);
-    if let Some((button, _)) = buttons(client, insets, decorations)
+    if let Some((button, _)) = buttons(client, insets, decorations, shades)
         .into_iter()
         .find(|(_, rect)| on(*rect))
     {
@@ -406,7 +418,7 @@ pub fn part_at(
     }
     let tab = titlebar(client, insets, decorations)
         .filter(|_| tabs > 1)
-        .and_then(|bar| tab_rects(bar, tabs).into_iter().position(on));
+        .and_then(|bar| tab_rects(bar, tabs, shades).into_iter().position(on));
     Some(tab.map_or(Part::Title, Part::Tab))
 }
 
@@ -537,7 +549,7 @@ mod tests {
     fn a_rolled_up_window_has_no_edges_and_nothing_under_its_titlebar() {
         let decorations = Decorations::default();
         let client = rolled_up(Rect::new(100, 100, 400, 300));
-        let at = |x: f64, y: f64| part_at((x, y), client, framed(), &decorations, false, 1);
+        let at = |x: f64, y: f64| part_at((x, y), client, framed(), &decorations, false, 1, true);
         assert_eq!(
             at(300.0, 101.0),
             Some(Part::Title),
@@ -587,16 +599,17 @@ mod tests {
         let decorations = Decorations::default();
         let client = Rect::new(100, 100, 400, 300);
         assert_eq!(
-            buttons(client, framed(), &decorations),
+            buttons(client, framed(), &decorations, true),
             vec![
                 (FrameButton::Close, Rect::new(476, 76, 24, 24)),
                 (FrameButton::Maximize, Rect::new(452, 76, 24, 24)),
                 (FrameButton::Minimize, Rect::new(428, 76, 24, 24)),
+                (FrameButton::Shade, Rect::new(404, 76, 24, 24)),
             ]
         );
         let narrow = Rect::new(0, 100, 50, 50);
         assert_eq!(
-            buttons(narrow, framed(), &decorations)
+            buttons(narrow, framed(), &decorations, true)
                 .iter()
                 .map(|(button, _)| *button)
                 .collect::<Vec<_>>(),
@@ -605,14 +618,68 @@ mod tests {
         );
     }
 
+    /// Leftmost of the four, and the first to go as the bar narrows: a
+    /// window too narrow for all of them can still be closed, maximized and
+    /// minimized before it can be rolled up.
+    #[test]
+    fn the_shade_button_is_leftmost_and_the_first_to_go_on_a_narrow_bar() {
+        let on = |width| {
+            buttons_in(Rect::new(0, 0, width, 24), true)
+                .into_iter()
+                .map(|(button, _)| button)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            on(96),
+            vec![
+                FrameButton::Close,
+                FrameButton::Maximize,
+                FrameButton::Minimize,
+                FrameButton::Shade,
+            ]
+        );
+        assert_eq!(
+            buttons_in(Rect::new(0, 0, 96, 24), true)[3],
+            (FrameButton::Shade, Rect::new(0, 0, 24, 24)),
+            "at the bar's left end"
+        );
+        assert_eq!(
+            on(72),
+            vec![
+                FrameButton::Close,
+                FrameButton::Maximize,
+                FrameButton::Minimize
+            ]
+        );
+        assert_eq!(on(24), vec![FrameButton::Close]);
+    }
+
+    /// A strip of tabs over a window that draws its own frame has no
+    /// titlebar of ours to roll up to: the other three keep their places,
+    /// the tabs take the room, and where a shade button would be is the
+    /// strip.
+    #[test]
+    fn a_frame_its_client_draws_has_no_shade_button() {
+        let bar = Rect::new(100, 76, 400, 24);
+        let shown = buttons_in(bar, false);
+        assert_eq!(shown, buttons_in(bar, true)[..3]);
+        assert_eq!(tab_rects(bar, 1, false), vec![Rect::new(100, 76, 328, 24)]);
+        let decorations = Decorations::default();
+        let client = Rect::new(100, 100, 400, 300);
+        let at = |x: f64| part_at((x, 88.0), client, framed(), &decorations, true, 2, false);
+        assert_eq!(at(416.0), Some(Part::Tab(1)));
+        assert_eq!(at(440.0), Some(Part::Button(FrameButton::Minimize)));
+    }
+
     #[test]
     fn a_point_on_the_frame_says_which_part() {
         let decorations = Decorations::default();
         let client = Rect::new(100, 100, 400, 300);
-        let at = |x: f64, y: f64| part_at((x, y), client, framed(), &decorations, true, 1);
+        let at = |x: f64, y: f64| part_at((x, y), client, framed(), &decorations, true, 1, true);
         assert_eq!(at(200.0, 90.0), Some(Part::Title));
         assert_eq!(at(488.0, 88.0), Some(Part::Button(FrameButton::Close)));
         assert_eq!(at(440.0, 88.0), Some(Part::Button(FrameButton::Minimize)));
+        assert_eq!(at(416.0, 88.0), Some(Part::Button(FrameButton::Shade)));
         assert_eq!(at(200.0, 200.0), None, "the client is the client's");
         assert_eq!(at(200.0, 500.0), None, "and far off is nothing");
         let edge = |left, right, top, bottom| {
@@ -654,19 +721,20 @@ mod tests {
     #[test]
     fn tabs_share_the_room_the_buttons_leave() {
         let bar = Rect::new(100, 76, 400, 24);
-        assert_eq!(tab_rects(bar, 1), vec![Rect::new(100, 76, 328, 24)]);
+        assert_eq!(tab_rects(bar, 1, true), vec![Rect::new(100, 76, 304, 24)]);
         assert_eq!(
-            tab_rects(bar, 3),
+            tab_rects(bar, 3, true),
             vec![
-                Rect::new(100, 76, 109, 24),
-                Rect::new(209, 76, 109, 24),
-                Rect::new(318, 76, 110, 24),
+                Rect::new(100, 76, 101, 24),
+                Rect::new(201, 76, 101, 24),
+                Rect::new(302, 76, 102, 24),
             ],
             "evenly, with the odd pixel at the end"
         );
         let decorations = Decorations::default();
         let client = Rect::new(100, 100, 400, 300);
-        let at = |x: f64, tabs| part_at((x, 88.0), client, framed(), &decorations, true, tabs);
+        let at =
+            |x: f64, tabs| part_at((x, 88.0), client, framed(), &decorations, true, tabs, true);
         assert_eq!(at(150.0, 3), Some(Part::Tab(0)));
         assert_eq!(at(400.0, 3), Some(Part::Tab(2)));
         assert_eq!(
@@ -682,7 +750,7 @@ mod tests {
         let decorations = Decorations::default();
         let maximized = Insets::of(&decorations, Look::Maximized);
         let client = Rect::new(0, 24, 1920, 1056);
-        let at = |x: f64, y: f64| part_at((x, y), client, maximized, &decorations, false, 1);
+        let at = |x: f64, y: f64| part_at((x, y), client, maximized, &decorations, false, 1, true);
         assert_eq!(at(0.0, 0.0), Some(Part::Title));
         assert_eq!(at(1910.0, 10.0), Some(Part::Button(FrameButton::Close)));
         assert_eq!(at(10.0, 500.0), None);

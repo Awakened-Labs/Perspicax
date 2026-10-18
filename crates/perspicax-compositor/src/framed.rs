@@ -88,6 +88,11 @@ pub(crate) struct TitleKey {
     /// The whole scale it is rasterised at. A buffer's scale is whole, so a
     /// fractional output gets the next one up, scaled down.
     pub(crate) scale: i32,
+    /// Whether it has a shade button: not a strip of tabs over a frame its
+    /// client draws, which has no titlebar of ours to roll up to.
+    pub(crate) shades: bool,
+    /// Whether the window is rolled up, which its shade button shows.
+    pub(crate) shaded: bool,
 }
 
 /// The whole scale a title is rasterised at for an output at `scale`.
