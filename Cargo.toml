@@ -152,6 +152,17 @@ serde = { version = "1", features = ["derive"] }
 # `panic` is deliberately left alone. Unwinding is load-bearing here: a client
 # that provokes a panic on the compositor's own thread must not take the seat,
 # the index and every other client's session down with it.
+# The PulseAudio protocol, from a fork until a release carries its fix
+# (#202). crates.io's 0.3.2 cannot read a sink or a source in state -2,
+# `PA_SINK_INIT`, which pipewire-pulse gives one it is still making
+# (colinmarc/pulseaudio-rs#16, fixed by #17). Pinned by `rev`, not by
+# branch, so the build is the commit that was read; `deny.toml` allows this
+# one git source and no other. `cargo publish` ignores this table: a
+# published perspicax-shell takes crates.io's 0.3, and reads such a sink once
+# it is made, through the re-read #198 added.
+[patch.crates-io]
+pulseaudio = { git = "https://github.com/project3301/pulseaudio-rs", rev = "55717d708241c845ecc09e50f7f8ec8989c8b059" }
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
