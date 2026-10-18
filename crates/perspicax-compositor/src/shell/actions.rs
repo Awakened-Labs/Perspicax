@@ -99,7 +99,11 @@ impl Compositor {
             }
             Action::SendToWorkspace(direction) => self.send_to_workspace(*direction, false),
             Action::CarryToWorkspace(direction) => self.send_to_workspace(*direction, true),
-            Action::ToggleSticky => self.toggle_sticky(),
+            Action::ToggleSticky => {
+                if let Some(window) = focused {
+                    self.toggle_sticky(&window);
+                }
+            }
             Action::Snap(direction) => self.snap_focused(*direction),
             Action::Reload => self.reload(),
             Action::StartMenu => self.ask_shell(crate::shell_protocol::Menu::Start),

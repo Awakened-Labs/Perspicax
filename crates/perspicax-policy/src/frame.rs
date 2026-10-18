@@ -73,6 +73,8 @@ pub struct Decorations {
     pub unfocused_ink: Colour,
     /// How a window an agent may act on is marked out.
     pub agent: AgentLook,
+    /// Which buttons the titlebar carries, at which end.
+    pub buttons: Buttons,
 }
 
 impl Default for Decorations {
@@ -86,6 +88,7 @@ impl Default for Decorations {
             unfocused: Colour::rgb(0x47, 0x50, 0x57),
             unfocused_ink: Colour::rgb(0xff, 0xff, 0xff),
             agent: AgentLook::default(),
+            buttons: Buttons::default(),
         }
     }
 }
@@ -258,11 +261,130 @@ pub fn outline_rects(around: Rect, width: i32) -> Vec<Rect> {
 /// A button on the titlebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameButton {
+    /// Roll the window up to its titlebar, or back.
+    Shade,
+    /// Keep the window on every workspace, or take it back to one.
+    Sticky,
     Minimize,
     Maximize,
     Close,
-    /// Roll the window up to its titlebar, or back.
-    Shade,
+}
+
+impl FrameButton {
+    /// Every button, in the order the issue that let a person choose them
+    /// listed them.
+    pub const ALL: [Self; 5] = [
+        Self::Shade,
+        Self::Sticky,
+        Self::Minimize,
+        Self::Maximize,
+        Self::Close,
+    ];
+
+    /// Its name as `[decorations] left` and `right` write it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Shade => "shade",
+            Self::Sticky => "sticky",
+            Self::Minimize => "minimize",
+            Self::Maximize => "maximize",
+            Self::Close => "close",
+        }
+    }
+}
+
+/// Which buttons a titlebar carries, and at which end: the
+/// `[decorations] left` and `right` lists, each in the order it is drawn
+/// from the bar's left, with the title or the tabs between the two. A
+/// button is at one end at most, and either end may have none.
+///
+/// Held in arrays rather than lists, so that [`Decorations`] stays `Copy`:
+/// there are only so many buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Buttons {
+    left: [Option<FrameButton>; FrameButton::ALL.len()],
+    right: [Option<FrameButton>; FrameButton::ALL.len()],
+}
+
+impl Buttons {
+    /// `left` at the bar's left end and `right` at its right, or the first
+    /// button listed a second time, at either end.
+    pub fn new(left: &[FrameButton], right: &[FrameButton]) -> Result<Self, FrameButton> {
+        let listed: Vec<FrameButton> = left.iter().chain(right).copied().collect();
+        for (n, button) in listed.iter().enumerate() {
+            if listed[..n].contains(button) {
+                return Err(*button);
+            }
+        }
+        // Listed once each, so there are no more of them than there are
+        // buttons, and every one has a place.
+        let mut buttons = Self {
+            left: [None; FrameButton::ALL.len()],
+            right: [None; FrameButton::ALL.len()],
+        };
+        for (place, button) in buttons.left.iter_mut().zip(left) {
+            *place = Some(*button);
+        }
+        for (place, button) in buttons.right.iter_mut().zip(right) {
+            *place = Some(*button);
+        }
+        Ok(buttons)
+    }
+
+    /// The buttons at the bar's left end, from the left.
+    pub fn left(&self) -> impl Iterator<Item = FrameButton> + '_ {
+        self.left.iter().flatten().copied()
+    }
+
+    /// The buttons at its right end, from the left: close, by default, last
+    /// and in the corner.
+    pub fn right(&self) -> impl Iterator<Item = FrameButton> + '_ {
+        self.right.iter().flatten().copied()
+    }
+
+    /// Whether the bar carries `button`, at either end.
+    #[must_use]
+    pub fn contains(&self, button: FrameButton) -> bool {
+        self.left()
+            .chain(self.right())
+            .any(|carried| carried == button)
+    }
+}
+
+impl Default for Buttons {
+    /// Shade, minimize, maximize and close, all at the right, close in the
+    /// corner, and none at the left.
+    fn default() -> Self {
+        use FrameButton::{Close, Maximize, Minimize, Shade};
+        Self::new(&[], &[Shade, Minimize, Maximize, Close]).expect("four buttons, once each")
+    }
+}
+
+/// How a button on a titlebar is lit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Light {
+    /// The pointer is over it.
+    Hover,
+    /// It was pressed, and the pointer is over it still: letting go here
+    /// does its job.
+    Pressed,
+}
+
+/// Which of a window's titlebar buttons is lit, and how. `held` is the one
+/// the left button went down on, if it went down on one of this window's,
+/// and `over` is the one of this window's the pointer is over now.
+///
+/// A button held is lit only while the pointer is over it, because only
+/// there does letting go do anything; dragged off it, nothing is lit, not
+/// even the button the pointer is over then, which the press is not for.
+#[must_use]
+pub fn light(held: Option<FrameButton>, over: Option<FrameButton>) -> Option<(FrameButton, Light)> {
+    match (held, over) {
+        (Some(held), Some(over)) if held == over => Some((held, Light::Pressed)),
+        (Some(_), _) => None,
+        (None, over) => over.map(|over| (over, Light::Hover)),
+    }
 }
 
 /// What part of a frame a point is on.
@@ -292,9 +414,16 @@ pub fn titlebar(client: Rect, insets: Insets, decorations: &Decorations) -> Opti
     (height > 0 && client.w > 0).then(|| Rect::new(client.x, client.y - height, client.w, height))
 }
 
-/// The titlebar's buttons, square, at its right-hand end: shade, minimize,
-/// maximize, close, with close in the corner. As many as fit, close first,
-/// so a narrow window can still be closed, and shade the first to go.
+/// The titlebar's buttons, square, at the two ends [`Decorations::buttons`]
+/// puts them, with the title or the tabs between: by default shade,
+/// minimize, maximize and close at the right, close in the corner.
+///
+/// As many as fit. Close is the last to go, so a narrow window can still be
+/// closed. The others go from the inside out, the nearest the title first,
+/// and of two as near, the one on the left first: by default shade goes
+/// first, then minimize, then maximize. They come in the order they are
+/// kept in, close first.
+///
 /// `shades` is false for a strip of tabs over a frame its client draws,
 /// which has no titlebar of ours to roll up to, and no shade button.
 #[must_use]
@@ -304,51 +433,90 @@ pub fn buttons(
     decorations: &Decorations,
     shades: bool,
 ) -> Vec<(FrameButton, Rect)> {
-    titlebar(client, insets, decorations).map_or_else(Vec::new, |bar| buttons_in(bar, shades))
+    titlebar(client, insets, decorations).map_or_else(Vec::new, |bar| {
+        buttons_in(bar, &decorations.buttons, shades)
+    })
 }
 
 /// The buttons on a titlebar that is `bar`, as [`buttons`] places them.
 #[must_use]
-pub fn buttons_in(bar: Rect, shades: bool) -> Vec<(FrameButton, Rect)> {
-    let side = bar.h;
-    let fit = usize::try_from(bar.w / side.max(1)).unwrap_or(0);
-    [
-        FrameButton::Close,
-        FrameButton::Maximize,
-        FrameButton::Minimize,
-        FrameButton::Shade,
-    ]
-    .into_iter()
-    .filter(|button| shades || *button != FrameButton::Shade)
-    .take(fit)
-    .enumerate()
-    .map(|(n, button)| {
-        let n = i32::try_from(n).unwrap_or(0) + 1;
-        (
-            button,
-            Rect::new(bar.x + bar.w - n * side, bar.y, side, side),
-        )
-    })
-    .collect()
+pub fn buttons_in(bar: Rect, buttons: &Buttons, shades: bool) -> Vec<(FrameButton, Rect)> {
+    lay_out(bar, buttons, shades).0
 }
 
 /// The tabs on a titlebar that is `bar`, for a group of `count`: the room
-/// the buttons leave, shared out evenly, left to right. One tab, the whole
-/// room, for a window in no group. `shades` as for [`buttons`].
+/// between the buttons at its two ends, shared out evenly, left to right.
+/// One tab, the whole room, for a window in no group. `shades` as for
+/// [`buttons`].
 #[must_use]
-pub fn tab_rects(bar: Rect, count: usize, shades: bool) -> Vec<Rect> {
-    let taken: i32 = buttons_in(bar, shades)
-        .iter()
-        .map(|(_, button)| button.w)
-        .sum();
-    let room = (bar.w - taken).max(0);
+pub fn tab_rects(bar: Rect, count: usize, buttons: &Buttons, shades: bool) -> Vec<Rect> {
+    let (_, (start, end)) = lay_out(bar, buttons, shades);
+    let room = (end - start).max(0);
     let count = i32::try_from(count.max(1)).unwrap_or(1);
     (0..count)
         .map(|n| {
             let (from, to) = (room * n / count, room * (n + 1) / count);
-            Rect::new(bar.x + from, bar.y, to - from, bar.h)
+            Rect::new(start + from, bar.y, to - from, bar.h)
         })
         .collect()
+}
+
+/// The buttons kept on `bar`, placed, in the order they are kept in, and
+/// where the room between the two ends starts and ends.
+fn lay_out(bar: Rect, buttons: &Buttons, shades: bool) -> (Vec<(FrameButton, Rect)>, (i32, i32)) {
+    let side = bar.h;
+    let fit = usize::try_from(bar.w / side.max(1)).unwrap_or(0);
+    let shown = |button: &FrameButton| shades || *button != FrameButton::Shade;
+    let left: Vec<FrameButton> = buttons.left().filter(shown).collect();
+    let right: Vec<FrameButton> = buttons.right().filter(shown).collect();
+
+    // How far each is from the title, counted in the buttons between them:
+    // the last on the left and the first on the right are beside it.
+    let mut kept: Vec<(bool, usize, FrameButton)> = left
+        .iter()
+        .enumerate()
+        .map(|(n, button)| (true, left.len() - 1 - n, *button))
+        .chain(
+            right
+                .iter()
+                .enumerate()
+                .map(|(n, button)| (false, n, *button)),
+        )
+        .collect();
+    kept.sort_by_key(|&(on_left, from_title, button)| {
+        (
+            button != FrameButton::Close,
+            std::cmp::Reverse(from_title),
+            on_left,
+        )
+    });
+    kept.truncate(fit);
+
+    let is_kept = |button: &FrameButton| kept.iter().any(|(_, _, held)| held == button);
+    let width = |count: usize| i32::try_from(count).unwrap_or(0) * side;
+    let at_left: Vec<FrameButton> = left.into_iter().filter(is_kept).collect();
+    let at_right: Vec<FrameButton> = right.into_iter().filter(is_kept).collect();
+    let (start, end) = (
+        bar.x + width(at_left.len()),
+        bar.x + bar.w - width(at_right.len()),
+    );
+    let place = |button: FrameButton| {
+        let (from, n) = match at_left.iter().position(|left| *left == button) {
+            Some(n) => (bar.x, n),
+            None => (
+                end,
+                at_right
+                    .iter()
+                    .position(|right| *right == button)
+                    .unwrap_or(0),
+            ),
+        };
+        (button, Rect::new(from + width(n), bar.y, side, side))
+    };
+    (
+        kept.iter().map(|&(_, _, button)| place(button)).collect(),
+        (start, end),
+    )
 }
 
 /// What part of the frame of a window with this client rect `point` is on,
@@ -418,7 +586,11 @@ pub fn part_at(
     }
     let tab = titlebar(client, insets, decorations)
         .filter(|_| tabs > 1)
-        .and_then(|bar| tab_rects(bar, tabs, shades).into_iter().position(on));
+        .and_then(|bar| {
+            tab_rects(bar, tabs, &decorations.buttons, shades)
+                .into_iter()
+                .position(on)
+        });
     Some(tab.map_or(Part::Title, Part::Tab))
 }
 
@@ -624,7 +796,7 @@ mod tests {
     #[test]
     fn the_shade_button_is_leftmost_and_the_first_to_go_on_a_narrow_bar() {
         let on = |width| {
-            buttons_in(Rect::new(0, 0, width, 24), true)
+            buttons_in(Rect::new(0, 0, width, 24), &Buttons::default(), true)
                 .into_iter()
                 .map(|(button, _)| button)
                 .collect::<Vec<_>>()
@@ -639,7 +811,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            buttons_in(Rect::new(0, 0, 96, 24), true)[3],
+            buttons_in(Rect::new(0, 0, 96, 24), &Buttons::default(), true)[3],
             (FrameButton::Shade, Rect::new(0, 0, 24, 24)),
             "at the bar's left end"
         );
@@ -661,9 +833,12 @@ mod tests {
     #[test]
     fn a_frame_its_client_draws_has_no_shade_button() {
         let bar = Rect::new(100, 76, 400, 24);
-        let shown = buttons_in(bar, false);
-        assert_eq!(shown, buttons_in(bar, true)[..3]);
-        assert_eq!(tab_rects(bar, 1, false), vec![Rect::new(100, 76, 328, 24)]);
+        let shown = buttons_in(bar, &Buttons::default(), false);
+        assert_eq!(shown, buttons_in(bar, &Buttons::default(), true)[..3]);
+        assert_eq!(
+            tab_rects(bar, 1, &Buttons::default(), false),
+            vec![Rect::new(100, 76, 328, 24)]
+        );
         let decorations = Decorations::default();
         let client = Rect::new(100, 100, 400, 300);
         let at = |x: f64| part_at((x, 88.0), client, framed(), &decorations, true, 2, false);
@@ -721,9 +896,12 @@ mod tests {
     #[test]
     fn tabs_share_the_room_the_buttons_leave() {
         let bar = Rect::new(100, 76, 400, 24);
-        assert_eq!(tab_rects(bar, 1, true), vec![Rect::new(100, 76, 304, 24)]);
         assert_eq!(
-            tab_rects(bar, 3, true),
+            tab_rects(bar, 1, &Buttons::default(), true),
+            vec![Rect::new(100, 76, 304, 24)]
+        );
+        assert_eq!(
+            tab_rects(bar, 3, &Buttons::default(), true),
             vec![
                 Rect::new(100, 76, 101, 24),
                 Rect::new(201, 76, 101, 24),
@@ -743,6 +921,186 @@ mod tests {
             "one window: a title, not a tab"
         );
         assert_eq!(at(488.0, 3), Some(Part::Button(FrameButton::Close)));
+    }
+
+    /// minimal's bar, Fluxbox's: sticky at the left, the other four at the
+    /// right.
+    fn fluxbox() -> Buttons {
+        use FrameButton::*;
+        Buttons::new(&[Sticky], &[Shade, Minimize, Maximize, Close]).unwrap()
+    }
+
+    #[test]
+    fn buttons_at_both_ends_leave_the_tabs_the_room_between() {
+        let bar = Rect::new(100, 76, 400, 24);
+        let placed = buttons_in(bar, &fluxbox(), true);
+        let at = |wanted| {
+            placed
+                .iter()
+                .find(|(button, _)| *button == wanted)
+                .map(|(_, rect)| *rect)
+        };
+        assert_eq!(at(FrameButton::Sticky), Some(Rect::new(100, 76, 24, 24)));
+        assert_eq!(at(FrameButton::Shade), Some(Rect::new(404, 76, 24, 24)));
+        assert_eq!(at(FrameButton::Close), Some(Rect::new(476, 76, 24, 24)));
+        assert_eq!(
+            tab_rects(bar, 1, &fluxbox(), true),
+            vec![Rect::new(124, 76, 280, 24)],
+            "after sticky, before shade"
+        );
+        assert_eq!(
+            tab_rects(bar, 2, &fluxbox(), true),
+            vec![Rect::new(124, 76, 140, 24), Rect::new(264, 76, 140, 24)]
+        );
+        let bare = Buttons::new(&[], &[]).unwrap();
+        assert!(buttons_in(bar, &bare, true).is_empty(), "no buttons at all");
+        assert_eq!(
+            tab_rects(bar, 1, &bare, true),
+            vec![bar],
+            "and the whole bar"
+        );
+    }
+
+    /// Close is the last to go; the rest go from beside the title outwards,
+    /// and of two as near the title, the one on the left goes first.
+    #[test]
+    fn a_narrow_bar_keeps_close_then_drops_from_the_title_outwards() {
+        use FrameButton::*;
+        let on = |width| {
+            let mut kept: Vec<_> = buttons_in(Rect::new(0, 0, width, 24), &fluxbox(), true)
+                .into_iter()
+                .map(|(button, _)| button)
+                .collect();
+            kept.sort_by_key(|button| FrameButton::ALL.iter().position(|b| b == button));
+            kept
+        };
+        assert_eq!(on(120), vec![Shade, Sticky, Minimize, Maximize, Close]);
+        assert_eq!(
+            on(96),
+            vec![Shade, Minimize, Maximize, Close],
+            "sticky and shade are as near the title, and the left one goes"
+        );
+        assert_eq!(on(72), vec![Minimize, Maximize, Close]);
+        assert_eq!(on(48), vec![Maximize, Close]);
+        assert_eq!(on(24), vec![Close]);
+        assert!(on(23).is_empty());
+        assert_eq!(
+            buttons_in(Rect::new(0, 0, 48, 24), &fluxbox(), true),
+            vec![
+                (Close, Rect::new(24, 0, 24, 24)),
+                (Maximize, Rect::new(0, 0, 24, 24))
+            ],
+            "what is kept closes up to the end it is at"
+        );
+    }
+
+    /// Close is kept first wherever it is: at the far left, as on a Mac, or
+    /// beside the title.
+    #[test]
+    fn close_is_kept_wherever_it_is_listed() {
+        use FrameButton::*;
+        let mac = Buttons::new(&[Close, Minimize, Maximize], &[]).unwrap();
+        assert_eq!(
+            buttons_in(Rect::new(0, 0, 24, 24), &mac, true),
+            vec![(Close, Rect::new(0, 0, 24, 24))]
+        );
+        let beside = Buttons::new(&[], &[Close, Maximize]).unwrap();
+        assert_eq!(
+            buttons_in(Rect::new(0, 0, 24, 24), &beside, true),
+            vec![(Close, Rect::new(0, 0, 24, 24))],
+            "and closes up to its end"
+        );
+        assert_eq!(
+            buttons_in(Rect::new(0, 0, 400, 24), &mac, true),
+            vec![
+                (Close, Rect::new(0, 0, 24, 24)),
+                (Minimize, Rect::new(24, 0, 24, 24)),
+                (Maximize, Rect::new(48, 0, 24, 24)),
+            ],
+            "kept close first, then the farthest from the title"
+        );
+    }
+
+    #[test]
+    fn a_point_on_a_left_hand_button_says_which() {
+        let decorations = Decorations {
+            buttons: fluxbox(),
+            ..Decorations::default()
+        };
+        let client = Rect::new(100, 100, 400, 300);
+        let at =
+            |x: f64, tabs| part_at((x, 88.0), client, framed(), &decorations, true, tabs, true);
+        assert_eq!(at(110.0, 1), Some(Part::Button(FrameButton::Sticky)));
+        assert_eq!(at(130.0, 1), Some(Part::Title));
+        assert_eq!(
+            at(130.0, 2),
+            Some(Part::Tab(0)),
+            "the first tab is after it"
+        );
+        assert_eq!(at(488.0, 1), Some(Part::Button(FrameButton::Close)));
+        assert_eq!(
+            at(99.0, 1),
+            Some(Part::Edge(Edges {
+                top: true,
+                left: true,
+                ..Edges::default()
+            })),
+            "the bar's end still resizes"
+        );
+    }
+
+    /// The layout nobody chose is the one there always was: every button at
+    /// the right, where the tests above, written before there was a choice,
+    /// still find them.
+    #[test]
+    fn the_default_layout_is_todays_to_the_pixel() {
+        let today = Buttons::new(
+            &[],
+            &[
+                FrameButton::Shade,
+                FrameButton::Minimize,
+                FrameButton::Maximize,
+                FrameButton::Close,
+            ],
+        )
+        .unwrap();
+        assert_eq!(Buttons::default(), today);
+        assert_eq!(Decorations::default().buttons, today);
+        assert_eq!(Buttons::default().left().count(), 0);
+        assert!(!Buttons::default().contains(FrameButton::Sticky));
+    }
+
+    #[test]
+    fn a_button_listed_twice_is_named() {
+        use FrameButton::*;
+        assert_eq!(Buttons::new(&[Close], &[Shade, Close]), Err(Close));
+        assert_eq!(Buttons::new(&[Sticky, Sticky], &[]), Err(Sticky));
+        assert_eq!(
+            Buttons::new(&[Shade, Sticky, Minimize], &[Maximize, Close, Shade]),
+            Err(Shade),
+            "six names for five buttons"
+        );
+        assert!(
+            Buttons::new(&FrameButton::ALL, &[]).is_ok(),
+            "all five at one end"
+        );
+    }
+
+    #[test]
+    fn light_is_pressed_only_while_held_over_its_own_button() {
+        use FrameButton::*;
+        assert_eq!(light(None, Some(Close)), Some((Close, Light::Hover)));
+        assert_eq!(light(None, None), None);
+        assert_eq!(
+            light(Some(Close), Some(Close)),
+            Some((Close, Light::Pressed))
+        );
+        assert_eq!(light(Some(Close), None), None, "dragged off it");
+        assert_eq!(
+            light(Some(Close), Some(Maximize)),
+            None,
+            "nor the one it was dragged to"
+        );
     }
 
     #[test]

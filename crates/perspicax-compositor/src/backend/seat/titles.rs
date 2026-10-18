@@ -63,8 +63,9 @@ impl Titles {
 
     /// Make sure `window` has its titlebar drawn at the whole scale `scale`
     /// in its ink and the theme's `family`: `labels`, one per tab, with
-    /// `front` the one in front, and its buttons, the shade button showing
-    /// whether it is rolled up. Does nothing if it already has.
+    /// `front` the one in front, and `buttons` at the bar's two ends, the
+    /// shade button showing whether it is rolled up. Does nothing if it
+    /// already has.
     pub(super) fn prepare(
         &mut self,
         window: &Framed,
@@ -72,6 +73,7 @@ impl Titles {
         front: usize,
         scale: i32,
         family: &perspicax_policy::Family,
+        buttons: perspicax_policy::Buttons,
     ) {
         let (Some(area), Some(ink)) = (window.title_at(), window.ink()) else {
             return;
@@ -83,6 +85,7 @@ impl Titles {
             ink,
             family: family.clone(),
             scale,
+            buttons,
             shades: Compositor::is_server_decorated(window),
             shaded: crate::shell::is_shaded(window),
         };
@@ -117,7 +120,7 @@ impl Titles {
 
         // The buttons, in pixels: the same places the pointer finds them.
         let bar = Rect::new(0, 0, key.size.0, key.size.1);
-        let buttons = buttons_in(bar, key.shades);
+        let buttons = buttons_in(bar, &key.buttons, key.shades);
         for (button, place) in &buttons {
             let place = Rect::new(
                 place.x * key.scale,
@@ -139,7 +142,7 @@ impl Titles {
         // One label per tab, in the same places the pointer finds the tabs.
         // With more than one, the tabs behind are written fainter, the one in
         // front is underlined, and a thin rule parts each from the next.
-        let tabs = tab_rects(bar, key.labels.len(), key.shades);
+        let tabs = tab_rects(bar, key.labels.len(), &key.buttons, key.shades);
         let grouped = tabs.len() > 1;
         for (n, (place, label)) in tabs.iter().zip(&key.labels).enumerate() {
             let place = Rect::new(
@@ -284,10 +287,12 @@ fn family(family: &perspicax_policy::Family) -> Family<'_> {
 
 /// Draw `button`'s symbol, centred in `place`, in pixels of a buffer
 /// `width` wide: a cross to close, a square to maximize, a bar along the
-/// bottom to minimize, and one along the top to roll up. For a window
-/// `shaded`, rolled up already, a chevron under that bar points down, the
-/// way it unrolls. Each pixel is inked by how much of it the shape covers,
-/// so the diagonals of the cross and the chevron are smooth.
+/// bottom to minimize, one along the top to roll up, and a pin, a ring on a
+/// short stem, to keep the window on every workspace. For a window
+/// `shaded`, rolled up already, a chevron under the shade button's bar
+/// points down, the way it unrolls. Each pixel is inked by how much of it
+/// the shape covers, so the diagonals of the cross and the chevron, and the
+/// pin's ring, are smooth.
 fn draw_button(
     pixels: &mut [u8],
     width: i32,
@@ -305,6 +310,8 @@ fn draw_button(
     );
     // The chevron's arms, from either side of it down to its point.
     let (arm, point) = ((half * 0.7, -half * 0.25), (0.0, half * 0.6));
+    // The pin's ring, above the middle, and how big round it is.
+    let (ring, round) = (-half * 0.3, half * 0.55);
     // How far a pixel's centre is from the shape's line, as `x, y` from the
     // middle of the button.
     let distance = |x: f32, y: f32| match button {
@@ -318,6 +325,9 @@ fn draw_button(
             .min(segment((x, y), (-arm.0, arm.1), point))
             .min(segment((x, y), arm, point)),
         FrameButton::Shade if x.abs() <= half => (y + half).abs(),
+        FrameButton::Sticky if x.abs() <= half && y.abs() <= half => (x.hypot(y - ring) - round)
+            .abs()
+            .min(segment((x, y), (0.0, ring + round), (0.0, half))),
         _ => f32::INFINITY,
     };
     for row in place.y..place.y + place.h {
@@ -388,6 +398,7 @@ mod tests {
             ink: perspicax_policy::Colour::rgb(0xff, 0xff, 0xff),
             family: perspicax_policy::Family::SansSerif,
             scale: 2,
+            buttons: perspicax_policy::Buttons::default(),
             shades: true,
             shaded: false,
         };
@@ -452,6 +463,7 @@ mod tests {
             ink: perspicax_policy::Colour::rgb(0xff, 0xff, 0xff),
             family: perspicax_policy::Family::SansSerif,
             scale: 1,
+            buttons: perspicax_policy::Buttons::default(),
             shades: true,
             shaded: false,
         };
@@ -478,11 +490,17 @@ mod tests {
             ink: perspicax_policy::Colour::rgb(0xff, 0xff, 0xff),
             family: perspicax_policy::Family::SansSerif,
             scale: 1,
+            buttons: perspicax_policy::Buttons::default(),
             shades: true,
             shaded: false,
         };
         let (pixels, (width, height)) = titles.pixels(&key);
-        let tabs = tab_rects(Rect::new(0, 0, 200, 24), 2, true);
+        let tabs = tab_rects(
+            Rect::new(0, 0, 200, 24),
+            2,
+            &perspicax_policy::Buttons::default(),
+            true,
+        );
         let underlined = |tab: Rect| {
             let row = height - 1;
             (tab.x + PADDING..tab.x + tab.w - PADDING)
@@ -511,15 +529,20 @@ mod tests {
             ink: perspicax_policy::Colour::rgb(0xff, 0xff, 0xff),
             family: perspicax_policy::Family::SansSerif,
             scale: 1,
+            buttons: perspicax_policy::Buttons::default(),
             shades: true,
             shaded,
         };
         let (unrolled, (width, _)) = titles.pixels(&key(false));
         let (rolled, _) = titles.pixels(&key(true));
-        let (_, place) = buttons_in(Rect::new(0, 0, 200, 24), true)
-            .into_iter()
-            .find(|(button, _)| *button == FrameButton::Shade)
-            .expect("a shade button");
+        let (_, place) = buttons_in(
+            Rect::new(0, 0, 200, 24),
+            &perspicax_policy::Buttons::default(),
+            true,
+        )
+        .into_iter()
+        .find(|(button, _)| *button == FrameButton::Shade)
+        .expect("a shade button");
         let inked = |pixels: &[u8], row: i32| -> Vec<i32> {
             (place.x..place.x + place.w)
                 .filter(|column| pixels[((row * width + column) * 4 + 3) as usize] > 0)
@@ -569,6 +592,85 @@ mod tests {
             (place.y..place.y + place.h).all(|row| inked(&strip, row).is_empty()),
             "no shade button on a strip of tabs"
         );
+    }
+
+    /// minimal's bar: sticky at the left, the other four at the right.
+    fn fluxbox() -> perspicax_policy::Buttons {
+        use FrameButton::*;
+        perspicax_policy::Buttons::new(&[Sticky], &[Shade, Minimize, Maximize, Close])
+            .expect("five buttons, once each")
+    }
+
+    /// No fonts, so all that is drawn is the buttons.
+    fn fontless() -> Titles {
+        Titles {
+            fonts: Fonts {
+                finding: None,
+                found: none(),
+            },
+            glyphs: SwashCache::new(),
+        }
+    }
+
+    fn bar(buttons: perspicax_policy::Buttons) -> TitleKey {
+        TitleKey {
+            labels: vec!["Terminal — foot".to_owned()],
+            front: 0,
+            size: (200, 24),
+            ink: perspicax_policy::Colour::rgb(0xff, 0xff, 0xff),
+            family: perspicax_policy::Family::SansSerif,
+            scale: 1,
+            buttons,
+            shades: true,
+            shaded: false,
+        }
+    }
+
+    /// Against whatever fonts this machine has, as the first test is: the
+    /// title is written after the buttons at the left, and their padding.
+    #[test]
+    fn a_title_starts_after_the_left_hand_buttons() {
+        let mut titles = Titles::new();
+        if titles.fonts.found().db().is_empty() {
+            return;
+        }
+        let (pixels, (width, height)) = titles.pixels(&bar(fluxbox()));
+        let inked = |column: i32| {
+            (0..height).any(|row| pixels[((row * width + column) * 4 + 3) as usize] > 0)
+        };
+        assert!((0..height).any(inked), "the sticky button, at the left end");
+        assert!(
+            (height..height + PADDING).all(|column| !inked(column)),
+            "then the padding before the title"
+        );
+        assert!(
+            (height + PADDING..width - 4 * height).any(inked),
+            "then the title"
+        );
+    }
+
+    /// Buttons need no fonts, so this runs anywhere.
+    #[test]
+    fn a_sticky_button_is_drawn_where_the_pointer_finds_it() {
+        let mut titles = fontless();
+        let found = |buttons| {
+            buttons_in(Rect::new(0, 0, 200, 24), &buttons, true)
+                .into_iter()
+                .find(|(button, _)| *button == FrameButton::Sticky)
+                .map(|(_, place)| place)
+        };
+        let place = found(fluxbox()).expect("minimal's bar has one");
+        let inked = |pixels: &[u8], width: i32| {
+            (place.y..place.y + place.h).any(|row| {
+                (place.x..place.x + place.w)
+                    .any(|column| pixels[((row * width + column) * 4 + 3) as usize] > 0)
+            })
+        };
+        let (pinned, (width, _)) = titles.pixels(&bar(fluxbox()));
+        assert!(inked(&pinned, width), "the pin, where the pointer finds it");
+        assert_eq!(found(perspicax_policy::Buttons::default()), None);
+        let (plain, _) = titles.pixels(&bar(perspicax_policy::Buttons::default()));
+        assert!(!inked(&plain, width), "and nothing there on classic's bar");
     }
 
     #[test]

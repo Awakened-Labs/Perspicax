@@ -88,6 +88,8 @@ pub(crate) struct TitleKey {
     /// The whole scale it is rasterised at. A buffer's scale is whole, so a
     /// fractional output gets the next one up, scaled down.
     pub(crate) scale: i32,
+    /// Which buttons it carries, at which end.
+    pub(crate) buttons: perspicax_policy::Buttons,
     /// Whether it has a shade button: not a strip of tabs over a frame its
     /// client draws, which has no titlebar of ours to roll up to.
     pub(crate) shades: bool,

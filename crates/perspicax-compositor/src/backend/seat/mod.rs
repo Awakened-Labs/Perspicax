@@ -1005,7 +1005,14 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     let whole = crate::framed::whole_scale(head.output.current_scale().fractional_scale());
     for (window, labels, front) in labels {
         if space.outputs_for_element(&window).contains(&head.output) {
-            titles.prepare(&window, labels, front, whole, &settings.theme.font.family);
+            titles.prepare(
+                &window,
+                labels,
+                front,
+                whole,
+                &settings.theme.font.family,
+                settings.decorations.buttons,
+            );
         }
     }
 
