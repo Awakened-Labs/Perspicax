@@ -23,7 +23,8 @@
 //! (`layout`); which workspace shows which windows (`workspace`); changing
 //! workspace with the pointer (`flip`); snapping to halves and quarters
 //! (`snap`); holding a window being moved at the edges of screens and panels
-//! (`resist`); how see-through a window is drawn (`opacity`); the frame drawn
+//! (`resist`); how a workspace switch is drawn while it happens (`transition`);
+//! how see-through a window is drawn (`opacity`); the frame drawn
 //! around a window (`frame`); and tab groups
 //! (`tabs`); and which programs may use the protocols that reach past their
 //! own windows (`access`); and whether a display tool's request for the
@@ -51,6 +52,7 @@ mod snap;
 mod tabs;
 mod tap;
 mod theme;
+mod transition;
 mod workspace;
 
 pub use crate::{
@@ -82,7 +84,13 @@ pub use crate::{
         Appearance, Builtin, ColorScheme, Contrast, Family, Font, Logo, Palette, Rgba, Role, Theme,
         follows,
     },
-    workspace::{Cell, Direction, Grid, GroupView, Home, Mode, Shape, WorkspaceView, Workspaces},
+    transition::{
+        Area, Effect, Frame, Pane, Transition, Transitioning, WIPE_BAR, ease_in_out, ease_out,
+        smoothstep,
+    },
+    workspace::{
+        Cell, Direction, Grid, GroupView, Home, Mode, Shape, Switched, WorkspaceView, Workspaces,
+    },
 };
 
 /// Keysyms, re-exported so a caller spells chords with the same type this
