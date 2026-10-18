@@ -43,8 +43,8 @@ use std::{
 use perspicax_policy::{
     Access, Action, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction, Drag, Face,
     Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Keysym, Mods, MouseBindings,
-    MouseChord, OPAQUE, Opacity, Place, Program, Protocol, Remembering, Resistance, Rule, Shape,
-    Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
+    MouseChord, OPAQUE, Opacity, Place, Program, Protocol, Remembering, Resistance, Rule, Shadow,
+    Shape, Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
 };
 use serde::Deserialize;
 
@@ -617,9 +617,16 @@ impl Config {
 fn decorations(profile: Profile) -> Decorations {
     use FrameButton::{Close, Maximize, Minimize, Shade, Sticky};
     match profile {
-        // Plasma's rounded corners.
+        // Plasma's rounded corners, and a shadow under every window that
+        // shows which is over which.
         Profile::Classic => Decorations {
             radius: 5,
+            shadow: Shadow {
+                size: 18,
+                offset: (0, 4),
+                opacity: 50,
+                colour: Colour::rgb(0, 0, 0),
+            },
             ..Decorations::default()
         },
         // Fluxbox's own titlebar, Stick at the left and the rest at the
@@ -1008,6 +1015,17 @@ struct RawDecorations {
     corner_radius: Option<i32>,
     agent: Option<RawAgentLook>,
     icons: Option<RawIcons>,
+    shadow: Option<RawShadow>,
+}
+
+/// The `[decorations.shadow]` table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawShadow {
+    size: Option<i32>,
+    offset: Option<[i32; 2]>,
+    opacity: Option<i32>,
+    colour: Option<String>,
 }
 
 /// The `[decorations.icons]` table: a file for each face, by what a press
@@ -1804,6 +1822,32 @@ impl RawDecorations {
         }
         if let Some(radius) = self.corner_radius {
             decorations.radius = pixels("corner-radius", radius, 0..=16)?;
+        }
+        if let Some(written) = self.shadow {
+            let shadow = &mut decorations.shadow;
+            if let Some(size) = written.size {
+                shadow.size = pixels("shadow.size", size, 0..=64)?;
+            }
+            if let Some([x, y]) = written.offset {
+                shadow.offset = (
+                    pixels("shadow.offset", x, -32..=32)?,
+                    pixels("shadow.offset", y, -32..=32)?,
+                );
+            }
+            if let Some(opacity) = written.opacity {
+                shadow.opacity = u8::try_from(opacity)
+                    .ok()
+                    .filter(|opacity| *opacity <= 100)
+                    .ok_or_else(|| {
+                        invalid(
+                            "decorations.shadow.opacity".to_owned(),
+                            format!("{opacity} is outside 0 to 100 percent"),
+                        )
+                    })?;
+            }
+            if let Some(text) = written.colour {
+                shadow.colour = opaque_colour("decorations.shadow.colour", &text)?;
+            }
         }
         if self.left.is_some() || self.right.is_some() {
             decorations.buttons = titlebar_buttons(self.left, self.right, decorations.buttons)?;
@@ -3709,6 +3753,50 @@ mod tests {
         match parse("[decorations]\ncorner-radius = 17", SEAT) {
             Err(Error::Invalid { key, .. }) => assert_eq!(key, "decorations.corner-radius"),
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// classic casts a shadow under every window it frames, and minimal,
+    /// flat, none; either is a table away.
+    #[test]
+    fn classic_casts_a_shadow_and_minimal_none() {
+        let classic = Config::profile(Profile::Classic, SEAT).decorations.shadow;
+        assert_eq!(
+            (classic.size, classic.offset, classic.opacity),
+            (18, (0, 4), 50)
+        );
+        assert_eq!(
+            Config::profile(Profile::Minimal, SEAT)
+                .decorations
+                .shadow
+                .size,
+            0
+        );
+        let config = parse(
+            "profile = \"minimal\"\n[decorations.shadow]\nsize = 20\noffset = [2, -4]\n\
+             opacity = 60\ncolour = \"#102030\"",
+            SEAT,
+        )
+        .unwrap();
+        let shadow = config.decorations.shadow;
+        assert_eq!(
+            (shadow.size, shadow.offset, shadow.opacity),
+            (20, (2, -4), 60)
+        );
+        assert_eq!(shadow.colour, Colour::rgb(0x10, 0x20, 0x30));
+        let config = parse("[decorations.shadow]\nsize = 0", SEAT).unwrap();
+        assert_eq!(config.decorations.shadow.size, 0, "none, in classic");
+        for (text, key) in [
+            ("size = 65", "decorations.shadow.size"),
+            ("offset = [0, 40]", "decorations.shadow.offset"),
+            ("opacity = 101", "decorations.shadow.opacity"),
+            ("opacity = -1", "decorations.shadow.opacity"),
+            ("colour = \"grey\"", "decorations.shadow.colour"),
+        ] {
+            match parse(&format!("[decorations.shadow]\n{text}"), SEAT) {
+                Err(Error::Invalid { key: at, .. }) => assert_eq!(at, key, "{text}"),
+                other => panic!("{text}: {other:?}"),
+            }
         }
     }
 

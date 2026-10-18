@@ -144,6 +144,10 @@ mod taking {
         /// Drawn rolled up to its titlebar, as the monitor shows it: its
         /// frame alone. A picture of the window by itself draws it whole.
         rolled: bool,
+        /// Drawn with its shadow, as the monitor shows it. A picture of the
+        /// window by itself, which ends a grip's width past its frame,
+        /// would cut the shadow short, and has none.
+        shadow: bool,
     }
 
     pub(super) fn take(state: &mut Compositor, target: &ShotTarget) -> Result<Shot, ActError> {
@@ -295,6 +299,7 @@ mod taking {
                 raised,
                 alpha: crate::shell::alpha(state.opacity_of(window, in_use)),
                 rolled,
+                shadow: true,
             });
         }
         for (layer, at) in &stack.lower {
@@ -364,6 +369,7 @@ mod taking {
                 // show through, so it is drawn whole.
                 alpha: 1.0,
                 rolled: false,
+                shadow: false,
             }],
             lower: Vec::new(),
             drawn: vec![Drawn {
@@ -470,6 +476,7 @@ mod taking {
                                 scale,
                                 placed.alpha,
                                 placed.rolled,
+                                placed.shadow,
                             )
                             .into_iter()
                             .map(Scene::Window),

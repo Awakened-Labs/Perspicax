@@ -264,6 +264,14 @@ impl Compositor {
             let radius =
                 perspicax_policy::corner_radius(&decorations, Self::look(window), insets, width);
             window.wear(insets, grip, radius, colour, ink, title_at);
+            // Only under a frame of ours, as it lies on the desk: a client
+            // that draws its own frame casts its own shadow, and a
+            // maximized or fullscreen window has nothing beside it to cast
+            // one on.
+            let casts = Self::look(window) == Look::Normal
+                && !insets.is_none()
+                && decorations.shadow.size > 0;
+            window.cast(casts.then_some(decorations.shadow));
             window.fade(crate::shell::alpha(self.opacity_of(window, in_use)));
             let shades = Self::is_server_decorated(window);
             window.light(

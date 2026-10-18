@@ -39,7 +39,10 @@
 
 use std::{cell::RefCell, ops::Deref};
 
-use perspicax_policy::{Insets, Rect, Rgba, outset, rolled_up, rounded_outline, rounded_rects};
+use perspicax_policy::{
+    Insets, Rect, Rgba, Shadow, Stretch, outset, rolled_up, rounded_outline, rounded_rects,
+    shadow_at, shadow_pieces,
+};
 use smithay::{
     backend::{
         allocator::Fourcc,
@@ -143,6 +146,21 @@ struct CornerKey {
 /// two, at each of two scales.
 const CORNERS: usize = 8;
 
+/// What a piece of a shadow was drawn from: which piece, the shadow, how
+/// round the frame casting it is, and the whole scale. A piece looks the
+/// same whatever size the window is, so it is drawn once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShadowKey {
+    piece: usize,
+    shadow: Shadow,
+    radius: i32,
+    scale: i32,
+}
+
+/// The most shadow pieces kept drawn per window: eight, at each of two
+/// scales.
+const SHADOWS: usize = 16;
+
 /// Where a window's pieces go, and how opaque: what every one of them is
 /// drawn with.
 struct Drawing {
@@ -190,6 +208,10 @@ struct Dress {
     radius: i32,
     /// Those corners, drawn, by what they were drawn from.
     corners: Vec<(CornerKey, MemoryRenderBuffer)>,
+    /// The shadow it casts, if it casts one.
+    shadow: Option<Shadow>,
+    /// Its pieces, drawn, by what they were drawn from.
+    shadows: Vec<(ShadowKey, MemoryRenderBuffer)>,
     colour: [f32; 4],
     strips: Vec<SolidColorBuffer>,
     /// The titlebar, where the title and its buttons are drawn, relative to
@@ -277,6 +299,12 @@ impl Framed {
             dress.outline_around = around;
             dress.outline_colour = rgba(colour);
         });
+    }
+
+    /// Cast a shadow under the window, or none.
+    #[cfg(feature = "seat")]
+    pub(crate) fn cast(&self, shadow: Option<Shadow>) {
+        self.dress(|dress| dress.shadow = shadow);
     }
 
     /// Light one of the titlebar's buttons, or none.
@@ -447,7 +475,10 @@ impl Framed {
     ///
     /// `rolled` up to its titlebar, the frame alone, measured from a client
     /// of no height, and nothing of the client: what is drawn of a window
-    /// rolled up. A picture of the window alone draws it whole.
+    /// rolled up. A picture of the window alone draws it whole. Behind it
+    /// all, its `shadow`, if it casts one and one is wanted: not in a
+    /// picture of the window alone, which ends a grip's width past its
+    /// frame and would cut a shadow short.
     pub(crate) fn elements<R, C>(
         &self,
         renderer: &mut R,
@@ -455,6 +486,7 @@ impl Framed {
         scale: Scale<f64>,
         alpha: f32,
         rolled: bool,
+        shadow: bool,
     ) -> Vec<C>
     where
         R: Renderer + ImportAll + ImportMem,
@@ -633,12 +665,109 @@ impl Framed {
                     .into_iter()
                     .map(|corner| C::from(FramedElement::Text(corner))),
             );
+            if shadow {
+                let outer = outset(client, dress.insets);
+                elements.extend(
+                    dress
+                        .shadow_pieces(renderer, outer, &drawing)
+                        .into_iter()
+                        .map(|piece| C::from(FramedElement::Text(piece))),
+                );
+            }
         });
         elements
     }
 }
 
 impl Dress {
+    /// The pieces of the shadow cast by a frame whose outside is `outer`,
+    /// if it casts one: each drawn once, a corner as it is and an edge as
+    /// one line across it, stretched along it.
+    fn shadow_pieces<R>(
+        &mut self,
+        renderer: &mut R,
+        outer: Rect,
+        drawing: &Drawing,
+    ) -> Vec<MemoryRenderBufferRenderElement<R>>
+    where
+        R: Renderer + ImportMem,
+        R::TextureId: Send + Clone + 'static,
+    {
+        let Some(shadow) = self.shadow else {
+            return Vec::new();
+        };
+        let whole = whole_scale(drawing.scale.x);
+        let radius = self.radius;
+        let colour = Rgba::new(
+            shadow.colour.r,
+            shadow.colour.g,
+            shadow.colour.b,
+            u8::try_from(u32::from(shadow.opacity.min(100)) * 255 / 100).unwrap_or(u8::MAX),
+        );
+        let mut pieces = Vec::new();
+        for (n, piece) in shadow_pieces(outer, radius, &shadow)
+            .into_iter()
+            .enumerate()
+        {
+            let at = piece.at;
+            let sample = match piece.stretch {
+                Stretch::None => at,
+                Stretch::Across => Rect::new(at.x + at.w / 2, at.y, 1, at.h),
+                Stretch::Down => Rect::new(at.x, at.y + at.h / 2, at.w, 1),
+            };
+            let key = ShadowKey {
+                piece: n,
+                shadow,
+                radius,
+                scale: whole,
+            };
+            if !self.shadows.iter().any(|(drawn, _)| *drawn == key) {
+                let size = (sample.w * whole, sample.h * whole);
+                let step = 1.0 / f64::from(whole);
+                let pixels = crate::raster::shaded(size, colour, |x, y| {
+                    let x = f64::from(sample.x) + x * step;
+                    let y = f64::from(sample.y) + y * step;
+                    shadow_at(x, y, outer, radius, &shadow)
+                });
+                let buffer = MemoryRenderBuffer::from_slice(
+                    &pixels,
+                    Fourcc::Argb8888,
+                    size,
+                    whole,
+                    Transform::Normal,
+                    None,
+                );
+                self.shadows.insert(0, (key, buffer));
+                self.shadows.truncate(SHADOWS);
+            }
+            let to =
+                drawing.origin + Point::from((at.x, at.y)).to_physical_precise_round(drawing.scale);
+            // Its whole picture, stretched to the piece: with no `src`,
+            // smithay would read as much of the picture as the piece is big.
+            let src = Rectangle::from_size((f64::from(sample.w), f64::from(sample.h)).into());
+            if let Some(element) = self
+                .shadows
+                .iter()
+                .find(|(drawn, _)| *drawn == key)
+                .and_then(|(_, buffer)| {
+                    MemoryRenderBufferRenderElement::from_buffer(
+                        renderer,
+                        to.to_f64(),
+                        buffer,
+                        Some(drawing.alpha),
+                        Some(src),
+                        Some((at.w, at.h).into()),
+                        Kind::Unspecified,
+                    )
+                    .ok()
+                })
+            {
+                pieces.push(element);
+            }
+        }
+        pieces
+    }
+
     /// `corners`, the top left and the top right, each drawn as a quarter
     /// ring from `inner` round to its square's side, in `colour`, from a
     /// buffer kept for the next frame; and any that could not be made, to
@@ -723,6 +852,6 @@ where
         scale: Scale<f64>,
         alpha: f32,
     ) -> Vec<C> {
-        self.elements(renderer, location, scale, alpha, is_shaded(self))
+        self.elements(renderer, location, scale, alpha, is_shaded(self), true)
     }
 }

@@ -81,6 +81,28 @@ pub(crate) fn corner(side: i32, inner: f32, colour: Rgba, right: bool) -> Vec<u8
     pixels
 }
 
+/// A piece of a shadow, `size` pixels: each pixel in `colour`, as dark as
+/// `dark` says it is at the pixel's centre, `(column, row)` from the
+/// piece's top left, as a share of the colour's own alpha.
+pub(crate) fn shaded(size: (i32, i32), colour: Rgba, dark: impl Fn(f64, f64) -> f64) -> Vec<u8> {
+    let (width, height) = (size.0.max(1), size.1.max(1));
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    for row in 0..height {
+        for column in 0..width {
+            let share = dark(f64::from(column) + 0.5, f64::from(row) + 0.5).clamp(0.0, 1.0);
+            let alpha = (share * f64::from(colour.a)).round() as u8;
+            if alpha > 0 {
+                let at = ((row * width + column) * 4) as usize;
+                over(
+                    &mut pixels[at..at + 4],
+                    [colour.r, colour.g, colour.b, alpha],
+                );
+            }
+        }
+    }
+    pixels
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +153,20 @@ mod tests {
         );
         assert_eq!(alpha(&ring, 0, 0), 0, "outside the outer");
         assert_eq!(alpha(&ring, 9, 1), 0xff, "on the ring");
+    }
+
+    /// A shadow's piece is its colour, only as dark as it is told, and
+    /// clear where it is told nothing.
+    #[test]
+    fn a_shadow_is_as_dark_as_it_is_told() {
+        let black = Rgba::new(0, 0, 0, 0x59);
+        let pixels = shaded((4, 1), black, |x, _| if x < 2.0 { 1.0 } else { x / 8.0 });
+        let alpha = |column: usize| pixels[column * 4 + 3];
+        assert_eq!(alpha(0), 0x59, "the darkest it can be");
+        assert_eq!(alpha(2), (2.5 / 8.0 * 89.0_f64).round() as u8);
+        assert!(alpha(3) > alpha(2), "as told");
+        let none = shaded((2, 2), black, |_, _| 0.0);
+        assert!(none.iter().all(|byte| *byte == 0));
     }
 
     /// Solid in its middle, clear at the corners and edges of its square,

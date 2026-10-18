@@ -80,6 +80,8 @@ pub struct Decorations {
     /// How round the titlebar's top corners are, in logical pixels: 0 for
     /// square.
     pub radius: i32,
+    /// The soft shadow cast under a window with a frame of ours.
+    pub shadow: Shadow,
 }
 
 impl Default for Decorations {
@@ -96,8 +98,147 @@ impl Default for Decorations {
             buttons: Buttons::default(),
             close_hover: Colour::rgb(0xda, 0x44, 0x53),
             radius: 0,
+            shadow: Shadow::default(),
         }
     }
+}
+
+/// A soft shadow under a window with a frame of ours: the
+/// `[decorations.shadow]` table. It is for the eye alone: it covers nothing
+/// an agent might act on, and takes no clicks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shadow {
+    /// How far past the frame it reaches, in logical pixels: 0 for none.
+    pub size: i32,
+    /// How far it falls from under the window, right and down.
+    pub offset: (i32, i32),
+    /// How dark it is where it is darkest, as a percentage.
+    pub opacity: u8,
+    pub colour: Colour,
+}
+
+impl Default for Shadow {
+    /// None.
+    fn default() -> Self {
+        Self {
+            size: 0,
+            offset: (0, 0),
+            opacity: 35,
+            colour: Colour::rgb(0, 0, 0),
+        }
+    }
+}
+
+/// How a piece of a shadow is drawn from the picture of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stretch {
+    /// As it is: a corner, where the shadow rounds.
+    None,
+    /// One column of it stretched across: the top or the bottom, which
+    /// fades the same way all along.
+    Across,
+    /// One row of it stretched down: a side.
+    Down,
+}
+
+/// A piece of a shadow: where it goes, relative to the client's geometry,
+/// and how it is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Piece {
+    pub at: Rect,
+    pub stretch: Stretch,
+}
+
+/// The pieces the shadow under a frame whose outside is `outer` is drawn
+/// as, its top corners rounded `radius` round: four corners, two edges
+/// across and two down, ringing the frame, and nothing in the middle, which
+/// the frame covers whatever the offset, so that a window seen through
+/// shows no shadow under itself. None for a shadow of no size.
+///
+/// Every edge fades the same way all along it, so the corners and one line
+/// across each edge are all that is ever drawn, whatever size the window is.
+#[must_use]
+pub fn shadow_pieces(outer: Rect, radius: i32, shadow: &Shadow) -> Vec<Piece> {
+    let reach = shadow.size.max(0);
+    if reach == 0 || outer.w <= 0 || outer.h <= 0 {
+        return Vec::new();
+    }
+    let (dx, dy) = shadow.offset;
+    // In from the edge of what casts it, far enough that the middle is under
+    // the frame wherever it falls, and past the rounding of its corners.
+    let inset = radius.max(dx.abs()).max(dy.abs()).max(0);
+    let cast = Rect::new(outer.x + dx, outer.y + dy, outer.w, outer.h);
+    let corner = reach + inset;
+    let (left, top) = (cast.x - reach, cast.y - reach);
+    let (right, bottom) = (cast.x + cast.w + reach, cast.y + cast.h + reach);
+    let across = right - left - 2 * corner;
+    let down = bottom - top - 2 * corner;
+    let piece = |x, y, w, h, stretch| Piece {
+        at: Rect::new(x, y, w, h),
+        stretch,
+    };
+    [
+        piece(left, top, corner, corner, Stretch::None),
+        piece(right - corner, top, corner, corner, Stretch::None),
+        piece(left, bottom - corner, corner, corner, Stretch::None),
+        piece(
+            right - corner,
+            bottom - corner,
+            corner,
+            corner,
+            Stretch::None,
+        ),
+        piece(left + corner, top, across, corner, Stretch::Across),
+        piece(
+            left + corner,
+            bottom - corner,
+            across,
+            corner,
+            Stretch::Across,
+        ),
+        piece(left, top + corner, corner, down, Stretch::Down),
+        piece(right - corner, top + corner, corner, down, Stretch::Down),
+    ]
+    .into_iter()
+    .filter(|piece| piece.at.w > 0 && piece.at.h > 0)
+    .collect()
+}
+
+/// How dark the shadow under a frame whose outside is `outer` is at the
+/// point `(x, y)`, as a share of its darkest: as a box blurred is, half as
+/// dark at the edge of what casts it, darker under it, and fading to
+/// nothing `shadow.size` beyond it. What casts it is the frame, offset, its
+/// top corners rounded `radius` round as the frame's are, and its bottom
+/// corners square.
+#[must_use]
+pub fn shadow_at(x: f64, y: f64, outer: Rect, radius: i32, shadow: &Shadow) -> f64 {
+    let reach = f64::from(shadow.size.max(0));
+    if reach <= 0.0 {
+        return 0.0;
+    }
+    let (dx, dy) = shadow.offset;
+    let (left, top) = (f64::from(outer.x + dx), f64::from(outer.y + dy));
+    let (right, bottom) = (left + f64::from(outer.w), top + f64::from(outer.h));
+    let radius = f64::from(radius.max(0));
+    // How far outside the cast it is, less than nothing inside it: round a
+    // top corner, from the corner's centre; elsewhere, from the nearer
+    // edges.
+    let outside = if y < top + radius && (x < left + radius || x > right - radius) {
+        let centre = if x < left + radius {
+            left + radius
+        } else {
+            right - radius
+        };
+        (x - centre).hypot(y - (top + radius)) - radius
+    } else {
+        let (across, down) = ((left - x).max(x - right), (top - y).max(y - bottom));
+        if across <= 0.0 && down <= 0.0 {
+            across.max(down)
+        } else {
+            across.max(0.0).hypot(down.max(0.0))
+        }
+    };
+    1.0 - crate::transition::smoothstep((outside + reach) / (2.0 * reach))
 }
 
 /// How a window an agent may act on is marked out, where a person has to
@@ -1441,6 +1582,107 @@ mod tests {
             corner_radius(&decorations, Look::Normal, insets, 30),
             15,
             "half the width"
+        );
+    }
+
+    fn classic_shadow() -> Shadow {
+        Shadow {
+            size: 14,
+            offset: (0, 3),
+            ..Shadow::default()
+        }
+    }
+
+    /// The shadow rings the frame: its pieces cover what is within its
+    /// reach of the frame, offset, and never the middle, which is under the
+    /// frame wherever it falls.
+    #[test]
+    fn the_shadow_rings_the_frame_and_covers_none_of_its_middle() {
+        let outer = Rect::new(98, 74, 404, 328);
+        let shadow = classic_shadow();
+        let pieces = shadow_pieces(outer, 5, &shadow);
+        assert_eq!(pieces.len(), 8);
+        let rects: Vec<Rect> = pieces.iter().map(|piece| piece.at).collect();
+        let covered = tiled(&rects).expect("no pixel twice");
+        // Fallen 3 down, reaching 14 past it, its middle 5 in from its edge
+        // (the corners' rounding, more than its fall), and that middle
+        // inside the frame.
+        let reached = Rect::new(98 - 14, 74 + 3 - 14, 404 + 28, 328 + 28);
+        let middle = Rect::new(98 + 5, 77 + 5, 404 - 10, 328 - 10);
+        assert!(
+            middle.x >= outer.x
+                && middle.y >= outer.y
+                && middle.x + middle.w <= outer.x + outer.w
+                && middle.y + middle.h <= outer.y + outer.h,
+            "under the frame"
+        );
+        for y in reached.y..reached.y + reached.h {
+            for x in reached.x..reached.x + reached.w {
+                let in_middle = x >= middle.x
+                    && x < middle.x + middle.w
+                    && y >= middle.y
+                    && y < middle.y + middle.h;
+                assert_eq!(covered.contains(&(x, y)), !in_middle, "({x}, {y})");
+            }
+        }
+        assert!(
+            pieces
+                .iter()
+                .filter(|piece| piece.stretch == Stretch::None)
+                .all(|piece| piece.at.w == 14 + 5 && piece.at.h == 14 + 5),
+            "corners the same whatever the window's size"
+        );
+        assert!(
+            shadow_pieces(outer, 5, &Shadow::default()).is_empty(),
+            "no size, no shadow"
+        );
+    }
+
+    /// Dark under what casts it, half at its edge, fading to nothing at its
+    /// reach; round at the top corners, where the frame is, and the same
+    /// all along an edge.
+    #[test]
+    fn the_shadow_fades_to_nothing_at_its_reach() {
+        let outer = Rect::new(0, 0, 200, 100);
+        let shadow = classic_shadow();
+        let at = |x: f64, y: f64| shadow_at(x, y, outer, 6, &shadow);
+        assert!((at(100.0, 50.0) - 1.0).abs() < 1e-9, "under the window");
+        assert!(
+            (at(100.0, 103.0) - 0.5).abs() < 1e-9,
+            "half at its foot, fallen 3 below, as a blurred box's edge is"
+        );
+        assert!(at(100.0, 100.0) > 0.5, "darker under the window's own foot");
+        assert!(at(100.0, 103.0 + 14.0).abs() < 1e-9, "nothing at its reach");
+        assert!(at(100.0, 110.0) > at(100.0, 114.0), "fading as it goes");
+        assert!(
+            (at(30.0, 110.0) - at(170.0, 110.0)).abs() < 1e-9,
+            "the same all along"
+        );
+        assert!(
+            at(-7.0, 50.0) > 0.0 && at(-7.0, 50.0) < 1.0,
+            "beside it too"
+        );
+        assert!(
+            at(-3.0, 3.0 - 3.0) < at(-3.0, 50.0),
+            "rounder, and so lighter, at a top corner than down a side"
+        );
+    }
+
+    /// The frame's facts are its strips alone: nothing about a shadow
+    /// reaches them, so it covers nothing for an agent.
+    #[test]
+    fn frame_facts_ignore_the_shadow() {
+        let client = Rect::new(100, 100, 400, 300);
+        let flat = Decorations::default();
+        let shadowed = Decorations {
+            shadow: classic_shadow(),
+            ..Decorations::default()
+        };
+        let insets = |decorations: &Decorations| Insets::of(decorations, Look::Normal);
+        assert_eq!(insets(&flat), insets(&shadowed));
+        assert_eq!(
+            frame_rects(client, insets(&shadowed)),
+            frame_rects(client, insets(&flat))
         );
     }
 
