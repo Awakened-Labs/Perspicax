@@ -11,7 +11,10 @@
 //! A change the server tells is read again, the first read whole or not:
 //! the object it names, once however often it is told while that read is
 //! out. The server answers in turn, so a read again comes after the first
-//! read of its kind, and is the newer. An object removed is dropped.
+//! read of its kind, and is the newer. An object removed is dropped. One
+//! whose reply cannot be read is read again when it is next told of:
+//! pipewire-pulse tells of a sink or a source while it is still making it,
+//! in a state the crate cannot read, and tells it changed once it is made.
 //!
 //! A server that cannot be reached, or goes away, is told once, and tried
 //! again after a pause that doubles each time, from [`PAUSE_FIRST`] to
@@ -138,7 +141,7 @@ struct Link {
     /// The first read is whole, and that has been acted on.
     following: bool,
     /// What is being read again, so that a change told meanwhile asks for
-    /// no second read.
+    /// no second read; until its reply comes, read or not.
     reading: HashSet<Expect>,
     /// The facts changed since they were last told.
     changed: bool,
@@ -498,6 +501,11 @@ impl Link {
         match message {
             Incoming::Reply(expect, reply) => self.replied(expect, reply)?,
             Incoming::Refused(expect, error) => self.refused(expect, error),
+            // Read again when next told of: a sink or a source still being
+            // made is told to have changed once it is.
+            Incoming::Unread(expect) => {
+                self.reading.remove(&expect);
+            }
             Incoming::Event(command) => match *command {
                 Command::SubscribeEvent(event) => self.told(event)?,
                 Command::RecordStreamKilled(channel) => {
@@ -1459,6 +1467,31 @@ mod tests {
             .filter(|asked| *asked == "sink 0")
             .count();
         assert_eq!(reads, 1, "three changes told, one read: {:?}", fake.asked());
+    }
+
+    #[test]
+    fn a_sink_read_while_it_is_still_being_made_is_read_again_once_it_is() {
+        let fake = Fake::start("making");
+        let (_running, heard) = follow(&fake);
+        heard.facts();
+        // A headset connects, and its sink is made the default while
+        // pipewire-pulse is still making it: read at once, it comes in a
+        // state the crate cannot read.
+        let e8 = "bluez_output.FC_58_FA_A9_62_22.1";
+        fake.connect_making(5, e8);
+        until_asked(&fake, "sink 5");
+        // Made, it is told to have changed, and that is read whole.
+        fake.made(5);
+        let facts = until_heard(&heard, |facts| {
+            facts.output().map(|sink| sink.index) == Some(5)
+        });
+        assert_eq!(facts.default_sink.as_deref(), Some(e8));
+        let reads = fake
+            .asked()
+            .iter()
+            .filter(|asked| *asked == "sink 5")
+            .count();
+        assert_eq!(reads, 2, "read as it was told of, and once made");
     }
 
     #[test]

@@ -6,7 +6,10 @@
 //! a whole message is there, its length told by the descriptor before it.
 //! A message the protocol crate cannot read, a command newer than it knows,
 //! is skipped whole and the rest read on: the server is not wrong to send
-//! it, and the shell has no use for it.
+//! it, and the shell has no use for it. A reply it cannot read is told as
+//! unread, so that what it answers is read again when next told of:
+//! pipewire-pulse gives a sink or a source it is still making a state the
+//! crate has no name for.
 
 use std::{
     collections::HashMap,
@@ -89,6 +92,10 @@ pub(super) enum Incoming {
     Reply(Expect, Reply),
     /// A command refused, and why.
     Refused(Expect, PulseError),
+    /// The reply to a command, which could not be read: a sink or a source
+    /// pipewire-pulse is still making, in state -2, `PA_SINK_INIT`, which
+    /// the crate has no name for.
+    Unread(Expect),
     /// A command of the server's own: a subscription's event, most often.
     Event(Box<Command>),
     /// What a stream of this channel recorded.
@@ -211,7 +218,7 @@ impl Wire {
                     Ok(reply) => Some(Incoming::Reply(expect, reply)),
                     Err(error) => {
                         tracing::debug!("a reply to {expect:?} could not be read: {error}");
-                        None
+                        Some(Incoming::Unread(expect))
                     }
                 }
             }
