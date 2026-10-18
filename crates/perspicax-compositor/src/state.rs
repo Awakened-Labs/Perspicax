@@ -591,13 +591,18 @@ impl Compositor {
     /// says the argument means.
     ///
     /// Every window in the space is told, counted on a monitor or not, but
-    /// each is counted first, as the seat counts before it tells: so a window
-    /// is told which monitor it is on as soon as it is told it may draw.
+    /// one rolled up to its titlebar, whose client is not drawn. Each is
+    /// counted first, as the seat counts before it tells: so a window is
+    /// told which monitor it is on as soon as it is told it may draw.
     pub(crate) fn send_frames(&mut self) {
         self.settle_outputs();
         let elapsed = u32::try_from(self.started.elapsed().as_millis() % u128::from(u32::MAX))
             .unwrap_or(u32::MAX);
-        let windows = self.space.elements().filter_map(shell::surface_of);
+        let windows = self
+            .space
+            .elements()
+            .filter(|window| !shell::is_shaded(window))
+            .filter_map(shell::surface_of);
         let layers = self
             .layers_in(&crate::layers::ALL)
             .into_iter()

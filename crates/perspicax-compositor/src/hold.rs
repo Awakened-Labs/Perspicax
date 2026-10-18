@@ -21,12 +21,13 @@
 //!
 //! Only with a person at the seat, never behind the lock screen, and only
 //! the window in use ([`Compositor::window_in_use`]): its surface has the
-//! pointer, and its window is on screen and has the keyboard. A window the
-//! person has left cannot reach out and take the pointer, and one they
-//! leave lets go of it. So the person always takes it back the way they
-//! leave any window -- Alt+Tab, any binding that moves the keyboard, a menu
-//! or launcher that takes it, the lock screen, another workspace, a drag
-//! with the drag modifier -- and none of those needs a rule of its own here.
+//! pointer, and its window is on screen, not rolled up to its titlebar, and
+//! has the keyboard. A window the person has left cannot reach out and take
+//! the pointer, and one they leave lets go of it. So the person always takes
+//! it back the way they leave any window -- Alt+Tab, any binding that moves
+//! the keyboard, a menu or launcher that takes it, the lock screen, another
+//! workspace, rolling it up, a drag with the drag modifier -- and none of
+//! those needs a rule of its own here.
 //! A constraint that lives on (`persistent`) takes hold again once all of
 //! that is true again, and a `oneshot` one is gone.
 //!
@@ -245,13 +246,15 @@ impl Compositor {
     /// Where `surface` is, on a window on screen: the window, and where the
     /// surface begins in global space, as [`under`] finds it there. `None`
     /// for a surface of no window on screen -- a layer, a popup, a window
-    /// parked -- none of which ever holds the pointer.
+    /// parked, or one rolled up to its titlebar, whose client is not drawn --
+    /// none of which ever holds the pointer.
     fn placed(&self, surface: &WlSurface) -> Option<(Framed, Point<f64, Logical>)> {
         let (root, at) = damage::root_of(surface);
         let window = self
             .space
             .elements()
-            .find(|window| shell::is_toplevel_of(window, &root))?
+            .find(|window| shell::is_toplevel_of(window, &root))
+            .filter(|window| !shell::is_shaded(window))?
             .clone();
         let location = self.space.element_location(&window)?;
         // Where smithay draws the window's surface: its geometry pushed back

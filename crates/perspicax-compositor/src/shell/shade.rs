@@ -7,7 +7,13 @@
 //! a strip would lay itself out again, lose its place in what it shows, and
 //! draw twice; left alone, it is put back exactly as it was. Nor is it drawn
 //! or hit: a click where it was lands on whatever is under it (see
-//! `crate::framed`).
+//! `crate::framed`). Not drawn, it is not told it may draw either, beyond
+//! the once a second a parked window is told (`backend::seat::overdue`), and
+//! it holds no pointer (`crate::hold`), so a game rolled up lets go of it.
+//!
+//! A tab group rolls up as one: the shade is the group's, and the tab
+//! coming forward takes it (`shell::tabs`). A tab taken out of the group
+//! comes out unrolled.
 //!
 //! Only a window whose frame this compositor draws has a titlebar to roll up
 //! to. One that draws its own, a GTK 4 window's headerbar say, is left as it
@@ -58,8 +64,10 @@ impl Compositor {
             crate::popup::dismiss_all(&surface);
         }
         placement(window, |placement| placement.shaded = rolled);
-        // The pointer, to what the client uncovered, or back to the client.
+        // The pointer, to what the client uncovered, or back to the client;
+        // and a game rolled up lets go of it.
         self.repoint();
+        self.settle_hold_later();
         self.backend.redraw();
         self.publish_facts();
     }

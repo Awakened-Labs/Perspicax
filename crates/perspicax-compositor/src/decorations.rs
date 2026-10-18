@@ -86,7 +86,10 @@ fn is_server_side(surface: &WlSurface) -> bool {
 
 /// The client rect `window`'s frame is drawn round: `client`, or, rolled up
 /// to its titlebar, a client of no height there (`perspicax_policy::rolled_up`).
-fn drawn_client(window: &Framed, client: perspicax_policy::Rect) -> perspicax_policy::Rect {
+pub(crate) fn drawn_client(
+    window: &Framed,
+    client: perspicax_policy::Rect,
+) -> perspicax_policy::Rect {
     if crate::shell::is_shaded(window) {
         perspicax_policy::rolled_up(client)
     } else {

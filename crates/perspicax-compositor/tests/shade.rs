@@ -12,6 +12,8 @@
 
 mod common;
 
+use std::{thread, time::Duration};
+
 use common::{Desk, Said, Session, configured, heard, until};
 use perspicax_compositor::Backend;
 use perspicax_index::{HostFacts, SurfaceFacts, SurfaceKind, judge};
@@ -60,6 +62,14 @@ fn configures(desk: &Desk, nth: usize) -> usize {
     desk.said_to(desk.windows[nth].wl_surface())
         .iter()
         .filter(|said| matches!(said, Said::Configure(_)))
+        .count()
+}
+
+/// How many times the window was told it may draw again.
+fn told_to_draw(desk: &Desk, nth: usize) -> usize {
+    desk.said_to(desk.windows[nth].wl_surface())
+        .iter()
+        .filter(|said| matches!(said, Said::Done))
         .count()
 }
 
@@ -217,6 +227,38 @@ fn a_window_that_draws_its_own_frame_does_not_roll_up() {
     session.stop((desk, queue));
 }
 
+/// Nor does a tab that draws its own frame come forward rolled up, into a
+/// group that is: its client would not be drawn, and nothing else of it is.
+/// The group comes unrolled with it.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_tab_that_draws_its_own_frame_comes_forward_unrolled() {
+    let session = Session::start("shade-own-tab", Backend::headless((800, 600)));
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_window(&qh, "own", "own");
+    until(&mut queue, &mut desk, |desk| desk.has_drawn(0));
+    session.wait_for(|facts| has(facts, "own"));
+    // The framed one, focused last, joins the other's group in front.
+    framed(&session, &mut desk, &mut queue, &qh, "framed");
+    session.perform(Action::TabWithPrevious);
+    session.wait_for(|facts| !has(facts, "own"));
+    session.perform(Action::Shade);
+    session.wait_for(|facts| surface(facts, "framed").shaded);
+
+    session.perform(Action::CycleTab { forward: true });
+    let facts = session.wait_for(|facts| has(facts, "own") && !has(facts, "framed"));
+    assert!(
+        !surface(&facts, "own").shaded,
+        "nothing of it would be drawn"
+    );
+    assert!(
+        !surface(&facts, "framed").shaded,
+        "no tab behind keeps a shade"
+    );
+
+    session.stop((desk, queue));
+}
+
 /// A fullscreen window has no titlebar, so going fullscreen unrolls one,
 /// whoever asks: a taskbar, which needs no person at the seat, or the
 /// window's own client, which does.
@@ -364,6 +406,38 @@ fn a_rolled_up_window_keeps_the_keyboard() {
     session.wait_for(|facts| surface(facts, "framed").shaded);
     queue.roundtrip(&mut desk).expect("the compositor answers");
     assert_eq!(heard(&ear).entered.as_ref(), Some(&window));
+
+    session.stop((desk, queue));
+}
+
+/// Its client not drawn, a window rolled up is not told it may draw: what it
+/// asks for comes back once it is unrolled. Headless there is no safety net
+/// a second later, and a window drawn is told within a tick of 16 ms.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_rolled_up_window_is_not_told_it_may_draw_until_it_is_unrolled() {
+    let session = Session::start("shade-frames", Backend::headless((800, 600)));
+    let (mut desk, mut queue, qh, _) = session.client();
+    framed(&session, &mut desk, &mut queue, &qh, "framed");
+    let window = desk.windows[0].wl_surface().clone();
+
+    session.perform(Action::Shade);
+    session.wait_for(|facts| surface(facts, "framed").shaded);
+    queue.roundtrip(&mut desk).expect("the compositor answers");
+    let told = told_to_draw(&desk, 0);
+    desk.ask_frame(&qh, &window);
+    queue.roundtrip(&mut desk).expect("the compositor answers");
+    thread::sleep(Duration::from_millis(200));
+    queue.roundtrip(&mut desk).expect("the compositor answers");
+    assert_eq!(
+        told_to_draw(&desk, 0),
+        told,
+        "told while rolled up: {:?}",
+        desk.said_to(&window)
+    );
+
+    session.perform(Action::Unshade);
+    until(&mut queue, &mut desk, |desk| told_to_draw(desk, 0) > told);
 
     session.stop((desk, queue));
 }
