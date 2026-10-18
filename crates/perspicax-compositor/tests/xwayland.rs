@@ -42,6 +42,7 @@ use perspicax_compositor::{
 use perspicax_index::{Action as Verb, HostFacts, SurfaceFacts, judge};
 use perspicax_node::{Origin, Rect, Visibility, X11Basis};
 use perspicax_policy::{Action, Button, Focus, FocusModel, Mods, Opacity};
+use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::Proxy as _;
 use x11rb::{
     connection::Connection as _,
@@ -504,6 +505,41 @@ fn an_x11_window_that_maps_behind_the_lock_screen_takes_no_keys_from_it() {
     .unwrap_or_else(|| panic!("unlocked, it never took the keyboard: {:?}", x11.facts()));
 
     x11.session.stop((locker, queue));
+}
+
+/// Issue #131: an X11 window that maps while a launcher holds the keys takes
+/// none of them, as a Wayland one takes none: the launcher keeps them, and
+/// what is typed at it. Once the launcher goes, the window has them, being on
+/// top. As behind the lock, its surface comes after it maps, so the keyboard
+/// it waits for is asked for only then.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_that_maps_under_a_launcher_takes_no_keys_from_it() {
+    let x11 = X11::start("x11-under-a-launcher", Backend::headless((800, 600)));
+    let (mut launcher, mut queue, qh, globals) = x11.session.client();
+    let ear = launcher.bind_keyboard(&globals, &qh);
+    launcher.open_launcher(&qh, 120, 0xff44_4444);
+    let held = launcher.layers[0].0.wl_surface().id();
+    until(&mut queue, &mut launcher, |_| {
+        heard(&ear).entered.as_ref() == Some(&held)
+    });
+
+    let window = x11.open("under");
+    queue.roundtrip(&mut launcher).expect("dispatch");
+    assert_eq!(
+        heard(&ear).entered.as_ref(),
+        Some(&held),
+        "the launcher keeps the keys"
+    );
+    assert_ne!(x11.focus(), window, "X gave the window the keys");
+
+    drop((launcher, queue));
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == window).then_some(())
+    })
+    .unwrap_or_else(|| panic!("it never took the keyboard: {:?}", x11.facts()));
+
+    x11.session.stop(());
 }
 
 x11rb::atom_manager! {

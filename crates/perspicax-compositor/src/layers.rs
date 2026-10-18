@@ -192,15 +192,13 @@ impl Compositor {
         }
         // A launcher or lock-ish overlay that wants every key gets them the
         // moment it is up, unless the session is locked (`focus_plain`
-        // refuses). Up is its first picture, not the commit that asked for
-        // its configure: until it shows something it is not mapped, and the
-        // keys typed at it would go to a surface nobody can see. `OnDemand`
-        // waits for a click (see the seat's input path).
-        let exclusive = layer.cached_state().keyboard_interactivity
-            == KeyboardInteractivity::Exclusive
-            && ABOVE.contains(&layer.layer());
+        // refuses), and keeps them while it is up (#131). Up is its first
+        // picture, not the commit that asked for its configure: until it
+        // shows something it is not mapped, and the keys typed at it would go
+        // to a surface nobody can see. `OnDemand` waits for a click (see the
+        // seat's input path).
         let shown = crate::geometry::shown(surface).is_some();
-        if exclusive && shown && self.keyboard_focus().as_ref() != Some(surface) {
+        if wants_every_key(&layer) && shown && self.keyboard_focus().as_ref() != Some(surface) {
             self.focus_plain(surface.clone());
         }
         // The usable area changed under the windows: a panel appearing
@@ -457,6 +455,21 @@ impl Compositor {
         })
     }
 
+    /// Whether `surface` is a launcher: a layer surface over the windows
+    /// that wants every key, as fuzzel does, and the shell's menus and pies.
+    ///
+    /// Asked of the layer maps rather than of the surface's own state, so one
+    /// taken off its monitor, gone or unmapped by its client, is a launcher
+    /// no longer by the time `take_layer_off` hands on the keys it held.
+    /// Takes the layer maps' locks: never asked while one is held.
+    pub(crate) fn is_launcher(&self, surface: &WlSurface) -> bool {
+        self.space.outputs().any(|output| {
+            layer_map_for_output(output)
+                .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
+                .is_some_and(wants_every_key)
+        })
+    }
+
     /// The layer surface an id names, with where it is in global space.
     pub(crate) fn layer_by_id(
         &self,
@@ -474,6 +487,14 @@ impl Compositor {
             .and_then(|at| self.space.output_under(at).next().cloned())
             .or_else(|| self.space.outputs().next().cloned())
     }
+}
+
+/// Whether `layer` wants every key: it asks for them all, and is over the
+/// windows, where layer-shell has the top-most such layer keep them. Asked
+/// for on `bottom` or `background`, they are only to be had by a click.
+fn wants_every_key(layer: &LayerSurface) -> bool {
+    layer.cached_state().keyboard_interactivity == KeyboardInteractivity::Exclusive
+        && ABOVE.contains(&layer.layer())
 }
 
 /// An output is going away: tell its layer surfaces, so a panel can move
