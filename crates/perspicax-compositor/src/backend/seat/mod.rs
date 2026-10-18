@@ -92,6 +92,7 @@ use crate::{
     state::Compositor,
 };
 
+mod icons;
 mod input;
 mod moving;
 mod overdue;
@@ -195,6 +196,9 @@ pub(crate) struct Session {
     /// Where art decoded on a thread is sent, for the backdrop: a logo of
     /// the person's, read each time the config is. See [`crate::backdrop`].
     art: Sender<Arrived>,
+    /// Where the person's icons for the titlebar's buttons are sent, read
+    /// on a thread at each save. See [`icons`].
+    icon_reads: Sender<icons::Arrived>,
     /// When the DRM reset turned every monitor dark. Taken when the first
     /// frame is queued, to log how long a person logging in looked at a dark
     /// screen.
@@ -277,6 +281,7 @@ impl Session {
         // without the compositor ever waiting on it.
         let (art, arriving) = channel::channel();
         backdrop::decode_builtin(art.clone());
+        let (icon_reads, icons_arriving) = channel::channel();
         // And the fonts, found meanwhile: the scan is slow, and the monitors
         // stay dark from the reset below until the first frame. Only a
         // title waits for the fonts.
@@ -391,6 +396,16 @@ impl Session {
                 }
             })
             .map_err(|error| Error::EventLoop(error.to_string()))?;
+        handle
+            .insert_source(icons_arriving, |event, (), state| {
+                if let (channel::Event::Msg(arrived), Running::Seat(session)) =
+                    (event, &mut state.backend)
+                    && session.titles.icons.arrived(arrived)
+                {
+                    state.backend.redraw();
+                }
+            })
+            .map_err(|error| Error::EventLoop(error.to_string()))?;
 
         let dwell = perspicax_policy::EdgeDwell::new(settings.flipping.delay_ms);
         let preview = SolidColorBuffer::new((1, 1), preview_colour(&settings));
@@ -414,6 +429,7 @@ impl Session {
             cursor,
             titles,
             art,
+            icon_reads,
             reset,
             title_press: None,
             button_press: None,
@@ -493,6 +509,7 @@ pub(crate) fn attach(state: &mut Compositor) -> Result<(), Error> {
     settings::apply_keyboard(state, numlock);
     settings::tell_appearance(state);
     settings::dress_backdrop(state);
+    settings::read_icons(state);
     rescan(state);
     let Running::Seat(session) = &state.backend else {
         return Ok(());

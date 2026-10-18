@@ -61,9 +61,9 @@ pub use crate::{
     flip::{EdgeDwell, Flipping, NOTCH_PIXELS, Notches, Resting, arrival, edge_at},
     focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},
     frame::{
-        AgentLook, Buttons, Colour, DOUBLE_CLICK_MS, Decorations, FrameButton, GRIP, Insets, Light,
-        Look, Part, Press, buttons, buttons_in, fit, frame_colours, frame_rects, inset, is_double,
-        light, outline_rects, outset, part_at, rolled_up, tab_rects, titlebar, wash,
+        AgentLook, Buttons, Colour, DOUBLE_CLICK_MS, Decorations, Face, FrameButton, GRIP, Insets,
+        Light, Look, Part, Press, buttons, buttons_in, fit, frame_colours, frame_rects, inset,
+        is_double, light, outline_rects, outset, part_at, rolled_up, tab_rects, titlebar, wash,
     },
     geometry::{
         DRAG_THRESHOLD, Edges, Rect, anchor, carry, clear_of, dragged, edges_near, neighbour,

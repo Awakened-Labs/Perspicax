@@ -41,7 +41,7 @@ use std::{
 };
 
 use perspicax_policy::{
-    Access, Action, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction, Drag,
+    Access, Action, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction, Drag, Face,
     Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Keysym, Mods, MouseBindings,
     MouseChord, OPAQUE, Opacity, Place, Program, Protocol, Remembering, Resistance, Rule, Shape,
     Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
@@ -69,6 +69,41 @@ pub struct Built {
     pub xwayland: bool,
     /// Rendering on demand for a screenshot, which `screencopy` needs.
     pub capture: bool,
+}
+
+/// A person's own pictures for the titlebar's buttons: the
+/// `[decorations.icons]` table. A face with no file is drawn as the
+/// built-in shape, and so is one whose file cannot be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Icons {
+    /// A file for each face that has one, as written: a seat finds a
+    /// relative path beside the config and `~` in the home folder, as it
+    /// finds the theme's logo ([`locate`]).
+    pub files: Vec<(Face, PathBuf)>,
+    /// Whether a file is a mask, drawn in the bar's ink by its alpha, so it
+    /// reads on every bar and in every theme. Otherwise it is drawn in its
+    /// own colours, the same on every bar.
+    pub tint: bool,
+}
+
+impl Default for Icons {
+    fn default() -> Self {
+        Self {
+            files: Vec::new(),
+            tint: true,
+        }
+    }
+}
+
+impl Icons {
+    /// The file `face` is drawn from, if it has one.
+    #[must_use]
+    pub fn file(&self, face: Face) -> Option<&Path> {
+        self.files
+            .iter()
+            .find(|(drawn, _)| *drawn == face)
+            .map(|(_, path)| path.as_path())
+    }
 }
 
 /// What an agent may do on the seat, beyond acting on what it was granted:
@@ -194,6 +229,9 @@ pub struct Config {
     /// Who draws a window's titlebar and border, and what they look like.
     /// Its colours are the theme's titlebar colours.
     pub decorations: Decorations,
+    /// The pictures the titlebar's buttons are drawn from, where a person
+    /// has their own: kept apart from `decorations`, which is `Copy`.
+    pub icons: Icons,
     /// What everything perspicax draws looks like: the `[theme]` table.
     pub theme: Theme,
     /// Whether a session shows the splash as it starts -- the `splash`
@@ -561,6 +599,7 @@ impl Config {
             // use where minimal's grid wraps and its edges flip.
             transitioning: Transitioning::default(),
             decorations: decorations(profile),
+            icons: Icons::default(),
             theme: Theme::default(),
             splash: built.seat,
             xwayland: built.xwayland,
@@ -961,6 +1000,55 @@ struct RawDecorations {
     left: Option<Vec<RawButton>>,
     right: Option<Vec<RawButton>>,
     agent: Option<RawAgentLook>,
+    icons: Option<RawIcons>,
+}
+
+/// The `[decorations.icons]` table: a file for each face, by what a press
+/// of the button then does.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawIcons {
+    close: Option<String>,
+    minimize: Option<String>,
+    maximize: Option<String>,
+    restore: Option<String>,
+    shade: Option<String>,
+    unshade: Option<String>,
+    stick: Option<String>,
+    unstick: Option<String>,
+    tint: Option<bool>,
+}
+
+impl RawIcons {
+    fn apply(self) -> Result<Icons, Error> {
+        let written = [
+            (Face::Close, self.close),
+            (Face::Minimize, self.minimize),
+            (Face::Maximize, self.maximize),
+            (Face::Restore, self.restore),
+            (Face::Shade, self.shade),
+            (Face::Unshade, self.unshade),
+            (Face::Stick, self.stick),
+            (Face::Unstick, self.unstick),
+        ];
+        let mut files = Vec::new();
+        for (face, path) in written {
+            match path {
+                None => {}
+                Some(path) if path.trim().is_empty() => {
+                    return Err(invalid(
+                        format!("decorations.icons.{}", face.key()),
+                        "an empty path; leave it out for the built-in shape".to_owned(),
+                    ));
+                }
+                Some(path) => files.push((face, PathBuf::from(path))),
+            }
+        }
+        Ok(Icons {
+            files,
+            tint: self.tint.unwrap_or(true),
+        })
+    }
 }
 
 /// A titlebar button, as `[decorations] left` and `right` name it.
@@ -1551,7 +1639,10 @@ impl Raw {
         }
 
         config.theme = theme(self.theme, self.decorations.as_ref())?;
-        if let Some(decorations) = self.decorations {
+        if let Some(mut decorations) = self.decorations {
+            if let Some(icons) = decorations.icons.take() {
+                config.icons = icons.apply()?;
+            }
             config.decorations = decorations.apply(config.decorations)?;
         }
         let palette = &config.theme.palette;
@@ -3486,6 +3577,51 @@ mod tests {
             (vec![Close], vec![Shade, Minimize, Maximize]),
             "classic's close taken to the left"
         );
+    }
+
+    /// A person's pictures for the buttons, by what a press then does, and
+    /// masks unless told otherwise; with none, the built-in shapes.
+    #[test]
+    fn a_buttons_icons_are_files_by_what_a_press_does() {
+        assert_eq!(
+            Config::profile(Profile::Minimal, SEAT).icons,
+            Icons::default()
+        );
+        assert!(Icons::default().files.is_empty() && Icons::default().tint);
+        let config = parse(
+            "[decorations.icons]\nclose = \"~/.config/perspicax/buttons/close.png\"\n\
+             restore = \"buttons/restore.png\"\ntint = false",
+            SEAT,
+        )
+        .unwrap();
+        let icons = &config.icons;
+        assert_eq!(
+            icons.file(Face::Close),
+            Some(Path::new("~/.config/perspicax/buttons/close.png")),
+            "as written: the seat finds it"
+        );
+        assert_eq!(
+            icons.file(Face::Restore),
+            Some(Path::new("buttons/restore.png"))
+        );
+        assert_eq!(icons.file(Face::Maximize), None, "restore is not maximize");
+        assert!(!icons.tint);
+        let config = parse("[decorations.icons]\nstick = \"pin.png\"", SEAT).unwrap();
+        assert!(config.icons.tint, "a mask by default");
+    }
+
+    #[test]
+    fn an_icon_that_cannot_be_named_is_refused_by_its_key() {
+        match parse("[decorations.icons]\nunshade = \" \"", SEAT) {
+            Err(Error::Invalid { key, reason }) => {
+                assert_eq!(key, "decorations.icons.unshade");
+                assert!(reason.contains("empty"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let unknown = parse("[decorations.icons]\nsticky = \"pin.png\"", SEAT).unwrap_err();
+        let said = unknown.to_string();
+        assert!(said.contains("sticky"), "the button, not a face: {said}");
     }
 
     #[test]

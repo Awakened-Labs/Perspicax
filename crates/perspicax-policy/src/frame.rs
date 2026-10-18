@@ -297,6 +297,71 @@ impl FrameButton {
     }
 }
 
+/// What a titlebar button shows: the button, and for one that toggles,
+/// which way it is. Each is named for what a press of the button then
+/// does, as the `[decorations.icons]` keys are: maximize, or restore what
+/// is maximized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Face {
+    Close,
+    Minimize,
+    Maximize,
+    /// Maximize, while maximized.
+    Restore,
+    Shade,
+    /// Shade, while rolled up.
+    Unshade,
+    Stick,
+    /// Sticky, while on every workspace.
+    Unstick,
+}
+
+impl Face {
+    /// Every face, a button's and then its toggled one's.
+    pub const ALL: [Self; 8] = [
+        Self::Close,
+        Self::Minimize,
+        Self::Maximize,
+        Self::Restore,
+        Self::Shade,
+        Self::Unshade,
+        Self::Stick,
+        Self::Unstick,
+    ];
+
+    /// Its name as `[decorations.icons]` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Close => "close",
+            Self::Minimize => "minimize",
+            Self::Maximize => "maximize",
+            Self::Restore => "restore",
+            Self::Shade => "shade",
+            Self::Unshade => "unshade",
+            Self::Stick => "stick",
+            Self::Unstick => "unstick",
+        }
+    }
+
+    /// The face `button` shows, `on` being whether its toggle is: the
+    /// window maximized, rolled up, or on every workspace. Close and
+    /// minimize toggle nothing, and show one face either way.
+    #[must_use]
+    pub const fn of(button: FrameButton, on: bool) -> Self {
+        match (button, on) {
+            (FrameButton::Close, _) => Self::Close,
+            (FrameButton::Minimize, _) => Self::Minimize,
+            (FrameButton::Maximize, false) => Self::Maximize,
+            (FrameButton::Maximize, true) => Self::Restore,
+            (FrameButton::Shade, false) => Self::Shade,
+            (FrameButton::Shade, true) => Self::Unshade,
+            (FrameButton::Sticky, false) => Self::Stick,
+            (FrameButton::Sticky, true) => Self::Unstick,
+        }
+    }
+}
+
 /// Which buttons a titlebar carries, and at which end: the
 /// `[decorations] left` and `right` lists, each in the order it is drawn
 /// from the bar's left, with the title or the tabs between the two. A
@@ -1155,6 +1220,27 @@ mod tests {
         assert!(
             red.a == 0xff && red.r < 0xda && red.r > 0x80,
             "darker: {red:?}"
+        );
+    }
+
+    /// A toggle's second face is what a press then does; close and
+    /// minimize have one face whatever the window is.
+    #[test]
+    fn a_toggle_shows_what_a_press_of_it_does() {
+        use FrameButton::*;
+        assert_eq!(Face::of(Maximize, false), Face::Maximize);
+        assert_eq!(Face::of(Maximize, true), Face::Restore);
+        assert_eq!(Face::of(Shade, true), Face::Unshade);
+        assert_eq!(Face::of(Sticky, true), Face::Unstick);
+        assert_eq!(Face::of(Sticky, false), Face::Stick);
+        assert_eq!(Face::of(Close, true), Face::of(Close, false));
+        assert_eq!(Face::of(Minimize, true), Face::Minimize);
+        let keys: Vec<_> = Face::ALL.iter().map(|face| face.key()).collect();
+        assert_eq!(
+            keys,
+            [
+                "close", "minimize", "maximize", "restore", "shade", "unshade", "stick", "unstick"
+            ]
         );
     }
 

@@ -333,6 +333,8 @@ pub(crate) fn reload(state: &mut Compositor) {
     // it may have changed on disk, or been put right since it could not be
     // read.
     dress_backdrop(state);
+    // And so is every icon for the titlebar's buttons.
+    read_icons(state);
     if theme_changed {
         state.backend.redraw();
     }
@@ -404,6 +406,24 @@ pub(crate) fn populate(
 /// Tell the backdrop how the config has the lock screen and the splash look,
 /// and start reading the person's logo if it names one: found as a wallpaper
 /// is, `~` the home folder and a relative path beside the config.
+/// Read the person's icons for the titlebar's buttons again, on a thread:
+/// what it reads is drawn when it arrives.
+pub(super) fn read_icons(state: &mut Compositor) {
+    let Running::Seat(session) = &mut state.backend else {
+        return;
+    };
+    let Session {
+        titles,
+        settings,
+        config_path,
+        icon_reads,
+        ..
+    } = &mut **session;
+    titles
+        .icons
+        .read(&settings.icons, config_path.as_deref(), icon_reads);
+}
+
 pub(super) fn dress_backdrop(state: &mut Compositor) {
     let Running::Seat(session) = &state.backend else {
         return;

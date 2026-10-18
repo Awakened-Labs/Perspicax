@@ -102,6 +102,8 @@ pub(crate) struct TitleKey {
     pub(crate) sticky: bool,
     /// Whether it is maximized, which its maximize button shows as restore.
     pub(crate) maximized: bool,
+    /// Which reading of the person's icons it is drawn from.
+    pub(crate) icons: u64,
 }
 
 /// A titlebar button lit under the pointer: where it is, relative to the
