@@ -77,6 +77,10 @@ pub enum Refusal {
     OtherWorkspace { workspace: u16 },
     /// A tab behind another in its window's tab group: `shown` is in front.
     InactiveTab { shown: SurfaceId },
+    /// Its window is rolled up to its titlebar, and only the bar is drawn.
+    /// The person rolled it up and is the one to unroll it; an agent never
+    /// changes what the person is looking at.
+    RolledUp,
     /// The node's own application says it is not being shown: a menu bar
     /// hidden until Alt is pressed, the page of a tab that is not in front.
     /// Show it through the application -- switch to its tab, open its menu
@@ -172,6 +176,10 @@ impl core::fmt::Display for Refusal {
                 f,
                 "node's window is a tab behind surface {}, the one showing in its group",
                 shown.0
+            ),
+            Self::RolledUp => write!(
+                f,
+                "node's window is rolled up to its titlebar, and only the person can unroll it"
             ),
             Self::OtherWorkspace { workspace } => {
                 write!(
@@ -324,6 +332,7 @@ pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
         Visibility::InactiveTab { shown } => {
             return Err(Refusal::InactiveTab { shown: *shown });
         }
+        Visibility::RolledUp => return Err(Refusal::RolledUp),
         // Decided from what the node already says, with nothing carried
         // from the read: joined to a window, and no bounds. Whether the
         // application never answered or had nothing to answer, the remedy is
@@ -370,8 +379,9 @@ pub fn check_readable(facts: &HostFacts, surface: SurfaceId) -> Result<&SurfaceF
 /// window at all rather than a panel or a wallpaper. Bringing a tab
 /// forward hides the tab in front, so consent for that one is needed too.
 /// And it is only done where the person can already see the group: a group
-/// on a hidden workspace, or minimized, is refused rather than brought into
-/// view, because an agent never switches what the person is looking at.
+/// on a hidden workspace, minimized, or rolled up to its titlebar is refused
+/// rather than brought into view, because an agent never switches what the
+/// person is looking at.
 ///
 /// # Errors
 ///
@@ -394,6 +404,9 @@ pub fn check_window(
         }
         if !front.mapped {
             return Err(Refusal::Unmapped);
+        }
+        if front.shaded {
+            return Err(Refusal::RolledUp);
         }
     }
     Ok(window)
@@ -603,6 +616,16 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, Refusal::Occluded { by: SurfaceId(7) });
         assert_eq!(err.to_string(), "node occluded by surface 7");
+    }
+
+    #[test]
+    fn a_node_on_a_rolled_up_window_is_refused_as_rolled_up() {
+        let err = check_actable(&node_with(attributed(), Visibility::RolledUp)).unwrap_err();
+        assert_eq!(err, Refusal::RolledUp);
+        assert_eq!(
+            err.to_string(),
+            "node's window is rolled up to its titlebar, and only the person can unroll it"
+        );
     }
 
     fn hidden(mut node: ObservedNode) -> ObservedNode {
@@ -940,6 +963,21 @@ mod tests {
         assert_eq!(
             check_window(&minimized, SurfaceId(1), WindowVerb::Forward).unwrap_err(),
             Refusal::Unmapped
+        );
+    }
+
+    /// The group's bar is on screen, but a tab brought forward would still
+    /// show nothing until the person unrolls it, and an agent does not.
+    #[test]
+    fn a_tab_is_not_brought_forward_into_a_group_rolled_up_to_its_titlebar() {
+        let rolled = tabs(front().rolled_up(), Consent::Everyone);
+        assert_eq!(
+            check_window(&rolled, SurfaceId(1), WindowVerb::Forward).unwrap_err(),
+            Refusal::RolledUp
+        );
+        assert!(
+            check_window(&rolled, SurfaceId(1), WindowVerb::Close).is_ok(),
+            "closing does not show anything"
         );
     }
 

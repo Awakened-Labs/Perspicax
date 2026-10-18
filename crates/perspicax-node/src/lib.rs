@@ -149,6 +149,11 @@ pub enum Visibility {
     /// would show it; as with a workspace, that is the person's screen to
     /// change, not an agent's to change silently.
     InactiveTab { shown: SurfaceId },
+    /// Its window is rolled up to its titlebar: still in its place, at its
+    /// size, with only the bar drawn. Unrolling it would show the node; as
+    /// with a tab, that is the person's screen to change, not an agent's to
+    /// change silently.
+    RolledUp,
 }
 
 impl Visibility {
@@ -233,6 +238,7 @@ mod tests {
         assert!(!Visibility::Unmapped.is_actable());
         assert!(!Visibility::OffScreen.is_actable());
         assert!(!Visibility::OtherWorkspace { workspace: 2 }.is_actable());
+        assert!(!Visibility::RolledUp.is_actable());
     }
 
     /// The default must be un-actable. An ingest path that forgets to set

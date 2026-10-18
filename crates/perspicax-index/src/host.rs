@@ -92,6 +92,12 @@
 //! same: something to read through a window, not something to act on behind
 //! it.
 //!
+//! A window rolled up to its titlebar ([`SurfaceFacts::shaded`]) draws its
+//! frame and nothing else, so its frame is all it covers: what was under its
+//! client shows, and is judged as though the window were its bar alone. Its
+//! own nodes are not shown at all, and are judged
+//! [`Visibility::RolledUp`].
+//!
 //! # What this module deliberately does not know
 //!
 //! Input regions. "Is anything drawn over this" and "would a click at this
@@ -294,6 +300,15 @@ pub struct SurfaceFacts {
     /// it in a tab group. The window is unmapped then, and as with a
     /// workspace, saying which tab is in front tells an agent where it went.
     pub behind_tab: Option<SurfaceId>,
+    /// Rolled up to its titlebar: still mapped, in its place and at its
+    /// size, with only its frame drawn. `geometry`, `drawn` and `opaque` go
+    /// on describing its client, which is where its nodes are measured from,
+    /// but the client is not drawn and covers nothing; `frame`, the bar and
+    /// the border round it, is all this window covers then.
+    ///
+    /// Not a reason to call it unmapped. An unmapped surface covers nothing
+    /// at all, and its titlebar is still there over whatever is under it.
+    pub shaded: bool,
     /// What the host drew around this surface, in global space: a titlebar
     /// and a border, outside `geometry`, and, round a window an agent may act
     /// on where consent is by grant, the line marking it out.
@@ -354,6 +369,7 @@ impl SurfaceFacts {
             damage: Vec::new(),
             off_workspace: None,
             behind_tab: None,
+            shaded: false,
             frame: Vec::new(),
             drawn_opacity: None,
             app_id: None,
@@ -419,6 +435,14 @@ impl SurfaceFacts {
     pub fn behind_tab(mut self, shown: SurfaceId) -> Self {
         self.mapped = false;
         self.behind_tab = Some(shown);
+        self
+    }
+
+    /// The same surface, rolled up to its titlebar: still mapped, and
+    /// covering by its frame alone.
+    #[must_use]
+    pub fn rolled_up(mut self) -> Self {
+        self.shaded = true;
         self
     }
 
@@ -773,7 +797,9 @@ impl Judgement {
 ///    `OtherWorkspace`, when it is unmapped only because the workspace it is
 ///    on is not the one showing, or `InactiveTab`, when it is a tab behind
 ///    another. A tab behind another in a group on a hidden workspace is
-///    `OtherWorkspace`: the coarser reason, and the one to clear first.
+///    `OtherWorkspace`: the coarser reason, and the one to clear first. A
+///    window rolled up to its titlebar is mapped, but its nodes are not
+///    drawn: `RolledUp`, once none of those coarser reasons applies.
 /// 3. A zero-area rect is `Clipped`. Toolkits report `0x0` extents for widgets
 ///    they have realised but not laid out, and for children scrolled out of a
 ///    viewport; a zero-area rect is also the one input for which every
@@ -792,7 +818,8 @@ impl Judgement {
 ///    drew the titlebar and stands behind it as solid, however see-through
 ///    the person has it drawn. A window's own frame and shadow never cover
 ///    its own nodes, because they are outside the window and test 4 has
-///    already said `Clipped` of anything out there.
+///    already said `Clipped` of anything out there. A window rolled up to
+///    its titlebar covers by its frame alone, which is all it draws.
 #[must_use]
 pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
     let Some(target) = facts.surface(surface) else {
@@ -804,6 +831,9 @@ pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
             (None, Some(shown)) => Visibility::InactiveTab { shown },
             (None, None) => Visibility::Unmapped,
         });
+    }
+    if target.shaded {
+        return Judgement::proven(Visibility::RolledUp);
     }
     if rect.abs().is_empty() {
         return Judgement::proven(Visibility::Clipped);
@@ -830,6 +860,10 @@ pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
         }
         if candidate.frame.iter().any(|strip| overlaps(*strip, global)) {
             return Judgement::proven(Visibility::Occluded { by: candidate.id });
+        }
+        // Rolled up, it draws its frame alone, which was tested just above.
+        if candidate.shaded {
+            continue;
         }
         if !overlaps(candidate.covers(), global) {
             continue;
@@ -885,7 +919,8 @@ pub struct Tally {
     pub unproven: usize,
     /// Clipped by their own window.
     pub clipped: usize,
-    /// On a surface that is not mapped.
+    /// On a surface that is not mapped, or is rolled up to its titlebar:
+    /// either way, not drawn.
     pub unmapped: usize,
     /// Not wholly on any output.
     pub off_screen: usize,
@@ -908,7 +943,8 @@ impl Tally {
             Visibility::Clipped => self.clipped += 1,
             Visibility::Unmapped
             | Visibility::OtherWorkspace { .. }
-            | Visibility::InactiveTab { .. } => self.unmapped += 1,
+            | Visibility::InactiveTab { .. }
+            | Visibility::RolledUp => self.unmapped += 1,
             Visibility::OffScreen => self.off_screen += 1,
             Visibility::Unknown => self.unjudged += 1,
         }
@@ -1007,6 +1043,50 @@ mod tests {
             verdict(&facts).visibility,
             Visibility::OtherWorkspace { workspace: 2 }
         );
+    }
+
+    #[test]
+    fn a_window_rolled_up_to_its_titlebar_says_so_of_its_own_nodes() {
+        let facts = HostFacts::bottom_to_top([window().rolled_up()], 1);
+        assert_eq!(verdict(&facts), Judgement::proven(Visibility::RolledUp));
+    }
+
+    /// A rolled-up window on a hidden workspace, or minimized, is not drawn
+    /// at all, bar included: the coarser reason is the one given.
+    #[test]
+    fn a_hidden_workspace_and_a_minimized_window_outrank_a_rolled_up_one() {
+        let facts = HostFacts::bottom_to_top([window().rolled_up().on_workspace(2)], 1);
+        assert_eq!(
+            verdict(&facts).visibility,
+            Visibility::OtherWorkspace { workspace: 2 }
+        );
+        let facts = HostFacts::bottom_to_top([window().rolled_up().unmapped()], 1);
+        assert_eq!(verdict(&facts).visibility, Visibility::Unmapped);
+    }
+
+    /// Its bar covers what is under it, on the host's word, and its client,
+    /// not drawn, covers nothing: not on policy, and not on the strength of
+    /// an opaque region it declared for a picture nobody sees.
+    #[test]
+    fn a_rolled_up_window_covers_what_is_under_it_by_its_titlebar_alone() {
+        let bar_over_button = SurfaceFacts::new(SurfaceId(2), rect(50.0, 140.0, 450.0, 440.0))
+            .framed([
+                rect(48.0, 114.0, 452.0, 140.0),
+                rect(48.0, 140.0, 452.0, 142.0),
+            ])
+            .rolled_up();
+        let facts = HostFacts::bottom_to_top([window(), bar_over_button], 1);
+        assert_eq!(
+            verdict(&facts),
+            Judgement::proven(Visibility::Occluded { by: SurfaceId(2) })
+        );
+
+        let client_over_button = SurfaceFacts::new(SurfaceId(2), rect(50.0, 50.0, 450.0, 350.0))
+            .framed([rect(48.0, 24.0, 452.0, 50.0), rect(48.0, 50.0, 452.0, 52.0)])
+            .declaring_opaque([rect(0.0, 0.0, 400.0, 300.0)])
+            .rolled_up();
+        let facts = HostFacts::bottom_to_top([window(), client_over_button], 1);
+        assert_eq!(verdict(&facts), Judgement::proven(Visibility::Visible));
     }
 
     #[test]

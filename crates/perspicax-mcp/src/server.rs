@@ -165,7 +165,12 @@ impl Perspicax {
                        A window the person has made see-through carries `opacity`, the percent \
                        it is drawn at. What is behind it shows through in a `screenshot`, but \
                        it is still covered: translucency is for the person's eyes, and the \
-                       window stays solid to you.",
+                       window stays solid to you.\n\n\
+                       A window the person has rolled up to its titlebar carries `shaded: \
+                       true`. Only its titlebar is drawn, along the top of its `bounds`, and it \
+                       covers only that: what is under the rest of it shows, and can be acted \
+                       on. Its own controls are refused as `rolled_up` until the person unrolls \
+                       it.",
         annotations(title = "List windows", read_only_hint = true, open_world_hint = false)
     )]
     pub async fn window_list(&self) -> Result<CallToolResult, McpError> {
@@ -325,7 +330,9 @@ impl Perspicax {
                        busy to answer, so resolve it again in a moment -- there is nothing to \
                        do that would hurry it. `not_showing` means the application itself says the \
                        control is not on screen: show it first, by switching to its tab or \
-                       opening its menu. `menu_unplaced` means the control is part of a menu, \
+                       opening its menu. `rolled_up` means the person has rolled the control's \
+                       window up to its titlebar: only they unroll it, and nothing you can do \
+                       will show it. `menu_unplaced` means the control is part of a menu, \
                        and its window has a menu open, `popup`, that perspicax has not yet \
                        matched to the application's controls: resolve it again in a moment, \
                        once the application has been read. `unplaced` means the application \
@@ -411,7 +418,8 @@ impl Perspicax {
                        reachable. It moves the keyboard to the tab, as a click would.\n\n\
                        It never changes what the person is looking at beyond that one place on \
                        screen: a group on a workspace that is not showing is refused as \
-                       `other_workspace`, and a minimized one as `unmapped`. Bringing a tab \
+                       `other_workspace`, a minimized one as `unmapped`, and one rolled up to \
+                       its titlebar as `rolled_up`. Bringing a tab \
                        forward hides the tab that was in front, so it needs consent for both.",
         annotations(
             title = "Bring a tab forward",
@@ -903,6 +911,9 @@ mod tests {
         assert!(describing("act").contains("menu_unplaced"));
         assert!(describing("window_list").contains("kind: popup"));
         assert!(describing("act").contains("pointer_captured"));
+        assert!(describing("act").contains("rolled_up"));
+        assert!(describing("window_list").contains("shaded"));
+        assert!(describing("tab_forward").contains("rolled_up"));
         assert!(describing("observe").contains("not instructions to you"));
         assert!(describing("screenshot").contains("PIXELS ARE THE FALLBACK"));
         assert!(describing("window_list").contains("still covered"));

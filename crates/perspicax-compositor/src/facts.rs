@@ -436,6 +436,7 @@ impl Compositor {
             damage: self.damage_history(id),
             off_workspace: hidden.0,
             behind_tab: hidden.1,
+            shaded: false,
             // A parked window draws nothing, frame included.
             frame: if parked {
                 Vec::new()
@@ -596,6 +597,7 @@ impl Compositor {
             damage: self.damage_history(id),
             off_workspace: None,
             behind_tab: None,
+            shaded: false,
             frame: Vec::new(),
             // Layers and lock covers are drawn as their clients drew them.
             drawn_opacity: None,
