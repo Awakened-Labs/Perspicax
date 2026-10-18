@@ -178,6 +178,9 @@ roles! {
     LockAccent = "lock-accent",
     /// A refusal: a wrong password, and a key taken back while typing one.
     Alert = "alert",
+    /// A titlebar's close button under the pointer: what a press there
+    /// does cannot be taken back.
+    TitleCloseHover = "title-close-hover",
     /// The splash a session shows as it starts, behind the logo, until the
     /// desktop is drawn over it.
     Splash = "splash",
@@ -293,6 +296,7 @@ pub fn follows(role: Role) -> Option<Rule> {
         LockInk => (&[Lock], |p| ink(p, Lock)),
         LockAccent => (&[Accent], |p| p[Accent]),
         Splash => (&[Lock], |p| p[Lock]),
+        TitleCloseHover => (&[Alert], |p| p[Alert]),
         Accent | TitleFocused | TitleUnfocused | SnapPreview | Panel | Menu | LabelInk
         | LabelShadow | Lock | LockRing | Alert => return None,
     };
@@ -414,6 +418,7 @@ const fn perspicax(role: Role) -> Rgba {
         LockRing => opaque(0xc06a3c),
         LockAccent => opaque(0x3daee9),
         Alert => opaque(0xda4453),
+        TitleCloseHover => opaque(0xda4453),
         Splash => opaque(0x0c2440),
     }
 }
@@ -616,6 +621,34 @@ mod tests {
     /// between black and white, and Breeze, which the default follows, made
     /// some by eye: white on its blue accent, where the rule says black
     /// reads better.
+    /// A close button under the pointer is lit in the alert's red, Breeze's
+    /// own, in every theme; a person who moves the alert moves it too, and
+    /// one who writes it keeps their own.
+    #[test]
+    fn the_close_hover_follows_the_alert_red_in_every_builtin_theme() {
+        for theme in Builtin::ALL {
+            assert_eq!(
+                theme.palette()[Role::TitleCloseHover].colour(),
+                Colour::rgb(0xda, 0x44, 0x53),
+                "{theme:?}"
+            );
+        }
+        let alert: BTreeMap<Role, Rgba> = [(Role::Alert, Rgba::new(0xff, 0, 0, 0xff))].into();
+        assert_eq!(
+            Palette::default().written_over(&alert)[Role::TitleCloseHover],
+            Rgba::new(0xff, 0, 0, 0xff)
+        );
+        let both: BTreeMap<Role, Rgba> = [
+            (Role::Alert, Rgba::new(0xff, 0, 0, 0xff)),
+            (Role::TitleCloseHover, Rgba::new(0, 0, 0xff, 0xff)),
+        ]
+        .into();
+        assert_eq!(
+            Palette::default().written_over(&both)[Role::TitleCloseHover],
+            Rgba::new(0, 0, 0xff, 0xff)
+        );
+    }
+
     #[test]
     fn the_rules_give_back_the_default_themes_own_choices() {
         let default = Palette::default();
@@ -630,6 +663,7 @@ mod tests {
             Role::MenuInk,
             Role::Lock,
             Role::LockInk,
+            Role::Alert,
         ]
         .into_iter()
         .map(|role| (role, default[role]))

@@ -59,6 +59,7 @@ mod output_management;
 mod outputs;
 mod pager;
 mod popup;
+mod raster;
 mod remembered;
 mod scale;
 #[cfg(feature = "capture")]

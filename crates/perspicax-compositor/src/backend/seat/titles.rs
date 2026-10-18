@@ -428,18 +428,10 @@ fn fill(pixels: &mut [u8], width: i32, place: Rect, colour: Color) {
     }
 }
 
-/// Lay `colour` over one ARGB8888 pixel, premultiplied: the renderer blends
-/// premultiplied alpha, and a straight-alpha glyph edge would come out dark.
-/// The bytes are little-endian, so blue comes first.
+/// Lay `colour` over one ARGB8888 pixel, premultiplied, as
+/// [`crate::raster::over`] lays every colour the compositor draws.
 fn over(pixel: &mut [u8], colour: Color) {
-    let alpha = u32::from(colour.a());
-    let keep = 255 - alpha;
-    let source = [colour.b(), colour.g(), colour.r()];
-    for (channel, value) in pixel.iter_mut().zip(source) {
-        let premultiplied = u32::from(value) * alpha / 255;
-        *channel = (premultiplied + u32::from(*channel) * keep / 255) as u8;
-    }
-    pixel[3] = (alpha + u32::from(pixel[3]) * keep / 255) as u8;
+    crate::raster::over(pixel, [colour.r(), colour.g(), colour.b(), colour.a()]);
 }
 
 #[cfg(test)]
@@ -829,14 +821,5 @@ mod tests {
         };
         assert!(inked(&restore), "the front square's edge");
         assert!(!inked(&plain), "inside maximize's square");
-    }
-
-    #[test]
-    fn a_glyph_edge_is_premultiplied_and_a_full_one_replaces() {
-        let mut pixel = [0u8; 4];
-        over(&mut pixel, Color::rgba(255, 255, 255, 128));
-        assert_eq!(pixel, [128, 128, 128, 128], "half white, premultiplied");
-        over(&mut pixel, Color::rgba(255, 0, 0, 255));
-        assert_eq!(pixel, [0, 0, 255, 255], "opaque red over it, blue first");
     }
 }

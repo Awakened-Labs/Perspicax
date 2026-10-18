@@ -383,6 +383,25 @@ impl Running {
         }
     }
 
+    /// The titlebar button lit under the pointer, on a seat: which window's,
+    /// which, and how. Headless lights none, for nothing points there.
+    #[cfg(feature = "seat")]
+    pub(crate) fn lit(
+        &self,
+    ) -> Option<(
+        &crate::framed::Framed,
+        perspicax_policy::FrameButton,
+        perspicax_policy::Light,
+    )> {
+        match self {
+            Self::Headless { .. } => None,
+            Self::Seat(session) => session
+                .lit
+                .as_ref()
+                .map(|(window, button, light)| (window, *button, *light)),
+        }
+    }
+
     /// The focus policy: the person's `[focus]` on a seat. Headless has
     /// none, for nobody points at anything there, until a test puts one in
     /// force for its stand-in hand ([`crate::Command::FocusPolicy`]).

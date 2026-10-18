@@ -204,6 +204,13 @@ pub(crate) struct Session {
     pub(super) title_press: Option<(Option<perspicax_node::SurfaceId>, perspicax_policy::Press)>,
     /// A titlebar button pressed and not yet let go.
     pub(super) button_press: Option<(crate::framed::Framed, perspicax_policy::FrameButton)>,
+    /// The titlebar button lit under the pointer: which window's, which, and
+    /// how. See [`input::relight`].
+    pub(super) lit: Option<(
+        crate::framed::Framed,
+        perspicax_policy::FrameButton,
+        perspicax_policy::Light,
+    )>,
     /// The snap preview's colour and size, kept so the damage tracker can
     /// tell a preview that moved from one that did not.
     preview: SolidColorBuffer,
@@ -410,6 +417,7 @@ impl Session {
             reset,
             title_press: None,
             button_press: None,
+            lit: None,
             preview,
             dwell,
             dwell_armed: None,
@@ -933,6 +941,16 @@ fn light(
 /// Render one output, queue it for scanout if anything changed, and let the
 /// clients on it draw again.
 fn render(state: &mut Compositor, crtc: crtc::Handle) {
+    // Windows move under a still pointer, closed by a key, brought forward,
+    // switched away or grown, and nothing tells the pointer: what is lit
+    // follows what is under it now.
+    if let (Running::Seat(session), Some(pointer)) = (&state.backend, state.pointer.as_ref())
+        && session.lit.is_some()
+    {
+        let at = pointer.current_location();
+        let hit = state.pointed(at);
+        input::relight(state, at, hit.as_ref());
+    }
     state.dress_frames();
     // Which windows are on this monitor, counted now: its titles are
     // written for them and they are told they may draw again, below. After

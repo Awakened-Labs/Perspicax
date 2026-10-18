@@ -63,7 +63,7 @@ pub use crate::{
     frame::{
         AgentLook, Buttons, Colour, DOUBLE_CLICK_MS, Decorations, FrameButton, GRIP, Insets, Light,
         Look, Part, Press, buttons, buttons_in, fit, frame_colours, frame_rects, inset, is_double,
-        light, outline_rects, outset, part_at, rolled_up, tab_rects, titlebar,
+        light, outline_rects, outset, part_at, rolled_up, tab_rects, titlebar, wash,
     },
     geometry::{
         DRAG_THRESHOLD, Edges, Rect, anchor, carry, clear_of, dragged, edges_near, neighbour,

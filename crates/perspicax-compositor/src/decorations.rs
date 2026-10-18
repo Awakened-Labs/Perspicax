@@ -244,6 +244,7 @@ impl Compositor {
     pub(crate) fn dress_frames(&self) {
         let decorations = self.backend.decorations();
         let in_use = self.window_in_use();
+        let lit = self.backend.lit();
         for window in self.space.elements() {
             let (colour, ink) = perspicax_policy::frame_colours(
                 &decorations,
@@ -261,6 +262,17 @@ impl Compositor {
             };
             window.wear(insets, grip, colour, ink, title_at);
             window.fade(crate::shell::alpha(self.opacity_of(window, in_use)));
+            let shades = Self::is_server_decorated(window);
+            window.light(
+                lit.filter(|(lit, ..)| *lit == window)
+                    .and_then(|(_, lit, light)| {
+                        let buttons =
+                            perspicax_policy::buttons(client, insets, &decorations, shades);
+                        let (_, at) = buttons.into_iter().find(|(button, _)| *button == lit)?;
+                        let colour = perspicax_policy::wash(&decorations, lit, light, ink);
+                        Some(crate::framed::Wash { at, colour })
+                    }),
+            );
         }
         self.dress_marks();
     }

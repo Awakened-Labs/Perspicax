@@ -11,7 +11,7 @@
 //! Which windows get a frame is the compositor's question: a client that draws
 //! its own, or a fullscreen one, has [`Insets::NONE`].
 
-use crate::{Edges, Rect};
+use crate::{Edges, Rect, Rgba};
 
 /// An RGB colour, as `config.toml` writes it: `"#rrggbb"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +75,8 @@ pub struct Decorations {
     pub agent: AgentLook,
     /// Which buttons the titlebar carries, at which end.
     pub buttons: Buttons,
+    /// What the close button is lit in under the pointer.
+    pub close_hover: Colour,
 }
 
 impl Default for Decorations {
@@ -89,6 +91,7 @@ impl Default for Decorations {
             unfocused_ink: Colour::rgb(0xff, 0xff, 0xff),
             agent: AgentLook::default(),
             buttons: Buttons::default(),
+            close_hover: Colour::rgb(0xda, 0x44, 0x53),
         }
     }
 }
@@ -405,6 +408,26 @@ pub const GRIP: i32 = 6;
 
 /// How far along an edge from a corner still counts as the corner.
 const CORNER: i32 = 16;
+
+/// What a titlebar button lit as `light` is lit in, on a bar whose title and
+/// buttons are written in `ink`: that ink, faint under the pointer and less
+/// faint pressed, so it reads on whatever colour the bar is, an agent's
+/// included; or for close, whose press cannot be taken back, the close
+/// colour, darker pressed.
+#[must_use]
+pub fn wash(decorations: &Decorations, button: FrameButton, light: Light, ink: Colour) -> Rgba {
+    const HOVER: u8 = 0x33;
+    const PRESSED: u8 = 0x59;
+    let lit = |colour: Colour, a: u8| Rgba::new(colour.r, colour.g, colour.b, a);
+    match (button, light) {
+        (FrameButton::Close, Light::Hover) => lit(decorations.close_hover, 0xff),
+        (FrameButton::Close, Light::Pressed) => {
+            lit(decorations.close_hover.mix(Colour::rgb(0, 0, 0), 200), 0xff)
+        }
+        (_, Light::Hover) => lit(ink, HOVER),
+        (_, Light::Pressed) => lit(ink, PRESSED),
+    }
+}
 
 /// The titlebar's own strip, without the border above it: directly above the
 /// client and as wide as it. `None` for a frame with no titlebar.
@@ -1100,6 +1123,38 @@ mod tests {
             light(Some(Close), Some(Maximize)),
             None,
             "nor the one it was dragged to"
+        );
+    }
+
+    /// Under the pointer a button is lit faintly in its bar's ink, which
+    /// reads on any bar, and pressed less faintly; close goes red, darker
+    /// pressed.
+    #[test]
+    fn a_button_is_lit_in_its_bars_ink_and_close_in_red() {
+        let decorations = Decorations::default();
+        let black = Colour::rgb(0, 0, 0);
+        let white = Colour::rgb(0xff, 0xff, 0xff);
+        let hover = wash(&decorations, FrameButton::Maximize, Light::Hover, white);
+        let pressed = wash(&decorations, FrameButton::Maximize, Light::Pressed, white);
+        assert_eq!((hover.r, hover.g, hover.b), (0xff, 0xff, 0xff));
+        assert!(
+            0 < hover.a && hover.a < pressed.a && pressed.a < 0x80,
+            "{hover:?} {pressed:?}"
+        );
+        let on_light = wash(&decorations, FrameButton::Shade, Light::Hover, black);
+        assert_eq!(
+            (on_light.r, on_light.g, on_light.b),
+            (0, 0, 0),
+            "a light bar's ink"
+        );
+        assert_eq!(
+            wash(&decorations, FrameButton::Close, Light::Hover, white),
+            Rgba::new(0xda, 0x44, 0x53, 0xff)
+        );
+        let red = wash(&decorations, FrameButton::Close, Light::Pressed, white);
+        assert!(
+            red.a == 0xff && red.r < 0xda && red.r > 0x80,
+            "darker: {red:?}"
         );
     }
 

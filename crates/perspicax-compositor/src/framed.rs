@@ -39,20 +39,23 @@
 
 use std::{cell::RefCell, ops::Deref};
 
-use perspicax_policy::{Insets, Rect, frame_rects, outline_rects, outset, rolled_up};
+use perspicax_policy::{Insets, Rect, Rgba, frame_rects, outline_rects, outset, rolled_up};
 use smithay::{
-    backend::renderer::{
-        ImportAll, ImportMem, Renderer,
-        element::{
-            AsRenderElements, Kind,
-            memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
-            solid::{SolidColorBuffer, SolidColorRenderElement},
-            surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+    backend::{
+        allocator::Fourcc,
+        renderer::{
+            ImportAll, ImportMem, Renderer,
+            element::{
+                AsRenderElements, Kind,
+                memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+                solid::{SolidColorBuffer, SolidColorRenderElement},
+                surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+            },
         },
     },
     desktop::{PopupManager, Window, space::SpaceElement},
     output::Output,
-    utils::{IsAlive, Logical, Physical, Point, Rectangle, Scale, Size},
+    utils::{IsAlive, Logical, Physical, Point, Rectangle, Scale, Size, Transform},
 };
 
 use crate::shell::is_shaded;
@@ -101,6 +104,27 @@ pub(crate) struct TitleKey {
     pub(crate) maximized: bool,
 }
 
+/// A titlebar button lit under the pointer: where it is, relative to the
+/// client's geometry, and what it is lit in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Wash {
+    pub(crate) at: Rect,
+    pub(crate) colour: Rgba,
+}
+
+/// What a wash's disc was drawn from: its side, its colour, and the whole
+/// scale it was drawn at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WashKey {
+    side: i32,
+    colour: Rgba,
+    scale: i32,
+}
+
+/// The most washes kept drawn per window: one for each scale it is showing
+/// at, as with titles.
+const WASHES: usize = 2;
+
 /// The whole scale a title is rasterised at for an output at `scale`.
 pub(crate) fn whole_scale(scale: f64) -> i32 {
     (scale.ceil() as i32).max(1)
@@ -139,6 +163,11 @@ struct Dress {
     #[cfg(feature = "seat")]
     alpha: Option<f32>,
     titles: Vec<Title>,
+    /// The titlebar button lit under the pointer, if it is one of this
+    /// window's.
+    wash: Option<Wash>,
+    /// Its disc, drawn, by what it was drawn from.
+    washes: Vec<(WashKey, MemoryRenderBuffer)>,
     /// The line round a window an agent may act on: how wide, 0 for none.
     outline: i32,
     /// The frame it goes round, which is the compositor's word on it rather
@@ -203,6 +232,12 @@ impl Framed {
             dress.outline_around = around;
             dress.outline_colour = rgba(colour);
         });
+    }
+
+    /// Light one of the titlebar's buttons, or none.
+    #[cfg(feature = "seat")]
+    pub(crate) fn light(&self, wash: Option<Wash>) {
+        self.dress(|dress| dress.wash = wash);
     }
 
     /// Set the alpha the whole window is drawn at.
@@ -356,13 +391,14 @@ impl SpaceElement for Framed {
 
 impl Framed {
     /// The client's menus, then the agent's outline, then the client's own
-    /// surfaces, then the title, then the bars: front to back, as smithay
-    /// draws a window but for the outline between. The outline is in front
-    /// of the client's own picture, for a client's shadow is drawn just
-    /// where it goes, and would hide it. Its menus are in front of all of
-    /// it, as they are of the titlebar: the index stacks them directly above
-    /// their window (#112), and what is drawn is what it describes. The title
-    /// is over the bar it is written on.
+    /// surfaces, then the title, then the button lit under the pointer, then
+    /// the bars: front to back, as smithay draws a window but for the
+    /// outline between. The outline is in front of the client's own
+    /// picture, for a client's shadow is drawn just where it goes, and would
+    /// hide it. Its menus are in front of all of it, as they are of the
+    /// titlebar: the index stacks them directly above their window (#112),
+    /// and what is drawn is what it describes. The title is over the light
+    /// behind its button, and both are over the bar.
     ///
     /// `rolled` up to its titlebar, the frame alone, measured from a client
     /// of no height, and nothing of the client: what is drawn of a window
@@ -474,6 +510,50 @@ impl Framed {
                     Kind::Unspecified,
                 ) {
                     elements.push(C::from(FramedElement::Text(text)));
+                }
+            }
+
+            if let Some(wash) = dress.wash {
+                let whole = whole_scale(scale.x);
+                let key = WashKey {
+                    side: wash.at.h,
+                    colour: wash.colour,
+                    scale: whole,
+                };
+                if !dress.washes.iter().any(|(drawn, _)| *drawn == key) {
+                    let side = key.side * whole;
+                    let pixels = crate::raster::disc(side, key.colour);
+                    let buffer = MemoryRenderBuffer::from_slice(
+                        &pixels,
+                        Fourcc::Argb8888,
+                        (side, side),
+                        whole,
+                        Transform::Normal,
+                        None,
+                    );
+                    dress.washes.retain(|(drawn, _)| drawn.scale != whole);
+                    dress.washes.insert(0, (key, buffer));
+                    dress.washes.truncate(WASHES);
+                }
+                let at =
+                    origin + Point::from((wash.at.x, wash.at.y)).to_physical_precise_round(scale);
+                let buffer = dress
+                    .washes
+                    .iter()
+                    .find(|(drawn, _)| *drawn == key)
+                    .map(|(_, buffer)| buffer);
+                if let Some(Ok(lit)) = buffer.map(|buffer| {
+                    MemoryRenderBufferRenderElement::from_buffer(
+                        renderer,
+                        at.to_f64(),
+                        buffer,
+                        Some(alpha),
+                        None,
+                        Some((wash.at.w, wash.at.h).into()),
+                        Kind::Unspecified,
+                    )
+                }) {
+                    elements.push(C::from(FramedElement::Text(lit)));
                 }
             }
 

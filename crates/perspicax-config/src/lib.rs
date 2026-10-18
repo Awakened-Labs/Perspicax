@@ -1559,6 +1559,7 @@ impl Raw {
         config.decorations.focused_ink = palette[Role::TitleFocusedInk].colour();
         config.decorations.unfocused = palette[Role::TitleUnfocused].colour();
         config.decorations.unfocused_ink = palette[Role::TitleUnfocusedInk].colour();
+        config.decorations.close_hover = palette[Role::TitleCloseHover].colour();
 
         if let Some(protocols) = self.protocols {
             config.protocols = protocols.apply(config.protocols, built)?;
@@ -3721,6 +3722,30 @@ mod tests {
         assert!(
             matches!(&error, Error::Invalid { key, .. } if key == "decorations.focused"),
             "{error}"
+        );
+    }
+
+    /// The close button's light is a palette colour like any, and reaches
+    /// the titlebars as their own colours do.
+    #[test]
+    fn the_close_buttons_light_is_written_in_the_palette() {
+        assert_eq!(
+            Config::profile(Profile::Classic, SEAT)
+                .decorations
+                .close_hover,
+            Colour::rgb(0xda, 0x44, 0x53),
+            "with no file at all"
+        );
+        let config = parse("[theme.palette]\ntitle-close-hover = \"#e81123\"", SEAT).unwrap();
+        assert_eq!(
+            config.decorations.close_hover,
+            Colour::rgb(0xe8, 0x11, 0x23)
+        );
+        let config = parse("[theme.palette]\nalert = \"#ff0000\"", SEAT).unwrap();
+        assert_eq!(
+            config.decorations.close_hover,
+            Colour::rgb(0xff, 0, 0),
+            "following the alert"
         );
     }
 
