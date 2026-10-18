@@ -253,6 +253,10 @@ pub(crate) fn reload(state: &mut Compositor) {
         .filter(|_| fresh.keyboard.numlock != session.settings.keyboard.numlock);
     let outputs_changed = fresh.outputs != session.settings.outputs;
     let decorations_changed = fresh.decorations != session.settings.decorations;
+    let reach = |decorations: &perspicax_policy::Decorations| {
+        (decorations.server, decorations.title, decorations.border)
+    };
+    let frames_changed = reach(&fresh.decorations) != reach(&session.settings.decorations);
     let opacity_changed = fresh.opacity != session.settings.opacity;
     let placement_changed = fresh.remembering != session.settings.remembering;
     let theme_changed = fresh.theme != session.settings.theme;
@@ -302,9 +306,14 @@ pub(crate) fn reload(state: &mut Compositor) {
         state.publish_facts();
     }
     // Frames are drawn from the settings as they are each time, but a window
-    // sized to fill a zone or a monitor was sized for the old frame.
-    if decorations_changed {
+    // sized to fill a zone or a monitor was sized for the old frame: one
+    // that reaches further or less far, or that its client is now to draw.
+    // Anything else about how frames look, their buttons say, only has to be
+    // drawn again.
+    if frames_changed {
         state.refit_frames();
+    } else if decorations_changed {
+        state.backend.redraw();
     }
     // The titles' font and the snap preview are drawn from the settings as
     // they are; a frame drawn since only has to be drawn again. The pointer

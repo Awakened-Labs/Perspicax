@@ -41,10 +41,10 @@ use std::{
 };
 
 use perspicax_policy::{
-    Access, Action, Bindings, Chord, Colour, Context, Decorations, Direction, Drag, Flipping,
-    Focus, FocusModel, Gesture, Grid, Keysym, Mods, MouseBindings, MouseChord, OPAQUE, Opacity,
-    Place, Program, Protocol, Remembering, Resistance, Rule, Shape, Side, Snapping, Switching,
-    Towards, Transitioning, VolumeKey,
+    Access, Action, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction, Drag,
+    Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Keysym, Mods, MouseBindings,
+    MouseChord, OPAQUE, Opacity, Place, Program, Protocol, Remembering, Resistance, Rule, Shape,
+    Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
 };
 use serde::Deserialize;
 
@@ -560,7 +560,7 @@ impl Config {
             // Both slide: a switch that shows which way it went is the more
             // use where minimal's grid wraps and its edges flip.
             transitioning: Transitioning::default(),
-            decorations: Decorations::default(),
+            decorations: decorations(profile),
             theme: Theme::default(),
             splash: built.seat,
             xwayland: built.xwayland,
@@ -568,6 +568,22 @@ impl Config {
             agent: Agent::default(),
             shell: Shell::profile(profile, ShellBuilt::FULL),
         }
+    }
+}
+
+/// How a profile decorates windows, before the `[decorations]` table: the
+/// same frame in both, and their titlebars' buttons.
+fn decorations(profile: Profile) -> Decorations {
+    use FrameButton::{Close, Maximize, Minimize, Shade, Sticky};
+    match profile {
+        Profile::Classic => Decorations::default(),
+        // Fluxbox's own titlebar, Stick at the left and the rest at the
+        // right, with the shade button the wheel over the title also works.
+        Profile::Minimal => Decorations {
+            buttons: Buttons::new(&[Sticky], &[Shade, Minimize, Maximize, Close])
+                .expect("five buttons, once each"),
+            ..Decorations::default()
+        },
     }
 }
 
@@ -942,7 +958,32 @@ struct RawDecorations {
     border: Option<i32>,
     focused: Option<String>,
     unfocused: Option<String>,
+    left: Option<Vec<RawButton>>,
+    right: Option<Vec<RawButton>>,
     agent: Option<RawAgentLook>,
+}
+
+/// A titlebar button, as `[decorations] left` and `right` name it.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawButton {
+    Shade,
+    Sticky,
+    Minimize,
+    Maximize,
+    Close,
+}
+
+impl From<RawButton> for FrameButton {
+    fn from(button: RawButton) -> Self {
+        match button {
+            RawButton::Shade => Self::Shade,
+            RawButton::Sticky => Self::Sticky,
+            RawButton::Minimize => Self::Minimize,
+            RawButton::Maximize => Self::Maximize,
+            RawButton::Close => Self::Close,
+        }
+    }
 }
 
 /// The `[decorations.agent]` table.
@@ -1656,6 +1697,9 @@ impl RawDecorations {
         if let Some(border) = self.border {
             decorations.border = pixels("border", border, 0..=32)?;
         }
+        if self.left.is_some() || self.right.is_some() {
+            decorations.buttons = titlebar_buttons(self.left, self.right, decorations.buttons)?;
+        }
         // Its colours are the theme's: see `theme`.
         if let Some(agent) = self.agent {
             let look = &mut decorations.agent;
@@ -1679,6 +1723,52 @@ impl RawDecorations {
         }
         Ok(decorations)
     }
+}
+
+/// The titlebar's two ends, as `[decorations] left` and `right` write them
+/// over `had`, the profile's.
+///
+/// A button listed twice in one list is refused at that list's key, and
+/// one in both lists at `right`'s. An end left unwritten keeps the
+/// profile's buttons there, but for any the written end has taken: under
+/// minimal, whose sticky is at the left, `right = ["sticky", "close"]`
+/// moves sticky to the right rather than being refused for a sticky the
+/// person never wrote at the left.
+fn titlebar_buttons(
+    left: Option<Vec<RawButton>>,
+    right: Option<Vec<RawButton>>,
+    had: Buttons,
+) -> Result<Buttons, Error> {
+    let written = |key: &str, list: Option<Vec<RawButton>>| {
+        let Some(list) = list else {
+            return Ok(None);
+        };
+        let list: Vec<FrameButton> = list.into_iter().map(FrameButton::from).collect();
+        match shell::twice(&list) {
+            Some(twice) => Err(invalid(
+                format!("decorations.{key}"),
+                format!("\"{}\" is listed twice", twice.key()),
+            )),
+            None => Ok(Some(list)),
+        }
+    };
+    let (left, right) = (written("left", left)?, written("right", right)?);
+    let untaken = |had: Vec<FrameButton>, taken: &[FrameButton]| -> Vec<FrameButton> {
+        had.into_iter()
+            .filter(|button| !taken.contains(button))
+            .collect()
+    };
+    let left =
+        left.unwrap_or_else(|| untaken(had.left().collect(), right.as_deref().unwrap_or(&[])));
+    let right = right.unwrap_or_else(|| untaken(had.right().collect(), &left));
+    // Each list has each button once, and an end left unwritten has none
+    // the other has: a button twice over is in both written lists.
+    Buttons::new(&left, &right).map_err(|both| {
+        invalid(
+            "decorations.right".to_owned(),
+            format!("\"{}\" is in decorations.left as well", both.key()),
+        )
+    })
 }
 
 /// The `[theme]` table, decided: a theme by name, the colours a person wrote
@@ -3279,7 +3369,11 @@ mod tests {
     fn decorations_are_configured_in_their_own_table() {
         assert_eq!(
             Config::profile(Profile::Minimal, SEAT).decorations,
-            Decorations::default()
+            Decorations {
+                buttons: Config::profile(Profile::Minimal, SEAT).decorations.buttons,
+                ..Decorations::default()
+            },
+            "the same frame in both profiles, but for its buttons"
         );
         let config = parse(
             "[decorations]\nmode = \"client\"\ntitle-height = 30\nborder = 0\n\
@@ -3292,6 +3386,105 @@ mod tests {
         assert_eq!((decorations.title, decorations.border), (30, 0));
         assert_eq!(decorations.focused, Colour::rgb(0xff, 0x88, 0x00));
         assert_eq!(decorations.unfocused, Decorations::default().unfocused);
+    }
+
+    fn ends(buttons: Buttons) -> (Vec<FrameButton>, Vec<FrameButton>) {
+        (buttons.left().collect(), buttons.right().collect())
+    }
+
+    #[test]
+    fn minimal_puts_sticky_on_the_left_as_fluxbox_does_and_classic_keeps_todays_bar() {
+        use FrameButton::*;
+        assert_eq!(
+            ends(Config::profile(Profile::Minimal, SEAT).decorations.buttons),
+            (vec![Sticky], vec![Shade, Minimize, Maximize, Close])
+        );
+        assert_eq!(
+            ends(Config::profile(Profile::Classic, SEAT).decorations.buttons),
+            (vec![], vec![Shade, Minimize, Maximize, Close])
+        );
+        assert_eq!(
+            Config::profile(Profile::Classic, SEAT).decorations,
+            Decorations::default(),
+            "classic's frame is the one there always was"
+        );
+        let config = parse(
+            "[decorations]\nleft = [\"close\", \"maximize\"]\nright = [\"sticky\"]",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(
+            ends(config.decorations.buttons),
+            (vec![Close, Maximize], vec![Sticky])
+        );
+    }
+
+    #[test]
+    fn a_titlebar_button_listed_twice_or_unknown_is_refused_by_name() {
+        for (text, key, says) in [
+            (
+                "[decorations]\nleft = [\"close\", \"close\"]",
+                "decorations.left",
+                "\"close\" is listed twice",
+            ),
+            (
+                "[decorations]\nright = [\"shade\", \"close\", \"shade\"]",
+                "decorations.right",
+                "\"shade\" is listed twice",
+            ),
+            (
+                "[decorations]\nleft = [\"sticky\"]\nright = [\"close\", \"sticky\"]",
+                "decorations.right",
+                "\"sticky\" is in decorations.left as well",
+            ),
+        ] {
+            match parse(text, SEAT) {
+                Err(Error::Invalid { key: at, reason }) => {
+                    assert_eq!(at, key, "{text}");
+                    assert!(reason.contains(says), "{text}: {reason}");
+                }
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+        let unknown = parse("[decorations]\nleft = [\"pin\"]", SEAT).unwrap_err();
+        let said = unknown.to_string();
+        assert!(said.contains("pin") && said.contains("left"), "{said}");
+    }
+
+    #[test]
+    fn an_empty_list_is_a_bare_end() {
+        let config = parse("profile = \"minimal\"\n[decorations]\nleft = []", SEAT).unwrap();
+        assert_eq!(config.decorations.buttons.left().count(), 0, "no sticky");
+        assert_eq!(config.decorations.buttons.right().count(), 4);
+        let config = parse("[decorations]\nleft = []\nright = []", SEAT).unwrap();
+        assert_eq!(
+            ends(config.decorations.buttons),
+            (vec![], vec![]),
+            "a titlebar with no buttons at all, close included, is a person's to choose"
+        );
+    }
+
+    /// An end left unwritten is the profile's, less what the written end
+    /// took: a button moves rather than being refused for a place the
+    /// person never wrote it in.
+    #[test]
+    fn writing_one_end_moves_a_button_off_the_other() {
+        use FrameButton::*;
+        let config = parse(
+            "profile = \"minimal\"\n[decorations]\nright = [\"sticky\", \"close\"]",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(
+            ends(config.decorations.buttons),
+            (vec![], vec![Sticky, Close])
+        );
+        let config = parse("[decorations]\nleft = [\"close\"]", SEAT).unwrap();
+        assert_eq!(
+            ends(config.decorations.buttons),
+            (vec![Close], vec![Shade, Minimize, Maximize]),
+            "classic's close taken to the left"
+        );
     }
 
     #[test]
