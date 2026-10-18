@@ -865,6 +865,25 @@ are its own: resting the pointer against one does not flip, so a game turning
 its camera stays where it is. So are a window's that holds the pointer,
 fullscreen or not ([see Mouse](#a-game-holding-the-pointer)). Nor does an edge
 flip behind the lock screen.
+
+In both, a workspace switch slides: the new workspace comes in from the side
+the person went towards, across a wrap too, and along the grid for a switch by
+number, a pager or a scroll. `[workspaces.transition]` picks another effect:
+`crossfade`, the old workspace's windows fading out as the new one's fade in;
+`wipe`, a black bar sweeping down the screen with the new workspace above it
+and the old one below; `carousel`, every other workspace sliding past the long
+way round before the one asked for, so going from 2 to 3 of four passes 1 and
+4, and from 3 to 2 passes 4 and 1; or `none`, at once. Each has its own length,
+200 ms for a slide or a crossfade, 300 for a wipe and 400 for a carousel, and
+`duration-ms` sets another. Only the picture moves. The windows are where they
+will be from the first frame, so a key or a click ends the transition and lands
+where it is drawn, and an agent, a screenshot and a screen recording all see
+the workspace arrived at. The panels, the wallpaper, a sticky window and a
+window being carried stay where they are. With a wallpaper per workspace, the
+new one replaces the old as the shell draws it, a frame or two in. A crossfade
+fades each window on its own, so halfway through, windows show through one
+another.
+
 Every key below is optional and overrides the profile one setting at a time.
 A misspelled key, or a key for a
 feature this build left out, is refused with its name rather than ignored.
