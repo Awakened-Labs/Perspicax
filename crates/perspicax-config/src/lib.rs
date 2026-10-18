@@ -69,6 +69,8 @@ pub struct Built {
     pub xwayland: bool,
     /// Rendering on demand for a screenshot, which `screencopy` needs.
     pub capture: bool,
+    /// Drawing SVG, which an SVG icon for a titlebar button needs.
+    pub svg: bool,
 }
 
 /// A person's own pictures for the titlebar's buttons: the
@@ -1020,7 +1022,7 @@ struct RawIcons {
 }
 
 impl RawIcons {
-    fn apply(self) -> Result<Icons, Error> {
+    fn apply(self, built: Built) -> Result<Icons, Error> {
         let written = [
             (Face::Close, self.close),
             (Face::Minimize, self.minimize),
@@ -1040,6 +1042,12 @@ impl RawIcons {
                         format!("decorations.icons.{}", face.key()),
                         "an empty path; leave it out for the built-in shape".to_owned(),
                     ));
+                }
+                Some(path) if !built.svg && is_svg(Path::new(&path)) => {
+                    return Err(Error::NotBuilt {
+                        key: icon_key(face),
+                        feature: "svg",
+                    });
                 }
                 Some(path) => files.push((face, PathBuf::from(path))),
             }
@@ -1641,7 +1649,7 @@ impl Raw {
         config.theme = theme(self.theme, self.decorations.as_ref())?;
         if let Some(mut decorations) = self.decorations {
             if let Some(icons) = decorations.icons.take() {
-                config.icons = icons.apply()?;
+                config.icons = icons.apply(built)?;
             }
             config.decorations = decorations.apply(config.decorations)?;
         }
@@ -1814,6 +1822,28 @@ impl RawDecorations {
             }
         }
         Ok(decorations)
+    }
+}
+
+/// Whether `path` names an SVG, by its extension: how a seat tells which
+/// reader an icon needs.
+#[must_use]
+pub fn is_svg(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+}
+
+/// The key an icon for `face` is written at, whole, as an error names it.
+const fn icon_key(face: Face) -> &'static str {
+    match face {
+        Face::Close => "decorations.icons.close",
+        Face::Minimize => "decorations.icons.minimize",
+        Face::Maximize => "decorations.icons.maximize",
+        Face::Restore => "decorations.icons.restore",
+        Face::Shade => "decorations.icons.shade",
+        Face::Unshade => "decorations.icons.unshade",
+        Face::Stick => "decorations.icons.stick",
+        Face::Unstick => "decorations.icons.unstick",
     }
 }
 
@@ -2380,6 +2410,7 @@ mod tests {
         seat: true,
         xwayland: true,
         capture: true,
+        svg: true,
     };
 
     fn alt(key: Keysym) -> (Mods, [Keysym; 1]) {
@@ -2427,6 +2458,7 @@ mod tests {
             seat: true,
             xwayland: false,
             capture: true,
+            svg: true,
         };
         let error = parse("xwayland = true", built).unwrap_err();
         assert!(
@@ -2441,6 +2473,7 @@ mod tests {
             seat: true,
             xwayland: false,
             capture: true,
+            svg: true,
         };
         assert!(!parse("xwayland = false", built).unwrap().xwayland);
     }
@@ -3608,6 +3641,27 @@ mod tests {
         assert!(!icons.tint);
         let config = parse("[decorations.icons]\nstick = \"pin.png\"", SEAT).unwrap();
         assert!(config.icons.tint, "a mask by default");
+    }
+
+    /// An SVG needs a build that draws SVG; one without it says which
+    /// feature would, at the icon's own key. A PNG needs nothing more.
+    #[test]
+    fn an_svg_in_a_build_without_svg_is_refused_naming_the_feature() {
+        let built = Built { svg: false, ..SEAT };
+        let error = parse("[decorations.icons]\nrestore = \"restore.SVG\"", built).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::NotBuilt {
+                    key: "decorations.icons.restore",
+                    feature: "svg"
+                }
+            ),
+            "{error}"
+        );
+        assert!(parse("[decorations.icons]\nrestore = \"restore.png\"", built).is_ok());
+        let config = parse("[decorations.icons]\nrestore = \"restore.svg\"", SEAT).unwrap();
+        assert!(is_svg(config.icons.file(Face::Restore).unwrap()));
     }
 
     #[test]

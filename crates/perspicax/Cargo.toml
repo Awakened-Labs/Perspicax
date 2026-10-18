@@ -67,7 +67,8 @@ perspicax-node = { path = "../perspicax-node", version = "0.1.0" }
 seat = ["perspicax-compositor/seat"]
 xwayland = ["perspicax-compositor/xwayland"]
 capture = ["perspicax-compositor/capture"]
-desktop = ["seat", "xwayland", "capture"]
+svg = ["seat", "perspicax-compositor/svg"]
+desktop = ["seat", "xwayland", "capture", "svg"]
 
 # The v1 demo asserts on the JSON two tools actually answered, rather than on a
 # projection of it made a second time in the test -- so it needs to hold a

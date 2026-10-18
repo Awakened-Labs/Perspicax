@@ -383,6 +383,7 @@ const BUILT: Built = Built {
     seat: cfg!(feature = "seat"),
     xwayland: cfg!(feature = "xwayland"),
     capture: cfg!(feature = "capture"),
+    svg: cfg!(feature = "svg"),
 };
 
 /// Where the agent socket is served, if anywhere. Headless reads no config, so

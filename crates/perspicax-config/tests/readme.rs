@@ -40,6 +40,7 @@ fn every_config_the_readme_shows_is_taken() {
         seat: true,
         xwayland: true,
         capture: true,
+        svg: true,
     };
     for (line, text) in samples {
         if let Err(error) = perspicax_config::parse(&text, everything) {

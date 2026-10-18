@@ -1554,6 +1554,7 @@ dependencies = [
  "perspicax-protocols",
  "perspicax-shell",
  "png",
+ "resvg",
  "serde",
  "serde_json",
  "smithay",

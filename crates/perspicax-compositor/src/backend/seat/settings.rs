@@ -62,6 +62,7 @@ const BUILT: Built = Built {
     seat: true,
     xwayland: cfg!(feature = "xwayland"),
     capture: cfg!(feature = "capture"),
+    svg: cfg!(feature = "svg"),
 };
 
 /// How long a save has to be quiet before it is read: long enough for an
