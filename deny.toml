@@ -129,3 +129,9 @@ yanked = "deny"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# One fork, decided 2026-10-17 (#202): `pulseaudio` from project3301's, at the
+# rev `[patch.crates-io]` in Cargo.toml pins. Its whole diff against 0.3.2 is
+# the fix for the sink and source states 0.3.2 cannot read, and its tests
+# (colinmarc/pulseaudio-rs#17), read before it landed. It goes, with the patch,
+# when a release carries the fix.
+allow-git = ["https://github.com/project3301/pulseaudio-rs"]

@@ -9,9 +9,9 @@
 //! profile that plays through that jack is set, as a server's does.
 //!
 //! A device can be connected whose sink is still being made, as a
-//! Bluetooth headset's is: a read of it is answered in the state
-//! pipewire-pulse gives such a sink, which the crate cannot read, until it
-//! is made and told to have changed.
+//! Bluetooth headset's is: a read of it is answered in the state a test
+//! gives, -2 as pipewire-pulse gives such a sink, or one the crate has no
+//! name for, until it is made and told to have changed.
 //!
 //! It records, too: a record stream asked for gets a channel, and a test
 //! sends samples on it, or on any channel, as a server sends what it
@@ -75,9 +75,9 @@ struct Shared {
     /// request held, by its sequence number.
     streams_held: bool,
     held: Option<u32>,
-    /// The sinks still being made, by index: a read of one is answered in
-    /// state -2.
-    making: Vec<u32>,
+    /// The sinks still being made, by index, each with the state a read of
+    /// it is answered in.
+    making: Vec<(u32, i32)>,
     default: CString,
     default_source: CString,
     /// What was asked, in order: one line each.
@@ -180,12 +180,12 @@ impl Fake {
     /// Connect a device whose sink, of `index` and called `name`, is made
     /// the default while it is still being made, as a Bluetooth headset's
     /// is: the sink is told of, and the server, and a read of the sink is
-    /// answered in state -2 until [`Fake::made`].
-    pub(super) fn connect_making(&self, index: u32, name: &str) {
+    /// answered in `state` until [`Fake::made`].
+    pub(super) fn connect_making(&self, index: u32, name: &str, state: i32) {
         let mut shared = self.lock();
         shared.sinks.push(sink(index, name, NORM));
         shared.default = CString::new(name).expect("a name");
-        shared.making.push(index);
+        shared.making.push((index, state));
         shared.told(
             SubscriptionEventFacility::Sink,
             SubscriptionEventType::New,
@@ -198,7 +198,7 @@ impl Fake {
     /// pipewire-pulse tells it, and read whole from now on.
     pub(super) fn made(&self, index: u32) {
         let mut shared = self.lock();
-        shared.making.retain(|&making| making != index);
+        shared.making.retain(|&(making, _)| making != index);
         shared.event(SubscriptionEventFacility::Sink, Some(index));
     }
 
@@ -579,11 +579,18 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
             }
             Command::GetSinkInfo(get) => {
                 asked.push(format!("sink {}", get.index.unwrap_or(u32::MAX)));
-                match sinks.iter().find(|sink| Some(sink.index) == get.index) {
-                    Some(sink) if making.contains(&sink.index) => being_made(sink, seq, version)
+                let sink = sinks.iter().find(|sink| Some(sink.index) == get.index);
+                let state = sink.and_then(|sink| {
+                    making
+                        .iter()
+                        .find(|&&(making, _)| making == sink.index)
+                        .map(|&(_, state)| state)
+                });
+                match (sink, state) {
+                    (Some(sink), Some(state)) => being_made(sink, state, seq, version)
                         .and_then(|reply| writer.write_all(&reply).map_err(Into::into)),
-                    Some(sink) => protocol::write_reply_message(writer, seq, sink, version),
-                    None => protocol::write_error(writer, seq, &PulseError::NoEntity),
+                    (Some(sink), None) => protocol::write_reply_message(writer, seq, sink, version),
+                    (None, _) => protocol::write_error(writer, seq, &PulseError::NoEntity),
                 }
             }
             Command::GetSourceInfoList if *sources_refused => {
@@ -908,16 +915,21 @@ fn sink(index: u32, name: &str, volume: u32) -> SinkInfo {
     }
 }
 
-/// The reply to a read of `sink` while it is still being made, as
-/// pipewire-pulse gives it: in state -2, `PA_SINK_INIT`, which the crate has
-/// no name for. It is written as the crate writes the sink, with the state
-/// put in after: the one byte that differs between the sink written
-/// suspended and written idle is the last of the state's four.
-fn being_made(sink: &SinkInfo, seq: u32, version: u16) -> Result<Vec<u8>, protocol::ProtocolError> {
-    let written = |state| {
+/// The reply to a read of `sink` while it is still being made: in `state`,
+/// as a server puts it on the wire, whether or not the crate has a name for
+/// it. It is written as the crate writes the sink, with the state put in
+/// after: the one byte that differs between the sink written suspended and
+/// written idle is the last of the state's four.
+fn being_made(
+    sink: &SinkInfo,
+    state: i32,
+    seq: u32,
+    version: u16,
+) -> Result<Vec<u8>, protocol::ProtocolError> {
+    let written = |named| {
         let mut reply = Vec::new();
         let sink = SinkInfo {
-            state,
+            state: named,
             ..sink.clone()
         };
         protocol::write_reply_message(&mut reply, seq, &sink, version).map(|()| reply)
@@ -928,7 +940,7 @@ fn being_made(sink: &SinkInfo, seq: u32, version: u16) -> Result<Vec<u8>, protoc
         .zip(&idle)
         .position(|(suspended, idle)| suspended != idle)
         .expect("the state, written");
-    reply[last - 3..=last].copy_from_slice(&(-2_i32).to_be_bytes());
+    reply[last - 3..=last].copy_from_slice(&state.to_be_bytes());
     Ok(reply)
 }
 

@@ -7,9 +7,9 @@
 //! A message the protocol crate cannot read, a command newer than it knows,
 //! is skipped whole and the rest read on: the server is not wrong to send
 //! it, and the shell has no use for it. A reply it cannot read is told as
-//! unread, so that what it answers is read again when next told of:
-//! pipewire-pulse gives a sink or a source it is still making a state the
-//! crate has no name for.
+//! unread, so that what it answers is read again when next told of: a sink
+//! or a source in a state the crate has no name for, as -2, which
+//! pipewire-pulse gives one it is still making, is to crates.io's 0.3.
 
 use std::{
     collections::HashMap,
@@ -93,8 +93,8 @@ pub(super) enum Incoming {
     /// A command refused, and why.
     Refused(Expect, PulseError),
     /// The reply to a command, which could not be read: a sink or a source
-    /// pipewire-pulse is still making, in state -2, `PA_SINK_INIT`, which
-    /// the crate has no name for.
+    /// in a state the crate has no name for, as -2, `PA_SINK_INIT`, is to
+    /// crates.io's 0.3 (#202).
     Unread(Expect),
     /// A command of the server's own: a subscription's event, most often.
     Event(Box<Command>),

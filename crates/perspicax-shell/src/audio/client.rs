@@ -12,9 +12,11 @@
 //! the object it names, once however often it is told while that read is
 //! out. The server answers in turn, so a read again comes after the first
 //! read of its kind, and is the newer. An object removed is dropped. One
-//! whose reply cannot be read is read again when it is next told of:
-//! pipewire-pulse tells of a sink or a source while it is still making it,
-//! in a state the crate cannot read, and tells it changed once it is made.
+//! whose reply cannot be read is read again when it is next told of: one in
+//! a state the crate has no name for is told to have changed when it leaves
+//! it. pipewire-pulse tells of a sink or a source while it is still making
+//! it, in state -2, which the crate reads from the fork #202 takes, and not
+//! from crates.io's 0.3.
 //!
 //! A server that cannot be reached, or goes away, is told once, and tried
 //! again after a pause that doubles each time, from [`PAUSE_FIRST`] to
@@ -501,8 +503,8 @@ impl Link {
         match message {
             Incoming::Reply(expect, reply) => self.replied(expect, reply)?,
             Incoming::Refused(expect, error) => self.refused(expect, error),
-            // Read again when next told of: a sink or a source still being
-            // made is told to have changed once it is.
+            // Read again when next told of: a sink or a source in a state
+            // the crate cannot read is told to have changed when it leaves it.
             Incoming::Unread(expect) => {
                 self.reading.remove(&expect);
             }
@@ -1470,15 +1472,31 @@ mod tests {
     }
 
     #[test]
-    fn a_sink_read_while_it_is_still_being_made_is_read_again_once_it_is() {
+    fn a_sink_read_while_it_is_still_being_made_is_known_at_once() {
         let fake = Fake::start("making");
         let (_running, heard) = follow(&fake);
         heard.facts();
         // A headset connects, and its sink is made the default while
-        // pipewire-pulse is still making it: read at once, it comes in a
-        // state the crate cannot read.
+        // pipewire-pulse is still making it: read at once, it comes in state
+        // -2, `PA_SINK_INIT`, and is known as it comes, before it is made.
         let e8 = "bluez_output.FC_58_FA_A9_62_22.1";
-        fake.connect_making(5, e8);
+        fake.connect_making(5, e8, -2);
+        let facts = until_heard(&heard, |facts| {
+            facts.output().map(|sink| sink.index) == Some(5)
+        });
+        assert_eq!(facts.default_sink.as_deref(), Some(e8));
+        assert!(!facts.output().expect("the headset").running);
+    }
+
+    #[test]
+    fn a_sink_read_in_a_state_the_crate_has_no_name_for_is_read_again_once_it_changes() {
+        let fake = Fake::start("unnamed");
+        let (_running, heard) = follow(&fake);
+        heard.facts();
+        // A headset connects, and its sink is read at once in a state no
+        // release of the crate names, as a server newer than it might give.
+        let e8 = "bluez_output.FC_58_FA_A9_62_22.1";
+        fake.connect_making(5, e8, -4);
         until_asked(&fake, "sink 5");
         // Made, it is told to have changed, and that is read whole.
         fake.made(5);
@@ -1491,7 +1509,7 @@ mod tests {
             .iter()
             .filter(|asked| *asked == "sink 5")
             .count();
-        assert_eq!(reads, 2, "read as it was told of, and once made");
+        assert_eq!(reads, 2, "read as it was told of, and once changed");
     }
 
     #[test]
