@@ -39,7 +39,7 @@
 
 use std::{cell::RefCell, ops::Deref};
 
-use perspicax_policy::{Insets, Rect, Rgba, frame_rects, outline_rects, outset, rolled_up};
+use perspicax_policy::{Insets, Rect, Rgba, outset, rolled_up, rounded_outline, rounded_rects};
 use smithay::{
     backend::{
         allocator::Fourcc,
@@ -127,6 +127,42 @@ struct WashKey {
 /// at, as with titles.
 const WASHES: usize = 2;
 
+/// What a rounded corner's quarter was drawn from: how many logical pixels
+/// a side, from how far round its centre it starts, in what, at what whole
+/// scale, and which of the two top corners it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CornerKey {
+    side: i32,
+    inner: i32,
+    colour: Rgba,
+    scale: i32,
+    right: bool,
+}
+
+/// The most corners kept drawn per window: the frame's two and its line's
+/// two, at each of two scales.
+const CORNERS: usize = 8;
+
+/// Where a window's pieces go, and how opaque: what every one of them is
+/// drawn with.
+struct Drawing {
+    /// The client's geometry's origin, in the output's pixels.
+    origin: Point<i32, Physical>,
+    scale: Scale<f64>,
+    alpha: f32,
+}
+
+/// A colour as the renderer takes it, back in bytes, for drawing by hand.
+fn bytes(colour: [f32; 4]) -> Rgba {
+    let byte = |channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Rgba::new(
+        byte(colour[0]),
+        byte(colour[1]),
+        byte(colour[2]),
+        byte(colour[3]),
+    )
+}
+
 /// The whole scale a title is rasterised at for an output at `scale`.
 pub(crate) fn whole_scale(scale: f64) -> i32 {
     (scale.ceil() as i32).max(1)
@@ -150,6 +186,10 @@ struct Dress {
     /// How far outside the frame the pointer can still grab an edge: zero
     /// for a window that cannot be resized from its frame.
     grip: i32,
+    /// How round the frame's top corners are, and its line's with them.
+    radius: i32,
+    /// Those corners, drawn, by what they were drawn from.
+    corners: Vec<(CornerKey, MemoryRenderBuffer)>,
     colour: [f32; 4],
     strips: Vec<SolidColorBuffer>,
     /// The titlebar, where the title and its buttons are drawn, relative to
@@ -201,13 +241,15 @@ impl Framed {
         f(&mut cell.borrow_mut())
     }
 
-    /// Set how the frame looks: how far it reaches, in what colours, and
-    /// where its title goes, relative to the client's geometry.
+    /// Set how the frame looks: how far it reaches, how round its top
+    /// corners are, in what colours, and where its title goes, relative to
+    /// the client's geometry.
     #[cfg(feature = "seat")]
     pub(crate) fn wear(
         &self,
         insets: Insets,
         grip: i32,
+        radius: i32,
         colour: perspicax_policy::Colour,
         ink: perspicax_policy::Colour,
         title_at: Option<Rect>,
@@ -215,6 +257,7 @@ impl Framed {
         self.dress(|dress| {
             dress.insets = insets;
             dress.grip = grip;
+            dress.radius = radius;
             dress.colour = rgba(colour);
             dress.title_at = title_at;
             dress.ink = Some(ink);
@@ -481,15 +524,29 @@ impl Framed {
             .into_iter()
             .map(|element| C::from(FramedElement::Surface(element)))
             .collect();
+        let drawing = Drawing {
+            origin,
+            scale,
+            alpha,
+        };
         elements.extend(self.dress(|dress| {
-            let strips = outline_rects(outset(client, dress.outline_around), dress.outline);
+            let around = outset(client, dress.outline_around);
+            let (strips, corners) = rounded_outline(around, dress.outline, dress.radius);
             let colour = dress.outline_colour;
+            let (rounded, unmade) =
+                dress.corners(renderer, &corners, dress.radius, colour, &drawing);
+            let strips: Vec<Rect> = strips.into_iter().chain(unmade).collect();
             let buffers = &mut dress.outline_strips;
             buffers.resize_with(strips.len(), || SolidColorBuffer::new((0, 0), [0.0; 4]));
-            strips
-                .iter()
-                .zip(buffers)
-                .map(|(strip, buffer)| solid(strip, buffer, colour))
+            rounded
+                .into_iter()
+                .map(|corner| C::from(FramedElement::Text(corner)))
+                .chain(
+                    strips
+                        .iter()
+                        .zip(buffers)
+                        .map(|(strip, buffer)| solid(strip, buffer, colour)),
+                )
                 .collect::<Vec<_>>()
         }));
         elements.extend(
@@ -559,16 +616,95 @@ impl Framed {
                 }
             }
 
-            let strips = frame_rects(client, dress.insets);
+            // A corner that cannot be drawn rounded is drawn square, never
+            // left a hole in the frame.
+            let (strips, corners) = rounded_rects(client, dress.insets, dress.radius);
             let colour = dress.colour;
+            let (rounded, unmade) = dress.corners(renderer, &corners, 0, colour, &drawing);
+            let strips: Vec<Rect> = strips.into_iter().chain(unmade).collect();
             dress
                 .strips
                 .resize_with(strips.len(), || SolidColorBuffer::new((0, 0), [0.0; 4]));
             for (strip, buffer) in strips.iter().zip(&mut dress.strips) {
                 elements.push(solid(strip, buffer, colour));
             }
+            elements.extend(
+                rounded
+                    .into_iter()
+                    .map(|corner| C::from(FramedElement::Text(corner))),
+            );
         });
         elements
+    }
+}
+
+impl Dress {
+    /// `corners`, the top left and the top right, each drawn as a quarter
+    /// ring from `inner` round to its square's side, in `colour`, from a
+    /// buffer kept for the next frame; and any that could not be made, to
+    /// be drawn square.
+    fn corners<R>(
+        &mut self,
+        renderer: &mut R,
+        corners: &[Rect],
+        inner: i32,
+        colour: [f32; 4],
+        drawing: &Drawing,
+    ) -> (Vec<MemoryRenderBufferRenderElement<R>>, Vec<Rect>)
+    where
+        R: Renderer + ImportMem,
+        R::TextureId: Send + Clone + 'static,
+    {
+        let whole = whole_scale(drawing.scale.x);
+        let mut rounded = Vec::new();
+        let mut unmade = Vec::new();
+        for (n, corner) in corners.iter().enumerate() {
+            let key = CornerKey {
+                side: corner.w,
+                inner,
+                colour: bytes(colour),
+                scale: whole,
+                right: n == 1,
+            };
+            if !self.corners.iter().any(|(drawn, _)| *drawn == key) {
+                let side = key.side * whole;
+                let pixels =
+                    crate::raster::corner(side, (key.inner * whole) as f32, key.colour, key.right);
+                let buffer = MemoryRenderBuffer::from_slice(
+                    &pixels,
+                    Fourcc::Argb8888,
+                    (side, side),
+                    whole,
+                    Transform::Normal,
+                    None,
+                );
+                self.corners.insert(0, (key, buffer));
+                self.corners.truncate(CORNERS);
+            }
+            let at = drawing.origin
+                + Point::from((corner.x, corner.y)).to_physical_precise_round(drawing.scale);
+            let made = self
+                .corners
+                .iter()
+                .find(|(drawn, _)| *drawn == key)
+                .and_then(|(_, buffer)| {
+                    MemoryRenderBufferRenderElement::from_buffer(
+                        renderer,
+                        at.to_f64(),
+                        buffer,
+                        Some(drawing.alpha),
+                        None,
+                        Some((corner.w, corner.h).into()),
+                        Kind::Unspecified,
+                    )
+                    .ok()
+                });
+            match made {
+                Some(element) => rounded.push(element),
+                None => unmade.push(*corner),
+            }
+        }
+        (rounded, unmade)
     }
 }
 

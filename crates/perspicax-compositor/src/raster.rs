@@ -53,6 +53,34 @@ pub(crate) fn disc(side: i32, colour: Rgba) -> Vec<u8> {
     pixels
 }
 
+/// A square `side` pixels a side holding a quarter of a ring round the
+/// square's inner bottom corner: everything from `inner` to `side` pixels
+/// from it, in `colour`. The top left corner's quarter, or the top right's
+/// if `right`. An `inner` of 0 is a quarter disc, a rounded frame's own
+/// corner; more is the agent's line going round it.
+pub(crate) fn corner(side: i32, inner: f32, colour: Rgba, right: bool) -> Vec<u8> {
+    let side = side.max(1);
+    let outer = side as f32;
+    let centre = if right { 0.0 } else { outer };
+    let mut pixels = vec![0u8; (side * side * 4) as usize];
+    for row in 0..side {
+        for column in 0..side {
+            let (x, y) = (column as f32 + 0.5 - centre, row as f32 + 0.5 - outer);
+            let distance = x.hypot(y);
+            let cover = (coverage(distance - outer) - coverage(distance - inner)).max(0.0);
+            if cover > 0.0 {
+                let at = ((row * side + column) * 4) as usize;
+                let alpha = (cover * f32::from(colour.a)).round() as u8;
+                over(
+                    &mut pixels[at..at + 4],
+                    [colour.r, colour.g, colour.b, alpha],
+                );
+            }
+        }
+    }
+    pixels
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +92,45 @@ mod tests {
         assert_eq!(pixel, [128, 128, 128, 128], "half white, premultiplied");
         over(&mut pixel, [255, 0, 0, 255]);
         assert_eq!(pixel, [0, 0, 255, 255], "opaque red over it, blue first");
+    }
+
+    /// A frame's top left corner: clear outside its arc, at the square's
+    /// own top left, and solid inside it, toward the bar; the top right's is
+    /// its mirror. A ring is clear inside its inner arc too.
+    #[test]
+    fn a_corner_is_clear_outside_its_arc_and_solid_inside() {
+        let colour = Rgba::new(0x2d, 0x6f, 0xa3, 0xff);
+        let side = 10;
+        let alpha =
+            |pixels: &[u8], row: i32, column: i32| pixels[((row * side + column) * 4 + 3) as usize];
+        let left = corner(side, 0.0, colour, false);
+        assert_eq!(alpha(&left, 0, 0), 0, "outside the arc");
+        assert_eq!(alpha(&left, 9, 9), 0xff, "inside it, beside the bar");
+        assert!(
+            alpha(&left, 0, 9) >= 0xf8,
+            "along the top, where the bar goes on: the arc meets the edge there"
+        );
+        assert!(alpha(&left, 9, 0) >= 0xf8, "and down the side");
+        assert!(
+            left.chunks(4).any(|pixel| (1..0xff).contains(&pixel[3])),
+            "smooth on the arc"
+        );
+        let right = corner(side, 0.0, colour, true);
+        for (row, column) in [(0, 0), (0, 9), (9, 0), (4, 6)] {
+            assert_eq!(
+                alpha(&right, row, column),
+                alpha(&left, row, side - 1 - column),
+                "mirrored"
+            );
+        }
+        let ring = corner(side, 6.0, colour, false);
+        assert_eq!(
+            alpha(&ring, 9, 9),
+            0,
+            "inside the inner arc: the frame's own corner"
+        );
+        assert_eq!(alpha(&ring, 0, 0), 0, "outside the outer");
+        assert_eq!(alpha(&ring, 9, 1), 0xff, "on the ring");
     }
 
     /// Solid in its middle, clear at the corners and edges of its square,

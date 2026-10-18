@@ -617,7 +617,11 @@ impl Config {
 fn decorations(profile: Profile) -> Decorations {
     use FrameButton::{Close, Maximize, Minimize, Shade, Sticky};
     match profile {
-        Profile::Classic => Decorations::default(),
+        // Plasma's rounded corners.
+        Profile::Classic => Decorations {
+            radius: 5,
+            ..Decorations::default()
+        },
         // Fluxbox's own titlebar, Stick at the left and the rest at the
         // right, with the shade button the wheel over the title also works.
         Profile::Minimal => Decorations {
@@ -1001,6 +1005,7 @@ struct RawDecorations {
     unfocused: Option<String>,
     left: Option<Vec<RawButton>>,
     right: Option<Vec<RawButton>>,
+    corner_radius: Option<i32>,
     agent: Option<RawAgentLook>,
     icons: Option<RawIcons>,
 }
@@ -1796,6 +1801,9 @@ impl RawDecorations {
         }
         if let Some(border) = self.border {
             decorations.border = pixels("border", border, 0..=32)?;
+        }
+        if let Some(radius) = self.corner_radius {
+            decorations.radius = pixels("corner-radius", radius, 0..=16)?;
         }
         if self.left.is_some() || self.right.is_some() {
             decorations.buttons = titlebar_buttons(self.left, self.right, decorations.buttons)?;
@@ -3498,7 +3506,7 @@ mod tests {
                 buttons: Config::profile(Profile::Minimal, SEAT).decorations.buttons,
                 ..Decorations::default()
             },
-            "the same frame in both profiles, but for its buttons"
+            "minimal's frame is flat, the one there always was, but for its buttons"
         );
         let config = parse(
             "[decorations]\nmode = \"client\"\ntitle-height = 30\nborder = 0\n\
@@ -3529,9 +3537,9 @@ mod tests {
             (vec![], vec![Shade, Minimize, Maximize, Close])
         );
         assert_eq!(
-            Config::profile(Profile::Classic, SEAT).decorations,
-            Decorations::default(),
-            "classic's frame is the one there always was"
+            Config::profile(Profile::Classic, SEAT).decorations.buttons,
+            Decorations::default().buttons,
+            "classic's buttons are the ones there always were"
         );
         let config = parse(
             "[decorations]\nleft = [\"close\", \"maximize\"]\nright = [\"sticky\"]",
@@ -3678,6 +3686,32 @@ mod tests {
         assert!(said.contains("sticky"), "the button, not a face: {said}");
     }
 
+    /// classic rounds its titlebars' top corners, as Plasma does, and
+    /// minimal keeps them square, as Fluxbox does; either is a key away.
+    #[test]
+    fn classic_rounds_its_corners_and_minimal_keeps_them_square() {
+        assert_eq!(
+            Config::profile(Profile::Classic, SEAT).decorations.radius,
+            5
+        );
+        assert_eq!(
+            Config::profile(Profile::Minimal, SEAT).decorations.radius,
+            0
+        );
+        let config = parse("[decorations]\ncorner-radius = 0", SEAT).unwrap();
+        assert_eq!(config.decorations.radius, 0, "square, in classic");
+        let config = parse(
+            "profile = \"minimal\"\n[decorations]\ncorner-radius = 8",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(config.decorations.radius, 8);
+        match parse("[decorations]\ncorner-radius = 17", SEAT) {
+            Err(Error::Invalid { key, .. }) => assert_eq!(key, "decorations.corner-radius"),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn the_agents_marks_are_configured_under_decorations() {
         let look = Config::profile(Profile::Classic, SEAT).decorations.agent;
@@ -3755,7 +3789,20 @@ mod tests {
     fn with_no_theme_the_desk_looks_as_it_did_before_themes() {
         let config = parse("", SEAT).unwrap();
         assert_eq!(config.theme, Theme::default());
-        assert_eq!(config.decorations, Decorations::default());
+        let colours = |decorations: Decorations| {
+            (
+                decorations.focused,
+                decorations.focused_ink,
+                decorations.unfocused,
+                decorations.unfocused_ink,
+                decorations.close_hover,
+            )
+        };
+        assert_eq!(
+            colours(config.decorations),
+            colours(Decorations::default()),
+            "the titlebars' colours"
+        );
     }
 
     #[test]

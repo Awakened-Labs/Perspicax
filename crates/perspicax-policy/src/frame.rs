@@ -77,6 +77,9 @@ pub struct Decorations {
     pub buttons: Buttons,
     /// What the close button is lit in under the pointer.
     pub close_hover: Colour,
+    /// How round the titlebar's top corners are, in logical pixels: 0 for
+    /// square.
+    pub radius: i32,
 }
 
 impl Default for Decorations {
@@ -92,6 +95,7 @@ impl Default for Decorations {
             agent: AgentLook::default(),
             buttons: Buttons::default(),
             close_hover: Colour::rgb(0xda, 0x44, 0x53),
+            radius: 0,
         }
     }
 }
@@ -244,6 +248,92 @@ pub fn frame_rects(client: Rect, insets: Insets) -> Vec<Rect> {
 #[must_use]
 pub fn rolled_up(client: Rect) -> Rect {
     Rect::new(client.x, client.y, client.w, 0)
+}
+
+/// How round the top corners of a frame with these insets, `width` wide,
+/// are drawn in `look`: [`Decorations::radius`] for a normal window, and
+/// square for a maximized one, whose bar meets the screen's own corners,
+/// and for one with no titlebar of ours. Never rounder than the titlebar is
+/// tall, so the side borders below it stay straight, nor than half the
+/// frame is wide.
+#[must_use]
+pub fn corner_radius(decorations: &Decorations, look: Look, insets: Insets, width: i32) -> i32 {
+    if look != Look::Normal {
+        return 0;
+    }
+    decorations.radius.min(insets.top).min(width / 2).max(0)
+}
+
+/// The pieces a frame with this client rect is drawn as, its top corners
+/// rounded `radius` round: the solid rectangles, and the two squares, top
+/// left and top right, each drawn as a quarter disc, the bar's colour
+/// inside its arc and nothing outside it. Together they tile
+/// [`frame_rects`] exactly, and a radius of 0 is [`frame_rects`] and no
+/// corners.
+///
+/// The facts still have [`frame_rects`]: a pixel outside an arc is said to
+/// be frame, though nothing is drawn there, which errs the way that refuses
+/// rather than the way that lets a click through.
+#[must_use]
+pub fn rounded_rects(client: Rect, insets: Insets, radius: i32) -> (Vec<Rect>, Vec<Rect>) {
+    let strips = frame_rects(client, insets);
+    let radius = radius.clamp(0, insets.top);
+    if radius == 0 || strips.is_empty() {
+        return (strips, Vec::new());
+    }
+    let top = strips[0];
+    let corners = vec![
+        Rect::new(top.x, top.y, radius, radius),
+        Rect::new(top.x + top.w - radius, top.y, radius, radius),
+    ];
+    let solids = [
+        Rect::new(top.x + radius, top.y, top.w - 2 * radius, radius),
+        Rect::new(top.x, top.y + radius, top.w, top.h - radius),
+    ]
+    .into_iter()
+    .chain(strips.into_iter().skip(1))
+    .filter(|strip| strip.w > 0 && strip.h > 0)
+    .collect();
+    (solids, corners)
+}
+
+/// The pieces the line `width` wide round a frame whose corners are
+/// rounded `radius` round is drawn as: the solid rectangles, and the two
+/// squares, `radius + width` a side, each drawn as a quarter ring from
+/// `radius` to `radius + width` round, following the frame's arc. They tile
+/// [`outline_rects`] and the frame's own two corner squares: the ring's
+/// inner edge reaches into the clear pixels outside the frame's arc, and
+/// draws only there. A radius of 0 is [`outline_rects`] and no corners.
+#[must_use]
+pub fn rounded_outline(around: Rect, width: i32, radius: i32) -> (Vec<Rect>, Vec<Rect>) {
+    let strips = outline_rects(around, width);
+    let radius = radius.max(0);
+    if radius == 0 || strips.is_empty() {
+        return (strips, Vec::new());
+    }
+    let width = width.max(0);
+    let side = radius + width;
+    let (left, top) = (around.x - width, around.y - width);
+    let right = around.x + around.w + width;
+    let corners = vec![
+        Rect::new(left, top, side, side),
+        Rect::new(right - side, top, side, side),
+    ];
+    let solids = [
+        Rect::new(left + side, top, around.w - 2 * radius, width),
+        Rect::new(left, around.y + radius, width, around.h - radius),
+        Rect::new(
+            around.x + around.w,
+            around.y + radius,
+            width,
+            around.h - radius,
+        ),
+        Rect::new(left, around.y + around.h, around.w + 2 * width, width),
+    ]
+    .into_iter()
+    .filter(|strip| strip.w > 0 && strip.h > 0)
+    .collect();
+    (solids, corners)
 }
 
 /// The rectangles a line `width` wide round `around` is drawn as, just
@@ -1241,6 +1331,116 @@ mod tests {
             [
                 "close", "minimize", "maximize", "restore", "shade", "unshade", "stick", "unstick"
             ]
+        );
+    }
+
+    /// Every pixel of a list of rectangles, once each, or `None` if any is
+    /// covered twice.
+    fn tiled(pieces: &[Rect]) -> Option<std::collections::BTreeSet<(i32, i32)>> {
+        let mut covered = std::collections::BTreeSet::new();
+        for piece in pieces {
+            for y in piece.y..piece.y + piece.h {
+                for x in piece.x..piece.x + piece.w {
+                    if !covered.insert((x, y)) {
+                        return None;
+                    }
+                }
+            }
+        }
+        Some(covered)
+    }
+
+    /// Rounded or not, a frame covers the same pixels: the solids and the
+    /// corner squares tile the square frame, none twice. A radius of 0 is
+    /// the square frame, and no corners.
+    #[test]
+    fn rounded_pieces_tile_the_square_frame_exactly() {
+        let client = Rect::new(100, 100, 400, 300);
+        let square = tiled(&frame_rects(client, framed())).unwrap();
+        for radius in [1, 5, 16, 26] {
+            let (solids, corners) = rounded_rects(client, framed(), radius);
+            assert_eq!(corners.len(), 2);
+            assert_eq!(corners[0], Rect::new(98, 74, radius, radius), "top left");
+            let all: Vec<Rect> = solids.iter().chain(&corners).copied().collect();
+            assert_eq!(tiled(&all).as_ref(), Some(&square), "radius {radius}");
+        }
+        let rolled = rolled_up(client);
+        let (solids, corners) = rounded_rects(rolled, framed(), 5);
+        let all: Vec<Rect> = solids.iter().chain(&corners).copied().collect();
+        assert_eq!(
+            tiled(&all),
+            tiled(&frame_rects(rolled, framed())),
+            "rolled up too"
+        );
+        assert_eq!(
+            rounded_rects(client, framed(), 0),
+            (frame_rects(client, framed()), vec![])
+        );
+
+        let around = outset(client, framed());
+        let ring = tiled(&outline_rects(around, 3)).unwrap();
+        let (solids, corners) = rounded_outline(around, 3, 5);
+        assert_eq!(
+            corners[1],
+            Rect::new(502 + 3 - 8, 71, 8, 8),
+            "top right, 5 + 3 a side"
+        );
+        let all: Vec<Rect> = solids.iter().chain(&corners).copied().collect();
+        let (_, frame_corners) = rounded_rects(client, framed(), 5);
+        let mut reached = ring;
+        reached.extend(tiled(&frame_corners).unwrap());
+        assert_eq!(
+            tiled(&all).as_ref(),
+            Some(&reached),
+            "the agent's line, round the frame's arcs"
+        );
+        assert_eq!(
+            rounded_outline(around, 3, 0),
+            (outline_rects(around, 3), vec![])
+        );
+    }
+
+    /// A maximized window's bar meets the screen's corners, and a window
+    /// that draws its own frame has no bar of ours: both are square.
+    #[test]
+    fn a_maximized_or_fullscreen_frame_is_square() {
+        let decorations = Decorations {
+            radius: 6,
+            ..Decorations::default()
+        };
+        let normal = Insets::of(&decorations, Look::Normal);
+        assert_eq!(corner_radius(&decorations, Look::Normal, normal, 400), 6);
+        let maximized = Insets::of(&decorations, Look::Maximized);
+        assert_eq!(
+            corner_radius(&decorations, Look::Maximized, maximized, 400),
+            0
+        );
+        assert_eq!(
+            corner_radius(&decorations, Look::Fullscreen, Insets::NONE, 400),
+            0
+        );
+        assert_eq!(
+            corner_radius(&decorations, Look::Normal, Insets::NONE, 400),
+            0
+        );
+    }
+
+    #[test]
+    fn a_radius_never_reaches_past_the_titlebar() {
+        let decorations = Decorations {
+            radius: 40,
+            ..Decorations::default()
+        };
+        let insets = Insets::of(&decorations, Look::Normal);
+        assert_eq!(
+            corner_radius(&decorations, Look::Normal, insets, 400),
+            26,
+            "the bar's height"
+        );
+        assert_eq!(
+            corner_radius(&decorations, Look::Normal, insets, 30),
+            15,
+            "half the width"
         );
     }
 

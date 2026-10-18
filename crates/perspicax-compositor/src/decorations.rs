@@ -260,7 +260,10 @@ impl Compositor {
             } else {
                 0
             };
-            window.wear(insets, grip, colour, ink, title_at);
+            let width = size.w + insets.left + insets.right;
+            let radius =
+                perspicax_policy::corner_radius(&decorations, Self::look(window), insets, width);
+            window.wear(insets, grip, radius, colour, ink, title_at);
             window.fade(crate::shell::alpha(self.opacity_of(window, in_use)));
             let shades = Self::is_server_decorated(window);
             window.light(
