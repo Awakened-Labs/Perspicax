@@ -921,6 +921,11 @@ while-dragging = true          # and take the window being dragged along
 scroll = true                  # scroll over the desktop: down and right to the
                                # next one; see Mouse to turn it round
 
+[workspaces.transition]
+effect = "slide"               # "slide", "crossfade", "wipe", "carousel", or
+                               # "none" to switch at once
+duration-ms = 200              # 1 to 2000; each effect has its own if left out
+
 [snap]
 drag = true
 threshold = 4                  # pixels from the edge
