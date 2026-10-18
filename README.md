@@ -755,6 +755,14 @@ commit that asks, and returns with a new id. One whose monitor is unplugged
 while it is away is told it is closed. A launcher that asks for every key,
 new or back, has them from the first picture it draws, and not before.
 
+And it keeps them while it is up, as layer-shell says the top-most one that
+asks for every key does: fuzzel, say, or the shell's own menus and pies. A
+window that opens under it, asks to be brought forward, or is clicked,
+pointed at or picked in the taskbar is raised as it would be, but takes
+none of the keys typed at the launcher. It has them once the launcher goes,
+being on top then. Only another launcher takes them, the newest being the
+top-most (#131).
+
 A new window opens on the monitor under the pointer, in the room its panels
 leave, cascaded from the top-left corner: 32 pixels further in for each
 window opened before it, back to the corner before the middle. With a

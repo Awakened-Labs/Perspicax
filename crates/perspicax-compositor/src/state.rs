@@ -681,12 +681,26 @@ impl Compositor {
     /// What has the keyboard then has the password as it is typed, and a
     /// window behind the lock -- a chat window, a terminal, a dialog that
     /// opened -- would send it with the Enter that was meant to unlock.
+    ///
+    /// Nor, while a launcher holds the keyboard, may anything but a launcher
+    /// (#131): layer-shell has the top-most layer that wants every key keep
+    /// them, and a window that opened under it, was brought forward, clicked
+    /// or pointed at, would have what was being typed at the launcher. The
+    /// window is raised all the same, and has the keys once the launcher
+    /// goes, as one that opened behind the lock has them at unlock.
+    ///
     /// [`Self::focus_plain`] and [`Self::focus_surface`] ask, which is every
     /// way to the keyboard but a menu's grab, refused while locked (#82).
     fn may_take_keyboard(&self, surface: &WlSurface) -> bool {
-        self.lock
-            .as_ref()
-            .is_none_or(|locked| locked.covers(surface))
+        match &self.lock {
+            Some(locked) => locked.covers(surface),
+            None => {
+                self.is_launcher(surface)
+                    || !self
+                        .keyboard_root()
+                        .is_some_and(|held| self.is_launcher(&held))
+            }
+        }
     }
 
     /// A window closed. If it held the keyboard, the keyboard goes to the
@@ -753,11 +767,11 @@ impl Compositor {
     /// an X11 window that places itself, which an application's menu is,
     /// and which is on top of everything when it opens (#181).
     ///
-    /// While the session is locked, [`Self::focus_surface`] refuses the
-    /// window the keyboard. Giving it to nothing is not refused, and need
-    /// not be: no caller asks while a lock surface holds the keyboard, only
-    /// once what held it has gone, or while a window, a menu or a launcher
-    /// holds it.
+    /// While the session is locked, or a launcher holds the keyboard,
+    /// [`Self::focus_surface`] refuses the window the keyboard. Giving it to
+    /// nothing is not refused, and need not be: no caller asks while a lock
+    /// surface or a launcher holds the keyboard, only once what held it has
+    /// gone, or while a window or a menu holds it.
     pub(crate) fn focus_top_window(&mut self) {
         let top = self
             .space
