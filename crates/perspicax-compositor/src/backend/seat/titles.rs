@@ -46,6 +46,19 @@ const TEXT_SHARE: f32 = 0.5;
 /// How opaque the label of a tab behind the front one is, out of 255.
 const BEHIND: u8 = 150;
 
+/// What a window's titlebar shows that only the compositor can say,
+/// gathered before drawing, while it can still be asked.
+pub(super) struct Bar {
+    /// One label per tab, the window's own title when it is in no group.
+    pub(super) labels: Vec<String>,
+    /// Which tab is in front.
+    pub(super) front: usize,
+    /// Whether it is on every workspace.
+    pub(super) sticky: bool,
+    /// Whether it is maximized, as its maximize button means it.
+    pub(super) maximized: bool,
+}
+
 /// The fonts, and the glyphs already rasterised from them.
 pub(super) struct Titles {
     fonts: Fonts,
@@ -62,15 +75,13 @@ impl Titles {
     }
 
     /// Make sure `window` has its titlebar drawn at the whole scale `scale`
-    /// in its ink and the theme's `family`: `labels`, one per tab, with
-    /// `front` the one in front, and `buttons` at the bar's two ends, the
-    /// shade button showing whether it is rolled up. Does nothing if it
+    /// in its ink and the theme's `family`: `bar`'s labels, and `buttons` at
+    /// the bar's two ends, each toggle showing its state. Does nothing if it
     /// already has.
     pub(super) fn prepare(
         &mut self,
         window: &Framed,
-        labels: Vec<String>,
-        front: usize,
+        bar: Bar,
         scale: i32,
         family: &perspicax_policy::Family,
         buttons: perspicax_policy::Buttons,
@@ -79,8 +90,8 @@ impl Titles {
             return;
         };
         let key = TitleKey {
-            labels,
-            front,
+            labels: bar.labels,
+            front: bar.front,
             size: (area.w, area.h),
             ink,
             family: family.clone(),
@@ -88,6 +99,8 @@ impl Titles {
             buttons,
             shades: Compositor::is_server_decorated(window),
             shaded: crate::shell::is_shaded(window),
+            sticky: bar.sticky,
+            maximized: bar.maximized,
         };
         if window.has_title(&key) {
             return;
@@ -135,7 +148,7 @@ impl Titles {
                 place,
                 ink,
                 key.scale,
-                key.shaded,
+                key.toggles(),
             );
         }
 
@@ -285,13 +298,36 @@ fn family(family: &perspicax_policy::Family) -> Family<'_> {
     }
 }
 
+/// The window's toggles, as its buttons show them.
+#[derive(Debug, Clone, Copy)]
+struct Toggles {
+    /// Rolled up to its titlebar.
+    shaded: bool,
+    /// On every workspace.
+    stuck: bool,
+    maximized: bool,
+}
+
+impl TitleKey {
+    fn toggles(&self) -> Toggles {
+        Toggles {
+            shaded: self.shaded,
+            stuck: self.sticky,
+            maximized: self.maximized,
+        }
+    }
+}
+
 /// Draw `button`'s symbol, centred in `place`, in pixels of a buffer
 /// `width` wide: a cross to close, a square to maximize, a bar along the
 /// bottom to minimize, one along the top to roll up, and a pin, a ring on a
-/// short stem, to keep the window on every workspace. For a window
-/// `shaded`, rolled up already, a chevron under the shade button's bar
-/// points down, the way it unrolls. Each pixel is inked by how much of it
-/// the shape covers, so the diagonals of the cross and the chevron, and the
+/// short stem, to keep the window on every workspace.
+///
+/// Each toggle shows its state, as `toggles` has it. Rolled up already, a
+/// chevron under the shade button's bar points down, the way it unrolls.
+/// On every workspace, the pin's head is filled. Maximized, two squares, one
+/// behind the other, restore it. Each pixel is inked by how much of it the
+/// shape covers, so the diagonals of the cross and the chevron, and the
 /// pin's ring, are smooth.
 fn draw_button(
     pixels: &mut [u8],
@@ -300,7 +336,7 @@ fn draw_button(
     place: Rect,
     ink: Color,
     scale: i32,
-    shaded: bool,
+    toggles: Toggles,
 ) {
     let half = place.h as f32 * 0.2;
     let stroke = 1.5 * scale as f32;
@@ -311,23 +347,50 @@ fn draw_button(
     // The chevron's arms, from either side of it down to its point.
     let (arm, point) = ((half * 0.7, -half * 0.25), (0.0, half * 0.6));
     // The pin's ring, above the middle, and how big round it is.
-    let (ring, round) = (-half * 0.3, half * 0.55);
+    let (ring, round) = (-half * 0.3, half * 0.7);
+    // How far inside a square's edge a point is, as maximize's square is
+    // drawn, or nowhere for a point outside it. Restore's two are offset
+    // from the middle, the one in front down and to the left.
+    let inside = |x: f32, y: f32, (cx, cy): (f32, f32), size: f32| {
+        let reach = (x - cx).abs().max((y - cy).abs());
+        if reach <= size {
+            size - reach
+        } else {
+            f32::INFINITY
+        }
+    };
+    let (front, back, size) = (
+        (-half * 0.25, half * 0.25),
+        (half * 0.25, -half * 0.25),
+        half * 0.75,
+    );
     // How far a pixel's centre is from the shape's line, as `x, y` from the
     // middle of the button.
     let distance = |x: f32, y: f32| match button {
         FrameButton::Close if x.abs() <= half && y.abs() <= half => {
             (x - y).abs().min((x + y).abs()) / std::f32::consts::SQRT_2
         }
+        // Behind the front square, the one behind is hidden.
+        FrameButton::Maximize if toggles.maximized => match inside(x, y, front, size) {
+            over if over.is_finite() => over,
+            _ => inside(x, y, back, size),
+        },
         FrameButton::Maximize if x.abs() <= half && y.abs() <= half => half - x.abs().max(y.abs()),
         FrameButton::Minimize if x.abs() <= half => (y - half).abs(),
-        FrameButton::Shade if x.abs() <= half && shaded => (y + half)
+        FrameButton::Shade if x.abs() <= half && toggles.shaded => (y + half)
             .abs()
             .min(segment((x, y), (-arm.0, arm.1), point))
             .min(segment((x, y), arm, point)),
         FrameButton::Shade if x.abs() <= half => (y + half).abs(),
-        FrameButton::Sticky if x.abs() <= half && y.abs() <= half => (x.hypot(y - ring) - round)
-            .abs()
-            .min(segment((x, y), (0.0, ring + round), (0.0, half))),
+        FrameButton::Sticky if x.abs() <= half && y.abs() <= half => {
+            let edge = x.hypot(y - ring) - round;
+            let head = if toggles.stuck {
+                edge.max(0.0)
+            } else {
+                edge.abs()
+            };
+            head.min(segment((x, y), (0.0, ring + round), (0.0, half)))
+        }
         _ => f32::INFINITY,
     };
     for row in place.y..place.y + place.h {
@@ -401,6 +464,8 @@ mod tests {
             buttons: perspicax_policy::Buttons::default(),
             shades: true,
             shaded: false,
+            sticky: false,
+            maximized: false,
         };
         let (pixels, (width, height)) = titles.pixels(&key("Terminal — foot"));
         assert_eq!((width, height), (400, 48), "drawn at twice the size");
@@ -466,6 +531,8 @@ mod tests {
             buttons: perspicax_policy::Buttons::default(),
             shades: true,
             shaded: false,
+            sticky: false,
+            maximized: false,
         };
         let (pixels, (width, height)) = titles.pixels(&key);
         let inked = |column: i32| {
@@ -493,6 +560,8 @@ mod tests {
             buttons: perspicax_policy::Buttons::default(),
             shades: true,
             shaded: false,
+            sticky: false,
+            maximized: false,
         };
         let (pixels, (width, height)) = titles.pixels(&key);
         let tabs = tab_rects(
@@ -532,6 +601,8 @@ mod tests {
             buttons: perspicax_policy::Buttons::default(),
             shades: true,
             shaded,
+            sticky: false,
+            maximized: false,
         };
         let (unrolled, (width, _)) = titles.pixels(&key(false));
         let (rolled, _) = titles.pixels(&key(true));
@@ -623,6 +694,8 @@ mod tests {
             buttons,
             shades: true,
             shaded: false,
+            sticky: false,
+            maximized: false,
         }
     }
 
@@ -671,6 +744,91 @@ mod tests {
         assert_eq!(found(perspicax_policy::Buttons::default()), None);
         let (plain, _) = titles.pixels(&bar(perspicax_policy::Buttons::default()));
         assert!(!inked(&plain, width), "and nothing there on classic's bar");
+    }
+
+    /// What of a bar `width` pixels wide is outside `place`, byte by byte.
+    fn outside(pixels: &[u8], width: i32, place: Rect) -> Vec<u8> {
+        pixels
+            .chunks(4)
+            .enumerate()
+            .filter(|(n, _)| {
+                let n = i32::try_from(*n).unwrap();
+                let (column, row) = (n % width, n / width);
+                column < place.x
+                    || column >= place.x + place.w
+                    || row < place.y
+                    || row >= place.y + place.h
+            })
+            .flat_map(|(_, pixel)| pixel.to_vec())
+            .collect()
+    }
+
+    /// How much ink there is in `place`.
+    fn ink_in(pixels: &[u8], width: i32, place: Rect) -> u32 {
+        (place.y..place.y + place.h)
+            .flat_map(|row| (place.x..place.x + place.w).map(move |column| (row, column)))
+            .map(|(row, column)| u32::from(pixels[((row * width + column) * 4 + 3) as usize]))
+            .sum()
+    }
+
+    fn place_of(buttons: perspicax_policy::Buttons, wanted: FrameButton) -> Rect {
+        buttons_in(Rect::new(0, 0, 200, 24), &buttons, true)
+            .into_iter()
+            .find(|(button, _)| *button == wanted)
+            .map(|(_, place)| place)
+            .expect("on the bar")
+    }
+
+    /// On every workspace, the pin's head is filled: more ink, where the
+    /// pin is, and none of the rest of the bar changes. Buttons need no
+    /// fonts, so this runs anywhere.
+    #[test]
+    fn a_stuck_window_fills_its_sticky_button_and_nothing_else_changes() {
+        let mut titles = fontless();
+        let (loose, (width, _)) = titles.pixels(&bar(fluxbox()));
+        let (stuck, _) = titles.pixels(&TitleKey {
+            sticky: true,
+            ..bar(fluxbox())
+        });
+        let place = place_of(fluxbox(), FrameButton::Sticky);
+        assert!(
+            ink_in(&stuck, width, place) > ink_in(&loose, width, place) * 3 / 2,
+            "filled: {} against {}",
+            ink_in(&stuck, width, place),
+            ink_in(&loose, width, place)
+        );
+        assert!(
+            outside(&stuck, width, place) == outside(&loose, width, place),
+            "the rest is as it was"
+        );
+    }
+
+    /// Maximized, the maximize button shows restore, two squares, the one
+    /// behind showing above and to the right of the one in front, and none
+    /// of the rest of the bar changes.
+    #[test]
+    fn a_maximized_window_shows_restore() {
+        let mut titles = fontless();
+        let buttons = perspicax_policy::Buttons::default();
+        let (plain, (width, _)) = titles.pixels(&bar(buttons));
+        let (restore, _) = titles.pixels(&TitleKey {
+            maximized: true,
+            ..bar(buttons)
+        });
+        let place = place_of(buttons, FrameButton::Maximize);
+        assert!(restore != plain, "a shape of its own");
+        assert!(
+            outside(&restore, width, place) == outside(&plain, width, place),
+            "the rest is as it was"
+        );
+        // Just right of the middle is the right-hand edge of restore's
+        // square in front, which maximize's one square, wider, has none of.
+        let inked = |pixels: &[u8]| {
+            let (row, column) = (place.y + place.h / 2, place.x + place.w / 2 + 1);
+            pixels[((row * width + column) * 4 + 3) as usize] > 0
+        };
+        assert!(inked(&restore), "the front square's edge");
+        assert!(!inked(&plain), "inside maximize's square");
     }
 
     #[test]

@@ -314,6 +314,13 @@ impl Compositor {
         self.workspace_changed();
     }
 
+    /// Whether `window` is on every workspace, which its sticky button
+    /// shows: made so, or never given one of its own.
+    #[cfg(feature = "seat")]
+    pub(crate) fn is_sticky(&self, window: &Framed) -> bool {
+        id_of(window).is_none_or(|id| !matches!(self.workspaces.home(id), Some(Home::On(_))))
+    }
+
     /// Show the workspace a window is on, on its monitor, if it is not
     /// showing already.
     pub(crate) fn go_to_workspace_of(&mut self, window: &Framed) {

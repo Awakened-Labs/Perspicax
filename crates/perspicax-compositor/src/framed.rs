@@ -95,6 +95,10 @@ pub(crate) struct TitleKey {
     pub(crate) shades: bool,
     /// Whether the window is rolled up, which its shade button shows.
     pub(crate) shaded: bool,
+    /// Whether it is on every workspace, which its sticky button shows.
+    pub(crate) sticky: bool,
+    /// Whether it is maximized, which its maximize button shows as restore.
+    pub(crate) maximized: bool,
 }
 
 /// The whole scale a title is rasterised at for an output at `scale`.

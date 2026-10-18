@@ -938,14 +938,20 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     // written for them and they are told they may draw again, below. After
     // the frames are dressed, whose insets reach into each window's bounds.
     state.settle_outputs();
-    // Every titlebar's labels, while the compositor can still be asked: a
-    // window's tabs name its whole group.
-    let labels: Vec<_> = state
+    // Every titlebar's labels and toggles, while the compositor can still be
+    // asked: a window's tabs name its whole group.
+    let bars: Vec<_> = state
         .space
         .elements()
         .map(|window| {
             let (labels, front) = state.tab_labels(window);
-            (window.clone(), labels, front)
+            let bar = titles::Bar {
+                labels,
+                front,
+                sticky: state.is_sticky(window),
+                maximized: Compositor::is_maximized(window),
+            };
+            (window.clone(), bar)
         })
         .collect();
     let now = state.started_at().elapsed();
@@ -1003,12 +1009,11 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     // Titles before the windows are drawn: writing one needs the fonts,
     // which drawing a window has no way to reach.
     let whole = crate::framed::whole_scale(head.output.current_scale().fractional_scale());
-    for (window, labels, front) in labels {
+    for (window, bar) in bars {
         if space.outputs_for_element(&window).contains(&head.output) {
             titles.prepare(
                 &window,
-                labels,
-                front,
+                bar,
                 whole,
                 &settings.theme.font.family,
                 settings.decorations.buttons,
