@@ -205,6 +205,10 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
                 };
             }
             session.logo_tap.press(logo, mods(modifiers));
+            // What is typed goes where the windows are, so they are drawn
+            // there: a switch being drawn ends. One this key makes is drawn
+            // after, from where this one ended.
+            session.settle_transitions();
             // While locked, only the escape hatches and the layout keys: a
             // binding that opened a terminal over the lock screen would be an
             // unlock, while a password is typed in a layout too.
@@ -307,6 +311,8 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
         if let Running::Seat(session) = &mut state.backend {
             session.dwell.cancel();
             session.logo_tap.interrupt();
+            // A click lands on what is there, so that is what is drawn.
+            session.settle_transitions();
         }
         let hit = state.pointed(at);
         // A panel or launcher that takes the keyboard on a click gets it,

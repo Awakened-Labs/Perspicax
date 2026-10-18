@@ -16,12 +16,40 @@
 //! A parked window keeps where it was in its [`super::Placement`], and that
 //! is also how its monitor is known while it is off screen: per output, a
 //! window's workspace is a cell of the grid of the monitor it sits on.
+//!
+//! The rule changes what is on screen at once. A seat then draws the change
+//! over a moment, as the person's `[workspaces.transition]` says: each
+//! switch is handed to the backend as the rule finishes, and the workspaces
+//! it draws on the way are the parked windows, where they will be mapped
+//! back ([`Compositor::pictured`]).
 
+#[cfg(feature = "seat")]
+use perspicax_policy::Mode;
 use perspicax_policy::{Cell, Direction, Home};
 use smithay::utils::Rectangle;
+#[cfg(feature = "seat")]
+use smithay::{
+    desktop::space::SpaceElement as _,
+    output::Output,
+    utils::{Logical, Point},
+};
 
+#[cfg(feature = "seat")]
+use super::covers_panels;
 use super::{extent_size, id_of, placement};
 use crate::{framed::Framed, state::Compositor};
+
+/// The windows a workspace that is not on screen shows on a monitor, front
+/// to back, each where its surface's origin is drawn in the monitor's own
+/// logical coordinates, as [`super::Stack`] has the ones on screen.
+#[cfg(feature = "seat")]
+#[derive(Default)]
+pub(crate) struct Pictured {
+    /// A fullscreen window that was in use when it was left, still over the
+    /// panels.
+    pub(crate) raised: Vec<(Framed, Point<i32, Logical>)>,
+    pub(crate) windows: Vec<(Framed, Point<i32, Logical>)>,
+}
 
 impl Compositor {
     /// A window the person will manage has appeared: it joins the workspace
@@ -117,6 +145,89 @@ impl Compositor {
             }
             self.focus_top_window();
         }
+        self.draw_switches();
+    }
+
+    /// Hand the switches just made to the backend, to draw over a moment.
+    /// Taken every time, drawn or not, so none is drawn long after it was
+    /// made. Behind the lock only the lock is drawn: a window brought forward
+    /// there switches with nothing to see.
+    fn draw_switches(&mut self) {
+        let switches = self.workspaces.take_switches();
+        if switches.is_empty() || self.lock.is_some() {
+            return;
+        }
+        let grid = self.workspaces.shape().grid;
+        let now = u64::try_from(self.started_at().elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.backend.begin_transitions(switches, grid, now);
+    }
+
+    /// What workspace `cell` shows on `output` while it is off screen and a
+    /// transition draws it: its parked windows, not minimized, the front tab
+    /// of a group, each where it will be mapped back (onto the nearest
+    /// monitor, if its own is gone). Per output, only the ones whose monitor
+    /// this is: another monitor's cell of the same number is another
+    /// workspace.
+    #[cfg(feature = "seat")]
+    pub(crate) fn pictured(&self, output: &Output, cell: Cell) -> Pictured {
+        let mut pictured = Pictured::default();
+        let Some(area) = self.space.output_geometry(output) else {
+            return pictured;
+        };
+        let per_output = self.workspaces.shape().mode == Mode::PerOutput;
+        for window in self.parked.iter().rev() {
+            let Some(id) = id_of(window) else {
+                continue;
+            };
+            let parked = placement(window, |placement| placement.parked);
+            let (Some(Home::On(home)), Some(parked)) = (self.workspaces.home(id), parked) else {
+                continue;
+            };
+            if home != cell || Self::is_minimized(window) || !self.tabs.is_front(id) {
+                continue;
+            }
+            // Where smithay would draw it, mapped there: its origin is the
+            // client geometry's offset back from the window's location.
+            let origin = self.unpark(window, parked) - window.geometry().loc;
+            let mut bbox = window.bbox();
+            bbox.loc += origin;
+            if !bbox.overlaps(area)
+                || (per_output && self.monitor_of(window).as_deref() != Some(&output.name()))
+            {
+                continue;
+            }
+            let piece = (window.clone(), origin - area.loc);
+            if covers_panels(window) {
+                pictured.raised.push(piece);
+            } else {
+                pictured.windows.push(piece);
+            }
+        }
+        pictured
+    }
+
+    /// Whether `window`, on screen, stays where it is while a transition on
+    /// `output` moves the rest: one on every workspace, or that was never
+    /// given one; the one in the person's hand, or carried by key; and, per
+    /// output, one on another monitor, whose workspace is not changing.
+    #[cfg(feature = "seat")]
+    pub(crate) fn stays_put(
+        &self,
+        window: &Framed,
+        output: &Output,
+        carrying: Option<perspicax_node::SurfaceId>,
+    ) -> bool {
+        let Some(id) = id_of(window) else {
+            return true;
+        };
+        if !matches!(self.workspaces.home(id), Some(Home::On(_)))
+            || carrying == Some(id)
+            || self.dragging.as_ref() == Some(window)
+        {
+            return true;
+        }
+        self.workspaces.shape().mode == Mode::PerOutput
+            && self.monitor_of(window).as_deref() != Some(&output.name())
     }
 
     /// Switch the workspace showing on `monitor` (every monitor, when

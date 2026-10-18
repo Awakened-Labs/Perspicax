@@ -294,6 +294,8 @@ pub(crate) fn reload(state: &mut Compositor) {
         put_rules_in_force(state);
     }
     if workspaces != state.workspaces.shape() {
+        // The cells a transition is drawing may be gone, or others now.
+        state.backend.settle_transitions();
         state.workspaces.reshape(workspaces);
         state.show_what_belongs();
         state.backend.redraw();

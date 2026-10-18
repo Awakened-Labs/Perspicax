@@ -179,6 +179,8 @@ impl SessionLockHandler for Compositor {
         }
         tracing::info!("session locked");
         self.lock = Some(Locked::by(lock));
+        // A switch being drawn is not finished behind the lock, nor after it.
+        self.backend.settle_transitions();
         self.let_go();
         self.clear_focus();
         self.cursor = CursorImageStatus::default_named();
