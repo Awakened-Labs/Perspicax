@@ -6,8 +6,10 @@
 //! bound by pressing it: the compositor reports it from where bindings are
 //! matched, over `perspicax-settings-v1`, which `[protocols] settings`
 //! offers to this program by name. So it must be run as
-//! `perspicax-settings`. Nothing is written that the installed perspicax,
-//! asked with `perspicax config check`, would refuse.
+//! `perspicax-settings`. The monitors it lists are the session's, read over
+//! `wlr-output-management`, which `[protocols] output-management` offers it
+//! by name too. Nothing is written that the installed perspicax, asked with
+//! `perspicax config check`, would refuse.
 //!
 //! No agent may drive it: the file it writes is what holds an agent back.
 //! perspicax refuses to hand it to one, whatever was granted.
@@ -17,6 +19,8 @@ mod fields;
 mod fonts;
 mod keys;
 mod layouts;
+mod monitors;
+mod outputs;
 #[cfg(test)]
 mod tests;
 mod window;
@@ -100,7 +104,12 @@ fn main() -> ExitCode {
             let woken = ctx.clone();
             let capture = capture::Wayland::connect(move || woken.request_repaint())
                 .map(|channel| Box::new(channel) as Box<dyn capture::Channel>);
-            Ok(Box::new(App::new(document, judge, capture, registry)))
+            let woken = ctx.clone();
+            let monitors = monitors::Wayland::connect(move || woken.request_repaint())
+                .map(|list| Box::new(list) as Box<dyn monitors::Monitors>);
+            Ok(Box::new(App::new(
+                document, judge, capture, registry, monitors,
+            )))
         }),
     );
     match ran {

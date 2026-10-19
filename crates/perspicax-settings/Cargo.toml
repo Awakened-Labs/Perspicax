@@ -52,6 +52,9 @@ fontdb = { version = "0.23", default-features = false, features = [
 # The capture channel, on a connection of its own beside winit's.
 perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", features = ["client"], optional = true }
 wayland-client = { workspace = true, optional = true }
+# The monitors the Outputs page lists, read as a display tool reads them, on
+# a connection of their own. Nothing is ever asked of it.
+wayland-protocols-wlr = { workspace = true, features = ["client"], optional = true }
 
 [features]
 # The app's window, off by default. winit's Wayland support puts every
@@ -65,6 +68,7 @@ gui = [
     "dep:fontdb",
     "dep:perspicax-protocols",
     "dep:wayland-client",
+    "dep:wayland-protocols-wlr",
 ]
 
 [[bin]]

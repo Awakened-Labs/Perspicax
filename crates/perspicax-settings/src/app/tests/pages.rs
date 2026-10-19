@@ -67,6 +67,8 @@ fn every_page_is_one_click_away() {
         open(&mut harness, section.title);
         harness.get_by_label(section.about);
     }
+    open(&mut harness, "Outputs");
+    harness.get_by_label_contains("Nothing is written until Apply");
     open(&mut harness, "Keys");
     harness.get_by_label("Add a binding…");
     assert_eq!(read(&path), "");

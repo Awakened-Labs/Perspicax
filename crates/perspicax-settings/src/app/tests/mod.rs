@@ -1,12 +1,14 @@
 //! The window, driven headless as a screen reader would find it: by what
 //! each widget is called. The compositor's channel is a stand-in that hears
-//! what each test says was pressed, and the judge a closure; the file is a
-//! real one, in a folder of the test's own.
+//! what each test says was pressed, its list of monitors one a test gives,
+//! and the judge a closure; the file is a real one, in a folder of the
+//! test's own.
 //!
 //! No fonts are loaded, so text is drawn as nothing; every widget is still
 //! laid out and found by its words.
 
 mod keys;
+mod outputs;
 mod pages;
 
 use std::{
@@ -22,6 +24,7 @@ use perspicax_settings::{Document, Registry};
 
 use crate::{
     capture::{Channel, Heard, NOT_OFFERED},
+    monitors::{self, Monitor, Monitors, Seen},
     window::{App, Judge},
 };
 
@@ -73,6 +76,16 @@ impl Channel for Compositor {
     }
 }
 
+/// The session's list of monitors, as a test gives it: each thing it says
+/// heard on a frame of its own.
+struct Desk(VecDeque<Seen>);
+
+impl Monitors for Desk {
+    fn seen(&mut self) -> Option<Seen> {
+        self.0.pop_front()
+    }
+}
+
 /// A fresh folder for one test, emptied when it ends.
 struct Scratch(PathBuf);
 
@@ -118,15 +131,46 @@ fn window_with(
     compositor: Option<&Compositor>,
     registry: Option<Registry>,
 ) -> Harness<'static, App> {
+    window_on(
+        path,
+        judge,
+        compositor,
+        registry,
+        Err(monitors::NOT_OFFERED),
+    )
+}
+
+/// The window on the file at `path`, the session listing `monitors`, or
+/// saying why it lists none.
+fn window_seeing(
+    path: &Path,
+    judge: Judge,
+    monitors: Result<Vec<Monitor>, &str>,
+) -> Harness<'static, App> {
+    let said = monitors.map(|monitors| vec![Seen::Monitors(monitors)]);
+    window_on(path, judge, Some(&Compositor::default()), None, said)
+}
+
+fn window_on(
+    path: &Path,
+    judge: Judge,
+    compositor: Option<&Compositor>,
+    registry: Option<Registry>,
+    said: Result<Vec<Seen>, &str>,
+) -> Harness<'static, App> {
     let capture = match compositor {
         Some(compositor) => Ok(Box::new(compositor.clone()) as Box<dyn Channel>),
         None => Err(NOT_OFFERED.to_owned()),
     };
+    let monitors = said
+        .map(|said| Box::new(Desk(said.into())) as Box<dyn Monitors>)
+        .map_err(str::to_owned);
     let app = App::new(
         Document::open(path).expect("the file"),
         judge,
         capture,
         registry,
+        monitors,
     );
     let mut harness = Harness::builder()
         .with_size([900.0, 900.0])

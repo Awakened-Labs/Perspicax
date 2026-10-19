@@ -3079,6 +3079,7 @@ dependencies = [
  "toml",
  "toml_edit",
  "wayland-client",
+ "wayland-protocols-wlr",
 ]
 
 [[package]]
