@@ -224,7 +224,9 @@ pub struct Refused {
     pub message: String,
     /// `occluded`: the surface in front of the node, its shadow included. Try
     /// again once it has moved off the node, or once the person has brought
-    /// the node's window in front of it.
+    /// the node's window in front of it. For `window_focus` and
+    /// `window_type`, none of the window shows, and this is the surface in
+    /// front of it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occluded_by: Option<u64>,
     /// `stale`: how many frames of damage the node owes. Zero is a real value --
@@ -479,8 +481,8 @@ pub struct Window {
     /// What it is: `window`, an application's; `layer`, part of the desk
     /// such as a panel, a wallpaper or a menu; `popup`, a menu, a combo list
     /// or a tooltip an application opened from a window or panel; or
-    /// `lock_cover`, a screen locker's. `window_close` and `tab_forward` are
-    /// for windows only.
+    /// `lock_cover`, a screen locker's. `window_close`, `tab_forward`,
+    /// `window_focus` and `window_type` are for windows only.
     pub kind: &'static str,
     /// For a popup, the window or panel it hangs from, through any menus
     /// between. It is drawn directly above that, and covers what is under it,
@@ -549,7 +551,8 @@ pub struct Window {
     pub opacity: Option<u8>,
     /// Rolled up to its titlebar by the person: only the bar is drawn, along
     /// the top of `bounds`, and it covers only that. Its nodes are refused as
-    /// `rolled_up` until the person unrolls it. Absent when it is not.
+    /// `rolled_up` until the person unrolls it, and so are `window_focus` and
+    /// `window_type` on it. Absent when it is not.
     #[serde(skip_serializing_if = "core::ops::Not::not")]
     pub shaded: bool,
 }

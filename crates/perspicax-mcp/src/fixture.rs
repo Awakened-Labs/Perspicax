@@ -113,6 +113,8 @@ pub(crate) struct Fake {
     facts: HostFacts,
     answer: Result<Receipt, Denied>,
     asked: Mutex<Vec<(String, Verb)>>,
+    /// Each window verb asked for, with its window.
+    windows_asked: Mutex<Vec<(SurfaceId, WindowVerb)>>,
     /// Each launch asked for, with its folder.
     launched: Mutex<Vec<(Vec<String>, Option<PathBuf>)>>,
 }
@@ -125,6 +127,7 @@ impl Fake {
             facts: facts(),
             answer,
             asked: Mutex::new(Vec::new()),
+            windows_asked: Mutex::new(Vec::new()),
             launched: Mutex::new(Vec::new()),
         }
     }
@@ -137,6 +140,14 @@ impl Fake {
     /// What this desktop has been asked to do, in order.
     pub(crate) fn asked(&self) -> Vec<(String, Verb)> {
         self.asked.lock().expect("no test poisons this").clone()
+    }
+
+    /// What this desktop has been asked to do to whole windows, in order.
+    pub(crate) fn windows_asked(&self) -> Vec<(SurfaceId, WindowVerb)> {
+        self.windows_asked
+            .lock()
+            .expect("no test poisons this")
+            .clone()
     }
 
     /// Something changes: a node nobody has seen before arrives, and is one
@@ -223,6 +234,10 @@ impl Desktop for Fake {
     /// as if the window had done what it was asked: closed, come forward, or
     /// taken the keyboard and drawn nothing.
     fn act_window(&self, surface: SurfaceId, verb: WindowVerb) -> Result<WindowReceipt, Denied> {
+        self.windows_asked
+            .lock()
+            .expect("no test poisons this")
+            .push((surface, verb.clone()));
         let origin = perspicax_index::check_window(&self.facts, surface, &verb)?
             .origin
             .clone();

@@ -1,7 +1,8 @@
 //! The agent interface -- an MCP server over stdio, or on a Unix socket.
 //!
-//! Nine tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
-//! `tab_forward`, `deltas`, `screenshot` and `launch`. Everything above them
+//! Eleven tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
+//! `tab_forward`, `window_focus`, `window_type`, `deltas`, `screenshot` and
+//! `launch`. Everything above them
 //! is `rmcp` and everything below them is [`Desktop`], a trait with six
 //! methods that this crate never implements.
 //!
@@ -12,7 +13,7 @@
 //! restraint `perspicax-index` observes and it is load-bearing for the same
 //! reason: the agent interface is portable, so a port of this project to a
 //! GNOME extension or a KWin plugin re-implements [`Desktop`] and gets these
-//! nine tools unchanged. A crate that cannot see a compositor cannot come to
+//! eleven tools unchanged. A crate that cannot see a compositor cannot come to
 //! depend on one.
 //!
 //! The consequence is that the act path is **injected, not imported**.
@@ -116,7 +117,8 @@ pub trait Desktop: Send + Sync + 'static {
     /// the compositor could not carry it out.
     fn act(&self, selector: &Selector, verb: &Verb) -> Result<Receipt, Denied>;
 
-    /// Close a window or bring a tab forward, and report what became of it.
+    /// Close a window, bring a tab forward, or focus or type into a window,
+    /// and report what became of it.
     ///
     /// Blocks, like [`Desktop::act`], for long enough to see the answer.
     ///
@@ -215,7 +217,7 @@ pub enum ServeError {
     Stopped(String),
 }
 
-/// Serve the nine tools over stdio until the client goes away.
+/// Serve the eleven tools over stdio until the client goes away.
 ///
 /// # A conversation begins with `initialize`
 ///
