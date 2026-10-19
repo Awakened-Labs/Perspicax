@@ -31,8 +31,8 @@
 //! imposes is not a ceiling anything can reach.
 
 use perspicax_index::{
-    Consent, DamageWitness, Delta, Drawn, HostFacts, Index, Receipt, Refusal, Shot, SurfaceFacts,
-    SurfaceKind, WindowReceipt, WindowWitness,
+    Consent, Delta, Drawn, HostFacts, Index, Receipt, Refusal, Shot, SurfaceFacts, SurfaceKind,
+    WindowReceipt, WindowWitness,
 };
 use perspicax_node::{
     NodeId, ObservedNode, Orientation, Origin, Rect, SurfaceId, Toggled, X11Basis,
@@ -706,11 +706,7 @@ impl From<&Receipt> for Acted {
             focus_after: receipt.focus_after.map(|surface: SurfaceId| surface.0),
             focus_landed: receipt.focus_landed(),
             damage: Damage {
-                witness: match receipt.damage {
-                    DamageWitness::Quiet => "quiet",
-                    DamageWitness::Elsewhere { .. } => "elsewhere",
-                    DamageWitness::OnTarget { .. } => "on_target",
-                },
+                witness: receipt.damage.name(),
                 frames: receipt.damage.frames(),
                 window_ms: u64::try_from(receipt.damage_window.as_millis()).unwrap_or(u64::MAX),
             },
@@ -718,7 +714,7 @@ impl From<&Receipt> for Acted {
     }
 }
 
-/// What became of a window an agent closed or brought forward.
+/// What became of a window an agent acted on.
 ///
 /// No `success`, for the reason [`Acted`] has none: `witness` is what was
 /// seen once the window had been given `window_ms` to react.
@@ -729,7 +725,7 @@ pub struct WindowActed {
     /// Who owns it, from its connection credentials.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rendered_by: Option<Provenance>,
-    /// `close` or `forward`.
+    /// `close`, `forward`, `focus` or `type`.
     pub verb: &'static str,
     /// The round trip to the compositor's thread and back.
     pub dispatch_ms: f64,
@@ -739,8 +735,17 @@ pub struct WindowActed {
     /// And after.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focus_after: Option<u64>,
-    /// `gone`, `still_open`, `in_front` or `still_behind`.
+    /// Whether focus is on the window acted on, afterwards. Not "did it
+    /// work", as in [`Acted`].
+    pub focus_landed: bool,
+    /// `gone`, `still_open`, `in_front` or `still_behind`; and, for `focus`
+    /// and `type`, what the window drew while watched, anywhere in it:
+    /// `quiet`, `elsewhere` or `on_target`, as [`Damage`] has it.
     pub witness: &'static str,
+    /// `quiet`, `elsewhere` or `on_target`: how many frames of damage
+    /// arrived while watching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frames: Option<u64>,
     /// `still_open`: windows of the same process that appeared meanwhile --
     /// a dialog asking about unsaved work, typically. Observe it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -754,15 +759,19 @@ pub struct WindowActed {
 
 impl From<&WindowReceipt> for WindowActed {
     fn from(receipt: &WindowReceipt) -> Self {
-        let (witness, appeared, shown_tab) = match &receipt.witness {
-            WindowWitness::Gone => ("gone", Vec::new(), None),
+        let (witness, appeared, shown_tab, frames) = match &receipt.witness {
+            WindowWitness::Gone => ("gone", Vec::new(), None, None),
             WindowWitness::StillOpen { appeared } => (
                 "still_open",
                 appeared.iter().map(|surface| surface.0).collect(),
                 None,
+                None,
             ),
-            WindowWitness::InFront => ("in_front", Vec::new(), None),
-            WindowWitness::StillBehind { shown } => ("still_behind", Vec::new(), Some(shown.0)),
+            WindowWitness::InFront => ("in_front", Vec::new(), None, None),
+            WindowWitness::StillBehind { shown } => {
+                ("still_behind", Vec::new(), Some(shown.0), None)
+            }
+            WindowWitness::Drew(damage) => (damage.name(), Vec::new(), None, Some(damage.frames())),
         };
         Self {
             surface: receipt.surface.0,
@@ -771,7 +780,9 @@ impl From<&WindowReceipt> for WindowActed {
             dispatch_ms: receipt.dispatch.as_secs_f64() * 1000.0,
             focus_before: receipt.focus_before.map(|surface| surface.0),
             focus_after: receipt.focus_after.map(|surface| surface.0),
+            focus_landed: receipt.focus_landed(),
             witness,
+            frames,
             appeared,
             shown_tab,
             window_ms: u64::try_from(receipt.window.as_millis()).unwrap_or(u64::MAX),
@@ -1305,6 +1316,43 @@ mod tests {
         // And focus_before is absent rather than null: nothing held focus, and
         // a `null` would invite a reader to treat it as a surface id of none.
         assert!(json.get("focus_before").is_none());
+    }
+
+    /// A window typed into is witnessed by what it drew, in the words a
+    /// node's receipt has for it, flat beside the rest of a window's
+    /// receipt; a close has no frames to report.
+    #[test]
+    fn a_window_typed_into_reports_what_it_drew_and_a_closed_one_does_not() {
+        use perspicax_index::{DamageWitness, WindowVerb};
+        use std::time::Duration;
+
+        let typed = WindowReceipt {
+            surface: WINDOW,
+            origin: crate::fixture::origin(),
+            verb: WindowVerb::Type("ls\n".to_owned()),
+            dispatch: Duration::from_micros(420),
+            focus_before: Some(WINDOW),
+            focus_after: Some(WINDOW),
+            witness: WindowWitness::Drew(DamageWitness::OnTarget { frames: 4 }),
+            window: Duration::from_millis(200),
+        };
+        let json = serde_json::to_value(WindowActed::from(&typed)).unwrap();
+        assert_eq!(json["verb"], "type");
+        assert_eq!(json["witness"], "on_target");
+        assert_eq!(json["frames"], 4);
+        assert_eq!(json["focus_landed"], true);
+        assert!(json.get("success").is_none());
+
+        let closed = WindowReceipt {
+            verb: WindowVerb::Close,
+            focus_after: None,
+            witness: WindowWitness::Gone,
+            ..typed
+        };
+        let json = serde_json::to_value(WindowActed::from(&closed)).unwrap();
+        assert_eq!(json["witness"], "gone");
+        assert!(json.get("frames").is_none());
+        assert_eq!(json["focus_landed"], false);
     }
 
     #[test]

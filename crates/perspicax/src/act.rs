@@ -189,19 +189,18 @@ fn witness(marked: &HostFacts, after: &HostFacts, surface: SurfaceId, rect: Rect
     })
 }
 
-/// Act on a whole window -- close it, or bring a tab forward -- and report
-/// what became of it.
+/// Act on a whole window -- close it, bring a tab forward, focus it or type
+/// into it -- and report what became of it.
 ///
 /// The same order as [`act`], with a window in place of a node: the gate
 /// (`check_window`, in `perspicax-index`), the dispatch, the wait, and then
-/// what the facts say happened. No damage is watched, because what a window
-/// verb does is not a change of pixels inside it: a closed window is gone,
-/// or a dialog asking about unsaved work has appeared beside it.
+/// what the facts say happened -- see [`seen`].
 ///
 /// # Errors
 ///
-/// [`Failure::Refused`] when the gate says no, [`Failure::Dispatch`] when the
-/// compositor did not carry it out.
+/// [`Failure::Refused`] when the gate says no, or when typing finds the
+/// keyboard in another window; [`Failure::Dispatch`] when the compositor did
+/// not carry it out.
 pub fn act_window(
     host: &Host,
     facts: &Facts,
@@ -209,9 +208,10 @@ pub fn act_window(
     verb: WindowVerb,
     window: Duration,
 ) -> Result<WindowReceipt, Failure> {
+    // Marked before the act, never after, as `act`'s is: these facts are
+    // also what a focus or a typing is witnessed from.
     let before = facts.read();
-    let origin = check_window(&before, surface, verb)?.origin.clone();
-    let known: Vec<SurfaceId> = before.surfaces().iter().map(|facts| facts.id).collect();
+    let origin = check_window(&before, surface, &verb)?.origin.clone();
 
     let started = Instant::now();
     let dispatched = host.act(surface, &verb.action())?;
@@ -219,26 +219,7 @@ pub fn act_window(
 
     thread::sleep(window);
 
-    let after = facts.read();
-    let witness = match after.surface(surface) {
-        None => WindowWitness::Gone,
-        Some(_) if verb == WindowVerb::Close => WindowWitness::StillOpen {
-            appeared: after
-                .surfaces()
-                .iter()
-                .filter(|facts| {
-                    !known.contains(&facts.id)
-                        && facts.origin == origin
-                        && facts.hangs_from().is_none()
-                })
-                .map(|facts| facts.id)
-                .collect(),
-        },
-        Some(facts) => match facts.behind_tab {
-            None => WindowWitness::InFront,
-            Some(shown) => WindowWitness::StillBehind { shown },
-        },
-    };
+    let witness = seen(&verb, &before, &facts.read(), surface);
 
     Ok(WindowReceipt {
         surface,
@@ -252,12 +233,54 @@ pub fn act_window(
     })
 }
 
+/// What became of a window acted on, from the facts read before the act and
+/// those read once it had been given time.
+///
+/// A window gone is gone whatever was asked of it: typing `exit` into a
+/// terminal closes it. What a close or a tab brought forward does is not a
+/// change of pixels inside the window -- a closed window is gone, or a dialog
+/// asking about unsaved work has appeared beside it -- so for those no damage
+/// is watched. What focus and typing do is, and for them it is watched over
+/// the whole window, since keys aim at no part of it.
+fn seen(
+    verb: &WindowVerb,
+    before: &HostFacts,
+    after: &HostFacts,
+    surface: SurfaceId,
+) -> WindowWitness {
+    let Some(now) = after.surface(surface) else {
+        return WindowWitness::Gone;
+    };
+    match verb {
+        WindowVerb::Close => WindowWitness::StillOpen {
+            appeared: after
+                .surfaces()
+                .iter()
+                .filter(|facts| {
+                    before.surface(facts.id).is_none()
+                        && facts.origin == now.origin
+                        && facts.hangs_from().is_none()
+                })
+                .map(|facts| facts.id)
+                .collect(),
+        },
+        WindowVerb::Forward => match now.behind_tab {
+            None => WindowWitness::InFront,
+            Some(shown) => WindowWitness::StillBehind { shown },
+        },
+        WindowVerb::Focus | WindowVerb::Type(_) => {
+            let whole = Rect::new(0.0, 0.0, now.geometry.width(), now.geometry.height());
+            WindowWitness::Drew(witness(before, after, surface, whole))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use perspicax_compositor::Requests;
-    use perspicax_index::{PointerButton, Selector};
-    use perspicax_node::{Node, NodeId, ObservedNode, Rect, Role};
+    use perspicax_index::{Consent, PointerButton, Selector};
+    use perspicax_node::{Node, NodeId, ObservedNode, Origin, ProcessOrigin, Rect, Role};
 
     /// An index holding one unjoined node, which is what M1 produced for
     /// everything and what the gate exists to refuse.
@@ -415,6 +438,109 @@ mod tests {
             ),
             Err(Failure::Refused(Refusal::NotFound))
         );
+    }
+
+    /// A window a process drew, away from the origin so that window space
+    /// and global space differ: 400x300 at (100, 100).
+    fn drawn() -> SurfaceFacts {
+        SurfaceFacts::new(SurfaceId(1), Rect::new(100.0, 100.0, 500.0, 400.0)).owned_by(
+            Origin::Process(Box::new(ProcessOrigin {
+                pid: 10,
+                exe: None,
+                cgroup: None,
+                sandbox: None,
+            })),
+        )
+    }
+
+    fn on_desk(surfaces: impl IntoIterator<Item = SurfaceFacts>) -> Facts {
+        Facts::of(HostFacts::bottom_to_top(surfaces, 1).with_consent(Consent::Everyone))
+    }
+
+    /// Out of sight, a window is refused by the gate, and the host -- with
+    /// no compositor behind it -- is never asked, or this would be
+    /// `Dispatch(Unreachable)`. In sight, it is asked: the gate let it by.
+    #[test]
+    fn a_window_out_of_sight_is_refused_before_focus_or_typing_is_dispatched() {
+        let over = SurfaceFacts::new(SurfaceId(2), Rect::new(0.0, 0.0, 600.0, 500.0));
+        let refused = [
+            (on_desk([drawn().rolled_up()]), Refusal::RolledUp),
+            (on_desk([drawn().unmapped()]), Refusal::Unmapped),
+            (
+                on_desk([drawn(), over]),
+                Refusal::Occluded { by: SurfaceId(2) },
+            ),
+        ];
+        for verb in [WindowVerb::Focus, WindowVerb::Type("ls\n".to_owned())] {
+            for (facts, refusal) in &refused {
+                assert_eq!(
+                    act_window(&host(), facts, SurfaceId(1), verb.clone(), Duration::ZERO),
+                    Err(Failure::Refused(refusal.clone()))
+                );
+            }
+            assert_eq!(
+                act_window(
+                    &host(),
+                    &on_desk([drawn()]),
+                    SurfaceId(1),
+                    verb,
+                    Duration::ZERO
+                ),
+                Err(Failure::Dispatch(ActError::Unreachable))
+            );
+        }
+    }
+
+    /// Focus and typing are witnessed by what the window drew, anywhere in
+    /// it, in its own space: damage inside it is on target, damage only
+    /// outside it -- its client's shadow, say -- elsewhere, and none quiet.
+    #[test]
+    fn focus_and_typing_are_witnessed_by_what_the_window_drew() {
+        let before = HostFacts::bottom_to_top(
+            [drawn().damaging([(1, Rect::new(0.0, 0.0, 10.0, 10.0))])],
+            1,
+        );
+        let drew = |history: &[(u64, Rect)]| {
+            seen(
+                &WindowVerb::Type("ls".to_owned()),
+                &before,
+                &HostFacts::bottom_to_top([drawn().damaging(history.iter().copied())], 2),
+                SurfaceId(1),
+            )
+        };
+        let first = (1, Rect::new(0.0, 0.0, 10.0, 10.0));
+        for corner in [
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            Rect::new(390.0, 290.0, 400.0, 300.0),
+        ] {
+            assert_eq!(
+                drew(&[first, (2, corner)]),
+                WindowWitness::Drew(DamageWitness::OnTarget { frames: 1 })
+            );
+        }
+        assert_eq!(
+            drew(&[first, (2, Rect::new(-20.0, -20.0, -10.0, -10.0))]),
+            WindowWitness::Drew(DamageWitness::Elsewhere { frames: 1 })
+        );
+        assert_eq!(drew(&[first]), WindowWitness::Drew(DamageWitness::Quiet));
+    }
+
+    /// Typing `exit` into a terminal closes it: gone is gone, whatever was
+    /// asked of it.
+    #[test]
+    fn a_window_gone_after_typing_is_witnessed_gone() {
+        let before = HostFacts::bottom_to_top([drawn()], 1);
+        let after = HostFacts::bottom_to_top([], 2);
+        for verb in [
+            WindowVerb::Type("exit\n".to_owned()),
+            WindowVerb::Focus,
+            WindowVerb::Close,
+        ] {
+            assert_eq!(
+                seen(&verb, &before, &after, SurfaceId(1)),
+                WindowWitness::Gone
+            );
+        }
     }
 
     #[test]

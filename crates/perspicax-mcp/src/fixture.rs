@@ -16,8 +16,8 @@ use std::{
 };
 
 use perspicax_index::{
-    Consent, Delta, Drawn, HostFacts, Index, Layer, Receipt, Selector, Shot, ShotTarget,
-    SurfaceFacts, Verb, WindowReceipt, WindowVerb, WindowWitness,
+    Consent, DamageWitness, Delta, Drawn, HostFacts, Index, Layer, Receipt, Selector, Shot,
+    ShotTarget, SurfaceFacts, Verb, WindowReceipt, WindowVerb, WindowWitness,
 };
 use perspicax_node::{Node, NodeId, ObservedNode, Origin, ProcessOrigin, Rect, Role, SurfaceId};
 
@@ -220,22 +220,27 @@ impl Desktop for Fake {
     }
 
     /// Through the real gate, against the fixture's facts, then a receipt
-    /// as if the window had done what it was asked.
+    /// as if the window had done what it was asked: closed, come forward, or
+    /// taken the keyboard and drawn nothing.
     fn act_window(&self, surface: SurfaceId, verb: WindowVerb) -> Result<WindowReceipt, Denied> {
-        let origin = perspicax_index::check_window(&self.facts, surface, verb)?
+        let origin = perspicax_index::check_window(&self.facts, surface, &verb)?
             .origin
             .clone();
+        let (focus_after, witness) = match verb {
+            WindowVerb::Close => (None, WindowWitness::Gone),
+            WindowVerb::Forward => (None, WindowWitness::InFront),
+            WindowVerb::Focus | WindowVerb::Type(_) => {
+                (Some(surface), WindowWitness::Drew(DamageWitness::Quiet))
+            }
+        };
         Ok(WindowReceipt {
             surface,
             origin,
             verb,
             dispatch: std::time::Duration::from_millis(1),
             focus_before: Some(surface),
-            focus_after: None,
-            witness: match verb {
-                WindowVerb::Close => WindowWitness::Gone,
-                WindowVerb::Forward => WindowWitness::InFront,
-            },
+            focus_after,
+            witness,
             window: std::time::Duration::from_millis(200),
         })
     }

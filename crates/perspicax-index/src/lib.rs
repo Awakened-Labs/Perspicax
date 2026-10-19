@@ -66,12 +66,17 @@ pub enum Refusal {
     /// The node is real but covered, and `by` is in front of it. It clears
     /// when `by` moves off it, or when the node's own window is brought in
     /// front, which a person can do and an agent cannot yet (issue #147).
+    ///
+    /// Of a window focused or typed into by surface: none of it can be
+    /// seen, and `by` is the window in front, the topmost that covers any
+    /// of it.
     Occluded { by: SurfaceId },
     /// Inside its window but scrolled out of view. Scroll it in and try again.
     Clipped,
     /// Its surface is not mapped -- a hidden window, an unopened menu.
     Unmapped,
     /// Not wholly on any monitor. Move its window onto one and try again.
+    /// Of a window focused or typed into by surface: none of it is on one.
     OffScreen,
     /// On a workspace that is not showing, numbered from 1.
     OtherWorkspace { workspace: u16 },
@@ -136,7 +141,8 @@ pub enum Refusal {
     NotFound,
     /// A window verb named a surface that is not an application's window: a
     /// panel, a wallpaper, a menu, a lock screen. They are part of the desk,
-    /// and nothing closes them or brings them forward but their own program.
+    /// and nothing closes them, brings them forward, focuses them or types
+    /// into them by surface but their own program.
     /// A picture of a menu is refused the same way: it is drawn as part of
     /// its window's, which is the one to ask for.
     NotAWindow,
@@ -380,32 +386,46 @@ pub fn check_readable(facts: &HostFacts, surface: SurfaceId) -> Result<&SurfaceF
 /// here, as every node verb goes through [`check_actable`].
 ///
 /// A window is addressed by surface, so there is no node to judge visible:
-/// what is checked instead is that the window exists, that it is attributed,
-/// and that the agent holds consent for whoever drew it, and that it is a
-/// window at all rather than a panel or a wallpaper. Bringing a tab
-/// forward hides the tab in front, so consent for that one is needed too.
-/// And it is only done where the person can already see the group: a group
-/// on a hidden workspace, minimized, or rolled up to its titlebar is refused
-/// rather than brought into view, because an agent never switches what the
-/// person is looking at.
+/// what is checked first is that the window exists, that it is attributed,
+/// that the agent holds consent for whoever drew it, and that it is a
+/// window at all rather than a panel or a wallpaper. Then what each verb
+/// needs in sight, because an agent never switches what the person is
+/// looking at, and acts only on what they can see:
+///
+/// - A close shows nothing, and needs nothing in sight: a minimized window,
+///   or one rolled up, can be closed.
+/// - Bringing a tab forward hides the tab in front, so consent for that one
+///   is needed too, and it is only done where the person can already see
+///   the group: a group on a hidden workspace, minimized, or rolled up to
+///   its titlebar is refused rather than brought into view.
+/// - Focusing it or typing into it needs it in sight, as a node does, but
+///   only some of it: keys aim at no pixel, so a window partly covered is
+///   in sight, and one with nothing showing is not ([`judge_window`]). On a
+///   hidden workspace, a tab behind, minimized or rolled up, it is refused
+///   for the reason its nodes are, and covered wholly, as occluded by the
+///   window in front.
 ///
 /// # Errors
 ///
 /// The [`Refusal`] saying why not.
-pub fn check_window(
-    facts: &HostFacts,
+pub fn check_window<'facts>(
+    facts: &'facts HostFacts,
     surface: SurfaceId,
-    verb: WindowVerb,
-) -> Result<&SurfaceFacts, Refusal> {
+    verb: &WindowVerb,
+) -> Result<&'facts SurfaceFacts, Refusal> {
     let window = check_readable(facts, surface)?;
     if window.kind != SurfaceKind::Window {
         return Err(Refusal::NotAWindow);
     }
-    if verb == WindowVerb::Forward
-        && let Some(front) = window.behind_tab
-    {
-        let front = check_readable(facts, front)?;
-        in_sight(&front.not_drawn().unwrap_or(Visibility::Visible))?;
+    match verb {
+        WindowVerb::Close => {}
+        WindowVerb::Forward => {
+            if let Some(front) = window.behind_tab {
+                let front = check_readable(facts, front)?;
+                in_sight(&front.not_drawn().unwrap_or(Visibility::Visible))?;
+            }
+        }
+        WindowVerb::Focus | WindowVerb::Type(_) => in_sight(&judge_window(facts, surface))?,
     }
     Ok(window)
 }
@@ -860,14 +880,14 @@ mod tests {
     fn a_window_verb_needs_a_window_an_origin_and_consent() {
         let facts = tabs(front(), Consent::Everyone);
         assert_eq!(
-            check_window(&facts, SurfaceId(9), WindowVerb::Close).unwrap_err(),
+            check_window(&facts, SurfaceId(9), &WindowVerb::Close).unwrap_err(),
             Refusal::NotFound
         );
-        assert!(check_window(&facts, SurfaceId(2), WindowVerb::Close).is_ok());
+        assert!(check_window(&facts, SurfaceId(2), &WindowVerb::Close).is_ok());
 
         let facts = tabs(front(), Consent::Granted(vec![11]));
         assert!(matches!(
-            check_window(&facts, SurfaceId(2), WindowVerb::Close),
+            check_window(&facts, SurfaceId(2), &WindowVerb::Close),
             Err(Refusal::NoCapability { .. })
         ));
 
@@ -880,7 +900,7 @@ mod tests {
         )
         .with_consent(Consent::Everyone);
         assert_eq!(
-            check_window(&unattributed, SurfaceId(1), WindowVerb::Close).unwrap_err(),
+            check_window(&unattributed, SurfaceId(1), &WindowVerb::Close).unwrap_err(),
             Refusal::Unattributed
         );
     }
@@ -907,9 +927,12 @@ mod tests {
         )
         .with_consent(Consent::Everyone);
         for id in 1..=4 {
-            for verb in [WindowVerb::Close, WindowVerb::Forward] {
+            for verb in [WindowVerb::Close, WindowVerb::Forward]
+                .into_iter()
+                .chain(keys())
+            {
                 assert_eq!(
-                    check_window(&facts, SurfaceId(id), verb).unwrap_err(),
+                    check_window(&facts, SurfaceId(id), &verb).unwrap_err(),
                     Refusal::NotAWindow
                 );
             }
@@ -941,25 +964,25 @@ mod tests {
     #[test]
     fn a_tab_comes_forward_only_where_the_person_can_already_see_its_group() {
         let showing = tabs(front(), Consent::Everyone);
-        assert!(check_window(&showing, SurfaceId(1), WindowVerb::Forward).is_ok());
+        assert!(check_window(&showing, SurfaceId(1), &WindowVerb::Forward).is_ok());
         assert!(
-            check_window(&showing, SurfaceId(2), WindowVerb::Forward).is_ok(),
+            check_window(&showing, SurfaceId(2), &WindowVerb::Forward).is_ok(),
             "already in front: nothing to refuse"
         );
 
         let elsewhere = tabs(front().on_workspace(3), Consent::Everyone);
         assert_eq!(
-            check_window(&elsewhere, SurfaceId(1), WindowVerb::Forward).unwrap_err(),
+            check_window(&elsewhere, SurfaceId(1), &WindowVerb::Forward).unwrap_err(),
             Refusal::OtherWorkspace { workspace: 3 }
         );
         assert!(
-            check_window(&elsewhere, SurfaceId(1), WindowVerb::Close).is_ok(),
+            check_window(&elsewhere, SurfaceId(1), &WindowVerb::Close).is_ok(),
             "closing does not show anything"
         );
 
         let minimized = tabs(front().unmapped(), Consent::Everyone);
         assert_eq!(
-            check_window(&minimized, SurfaceId(1), WindowVerb::Forward).unwrap_err(),
+            check_window(&minimized, SurfaceId(1), &WindowVerb::Forward).unwrap_err(),
             Refusal::Unmapped
         );
     }
@@ -970,13 +993,113 @@ mod tests {
     fn a_tab_is_not_brought_forward_into_a_group_rolled_up_to_its_titlebar() {
         let rolled = tabs(front().rolled_up(), Consent::Everyone);
         assert_eq!(
-            check_window(&rolled, SurfaceId(1), WindowVerb::Forward).unwrap_err(),
+            check_window(&rolled, SurfaceId(1), &WindowVerb::Forward).unwrap_err(),
             Refusal::RolledUp
         );
         assert!(
-            check_window(&rolled, SurfaceId(1), WindowVerb::Close).is_ok(),
+            check_window(&rolled, SurfaceId(1), &WindowVerb::Close).is_ok(),
             "closing does not show anything"
         );
+    }
+
+    /// The keyboard's verbs, by surface.
+    fn keys() -> [WindowVerb; 2] {
+        [WindowVerb::Focus, WindowVerb::Type("ls\n".to_owned())]
+    }
+
+    /// One window at the origin, 400x300.
+    fn lone() -> SurfaceFacts {
+        SurfaceFacts::new(SurfaceId(1), Rect::new(0.0, 0.0, 400.0, 300.0))
+    }
+
+    /// `window`, drawn by pid 10, with `above` over it.
+    fn desk(window: SurfaceFacts, above: impl IntoIterator<Item = SurfaceFacts>) -> HostFacts {
+        HostFacts::bottom_to_top(
+            core::iter::once(window.owned_by(owned_by(10))).chain(above),
+            1,
+        )
+        .with_consent(Consent::Everyone)
+    }
+
+    /// Keys go only where the person can see them go: not into a window on
+    /// a hidden workspace, a tab behind, a window minimized or rolled up,
+    /// none of which an agent brings into view. Closing shows nothing, and
+    /// is allowed in every case.
+    #[test]
+    fn a_window_is_focused_and_typed_into_only_while_the_person_can_see_it() {
+        let showing = desk(lone(), []);
+        for verb in keys() {
+            assert!(check_window(&showing, SurfaceId(1), &verb).is_ok());
+        }
+
+        let hidden = [
+            (
+                lone().on_workspace(3),
+                Refusal::OtherWorkspace { workspace: 3 },
+            ),
+            (
+                lone().behind_tab(SurfaceId(2)),
+                Refusal::InactiveTab {
+                    shown: SurfaceId(2),
+                },
+            ),
+            (lone().unmapped(), Refusal::Unmapped),
+            (lone().rolled_up(), Refusal::RolledUp),
+        ];
+        for (window, refusal) in hidden {
+            let facts = desk(window, []);
+            for verb in keys() {
+                assert_eq!(
+                    check_window(&facts, SurfaceId(1), &verb).unwrap_err(),
+                    refusal
+                );
+            }
+            assert!(
+                check_window(&facts, SurfaceId(1), &WindowVerb::Close).is_ok(),
+                "closing does not show anything"
+            );
+        }
+    }
+
+    /// Partly covered, a window is in sight, and keys can go to it. Covered
+    /// wholly, the refusal names the window in front, and off every monitor
+    /// it says so. Closing it is allowed either way.
+    #[test]
+    fn a_window_hidden_by_others_or_off_the_monitors_is_not_focused_or_typed_into() {
+        let corner = SurfaceFacts::new(SurfaceId(2), Rect::new(100.0, 100.0, 500.0, 400.0))
+            .owned_by(owned_by(20));
+        let over = SurfaceFacts::new(SurfaceId(3), Rect::new(-10.0, -10.0, 500.0, 400.0))
+            .owned_by(owned_by(20));
+        let partly = desk(lone(), [corner.clone()]);
+        let wholly = desk(lone(), [corner, over]);
+        let elsewhere = desk(lone(), []).with_outputs([Rect::new(1000.0, 0.0, 2000.0, 1000.0)]);
+        for verb in keys() {
+            assert!(check_window(&partly, SurfaceId(1), &verb).is_ok());
+            assert_eq!(
+                check_window(&wholly, SurfaceId(1), &verb).unwrap_err(),
+                Refusal::Occluded { by: SurfaceId(3) }
+            );
+            assert_eq!(
+                check_window(&elsewhere, SurfaceId(1), &verb).unwrap_err(),
+                Refusal::OffScreen
+            );
+        }
+        assert!(check_window(&wholly, SurfaceId(1), &WindowVerb::Close).is_ok());
+        assert!(check_window(&elsewhere, SurfaceId(1), &WindowVerb::Close).is_ok());
+    }
+
+    /// Whether the agent may touch a window at all is asked before whether
+    /// the person can see it, as for a close: a window it holds no consent
+    /// for is refused as that, wherever it is.
+    #[test]
+    fn consent_is_asked_before_whether_a_window_is_in_sight() {
+        let facts = desk(lone().rolled_up(), []).with_consent(Consent::Granted(vec![11]));
+        for verb in keys() {
+            assert!(matches!(
+                check_window(&facts, SurfaceId(1), &verb),
+                Err(Refusal::NoCapability { .. })
+            ));
+        }
     }
 
     #[test]
@@ -993,7 +1116,7 @@ mod tests {
         )
         .with_consent(Consent::Granted(vec![10]));
         assert!(matches!(
-            check_window(&facts, SurfaceId(1), WindowVerb::Forward),
+            check_window(&facts, SurfaceId(1), &WindowVerb::Forward),
             Err(Refusal::NoCapability { .. })
         ));
     }

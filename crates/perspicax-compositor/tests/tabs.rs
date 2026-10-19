@@ -307,7 +307,7 @@ fn a_tab_group_rolls_up_as_one_and_a_tab_coming_forward_comes_rolled_up() {
         "no tab behind keeps a shade"
     );
     assert_eq!(
-        check_window(&cycled, window(&cycled, "second").id, WindowVerb::Forward).unwrap_err(),
+        check_window(&cycled, window(&cycled, "second").id, &WindowVerb::Forward).unwrap_err(),
         Refusal::RolledUp,
         "an agent may not bring it forward into view"
     );
