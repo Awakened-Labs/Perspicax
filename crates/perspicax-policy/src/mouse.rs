@@ -180,14 +180,22 @@ impl MouseBindings {
         self.with(context, chord, None)
     }
 
+    /// Where the chord is already bound in the context, in its place, as
+    /// [`Bindings::bind`](crate::Bindings::bind) does: binding one to what
+    /// it already does changes nothing.
     fn with(mut self, context: Context, chord: MouseChord, action: Option<Action>) -> Self {
-        self.bound
-            .retain(|&(bound_in, bound, _)| (bound_in, bound) != (context, chord));
-        self.bound.push((context, chord, action));
+        let bound = self
+            .bound
+            .iter_mut()
+            .find(|&&mut (bound_in, bound, _)| (bound_in, bound) == (context, chord));
+        match bound {
+            Some((_, _, bound)) => *bound = action,
+            None => self.bound.push((context, chord, action)),
+        }
         self
     }
 
-    /// Every binding, in the order they were made, `None` for a chord
+    /// Every binding, in the order each was first made, `None` for a chord
     /// handed back.
     pub fn iter(&self) -> impl Iterator<Item = (Context, &MouseChord, Option<&Action>)> {
         self.bound
@@ -408,6 +416,17 @@ mod tests {
         assert_eq!(
             bindings.resolve(Context::Desktop, Mods::default(), SIDE),
             None
+        );
+    }
+
+    #[test]
+    fn binding_a_chord_to_what_it_already_does_changes_nothing() {
+        let bindings = MouseBindings::default()
+            .bind(Context::Desktop, plain(SIDE), NEXT)
+            .bind(Context::Window, plain(SIDE), Action::Close);
+        assert_eq!(
+            bindings.clone().bind(Context::Desktop, plain(SIDE), NEXT),
+            bindings
         );
     }
 

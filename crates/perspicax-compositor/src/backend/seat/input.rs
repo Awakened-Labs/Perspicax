@@ -4,16 +4,19 @@
 //! ([`Compositor::person_used_seat`]) so an agent's act can see it would race
 //! the person, as is every button they still have down
 //! ([`Compositor::person_button`]), however long they hold it still. For a
-//! key, the order of authority is:
+//! key, the order of authority is [`perspicax_policy::take`]'s:
 //!
 //! 1. the escape hatches ([`super::super::hatch`]), which nothing can rebind;
-//! 2. the bindings ([`perspicax_policy::Bindings`]);
-//! 3. the focused client.
+//! 2. the settings app waiting for a chord to bind ([`crate::chord_capture`]),
+//!    which is told it instead of any binding doing it;
+//! 3. the bindings ([`perspicax_policy::Bindings`]);
+//! 4. the focused client.
 //!
 //! A tap of the Logo key is a binding too, but one known only once the key
 //! comes back up with nothing pressed in between
-//! ([`perspicax_policy::LogoTap`]). Its press and release still reach the
-//! client, as any modifier's do.
+//! ([`perspicax_policy::LogoTap`]), and the settings app is told it in the
+//! same way. Its press and release still reach the client, as any
+//! modifier's do.
 //!
 //! A binding is found under any layout: a key is matched by what it makes
 //! there, and by what it makes in the keymap's Latin layout and, for
@@ -40,8 +43,8 @@
 use std::time::Duration;
 
 use perspicax_policy::{
-    Action, Button, Drag, FrameButton, Mods, Part, Resting, arrival, candidates, edge_at,
-    edges_near, is_double, is_logo,
+    Action, Button, Drag, FrameButton, Hatch, KeyPress, Mods, Part, Resting, Taken, arrival,
+    edge_at, edges_near, is_double, is_logo, take, take_tap,
 };
 use smithay::{
     backend::{
@@ -65,14 +68,9 @@ use smithay::{
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
 };
 
-use super::{
-    super::{
-        Running,
-        hatch::{self, Hatch},
-    },
-    Lit, Session, settings,
-};
+use super::{super::Running, Lit, Session, settings};
 use crate::{
+    chord_capture::Heard,
     framed::Framed,
     mouse::{Hit, Scrolled, Travelled},
     shell::{covers_panels, id_of},
@@ -83,8 +81,12 @@ const BTN_LEFT: u32 = Button::Left.code();
 const BTN_MIDDLE: u32 = Button::Middle.code();
 
 /// A key the compositor kept for itself.
-enum Taken {
+enum Kept {
     Hatch(Hatch),
+    /// The chord the settings app waits for.
+    Captured(KeyPress),
+    /// A tap of the Logo key, which the settings app waits for.
+    Tap,
     Bound(Action),
     /// The release of a key whose press was taken: swallowed, nothing to do.
     Release,
@@ -165,16 +167,20 @@ pub(super) fn handle(state: &mut Compositor, event: InputEvent<LibinputInputBack
     }
 }
 
-/// One key. Escape hatches first, then bindings, then the focused client.
+/// One key. Escape hatches first, then a capture, then bindings, then the
+/// focused client.
 fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
     let Some(keyboard) = state.keyboard.clone() else {
         return;
     };
     let serial = SERIAL_COUNTER.next_serial();
+    // Before the keyboard is asked: inside its callback nothing may ask
+    // where its focus is (#131).
+    let capturing = state.capturing();
     // A tap of the Logo key, finished by this release: done once the client
     // has seen the release, so it never believes the key is still down.
     let mut tapped = None;
-    let taken = keyboard.input(
+    let kept = keyboard.input(
         state,
         keycode,
         pressed,
@@ -189,17 +195,17 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
             let locked = state.lock.is_some();
             if pressed == KeyState::Released {
                 if session.logo_tap.release(logo) {
-                    tapped = session
-                        .settings
-                        .bindings
-                        .tap()
-                        .filter(|action| !locked || action.while_locked())
-                        .cloned();
+                    tapped = match take_tap(capturing, locked, &session.settings.bindings) {
+                        Some(Taken::Captured) => Some(Kept::Tap),
+                        Some(Taken::Bound(action)) => Some(Kept::Bound(action.clone())),
+                        // No tap is a way out.
+                        Some(Taken::Hatch(_)) | None => None,
+                    };
                 }
                 return match session.swallowed.iter().position(|&k| k == keycode) {
                     Some(at) => {
                         session.swallowed.swap_remove(at);
-                        FilterResult::Intercept(Taken::Release)
+                        FilterResult::Intercept(Kept::Release)
                     }
                     None => FilterResult::Forward,
                 };
@@ -209,44 +215,40 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
             // there: a switch being drawn ends. One this key makes is drawn
             // after, from where this one ended.
             session.settle_transitions();
+            let layout = modifiers.serialized.layout_effective;
+            let press = KeyPress {
+                mods: mods(modifiers),
+                made: keysym.modified_sym(),
+                raw: raw.to_vec(),
+                latin: keysym.raw_latin_sym_or_raw_current_sym(),
+                shifted: state.keys.shifted(layout, keycode),
+            };
             // While locked, only the escape hatches and the layout keys: a
             // binding that opened a terminal over the lock screen would be an
             // unlock, while a password is typed in a layout too.
-            let taken = hatch::classify(modifiers, keysym.modified_sym(), &raw)
-                .map(Taken::Hatch)
-                .or_else(|| {
-                    let layout = modifiers.serialized.layout_effective;
-                    let syms = candidates(
-                        keysym.modified_sym(),
-                        &raw,
-                        keysym.raw_latin_sym_or_raw_current_sym(),
-                        state.keys.shifted(layout, keycode),
-                    );
-                    session
-                        .settings
-                        .bindings
-                        .resolve(mods(modifiers), &syms)
-                        .filter(|action| !locked || action.while_locked())
-                        .cloned()
-                        .map(Taken::Bound)
-                });
-            match taken {
-                Some(taken) => {
-                    session.swallowed.push(keycode);
-                    FilterResult::Intercept(taken)
-                }
-                None => FilterResult::Forward,
-            }
+            let kept = match take(&press, capturing, locked, &session.settings.bindings) {
+                Some(Taken::Hatch(hatch)) => Kept::Hatch(hatch),
+                Some(Taken::Captured) => Kept::Captured(press),
+                Some(Taken::Bound(action)) => Kept::Bound(action.clone()),
+                None => return FilterResult::Forward,
+            };
+            session.swallowed.push(keycode);
+            FilterResult::Intercept(kept)
         },
     );
 
-    match taken {
-        Some(Taken::Hatch(hatch)) => escape(state, hatch),
-        Some(Taken::Bound(action)) => state.perform(&action),
-        Some(Taken::Release) | None => {}
-    }
-    if let Some(action) = tapped {
-        state.perform(&action);
+    for kept in [kept, tapped].into_iter().flatten() {
+        match kept {
+            Kept::Hatch(hatch) => {
+                // Told before it is done: an exit takes the app with it.
+                state.end_capture(Heard::Hatch(hatch));
+                escape(state, hatch);
+            }
+            Kept::Captured(press) => state.end_capture(Heard::Chord(&press)),
+            Kept::Tap => state.end_capture(Heard::Tap),
+            Kept::Bound(action) => state.perform(&action),
+            Kept::Release => {}
+        }
     }
 }
 
@@ -261,7 +263,7 @@ fn escape(state: &mut Compositor, hatch: Hatch) {
         }
         Hatch::Vt(vt) => {
             tracing::info!(vt, "switching VT");
-            if let Err(error) = session.seat.change_vt(vt) {
+            if let Err(error) = session.seat.change_vt(i32::from(vt)) {
                 tracing::warn!(vt, %error, "could not switch VT");
             }
         }

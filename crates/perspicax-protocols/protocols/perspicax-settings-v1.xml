@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="perspicax_settings_v1">
+  <copyright>
+    Copyright 2026 Awakened Labs Inc.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+  </copyright>
+
+  <description summary="the compositor's channel to its settings app">
+    What perspicax-settings needs from the compositor that no standard
+    protocol carries: the next chord the person presses, as the
+    compositor reads it, so that the app can bind it.
+
+    A binding is matched inside the compositor, before any client sees
+    the key. A client listening on wl_keyboard would never hear a chord
+    that is already bound: pressing Logo+Return to rebind it would start
+    a terminal instead. And the compositor matches a key by several
+    keysyms at once, under every layout in the keymap, which a client
+    reading its own keymap cannot be sure of reproducing. So the
+    compositor reports the press itself, with the keysyms it matches a
+    binding by, and the client spells the chord from those.
+
+    The global is privileged: the compositor offers it only to the
+    programs its [protocols] settings rule admits. While the session is
+    locked nothing is captured.
+  </description>
+
+  <interface name="perspicax_settings_v1" version="1">
+    <description summary="a settings app's binding to the compositor">
+      Bound once by the settings app.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="unbind">
+        The client is done with this object. A capture it asked for is
+        left as it is, and is destroyed on its own.
+      </description>
+    </request>
+
+    <request name="capture_chord">
+      <description summary="report the next chord pressed">
+        Wait for the next chord the person presses while a surface of this
+        client's process has the keyboard. The process, not this
+        connection: a toolkit that keeps its own connection draws the
+        window, and the capture is asked for on another.
+
+        One capture waits at a time, whoever asked: a new one replaces
+        the one waiting, which is cancelled as replaced. One asked for
+        while no surface of this process has the keyboard, or while the
+        session is locked, is cancelled at once.
+      </description>
+      <arg name="id" type="new_id" interface="perspicax_chord_capture_v1"/>
+    </request>
+  </interface>
+
+  <interface name="perspicax_chord_capture_v1" version="1">
+    <description summary="one chord, waited for">
+      Exactly one of chord, tap, hatch or cancelled is sent, and then
+      nothing more. The client destroys the object once it has heard.
+
+      While it waits, keys reach the focused surface as ever, but for the
+      one that makes the chord: a modifier on its own is pressed and let
+      go as usual, so the client can show what is held, while the key
+      pressed with them is taken, its release too, and neither a binding
+      nor any client sees it. The escape hatches are still what they are.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="stop waiting">
+        The client is done with this capture. If it still waits, it waits
+        no more, and the next chord is matched against the bindings as
+        any other.
+      </description>
+    </request>
+
+    <enum name="mods" bitfield="true">
+      <description summary="the modifiers a binding names">
+        Caps Lock and Num Lock are not among them: a binding never
+        depends on them.
+      </description>
+      <entry name="ctrl" value="1"/>
+      <entry name="alt" value="2"/>
+      <entry name="shift" value="4"/>
+      <entry name="logo" value="8"/>
+    </enum>
+
+    <enum name="hatch">
+      <entry name="exit" value="0" summary="Ctrl+Alt+Backspace, which ends the session"/>
+      <entry name="vt" value="1" summary="Ctrl+Alt+F1 to F12, which switch VT"/>
+    </enum>
+
+    <enum name="reason">
+      <entry name="unfocused" value="0"
+             summary="no surface of the asking process has the keyboard"/>
+      <entry name="locked" value="1" summary="the session is locked"/>
+      <entry name="replaced" value="2" summary="another capture was asked for"/>
+      <entry name="withdrawn" value="3"
+             summary="the [protocols] settings rule no longer admits this client"/>
+    </enum>
+
+    <event name="chord">
+      <description summary="a key was pressed with these modifiers">
+        A key pressed with mods held. The other arguments are the keysyms
+        a binding finds the key by, which the compositor tries in this
+        order, the first that is bound winning:
+
+        made, what the key made with the modifiers held;
+        raw, what it makes with none in the layout in use, as an array of
+        32-bit keysyms in the host's byte order;
+        latin, what it makes in the keymap's first layout with a Latin
+        letter on it, so that Logo+q pressed under a Cyrillic layout is
+        Logo+q;
+        shifted, what it makes with Shift in the layout in use, which
+        counts only when it is a digit, as on an AZERTY number row.
+
+        Zero is no keysym.
+      </description>
+      <arg name="mods" type="uint" enum="mods" summary="the modifiers held"/>
+      <arg name="made" type="uint" summary="the keysym made with them held"/>
+      <arg name="raw" type="array" summary="the keysyms made with none"/>
+      <arg name="latin" type="uint" summary="the keysym in the Latin layout, or 0"/>
+      <arg name="shifted" type="uint" summary="the keysym made with Shift, or 0"/>
+    </event>
+
+    <event name="tap">
+      <description summary="the Logo key was tapped">
+        The Logo key was pressed and let go with nothing else in between,
+        which a binding written "Logo" takes. Its press and release still
+        reached the client.
+      </description>
+    </event>
+
+    <event name="hatch">
+      <description summary="an escape hatch was pressed">
+        One of the chords no configuration can take away was pressed, and
+        is done once this is sent: the session ends, or the VT switches.
+        It cannot be bound.
+      </description>
+      <arg name="kind" type="uint" enum="hatch" summary="which way out"/>
+      <arg name="vt" type="uint" summary="for vt, the VT counted from 1; 0 for exit"/>
+    </event>
+
+    <event name="cancelled">
+      <description summary="the capture ended with no chord">
+        Nothing was captured, for this reason.
+      </description>
+      <arg name="reason" type="uint" enum="reason" summary="why"/>
+    </event>
+  </interface>
+</protocol>

@@ -323,6 +323,9 @@ pub struct Compositor {
     /// The desktop shells listening for the menus a person asks for. See
     /// [`crate::shell_protocol`].
     pub(crate) shells: crate::shell_protocol::Shells,
+    /// The settings app's capture of the next chord, if one waits. See
+    /// [`crate::chord_capture`].
+    pub(crate) captures: crate::chord_capture::Captures,
     /// The shell asked to end the session: the person chose to log out.
     pub(crate) exit_asked: bool,
     /// Screenshot tools' frames waiting for something to change. See
@@ -389,6 +392,7 @@ impl Compositor {
         let pager = crate::pager::Pager::new(display, &gate);
         let displays = crate::output_management::Displays::new(display, &gate);
         let shells = crate::shell_protocol::Shells::new(display, &gate);
+        let captures = crate::chord_capture::Captures::new(display, &gate);
         #[cfg(feature = "capture")]
         let screencopy = crate::screencopy::Screencopy::new(display, &gate);
         // Empty: outputs are mapped by `arrange_outputs`, once every one
@@ -469,6 +473,7 @@ impl Compositor {
             pager,
             displays,
             shells,
+            captures,
             exit_asked: false,
             #[cfg(feature = "capture")]
             screencopy,
@@ -1604,6 +1609,8 @@ impl SeatHandler for Compositor {
         let client = focused.and_then(|surface| self.display.get_client(surface.id()).ok());
         set_data_device_focus(&self.display, seat, client.clone());
         set_primary_focus(&self.display, seat, client);
+        // A chord is captured only for the process that has the keyboard.
+        self.capture_follows_keyboard(focused);
         // The window in use: the one with the keyboard, or the one whose own
         // menu has it, since a menu's keys are its window's. Found from the
         // surface smithay names, as the keyboard cannot be asked here.

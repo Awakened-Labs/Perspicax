@@ -1,0 +1,86 @@
+[package]
+name = "perspicax-settings"
+description = "The settings app's writer: edits config.toml in place, keeping the person's comments, order and alignment, and writes only a file the installed perspicax takes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+# The writer lives here, not in perspicax-config, so that crate stays parse-only
+# and the compositor's graph never sees toml_edit.
+[dependencies]
+perspicax-config = { path = "../perspicax-config", version = "0.1.0" }
+# The actions and chords the Keys page shows, and the press a capture hears.
+perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
+# A command line, split into its words and joined back, as a shell would:
+# the app's spawn bindings and the shell's commands.
+shlex = "2"
+thiserror.workspace = true
+# Parse only, as perspicax-config has it: what two texts mean is compared as
+# plain tables, which ignore layout.
+toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
+# The writer: a document that keeps every comment, blank and space it was
+# parsed with, and prints them back. `display` is that printing.
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
+
+# The app, behind `gui`.
+clap = { workspace = true, optional = true }
+# 0.35: 0.36 and later need rustc 1.95, and CI builds with 1.93. Drawn with
+# OpenGL through glutin, on Wayland only, read by screen readers through
+# AccessKit, and with no fonts of its own: the theme's are found on the
+# system, as the shell finds them.
+eframe = { version = "0.35", default-features = false, features = [
+    "accesskit",
+    "glow",
+    "wayland",
+], optional = true }
+# The theme's font, found as cosmic-text finds it for the shell: the same
+# version, and fonts.conf read for what sans-serif means here.
+fontdb = { version = "0.23", default-features = false, features = [
+    "std",
+    "fs",
+    "memmap",
+    "fontconfig",
+], optional = true }
+# The capture channel, on a connection of its own beside winit's.
+perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", features = ["client"], optional = true }
+wayland-client = { workspace = true, optional = true }
+# The monitors the Outputs page lists, read as a display tool reads them, on
+# a connection of their own. Nothing is ever asked of it.
+wayland-protocols-wlr = { workspace = true, features = ["client"], optional = true }
+
+[features]
+# The app's window, off by default. winit's Wayland support puts every
+# Wayland client in a build onto libwayland (EGL needs its `wl_display`), and
+# cargo turns a feature on for a whole build: so the app is built in a cargo
+# run of its own, and a workspace build leaves perspicax-shell and the
+# compositor's test clients on wayland-client's Rust backend.
+gui = [
+    "dep:clap",
+    "dep:eframe",
+    "dep:fontdb",
+    "dep:perspicax-protocols",
+    "dep:wayland-client",
+    "dep:wayland-protocols-wlr",
+]
+
+[[bin]]
+name = "perspicax-settings"
+path = "src/app/main.rs"
+required-features = ["gui"]
+
+[dev-dependencies]
+# The app's pages, driven headless and found by what a screen reader hears.
+egui_kittest = "0.35"
+# `examples/capture.rs`: a window of its own, and the compositor's capture
+# channel beside it. The library speaks no Wayland.
+perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", features = ["client"] }
+smithay-client-toolkit.workspace = true
+wayland-client.workspace = true

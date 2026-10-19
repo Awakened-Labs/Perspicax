@@ -234,7 +234,7 @@ pub(crate) struct Session {
     pub(super) runtime: Option<Vec<perspicax_config::OutputRule>>,
     /// Connected monitors left dark, by name, with the modes each offers: so
     /// a display tool can turn one on.
-    dark: Vec<(String, Vec<connectors::Offered>)>,
+    dark: Vec<(String, Vec<perspicax_policy::HeadMode>)>,
 }
 
 /// One connected monitor, driven by one CRTC.
@@ -245,7 +245,7 @@ struct Head {
     global: GlobalId,
     drm: DrmOutput<Allocator, Exporter, (), DrmDeviceFd>,
     /// The modes the monitor offers, and which it is showing.
-    modes: Vec<connectors::Offered>,
+    modes: Vec<perspicax_policy::HeadMode>,
     mode: usize,
     /// Something was committed since this output last rendered.
     dirty: bool,
@@ -571,27 +571,12 @@ impl Session {
         &self,
         space: &smithay::desktop::Space<crate::framed::Framed>,
     ) -> Vec<perspicax_policy::Head> {
-        let modes = |offered: &[connectors::Offered]| -> Vec<perspicax_policy::HeadMode> {
-            offered
-                .iter()
-                .map(|mode| perspicax_policy::HeadMode {
-                    width: i32::from(mode.width),
-                    height: i32::from(mode.height),
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "a refresh rate in millihertz fits an i32 many times over"
-                    )]
-                    refresh: (mode.refresh * 1000.0).round() as i32,
-                    preferred: mode.preferred,
-                })
-                .collect()
-        };
         self.heads
             .iter()
             .map(|head| perspicax_policy::Head {
                 name: head.output.name(),
                 enabled: true,
-                modes: modes(&head.modes),
+                modes: head.modes.clone(),
                 current: Some(head.mode),
                 position: space
                     .output_geometry(&head.output)
@@ -604,7 +589,7 @@ impl Session {
                     .map(|(name, offered)| perspicax_policy::Head {
                         name: name.clone(),
                         enabled: false,
-                        modes: modes(offered),
+                        modes: offered.clone(),
                         current: None,
                         position: (0, 0),
                         scale: 1.0,
@@ -754,7 +739,7 @@ pub(crate) fn apply_heads(state: &mut Compositor, changes: &[perspicax_policy::H
             rule.mode = Some(perspicax_config::Mode {
                 width: u16::try_from(mode.width).unwrap_or(0),
                 height: u16::try_from(mode.height).unwrap_or(0),
-                refresh: Some(f64::from(mode.refresh) / 1000.0),
+                refresh: Some(mode.hertz()),
             });
         }
         if let Some(scale) = change.scale {
@@ -867,10 +852,12 @@ fn light(
         .iter()
         .map(|mode| {
             let (width, height) = mode.size();
-            connectors::Offered {
-                width,
-                height,
-                refresh: f64::from(mode.vrefresh()),
+            perspicax_policy::HeadMode {
+                width: i32::from(width),
+                height: i32::from(height),
+                // In millihertz, as a display tool counts it. DRM gives a
+                // whole number of Hz, which fits many times over.
+                refresh: i32::try_from(mode.vrefresh().saturating_mul(1000)).unwrap_or(i32::MAX),
                 preferred: mode.mode_type().contains(ModeTypeFlags::PREFERRED),
             }
         })
@@ -890,7 +877,7 @@ fn light(
         .and_then(|rule| rule.mode)
         .map(|mode| (mode.width, mode.height, mode.refresh));
     let (at, honoured) =
-        connectors::pick_mode(wanted, &offered).ok_or("the monitor offers no modes")?;
+        perspicax_policy::pick_mode(wanted, &offered).ok_or("the monitor offers no modes")?;
     if !honoured {
         tracing::warn!(
             output = name,

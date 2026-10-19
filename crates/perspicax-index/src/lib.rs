@@ -43,7 +43,9 @@ pub mod shot;
 
 use core::future::Future;
 
-use perspicax_node::{Node, NodeId, ObservedNode, Origin, Rect, SurfaceId, Visibility};
+use perspicax_node::{
+    Node, NodeId, ObservedNode, Origin, ProcessOrigin, Rect, SurfaceId, Visibility,
+};
 
 pub use crate::{
     cache::{Delta, Index},
@@ -279,6 +281,13 @@ impl Consent {
     /// unattributed origin, whatever the policy: a policy about processes
     /// cannot say yes to a process nobody has identified.
     ///
+    /// Never for perspicax's settings app either, whatever was granted or
+    /// started for an agent. It edits the session's config, which is what
+    /// says what an agent may do: an agent driving it could grant itself
+    /// anything. Known by its executable's name, which anything can take, so
+    /// this keeps an agent off the real one rather than proving a program
+    /// is not it.
+    ///
     /// An X11 origin is judged by its server, never by its client: every X
     /// client shares one Xwayland, and X11 lets any of them read and inject
     /// into the others, so consenting to one X client is consenting to all of
@@ -288,6 +297,7 @@ impl Consent {
     pub fn permits(&self, origin: &Origin) -> bool {
         let pid = match origin {
             Origin::Unattributed => return false,
+            Origin::Process(process) if is_settings_app(process) => return false,
             Origin::Process(process) => process.pid,
             Origin::X11(x11) => x11.server,
         };
@@ -297,6 +307,18 @@ impl Consent {
             Self::Everyone => true,
         }
     }
+}
+
+/// The settings app's executable, as `perspicax-config` names it.
+const SETTINGS_APP: &str = "perspicax-settings";
+
+/// Whether `process` runs the settings app, from wherever, and even once its
+/// file was replaced by an upgrade (`/proc` then says ` (deleted)`).
+fn is_settings_app(process: &ProcessOrigin) -> bool {
+    process.exe.as_deref().is_some_and(|exe| {
+        let exe = exe.strip_suffix(" (deleted)").unwrap_or(exe);
+        exe.rsplit('/').next() == Some(SETTINGS_APP)
+    })
 }
 
 /// The gate. Every act path goes through here.
@@ -602,7 +624,7 @@ mod tests {
     };
 
     use super::*;
-    use perspicax_node::{ProcessOrigin, Rect, Role};
+    use perspicax_node::{Rect, Role};
 
     fn attributed() -> Origin {
         Origin::Process(Box::new(ProcessOrigin {
@@ -846,6 +868,32 @@ mod tests {
         );
         assert!(Consent::Granted(vec![700]).permits(&x11));
         assert!(Consent::Everyone.permits(&x11));
+    }
+
+    #[test]
+    fn the_settings_app_is_never_consented_even_when_granted() {
+        let running = |exe: &str| {
+            Origin::Process(Box::new(ProcessOrigin {
+                pid: 42,
+                exe: Some(exe.to_owned()),
+                cgroup: None,
+                sandbox: None,
+            }))
+        };
+        for exe in [
+            "/usr/bin/perspicax-settings",
+            "/home/me/.cargo/bin/perspicax-settings (deleted)",
+            "perspicax-settings",
+        ] {
+            for consent in [Consent::Granted(vec![42]), Consent::Everyone] {
+                assert!(!consent.permits(&running(exe)), "{exe} under {consent:?}");
+            }
+        }
+        assert!(
+            Consent::Granted(vec![42]).permits(&running("/usr/bin/perspicax-settings-viewer")),
+            "another program"
+        );
+        assert!(Consent::Everyone.permits(&running("/usr/bin/foot")));
     }
 
     fn owned_by(pid: u32) -> Origin {

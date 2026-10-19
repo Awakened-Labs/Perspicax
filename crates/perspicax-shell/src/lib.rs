@@ -163,11 +163,45 @@ pub fn run(options: Options) -> Result<(), Error> {
     )
 }
 
+/// Read the config file as [`run`] would, and go no further: no compositor,
+/// nothing drawn. `perspicax config check` runs `perspicax-shell --check` so
+/// that a file is judged by the shell that is installed, with the components
+/// it was built with, in its own words.
+///
+/// # Errors
+///
+/// [`Error::Config`] for a config file this build cannot use.
+pub fn check(config: Option<PathBuf>) -> Result<Shell, Error> {
+    let path = config.or_else(perspicax_config::default_path);
+    Ok(read(path.as_deref())?)
+}
+
 /// The `[shell]` table of the config file at `path`, as this build reads it,
 /// or the classic profile's with no file to read.
 fn read(path: Option<&Path>) -> Result<Shell, perspicax_config::Error> {
     match path {
         Some(path) => perspicax_config::load_shell(path, BUILT),
         None => Ok(Shell::profile(Profile::Classic, BUILT)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checking_reads_the_file_as_this_build_does() {
+        let path =
+            std::env::temp_dir().join(format!("perspicax-shell-check-{}.toml", std::process::id()));
+        std::fs::write(&path, "[shell]\nroot-menu = true\n").expect("a config");
+        let checked = check(Some(path.clone()));
+        std::fs::remove_file(&path).ok();
+        // A root menu is the `menus` component's: taken by a shell with it,
+        // and refused by one without, naming the key.
+        assert_eq!(checked.is_ok(), cfg!(feature = "menus"), "{checked:?}");
+        if let Err(error) = checked {
+            assert_eq!(error.exit_code(), 78);
+            assert!(error.to_string().contains("`shell.root-menu`"), "{error}");
+        }
     }
 }

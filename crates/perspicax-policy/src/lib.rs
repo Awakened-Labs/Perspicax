@@ -16,6 +16,8 @@
 //! integers.
 //!
 //! The decisions, by module: focus and what a chord means (`focus`, `binds`);
+//! the two chords no binding can take (`hatch`); and who a key press is
+//! for, a hatch, a capture or a binding (`take`);
 //! what a button, a double-click or the wheel means where the pointer is
 //! (`mouse`);
 //! where a window goes and how big (`geometry`); where each program's window
@@ -40,6 +42,7 @@ mod flip;
 mod focus;
 mod frame;
 mod geometry;
+mod hatch;
 mod heads;
 mod keyboard;
 mod layout;
@@ -50,6 +53,7 @@ mod resist;
 mod restart;
 mod snap;
 mod tabs;
+mod take;
 mod tap;
 mod theme;
 mod transition;
@@ -71,7 +75,8 @@ pub use crate::{
         DRAG_THRESHOLD, Edges, Rect, anchor, carry, clear_of, dragged, edges_near, neighbour,
         place, resize, settle, unmaximized_at,
     },
-    heads::{Head, HeadChange, HeadMode, ModeChoice, Rejection, check_heads},
+    hatch::{Hatch, hatch},
+    heads::{Head, HeadChange, HeadMode, ModeChoice, Rejection, SCALES, check_heads, pick_mode},
     keyboard::{LayoutMemory, Switching},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
     mouse::{Button, Clicks, Context, Gesture, MouseBindings, MouseChord, Wheel},
@@ -81,6 +86,7 @@ pub use crate::{
     restart::{EX_CONFIG, EX_UNAVAILABLE, Ended, Restart, Restarts},
     snap::{Snapping, Zone, keyed, zone},
     tabs::Groups,
+    take::{KeyPress, Taken, take, take_tap},
     tap::{LogoTap, is_logo},
     theme::{
         Appearance, Builtin, ColorScheme, Contrast, Family, Font, Logo, Motion, Palette, Rgba,

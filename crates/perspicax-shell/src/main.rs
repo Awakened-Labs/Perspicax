@@ -5,6 +5,10 @@
 //! waits for the file to change before trying again; 69 says the connection
 //! to perspicax broke, and perspicax starts it again as after a crash. Run
 //! by hand, it draws on whichever compositor `WAYLAND_DISPLAY` names.
+//!
+//! With `--check` it reads the config and stops there, with the same two
+//! answers: 0 if this build can use it, 78 if not, and why on stderr.
+//! `perspicax config check` asks it that way.
 
 use std::{path::PathBuf, process::ExitCode};
 
@@ -19,6 +23,11 @@ struct Cli {
     /// `$XDG_CONFIG_HOME/perspicax/config.toml`.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
+
+    /// Read the config as this build would, say whether it can be used, and
+    /// exit without connecting to anything: 0 if it can, 78 if not.
+    #[arg(long)]
+    check: bool,
 }
 
 fn main() -> ExitCode {
@@ -35,6 +44,15 @@ fn main() -> ExitCode {
         .init();
 
     let cli = Cli::parse();
+    if cli.check {
+        return match perspicax_shell::check(cli.config) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("perspicax-shell: {error}");
+                ExitCode::from(error.exit_code())
+            }
+        };
+    }
     match perspicax_shell::run(Options {
         connection: None,
         config: cli.config,

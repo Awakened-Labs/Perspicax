@@ -53,8 +53,9 @@ perspicax-policy       WM decisions as data — focus, bindings, placement, moni
 perspicax-config       config.toml — schema, classic/minimal profiles, feature check  [portable]
 perspicax-atspi        impl Ingest — AT-SPI2 over D-Bus
 perspicax-compositor   impl HostView — Smithay: outputs, seat, damage. Headless draws nothing.
-perspicax-protocols    perspicax's own Wayland protocols — the channel to the desktop shell
+perspicax-protocols    perspicax's own Wayland protocols — the channels to the desktop shell and the settings app
 perspicax-shell        the desktop — wallpaper, panel, menus, tray, icons; a Wayland client, no Smithay
+perspicax-settings     the settings app — config.toml edited in place, a chord bound by pressing it; egui, behind `gui`
 perspicax-probe        dev CLI — dump a tree, time a read, explain a refusal
 ```
 
@@ -520,7 +521,9 @@ things grant one:
 
 Everything else is exactly the one process. An X11 window is never granted
 by a key: every X client shares one Xwayland, and may read and drive the
-others, so granting one would grant them all. `window_list` says which windows
+others, so granting one would grant them all. And the settings app is never
+an agent's, whatever grants it: it writes the file that holds an agent back
+([see The settings app](#the-settings-app)). `window_list` says which windows
 an agent may act on (`agent`), and `deltas` says when that changes. On screen,
 each is marked out: a line round it, in front of its shadow, and its titlebar,
 where perspicax draws one, in the agent's colours (`[decorations.agent]`).
@@ -700,6 +703,19 @@ leaves a shell of no components in `target/`, which draws nothing; to install
 the shell on its own, `cargo install --path crates/perspicax-shell --features
 full`.
 
+The settings app is built in a cargo run of its own:
+
+```sh
+cargo build --release -p perspicax-settings --features gui
+```
+
+Its window's toolkit puts every Wayland client in a build onto libwayland,
+and cargo turns a feature on for a whole build, so a workspace build leaves
+the app out and keeps the shell off libwayland. It needs no development
+packages: libwayland, libEGL and xkbcommon are opened as it starts. What it
+writes is checked by the `perspicax` beside it, or else the one on `PATH`, so
+install the two together.
+
 Run it from a text console (a TTY, not a terminal inside another desktop), with
 seatd or logind managing the seat. Log to a file: the console the session
 takes over shows nothing until it ends, and what the programs it starts
@@ -712,6 +728,7 @@ perspicax --seat --spawn foot 2>~/perspicax.log
 
 Two chords always work, whatever the configuration says:
 **Ctrl+Alt+Backspace** ends the session, and **Ctrl+Alt+F1…F12** switches VT.
+No binding can take them, so `[keys]` refuses either, `"none"` included.
 
 X11 applications run under an Xwayland the session starts (`xwayland = false`
 in the config turns it off), with `DISPLAY` set for everything it launches:
@@ -855,8 +872,9 @@ remembered, by app id or `WM_CLASS` class matched exactly, and forgets what
 was kept of them.
 
 The session reads `$XDG_CONFIG_HOME/perspicax/config.toml` (or `--config PATH`),
-and reads it again whenever it is saved. Without one it runs the `classic`
-profile, which is Plasma's and Windows' habits:
+and reads it again whenever it is saved, by an editor or by [the settings
+app](#the-settings-app). Without one it runs the `classic` profile, which is
+Plasma's and Windows' habits:
 
 - click to focus, Alt+F4, Alt+Tab;
 - Alt+drag to move and Alt+right-drag to resize;
@@ -984,8 +1002,31 @@ own frame, which casts its own, nor under a maximized or fullscreen one.
 and a button's light coming up or going out, 0 for at once.
 
 Every key below is optional and overrides the profile one setting at a time.
-A misspelled key, or a key for a
-feature this build left out, is refused with its name rather than ignored.
+A misspelled key, or a key for a feature this build left out, is refused
+with its name rather than ignored. So is a chord `[keys]` writes twice, in
+two spellings, since only one of them could be the binding: `"Super+a"`
+beside `"Logo+a"`, or `"Super"` beside `"Logo"` for the tap. And so is a
+chord no binding can take, Ctrl+Alt+Backspace or Ctrl+Alt+F1…F12.
+
+A file with a key refused is refused whole: the session carries on with the
+config it had, and says why only in its log. `perspicax config check` asks
+first, in the words of both programs that read the file, each as it was
+built: perspicax itself, and the perspicax-shell the session would start,
+beside it or on `PATH`, asked with `perspicax-shell --check`.
+
+```sh
+perspicax config check                # the session's own file
+perspicax config check ~/try.toml     # or any other
+```
+
+It prints what each said, and exits 0 when both take the file, or 78 when
+either refuses it, naming the key and why. It exits 66 for a file named that
+is not there, and 1 for a check it could not make. With no file where a
+session would look, it says a session there runs the classic profile, and
+exits 0. A shell it cannot find, or one too old to be asked, is said to be,
+and `[shell]` is checked as if the shell had every component. A keyboard
+layout xkb cannot make is not caught yet: the file is taken, and the
+keyboard keeps its old layout, with a line in the log (#215).
 
 ```toml
 profile = "minimal"            # or "classic"; minimal focuses under the pointer
@@ -1113,8 +1154,9 @@ enable = false
 foreign-toplevel-management = "any"   # "any", "off", or a list of programs
 workspace = "any"
 screencopy = ["grim", "/usr/bin/wf-recorder"]   # a name, or a full path
-output-management = ["kanshi", "wlr-randr"]
+output-management = ["kanshi", "wlr-randr", "perspicax-settings"]
 shell = ["/usr/local/bin/perspicax-shell"]
+settings = ["/usr/local/bin/perspicax-settings"]
 
 [agent]                        # what an agent may do on the seat; see below
 socket = true                  # serve it at $XDG_RUNTIME_DIR/perspicax-mcp;
@@ -1127,13 +1169,16 @@ launch = ["flutter", "zenity"] # what it may start for itself: a list, "any",
 their own windows: a taskbar's list of windows (`foreign-toplevel-list`, and
 `foreign-toplevel-management` to activate and close them), a pager
 (`workspace`), a screenshot tool (`screencopy`), a display tool
-(`output-management`) and the desktop shell (`shell`), which is told when a
-key asks for a menu or a pie or changes the volume, and may end the session. Listing windows and workspaces
-is open by default; reading pixels, moving monitors and speaking for the shell
-are for the usual programs, by name. A name is
-whatever the kernel says the client is running, which any program can be
-called, so a full path is the stricter form. Whatever this says, all of them
-are inert while the screen is locked.
+(`output-management`), the desktop shell (`shell`), which is told when a
+key asks for a menu or a pie or changes the volume, and may end the session,
+and the settings app (`settings`), which hears the next chord pressed, to
+bind it. Listing windows and workspaces is open by default; reading pixels,
+moving monitors, speaking for the shell and hearing a chord are for the
+usual programs, by name. The settings app is among the display tools, to
+list the monitors on its Outputs page; it changes them only through the
+file. A name is whatever the kernel says the client is running, which any
+program can be called, so a full path is the stricter form. Whatever this
+says, all of them are inert while the screen is locked.
 
 | Protocol | `[protocols]` key | Spoken by | While locked | When the rule narrows |
 |---|---|---|---|---|
@@ -1141,8 +1186,9 @@ are inert while the screen is locked.
 | `wlr-foreign-toplevel-management-unstable-v1` v3 | `foreign-toplevel-management` | waybar `wlr/taskbar` | requests ignored | every handle closed, manager finished |
 | `ext-workspace-v1` | `workspace` | waybar `ext/workspaces` | switches ignored | everything removed, manager finished |
 | `wlr-screencopy-unstable-v1` v3 (shm) | `screencopy` | grim, wf-recorder, xdg-desktop-portal-wlr | every copy fails | waiting frames fail |
-| `wlr-output-management-unstable-v1` v4 | `output-management` | wlr-randr, kanshi, wdisplays | every configuration fails | manager finished |
+| `wlr-output-management-unstable-v1` v4 | `output-management` | wlr-randr, kanshi, wdisplays; perspicax-settings, to list | every configuration fails | manager finished |
 | `perspicax-shell-v1` (perspicax's own) | `shell` | perspicax-shell | told nothing; log-out ignored | finished |
+| `perspicax-settings-v1` (perspicax's own) | `settings` | perspicax-settings | nothing captured; a capture waiting is cancelled | a capture waiting is cancelled |
 
 A rule a reload changes applies to the next client that looks, with no
 global torn down, and what a client already holds is withdrawn as above.
@@ -1210,16 +1256,20 @@ first if it has to, and uses sudo only for the copy:
 scripts/install.sh --features perspicax/desktop,perspicax-shell/full
 ```
 
-It builds when there is no build in `target/release`, or when the run names
+It builds what `target/release` lacks, and builds again when the run names
 features, by `--features` or `PERSPICAX_BUILD_FEATURES`. With the variable
 exported, `scripts/install.sh` alone is enough, and with no build and nothing
 named it builds the features above. A run that names none installs the build
-that is there, so one made by hand is installed as it is. As root it builds
-nothing: `sudo scripts/install.sh` installs what you built.
+that is there, so one made by hand is installed as it is. The settings app is
+built apart, in a cargo run of its own (see [Build](#build)), and building it
+leaves the session's programs as they are. As root it builds nothing: `sudo
+scripts/install.sh` installs what you built.
 
-That puts `perspicax` and `perspicax-shell` side by side in `/usr/local/bin`,
-the session entry in `/usr/local/share/wayland-sessions`, and the settings
-portal's two files under `/usr/local/share/xdg-desktop-portal`. Some programs
+That puts `perspicax`, `perspicax-shell` and `perspicax-settings` side by
+side in `/usr/local/bin`, the session entry in
+`/usr/local/share/wayland-sessions`, the settings app's entry in
+`/usr/local/share/applications`, and the settings portal's two files under
+`/usr/local/share/xdg-desktop-portal`. Some programs
 read only from `/usr`: LightDM, greetd's greeters and older SDDM look for
 sessions only in `/usr/share/wayland-sessions`, and xdg-desktop-portal for
 portal files only in `/usr/share/xdg-desktop-portal/portals`. The script says
@@ -1862,7 +1912,9 @@ switching = "window"           # each window keeps its own layout; "global",
 ```
 
 xkb's own switching options, `grp:alt_shift_toggle` and the like, work as
-well. classic binds Logo+Space, so applications no longer get it. A reload
+well. classic binds Logo+Space, so applications no longer get it. A program
+that wants every key, a VM viewer or a remote desktop, has no way yet to ask
+for the ones a binding takes (#214). A reload
 keeps the layout in use, and Caps Lock and Num Lock with it. The lock keys
 light their LEDs on every keyboard, one plugged in later included.
 
@@ -2052,31 +2104,174 @@ drag moves the window. Back in the game, a game that asked to keep the
 pointer has it again at once. Let go, the pointer is where the game last drew
 it. An agent cannot take it ([see acting](#what-acting-looks-like)).
 
+## The settings app
+
+`perspicax-settings` puts every setting on a page, and writes it into the
+same `config.toml` an editor writes, in place, so the two can be used turn
+and turn about: a line added in vi is on its page as soon as the app's
+window has the keyboard again, and a change made in the app is in the file
+for vi to find. Start it from the start menu or a launcher, as Perspicax
+Settings, or as `perspicax-settings`. It writes the session's own file, which
+the session tells every program it starts in `PERSPICAX_CONFIG`, or else
+`$XDG_CONFIG_HOME/perspicax/config.toml`; `--config PATH` names another.
+
+**The file stays yours.** A change rewrites the lines it must and no others:
+every comment, blank line, alignment and order is kept. A key the file
+writes is changed where it stands, and keeps the comment beside it. One it
+does not write fills the file's own commented-out example, `# border = 2`,
+where it stands, as a table fills its commented-out header, `# [splash]`; a
+table the file has no example of goes at the end. A binding is found by the
+chord it means, not by how it is written, so binding Logo+a again changes a
+`"Super+a"` line and keeps that spelling. A value already in force is not
+written, so the file goes on following its profile there, and a key's
+"Reset to the profile's" takes its line out.
+
+**Only a file the session takes is written.** A change is made in a file
+beside the config and checked by the installed perspicax, with `perspicax
+config check`, as both programs a session starts would read it. Only then is
+it renamed over the config, so the session, which reads the file again when
+it is saved, only ever reads a whole one. A change either program refuses is
+not written: the window says why, in that program's words, and offers each
+fix that would be taken. Switching to `minimal` with `[shell.panel]` keys
+written, which a profile with no panel refuses, offers to take them out or
+to turn the panel on. A file the session already refuses says so above every
+page, with its fixes, and one that is not TOML at all is never written, and
+can be opened in an editor from there. With no `perspicax` beside the app or
+on `PATH`, nothing is written. If another program wrote the file since the
+app read it, the change is made again on top of what it wrote.
+
+Its pages, down the left of the window:
+
+- **Keys:** every chord the session binds and every one the file writes,
+  each with whose it is: the profile's, yours, yours over the profile's, or
+  unbound by you.
+- **Session, Focus, Workspaces, Windows, Keyboard, Pointer, Shell, Panel,
+  Theme and Decorations:** every other setting that holds one value, each
+  with whose it is.
+- **Outputs:** each monitor's `[[output]]`.
+- **Protocols:** `[protocols]` and `[agent]`, to read.
+
+**A chord is bound by pressing it.** "Add a binding…", or a row's "Move to
+another chord…", asks perspicax for the next chord pressed. perspicax tells
+the app from where it matches bindings, before any program sees the key, so
+pressing Logo+Return starts no terminal, and the chord is written as the
+session will match it: under `"us,ru"` with Russian in use, Logo+й is
+written `Logo+q` (see [Keyboards](#keyboards)). Tapping Logo binds the tap,
+and Escape on its own gives up. Ctrl+Alt+Backspace and Ctrl+Alt+F1…F12 still
+do what they do, and the page says nothing can bind them. A key no config
+can name yet, the keypad's Enter for one, is said to be, for another to be
+pressed. The wait ends if the window loses the keyboard or the screen locks.
+Only a program `[protocols] settings` admits is told a chord, by default
+`perspicax-settings`, by name. Left out, or outside a perspicax session, the
+app has the chord typed instead, and reads it as the config reads it, with
+the reason under it when it does not read. The chord is then
+given an action, a pie, or a program to start, with "An agent may act on
+what it starts" for `agent = true`. A row can also be given another action,
+unbound, or reset to the profile's.
+
+**Every other page writes as it is changed.** A switch or a choice is
+written when it is clicked, and a number, a colour or a word when its field
+loses the keyboard, not as it is typed; Escape puts the field back. A value
+out of its range is refused beside its field, in the parser's words. A
+colour is typed, `#rrggbb`, beside a swatch of it; a picker that writes once,
+as it closes, is to come (#216). The pages read the file as if perspicax
+were built with everything, so `xwayland` and the splash have their switches
+even where the installed perspicax lacks them, and a change to one is
+refused in its words. A section whose switch is off, the shell or the panel,
+shows only the switch, and the file keeps what it writes for the rest.
+
+What has no page is left to the file, and an editor: what names things of
+your own, `[opacity.apps]`, `[placement] forget` and `[shell.wallpapers]`;
+`[shell.pie]`, `[shell.start-menu]` and `[shell.mixer]`; `[mouse]` and
+`autostart`; and `[decorations] focused` and `unfocused`, which the Theme
+page writes in their newer place, as the palette's `title-focused` and
+`title-unfocused`. Writing both places is refused, and the fix takes the
+older one out.
+
+**Keyboard layouts** are picked from xkb's own list, the one `setxkbmap`
+reads: `rules/evdev.lst`, or `rules/<rules>.lst` for the `rules` written,
+under `$XKB_CONFIG_ROOT`, or else `/usr/share/xkeyboard-config-2`, or else
+`/usr/share/X11/xkb`. Each
+is shown by its name and xkb's description, `us — English (US)`, with its
+variant, and `layout` and `variant` are written together. The list leaves
+out xkb's extra layouts, and any of your own in `~/.config/xkb`, so a layout
+the file writes that the list lacks is kept, and said to be. With no list,
+the two are typed.
+
+**Outputs** has each monitor connected, with its modes, as the session lists
+them to a display tool, then each rule the file writes for one that is not.
+A monitor can be turned off, given one of its modes (a size, then a refresh
+rate, or the preferred or the fastest), a scale, and a place: right of the
+others, at a position, or beside another, with an offset. A preview draws
+the arrangement; dragging monitors in it is to come (#217). Nothing is
+written until Apply. Then the monitors change, and the window asks "Keep
+these settings? Reverting in 15 s." Keep keeps them. "Revert now", the 15
+seconds running out, or closing the window writes back the values the change
+altered, over whatever else the file says by then. If the app is killed in
+that time, nothing is put back: the change stays written. A change that
+would leave no connected monitor on is refused, and nothing is written. The
+monitors are listed over `wlr-output-management`, which the default
+`[protocols] output-management` admits `perspicax-settings` to; with a rule
+that leaves it out, the page has the file's rules alone, each mode typed:
+`2560x1440@144`.
+
+**Protocols** shows each `[protocols]` rule and `[agent] launch` in force,
+beside the profile's, with `[agent] socket`, and changes none of them. Who
+may reach past their own windows, and what an agent may do, is the file's to
+say, in an editor: the app never writes it, so nothing that drives the app
+can widen it. "Open the file" opens it.
+
+**No agent drives it.** The file it writes is what holds an agent back, so
+an agent that could drive the app could grant itself anything. perspicax
+never lets an agent act on its windows, whatever was granted, and the config
+refuses `agent = true` on a binding or an `autostart` entry that starts it,
+and `perspicax-settings` in `[agent] launch`. It is known by the name its
+program runs as, wherever it is installed.
+
 ## Test
 
-Gates, in the order CI runs them:
+Gates, as CI runs them, in four jobs side by side:
 
 ```sh
+# check: the workspace, which needs only xkbcommon's development package
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo clippy --locked -p perspicax-shell --all-targets -- -D warnings   # no components
+cargo test --locked --workspace
+
+# seat: the daily-driver build, with the seat's development packages (see Build)
+cargo clippy --locked --workspace --all-targets --features perspicax/desktop -- -D warnings
+cargo clippy --locked --workspace --all-targets --features perspicax/capture -- -D warnings
+cargo clippy --locked --workspace --all-targets --features perspicax/seat -- -D warnings
+cargo test --locked --workspace --features perspicax/desktop
+
+# settings: the settings app's window, in a cargo run of its own
+cargo clippy --locked -p perspicax-settings --all-targets --features gui -- -D warnings
+cargo test --locked -p perspicax-settings --features gui
+
+# deny
 cargo deny --all-features check
-cargo test --workspace
 ```
 
-Tests that need a real accessibility bus and real applications are `#[ignore]`d,
-so the four gates above stay green on a machine with no graphical session. To
-run them:
+The settings job drives the app's pages headless, finding each control by
+what a screen reader hears, with no compositor. Tests that need a real
+accessibility bus, real applications or a Wayland socket are `#[ignore]`d, so
+every gate above stays green on a machine with no graphical session. To run
+them:
 
 ```sh
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
 cargo test -p perspicax-atspi --test live -- --ignored --test-threads=1
 cargo test -p perspicax --test act  -- --ignored --test-threads=1
+cargo test -p perspicax-compositor --all-features -- --ignored --test-threads=1
 ```
 
 The second is v1's exit criterion, and it is the one command that asserts the
 whole claim: two toolkits hosted, a control clicked in each with a receipt to
 show for it, and a covered control refused with the occluding surface named.
+The third is the compositor's own: headless, on virtual monitors, with
+Wayland clients of its own.
 
 Without those two variables an SSH session finds an empty desktop and reports
 no error worth reading. `perspicax-probe apps` says what the bus can actually see.

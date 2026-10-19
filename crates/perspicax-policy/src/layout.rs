@@ -21,6 +21,22 @@ pub enum Side {
     Below,
 }
 
+impl Side {
+    /// Every side, in the order the README lists them.
+    pub const ALL: [Self; 4] = [Self::LeftOf, Self::RightOf, Self::Above, Self::Below];
+
+    /// Its name as an `[[output]]` key writes it: `right-of = "DP-1"`.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::LeftOf => "left-of",
+            Self::RightOf => "right-of",
+            Self::Above => "above",
+            Self::Below => "below",
+        }
+    }
+}
+
 /// How one monitor is placed.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Place {

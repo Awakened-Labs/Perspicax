@@ -1,0 +1,231 @@
+profile = "minimal"
+
+# autostart = [
+#     { spawn = ["foot"], agent = true },   # the agent may act on this one
+#     ["mako"],                             # and not on this one
+# ]
+
+[keys]
+"Logo+Return" = { spawn = ["foot"] }
+"Logo+Shift+Return" = { spawn = ["foot"], agent = true }
+"Logo+f" = { spawn = ["firefox"] }
+"Logo+Shift+f" = { spawn = ["firefox"], agent = true }
+"Logo+v" = { spawn = ["vivaldi"] }
+"Logo+Shift+v" = { spawn = ["vivaldi"], agent = true }
+"Logo+x" = { spawn = ["env", "-u", "WAYLAND_DISPLAY", "alacritty", "--title", "x11-alacritty"] }
+"Logo+g" = { spawn = ["ghostty"] }
+"Logo+s" = "toggle-sticky"
+"Logo+p" = { spawn = ["sh", "-c", "grim ~/pictures/$(date +%Y%m%d_%H%M%S)_screenshot.png"] }
+"Alt+q" = { spawn = ["run"] }
+"Logo+Left"  = "snap-left"
+"Logo+Right" = "snap-right"
+"Logo+Up"    = "snap-up"     # maximize; on a snapped half, its top quarter
+"Logo+Down"  = "snap-down"   # un-maximize; on a snapped half, its bottom quarter
+"Alt+Delete" = { spawn = ["perspicax", "lock"] }
+"Logo+Page_Up" = "opacity-up"       # unbound in both profiles
+"Logo+Page_Down" = "opacity-down"
+"Logo+End" = "opacity-reset"
+
+[input.keyboard]
+repeat-rate = 30
+numlock = true
+
+[input.pointer]
+
+[focus]
+# model = "click"
+
+[snap]
+drag = false
+
+[mouse.desktop]
+"Mouse4" = "next-workspace"    # WheelUp
+"Mouse5" = "previous-workspace"
+
+[mouse.anywhere]
+"Mouse8" = { pie = "launchers" }
+
+[resistance]
+edges = 40
+
+[decorations]
+mode = "server"
+title-height = 20
+# border = 2
+focused = "#440000"
+
+[decorations.agent]
+focused = "#c06a3c"          # "#5a2d82", titlebar, where perspicax draws one
+unfocused = "#834726"        # "#3b2454"
+outline = 3                  # 0 to 8 px; 0 turns the line off
+outline-colour = "#c06a3c"   # "#b37feb"
+
+[workspaces]
+grid = [6, 1]
+wrap = false
+
+[opacity]
+step = 10          # defaults; every value a whole percent, 1–100
+floor = 20         # the lowest the keys go
+unfocused = 90     # share of its own a window without the keyboard is drawn at
+
+[opacity.apps]     # by Wayland app id or X11 WM_CLASS class, exact
+foot = 90
+
+[shell]
+desktop-icons = false
+leave = ["lock", "log-out", "reboot", "power-off"]
+# lock = ["swaylock"]
+
+[shell.wallpapers]
+1 = "~/My Documents/My Wallpapers/Dreaming_by_DerecV2-1920x1200.png"
+# 1 = "#b3d9f3"
+2 = "~/pictures/wallpaper/06fa75867b875a2f7a09a2bfd7491406.jpg"
+3 = "~/My Documents/My Wallpapers/gnome_Pathway_1600x1200.jpg"
+4 = "~/pictures/wallpaper/The_Hive_by_spr33.jpg"
+5 = "~/My Documents/My Wallpapers/shadowness_insanitydimension_1920x1200.png"
+6 = "~/My Documents/My Wallpapers/shadowness_unleashed-1920x1200_expanded_left.png"
+
+[shell.panel]
+enabled = true
+clock = "%H:%M:%S"
+edge = "bottom"
+height = 32
+width = 400
+align = "center"
+items = ["start", "taskbar", "mixer", "tray", "clock"]
+task-titles = true
+
+[shell.mixer]
+panel = ["levels"]
+
+[shell.pie]
+size = 580
+icons = "~/.config/perspicax/icons"
+grow = 1.75
+# aliases = [
+#   { app-id = "com.mitchellh.ghostty", as = "ghostty" },
+#   { title = "Steam", as = "steam" }
+# ]
+
+[shell.pie.menus]
+launchers = [
+  { label = "terminal", exec = ["foot"] },
+  { label = "ghostty", exec = ["ghostty"] },
+  { label = "alacritty", exec = ["alacritty"] },
+  { label = "ennius", exec = ["ennius"] },
+  { label = "vivaldi", exec = ["vivaldi"] },
+  { label = "internet", items = [
+    { label = "firefox", exec = ["firefox"] },
+    { label = "firework", exec = ["firework"] },
+    { label = "firehome", exec = ["firehome"] },
+    { label = "firelora", exec = ["firelora"] },
+    { label = "firegage", exec = ["firegage"] },
+    { label = "fireisla", exec = ["fireisla"] },
+    { label = "chromium", exec = ["chromium"] },
+    { label = "slack", exec = ["slack"] },
+    { label = "discord", exec = ["discord"] },
+  ] },
+  { label = "productivity", items = [
+    { label = "libreoffice", exec = ["libreoffice"] },
+    { label = "antigravity", exec = ["antigravity"] },
+    { label = "vscode", exec = ["vscode"] },
+    { label = "android", exec = ["android-studio"] },
+    { label = "raiblocks", exec = ["rai_wallet"] },
+    # { label = "bitcoin", exec = ["bitcoin-qt"] },
+    { label = "electrum", exec = ["electrum"] },
+    # { label = "exodus", exec = ["Exodus"] },
+    # { label = "godot", exec = ["godot4"] },
+  ] },
+  { label = "multimedia", items = [
+    # { label = "inkscape", exec = ["inkscape"] },
+    { label = "gimp", exec = ["gimp"] },
+    { label = "blender", exec = ["blender-4.4"] },
+    { label = "freecad", exec = ["freecad"] },
+    { label = "kicad", exec = ["kicad"] },
+    # { label = "cura", exec = ["cura"] },
+    { label = "ideamaker", exec = ["ideamaker-start.sh"] },
+    # { label = "slic3r", exec = ["slic3r.pl"] },
+    { label = "meshmixer", exec = ["meshmixer"] },
+    { label = "obs studio", exec = ["obs"] },
+    { label = "audacious", exec = ["audacious"] },
+  ] },
+  { label = "games", items = [
+    { label = "steam", exec = ["steam"] },
+    { label = "legend", exec = ["mrxvt.legend"] },
+    { label = "pyfa", exec = ["pyfa"] },
+  ] },
+  { running = true },
+]
+
+[shell.start-menu]
+# icon = "start-here"          # a theme's name, or an image file (anything with a "/"); unset or not found: the mark
+mode = "replace"               # "extend" (the default) puts the items above the applications
+search = "all"                 # "menu" (the default), "all", or "none" for no search line
+items = [
+  { app = "com.mitchellh.ghostty" },
+  { app = "Alacritty" },
+  { app = "foot" },
+  { label = "ennius", exec = ["ennius"] },
+  { label = "Internet", items = [
+    { app = "vivaldi-stable" },
+    { app = "firefox" },
+    { app = "chromium-browser" },
+    { app = "slack" },
+    { app = "discord" },
+  ] },
+  { label = "Productivity", items = [
+    { app = "libreoffice" },
+    { app = "antigravity" },
+    { app = "code" },
+    { app = "android-studio" },
+    { label = "raiblocks", exec = ["rai_wallet"] },
+    { app = "electrum" },
+  ] },
+  { label = "Multimedia", items = [
+    { app = "gimp" },
+    { app = "blender-4.4" },
+    { app = "org.freecad.FreeCAD" },
+    { app = "org.kicad.kicad" },
+    { app = "ideamaker" },
+    { label = "meshmixer", exec = ["meshmixer"] },
+    { app = "com.obsproject.Studio" },
+    { app = "audacious" },
+  ] },
+  { label = "Games", items = [
+    { app = "steam" },
+    { label = "legend", exec = ["mrxvt.legend"] },
+    { label = "pyfa", exec = ["pyfa"] },
+  ] },
+  { separator = true },
+  { session = true },          # the ways to leave, as [shell] leave says
+]
+
+[theme]
+name = "breeze-dark"
+logo = "~/pictures/ennius_logo.png"
+# logo = "~/pictures/perspicax_logo.png"
+# logo = "~/pictures/atlabs_logo.png"
+
+[theme.palette]
+accent = "#e93d5a"
+lock-accent = "#834726"
+# lock
+# font
+# lock-ink
+lock-ring = "#c06a3c"
+# alert
+
+# [splash]
+# enabled = false   # on by default, wherever there is a seat
+
+[protocols]
+
+[agent]
+socket = true                     # $XDG_RUNTIME_DIR/perspicax-mcp (default); or a path; or false
+# launch = ["flutter", "zenity"]  # apps the agent can freely launch, "off" (the default), "any", or a list
+
+[[output]]
+name = "eDP-1"
+scale = 0.9
+

@@ -1,6 +1,6 @@
 [package]
 name = "perspicax-protocols"
-description = "perspicax's own Wayland protocols, generated for the compositor and its shell."
+description = "perspicax's own Wayland protocols, generated for the compositor, its shell and its settings app."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -26,6 +26,9 @@ wayland-backend = "0.3"
 wayland-scanner = "0.31"
 wayland-client = { version = "0.31", optional = true }
 wayland-server = { version = "0.31", optional = true }
+# What the scanner writes a bitfield enum with, as `wayland-protocols` has
+# it: `perspicax-settings-v1`'s modifiers. Already in the tree. MIT or Apache-2.0.
+bitflags = "2"
 
 [features]
 # The compositor's side.

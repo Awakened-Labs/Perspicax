@@ -53,7 +53,9 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use perspicax::{attach, bus, desk::Desk, keep::keep_current, lock, observe, session, wire::Wire};
+use perspicax::{
+    attach, bus, check, desk::Desk, keep::keep_current, lock, observe, session, wire::Wire,
+};
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop, Virtual};
 use perspicax_config::{AgentSocket, Built};
 use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt::writer::BoxMakeWriter};
@@ -250,6 +252,29 @@ enum Command {
         )]
         args: Vec<String>,
     },
+
+    /// The config file, without a session.
+    Config {
+        #[command(subcommand)]
+        verb: ConfigVerb,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigVerb {
+    /// Say whether a session would take the config, in the words of the
+    /// two programs that read it: this perspicax, and the perspicax-shell
+    /// the session would start, each with the features it was built with.
+    ///
+    /// A save the session refuses is otherwise only a line in its log, and
+    /// it carries on with the config it had. Exits 0 if both take it, 78 if
+    /// either refuses it, 66 for a PATH that is not there.
+    Check {
+        /// The file, instead of the session's own (`$PERSPICAX_CONFIG`, or
+        /// else `$XDG_CONFIG_HOME/perspicax/config.toml`).
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+    },
 }
 
 impl Cli {
@@ -274,6 +299,14 @@ fn main() -> Result<()> {
     // not.
     if let Some(Command::Lock { args }) = &cli.command {
         return Err(lock::lock(args));
+    }
+
+    // Likewise: an answer about a file, and nothing started to give it.
+    if let Some(Command::Config {
+        verb: ConfigVerb::Check { path },
+    }) = &cli.command
+    {
+        std::process::exit(check::run(path.as_deref(), BUILT));
     }
 
     // Before the log is opened and before anything is started, because when it
@@ -920,6 +953,32 @@ mod tests {
         assert_eq!(
             parse(&["--seat", "lock"]).err(),
             Some(ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn checking_a_config_needs_no_session_and_takes_a_path() {
+        let path = |cli: Cli| match cli.command {
+            Some(Command::Config {
+                verb: ConfigVerb::Check { path },
+            }) => path,
+            _ => panic!("not config check"),
+        };
+        assert_eq!(
+            path(parse(&["config", "check"]).expect("check alone")),
+            None
+        );
+        assert_eq!(
+            path(parse(&["config", "check", "/tmp/config.toml"]).expect("check PATH")),
+            Some(PathBuf::from("/tmp/config.toml"))
+        );
+        assert_eq!(
+            parse(&["--seat", "config", "check"]).err(),
+            Some(ErrorKind::ArgumentConflict)
+        );
+        assert!(
+            parse(&["config"]).is_err(),
+            "config is not a verb on its own"
         );
     }
 }

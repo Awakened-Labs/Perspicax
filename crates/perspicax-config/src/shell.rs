@@ -135,6 +135,19 @@ pub enum UntrustedLaunchers {
     Hidden,
 }
 
+impl UntrustedLaunchers {
+    pub const ALL: [Self; 2] = [Self::AsFiles, Self::Hidden];
+
+    /// Its name as `untrusted-launchers` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::AsFiles => "as-files",
+            Self::Hidden => "hidden",
+        }
+    }
+}
+
 /// A wallpaper: a colour, and an image over it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Wallpaper {
@@ -161,6 +174,21 @@ pub enum WallpaperMode {
     Center,
     /// At its own size, repeated from the top-left corner.
     Tile,
+}
+
+impl WallpaperMode {
+    pub const ALL: [Self; 4] = [Self::Fill, Self::Fit, Self::Center, Self::Tile];
+
+    /// Its name as `wallpaper-mode` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Fill => "fill",
+            Self::Fit => "fit",
+            Self::Center => "center",
+            Self::Tile => "tile",
+        }
+    }
 }
 
 /// The panel: a bar along one edge of a monitor.
@@ -194,6 +222,19 @@ pub enum Edge {
     Bottom,
 }
 
+impl Edge {
+    pub const ALL: [Self; 2] = [Self::Top, Self::Bottom];
+
+    /// Its name as `[shell.panel] edge` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+        }
+    }
+}
+
 /// How wide a panel's bar is asked to be. It is wider when what it holds
 /// needs more room, once its tasks are shrunk to their icons, and never
 /// wider than its monitor.
@@ -219,6 +260,20 @@ pub enum Align {
     Right,
 }
 
+impl Align {
+    pub const ALL: [Self; 3] = [Self::Left, Self::Center, Self::Right];
+
+    /// Its name as `[shell.panel] align` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Center => "center",
+            Self::Right => "right",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PanelOutputs {
     /// Every monitor.
@@ -236,6 +291,19 @@ pub enum TaskbarScope {
     ThisOutput,
     /// Every window, on every panel.
     All,
+}
+
+impl TaskbarScope {
+    pub const ALL: [Self; 2] = [Self::ThisOutput, Self::All];
+
+    /// Its name as `[shell.panel] taskbar` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::ThisOutput => "this-output",
+            Self::All => "all",
+        }
+    }
 }
 
 /// One thing a panel holds.
@@ -259,6 +327,17 @@ pub enum Item {
 }
 
 impl Item {
+    /// Every item, in the order a panel would hold them all.
+    pub const ALL: [Self; 7] = [
+        Self::Start,
+        Self::Taskbar,
+        Self::Pager,
+        Self::Layout,
+        Self::Tray,
+        Self::Mixer,
+        Self::Clock,
+    ];
+
     /// Its name as `items` writes it.
     #[must_use]
     pub const fn key(self) -> &'static str {
@@ -313,11 +392,6 @@ impl Leave {
 
 /// What `wallpaper` is set to for no wallpaper.
 const NONE: &str = "none";
-
-/// The tallest panel: past this it is a typo, not a panel.
-const PANEL_MAX: u32 = 128;
-/// The shortest panel that still holds a line of text.
-const PANEL_MIN: u32 = 16;
 
 impl Shell {
     /// A profile's shell, holding only what `built` has.
@@ -792,10 +866,15 @@ impl RawPanel {
             panel.edge = edge;
         }
         if let Some(height) = self.height {
-            if !(PANEL_MIN..=PANEL_MAX).contains(&height) {
+            let range = crate::limits::PANEL_HEIGHT;
+            if !range.contains(&height) {
                 return Err(invalid(
                     "shell.panel.height".to_owned(),
-                    format!("{height} is outside {PANEL_MIN} to {PANEL_MAX} pixels"),
+                    format!(
+                        "{height} is outside {} to {} pixels",
+                        range.start(),
+                        range.end()
+                    ),
                 ));
             }
             panel.height = height;
@@ -881,9 +960,12 @@ impl RawWidth {
                     0 => Err(refused(
                         "0% leaves no panel; write `enabled = false` for none".to_owned(),
                     )),
-                    1..=100 => Ok(PanelWidth::Percent(percent)),
+                    _ if crate::limits::PANEL_SHARE.contains(&percent) => {
+                        Ok(PanelWidth::Percent(percent))
+                    }
                     _ => Err(refused(format!(
-                        "{percent}% is wider than the monitor; \"100%\" is the whole of it"
+                        "{percent}% is wider than the monitor; \"{}%\" is the whole of it",
+                        crate::limits::PANEL_SHARE.end()
                     ))),
                 }
             }

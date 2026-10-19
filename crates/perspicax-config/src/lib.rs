@@ -23,11 +23,15 @@
 //! entries, which the shell lists in its menus and the session starts in
 //! [`autostart`](mod@autostart), by the same rules. And the [`menu`]
 //! vocabulary, which the menu file, the start menu and a pie are written in.
-//! And [`locate`]: where a path written in the file points.
+//! And [`locate`]: where a path written in the file points. And
+//! [`find_program`]: where perspicax's own programs are, so that the session
+//! and `perspicax config check` find the same shell.
 
+mod actions;
 pub mod autostart;
 pub mod desktop;
 mod keys;
+pub mod limits;
 pub mod menu;
 pub mod mixer;
 pub mod pie;
@@ -37,17 +41,22 @@ mod swaylock;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsStr,
     path::{Path, PathBuf},
 };
 
 use perspicax_policy::{
     Access, Action, Animation, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction,
-    Drag, Effect, Face, Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Keysym, Mods,
-    MouseBindings, MouseChord, OPAQUE, Opacity, Place, Program, Protocol, Remembering, Resistance,
+    Drag, Effect, Face, Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Hatch, Keysym,
+    Mods, MouseBindings, MouseChord, Opacity, Place, Program, Protocol, Remembering, Resistance,
     Rule, Shadow, Shape, Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
 };
 use serde::Deserialize;
 
+pub use crate::actions::{Spelled, action_names, spell_action};
+pub use crate::keys::{
+    Trigger, modifiers, spell_chord, spell_modifiers, spell_press, spell_trigger, trigger,
+};
 use crate::shell::RawShell;
 pub use crate::shell::{
     Align, Edge, Item, Leave, Panel, PanelOutputs, PanelWidth, Shell, ShellBuilt, TaskbarScope,
@@ -174,6 +183,19 @@ pub enum Profile {
     /// Fluxbox- and Enlightenment-like: focus follows the pointer, and
     /// otherwise the same keys.
     Minimal,
+}
+
+impl Profile {
+    pub const ALL: [Self; 2] = [Self::Classic, Self::Minimal];
+
+    /// Its name as `profile` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Minimal => "minimal",
+        }
+    }
 }
 
 /// Everything a config file decides, with the profile applied and every
@@ -325,29 +347,20 @@ impl Default for Pointer {
     }
 }
 
-/// The double-click times a config may ask for. Faster than the shortest, a
-/// hand cannot click twice on purpose; slower than the longest, two clicks
-/// a person meant as two would open what they only meant to select.
-const DOUBLE_CLICK_RANGE: std::ops::RangeInclusive<u32> = 100..=2000;
-
-/// `double-click-ms` as written, if it is in [`DOUBLE_CLICK_RANGE`].
+/// `double-click-ms` as written, if it is in [`limits::DOUBLE_CLICK_MS`].
 fn double_click_ms(written: u32) -> Result<u32, Error> {
-    if DOUBLE_CLICK_RANGE.contains(&written) {
+    if limits::DOUBLE_CLICK_MS.contains(&written) {
         return Ok(written);
     }
     Err(invalid(
         "input.pointer.double-click-ms".to_owned(),
         format!(
             "{written} is outside {} to {} milliseconds",
-            DOUBLE_CLICK_RANGE.start(),
-            DOUBLE_CLICK_RANGE.end()
+            limits::DOUBLE_CLICK_MS.start(),
+            limits::DOUBLE_CLICK_MS.end()
         ),
     ))
 }
-
-/// The most workspaces along one side of the grid. Generous: past this, a
-/// grid is a typo, and a 1000x1000 one would be a million workspaces.
-const GRID_SIDE: u16 = 16;
 
 /// What to do with one output.
 #[derive(Debug, Clone, PartialEq)]
@@ -703,12 +716,35 @@ fn count(grid: Grid) -> u32 {
     u32::from(grid.columns) * u32::from(grid.rows)
 }
 
+/// The settings app's program. It edits this file, and the file is what
+/// holds every agent back, so no agent is ever handed it: the config
+/// refuses to mark it for one, and `perspicax-index` refuses to act on its
+/// windows whatever was granted.
+pub const SETTINGS_APP: &str = "perspicax-settings";
+
+/// Whether `program`, a bare name or a path, is [`SETTINGS_APP`].
+fn is_settings_app(program: &str) -> bool {
+    Path::new(program)
+        .file_name()
+        .is_some_and(|name| name == SETTINGS_APP)
+}
+
+/// Why `perspicax-settings` may not be an agent's, and what to do instead.
+fn no_agent_settings(remedy: &str) -> String {
+    format!(
+        "`{SETTINGS_APP}` edits this file, which is what holds an agent back, so no agent may \
+         be given it; {remedy}"
+    )
+}
+
 /// The `[protocols]` defaults, the same in both profiles: a profile is a
 /// window manager's habits, not a security posture. Listing windows and
 /// workspaces is open to any client, as every panel expects. Reading pixels,
-/// moving monitors and speaking for the desktop shell are for the programs
-/// that are known to do it, by name, which anything can claim; a person who
-/// wants it tighter writes full paths.
+/// moving monitors, speaking for the desktop shell and hearing the chord a
+/// person presses to bind are for the programs that are known to do it, by
+/// name, which anything can claim; a person who wants it tighter writes full
+/// paths. The settings app reads the monitors it lists on its Outputs page:
+/// it writes `[[output]]` already, so that grants it nothing new.
 fn protocols(built: Built) -> Access {
     let only = |names: &[&str]| Rule::Only(names.iter().map(|name| Program::parse(name)).collect());
     Access::open()
@@ -722,9 +758,34 @@ fn protocols(built: Built) -> Access {
         )
         .with(
             Protocol::OutputManagement,
-            only(&["wlr-randr", "kanshi", "wdisplays", "nwg-displays"]),
+            only(&[
+                "wlr-randr",
+                "kanshi",
+                "wdisplays",
+                "nwg-displays",
+                SETTINGS_APP,
+            ]),
         )
         .with(Protocol::Shell, only(&["perspicax-shell"]))
+        .with(Protocol::Settings, only(&[SETTINGS_APP]))
+}
+
+/// Set in the environment of every program a session on a seat starts: the
+/// config file the session read. Empty for a session that read none.
+pub const SESSION_CONFIG: &str = "PERSPICAX_CONFIG";
+
+/// The config a program in the session reads: the session's own
+/// ([`SESSION_CONFIG`]), or else the one a session would read by default.
+/// `perspicax lock`, `perspicax config check` and the settings app each find
+/// it so.
+///
+/// `var` reads the environment.
+#[must_use]
+pub fn session_path(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    var(SESSION_CONFIG)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(default_path)
 }
 
 /// Where the config file lives: `$XDG_CONFIG_HOME/perspicax/config.toml`,
@@ -768,6 +829,28 @@ pub fn locate(written: &Path, config: Option<&Path>, home: Option<&Path>) -> Pat
         Some(beside) if written.is_relative() => beside.join(written),
         _ => written.to_owned(),
     }
+}
+
+/// Where one of perspicax's own programs is: `name` in `beside`, the folder
+/// the running binary is in, where `cargo build` and a package both put the
+/// pair; then in the first folder of `path` that has one. Only a file that
+/// may be run counts.
+#[must_use]
+pub fn find_program(name: &str, beside: Option<&Path>, path: Option<&OsStr>) -> Option<PathBuf> {
+    let on_path = path.into_iter().flat_map(std::env::split_paths);
+    beside
+        .map(Path::to_owned)
+        .into_iter()
+        .chain(on_path)
+        .map(|folder| folder.join(name))
+        .find(|candidate| runnable(candidate))
+}
+
+/// Whether `path` is a file that may be run.
+fn runnable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    path.metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 /// Read and parse a config file. A file that does not exist is the classic
@@ -914,6 +997,12 @@ impl RawAgent {
         if let Some(launch) = self.launch {
             let rule = launch.rule("agent.launch")?;
             for (at, program) in rule.named().into_iter().enumerate() {
+                if is_settings_app(program) {
+                    return Err(invalid(
+                        format!("agent.launch[{at}]"),
+                        no_agent_settings("take it out of the list"),
+                    ));
+                }
                 if program.contains('/') && !program.starts_with('/') {
                     return Err(invalid(
                         format!("agent.launch[{at}]"),
@@ -1007,6 +1096,7 @@ struct RawProtocols {
     screencopy: Option<RawRule>,
     output_management: Option<RawRule>,
     shell: Option<RawRule>,
+    settings: Option<RawRule>,
 }
 
 /// `"any"`, `"off"`, or a list of programs.
@@ -1162,9 +1252,6 @@ struct RawResistance {
     seams: Option<i32>,
 }
 
-/// More than this and an edge is a wall a person has to fight.
-const RESISTANCE_MAX: i32 = 128;
-
 /// Read wider than a percent, so that a value out of range is refused by its
 /// key rather than by serde.
 #[derive(Debug, Deserialize)]
@@ -1205,9 +1292,6 @@ struct RawFlip {
     scroll: Option<bool>,
 }
 
-/// Longer than this and a person would think edge flipping was broken.
-const FLIP_DELAY_MAX_MS: u64 = 5000;
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct RawTransition {
@@ -1224,9 +1308,6 @@ enum RawEffect {
     Wipe,
     Carousel,
 }
-
-/// Longer than this and a switch would feel stuck rather than shown.
-const TRANSITION_MAX_MS: u64 = 2000;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1331,6 +1412,23 @@ fn drag_taken(bindings: &Bindings, chord: &MouseChord, drag_from: &str) -> Strin
          modifier, bind it in `[mouse.titlebar]`, or change `drag`",
         keys::spelled(chord.mods)
     )
+}
+
+/// Why a `[keys]` entry for an escape hatch is refused. The compositor takes
+/// those chords before it looks at a binding, so one written here could
+/// never fire, and a `"none"` could never hand the chord to the client.
+fn hatch_taken(trigger: keys::Trigger) -> Option<String> {
+    let keys::Trigger::Chord(chord) = trigger else {
+        return None;
+    };
+    let does = match perspicax_policy::hatch(chord.mods, [chord.key])? {
+        Hatch::Exit => "ends the session".to_owned(),
+        Hatch::Vt(vt) => format!("switches to VT {vt}"),
+    };
+    Some(format!(
+        "{does} before any binding is looked at, so no config can bind or unbind it; choose \
+         another chord"
+    ))
 }
 
 /// A binding's value: an action's name, `{ spawn = [...] }` or
@@ -1511,14 +1609,25 @@ impl Raw {
         // The first key written to change the sound, to refuse with the
         // shell off.
         let mut volume_written = None;
+        let mut written_as = Vec::new();
         for (written, action) in self.keys {
-            let trigger = keys::trigger(&written)
-                .map_err(|reason| invalid(format!("keys.{written}"), reason))?;
-            let action = action_for(action, &pies)
-                .map_err(|reason| invalid(format!("keys.{written}"), reason))?;
-            if matches!(action, Some(Action::Volume(_))) && volume_written.is_none() {
-                volume_written = Some(format!("keys.{written}"));
+            let key = format!("keys.{written}");
+            let trigger = keys::trigger(&written).map_err(|reason| invalid(key.clone(), reason))?;
+            if let Some(reason) = hatch_taken(trigger) {
+                return Err(invalid(key, reason));
             }
+            if let Some((_, first)) = written_as.iter().find(|(seen, _)| *seen == trigger) {
+                return Err(invalid(
+                    key,
+                    format!("is the same as `{first}`, already written; write it once"),
+                ));
+            }
+            let action =
+                action_for(action, &pies).map_err(|reason| invalid(key.clone(), reason))?;
+            if matches!(action, Some(Action::Volume(_))) && volume_written.is_none() {
+                volume_written = Some(key);
+            }
+            written_as.push((trigger, written));
             config.bindings = match (trigger, action) {
                 (keys::Trigger::Chord(chord), Some(action)) => config.bindings.bind(chord, action),
                 (keys::Trigger::Chord(chord), None) => config.bindings.unbind(chord),
@@ -1550,11 +1659,15 @@ impl Raw {
             }
             if let Some(pointer) = input.pointer {
                 if let Some(accel) = pointer.accel
-                    && !(-1.0..=1.0).contains(&accel)
+                    && !limits::ACCEL.contains(&accel)
                 {
                     return Err(invalid(
                         "input.pointer.accel".to_owned(),
-                        format!("{accel} is outside -1 to 1"),
+                        format!(
+                            "{accel} is outside {} to {}",
+                            limits::ACCEL.start(),
+                            limits::ACCEL.end()
+                        ),
                     ));
                 }
                 config.pointer = Pointer {
@@ -1595,12 +1708,15 @@ impl Raw {
                 };
             }
             if let Some([columns, rows]) = workspaces.grid {
-                if !(1..=GRID_SIDE).contains(&columns) || !(1..=GRID_SIDE).contains(&rows) {
+                let side = limits::GRID_SIDE;
+                if !side.contains(&columns) || !side.contains(&rows) {
                     return Err(invalid(
                         "workspaces.grid".to_owned(),
                         format!(
-                            "[{columns}, {rows}] is not a grid; each side is 1 to {GRID_SIDE} \
-                             workspaces, columns first"
+                            "[{columns}, {rows}] is not a grid; each side is {} to {} \
+                             workspaces, columns first",
+                            side.start(),
+                            side.end()
                         ),
                     ));
                 }
@@ -1612,10 +1728,13 @@ impl Raw {
             }
             if let Some(flip) = workspaces.flip {
                 if let Some(delay) = flip.delay_ms {
-                    if delay > FLIP_DELAY_MAX_MS {
+                    if !limits::FLIP_DELAY_MS.contains(&delay) {
                         return Err(invalid(
                             "workspaces.flip.delay-ms".to_owned(),
-                            format!("{delay} is more than {FLIP_DELAY_MAX_MS} milliseconds"),
+                            format!(
+                                "{delay} is more than {} milliseconds",
+                                limits::FLIP_DELAY_MS.end()
+                            ),
                         ));
                     }
                     config.flipping.delay_ms = delay;
@@ -1643,10 +1762,13 @@ impl Raw {
                             "0 is no transition: write effect = \"none\"".to_owned(),
                         ));
                     }
-                    if length > TRANSITION_MAX_MS {
+                    if !limits::TRANSITION_MS.contains(&length) {
                         return Err(invalid(
                             key,
-                            format!("{length} is more than {TRANSITION_MAX_MS} milliseconds"),
+                            format!(
+                                "{length} is more than {} milliseconds",
+                                limits::TRANSITION_MS.end()
+                            ),
                         ));
                     }
                     config.transitioning.duration_ms = Some(length);
@@ -1656,10 +1778,15 @@ impl Raw {
 
         if let Some(snap) = self.snap {
             if let Some(threshold) = snap.threshold {
-                if !(1..=64).contains(&threshold) {
+                let range = limits::SNAP_THRESHOLD;
+                if !range.contains(&threshold) {
                     return Err(invalid(
                         "snap.threshold".to_owned(),
-                        format!("{threshold} is outside 1 to 64 pixels"),
+                        format!(
+                            "{threshold} is outside {} to {} pixels",
+                            range.start(),
+                            range.end()
+                        ),
                     ));
                 }
                 config.snapping.threshold = threshold;
@@ -1675,10 +1802,15 @@ impl Raw {
                 let Some(value) = value else {
                     continue;
                 };
-                if !(0..=RESISTANCE_MAX).contains(&value) {
+                let range = limits::RESISTANCE;
+                if !range.contains(&value) {
                     return Err(invalid(
                         format!("resistance.{key}"),
-                        format!("{value} is outside 0 to {RESISTANCE_MAX} pixels"),
+                        format!(
+                            "{value} is outside {} to {} pixels",
+                            range.start(),
+                            range.end()
+                        ),
                     ));
                 }
                 *into = value;
@@ -1754,6 +1886,15 @@ impl Raw {
                 "an empty command".to_owned(),
             ));
         }
+        if let Some(settings) = starts
+            .iter()
+            .position(|start| start.agent && is_settings_app(&start.command[0]))
+        {
+            return Err(invalid(
+                format!("autostart[{settings}]"),
+                no_agent_settings("drop `agent = true`"),
+            ));
+        }
         config.autostart = starts;
         Ok(config)
     }
@@ -1761,11 +1902,21 @@ impl Raw {
 
 impl RawOpacity {
     fn apply(self, mut opacity: Opacity) -> Result<Opacity, Error> {
+        let range = limits::OPACITY;
         let percent = |key: String, value: i64| {
             u8::try_from(value)
                 .ok()
-                .filter(|percent| (1..=OPAQUE).contains(percent))
-                .ok_or_else(|| invalid(key, format!("{value} is outside 1 to {OPAQUE} percent")))
+                .filter(|percent| range.contains(percent))
+                .ok_or_else(|| {
+                    invalid(
+                        key,
+                        format!(
+                            "{value} is outside {} to {} percent",
+                            range.start(),
+                            range.end()
+                        ),
+                    )
+                })
         };
         for (key, value, into) in [
             ("step", self.step, &mut opacity.step),
@@ -1846,22 +1997,25 @@ impl RawDecorations {
             }
         };
         if let Some(title) = self.title_height {
-            decorations.title = pixels("title-height", title, 8..=96)?;
+            decorations.title = pixels("title-height", title, limits::TITLE_HEIGHT)?;
         }
         if let Some(border) = self.border {
-            decorations.border = pixels("border", border, 0..=32)?;
+            decorations.border = pixels("border", border, limits::BORDER)?;
         }
         if let Some(radius) = self.corner_radius {
-            decorations.radius = pixels("corner-radius", radius, 0..=16)?;
+            decorations.radius = pixels("corner-radius", radius, limits::CORNER_RADIUS)?;
         }
         if let Some(written) = self.animation {
             let length = |key: &str, ms: u32| {
-                if ms <= 1000 {
+                if limits::ANIMATION_MS.contains(&ms) {
                     Ok(ms)
                 } else {
                     Err(invalid(
                         format!("decorations.animation.{key}"),
-                        format!("{ms} is more than 1000 milliseconds; 0 is none"),
+                        format!(
+                            "{ms} is more than {} milliseconds; 0 is none",
+                            limits::ANIMATION_MS.end()
+                        ),
                     ))
                 }
             };
@@ -1875,22 +2029,27 @@ impl RawDecorations {
         if let Some(written) = self.shadow {
             let shadow = &mut decorations.shadow;
             if let Some(size) = written.size {
-                shadow.size = pixels("shadow.size", size, 0..=64)?;
+                shadow.size = pixels("shadow.size", size, limits::SHADOW_SIZE)?;
             }
             if let Some([x, y]) = written.offset {
                 shadow.offset = (
-                    pixels("shadow.offset", x, -32..=32)?,
-                    pixels("shadow.offset", y, -32..=32)?,
+                    pixels("shadow.offset", x, limits::SHADOW_OFFSET)?,
+                    pixels("shadow.offset", y, limits::SHADOW_OFFSET)?,
                 );
             }
             if let Some(opacity) = written.opacity {
+                let range = limits::SHADOW_OPACITY;
                 shadow.opacity = u8::try_from(opacity)
                     .ok()
-                    .filter(|opacity| *opacity <= 100)
+                    .filter(|_| range.contains(&opacity))
                     .ok_or_else(|| {
                         invalid(
                             "decorations.shadow.opacity".to_owned(),
-                            format!("{opacity} is outside 0 to 100 percent"),
+                            format!(
+                                "{opacity} is outside {} to {} percent",
+                                range.start(),
+                                range.end()
+                            ),
                         )
                     })?;
             }
@@ -1905,7 +2064,7 @@ impl RawDecorations {
         if let Some(agent) = self.agent {
             let look = &mut decorations.agent;
             if let Some(outline) = agent.outline {
-                look.outline = pixels("agent.outline", outline, 0..=8)?;
+                look.outline = pixels("agent.outline", outline, limits::AGENT_OUTLINE)?;
             }
             let written = [
                 ("focused", agent.focused, &mut look.focused),
@@ -2053,10 +2212,15 @@ fn theme(written: Option<RawTheme>, decorations: Option<&RawDecorations>) -> Res
         font.family = Family::parse(&family);
     }
     if let Some(size) = written.font_size {
-        if !(10..=20).contains(&size) {
+        let range = limits::FONT_SIZE;
+        if !range.contains(&size) {
             return Err(invalid(
                 "theme.font-size".to_owned(),
-                format!("{size} is outside 10 to 20 pixels"),
+                format!(
+                    "{size} is outside {} to {} pixels",
+                    range.start(),
+                    range.end()
+                ),
             ));
         }
         font.size = size;
@@ -2073,11 +2237,15 @@ fn theme(written: Option<RawTheme>, decorations: Option<&RawDecorations>) -> Res
         ));
     }
     if let Some(size) = written.cursor_size
-        && !(8..=128).contains(&size)
+        && !limits::CURSOR_SIZE.contains(&size)
     {
         return Err(invalid(
             "theme.cursor-size".to_owned(),
-            format!("{size} is outside 8 to 128 pixels"),
+            format!(
+                "{size} is outside {} to {} pixels",
+                limits::CURSOR_SIZE.start(),
+                limits::CURSOR_SIZE.end()
+            ),
         ));
     }
 
@@ -2187,6 +2355,7 @@ impl RawProtocols {
             (Protocol::Screencopy, self.screencopy),
             (Protocol::OutputManagement, self.output_management),
             (Protocol::Shell, self.shell),
+            (Protocol::Settings, self.settings),
         ];
         for (protocol, raw) in written {
             let Some(raw) = raw else { continue };
@@ -2240,7 +2409,7 @@ impl RawRule {
 impl RawKeyboard {
     fn apply(self, mut keyboard: Keyboard) -> Result<Keyboard, Error> {
         let positive = |key: &str, value: i32| {
-            if value > 0 {
+            if limits::REPEAT.contains(&value) {
                 Ok(value)
             } else {
                 Err(invalid(
@@ -2277,15 +2446,19 @@ impl RawOutput {
         let mode = self
             .mode
             .as_deref()
-            .map(mode)
+            .map(str::parse)
             .transpose()
             .map_err(|reason| invalid(format!("{key}.mode"), reason))?;
         if let Some(scale) = self.scale
-            && !(0.5..=4.0).contains(&scale)
+            && !limits::SCALE.contains(&scale)
         {
             return Err(invalid(
                 format!("{key}.scale"),
-                format!("{scale} is outside 0.5 to 4"),
+                format!(
+                    "{scale} is outside {} to {}",
+                    limits::SCALE.start(),
+                    limits::SCALE.end()
+                ),
             ));
         }
         let place = self.place(&key)?;
@@ -2302,14 +2475,14 @@ impl RawOutput {
     /// and an `offset` only with a side to be offset along.
     fn place(&self, key: &str) -> Result<Place, Error> {
         let sides = [
-            ("left-of", Side::LeftOf, &self.left_of),
-            ("right-of", Side::RightOf, &self.right_of),
-            ("above", Side::Above, &self.above),
-            ("below", Side::Below, &self.below),
+            (Side::LeftOf, &self.left_of),
+            (Side::RightOf, &self.right_of),
+            (Side::Above, &self.above),
+            (Side::Below, &self.below),
         ];
         let mut written = sides
             .iter()
-            .filter_map(|(word, side, of)| of.as_ref().map(|of| (*word, *side, of)));
+            .filter_map(|(side, of)| of.as_ref().map(|of| (side.key(), *side, of)));
         let beside = written.next();
         if let Some((second, _, _)) = written.next() {
             return Err(invalid(
@@ -2378,127 +2551,42 @@ fn cycle(outputs: &[OutputRule]) -> Option<&str> {
 /// The action a binding's value names. `pies` are the pies
 /// `[shell.pie.menus]` names, which a `{ pie = "..." }` must be one of.
 fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Action>, String> {
-    Ok(Some(match action {
-        RawAction::Spawn(RawSpawn { spawn, .. }) if spawn.is_empty() => {
-            return Err("`spawn` needs a program".to_owned());
-        }
-        RawAction::Spawn(RawSpawn { spawn, agent }) => Action::Spawn {
-            command: spawn,
-            agent,
-        },
-        RawAction::Pie(RawOpenPie { pie }) if pies.contains(&pie) => Action::Pie(pie),
-        RawAction::Pie(RawOpenPie { pie }) if pies.is_empty() => {
-            return Err(format!(
-                "there is no pie `{pie}`: write it in `[shell.pie.menus]`"
-            ));
-        }
-        RawAction::Pie(RawOpenPie { pie }) => {
-            let named: Vec<&str> = pies.iter().map(String::as_str).collect();
-            return Err(format!(
-                "there is no pie `{pie}`; `[shell.pie.menus]` names {}",
-                named.join(", ")
-            ));
-        }
-        RawAction::Named(name) => match name.as_str() {
-            "none" => return Ok(None),
-            "close" => Action::Close,
-            "cycle-focus" => Action::CycleFocus,
-            "move-to-next-output" => Action::MoveToOutput(Towards::Next),
-            "move-to-previous-output" => Action::MoveToOutput(Towards::Previous),
-            "reload" => Action::Reload,
-            "toggle-sticky" => Action::ToggleSticky,
-            "toggle-maximize" => Action::ToggleMaximize,
-            "minimize" => Action::Minimize,
-            "shade" => Action::Shade,
-            "unshade" => Action::Unshade,
-            "toggle-shade" => Action::ToggleShade,
-            "next-tab" => Action::CycleTab { forward: true },
-            "previous-tab" => Action::CycleTab { forward: false },
-            "tab-with-previous" => Action::TabWithPrevious,
-            "detach-tab" => Action::DetachTab,
-            "start-menu" => Action::StartMenu,
-            "root-menu" => Action::RootMenu,
-            "next-layout" => Action::CycleLayout { forward: true },
-            "previous-layout" => Action::CycleLayout { forward: false },
-            "next-workspace" => Action::CycleWorkspace { forward: true },
-            "previous-workspace" => Action::CycleWorkspace { forward: false },
-            "opacity-up" => Action::OpacityUp,
-            "opacity-down" => Action::OpacityDown,
-            "opacity-reset" => Action::OpacityReset,
-            "toggle-agent" => Action::ToggleAgent,
-            "revoke-agent-all" => Action::RevokeAgents,
-            "volume-up" => Action::Volume(VolumeKey::Up),
-            "volume-down" => Action::Volume(VolumeKey::Down),
-            "volume-mute" => Action::Volume(VolumeKey::Mute),
-            "mic-mute" => Action::Volume(VolumeKey::MicMute),
-            other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
-                format!(
-                    "`{other}` is not an action; use close, cycle-focus, reload, \
-                         toggle-sticky, toggle-maximize, minimize, \
-                         shade, unshade, toggle-shade, next-tab, previous-tab, \
-                         tab-with-previous, detach-tab, start-menu, root-menu, \
-                         next-layout, previous-layout, layout-<1-4>, \
-                         next-workspace, previous-workspace, \
-                         opacity-up, opacity-down, opacity-reset, \
-                         toggle-agent, revoke-agent-all, \
-                         volume-up, volume-down, volume-mute, mic-mute, \
-                         move-to-next-output, move-to-previous-output, \
-                         move-to-output-<side>, workspace-<side>, workspace-<number>, \
-                         send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
-                         none, {{ spawn = [...] }}, or \
-                         {{ pie = \"<name>\" }}, where <side> is left, right, up or down"
-                )
-            })?,
-        },
-    }))
+    Spelled::from(action).read(pies)
 }
 
-/// An action that takes a side: `workspace-left`, `move-to-output-down`.
-fn directed(name: &str) -> Option<Action> {
-    let (verb, side) = name.rsplit_once('-')?;
-    let direction = match side {
-        "left" => Direction::Left,
-        "right" => Direction::Right,
-        "up" => Direction::Up,
-        "down" => Direction::Down,
-        _ => return None,
-    };
-    Some(match verb {
-        "workspace" => Action::Workspace(direction),
-        "send-to-workspace" => Action::SendToWorkspace(direction),
-        "carry-to-workspace" => Action::CarryToWorkspace(direction),
-        "move-to-output" => Action::MoveToOutput(Towards::Side(direction)),
-        "snap" => Action::Snap(direction),
-        _ => return None,
-    })
-}
-
-/// `workspace-3`. Any positive number is accepted here: whether the grid has
-/// that many is a question for the grid, which a later reload may change.
-/// `layout-2`, from 1 to 4: xkb holds four layouts at most, and whether the
-/// keymap has that many is the keymap's question.
-fn numbered(name: &str) -> Option<Action> {
-    if let Some(layout) = name.strip_prefix("layout-") {
-        let number: u8 = layout.parse().ok()?;
-        return (1..=4).contains(&number).then_some(Action::Layout(number));
+impl From<RawAction> for Spelled {
+    fn from(action: RawAction) -> Self {
+        match action {
+            RawAction::Named(name) => Self::Name(name),
+            RawAction::Spawn(RawSpawn { spawn, agent }) => Self::Spawn {
+                command: spawn,
+                agent,
+            },
+            RawAction::Pie(RawOpenPie { pie }) => Self::Pie(pie),
+        }
     }
-    let number: u16 = name.strip_prefix("workspace-")?.parse().ok()?;
-    (number > 0).then_some(Action::GoToWorkspace(number))
 }
 
 /// `"WxH"` or `"WxH@Hz"`.
-fn mode(text: &str) -> Result<Mode, String> {
-    let bad = || format!("`{text}` is not a mode; write it as 2560x1440 or 2560x1440@144");
-    let (size, refresh) = match text.split_once('@') {
-        Some((size, refresh)) => (size, Some(refresh.parse::<f64>().map_err(|_| bad())?)),
-        None => (text, None),
-    };
-    let (width, height) = size.split_once('x').ok_or_else(bad)?;
-    Ok(Mode {
-        width: width.trim().parse().map_err(|_| bad())?,
-        height: height.trim().parse().map_err(|_| bad())?,
-        refresh,
-    })
+/// A mode as `[[output]] mode` writes it: `"2560x1440"`, or with a refresh
+/// in Hz, `"2560x1440@143.912"`.
+impl std::str::FromStr for Mode {
+    /// Why it is not a mode, in the parser's words.
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        let bad = || format!("`{text}` is not a mode; write it as 2560x1440 or 2560x1440@144");
+        let (size, refresh) = match text.split_once('@') {
+            Some((size, refresh)) => (size, Some(refresh.parse::<f64>().map_err(|_| bad())?)),
+            None => (text, None),
+        };
+        let (width, height) = size.split_once('x').ok_or_else(bad)?;
+        Ok(Self {
+            width: width.trim().parse().map_err(|_| bad())?,
+            height: height.trim().parse().map_err(|_| bad())?,
+            refresh,
+        })
+    }
 }
 
 fn invalid(key: String, reason: String) -> Error {
@@ -2534,6 +2622,73 @@ mod tests {
     fn the_minimal_profile_focuses_under_the_pointer() {
         let config = parse(r#"profile = "minimal""#, SEAT).unwrap();
         assert_eq!(config.focus.model, FocusModel::Sloppy);
+    }
+
+    /// The settings app writes each choice it offers with the value's
+    /// `key()`: every word must be one this parser reads back as that value.
+    #[test]
+    fn every_word_a_page_offers_reads_back_as_its_value() {
+        let read = |text: String| parse(&text, SEAT).unwrap_or_else(|e| panic!("{text}: {e}"));
+        let panel = |text: String| read(text).shell.panel.expect("a panel");
+        for profile in Profile::ALL {
+            let text = format!("profile = \"{}\"", profile.key());
+            assert_eq!(read(text).profile, profile);
+        }
+        for model in FocusModel::ALL {
+            let text = format!("[focus]\nmodel = \"{}\"", model.key());
+            assert_eq!(read(text).focus.model, model);
+        }
+        for mode in perspicax_policy::Mode::ALL {
+            let text = format!("[workspaces]\nmode = \"{}\"", mode.key());
+            assert_eq!(read(text).workspaces.mode, mode);
+        }
+        for effect in Effect::ALL {
+            let text = format!("[workspaces.transition]\neffect = \"{}\"", effect.key());
+            assert_eq!(read(text).transitioning.effect, effect);
+        }
+        for switching in Switching::ALL {
+            let text = format!("[input.keyboard]\nswitching = \"{}\"", switching.key());
+            assert_eq!(read(text).keyboard.switching, switching);
+        }
+        for scheme in ColorScheme::ALL {
+            let text = format!("[theme]\ncolor-scheme = \"{}\"", scheme.key());
+            assert_eq!(read(text).theme.apps.color_scheme, Some(scheme));
+        }
+        for contrast in Contrast::ALL {
+            let text = format!("[theme]\ncontrast = \"{}\"", contrast.key());
+            assert_eq!(read(text).theme.apps.contrast, Some(contrast));
+        }
+        for motion in Motion::ALL {
+            let text = format!("[theme]\nmotion = \"{}\"", motion.key());
+            assert_eq!(read(text).theme.motion, motion);
+        }
+        for mode in WallpaperMode::ALL {
+            let text = format!("[shell]\nwallpaper-mode = \"{}\"", mode.key());
+            assert_eq!(read(text).shell.wallpaper.expect("a wallpaper").mode, mode);
+        }
+        for untrusted in UntrustedLaunchers::ALL {
+            let text = format!("[shell]\nuntrusted-launchers = \"{}\"", untrusted.key());
+            assert_eq!(read(text).shell.untrusted_launchers, untrusted);
+        }
+        for edge in Edge::ALL {
+            let text = format!("[shell.panel]\nedge = \"{}\"", edge.key());
+            assert_eq!(panel(text).edge, edge);
+        }
+        for align in Align::ALL {
+            let text = format!(
+                "[shell.panel]\nwidth = \"50%\"\nalign = \"{}\"",
+                align.key()
+            );
+            assert_eq!(panel(text).align, align);
+        }
+        for taskbar in TaskbarScope::ALL {
+            let text = format!("[shell.panel]\ntaskbar = \"{}\"", taskbar.key());
+            assert_eq!(panel(text).taskbar, taskbar);
+        }
+        for item in Item::ALL {
+            let text = format!("[shell.panel]\nitems = [\"{}\"]", item.key());
+            assert_eq!(panel(text).items, [item]);
+        }
     }
 
     #[test]
@@ -2625,6 +2780,146 @@ mod tests {
     fn an_unknown_action_is_named() {
         let error = parse("[keys]\n\"Alt+x\" = \"explode\"", SEAT).unwrap_err();
         assert!(error.to_string().contains("`explode`"), "{error}");
+    }
+
+    /// A fresh folder for one test, emptied when it ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("perspicax-config-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("a scratch folder");
+            Self(dir)
+        }
+
+        /// A folder in it holding a program called `name`, with `mode`.
+        fn program(&self, folder: &str, name: &str, mode: u32) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt as _;
+            let folder = self.0.join(folder);
+            std::fs::create_dir_all(&folder).expect("a folder");
+            let program = folder.join(name);
+            std::fs::write(&program, "").expect("a program");
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(mode))
+                .expect("its mode");
+            folder
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn the_program_beside_perspicax_comes_before_the_one_on_path() {
+        let scratch = Scratch::new("beside");
+        let beside = scratch.program("bin", "perspicax-shell", 0o755);
+        let installed = scratch.program("usr-bin", "perspicax-shell", 0o755);
+        let path = std::env::join_paths([&installed]).unwrap();
+        assert_eq!(
+            find_program("perspicax-shell", Some(&beside), Some(&path)),
+            Some(beside.join("perspicax-shell"))
+        );
+        assert_eq!(
+            find_program("perspicax-shell", Some(&scratch.0), Some(&path)),
+            Some(installed.join("perspicax-shell")),
+            "and with none beside, the one on PATH"
+        );
+    }
+
+    #[test]
+    fn a_file_that_may_not_be_run_is_not_the_program() {
+        let scratch = Scratch::new("mode");
+        let beside = scratch.program("bin", "perspicax-shell", 0o644);
+        assert_eq!(find_program("perspicax-shell", Some(&beside), None), None);
+    }
+
+    /// The key and the reason a `[keys]` table is refused for.
+    fn keys_refused(table: &str) -> (String, String) {
+        match parse(&format!("[keys]\n{table}"), SEAT) {
+            Err(Error::Invalid { key, reason }) => (key, reason),
+            other => panic!("{table}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_escape_hatch_chord_is_refused_naming_what_it_does() {
+        let (key, reason) = keys_refused("\"Ctrl+Alt+F2\" = \"close\"");
+        assert_eq!(key, "keys.Ctrl+Alt+F2");
+        assert!(
+            reason.starts_with("switches to VT 2 before any binding"),
+            "{reason}"
+        );
+        let (key, reason) = keys_refused("\"Ctrl+Alt+BackSpace\" = \"close\"");
+        assert_eq!(key, "keys.Ctrl+Alt+BackSpace");
+        assert!(
+            reason.starts_with("ends the session before any binding"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn an_escape_hatch_chord_cannot_be_unbound_either() {
+        let (_, reason) = keys_refused("\"Ctrl+Alt+F3\" = \"none\"");
+        assert!(
+            reason.contains("no config can bind or unbind it"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_hatch_with_more_modifiers_held_is_still_a_hatch() {
+        let (_, reason) = keys_refused("\"Ctrl+Alt+Shift+F12\" = \"close\"");
+        assert!(reason.starts_with("switches to VT 12"), "{reason}");
+    }
+
+    #[test]
+    fn ctrl_alt_with_another_key_is_still_bindable() {
+        let text = "[keys]\n\"Ctrl+Alt+Left\" = \"workspace-left\"\n\
+                    \"Ctrl+F2\" = \"close\"\n\"Alt+F2\" = \"minimize\"\n\
+                    \"Ctrl+Logo+BackSpace\" = \"reload\"";
+        let config = parse(text, SEAT).unwrap();
+        let ctrl_f2 = Mods {
+            ctrl: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(ctrl_f2, &[Keysym::F2]),
+            Some(&Action::Close)
+        );
+    }
+
+    #[test]
+    fn two_spellings_of_one_chord_in_keys_are_refused() {
+        let (key, reason) = keys_refused("\"Logo+a\" = \"close\"\n\"Super+A\" = \"minimize\"");
+        assert_eq!(key, "keys.Super+A");
+        assert_eq!(
+            reason,
+            "is the same as `Logo+a`, already written; write it once"
+        );
+    }
+
+    #[test]
+    fn two_spellings_of_the_logo_tap_are_refused() {
+        let (key, reason) = keys_refused("\"Logo\" = \"start-menu\"\n\"Super\" = \"none\"");
+        assert_eq!(key, "keys.Super");
+        assert!(reason.contains("`Logo`"), "{reason}");
+    }
+
+    #[test]
+    fn no_profile_binds_an_escape_hatch() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let config = Config::profile(profile, SEAT);
+            for (chord, action) in config.bindings.iter() {
+                assert_eq!(
+                    perspicax_policy::hatch(chord.mods, [chord.key]),
+                    None,
+                    "{profile:?} binds {chord:?} to {action:?}"
+                );
+            }
+        }
     }
 
     const SIDE: Gesture = Gesture::Press(perspicax_policy::Button::Side);
@@ -3159,6 +3454,43 @@ mod tests {
                 agent: true
             })
         );
+    }
+
+    #[test]
+    fn the_settings_app_is_never_given_to_an_agent() {
+        let refused = |toml: &str| match parse(toml, SEAT) {
+            Err(Error::Invalid { key, reason }) => {
+                assert!(
+                    reason.contains("`perspicax-settings` edits this file"),
+                    "{reason}"
+                );
+                key
+            }
+            other => panic!("{toml}: {other:?}"),
+        };
+        assert_eq!(
+            refused("[keys]\n\"Logo+,\" = { spawn = [\"perspicax-settings\"], agent = true }"),
+            "keys.Logo+,"
+        );
+        assert_eq!(
+            refused(
+                "[mouse.desktop]\n\"Mouse8\" = { spawn = [\"/usr/bin/perspicax-settings\"], agent = true }"
+            ),
+            "mouse.desktop.Mouse8"
+        );
+        assert_eq!(
+            refused("autostart = [[\"foot\"], { spawn = [\"perspicax-settings\"], agent = true }]"),
+            "autostart[1]"
+        );
+        assert_eq!(
+            refused("[agent]\nlaunch = [\"foot\", \"/usr/local/bin/perspicax-settings\"]"),
+            "agent.launch[1]"
+        );
+        let persons = parse(
+            "autostart = [[\"perspicax-settings\"]]\n[keys]\n\"Logo+,\" = { spawn = [\"perspicax-settings\"] }",
+            SEAT,
+        );
+        assert!(persons.is_ok(), "the person's own: {persons:?}");
     }
 
     #[test]
@@ -4666,6 +4998,18 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_protocol_defaults_to_perspicax_settings_in_both_profiles() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let access = Config::profile(profile, SEAT).protocols;
+            assert!(access.admits(Protocol::Settings, Some("/usr/bin/perspicax-settings")));
+            assert!(!access.admits(Protocol::Settings, Some("/usr/bin/perspicax-shell")));
+            assert!(!access.admits(Protocol::Settings, None));
+        }
+        let config = parse("[protocols]\nsettings = \"off\"", SEAT).unwrap();
+        assert_eq!(config.protocols.rule(Protocol::Settings), &Rule::Off);
+    }
+
+    #[test]
     fn a_missing_file_is_the_classic_profile() {
         let config = load(Path::new("/nonexistent/perspicax/config.toml"), SEAT).unwrap();
         assert_eq!(config.profile, Profile::Classic);
@@ -4679,6 +5023,30 @@ mod tests {
         assert!(classic.admits(Protocol::Screencopy, Some("/usr/bin/grim")));
         assert!(!classic.admits(Protocol::Screencopy, Some("/usr/bin/firefox")));
         assert!(classic.admits(Protocol::OutputManagement, Some("/usr/bin/kanshi")));
+    }
+
+    #[test]
+    fn the_settings_app_may_read_the_monitors_by_default() {
+        let protocols = Config::profile(Profile::Classic, SEAT).protocols;
+        let app = format!("/usr/local/bin/{SETTINGS_APP}");
+        assert!(protocols.admits(Protocol::OutputManagement, Some(&app)));
+        assert!(!protocols.admits(Protocol::OutputManagement, Some("/usr/bin/firefox")));
+    }
+
+    #[test]
+    fn every_side_word_reads_back() {
+        for side in Side::ALL {
+            let text = format!("[[output]]\nname = \"A\"\n{} = \"B\"", side.key());
+            let config = parse(&text, SEAT).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(
+                config.outputs[0].place,
+                Place::Beside {
+                    side,
+                    of: "B".to_owned(),
+                    offset: 0
+                }
+            );
+        }
     }
 
     #[test]

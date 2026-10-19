@@ -21,6 +21,10 @@ use perspicax_compositor::{Backend, Command, Config, Facts, Requests, Stop};
 use perspicax_index::{HostFacts, Shot, SurfaceFacts};
 use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::Action;
+use perspicax_protocols::settings::v1::client::{
+    perspicax_chord_capture_v1::{self, PerspicaxChordCaptureV1},
+    perspicax_settings_v1::PerspicaxSettingsV1,
+};
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 use smithay::input::keyboard::{Keycode, xkb};
 use smithay_client_toolkit::{
@@ -866,6 +870,12 @@ pub struct Desk {
     pub active_layout: Option<u32>,
     /// How many of the channel's layout events arrived, of any kind.
     pub layout_events: usize,
+    /// The settings app's channel, once bound.
+    pub settings: Option<PerspicaxSettingsV1>,
+    /// What each chord capture was told, by the order it was asked in.
+    pub caught: Vec<(usize, perspicax_chord_capture_v1::Event)>,
+    /// How many chord captures were asked for.
+    captures: usize,
     layer_shell: LayerShell,
     /// Strips across the top of the screen, each with its colour and height,
     /// and wallpapers, whose height is 0 for the whole of what they are
@@ -962,6 +972,9 @@ impl Desk {
             listing: Vec::new(),
             active_layout: None,
             layout_events: 0,
+            settings: None,
+            caught: Vec::new(),
+            captures: 0,
             layer_shell: LayerShell::bind(globals, qh).expect("zwlr_layer_shell_v1"),
             layers: Vec::new(),
             layers_drawn: 0,
@@ -1928,6 +1941,38 @@ impl Desk {
         );
     }
 
+    /// Bind the settings app's channel, as perspicax-settings does. Panics
+    /// if it is not advertised.
+    pub fn bind_settings(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.settings = Some(
+            globals
+                .bind::<PerspicaxSettingsV1, _, _>(qh, 1..=1, ())
+                .expect("perspicax_settings_v1"),
+        );
+    }
+
+    /// Ask for the next chord pressed, as the settings app does. What it is
+    /// told lands in `caught` under the number returned, counted from 0.
+    pub fn capture_chord(&mut self, qh: &QueueHandle<Self>) -> usize {
+        let nth = self.captures;
+        self.captures += 1;
+        self.settings
+            .as_ref()
+            .expect("the settings channel is bound")
+            .capture_chord(qh, nth);
+        nth
+    }
+
+    /// Why capture `nth` was cancelled, if it was.
+    pub fn cancelled(&self, nth: usize) -> Option<perspicax_chord_capture_v1::Reason> {
+        self.caught.iter().find_map(|(caught, event)| match event {
+            perspicax_chord_capture_v1::Event::Cancelled {
+                reason: WEnum::Value(reason),
+            } if *caught == nth => Some(*reason),
+            _ => None,
+        })
+    }
+
     /// The name of a monitor this client was told of.
     fn output_name(&self, output: &wl_output::WlOutput) -> Option<String> {
         self.outputs.info(output).and_then(|info| info.name)
@@ -2182,6 +2227,31 @@ impl Dispatch<PerspicaxShellV1, ()> for Desk {
             }
             _ => {}
         }
+    }
+}
+
+impl Dispatch<PerspicaxSettingsV1, ()> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &PerspicaxSettingsV1,
+        _: <PerspicaxSettingsV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<PerspicaxChordCaptureV1, usize> for Desk {
+    fn event(
+        desk: &mut Self,
+        _: &PerspicaxChordCaptureV1,
+        event: perspicax_chord_capture_v1::Event,
+        nth: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        desk.caught.push((*nth, event));
     }
 }
 

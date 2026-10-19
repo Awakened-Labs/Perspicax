@@ -23,6 +23,21 @@ pub enum FocusModel {
     Strict,
 }
 
+impl FocusModel {
+    /// Every model, in the order the README lists them.
+    pub const ALL: [Self; 3] = [Self::Click, Self::Sloppy, Self::Strict];
+
+    /// Its name as `[focus] model` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Click => "click",
+            Self::Sloppy => "sloppy",
+            Self::Strict => "strict",
+        }
+    }
+}
+
 /// The focus policy: a model, and whether a window focused by pointing is
 /// also raised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

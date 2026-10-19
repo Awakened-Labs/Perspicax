@@ -24,14 +24,13 @@
 //! consent: an agent can read it, but not click it.
 
 use std::{
-    ffi::OsStr,
     fmt::Display,
-    path::{Path, PathBuf},
+    path::Path,
     process::Child,
     time::{Duration, Instant},
 };
 
-use perspicax_config::Shell;
+use perspicax_config::{Shell, find_program};
 use perspicax_policy::{Ended, Restart, Restarts};
 use smithay::reexports::calloop::{
     RegistrationToken,
@@ -125,7 +124,8 @@ impl Session {
         let beside = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(Path::to_owned));
-        let Some(program) = find(beside.as_deref(), std::env::var_os("PATH").as_deref()) else {
+        let path = std::env::var_os("PATH");
+        let Some(program) = find_program(PROGRAM, beside.as_deref(), path.as_deref()) else {
             tracing::warn!(
                 "{PROGRAM} is neither beside perspicax nor on PATH; the desktop stays bare"
             );
@@ -223,73 +223,5 @@ impl Drop for Supervisor {
         if let Some(child) = &mut self.child {
             super::settings::stop(child);
         }
-    }
-}
-
-/// The shell's binary: in `beside`, then in the first directory of `path`
-/// that has one. Only a file that may be run counts.
-fn find(beside: Option<&Path>, path: Option<&OsStr>) -> Option<PathBuf> {
-    let on_path = path.into_iter().flat_map(std::env::split_paths);
-    beside
-        .map(Path::to_owned)
-        .into_iter()
-        .chain(on_path)
-        .map(|directory| directory.join(PROGRAM))
-        .find(|candidate| crate::runnable(candidate))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{env, fs, os::unix::fs::PermissionsExt};
-
-    use super::*;
-
-    /// A fresh directory for one test, emptied when it ends.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let dir =
-                env::temp_dir().join(format!("perspicax-supervise-{name}-{}", std::process::id()));
-            fs::create_dir_all(&dir).expect("a scratch directory");
-            Self(dir)
-        }
-
-        /// A directory in it holding a `perspicax-shell` with `mode`.
-        fn shell(&self, directory: &str, mode: u32) -> PathBuf {
-            let directory = self.0.join(directory);
-            fs::create_dir_all(&directory).expect("a directory");
-            let program = directory.join(PROGRAM);
-            fs::write(&program, "").expect("a program");
-            fs::set_permissions(&program, fs::Permissions::from_mode(mode)).expect("its mode");
-            directory
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).ok();
-        }
-    }
-
-    #[test]
-    fn the_shell_beside_perspicax_comes_before_the_one_on_path() {
-        let scratch = Scratch::new("beside");
-        let beside = scratch.shell("bin", 0o755);
-        let installed = scratch.shell("usr-bin", 0o755);
-        let path = env::join_paths([&installed]).unwrap();
-        assert_eq!(find(Some(&beside), Some(&path)), Some(beside.join(PROGRAM)));
-        assert_eq!(
-            find(Some(&scratch.0), Some(&path)),
-            Some(installed.join(PROGRAM)),
-            "and with none beside, the one on PATH"
-        );
-    }
-
-    #[test]
-    fn a_file_that_may_not_be_run_is_not_the_shell() {
-        let scratch = Scratch::new("mode");
-        let beside = scratch.shell("bin", 0o644);
-        assert_eq!(find(Some(&beside), None), None);
     }
 }
