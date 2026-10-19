@@ -18,7 +18,9 @@
 # none installs the build target/release holds, so one made by hand with
 # `cargo build --release --features ...` is installed as it is, never rebuilt
 # without its features. With no build and nothing named, it builds what a
-# session needs.
+# session needs. The settings app is built apart, in a cargo run of its own,
+# when it is missing or features are named, and building it leaves the
+# session's two programs as they are.
 #
 # As root -- `sudo scripts/install.sh`, or a package -- it builds nothing. A
 # build as root leaves target/ owned by root, and sudo drops an exported
@@ -68,9 +70,9 @@ Usage:
   scripts/install.sh [--features <list>]
 
 Run it as yourself: it builds first if it has to, through scripts/build.sh,
-and uses sudo only for the folders you cannot write to. It builds when there is
-no build in target/release, or when this run names features; a run that names
-none installs the build that is there. As root it builds nothing.
+and uses sudo only for the folders you cannot write to. It builds what
+target/release lacks, and builds again when this run names features; a run
+that names none installs the build that is there. As root it builds nothing.
 
 Flags:
   --features <list>  Cargo features to build with, comma-separated, in the
@@ -125,36 +127,46 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-missing=
-for program in perspicax perspicax-shell perspicax-settings; do
-    [ -x "$built/$program" ] || missing=${missing:-$program}
+# What target/release lacks, as two builds: the session's two programs, and
+# the settings app, which is built apart.
+session=
+for program in perspicax perspicax-shell; do
+    [ -x "$built/$program" ] || session=${session:-$program}
 done
+app=
+[ -x "$built/perspicax-settings" ] || app=perspicax-settings
+missing=${session:-$app}
 
 if [ "$(id -u)" -eq 0 ]; then
     if [ -n "$missing" ]; then
-        cat >&2 <<EOF
-install.sh: there is no $built/$missing, and as root this builds
-  nothing. Build as yourself first, then install as root:
-  scripts/build.sh --release --features $SESSION_FEATURES
-  sudo scripts/install.sh
-Or run this as yourself, which builds and then uses sudo for the copy.
-EOF
+        {
+            echo "install.sh: there is no $built/$missing, and as root this builds"
+            echo "  nothing. Build as yourself first, then install as root:"
+            [ -z "$session" ] || echo "  scripts/build.sh --release --features $SESSION_FEATURES"
+            [ -z "$app" ] || echo "  scripts/build.sh --release -p perspicax-settings --features $SETTINGS_FEATURES"
+            echo "  sudo scripts/install.sh"
+            echo "Or run this as yourself, which builds and then uses sudo for the copy."
+        } >&2
         exit 1
     fi
     if [ -n "$from" ]; then
         echo "install.sh: as root this builds nothing, so it installs what $built holds, not a build with '$features' (from $from)" >&2
     fi
-elif [ -n "$from" ] || [ -n "$missing" ]; then
+else
     # build.sh reads the variable itself, and says it did.
     case $from in
         --features) "$repo/scripts/build.sh" --release --features "$features" ;;
         PERSPICAX_BUILD_FEATURES) "$repo/scripts/build.sh" --release ;;
         *)
-            echo "install.sh: there is no build, and no features named: building a session's, $SESSION_FEATURES" >&2
-            "$repo/scripts/build.sh" --release --features "$SESSION_FEATURES"
+            if [ -n "$session" ]; then
+                echo "install.sh: there is no $built/$session, and no features named: building a session's, $SESSION_FEATURES" >&2
+                "$repo/scripts/build.sh" --release --features "$SESSION_FEATURES"
+            fi
             ;;
     esac
-    "$repo/scripts/build.sh" --release -p perspicax-settings --features "$SETTINGS_FEATURES"
+    if [ -n "$from" ] || [ -n "$app" ]; then
+        "$repo/scripts/build.sh" --release -p perspicax-settings --features "$SETTINGS_FEATURES"
+    fi
 fi
 
 # Whether a folder can be written: it, or the nearest folder above it that
