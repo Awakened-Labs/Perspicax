@@ -165,7 +165,15 @@ else
             ;;
     esac
     if [ -n "$from" ] || [ -n "$app" ]; then
-        "$repo/scripts/build.sh" --release -p perspicax-settings --features "$SETTINGS_FEATURES"
+        if [ -n "$app" ]; then
+            echo "install.sh: there is no $built/$app: building it, in a cargo run of its own, which takes some minutes the first time" >&2
+        else
+            echo "install.sh: building perspicax-settings too, in a cargo run of its own" >&2
+        fi
+        # The variable names the session's features, never the app's, so it
+        # is kept from this build: build.sh would say the app's own
+        # --features set it aside, as if you had named some.
+        PERSPICAX_BUILD_FEATURES= "$repo/scripts/build.sh" --release -p perspicax-settings --features "$SETTINGS_FEATURES"
     fi
 fi
 
