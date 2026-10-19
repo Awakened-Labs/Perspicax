@@ -104,8 +104,10 @@ impl Verb {
 /// Addressed by surface, not by selector: a window is what `window_list`
 /// names, and the controls a person would use to do the same (a titlebar's
 /// close button, a tab) are drawn by the compositor and are in no
-/// accessible tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// accessible tree. Nor is anything at all, in a window whose toolkit has
+/// no accessibility bridge -- a terminal, a game, a canvas -- which the
+/// keyboard reaches by surface or not at all (#38).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowVerb {
     /// Ask the window to close. A request its client may decline -- to ask
     /// about unsaved work, say -- and never a kill.
@@ -113,30 +115,39 @@ pub enum WindowVerb {
     /// Bring a tab behind another to the front of its group, in the group's
     /// place, as clicking its tab does.
     Forward,
+    /// Give the window keyboard focus, as [`Verb::Focus`] gives a node's.
+    Focus,
+    /// Type text into the window, which must hold keyboard focus, as
+    /// [`Verb::Type`] types into a node's: see [`Action::Type`].
+    Type(String),
 }
 
 impl WindowVerb {
     /// The action a host dispatches for it.
     #[must_use]
-    pub fn action(self) -> Action {
+    pub fn action(&self) -> Action {
         match self {
             Self::Close => Action::Close,
             Self::Forward => Action::Forward,
+            Self::Focus => Action::Focus,
+            Self::Type(text) => Action::Type { text: text.clone() },
         }
     }
 
     /// A short name, for a receipt an agent will read.
     #[must_use]
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::Close => "close",
             Self::Forward => "forward",
+            Self::Focus => "focus",
+            Self::Type(_) => "type",
         }
     }
 }
 
-/// What became of a window an agent closed or brought forward, once it had
-/// been given time to react.
+/// What became of a window an agent acted on, once it had been given time
+/// to react.
 ///
 /// As with [`DamageWitness`], what was seen rather than whether it worked.
 /// A window still open after a close has not necessarily refused: it may be
@@ -154,6 +165,9 @@ pub enum WindowWitness {
     InFront,
     /// The tab is still behind `shown`.
     StillBehind { shown: SurfaceId },
+    /// What a window focused or typed into drew meanwhile, anywhere in it:
+    /// the evidence a node's receipt has, for the whole window.
+    Drew(DamageWitness),
 }
 
 /// What happened when an agent acted on a window.
@@ -177,6 +191,16 @@ pub struct WindowReceipt {
     pub witness: WindowWitness,
     /// How long it was given to react.
     pub window: Duration,
+}
+
+impl WindowReceipt {
+    /// Whether keyboard focus is on the window acted on, afterwards: for
+    /// [`WindowVerb::Focus`], the claim being made. Not "did it work", for
+    /// the reason [`Receipt::focus_landed`] is not.
+    #[must_use]
+    pub fn focus_landed(&self) -> bool {
+        self.focus_after == Some(self.surface)
+    }
 }
 
 /// What the pixels did, in the window an act was given to have an effect.
@@ -220,6 +244,16 @@ impl DamageWitness {
     #[must_use]
     pub fn saw_anything(&self) -> bool {
         !matches!(self, Self::Quiet)
+    }
+
+    /// A short name, for a receipt an agent will read.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Quiet => "quiet",
+            Self::Elsewhere { .. } => "elsewhere",
+            Self::OnTarget { .. } => "on_target",
+        }
     }
 }
 

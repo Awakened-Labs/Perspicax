@@ -646,6 +646,27 @@ impl SurfaceFacts {
         self.drawn.union(self.geometry)
     }
 
+    /// Why nothing of this surface's own is drawn, when nothing is: asked
+    /// before any arithmetic, because the geometry of a surface that is not
+    /// drawn means nothing.
+    ///
+    /// Unmapped, it is on a workspace that is not showing, or a tab behind
+    /// another, or simply not on screen -- a hidden window, an unopened menu.
+    /// A tab behind another in a group on a hidden workspace is
+    /// `OtherWorkspace`: the coarser reason, and the one to clear first. A
+    /// window rolled up to its titlebar is mapped, but its client is not
+    /// drawn: `RolledUp`, once none of those applies.
+    pub(crate) fn not_drawn(&self) -> Option<Visibility> {
+        if !self.mapped {
+            return Some(match (self.off_workspace, self.behind_tab) {
+                (Some(workspace), _) => Visibility::OtherWorkspace { workspace },
+                (None, Some(shown)) => Visibility::InactiveTab { shown },
+                (None, None) => Visibility::Unmapped,
+            });
+        }
+        self.shaded.then_some(Visibility::RolledUp)
+    }
+
     /// Whether a region this surface declared opaque is over `global`: what
     /// makes its covering a node proof rather than policy. Only where it
     /// draws, as the protocol has it: "the compositor ignores the parts of
@@ -825,15 +846,8 @@ pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
     let Some(target) = facts.surface(surface) else {
         return Judgement::proven(Visibility::Unknown);
     };
-    if !target.mapped {
-        return Judgement::proven(match (target.off_workspace, target.behind_tab) {
-            (Some(workspace), _) => Visibility::OtherWorkspace { workspace },
-            (None, Some(shown)) => Visibility::InactiveTab { shown },
-            (None, None) => Visibility::Unmapped,
-        });
-    }
-    if target.shaded {
-        return Judgement::proven(Visibility::RolledUp);
+    if let Some(hidden) = target.not_drawn() {
+        return Judgement::proven(hidden);
     }
     if rect.abs().is_empty() {
         return Judgement::proven(Visibility::Clipped);
@@ -875,6 +889,119 @@ pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
     }
 
     Judgement::proven(Visibility::Visible)
+}
+
+/// Whether any of a window can be seen: what an act addressed to a whole
+/// window by its surface needs, where [`judge`] asks it of a node's rect.
+///
+/// The keyboard's verbs aim at no pixel -- keys go wherever focus is -- so a
+/// window partly covered is in sight, and the person sees what is typed into
+/// the part that shows (#38). A window with nothing showing is not, as a
+/// node with nothing showing is not. The same order as `judge`, with "any
+/// of it" for "all of it":
+///
+/// 1. A surface this host has never heard of is `Unknown`.
+/// 2. One with nothing of its own drawn says why, as `judge` does: another
+///    workspace, a tab behind, minimized, rolled up. A window of no area has
+///    nothing to see either, and is `Unmapped`.
+/// 3. None of it on any monitor is `OffScreen`. Only the part on one is
+///    looked at from here on, so a window whose only uncovered part hangs
+///    past the edge of the desk is not seen.
+/// 4. Then what is above it, from the top down, each taking from what is
+///    left of it what it covers: its frame, and, unless it is rolled up,
+///    everything it draws. Nothing left is `Occluded`, by the surface in
+///    front: the topmost one that covered any of it, what the person sees
+///    over it. Its own menus are drawn as part of it, and take nothing.
+///
+/// Its own frame is not what is seen of it: a window showing only its
+/// titlebar is refused, as one rolled up to it is.
+#[must_use]
+pub fn judge_window(facts: &HostFacts, surface: SurfaceId) -> Visibility {
+    let Some(target) = facts.surface(surface) else {
+        return Visibility::Unknown;
+    };
+    if let Some(hidden) = target.not_drawn() {
+        return hidden;
+    }
+    let geometry = target.geometry.abs();
+    if geometry.is_empty() {
+        return Visibility::Unmapped;
+    }
+    let mut left: Vec<Rect> = if facts.outputs.is_empty() {
+        vec![geometry]
+    } else {
+        facts
+            .outputs
+            .iter()
+            .map(|output| output.intersect(geometry))
+            .filter(|piece| !piece.is_empty())
+            .collect()
+    };
+    if left.is_empty() {
+        return Visibility::OffScreen;
+    }
+
+    let above = facts
+        .surfaces()
+        .iter()
+        .position(|candidate| candidate.id == surface)
+        .map_or(0, |index| index + 1);
+    let mut front = None;
+    for candidate in facts.surfaces()[above..].iter().rev() {
+        if !candidate.mapped || menu_of(facts, candidate, surface) {
+            continue;
+        }
+        let covered = candidate
+            .frame
+            .iter()
+            .copied()
+            .chain((!candidate.shaded).then(|| candidate.covers()));
+        for cut in covered {
+            if front.is_none() && left.iter().any(|piece| overlaps(*piece, cut)) {
+                front = Some(candidate.id);
+            }
+            left = left
+                .into_iter()
+                .flat_map(|piece| subtract(piece, cut))
+                .collect();
+        }
+        if left.is_empty() {
+            return Visibility::Occluded {
+                by: front.unwrap_or(candidate.id),
+            };
+        }
+    }
+    Visibility::Visible
+}
+
+/// Whether `candidate` is one of `window`'s menus, or a menu of one of them.
+/// Bounded by how many surfaces there are, so facts that hang menus from
+/// each other in a ring cannot keep it going.
+fn menu_of(facts: &HostFacts, candidate: &SurfaceFacts, window: SurfaceId) -> bool {
+    core::iter::successors(candidate.hangs_from(), |from| {
+        facts.surface(*from).and_then(SurfaceFacts::hangs_from)
+    })
+    .take(facts.surfaces().len())
+    .any(|from| from == window)
+}
+
+/// What is left of `from` once `cut` is taken out of it: `from` whole where
+/// they do not meet, and otherwise the strips above, below, left and right
+/// of where they do, those of any area.
+fn subtract(from: Rect, cut: Rect) -> Vec<Rect> {
+    let meet = from.intersect(cut);
+    if meet.is_empty() {
+        return vec![from];
+    }
+    [
+        Rect::new(from.x0, from.y0, from.x1, meet.y0),
+        Rect::new(from.x0, meet.y1, from.x1, from.y1),
+        Rect::new(from.x0, meet.y0, meet.x0, meet.y1),
+        Rect::new(meet.x1, meet.y0, from.x1, meet.y1),
+    ]
+    .into_iter()
+    .filter(|strip| !strip.is_empty())
+    .collect()
 }
 
 /// Whether two rects share any area. Touching edges do not count: a rect that
@@ -1414,6 +1541,185 @@ mod tests {
             1,
         );
         assert_eq!(verdict(&facts).visibility, Visibility::Visible);
+    }
+
+    /// Whether any of the window at the origin can be seen.
+    fn seen(facts: &HostFacts) -> Visibility {
+        judge_window(facts, SurfaceId(1))
+    }
+
+    #[test]
+    fn a_window_out_of_sight_says_why_as_its_nodes_do() {
+        let alone = |window: SurfaceFacts| seen(&HostFacts::bottom_to_top([window], 1));
+        assert_eq!(alone(window()), Visibility::Visible);
+        assert_eq!(
+            judge_window(&HostFacts::bottom_to_top([window()], 1), SurfaceId(99)),
+            Visibility::Unknown
+        );
+        assert_eq!(
+            alone(window().on_workspace(3)),
+            Visibility::OtherWorkspace { workspace: 3 }
+        );
+        assert_eq!(
+            alone(window().behind_tab(SurfaceId(7))),
+            Visibility::InactiveTab {
+                shown: SurfaceId(7)
+            }
+        );
+        assert_eq!(
+            alone(window().behind_tab(SurfaceId(7)).on_workspace(2)),
+            Visibility::OtherWorkspace { workspace: 2 }
+        );
+        assert_eq!(alone(window().unmapped()), Visibility::Unmapped);
+        assert_eq!(alone(window().rolled_up()), Visibility::RolledUp);
+        assert_eq!(alone(window().unmapped().rolled_up()), Visibility::Unmapped);
+    }
+
+    #[test]
+    fn a_window_of_no_area_has_nothing_to_see() {
+        let flat = SurfaceFacts::new(SurfaceId(1), rect(10.0, 10.0, 410.0, 10.0));
+        assert_eq!(
+            seen(&HostFacts::bottom_to_top([flat], 1)),
+            Visibility::Unmapped
+        );
+    }
+
+    /// Keys aim at no pixel, so a window is in sight while any of it shows:
+    /// a strip of it, a corner, what a window flush beside it leaves.
+    #[test]
+    fn a_window_partly_covered_can_be_seen() {
+        let all_but_a_strip = SurfaceFacts::new(SurfaceId(2), rect(-50.0, 10.0, 450.0, 400.0));
+        let all_but_a_corner = SurfaceFacts::new(SurfaceId(3), rect(20.0, -50.0, 450.0, 400.0));
+        let flush = SurfaceFacts::new(SurfaceId(4), rect(400.0, 0.0, 800.0, 300.0));
+        let facts =
+            HostFacts::bottom_to_top([window(), all_but_a_strip, all_but_a_corner, flush], 1);
+        assert_eq!(seen(&facts), Visibility::Visible);
+    }
+
+    #[test]
+    fn a_window_wholly_covered_by_another_is_occluded_by_it() {
+        let over = SurfaceFacts::new(SurfaceId(2), rect(-10.0, -10.0, 500.0, 400.0));
+        let facts = HostFacts::bottom_to_top([window(), over.clone()], 1);
+        assert_eq!(seen(&facts), Visibility::Occluded { by: SurfaceId(2) });
+
+        let exactly = SurfaceFacts::new(SurfaceId(2), rect(0.0, 0.0, 400.0, 300.0));
+        let facts = HostFacts::bottom_to_top([window(), exactly], 1);
+        assert_eq!(seen(&facts), Visibility::Occluded { by: SurfaceId(2) });
+
+        // Under it, it covers nothing.
+        let facts = HostFacts::bottom_to_top([over, window()], 1);
+        assert_eq!(seen(&facts), Visibility::Visible);
+    }
+
+    /// Two windows each covering half of it hide it between them. The one in
+    /// front is named, the one the person sees over it; a third above that
+    /// covers none of it changes nothing.
+    #[test]
+    fn a_window_hidden_by_two_together_names_the_one_in_front() {
+        let left = SurfaceFacts::new(SurfaceId(2), rect(-10.0, -10.0, 210.0, 400.0));
+        let right = SurfaceFacts::new(SurfaceId(3), rect(190.0, -10.0, 500.0, 400.0));
+        let elsewhere = SurfaceFacts::new(SurfaceId(4), rect(600.0, 0.0, 900.0, 300.0));
+        let facts = HostFacts::bottom_to_top([window(), left.clone(), right.clone()], 1);
+        assert_eq!(seen(&facts), Visibility::Occluded { by: SurfaceId(3) });
+        let facts = HostFacts::bottom_to_top([window(), right, left, elsewhere], 1);
+        assert_eq!(seen(&facts), Visibility::Occluded { by: SurfaceId(2) });
+    }
+
+    /// Rolled up, a window covers by its titlebar alone, so it hides a
+    /// window under it only where the bar is. A titlebar takes its part as
+    /// surely as a client does, the last of a window included.
+    #[test]
+    fn a_window_rolled_up_above_hides_only_what_its_titlebar_covers() {
+        let titlebar = rect(-10.0, -26.0, 410.0, 20.0);
+        let rolled = SurfaceFacts::new(SurfaceId(2), rect(-10.0, 20.0, 410.0, 320.0))
+            .framed([titlebar])
+            .rolled_up();
+        let facts = HostFacts::bottom_to_top([window(), rolled.clone()], 1);
+        assert_eq!(seen(&facts), Visibility::Visible);
+
+        let all_but_the_top = SurfaceFacts::new(SurfaceId(3), rect(-10.0, 15.0, 410.0, 320.0));
+        let facts = HostFacts::bottom_to_top([window(), all_but_the_top, rolled], 1);
+        assert_eq!(seen(&facts), Visibility::Occluded { by: SurfaceId(2) });
+    }
+
+    #[test]
+    fn a_window_on_no_monitor_is_off_screen() {
+        let elsewhere = HostFacts::bottom_to_top([window()], 1)
+            .with_outputs([rect(1000.0, 0.0, 2000.0, 1000.0)]);
+        assert_eq!(seen(&elsewhere), Visibility::OffScreen);
+
+        let half_on = HostFacts::bottom_to_top([window()], 1)
+            .with_outputs([rect(200.0, 0.0, 1200.0, 1000.0)]);
+        assert_eq!(seen(&half_on), Visibility::Visible);
+    }
+
+    /// Past the edge of every monitor nobody sees it, uncovered or not: a
+    /// window whose part on a monitor is covered is hidden, whatever hangs
+    /// off the edge.
+    #[test]
+    fn only_what_is_on_a_monitor_is_seen() {
+        let over_the_part_on_screen =
+            SurfaceFacts::new(SurfaceId(2), rect(150.0, -10.0, 500.0, 400.0));
+        let facts = HostFacts::bottom_to_top([window(), over_the_part_on_screen], 1)
+            .with_outputs([rect(200.0, 0.0, 1200.0, 1000.0)]);
+        assert_eq!(seen(&facts), Visibility::Occluded { by: SurfaceId(2) });
+    }
+
+    /// A menu is drawn as part of its window, and so is a menu opened from
+    /// it: the window is no less in sight for showing them. Another
+    /// window's menu covers like anything else.
+    #[test]
+    fn a_windows_own_menus_do_not_hide_it() {
+        let now = Instant::now();
+        let left_half = SurfaceFacts::new(SurfaceId(3), rect(-10.0, -10.0, 250.0, 400.0));
+        let menu = SurfaceFacts::new(SurfaceId(5), rect(0.0, 0.0, 250.0, 300.0))
+            .hung_from(SurfaceId(1), now);
+        let submenu = SurfaceFacts::new(SurfaceId(6), rect(240.0, 0.0, 400.0, 300.0))
+            .hung_from(SurfaceId(5), now);
+        let facts =
+            HostFacts::bottom_to_top([window(), left_half.clone(), menu, submenu.clone()], 1);
+        assert_eq!(seen(&facts), Visibility::Visible);
+
+        let other = SurfaceFacts::new(SurfaceId(7), rect(0.0, 0.0, 250.0, 300.0))
+            .hung_from(SurfaceId(8), now);
+        let theirs = submenu.hung_from(SurfaceId(7), now);
+        let facts = HostFacts::bottom_to_top([window(), left_half, other, theirs], 1);
+        assert_eq!(seen(&facts), Visibility::Occluded { by: SurfaceId(6) });
+    }
+
+    /// Menus hung from each other in a ring are no window's, and the walk up
+    /// them ends.
+    #[test]
+    fn menus_hung_in_a_ring_are_nobodys() {
+        let now = Instant::now();
+        let first = SurfaceFacts::new(SurfaceId(5), rect(0.0, 0.0, 400.0, 300.0))
+            .hung_from(SurfaceId(6), now);
+        let second = SurfaceFacts::new(SurfaceId(6), rect(500.0, 0.0, 600.0, 100.0))
+            .hung_from(SurfaceId(5), now);
+        let facts = HostFacts::bottom_to_top([window(), first, second], 1);
+        assert_eq!(seen(&facts), Visibility::Occluded { by: SurfaceId(5) });
+    }
+
+    #[test]
+    fn subtracting_leaves_the_strips_around_where_two_rects_meet() {
+        let from = rect(0.0, 0.0, 100.0, 100.0);
+        let area = |pieces: &[Rect]| pieces.iter().map(Rect::area).sum::<f64>();
+
+        let hole = subtract(from, rect(25.0, 25.0, 75.0, 75.0));
+        assert_eq!(hole.len(), 4);
+        assert!((area(&hole) - 7500.0).abs() < f64::EPSILON);
+        assert!(
+            hole.iter()
+                .all(|piece| !overlaps(*piece, rect(25.0, 25.0, 75.0, 75.0)))
+        );
+
+        assert_eq!(
+            subtract(from, rect(50.0, -10.0, 150.0, 110.0)),
+            [rect(0.0, 0.0, 50.0, 100.0)]
+        );
+        assert_eq!(subtract(from, rect(200.0, 0.0, 300.0, 100.0)), [from]);
+        assert_eq!(subtract(from, rect(100.0, 0.0, 200.0, 100.0)), [from]);
+        assert!(subtract(from, rect(-1.0, -1.0, 101.0, 101.0)).is_empty());
     }
 
     /// Under client-side decoration the buffer starts outside the visible
