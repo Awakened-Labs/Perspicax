@@ -46,7 +46,7 @@ compositor:
 
 ```
 perspicax              the composition root — one binary, `perspicax --headless`
-perspicax-mcp          MCP server (rmcp, stdio or a Unix socket) — nine tools, DTOs, receipts  [portable]
+perspicax-mcp          MCP server (rmcp, stdio or a Unix socket) — eleven tools, DTOs, receipts  [portable]
 perspicax-index        node cache, stable ids, selectors, deltas, refusals  [portable]
 perspicax-node         node schema — AccessKit types plus Origin and Visibility
 perspicax-policy       WM decisions as data — focus, bindings, placement, monitors, workspaces, snapping  [portable]
@@ -213,14 +213,16 @@ agent on its stdin. A request sent before `initialize` is answered with
 an error naming what to send first, and the server waits on.
 `--mcp-socket PATH` serves the same on a Unix socket instead, for an agent
 running inside the session it drives: see [An agent inside the
-session](#an-agent-inside-the-session). Nine tools: `window_list`, `observe`,
-`resolve`, `act`, `window_close`, `tab_forward`, `deltas`, `screenshot` and
-`launch`. The two window verbs act on a whole window by its surface: a close
-is a request the application may answer with a dialog, and a tab is brought
-forward only where the person can already see its group, never by switching
-what they are looking at. `launch` starts a program for the agent, no shell
-between, and answers its pid; on a seat, only one the person's
-`[agent] launch` names (see [An agent inside the
+session](#an-agent-inside-the-session). Eleven tools: `window_list`,
+`observe`, `resolve`, `act`, `window_close`, `tab_forward`, `window_focus`,
+`window_type`, `deltas`, `screenshot` and `launch`. The four window verbs act
+on a whole window by its surface: a close is a request the application may
+answer with a dialog, a tab is brought forward only where the person can
+already see its group, never by switching what they are looking at, and a
+window with no controls to name, a terminal or a game, is focused and typed
+into only while some of it can be seen. `launch` starts a program for the
+agent, no shell between, and answers its pid; on a seat, only one the
+person's `[agent] launch` names (see [An agent inside the
 session](#an-agent-inside-the-session)).
 
 **Nothing else is on that wire.** perspicax moves it off its own stdin and
@@ -330,9 +332,10 @@ workspace that is not showing is refused as `other_workspace`, naming the
 workspace, a window that is a tab behind another as `inactive_tab`, naming the
 tab in front, and a node hanging off the edge of every monitor as `off_screen`.
 A node of a window rolled up to its titlebar is refused as `rolled_up`, and
-so is `tab_forward` into a group rolled up, though `window_close` still
-closes one. None is cleared by the agent switching the person's screen on its
-own, or unrolling what the person rolled up.
+so are `tab_forward` into a group rolled up and `window_focus` and
+`window_type` on one, though `window_close` still closes one. None is cleared
+by the agent switching the person's screen on its own, or unrolling what the
+person rolled up.
 
 A control its own application says is not being shown is refused as
 `not_showing`: Firefox's menu bar, hidden until Alt is pressed, and the page of
@@ -398,13 +401,31 @@ focus cannot move between the two. While a window's menu holds the keyboard,
 the keys go to the menu, where a letter can choose an item: typing at the
 window is refused, naming the menu, and typing at the menu goes ahead.
 
+A window whose toolkit has no accessibility bridge — foot, a game, an SDL or
+plain-GL canvas — is listed by `window_list` with `nodes: 0`, and has nothing
+in it for `act` to name. `window_focus` gives it the keyboard by its
+`surface`, and `window_type` types into it, under `type`'s rule: only while it
+holds the keyboard, and otherwise refused as `focus_elsewhere`. Focusing
+changes nothing the person is looking at: the window is not raised, restored
+or brought to the workspace showing, though a fullscreen one comes on top
+when it takes the keyboard, as it does for the person. So it has to be in
+sight already, and is refused when it is not, as its nodes would be: on a
+workspace not showing, a tab behind, minimized or rolled up. It is in sight
+while any of it shows, since keys aim at no pixel and the person sees what
+is typed into the part that does: covered wholly, it is refused as
+`occluded`, naming the window in front, and on no monitor as `off_screen`.
+The receipt says whether focus landed and what the window drew, anywhere in
+it, and is `gone` when what was typed closed it, `exit` into a terminal.
+Clicking a canvas is still not possible: it needs a coordinate, which an
+agent is never given.
+
 While a game holds the pointer ([see Mouse](#a-game-holding-the-pointer)), an
 agent's `click` and `scroll`, on the game or anywhere else, are refused as
 `pointer_captured`, naming the game as `captured_by`: they would move a pointer
-that may not move. So are its `focus` and `tab_forward` on any other window,
-which would take the game's keyboard and the pointer with it. Only the person
-ends a hold, so waiting for them to pause does not help; the game itself can
-still be focused and typed into.
+that may not move. So are its `focus`, `window_focus` and `tab_forward` on any
+other window, which would take the game's keyboard and the pointer with it.
+Only the person ends a hold, so waiting for them to pause does not help; the
+game itself can still be focused and typed into.
 
 **A titlebar is pixels no client drew.** The frame perspicax draws around a
 window goes into the facts beside the window, so a node of another window
@@ -475,8 +496,9 @@ of their drag would carry the window off to where the agent aimed and end the
 drag under their hand. Typing only into a window that holds the keyboard is
 what keeps an agent's keys out of the person's terminal while it acts on a
 window it was granted. A window with no
-accessibility tree has no node to name, so it cannot be typed into yet
-([#38](https://github.com/Awakened-Labs/Perspicax/issues/38)).
+accessibility tree has no node to name, and is typed into by its surface
+instead, with `window_focus` and `window_type`, under the same rule and the
+same consent.
 
 **What is granted, and for how long.** A grant is to a process, and lasts
 until that process exits: its pid is the kernel's to give to the next program
@@ -534,7 +556,7 @@ acted on, and a click there lands there.
 `--mcp` has one client, whatever started perspicax, and on a seat that is the
 login. So the agent a person most wants beside them, one they can see and talk
 to in a terminal inside the session, cannot reach it: it would have to start
-the very session it is running in. `--mcp-socket` serves the same nine tools
+the very session it is running in. `--mcp-socket` serves the same eleven tools
 on a Unix socket instead:
 
 ```sh
