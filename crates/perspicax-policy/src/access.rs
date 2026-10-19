@@ -2,8 +2,9 @@
 //!
 //! Most of Wayland confines a client to what it drew. A handful of protocols
 //! do not: a taskbar lists and closes other programs' windows, a screenshot
-//! tool reads every pixel, a display tool moves monitors, and perspicax's own
-//! shell protocol can end the session. Each of those is granted per protocol,
+//! tool reads every pixel, a display tool moves monitors, perspicax's own
+//! shell protocol can end the session, and its settings protocol hears the
+//! next chord pressed. Each of those is granted per protocol,
 //! in one of three forms: to nobody, to any client, or to the programs named
 //! in a list.
 //!
@@ -38,17 +39,21 @@ pub enum Protocol {
     /// `perspicax-shell-v1`: the menus a person asks for by key, and ending
     /// the session. perspicax's own, for its desktop shell.
     Shell,
+    /// `perspicax-settings-v1`: the next chord the person presses, before
+    /// any binding takes it. perspicax's own, for its settings app.
+    Settings,
 }
 
 impl Protocol {
     /// Every protocol, in the order a config file lists them.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::ForeignToplevelList,
         Self::ForeignToplevelManagement,
         Self::Workspace,
         Self::Screencopy,
         Self::OutputManagement,
         Self::Shell,
+        Self::Settings,
     ];
 
     /// Its key in the `[protocols]` table.
@@ -61,6 +66,7 @@ impl Protocol {
             Self::Screencopy => "screencopy",
             Self::OutputManagement => "output-management",
             Self::Shell => "shell",
+            Self::Settings => "settings",
         }
     }
 

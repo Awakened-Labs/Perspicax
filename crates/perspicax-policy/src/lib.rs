@@ -16,7 +16,8 @@
 //! integers.
 //!
 //! The decisions, by module: focus and what a chord means (`focus`, `binds`);
-//! the two chords no binding can take (`hatch`);
+//! the two chords no binding can take (`hatch`); and who a key press is
+//! for, a hatch, a capture or a binding (`take`);
 //! what a button, a double-click or the wheel means where the pointer is
 //! (`mouse`);
 //! where a window goes and how big (`geometry`); where each program's window
@@ -52,6 +53,7 @@ mod resist;
 mod restart;
 mod snap;
 mod tabs;
+mod take;
 mod tap;
 mod theme;
 mod transition;
@@ -84,6 +86,7 @@ pub use crate::{
     restart::{EX_CONFIG, EX_UNAVAILABLE, Ended, Restart, Restarts},
     snap::{Snapping, Zone, keyed, zone},
     tabs::Groups,
+    take::{KeyPress, Taken, take, take_tap},
     tap::{LogoTap, is_logo},
     theme::{
         Appearance, Builtin, ColorScheme, Contrast, Family, Font, Logo, Motion, Palette, Rgba,

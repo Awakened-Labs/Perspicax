@@ -53,7 +53,7 @@ use perspicax_policy::{
 use serde::Deserialize;
 
 pub use crate::actions::{Spelled, spell_action};
-pub use crate::keys::{Trigger, spell_chord, spell_trigger, trigger};
+pub use crate::keys::{Trigger, spell_chord, spell_press, spell_trigger, trigger};
 use crate::shell::RawShell;
 pub use crate::shell::{
     Align, Edge, Item, Leave, Panel, PanelOutputs, PanelWidth, Shell, ShellBuilt, TaskbarScope,
@@ -709,12 +709,34 @@ fn count(grid: Grid) -> u32 {
     u32::from(grid.columns) * u32::from(grid.rows)
 }
 
+/// The settings app's program. It edits this file, and the file is what
+/// holds every agent back, so no agent is ever handed it: the config
+/// refuses to mark it for one, and `perspicax-index` refuses to act on its
+/// windows whatever was granted.
+pub const SETTINGS_APP: &str = "perspicax-settings";
+
+/// Whether `program`, a bare name or a path, is [`SETTINGS_APP`].
+fn is_settings_app(program: &str) -> bool {
+    Path::new(program)
+        .file_name()
+        .is_some_and(|name| name == SETTINGS_APP)
+}
+
+/// Why `perspicax-settings` may not be an agent's, and what to do instead.
+fn no_agent_settings(remedy: &str) -> String {
+    format!(
+        "`{SETTINGS_APP}` edits this file, which is what holds an agent back, so no agent may \
+         be given it; {remedy}"
+    )
+}
+
 /// The `[protocols]` defaults, the same in both profiles: a profile is a
 /// window manager's habits, not a security posture. Listing windows and
 /// workspaces is open to any client, as every panel expects. Reading pixels,
-/// moving monitors and speaking for the desktop shell are for the programs
-/// that are known to do it, by name, which anything can claim; a person who
-/// wants it tighter writes full paths.
+/// moving monitors, speaking for the desktop shell and hearing the chord a
+/// person presses to bind are for the programs that are known to do it, by
+/// name, which anything can claim; a person who wants it tighter writes full
+/// paths.
 fn protocols(built: Built) -> Access {
     let only = |names: &[&str]| Rule::Only(names.iter().map(|name| Program::parse(name)).collect());
     Access::open()
@@ -731,6 +753,7 @@ fn protocols(built: Built) -> Access {
             only(&["wlr-randr", "kanshi", "wdisplays", "nwg-displays"]),
         )
         .with(Protocol::Shell, only(&["perspicax-shell"]))
+        .with(Protocol::Settings, only(&[SETTINGS_APP]))
 }
 
 /// Where the config file lives: `$XDG_CONFIG_HOME/perspicax/config.toml`,
@@ -942,6 +965,12 @@ impl RawAgent {
         if let Some(launch) = self.launch {
             let rule = launch.rule("agent.launch")?;
             for (at, program) in rule.named().into_iter().enumerate() {
+                if is_settings_app(program) {
+                    return Err(invalid(
+                        format!("agent.launch[{at}]"),
+                        no_agent_settings("take it out of the list"),
+                    ));
+                }
                 if program.contains('/') && !program.starts_with('/') {
                     return Err(invalid(
                         format!("agent.launch[{at}]"),
@@ -1035,6 +1064,7 @@ struct RawProtocols {
     screencopy: Option<RawRule>,
     output_management: Option<RawRule>,
     shell: Option<RawRule>,
+    settings: Option<RawRule>,
 }
 
 /// `"any"`, `"off"`, or a list of programs.
@@ -1810,6 +1840,15 @@ impl Raw {
                 "an empty command".to_owned(),
             ));
         }
+        if let Some(settings) = starts
+            .iter()
+            .position(|start| start.agent && is_settings_app(&start.command[0]))
+        {
+            return Err(invalid(
+                format!("autostart[{settings}]"),
+                no_agent_settings("drop `agent = true`"),
+            ));
+        }
         config.autostart = starts;
         Ok(config)
     }
@@ -2243,6 +2282,7 @@ impl RawProtocols {
             (Protocol::Screencopy, self.screencopy),
             (Protocol::OutputManagement, self.output_management),
             (Protocol::Shell, self.shell),
+            (Protocol::Settings, self.settings),
         ];
         for (protocol, raw) in written {
             let Some(raw) = raw else { continue };
@@ -3263,6 +3303,43 @@ mod tests {
                 agent: true
             })
         );
+    }
+
+    #[test]
+    fn the_settings_app_is_never_given_to_an_agent() {
+        let refused = |toml: &str| match parse(toml, SEAT) {
+            Err(Error::Invalid { key, reason }) => {
+                assert!(
+                    reason.contains("`perspicax-settings` edits this file"),
+                    "{reason}"
+                );
+                key
+            }
+            other => panic!("{toml}: {other:?}"),
+        };
+        assert_eq!(
+            refused("[keys]\n\"Logo+,\" = { spawn = [\"perspicax-settings\"], agent = true }"),
+            "keys.Logo+,"
+        );
+        assert_eq!(
+            refused(
+                "[mouse.desktop]\n\"Mouse8\" = { spawn = [\"/usr/bin/perspicax-settings\"], agent = true }"
+            ),
+            "mouse.desktop.Mouse8"
+        );
+        assert_eq!(
+            refused("autostart = [[\"foot\"], { spawn = [\"perspicax-settings\"], agent = true }]"),
+            "autostart[1]"
+        );
+        assert_eq!(
+            refused("[agent]\nlaunch = [\"foot\", \"/usr/local/bin/perspicax-settings\"]"),
+            "agent.launch[1]"
+        );
+        let persons = parse(
+            "autostart = [[\"perspicax-settings\"]]\n[keys]\n\"Logo+,\" = { spawn = [\"perspicax-settings\"] }",
+            SEAT,
+        );
+        assert!(persons.is_ok(), "the person's own: {persons:?}");
     }
 
     #[test]
@@ -4767,6 +4844,18 @@ mod tests {
         }
         let config = parse("[protocols]\nshell = \"off\"", SEAT).unwrap();
         assert_eq!(config.protocols.rule(Protocol::Shell), &Rule::Off);
+    }
+
+    #[test]
+    fn the_settings_protocol_defaults_to_perspicax_settings_in_both_profiles() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let access = Config::profile(profile, SEAT).protocols;
+            assert!(access.admits(Protocol::Settings, Some("/usr/bin/perspicax-settings")));
+            assert!(!access.admits(Protocol::Settings, Some("/usr/bin/perspicax-shell")));
+            assert!(!access.admits(Protocol::Settings, None));
+        }
+        let config = parse("[protocols]\nsettings = \"off\"", SEAT).unwrap();
+        assert_eq!(config.protocols.rule(Protocol::Settings), &Rule::Off);
     }
 
     #[test]

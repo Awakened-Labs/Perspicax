@@ -1637,6 +1637,7 @@ dependencies = [
 name = "perspicax-protocols"
 version = "0.1.0"
 dependencies = [
+ "bitflags",
  "wayland-backend",
  "wayland-client",
  "wayland-scanner",
@@ -1649,9 +1650,12 @@ version = "0.1.0"
 dependencies = [
  "perspicax-config",
  "perspicax-policy",
+ "perspicax-protocols",
+ "smithay-client-toolkit",
  "thiserror 2.0.20",
  "toml",
  "toml_edit",
+ "wayland-client",
 ]
 
 [[package]]

@@ -17,9 +17,10 @@
 //!
 //! Both ways, as `actions` does for actions: [`trigger`] reads an entry, and
 //! [`spell_trigger`] writes one back, for the settings app. A spelling is
-//! only ever given when reading it back is the same chord.
+//! only ever given when reading it back is the same chord. A key pressed is
+//! written by [`spell_press`], as the chord the compositor would match it by.
 
-use perspicax_policy::{Button, Chord, Gesture, Keysym, Mods, MouseChord, Wheel};
+use perspicax_policy::{Button, Chord, Gesture, KeyPress, Keysym, Mods, MouseChord, Wheel};
 
 /// The named keys a binding may use, matched without regard to case. Where a
 /// key has two common spellings, both are listed.
@@ -317,6 +318,39 @@ pub fn spell_chord(chord: Chord) -> Option<String> {
     spell_trigger(Trigger::Chord(chord))
 }
 
+/// A key pressed, as the `[keys]` entry that binds it: what the settings
+/// app writes for a chord the person pressed.
+///
+/// The key is one of those a binding finds the press by
+/// ([`KeyPress::candidates`]), so the entry written is the one the
+/// compositor will match. Of those, the one a person would write: the digit
+/// an AZERTY number row makes with Shift, then the key in the keymap's Latin
+/// layout, then what it makes alone, then what it made. So under `us,ru`
+/// with Russian in use the key that makes `й` is written `q`, as it is under
+/// `us`, and Shift+a is `Shift+a` rather than a capital no file can write.
+///
+/// `None` when none of them has a spelling: a keypad key, say, which no
+/// config can bind yet.
+#[must_use]
+pub fn spell_press(press: &KeyPress) -> Option<String> {
+    let found = press.candidates();
+    let digit = press
+        .shifted
+        .filter(|sym| sym.key_char().is_some_and(|made| made.is_ascii_digit()));
+    digit
+        .into_iter()
+        .chain(press.latin)
+        .chain(press.raw.iter().copied())
+        .chain([press.made])
+        .filter(|key| found.contains(key))
+        .find_map(|key| {
+            spell_chord(Chord {
+                mods: press.mods,
+                key,
+            })
+        })
+}
+
 /// A key as a person writes it: the first of its names in [`NAMED`], or else
 /// the character it makes, when that is one a person can see.
 ///
@@ -592,6 +626,138 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A key pressed on a US keyboard, which makes `sym` whatever is held.
+    fn plain(mods: Mods, sym: Keysym) -> KeyPress {
+        KeyPress {
+            mods,
+            made: sym,
+            raw: vec![sym],
+            latin: Some(sym),
+            shifted: None,
+        }
+    }
+
+    fn logo() -> Mods {
+        Mods {
+            logo: true,
+            ..Mods::default()
+        }
+    }
+
+    /// The key that makes `й` on the Russian layout and `q` on the US one,
+    /// pressed with Russian in use.
+    fn shorti(mods: Mods) -> KeyPress {
+        KeyPress {
+            mods,
+            made: if mods.shift {
+                Keysym::Cyrillic_SHORTI
+            } else {
+                Keysym::Cyrillic_shorti
+            },
+            raw: vec![Keysym::Cyrillic_shorti],
+            latin: Some(Keysym::q),
+            shifted: Some(Keysym::Cyrillic_SHORTI),
+        }
+    }
+
+    /// AZERTY's `&` key, which makes `1` with Shift.
+    fn azerty_one(mods: Mods) -> KeyPress {
+        KeyPress {
+            mods,
+            made: if mods.shift {
+                Keysym::_1
+            } else {
+                Keysym::ampersand
+            },
+            raw: vec![Keysym::ampersand],
+            latin: Some(Keysym::ampersand),
+            shifted: Some(Keysym::_1),
+        }
+    }
+
+    #[test]
+    fn a_press_on_the_ru_layout_is_written_in_the_latin_one() {
+        assert_eq!(spell_press(&shorti(logo())).as_deref(), Some("Logo+q"));
+        let without_latin = KeyPress {
+            latin: Some(Keysym::Cyrillic_shorti),
+            ..shorti(logo())
+        };
+        assert_eq!(
+            spell_press(&without_latin).as_deref(),
+            Some("Logo+й"),
+            "a keymap with no Latin layout binds the letter itself"
+        );
+    }
+
+    #[test]
+    fn a_shifted_letter_is_written_lower_case_with_shift() {
+        let held = Mods {
+            shift: true,
+            ..logo()
+        };
+        let press = KeyPress {
+            made: Keysym::A,
+            shifted: Some(Keysym::A),
+            ..plain(held, Keysym::a)
+        };
+        assert_eq!(spell_press(&press).as_deref(), Some("Logo+Shift+a"));
+        let slash = KeyPress {
+            made: Keysym::question,
+            shifted: Some(Keysym::question),
+            ..plain(held, Keysym::slash)
+        };
+        assert_eq!(spell_press(&slash).as_deref(), Some("Logo+Shift+/"));
+    }
+
+    #[test]
+    fn azertys_number_row_is_written_as_the_digit() {
+        assert_eq!(spell_press(&azerty_one(logo())).as_deref(), Some("Logo+1"));
+        let held = Mods {
+            shift: true,
+            ..logo()
+        };
+        assert_eq!(
+            spell_press(&azerty_one(held)).as_deref(),
+            Some("Logo+Shift+1")
+        );
+    }
+
+    #[test]
+    fn a_keypad_enter_has_no_spelling_yet() {
+        assert_eq!(spell_press(&plain(logo(), Keysym::KP_Enter)), None);
+        assert_eq!(spell_press(&plain(Mods::default(), Keysym::KP_1)), None);
+    }
+
+    #[test]
+    fn every_spelled_press_resolves_to_its_binding() {
+        let unusual = [shorti(logo()), azerty_one(logo())];
+        let presses = every_mods()
+            .flat_map(|mods| {
+                writable_keys()
+                    .map(move |sym| plain(mods, sym))
+                    .chain([shorti(mods), azerty_one(mods)])
+            })
+            .chain(unusual);
+        let mut spelled = 0;
+        for press in presses {
+            let Some(text) = spell_press(&press) else {
+                continue;
+            };
+            let Ok(Trigger::Chord(written)) = trigger(&text) else {
+                panic!("{text} is no chord");
+            };
+            let bindings = perspicax_policy::Bindings::default()
+                .bind(written, perspicax_policy::Action::Close);
+            assert_eq!(
+                bindings.resolve(press.mods, &press.candidates()),
+                Some(&perspicax_policy::Action::Close),
+                "{text} for {press:?}"
+            );
+            spelled += 1;
+        }
+        assert!(spelled > 16 * 100, "only {spelled} spelled");
     }
 
     #[test]

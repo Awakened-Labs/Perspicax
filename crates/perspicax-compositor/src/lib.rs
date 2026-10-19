@@ -40,6 +40,7 @@ pub mod act;
 mod backdrop;
 mod backend;
 mod capture;
+mod chord_capture;
 mod damage;
 mod decorations;
 pub mod facts;

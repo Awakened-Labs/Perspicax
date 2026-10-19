@@ -102,6 +102,9 @@ impl Spelled {
             Self::Spawn { command, .. } if command.is_empty() => {
                 return Err("`spawn` needs a program".to_owned());
             }
+            Self::Spawn { command, agent } if agent && crate::is_settings_app(&command[0]) => {
+                return Err(crate::no_agent_settings("drop `agent = true`"));
+            }
             Self::Spawn { command, agent } => Action::Spawn { command, agent },
             Self::Pie(pie) if pies.contains(&pie) => Action::Pie(pie),
             Self::Pie(pie) if pies.is_empty() => {
@@ -126,7 +129,8 @@ impl Spelled {
 }
 
 /// The words for `action`, as a binding's value would say it. `None` for an
-/// action no file can write: a spawn of nothing, workspace 0, a fifth layout.
+/// action no file can write: a spawn of nothing, the settings app spawned
+/// for an agent, workspace 0, a fifth layout.
 ///
 /// The match names every variant, so an action added to policy without a
 /// spelling here does not compile; each arm then asks the same tables
@@ -136,6 +140,7 @@ pub fn spell_action(action: &Action) -> Option<Spelled> {
     let name = |text: &str| Some(Spelled::Name(text.to_owned()));
     match action {
         Action::Spawn { command, .. } if command.is_empty() => None,
+        Action::Spawn { command, agent } if *agent && crate::is_settings_app(&command[0]) => None,
         Action::Spawn { command, agent } => Some(Spelled::Spawn {
             command: command.clone(),
             agent: *agent,
@@ -410,6 +415,10 @@ mod tests {
             Action::Spawn {
                 command: Vec::new(),
                 agent: false,
+            },
+            Action::Spawn {
+                command: vec!["/usr/bin/perspicax-settings".to_owned()],
+                agent: true,
             },
         ] {
             assert_eq!(spell_action(&action), None, "{action:?}");

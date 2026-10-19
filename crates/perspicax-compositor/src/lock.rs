@@ -90,7 +90,10 @@ use smithay::{
     },
 };
 
-use crate::state::{ClientState, Compositor};
+use crate::{
+    chord_capture::{Heard, Reason},
+    state::{ClientState, Compositor},
+};
 
 /// The session is locked: by which lock, and the surfaces covering each
 /// output.
@@ -178,6 +181,8 @@ impl SessionLockHandler for Compositor {
             return;
         }
         tracing::info!("session locked");
+        // Before the keyboard goes, which would call it unfocused.
+        self.end_capture(Heard::Cancelled(Reason::Locked));
         self.lock = Some(Locked::by(lock));
         // A switch being drawn is not finished behind the lock, nor after it.
         self.backend.settle_transitions();
