@@ -295,15 +295,30 @@ impl Compositor {
         }
     }
 
-    /// Put the focused window on every workspace, or back on one.
-    pub(crate) fn toggle_sticky(&mut self) {
-        let Some(window) = self.focused_surface().and_then(|id| self.window_for_id(id)) else {
+    /// Put `window` on every workspace, or back on the one its monitor
+    /// shows: the focused window, by a key, or the one whose sticky button
+    /// was pressed, which need not have the keyboard. A window never given
+    /// a workspace is on every one already, and stays so.
+    pub(crate) fn toggle_sticky(&mut self, window: &Framed) {
+        let (Some(id), Some(output)) = (id_of(window), self.monitor_of(window)) else {
             return;
         };
-        if let (Some(id), Some(output)) = (id_of(&window), self.monitor_of(&window)) {
-            self.workspaces.toggle_sticky(id, &output);
-            self.workspace_changed();
+        if self.workspaces.home(id).is_none() {
+            tracing::debug!(
+                ?id,
+                "not made sticky or not: it has no workspace of its own"
+            );
+            return;
         }
+        self.workspaces.toggle_sticky(id, &output);
+        self.workspace_changed();
+    }
+
+    /// Whether `window` is on every workspace, which its sticky button
+    /// shows: made so, or never given one of its own.
+    #[cfg(feature = "seat")]
+    pub(crate) fn is_sticky(&self, window: &Framed) -> bool {
+        id_of(window).is_none_or(|id| !matches!(self.workspaces.home(id), Some(Home::On(_))))
     }
 
     /// Show the workspace a window is on, on its monitor, if it is not

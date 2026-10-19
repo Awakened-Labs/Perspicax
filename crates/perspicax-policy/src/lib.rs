@@ -61,9 +61,11 @@ pub use crate::{
     flip::{EdgeDwell, Flipping, NOTCH_PIXELS, Notches, Resting, arrival, edge_at},
     focus::{ACTIVATION_WINDOW, Change, Decision, Focus, FocusModel, cycle, grants_activation},
     frame::{
-        AgentLook, Colour, DOUBLE_CLICK_MS, Decorations, FrameButton, GRIP, Insets, Look, Part,
-        Press, buttons, buttons_in, fit, frame_colours, frame_rects, inset, is_double,
-        outline_rects, outset, part_at, rolled_up, tab_rects, titlebar,
+        AgentLook, Animation, Buttons, Colour, DOUBLE_CLICK_MS, Decorations, Face, FrameButton,
+        GRIP, Insets, Light, Look, Part, Piece, Press, Shadow, Stretch, buttons, buttons_in,
+        corner_radius, fit, frame_colours, frame_rects, inset, is_double, light, outline_rects,
+        outset, part_at, rolled_up, rounded_outline, rounded_rects, shadow_at, shadow_pieces,
+        tab_rects, titlebar, wash,
     },
     geometry::{
         DRAG_THRESHOLD, Edges, Rect, anchor, carry, clear_of, dragged, edges_near, neighbour,
@@ -81,12 +83,12 @@ pub use crate::{
     tabs::Groups,
     tap::{LogoTap, is_logo},
     theme::{
-        Appearance, Builtin, ColorScheme, Contrast, Family, Font, Logo, Palette, Rgba, Role, Theme,
-        follows,
+        Appearance, Builtin, ColorScheme, Contrast, Family, Font, Logo, Motion, Palette, Rgba,
+        Role, Theme, follows,
     },
     transition::{
-        Area, Effect, Frame, Pane, Transition, Transitioning, WIPE_BAR, ease_in_out, ease_out,
-        smoothstep,
+        Area, Effect, Frame, Pane, Transition, Transitioning, Tween, WIPE_BAR, ease_in_out,
+        ease_out, smoothstep,
     },
     workspace::{
         Cell, Direction, Grid, GroupView, Home, Mode, Shape, Switched, WorkspaceView, Workspaces,

@@ -41,10 +41,10 @@ use std::{
 };
 
 use perspicax_policy::{
-    Access, Action, Bindings, Chord, Colour, Context, Decorations, Direction, Drag, Flipping,
-    Focus, FocusModel, Gesture, Grid, Keysym, Mods, MouseBindings, MouseChord, OPAQUE, Opacity,
-    Place, Program, Protocol, Remembering, Resistance, Rule, Shape, Side, Snapping, Switching,
-    Towards, Transitioning, VolumeKey,
+    Access, Action, Animation, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction,
+    Drag, Effect, Face, Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Keysym, Mods,
+    MouseBindings, MouseChord, OPAQUE, Opacity, Place, Program, Protocol, Remembering, Resistance,
+    Rule, Shadow, Shape, Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
 };
 use serde::Deserialize;
 
@@ -57,7 +57,8 @@ pub use crate::shell::{
 pub use perspicax_policy::DOUBLE_CLICK_MS;
 /// The theme's types, as the shell reads them from [`Shell`].
 pub use perspicax_policy::{
-    Appearance, Builtin, ColorScheme, Contrast, Family, Font, Logo, Palette, Rgba, Role, Theme,
+    Appearance, Builtin, ColorScheme, Contrast, Family, Font, Logo, Motion, Palette, Rgba, Role,
+    Theme,
 };
 
 /// Which cargo features this binary was built with, as far as config cares.
@@ -69,6 +70,43 @@ pub struct Built {
     pub xwayland: bool,
     /// Rendering on demand for a screenshot, which `screencopy` needs.
     pub capture: bool,
+    /// Drawing SVG, which an SVG icon for a titlebar button needs.
+    pub svg: bool,
+}
+
+/// A person's own pictures for the titlebar's buttons: the
+/// `[decorations.icons]` table. A face with no file is drawn as the
+/// built-in shape, and so is one whose file cannot be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Icons {
+    /// A file for each face that has one, as written: a seat finds a
+    /// relative path beside the config and `~` in the home folder, as it
+    /// finds the theme's logo ([`locate`]).
+    pub files: Vec<(Face, PathBuf)>,
+    /// Whether a file is a mask, drawn in the bar's ink by its alpha, so it
+    /// reads on every bar and in every theme. Otherwise it is drawn in its
+    /// own colours, the same on every bar.
+    pub tint: bool,
+}
+
+impl Default for Icons {
+    fn default() -> Self {
+        Self {
+            files: Vec::new(),
+            tint: true,
+        }
+    }
+}
+
+impl Icons {
+    /// The file `face` is drawn from, if it has one.
+    #[must_use]
+    pub fn file(&self, face: Face) -> Option<&Path> {
+        self.files
+            .iter()
+            .find(|(drawn, _)| *drawn == face)
+            .map(|(_, path)| path.as_path())
+    }
 }
 
 /// What an agent may do on the seat, beyond acting on what it was granted:
@@ -194,6 +232,9 @@ pub struct Config {
     /// Who draws a window's titlebar and border, and what they look like.
     /// Its colours are the theme's titlebar colours.
     pub decorations: Decorations,
+    /// The pictures the titlebar's buttons are drawn from, where a person
+    /// has their own: kept apart from `decorations`, which is `Copy`.
+    pub icons: Icons,
     /// What everything perspicax draws looks like: the `[theme]` table.
     pub theme: Theme,
     /// Whether a session shows the splash as it starts -- the `splash`
@@ -560,7 +601,8 @@ impl Config {
             // Both slide: a switch that shows which way it went is the more
             // use where minimal's grid wraps and its edges flip.
             transitioning: Transitioning::default(),
-            decorations: Decorations::default(),
+            decorations: decorations(profile),
+            icons: Icons::default(),
             theme: Theme::default(),
             splash: built.seat,
             xwayland: built.xwayland,
@@ -568,6 +610,39 @@ impl Config {
             agent: Agent::default(),
             shell: Shell::profile(profile, ShellBuilt::FULL),
         }
+    }
+}
+
+/// How a profile decorates windows, before the `[decorations]` table: the
+/// same frame in both, and their titlebars' buttons.
+fn decorations(profile: Profile) -> Decorations {
+    use FrameButton::{Close, Maximize, Minimize, Shade, Sticky};
+    match profile {
+        // Plasma's rounded corners, and a shadow under every window that
+        // shows which is over which.
+        Profile::Classic => Decorations {
+            radius: 5,
+            shadow: Shadow {
+                size: 18,
+                offset: (0, 4),
+                opacity: 50,
+                colour: Colour::rgb(0, 0, 0),
+            },
+            // A roll the eye can follow, and a light that comes up rather
+            // than snapping on.
+            animation: Animation {
+                shade_ms: 150,
+                hover_ms: 80,
+            },
+            ..Decorations::default()
+        },
+        // Fluxbox's own titlebar, Stick at the left and the rest at the
+        // right, with the shade button the wheel over the title also works.
+        Profile::Minimal => Decorations {
+            buttons: Buttons::new(&[Sticky], &[Shade, Minimize, Maximize, Close])
+                .expect("five buttons, once each"),
+            ..Decorations::default()
+        },
     }
 }
 
@@ -892,6 +967,13 @@ enum RawContrast {
     High,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawMotion {
+    Normal,
+    Reduced,
+}
+
 /// The `[splash]` table.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -910,6 +992,7 @@ struct RawTheme {
     cursor_size: Option<u32>,
     color_scheme: Option<RawColorScheme>,
     contrast: Option<RawContrast>,
+    motion: Option<RawMotion>,
     /// By role, checked against [`Role`] rather than by serde, so that a
     /// misspelled role is named with the table it is in.
     palette: Option<std::collections::BTreeMap<String, String>>,
@@ -942,7 +1025,108 @@ struct RawDecorations {
     border: Option<i32>,
     focused: Option<String>,
     unfocused: Option<String>,
+    left: Option<Vec<RawButton>>,
+    right: Option<Vec<RawButton>>,
+    corner_radius: Option<i32>,
     agent: Option<RawAgentLook>,
+    icons: Option<RawIcons>,
+    shadow: Option<RawShadow>,
+    animation: Option<RawAnimation>,
+}
+
+/// The `[decorations.animation]` table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawAnimation {
+    shade_ms: Option<u32>,
+    hover_ms: Option<u32>,
+}
+
+/// The `[decorations.shadow]` table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawShadow {
+    size: Option<i32>,
+    offset: Option<[i32; 2]>,
+    opacity: Option<i32>,
+    colour: Option<String>,
+}
+
+/// The `[decorations.icons]` table: a file for each face, by what a press
+/// of the button then does.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RawIcons {
+    close: Option<String>,
+    minimize: Option<String>,
+    maximize: Option<String>,
+    restore: Option<String>,
+    shade: Option<String>,
+    unshade: Option<String>,
+    stick: Option<String>,
+    unstick: Option<String>,
+    tint: Option<bool>,
+}
+
+impl RawIcons {
+    fn apply(self, built: Built) -> Result<Icons, Error> {
+        let written = [
+            (Face::Close, self.close),
+            (Face::Minimize, self.minimize),
+            (Face::Maximize, self.maximize),
+            (Face::Restore, self.restore),
+            (Face::Shade, self.shade),
+            (Face::Unshade, self.unshade),
+            (Face::Stick, self.stick),
+            (Face::Unstick, self.unstick),
+        ];
+        let mut files = Vec::new();
+        for (face, path) in written {
+            match path {
+                None => {}
+                Some(path) if path.trim().is_empty() => {
+                    return Err(invalid(
+                        format!("decorations.icons.{}", face.key()),
+                        "an empty path; leave it out for the built-in shape".to_owned(),
+                    ));
+                }
+                Some(path) if !built.svg && is_svg(Path::new(&path)) => {
+                    return Err(Error::NotBuilt {
+                        key: icon_key(face),
+                        feature: "svg",
+                    });
+                }
+                Some(path) => files.push((face, PathBuf::from(path))),
+            }
+        }
+        Ok(Icons {
+            files,
+            tint: self.tint.unwrap_or(true),
+        })
+    }
+}
+
+/// A titlebar button, as `[decorations] left` and `right` name it.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RawButton {
+    Shade,
+    Sticky,
+    Minimize,
+    Maximize,
+    Close,
+}
+
+impl From<RawButton> for FrameButton {
+    fn from(button: RawButton) -> Self {
+        match button {
+            RawButton::Shade => Self::Shade,
+            RawButton::Sticky => Self::Sticky,
+            RawButton::Minimize => Self::Minimize,
+            RawButton::Maximize => Self::Maximize,
+            RawButton::Close => Self::Close,
+        }
+    }
 }
 
 /// The `[decorations.agent]` table.
@@ -1510,7 +1694,10 @@ impl Raw {
         }
 
         config.theme = theme(self.theme, self.decorations.as_ref())?;
-        if let Some(decorations) = self.decorations {
+        if let Some(mut decorations) = self.decorations {
+            if let Some(icons) = decorations.icons.take() {
+                config.icons = icons.apply(built)?;
+            }
             config.decorations = decorations.apply(config.decorations)?;
         }
         let palette = &config.theme.palette;
@@ -1518,6 +1705,14 @@ impl Raw {
         config.decorations.focused_ink = palette[Role::TitleFocusedInk].colour();
         config.decorations.unfocused = palette[Role::TitleUnfocused].colour();
         config.decorations.unfocused_ink = palette[Role::TitleUnfocusedInk].colour();
+        config.decorations.close_hover = palette[Role::TitleCloseHover].colour();
+        // Less motion is every animation at once, whatever each one's own
+        // table says: a person troubled by motion should not have to find
+        // them all.
+        if config.theme.motion == Motion::Reduced {
+            config.transitioning.effect = Effect::None;
+            config.decorations.animation = Animation::default();
+        }
 
         if let Some(protocols) = self.protocols {
             config.protocols = protocols.apply(config.protocols, built)?;
@@ -1656,6 +1851,56 @@ impl RawDecorations {
         if let Some(border) = self.border {
             decorations.border = pixels("border", border, 0..=32)?;
         }
+        if let Some(radius) = self.corner_radius {
+            decorations.radius = pixels("corner-radius", radius, 0..=16)?;
+        }
+        if let Some(written) = self.animation {
+            let length = |key: &str, ms: u32| {
+                if ms <= 1000 {
+                    Ok(ms)
+                } else {
+                    Err(invalid(
+                        format!("decorations.animation.{key}"),
+                        format!("{ms} is more than 1000 milliseconds; 0 is none"),
+                    ))
+                }
+            };
+            if let Some(ms) = written.shade_ms {
+                decorations.animation.shade_ms = length("shade-ms", ms)?;
+            }
+            if let Some(ms) = written.hover_ms {
+                decorations.animation.hover_ms = length("hover-ms", ms)?;
+            }
+        }
+        if let Some(written) = self.shadow {
+            let shadow = &mut decorations.shadow;
+            if let Some(size) = written.size {
+                shadow.size = pixels("shadow.size", size, 0..=64)?;
+            }
+            if let Some([x, y]) = written.offset {
+                shadow.offset = (
+                    pixels("shadow.offset", x, -32..=32)?,
+                    pixels("shadow.offset", y, -32..=32)?,
+                );
+            }
+            if let Some(opacity) = written.opacity {
+                shadow.opacity = u8::try_from(opacity)
+                    .ok()
+                    .filter(|opacity| *opacity <= 100)
+                    .ok_or_else(|| {
+                        invalid(
+                            "decorations.shadow.opacity".to_owned(),
+                            format!("{opacity} is outside 0 to 100 percent"),
+                        )
+                    })?;
+            }
+            if let Some(text) = written.colour {
+                shadow.colour = opaque_colour("decorations.shadow.colour", &text)?;
+            }
+        }
+        if self.left.is_some() || self.right.is_some() {
+            decorations.buttons = titlebar_buttons(self.left, self.right, decorations.buttons)?;
+        }
         // Its colours are the theme's: see `theme`.
         if let Some(agent) = self.agent {
             let look = &mut decorations.agent;
@@ -1679,6 +1924,74 @@ impl RawDecorations {
         }
         Ok(decorations)
     }
+}
+
+/// Whether `path` names an SVG, by its extension: how a seat tells which
+/// reader an icon needs.
+#[must_use]
+pub fn is_svg(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+}
+
+/// The key an icon for `face` is written at, whole, as an error names it.
+const fn icon_key(face: Face) -> &'static str {
+    match face {
+        Face::Close => "decorations.icons.close",
+        Face::Minimize => "decorations.icons.minimize",
+        Face::Maximize => "decorations.icons.maximize",
+        Face::Restore => "decorations.icons.restore",
+        Face::Shade => "decorations.icons.shade",
+        Face::Unshade => "decorations.icons.unshade",
+        Face::Stick => "decorations.icons.stick",
+        Face::Unstick => "decorations.icons.unstick",
+    }
+}
+
+/// The titlebar's two ends, as `[decorations] left` and `right` write them
+/// over `had`, the profile's.
+///
+/// A button listed twice in one list is refused at that list's key, and
+/// one in both lists at `right`'s. An end left unwritten keeps the
+/// profile's buttons there, but for any the written end has taken: under
+/// minimal, whose sticky is at the left, `right = ["sticky", "close"]`
+/// moves sticky to the right rather than being refused for a sticky the
+/// person never wrote at the left.
+fn titlebar_buttons(
+    left: Option<Vec<RawButton>>,
+    right: Option<Vec<RawButton>>,
+    had: Buttons,
+) -> Result<Buttons, Error> {
+    let written = |key: &str, list: Option<Vec<RawButton>>| {
+        let Some(list) = list else {
+            return Ok(None);
+        };
+        let list: Vec<FrameButton> = list.into_iter().map(FrameButton::from).collect();
+        match shell::twice(&list) {
+            Some(twice) => Err(invalid(
+                format!("decorations.{key}"),
+                format!("\"{}\" is listed twice", twice.key()),
+            )),
+            None => Ok(Some(list)),
+        }
+    };
+    let (left, right) = (written("left", left)?, written("right", right)?);
+    let untaken = |had: Vec<FrameButton>, taken: &[FrameButton]| -> Vec<FrameButton> {
+        had.into_iter()
+            .filter(|button| !taken.contains(button))
+            .collect()
+    };
+    let left =
+        left.unwrap_or_else(|| untaken(had.left().collect(), right.as_deref().unwrap_or(&[])));
+    let right = right.unwrap_or_else(|| untaken(had.right().collect(), &left));
+    // Each list has each button once, and an end left unwritten has none
+    // the other has: a button twice over is in both written lists.
+    Buttons::new(&left, &right).map_err(|both| {
+        invalid(
+            "decorations.right".to_owned(),
+            format!("\"{}\" is in decorations.left as well", both.key()),
+        )
+    })
 }
 
 /// The `[theme]` table, decided: a theme by name, the colours a person wrote
@@ -1810,6 +2123,10 @@ fn theme(written: Option<RawTheme>, decorations: Option<&RawDecorations>) -> Res
         cursor_size: written.cursor_size,
         apps,
         logo,
+        motion: match written.motion {
+            None | Some(RawMotion::Normal) => Motion::Normal,
+            Some(RawMotion::Reduced) => Motion::Reduced,
+        },
     })
 }
 
@@ -2198,6 +2515,7 @@ mod tests {
         seat: true,
         xwayland: true,
         capture: true,
+        svg: true,
     };
 
     fn alt(key: Keysym) -> (Mods, [Keysym; 1]) {
@@ -2245,6 +2563,7 @@ mod tests {
             seat: true,
             xwayland: false,
             capture: true,
+            svg: true,
         };
         let error = parse("xwayland = true", built).unwrap_err();
         assert!(
@@ -2259,6 +2578,7 @@ mod tests {
             seat: true,
             xwayland: false,
             capture: true,
+            svg: true,
         };
         assert!(!parse("xwayland = false", built).unwrap().xwayland);
     }
@@ -3279,7 +3599,11 @@ mod tests {
     fn decorations_are_configured_in_their_own_table() {
         assert_eq!(
             Config::profile(Profile::Minimal, SEAT).decorations,
-            Decorations::default()
+            Decorations {
+                buttons: Config::profile(Profile::Minimal, SEAT).decorations.buttons,
+                ..Decorations::default()
+            },
+            "minimal's frame is flat, the one there always was, but for its buttons"
         );
         let config = parse(
             "[decorations]\nmode = \"client\"\ntitle-height = 30\nborder = 0\n\
@@ -3292,6 +3616,287 @@ mod tests {
         assert_eq!((decorations.title, decorations.border), (30, 0));
         assert_eq!(decorations.focused, Colour::rgb(0xff, 0x88, 0x00));
         assert_eq!(decorations.unfocused, Decorations::default().unfocused);
+    }
+
+    fn ends(buttons: Buttons) -> (Vec<FrameButton>, Vec<FrameButton>) {
+        (buttons.left().collect(), buttons.right().collect())
+    }
+
+    #[test]
+    fn minimal_puts_sticky_on_the_left_as_fluxbox_does_and_classic_keeps_todays_bar() {
+        use FrameButton::*;
+        assert_eq!(
+            ends(Config::profile(Profile::Minimal, SEAT).decorations.buttons),
+            (vec![Sticky], vec![Shade, Minimize, Maximize, Close])
+        );
+        assert_eq!(
+            ends(Config::profile(Profile::Classic, SEAT).decorations.buttons),
+            (vec![], vec![Shade, Minimize, Maximize, Close])
+        );
+        assert_eq!(
+            Config::profile(Profile::Classic, SEAT).decorations.buttons,
+            Decorations::default().buttons,
+            "classic's buttons are the ones there always were"
+        );
+        let config = parse(
+            "[decorations]\nleft = [\"close\", \"maximize\"]\nright = [\"sticky\"]",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(
+            ends(config.decorations.buttons),
+            (vec![Close, Maximize], vec![Sticky])
+        );
+    }
+
+    #[test]
+    fn a_titlebar_button_listed_twice_or_unknown_is_refused_by_name() {
+        for (text, key, says) in [
+            (
+                "[decorations]\nleft = [\"close\", \"close\"]",
+                "decorations.left",
+                "\"close\" is listed twice",
+            ),
+            (
+                "[decorations]\nright = [\"shade\", \"close\", \"shade\"]",
+                "decorations.right",
+                "\"shade\" is listed twice",
+            ),
+            (
+                "[decorations]\nleft = [\"sticky\"]\nright = [\"close\", \"sticky\"]",
+                "decorations.right",
+                "\"sticky\" is in decorations.left as well",
+            ),
+        ] {
+            match parse(text, SEAT) {
+                Err(Error::Invalid { key: at, reason }) => {
+                    assert_eq!(at, key, "{text}");
+                    assert!(reason.contains(says), "{text}: {reason}");
+                }
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+        let unknown = parse("[decorations]\nleft = [\"pin\"]", SEAT).unwrap_err();
+        let said = unknown.to_string();
+        assert!(said.contains("pin") && said.contains("left"), "{said}");
+    }
+
+    #[test]
+    fn an_empty_list_is_a_bare_end() {
+        let config = parse("profile = \"minimal\"\n[decorations]\nleft = []", SEAT).unwrap();
+        assert_eq!(config.decorations.buttons.left().count(), 0, "no sticky");
+        assert_eq!(config.decorations.buttons.right().count(), 4);
+        let config = parse("[decorations]\nleft = []\nright = []", SEAT).unwrap();
+        assert_eq!(
+            ends(config.decorations.buttons),
+            (vec![], vec![]),
+            "a titlebar with no buttons at all, close included, is a person's to choose"
+        );
+    }
+
+    /// An end left unwritten is the profile's, less what the written end
+    /// took: a button moves rather than being refused for a place the
+    /// person never wrote it in.
+    #[test]
+    fn writing_one_end_moves_a_button_off_the_other() {
+        use FrameButton::*;
+        let config = parse(
+            "profile = \"minimal\"\n[decorations]\nright = [\"sticky\", \"close\"]",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(
+            ends(config.decorations.buttons),
+            (vec![], vec![Sticky, Close])
+        );
+        let config = parse("[decorations]\nleft = [\"close\"]", SEAT).unwrap();
+        assert_eq!(
+            ends(config.decorations.buttons),
+            (vec![Close], vec![Shade, Minimize, Maximize]),
+            "classic's close taken to the left"
+        );
+    }
+
+    /// A person's pictures for the buttons, by what a press then does, and
+    /// masks unless told otherwise; with none, the built-in shapes.
+    #[test]
+    fn a_buttons_icons_are_files_by_what_a_press_does() {
+        assert_eq!(
+            Config::profile(Profile::Minimal, SEAT).icons,
+            Icons::default()
+        );
+        assert!(Icons::default().files.is_empty() && Icons::default().tint);
+        let config = parse(
+            "[decorations.icons]\nclose = \"~/.config/perspicax/buttons/close.png\"\n\
+             restore = \"buttons/restore.png\"\ntint = false",
+            SEAT,
+        )
+        .unwrap();
+        let icons = &config.icons;
+        assert_eq!(
+            icons.file(Face::Close),
+            Some(Path::new("~/.config/perspicax/buttons/close.png")),
+            "as written: the seat finds it"
+        );
+        assert_eq!(
+            icons.file(Face::Restore),
+            Some(Path::new("buttons/restore.png"))
+        );
+        assert_eq!(icons.file(Face::Maximize), None, "restore is not maximize");
+        assert!(!icons.tint);
+        let config = parse("[decorations.icons]\nstick = \"pin.png\"", SEAT).unwrap();
+        assert!(config.icons.tint, "a mask by default");
+    }
+
+    /// An SVG needs a build that draws SVG; one without it says which
+    /// feature would, at the icon's own key. A PNG needs nothing more.
+    #[test]
+    fn an_svg_in_a_build_without_svg_is_refused_naming_the_feature() {
+        let built = Built { svg: false, ..SEAT };
+        let error = parse("[decorations.icons]\nrestore = \"restore.SVG\"", built).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::NotBuilt {
+                    key: "decorations.icons.restore",
+                    feature: "svg"
+                }
+            ),
+            "{error}"
+        );
+        assert!(parse("[decorations.icons]\nrestore = \"restore.png\"", built).is_ok());
+        let config = parse("[decorations.icons]\nrestore = \"restore.svg\"", SEAT).unwrap();
+        assert!(is_svg(config.icons.file(Face::Restore).unwrap()));
+    }
+
+    #[test]
+    fn an_icon_that_cannot_be_named_is_refused_by_its_key() {
+        match parse("[decorations.icons]\nunshade = \" \"", SEAT) {
+            Err(Error::Invalid { key, reason }) => {
+                assert_eq!(key, "decorations.icons.unshade");
+                assert!(reason.contains("empty"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let unknown = parse("[decorations.icons]\nsticky = \"pin.png\"", SEAT).unwrap_err();
+        let said = unknown.to_string();
+        assert!(said.contains("sticky"), "the button, not a face: {said}");
+    }
+
+    /// classic rounds its titlebars' top corners, as Plasma does, and
+    /// minimal keeps them square, as Fluxbox does; either is a key away.
+    #[test]
+    fn classic_rounds_its_corners_and_minimal_keeps_them_square() {
+        assert_eq!(
+            Config::profile(Profile::Classic, SEAT).decorations.radius,
+            5
+        );
+        assert_eq!(
+            Config::profile(Profile::Minimal, SEAT).decorations.radius,
+            0
+        );
+        let config = parse("[decorations]\ncorner-radius = 0", SEAT).unwrap();
+        assert_eq!(config.decorations.radius, 0, "square, in classic");
+        let config = parse(
+            "profile = \"minimal\"\n[decorations]\ncorner-radius = 8",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(config.decorations.radius, 8);
+        match parse("[decorations]\ncorner-radius = 17", SEAT) {
+            Err(Error::Invalid { key, .. }) => assert_eq!(key, "decorations.corner-radius"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// classic casts a shadow under every window it frames, and minimal,
+    /// flat, none; either is a table away.
+    #[test]
+    fn classic_casts_a_shadow_and_minimal_none() {
+        let classic = Config::profile(Profile::Classic, SEAT).decorations.shadow;
+        assert_eq!(
+            (classic.size, classic.offset, classic.opacity),
+            (18, (0, 4), 50)
+        );
+        assert_eq!(
+            Config::profile(Profile::Minimal, SEAT)
+                .decorations
+                .shadow
+                .size,
+            0
+        );
+        let config = parse(
+            "profile = \"minimal\"\n[decorations.shadow]\nsize = 20\noffset = [2, -4]\n\
+             opacity = 60\ncolour = \"#102030\"",
+            SEAT,
+        )
+        .unwrap();
+        let shadow = config.decorations.shadow;
+        assert_eq!(
+            (shadow.size, shadow.offset, shadow.opacity),
+            (20, (2, -4), 60)
+        );
+        assert_eq!(shadow.colour, Colour::rgb(0x10, 0x20, 0x30));
+        let config = parse("[decorations.shadow]\nsize = 0", SEAT).unwrap();
+        assert_eq!(config.decorations.shadow.size, 0, "none, in classic");
+        for (text, key) in [
+            ("size = 65", "decorations.shadow.size"),
+            ("offset = [0, 40]", "decorations.shadow.offset"),
+            ("opacity = 101", "decorations.shadow.opacity"),
+            ("opacity = -1", "decorations.shadow.opacity"),
+            ("colour = \"grey\"", "decorations.shadow.colour"),
+        ] {
+            match parse(&format!("[decorations.shadow]\n{text}"), SEAT) {
+                Err(Error::Invalid { key: at, .. }) => assert_eq!(at, key, "{text}"),
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+    }
+
+    /// classic rolls a window up as the eye can follow and brings a
+    /// button's light up; minimal, flat, does both at once.
+    #[test]
+    fn classic_animates_its_frames_and_minimal_does_not() {
+        let classic = Config::profile(Profile::Classic, SEAT)
+            .decorations
+            .animation;
+        assert_eq!((classic.shade_ms, classic.hover_ms), (150, 80));
+        assert_eq!(
+            Config::profile(Profile::Minimal, SEAT)
+                .decorations
+                .animation,
+            Animation::default()
+        );
+        let config = parse(
+            "profile = \"minimal\"\n[decorations.animation]\nshade-ms = 200",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(config.decorations.animation.shade_ms, 200);
+        assert_eq!(config.decorations.animation.hover_ms, 0);
+        match parse("[decorations.animation]\nhover-ms = 1001", SEAT) {
+            Err(Error::Invalid { key, .. }) => assert_eq!(key, "decorations.animation.hover-ms"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Less motion is every animation at once, a workspace switch's among
+    /// them, whatever their own tables say.
+    #[test]
+    fn reduced_motion_makes_every_switch_and_roll_instant() {
+        let config = parse(
+            "[theme]\nmotion = \"reduced\"\n[workspaces.transition]\neffect = \"carousel\"\n\
+             [decorations.animation]\nshade-ms = 400",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(config.theme.motion, Motion::Reduced);
+        assert_eq!(config.transitioning.effect, Effect::None);
+        assert_eq!(config.decorations.animation, Animation::default());
+        let config = parse("[theme]\nmotion = \"normal\"", SEAT).unwrap();
+        assert_ne!(config.transitioning.effect, Effect::None, "classic's slide");
+        assert_eq!(config.decorations.animation.shade_ms, 150);
+        assert!(parse("[theme]\nmotion = \"none\"", SEAT).is_err());
     }
 
     #[test]
@@ -3371,7 +3976,20 @@ mod tests {
     fn with_no_theme_the_desk_looks_as_it_did_before_themes() {
         let config = parse("", SEAT).unwrap();
         assert_eq!(config.theme, Theme::default());
-        assert_eq!(config.decorations, Decorations::default());
+        let colours = |decorations: Decorations| {
+            (
+                decorations.focused,
+                decorations.focused_ink,
+                decorations.unfocused,
+                decorations.unfocused_ink,
+                decorations.close_hover,
+            )
+        };
+        assert_eq!(
+            colours(config.decorations),
+            colours(Decorations::default()),
+            "the titlebars' colours"
+        );
     }
 
     #[test]
@@ -3528,6 +4146,30 @@ mod tests {
         assert!(
             matches!(&error, Error::Invalid { key, .. } if key == "decorations.focused"),
             "{error}"
+        );
+    }
+
+    /// The close button's light is a palette colour like any, and reaches
+    /// the titlebars as their own colours do.
+    #[test]
+    fn the_close_buttons_light_is_written_in_the_palette() {
+        assert_eq!(
+            Config::profile(Profile::Classic, SEAT)
+                .decorations
+                .close_hover,
+            Colour::rgb(0xda, 0x44, 0x53),
+            "with no file at all"
+        );
+        let config = parse("[theme.palette]\ntitle-close-hover = \"#e81123\"", SEAT).unwrap();
+        assert_eq!(
+            config.decorations.close_hover,
+            Colour::rgb(0xe8, 0x11, 0x23)
+        );
+        let config = parse("[theme.palette]\nalert = \"#ff0000\"", SEAT).unwrap();
+        assert_eq!(
+            config.decorations.close_hover,
+            Colour::rgb(0xff, 0, 0),
+            "following the alert"
         );
     }
 

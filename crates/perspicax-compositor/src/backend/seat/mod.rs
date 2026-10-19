@@ -92,6 +92,7 @@ use crate::{
     state::Compositor,
 };
 
+mod icons;
 mod input;
 mod moving;
 mod overdue;
@@ -195,6 +196,9 @@ pub(crate) struct Session {
     /// Where art decoded on a thread is sent, for the backdrop: a logo of
     /// the person's, read each time the config is. See [`crate::backdrop`].
     art: Sender<Arrived>,
+    /// Where the person's icons for the titlebar's buttons are sent, read
+    /// on a thread at each save. See [`icons`].
+    icon_reads: Sender<icons::Arrived>,
     /// When the DRM reset turned every monitor dark. Taken when the first
     /// frame is queued, to log how long a person logging in looked at a dark
     /// screen.
@@ -204,6 +208,10 @@ pub(crate) struct Session {
     pub(super) title_press: Option<(Option<perspicax_node::SurfaceId>, perspicax_policy::Press)>,
     /// A titlebar button pressed and not yet let go.
     pub(super) button_press: Option<(crate::framed::Framed, perspicax_policy::FrameButton)>,
+    /// The titlebar button lit under the pointer. See [`input::relight`].
+    pub(super) lit: Option<Lit>,
+    /// The one lit before it, its light going out from how lit it was.
+    pub(super) fading: Option<(Lit, f64)>,
     /// The snap preview's colour and size, kept so the damage tracker can
     /// tell a preview that moved from one that did not.
     preview: SolidColorBuffer,
@@ -270,6 +278,7 @@ impl Session {
         // without the compositor ever waiting on it.
         let (art, arriving) = channel::channel();
         backdrop::decode_builtin(art.clone());
+        let (icon_reads, icons_arriving) = channel::channel();
         // And the fonts, found meanwhile: the scan is slow, and the monitors
         // stay dark from the reset below until the first frame. Only a
         // title waits for the fonts.
@@ -384,6 +393,16 @@ impl Session {
                 }
             })
             .map_err(|error| Error::EventLoop(error.to_string()))?;
+        handle
+            .insert_source(icons_arriving, |event, (), state| {
+                if let (channel::Event::Msg(arrived), Running::Seat(session)) =
+                    (event, &mut state.backend)
+                    && session.titles.icons.arrived(arrived)
+                {
+                    state.backend.redraw();
+                }
+            })
+            .map_err(|error| Error::EventLoop(error.to_string()))?;
 
         let dwell = perspicax_policy::EdgeDwell::new(settings.flipping.delay_ms);
         let preview = SolidColorBuffer::new((1, 1), preview_colour(&settings));
@@ -407,9 +426,12 @@ impl Session {
             cursor,
             titles,
             art,
+            icon_reads,
             reset,
             title_press: None,
             button_press: None,
+            lit: None,
+            fading: None,
             preview,
             dwell,
             dwell_armed: None,
@@ -485,6 +507,7 @@ pub(crate) fn attach(state: &mut Compositor) -> Result<(), Error> {
     settings::apply_keyboard(state, numlock);
     settings::tell_appearance(state);
     settings::dress_backdrop(state);
+    settings::read_icons(state);
     rescan(state);
     let Running::Seat(session) = &state.backend else {
         return Ok(());
@@ -930,25 +953,61 @@ fn light(
     }))
 }
 
+/// A titlebar button lit: which window's, which, how, and since when, by
+/// the compositor's clock, for its light to come up.
+#[derive(Debug, Clone)]
+pub(super) struct Lit {
+    pub(super) window: crate::framed::Framed,
+    pub(super) button: perspicax_policy::FrameButton,
+    pub(super) light: perspicax_policy::Light,
+    pub(super) since: u64,
+}
+
+impl Lit {
+    /// Whether it is the same button lit the same way, whenever it was lit.
+    pub(super) fn is(&self, other: &Self) -> bool {
+        (&self.window, self.button, self.light) == (&other.window, other.button, other.light)
+    }
+}
+
 /// Render one output, queue it for scanout if anything changed, and let the
 /// clients on it draw again.
 fn render(state: &mut Compositor, crtc: crtc::Handle) {
+    // Windows move under a still pointer, closed by a key, brought forward,
+    // switched away or grown, and nothing tells the pointer: what is lit
+    // follows what is under it now.
+    if let (Running::Seat(session), Some(pointer)) = (&state.backend, state.pointer.as_ref())
+        && session.lit.is_some()
+    {
+        let at = pointer.current_location();
+        let hit = state.pointed(at);
+        input::relight(state, at, hit.as_ref());
+    }
     state.dress_frames();
     // Which windows are on this monitor, counted now: its titles are
     // written for them and they are told they may draw again, below. After
     // the frames are dressed, whose insets reach into each window's bounds.
     state.settle_outputs();
-    // Every titlebar's labels, while the compositor can still be asked: a
-    // window's tabs name its whole group.
-    let labels: Vec<_> = state
+    // Every titlebar's labels and toggles, while the compositor can still be
+    // asked: a window's tabs name its whole group.
+    let bars: Vec<_> = state
         .space
         .elements()
         .map(|window| {
             let (labels, front) = state.tab_labels(window);
-            (window.clone(), labels, front)
+            let bar = titles::Bar {
+                labels,
+                front,
+                sticky: state.is_sticky(window),
+                maximized: Compositor::is_maximized(window),
+            };
+            (window.clone(), bar)
         })
         .collect();
     let now = state.started_at().elapsed();
+    // Anything rolling, or a light coming up or going out, is drawn again
+    // at the next chance, as a workspace switch is.
+    let animating = state.animating(u64::try_from(now.as_millis()).unwrap_or(u64::MAX));
     // A switch being drawn, gathered while the compositor can still be
     // asked which windows are where.
     let prepared = moving::prepare(
@@ -1003,9 +1062,15 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     // Titles before the windows are drawn: writing one needs the fonts,
     // which drawing a window has no way to reach.
     let whole = crate::framed::whole_scale(head.output.current_scale().fractional_scale());
-    for (window, labels, front) in labels {
+    for (window, bar) in bars {
         if space.outputs_for_element(&window).contains(&head.output) {
-            titles.prepare(&window, labels, front, whole, &settings.theme.font.family);
+            titles.prepare(
+                &window,
+                bar,
+                whole,
+                &settings.theme.font.family,
+                settings.decorations.buttons,
+            );
         }
     }
 
@@ -1102,7 +1167,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         Ok(_) => {}
         Err(error) => tracing::warn!(output = head.output.name(), %error, "frame not rendered"),
     }
-    if prepared.frame.is_some() && lock.is_none() {
+    if (prepared.frame.is_some() || animating) && lock.is_none() {
         moving::keep_moving(head, handle);
     }
 

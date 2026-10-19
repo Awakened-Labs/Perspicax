@@ -64,6 +64,11 @@ cosmic-text = { workspace = true, optional = true }
 # MIT OR Apache-2.0, and the version already in the tree for the shell's
 # wallpapers and screenshots.
 png = { version = "0.18", optional = true }
+# A person's SVG icons for the titlebar's buttons, drawn at each button's own
+# size. Default features off, as the shell has it: an icon needs no text, no
+# system fonts and no embedded photographs. The version, and the tiny-skia it
+# draws with, already in the tree for the shell's icons; Apache-2.0 OR MIT.
+resvg = { version = "0.48", default-features = false, optional = true }
 
 # Backends, as cargo features, so a build carries only the system libraries it
 # will actually use. Neither is on by default: the four gates build the
@@ -100,6 +105,9 @@ xwayland = ["smithay/xwayland", "dep:x11rb"]
 # libxkbcommon unless a picture is wanted. xcursor draws the pointer into a
 # recording that asks for it, and png the splash's lockup into a picture.
 capture = ["smithay/renderer_pixman", "dep:xcursor", "dep:png"]
+# SVG icons for the titlebar's buttons, on a seat: a build without it refuses
+# an icon file that is an SVG, naming this feature, and still reads PNGs.
+svg = ["seat", "dep:resvg"]
 
 # A real Wayland client for the live tests, so a layer-shell test needs no
 # panel program installed. MIT; default features off, since the tests need

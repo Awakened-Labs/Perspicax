@@ -64,7 +64,7 @@ impl Compositor {
             }
             Action::Shade | Action::Unshade => {
                 if let Some(window) = focused {
-                    self.shade(&window, *action == Action::Shade);
+                    self.roll(&window, *action == Action::Shade);
                 }
             }
             Action::ToggleShade => {
@@ -99,7 +99,11 @@ impl Compositor {
             }
             Action::SendToWorkspace(direction) => self.send_to_workspace(*direction, false),
             Action::CarryToWorkspace(direction) => self.send_to_workspace(*direction, true),
-            Action::ToggleSticky => self.toggle_sticky(),
+            Action::ToggleSticky => {
+                if let Some(window) = focused {
+                    self.toggle_sticky(&window);
+                }
+            }
             Action::Snap(direction) => self.snap_focused(*direction),
             Action::Reload => self.reload(),
             Action::StartMenu => self.ask_shell(crate::shell_protocol::Menu::Start),
@@ -167,22 +171,35 @@ impl Compositor {
     /// window has no xdg state to carry it, so it is snapped to the whole
     /// monitor instead, which is the same rect by the same path.
     pub(crate) fn toggle_maximize(&mut self, window: &Framed) {
-        if let Some(toplevel) = window.toplevel().cloned() {
-            let maximized = toplevel.with_pending_state(|pending| {
-                pending.states.contains(xdg_toplevel::State::Maximized)
-            });
+        let maximized = Self::is_maximized(window);
+        if window.toplevel().is_some() {
             if maximized {
                 self.unfill(window, super::Fill::Maximized, None);
             } else {
                 self.fill(window, super::Fill::Maximized, None);
             }
-        } else if Self::is_snapped(window) {
+        } else if maximized {
             self.unsnap(window, None);
         } else {
             self.snap(window, perspicax_policy::Zone::Top, None);
         }
         self.backend.redraw();
         self.publish_facts();
+    }
+
+    /// Whether `window` is maximized, as its maximize button means it: an
+    /// xdg window asked to be, or an X11 window snapped, which is how one is
+    /// maximized here. What a press of the button undoes, and so what the
+    /// button shows: the two read this one answer, and never disagree.
+    pub(crate) fn is_maximized(window: &Framed) -> bool {
+        window.toplevel().map_or_else(
+            || Self::is_snapped(window),
+            |toplevel| {
+                toplevel.with_pending_state(|pending| {
+                    pending.states.contains(xdg_toplevel::State::Maximized)
+                })
+            },
+        )
     }
 
     /// Carry out a focus decision. A parked window being focused or raised

@@ -62,6 +62,7 @@ const BUILT: Built = Built {
     seat: true,
     xwayland: cfg!(feature = "xwayland"),
     capture: cfg!(feature = "capture"),
+    svg: cfg!(feature = "svg"),
 };
 
 /// How long a save has to be quiet before it is read: long enough for an
@@ -253,6 +254,10 @@ pub(crate) fn reload(state: &mut Compositor) {
         .filter(|_| fresh.keyboard.numlock != session.settings.keyboard.numlock);
     let outputs_changed = fresh.outputs != session.settings.outputs;
     let decorations_changed = fresh.decorations != session.settings.decorations;
+    let reach = |decorations: &perspicax_policy::Decorations| {
+        (decorations.server, decorations.title, decorations.border)
+    };
+    let frames_changed = reach(&fresh.decorations) != reach(&session.settings.decorations);
     let opacity_changed = fresh.opacity != session.settings.opacity;
     let placement_changed = fresh.remembering != session.settings.remembering;
     let theme_changed = fresh.theme != session.settings.theme;
@@ -302,9 +307,14 @@ pub(crate) fn reload(state: &mut Compositor) {
         state.publish_facts();
     }
     // Frames are drawn from the settings as they are each time, but a window
-    // sized to fill a zone or a monitor was sized for the old frame.
-    if decorations_changed {
+    // sized to fill a zone or a monitor was sized for the old frame: one
+    // that reaches further or less far, or that its client is now to draw.
+    // Anything else about how frames look, their buttons say, only has to be
+    // drawn again.
+    if frames_changed {
         state.refit_frames();
+    } else if decorations_changed {
+        state.backend.redraw();
     }
     // The titles' font and the snap preview are drawn from the settings as
     // they are; a frame drawn since only has to be drawn again. The pointer
@@ -324,6 +334,8 @@ pub(crate) fn reload(state: &mut Compositor) {
     // it may have changed on disk, or been put right since it could not be
     // read.
     dress_backdrop(state);
+    // And so is every icon for the titlebar's buttons.
+    read_icons(state);
     if theme_changed {
         state.backend.redraw();
     }
@@ -395,6 +407,24 @@ pub(crate) fn populate(
 /// Tell the backdrop how the config has the lock screen and the splash look,
 /// and start reading the person's logo if it names one: found as a wallpaper
 /// is, `~` the home folder and a relative path beside the config.
+/// Read the person's icons for the titlebar's buttons again, on a thread:
+/// what it reads is drawn when it arrives.
+pub(super) fn read_icons(state: &mut Compositor) {
+    let Running::Seat(session) = &mut state.backend else {
+        return;
+    };
+    let Session {
+        titles,
+        settings,
+        config_path,
+        icon_reads,
+        ..
+    } = &mut **session;
+    titles
+        .icons
+        .read(&settings.icons, config_path.as_deref(), icon_reads);
+}
+
 pub(super) fn dress_backdrop(state: &mut Compositor) {
     let Running::Seat(session) = &state.backend else {
         return;

@@ -109,6 +109,12 @@ jobs:
       - name: clippy (headless capture)
         run: cargo clippy --locked --workspace --all-targets --features perspicax/capture -- -D warnings
 
+      # A seat without SVG icons: `desktop` reads them, and a build without
+      # the `svg` feature still draws every button, so it is linted on its
+      # own.
+      - name: clippy (seat without svg)
+        run: cargo clippy --locked --workspace --all-targets --features perspicax/seat -- -D warnings
+
       - name: test
         run: cargo test --locked --workspace --features perspicax/desktop
 

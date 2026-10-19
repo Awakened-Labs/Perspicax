@@ -517,7 +517,17 @@ as redacted rather than shown: a picture is a way of reading, and the gate on
 reading applies to it. A picture of the monitor shows a window rolled up as
 the person sees it, its titlebar and what is under the rest. A picture of
 that window alone shows it whole, as one of a minimized window does: it is
-a reading of the window, which the agent may read already.
+a reading of the window, which the agent may read already, and without the
+shadow it casts. A picture never shows a window halfway rolled up: what is
+pictured, and what an agent is told, is where it is going, from the moment
+it sets off.
+
+**A frame's looks change nothing an agent is told.** Its strips are proven
+to cover what is under them, square: a pixel outside a rounded corner's arc,
+where nothing is drawn, still counts as frame, which errs on the side of
+refusing. The shadow perspicax casts under a window it frames covers nothing:
+perspicax drew it, and knows it is see-through, so a node under it can be
+acted on, and a click there lands there.
 
 ## An agent inside the session
 
@@ -840,7 +850,10 @@ profile, which is Plasma's and Windows' habits:
 - a titlebar drawn by the compositor for a client that asks for one (Qt, foot,
   GTK 3 without a headerbar, and X11 applications): drag it to move,
   double-click it to maximize, and roll up, minimize, maximize and close at
-  its right; drag an edge or a corner, or just outside one, to resize;
+  its right; drag an edge or a corner, or just outside one, to resize. Its
+  top corners are rounded and it casts a soft shadow, as Plasma's do, a
+  button lights up under the pointer, and a window rolls up and down rather
+  than jumping;
 - tabs, as Fluxbox has them: drag a titlebar with the middle button onto
   another window's to make the two tabs of one window, and a tab away to part
   them. Logo+G does the same from the keyboard with the window focused before,
@@ -855,7 +868,11 @@ screen or a panel until it is pushed 20 pixels further. The pointer itself
 stops at the edge of the desk, so a window grabbed nearer than that to the
 side it is pushed towards, as a titlebar is to the top, stays on screen.
 It does not snap. The wheel over a titlebar rolls its window up to it, and
-down again, as Openbox does.
+down again, as Openbox does. Its titlebar is Fluxbox's: a sticky button at
+the left, which keeps the window on every workspace, and roll up, minimize,
+maximize and close at the right. It is flat, as Fluxbox's is: square
+corners, no shadow, and nothing animated, though a button still lights up
+under the pointer.
 In both, a window being dragged stays in hand: switching
 workspace by a key, a number, a pager or an edge takes it along, sending it
 to another workspace takes the person with it, and one minimized while held
@@ -877,8 +894,8 @@ fullscreen or not ([see Mouse](#a-game-holding-the-pointer)). Nor does an edge
 flip behind the lock screen.
 
 In both, a window can be rolled up to its titlebar and back, as Fluxbox and
-Openbox shade one: by the button left of minimize, or by `shade`, `unshade`
-and `toggle-shade` bound to a key or a button. Rolled up, it keeps its size
+Openbox shade one: by the shade button, left of minimize, or by `shade`,
+`unshade` and `toggle-shade` bound to a key or a button. Rolled up, it keeps its size
 and its place, and is put back exactly as it was, for its client is neither
 told nor resized. A click where it was lands on what is under it. It moves
 by its bar, has no edge to resize by, and its menus close. It keeps the
@@ -906,7 +923,43 @@ the workspace arrived at. The panels, the wallpaper, a sticky window and a
 window being carried stay where they are. With a wallpaper per workspace, the
 new one replaces the old as the shell draws it, a frame or two in. A crossfade
 fades each window on its own, so halfway through, windows show through one
-another.
+another. `[theme] motion = "reduced"` makes every switch instant, whatever
+`[workspaces.transition]` says, and so is every other animation.
+
+In both, a titlebar's buttons are a person's to choose, and where:
+`[decorations] left` and `right` list them, from the bar's left, with the
+title or the tabs between, as Fluxbox's `titlebar.left` and `titlebar.right`
+do. There are five, `shade`, `sticky`, `minimize`, `maximize` and `close`,
+each at one end at most, and either end may have none. Writing one end alone
+keeps the profile's other, but for any button the written end took. A bar
+too narrow for them all keeps close the longest, so a narrow window can still
+be closed, and lets the others go from beside the title outwards, the
+left-hand one first of two as near it. A button acts on its own window,
+whether or not it has the keyboard. Each that toggles shows which way it is:
+the sticky pin filled while the window is on every workspace, maximize as two
+squares, restore, while it is maximized, and shade with a chevron pointing
+down while it is rolled up. Under the pointer, a button is lit behind its
+shape, in the bar's own ink, faintly, and less faintly pressed; close goes
+red, `title-close-hover` in the palette. A press dragged off a button goes
+out, and does nothing.
+
+A button can be drawn from a picture of your own, by what a press of it then
+does: `[decorations.icons]` names a PNG, or an SVG in a build with the `svg`
+feature, for `close`, `minimize`, `maximize`, `restore` (maximize, while
+maximized), `shade`, `unshade`, `stick` and `unstick`. A picture is a mask by
+default, drawn in the bar's ink by its alpha, so it reads on every bar and
+in every theme; `tint = false` draws it in its own colours. A PNG is shrunk to
+its button, never enlarged, and an SVG drawn at its button's own size, so it
+is crisp at any scale. One that cannot be read is said once in the log, and
+the button keeps its own shape, never an empty square. They are read again
+at every save, found as a wallpaper is.
+
+`corner-radius` rounds a titlebar's top corners, square for a maximized
+window, whose bar meets the screen's own corners, and `[decorations.shadow]`
+casts a shadow under a window perspicax frames, not under one that draws its
+own frame, which casts its own, nor under a maximized or fullscreen one.
+`[decorations.animation]` says how long rolling a window up or down takes,
+and a button's light coming up or going out, 0 for at once.
 
 Every key below is optional and overrides the profile one setting at a time.
 A misspelled key, or a key for a
@@ -995,6 +1048,24 @@ title-height = 24
 border = 2
 focused = "#2d6fa3"            # the title is written in black or white,
 unfocused = "#475057"          # whichever reads on the colour
+left = ["sticky"]              # the titlebar's buttons at its left end, and
+right = ["shade", "minimize", "maximize", "close"]  # at its right
+corner-radius = 5              # 0 to 16 pixels; 0 is square
+
+[decorations.shadow]           # under a window perspicax frames
+size = 18                      # how far it reaches, 0 to 64; 0 is none
+offset = [0, 4]                # how far it falls, right and down
+opacity = 50                   # how dark, at its darkest: 0 to 100 percent
+colour = "#000000"
+
+[decorations.animation]        # how long each takes, 0 to 1000 ms; 0 is at once
+shade-ms = 150                 # rolling a window up or down
+hover-ms = 80                  # a button's light coming up or going out
+
+[decorations.icons]            # a picture for a button, by what a press does
+close = "~/.config/perspicax/buttons/close.png"
+restore = "buttons/restore.svg"  # SVG needs the svg feature
+tint = true                    # drawn in the bar's ink; false, its own colours
 
 [decorations.agent]            # a window an agent may act on, on a seat
 focused = "#5a2d82"            # its titlebar, where perspicax draws one
@@ -1593,6 +1664,7 @@ cursor = "breeze_cursors"      # an Xcursor theme; unset, XCURSOR_THEME's
 cursor-size = 32               # 8 to 128; unset, XCURSOR_SIZE's
 color-scheme = "dark"          # what applications are told: dark, light or
 contrast = "high"              # no-preference; normal or high
+motion = "reduced"             # every animation at once; normal unset
 logo = "~/Pictures/logo.png"   # on the lock screen and the splash: perspicax
                                # (the default), a PNG's path, or none
 
@@ -1647,6 +1719,7 @@ the first colour toward the second. The last column is the `perspicax` theme.
 | `lock-ring` | the lock screen's ring, at rest: the brand's terracotta on any screen | — | `#c06a3c` |
 | `lock-accent` | the lock screen's ring as keys are typed, and while a password is checked | `accent` | `#3daee9` |
 | `alert` | a refusal: a wrong password, and a key taken back while typing one | — | `#da4453` |
+| `title-close-hover` | a titlebar's close button under the pointer | `alert` | `#da4453` |
 | `splash` | the splash a session shows as it starts, behind the logo | `lock` | `#0c2440` |
 
 `logo` is what the lock screen and the splash show over their colour.
@@ -1742,7 +1815,9 @@ such a window an `opacity`, so an agent shown that text and told it is
 covered has the reason. A picture of the window by itself shows it whole.
 What an application draws see-through itself, such as a terminal's
 translucent background, rounded corners, or the shadow around its window,
-covers what is behind it in the same way.
+covers what is behind it in the same way: nothing an application says can
+tell a shadow from an opaque band. The shadow perspicax casts under a window
+it frames is not the application's, and covers nothing.
 
 ## Keyboards
 

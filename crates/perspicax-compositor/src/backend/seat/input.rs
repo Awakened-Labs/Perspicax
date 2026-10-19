@@ -70,11 +70,11 @@ use super::{
         Running,
         hatch::{self, Hatch},
     },
-    Session, settings,
+    Lit, Session, settings,
 };
 use crate::{
     framed::Framed,
-    mouse::{Scrolled, Travelled},
+    mouse::{Hit, Scrolled, Travelled},
     shell::{covers_panels, id_of},
     state::Compositor,
 };
@@ -285,6 +285,9 @@ fn moved(
         return;
     };
     state.follow_pointer(under.as_ref());
+    if let Some(at) = state.pointer.as_ref().map(PointerHandle::current_location) {
+        relight(state, at, under.as_ref());
+    }
     // After the focus policy, so the window in use is the one it chose.
     state.settle_hold();
     // The cursor itself moved, whatever the policy decided.
@@ -393,6 +396,84 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
     handle.button(state, &event);
     handle.frame(state);
     state.after_menu_button(held);
+    // Let go, the pointer is held by nothing, and whatever button is under
+    // it now is lit: the one just pressed, if a press on it left it there.
+    if pressed == ButtonState::Released {
+        let hit = state.pointed(at);
+        relight(state, at, hit.as_ref());
+    }
+}
+
+/// Light the titlebar button under the pointer at `at`, or none, as
+/// [`perspicax_policy::light`] says: the one pressed on, while the pointer is over it, and
+/// otherwise the one `hit` is on. Nothing is lit while something else holds
+/// the pointer, a window being moved or text being selected, so that drags
+/// light no bar they cross, nor behind the lock screen.
+///
+/// A window that loses its light is told at once, not at its next frame: a
+/// window a workspace switch parks is drawn from what it was last told
+/// while the switch is drawn.
+pub(super) fn relight(state: &mut Compositor, at: Point<f64, Logical>, hit: Option<&Hit>) {
+    let Running::Seat(session) = &state.backend else {
+        return;
+    };
+    let button_at = |part: Option<Part>| match part {
+        Some(Part::Button(button)) => Some(button),
+        _ => None,
+    };
+    let now = state.clock_ms();
+    let lit = match &session.button_press {
+        _ if state.lock.is_some() => None,
+        // Asked of the window pressed on, as the release asks, and not of
+        // whatever window is on top there now.
+        Some((window, held)) => {
+            perspicax_policy::light(Some(*held), button_at(state.frame_part(window, at)))
+                .map(|(button, light)| (window.clone(), button, light))
+        }
+        None if state
+            .pointer
+            .as_ref()
+            .is_some_and(PointerHandle::is_grabbed) =>
+        {
+            None
+        }
+        None => hit.and_then(|hit| {
+            let window = hit.window.clone()?;
+            perspicax_policy::light(None, button_at(hit.frame))
+                .map(|(button, light)| (window, button, light))
+        }),
+    }
+    .map(|(window, button, light)| Lit {
+        window,
+        button,
+        light,
+        since: now,
+    });
+    // How lit the one lit now is, for its light to go out from there.
+    let share = state.backend.lit(now).map_or(0.0, |(.., share)| share);
+    let Running::Seat(session) = &mut state.backend else {
+        return;
+    };
+    let unchanged = match (&session.lit, &lit) {
+        (Some(was), Some(now)) => was.is(now),
+        (was, now) => was.is_none() && now.is_none(),
+    };
+    if unchanged {
+        return;
+    }
+    let mut lit = lit;
+    if let Some(old) = session.lit.take() {
+        old.window.light(None);
+        match &mut lit {
+            // The same button, pressed now or let go: its light carries on.
+            Some(new) if new.window == old.window && new.button == old.button => {
+                new.since = old.since;
+            }
+            _ => session.fading = Some((Lit { since: now, ..old }, share)),
+        }
+    }
+    session.lit = lit;
+    state.backend.redraw();
 }
 
 /// The left button went down on `window`'s frame.
@@ -439,6 +520,9 @@ fn pressed_frame(
             state.start_move(&tab, start, serial);
         }
     }
+    // A button pressed is lit pressed; a press anywhere else on the frame
+    // holds the pointer, and puts out whatever was lit.
+    relight(state, at, None);
 }
 
 /// The left button came up: if it went down on a frame's button and comes up
@@ -464,6 +548,7 @@ fn released_frame(state: &mut Compositor, at: Point<f64, Logical>) {
         FrameButton::Maximize => state.toggle_maximize(&window),
         FrameButton::Minimize => state.minimize(&window),
         FrameButton::Shade => state.toggle_shade(&window),
+        FrameButton::Sticky => state.toggle_sticky(&window),
     }
 }
 

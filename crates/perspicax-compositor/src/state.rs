@@ -1023,6 +1023,11 @@ impl Compositor {
         self.started
     }
 
+    /// Milliseconds since it started: the clock an animation is timed by.
+    pub(crate) fn clock_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
     /// The window whose toplevel is this surface, mapped or parked.
     pub(crate) fn window_for(&self, surface: &WlSurface) -> Option<Framed> {
         self.space

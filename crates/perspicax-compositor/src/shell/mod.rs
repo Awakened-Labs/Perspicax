@@ -110,6 +110,9 @@ pub(crate) struct Placement {
     /// Rolled up to its titlebar by the person: in its place, at its size,
     /// with only its frame drawn. See `shade`.
     pub(crate) shaded: bool,
+    /// How much of its client is drawn while it rolls up or down, from all
+    /// of it, 1, to none: for the eye alone, `shaded` having changed already.
+    pub(crate) roll: Option<perspicax_policy::Tween>,
 }
 
 /// How a window fills its monitor.
@@ -173,6 +176,17 @@ pub(crate) fn is_shaded(window: &Framed) -> bool {
         .user_data()
         .get::<RefCell<Placement>>()
         .is_some_and(|cell| cell.borrow().shaded)
+}
+
+/// How much of this window's client is drawn at `now_ms`, if it is rolling
+/// up or down: from 1, all of it, to 0, none. Only looks, as `is_shaded`
+/// does.
+pub(crate) fn rolling(window: &Framed, now_ms: u64) -> Option<f64> {
+    window
+        .user_data()
+        .get::<RefCell<Placement>>()
+        .and_then(|cell| cell.borrow().roll)
+        .and_then(|roll| roll.at(now_ms))
 }
 
 /// The resize arrow for dragging `edges`.

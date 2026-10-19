@@ -58,7 +58,10 @@ mod origin;
 mod output_management;
 mod outputs;
 mod pager;
+#[cfg(any(feature = "seat", feature = "capture"))]
+mod picture;
 mod popup;
+mod raster;
 mod remembered;
 mod scale;
 #[cfg(feature = "capture")]
