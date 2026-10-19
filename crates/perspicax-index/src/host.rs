@@ -646,6 +646,27 @@ impl SurfaceFacts {
         self.drawn.union(self.geometry)
     }
 
+    /// Why nothing of this surface's own is drawn, when nothing is: asked
+    /// before any arithmetic, because the geometry of a surface that is not
+    /// drawn means nothing.
+    ///
+    /// Unmapped, it is on a workspace that is not showing, or a tab behind
+    /// another, or simply not on screen -- a hidden window, an unopened menu.
+    /// A tab behind another in a group on a hidden workspace is
+    /// `OtherWorkspace`: the coarser reason, and the one to clear first. A
+    /// window rolled up to its titlebar is mapped, but its client is not
+    /// drawn: `RolledUp`, once none of those applies.
+    pub(crate) fn not_drawn(&self) -> Option<Visibility> {
+        if !self.mapped {
+            return Some(match (self.off_workspace, self.behind_tab) {
+                (Some(workspace), _) => Visibility::OtherWorkspace { workspace },
+                (None, Some(shown)) => Visibility::InactiveTab { shown },
+                (None, None) => Visibility::Unmapped,
+            });
+        }
+        self.shaded.then_some(Visibility::RolledUp)
+    }
+
     /// Whether a region this surface declared opaque is over `global`: what
     /// makes its covering a node proof rather than policy. Only where it
     /// draws, as the protocol has it: "the compositor ignores the parts of
@@ -825,15 +846,8 @@ pub fn judge(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Judgement {
     let Some(target) = facts.surface(surface) else {
         return Judgement::proven(Visibility::Unknown);
     };
-    if !target.mapped {
-        return Judgement::proven(match (target.off_workspace, target.behind_tab) {
-            (Some(workspace), _) => Visibility::OtherWorkspace { workspace },
-            (None, Some(shown)) => Visibility::InactiveTab { shown },
-            (None, None) => Visibility::Unmapped,
-        });
-    }
-    if target.shaded {
-        return Judgement::proven(Visibility::RolledUp);
+    if let Some(hidden) = target.not_drawn() {
+        return Judgement::proven(hidden);
     }
     if rect.abs().is_empty() {
         return Judgement::proven(Visibility::Clipped);

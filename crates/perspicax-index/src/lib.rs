@@ -319,20 +319,6 @@ pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
         Origin::Process(_) | Origin::X11(_) => {}
     }
     match &node.visibility {
-        Visibility::Visible => {}
-        Visibility::Occluded { by } => return Err(Refusal::Occluded { by: *by }),
-        Visibility::Clipped => return Err(Refusal::Clipped),
-        Visibility::Unmapped => return Err(Refusal::Unmapped),
-        Visibility::OffScreen => return Err(Refusal::OffScreen),
-        Visibility::OtherWorkspace { workspace } => {
-            return Err(Refusal::OtherWorkspace {
-                workspace: *workspace,
-            });
-        }
-        Visibility::InactiveTab { shown } => {
-            return Err(Refusal::InactiveTab { shown: *shown });
-        }
-        Visibility::RolledUp => return Err(Refusal::RolledUp),
         // Decided from what the node already says, with nothing carried
         // from the read: joined to a window, and no bounds. Whether the
         // application never answered or had nothing to answer, the remedy is
@@ -340,12 +326,32 @@ pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
         Visibility::Unknown if node.surface.is_some() && node.node_space_bounds().is_none() => {
             return Err(Refusal::Unplaced);
         }
-        Visibility::Unknown => return Err(Refusal::Unjudged),
+        visibility => in_sight(visibility)?,
     }
     if node.node.is_hidden() {
         return Err(Refusal::NotShowing);
     }
     Ok(())
+}
+
+/// What a verdict on whether something can be seen refuses, if anything:
+/// one mapping, for a node's verdict and a window's alike. Only
+/// [`Visible`](Visibility::Visible) passes, and `Unknown` fails closed as
+/// [`Unjudged`](Refusal::Unjudged).
+fn in_sight(visibility: &Visibility) -> Result<(), Refusal> {
+    match visibility {
+        Visibility::Visible => Ok(()),
+        Visibility::Occluded { by } => Err(Refusal::Occluded { by: *by }),
+        Visibility::Clipped => Err(Refusal::Clipped),
+        Visibility::Unmapped => Err(Refusal::Unmapped),
+        Visibility::OffScreen => Err(Refusal::OffScreen),
+        Visibility::OtherWorkspace { workspace } => Err(Refusal::OtherWorkspace {
+            workspace: *workspace,
+        }),
+        Visibility::InactiveTab { shown } => Err(Refusal::InactiveTab { shown: *shown }),
+        Visibility::RolledUp => Err(Refusal::RolledUp),
+        Visibility::Unknown => Err(Refusal::Unjudged),
+    }
 }
 
 /// The gate for reading a whole window: a picture of it. It must exist, be
@@ -399,15 +405,7 @@ pub fn check_window(
         && let Some(front) = window.behind_tab
     {
         let front = check_readable(facts, front)?;
-        if let Some(workspace) = front.off_workspace {
-            return Err(Refusal::OtherWorkspace { workspace });
-        }
-        if !front.mapped {
-            return Err(Refusal::Unmapped);
-        }
-        if front.shaded {
-            return Err(Refusal::RolledUp);
-        }
+        in_sight(&front.not_drawn().unwrap_or(Visibility::Visible))?;
     }
     Ok(window)
 }
