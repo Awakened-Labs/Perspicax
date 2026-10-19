@@ -19,6 +19,9 @@ workspace = true
 perspicax-config = { path = "../perspicax-config", version = "0.1.0" }
 # The actions and chords the Keys page shows, and the press a capture hears.
 perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
+# A command line, split into its words and joined back, as a shell would:
+# the app's spawn bindings and the shell's commands.
+shlex = "2"
 thiserror.workspace = true
 # Parse only, as perspicax-config has it: what two texts mean is compared as
 # plain tables, which ignore layout.
@@ -48,9 +51,6 @@ fontdb = { version = "0.23", default-features = false, features = [
 ], optional = true }
 # The capture channel, on a connection of its own beside winit's.
 perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", features = ["client"], optional = true }
-# A program's command line, split into its words and joined back, as a shell
-# would.
-shlex = { version = "2", optional = true }
 wayland-client = { workspace = true, optional = true }
 
 [features]
@@ -64,7 +64,6 @@ gui = [
     "dep:eframe",
     "dep:fontdb",
     "dep:perspicax-protocols",
-    "dep:shlex",
     "dep:wayland-client",
 ]
 

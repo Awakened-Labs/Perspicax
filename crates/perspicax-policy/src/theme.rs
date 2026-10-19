@@ -57,6 +57,18 @@ impl Rgba {
         }
     }
 
+    /// As `config.toml` writes it, the inverse of [`parse`](Self::parse):
+    /// `"#rrggbb"` when opaque, else `"#rrggbbaa"`, in lower case.
+    #[must_use]
+    pub fn hex(self) -> String {
+        let Self { r, g, b, a } = self;
+        if a == 0xff {
+            format!("#{r:02x}{g:02x}{b:02x}")
+        } else {
+            format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+        }
+    }
+
     /// The colour, whatever its opacity.
     #[must_use]
     pub const fn colour(self) -> Colour {
@@ -446,6 +458,17 @@ impl Family {
             named => Self::Named(named.to_owned()),
         }
     }
+
+    /// As `[theme] font` writes it: the inverse of [`parse`](Self::parse).
+    #[must_use]
+    pub fn key(&self) -> &str {
+        match self {
+            Self::SansSerif => "sans-serif",
+            Self::Serif => "serif",
+            Self::Monospace => "monospace",
+            Self::Named(named) => named,
+        }
+    }
 }
 
 /// The font the shell writes in, and the titles' family.
@@ -475,6 +498,20 @@ pub enum ColorScheme {
     Light = 2,
 }
 
+impl ColorScheme {
+    pub const ALL: [Self; 3] = [Self::Dark, Self::Light, Self::NoPreference];
+
+    /// Its name as `[theme] color-scheme` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+            Self::NoPreference => "no-preference",
+        }
+    }
+}
+
 /// How much perspicax moves what it draws: `[theme] motion`. Reduced, every
 /// animation is instant, workspace switches and rolling a window up among
 /// them, for a person whom motion on the screen troubles.
@@ -485,12 +522,38 @@ pub enum Motion {
     Reduced,
 }
 
+impl Motion {
+    pub const ALL: [Self; 2] = [Self::Normal, Self::Reduced];
+
+    /// Its name as `[theme] motion` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Reduced => "reduced",
+        }
+    }
+}
+
 /// Whether applications are asked for more contrast: the portal's
 /// `contrast`, in its numbering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Contrast {
     Normal = 0,
     High = 1,
+}
+
+impl Contrast {
+    pub const ALL: [Self; 2] = [Self::Normal, Self::High];
+
+    /// Its name as `[theme] contrast` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
 }
 
 /// What applications are told about the theme, through the settings portal.
@@ -581,6 +644,31 @@ mod tests {
         assert_eq!(Rgba::parse("#000000c0"), Some(Rgba::new(0, 0, 0, 0xc0)));
         for wrong in ["3daee9", "#3dae", "#3daee9c", "#gggggg", "#3daeé9", "blue"] {
             assert_eq!(Rgba::parse(wrong), None, "{wrong}");
+        }
+    }
+
+    #[test]
+    fn a_colour_is_written_back_as_it_is_read_in_lower_case() {
+        for written in ["#3daee9", "#000000c0", "#ffffff00"] {
+            assert_eq!(
+                Rgba::parse(written).map(Rgba::hex).as_deref(),
+                Some(written)
+            );
+        }
+        assert_eq!(
+            Rgba::parse("#3DAEE9FF").map(Rgba::hex).as_deref(),
+            Some("#3daee9")
+        );
+        assert_eq!(
+            Colour::parse("#1E4A73").map(Colour::hex).as_deref(),
+            Some("#1e4a73")
+        );
+    }
+
+    #[test]
+    fn a_font_family_is_written_back_as_it_is_read() {
+        for written in ["sans-serif", "serif", "monospace", "Inter Display"] {
+            assert_eq!(Family::parse(written).key(), written);
         }
     }
 

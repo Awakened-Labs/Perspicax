@@ -11,6 +11,8 @@ use std::collections::BTreeSet;
 
 use perspicax_policy::{Action, Direction, Towards, VolumeKey};
 
+use crate::limits;
+
 /// An action as a binding's value says it: a name, or one of the two tables.
 /// Data rather than TOML text, because this crate parses TOML and never
 /// writes it: whoever writes the file renders these as it sees fit.
@@ -86,10 +88,6 @@ const SIDES: &[(&str, Direction)] = &[
     ("down", Direction::Down),
 ];
 
-/// How many layouts `layout-N` can name: xkb holds four at most, and whether
-/// the keymap has that many is the keymap's question.
-const LAYOUTS: std::ops::RangeInclusive<u8> = 1..=4;
-
 fn to_output(direction: Direction) -> Action {
     Action::MoveToOutput(Towards::Side(direction))
 }
@@ -148,7 +146,9 @@ pub fn spell_action(action: &Action) -> Option<Spelled> {
         Action::Pie(pie) => Some(Spelled::Pie(pie.clone())),
         Action::GoToWorkspace(0) => None,
         Action::GoToWorkspace(number) => name(&format!("workspace-{number}")),
-        Action::Layout(number) if LAYOUTS.contains(number) => name(&format!("layout-{number}")),
+        Action::Layout(number) if limits::LAYOUTS.contains(number) => {
+            name(&format!("layout-{number}"))
+        }
         Action::Layout(_) => None,
         Action::Workspace(_)
         | Action::SendToWorkspace(_)
@@ -200,7 +200,8 @@ pub fn spell_action(action: &Action) -> Option<Spelled> {
 #[must_use]
 pub fn action_names(workspaces: u16, layouts: u8) -> Vec<String> {
     let fixed = NAMED.iter().map(|&(text, _)| text.to_owned());
-    let layout = (*LAYOUTS.start()..=layouts.min(*LAYOUTS.end())).map(|n| format!("layout-{n}"));
+    let layout = (*limits::LAYOUTS.start()..=layouts.min(*limits::LAYOUTS.end()))
+        .map(|n| format!("layout-{n}"));
     let workspace = (1..=workspaces).map(|n| format!("workspace-{n}"));
     let sided = SIDED
         .iter()
@@ -229,7 +230,9 @@ fn sided(name: &str) -> Option<Action> {
 fn numbered(name: &str) -> Option<Action> {
     if let Some(layout) = name.strip_prefix("layout-") {
         let number: u8 = layout.parse().ok()?;
-        return LAYOUTS.contains(&number).then_some(Action::Layout(number));
+        return limits::LAYOUTS
+            .contains(&number)
+            .then_some(Action::Layout(number));
     }
     let number: u16 = name.strip_prefix("workspace-")?.parse().ok()?;
     (number > 0).then_some(Action::GoToWorkspace(number))
@@ -239,7 +242,11 @@ fn numbered(name: &str) -> Option<Action> {
 fn unknown(name: &str) -> String {
     let fixed = NAMED.iter().map(|&(text, _)| text.to_owned());
     let numbered = [
-        format!("layout-<{}-{}>", LAYOUTS.start(), LAYOUTS.end()),
+        format!(
+            "layout-<{}-{}>",
+            limits::LAYOUTS.start(),
+            limits::LAYOUTS.end()
+        ),
         "workspace-<number>".to_owned(),
     ];
     let sided = SIDED.iter().map(|&(verb, _)| format!("{verb}-<side>"));

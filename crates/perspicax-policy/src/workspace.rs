@@ -38,6 +38,19 @@ pub enum Mode {
     PerOutput,
 }
 
+impl Mode {
+    pub const ALL: [Self; 2] = [Self::Spanning, Self::PerOutput];
+
+    /// Its name as `[workspaces] mode` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Spanning => "spanning",
+            Self::PerOutput => "per-output",
+        }
+    }
+}
+
 /// The shape of the grid and how moving off its edge behaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Grid {

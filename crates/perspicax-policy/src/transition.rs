@@ -36,6 +36,27 @@ pub enum Effect {
 }
 
 impl Effect {
+    /// Every effect, nothing first.
+    pub const ALL: [Self; 5] = [
+        Self::None,
+        Self::Slide,
+        Self::Crossfade,
+        Self::Wipe,
+        Self::Carousel,
+    ];
+
+    /// Its name as `[workspaces.transition] effect` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Slide => "slide",
+            Self::Crossfade => "crossfade",
+            Self::Wipe => "wipe",
+            Self::Carousel => "carousel",
+        }
+    }
+
     /// How long it takes when the config does not say, in milliseconds. A
     /// carousel has more to show than a slide, and a wipe crosses the whole
     /// monitor where a slide only finishes its move.

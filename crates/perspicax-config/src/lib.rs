@@ -31,6 +31,7 @@ mod actions;
 pub mod autostart;
 pub mod desktop;
 mod keys;
+pub mod limits;
 pub mod menu;
 pub mod mixer;
 pub mod pie;
@@ -47,13 +48,15 @@ use std::{
 use perspicax_policy::{
     Access, Action, Animation, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction,
     Drag, Effect, Face, Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Hatch, Keysym,
-    Mods, MouseBindings, MouseChord, OPAQUE, Opacity, Place, Program, Protocol, Remembering,
-    Resistance, Rule, Shadow, Shape, Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
+    Mods, MouseBindings, MouseChord, Opacity, Place, Program, Protocol, Remembering, Resistance,
+    Rule, Shadow, Shape, Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
 };
 use serde::Deserialize;
 
 pub use crate::actions::{Spelled, action_names, spell_action};
-pub use crate::keys::{Trigger, spell_chord, spell_press, spell_trigger, trigger};
+pub use crate::keys::{
+    Trigger, modifiers, spell_chord, spell_modifiers, spell_press, spell_trigger, trigger,
+};
 use crate::shell::RawShell;
 pub use crate::shell::{
     Align, Edge, Item, Leave, Panel, PanelOutputs, PanelWidth, Shell, ShellBuilt, TaskbarScope,
@@ -180,6 +183,19 @@ pub enum Profile {
     /// Fluxbox- and Enlightenment-like: focus follows the pointer, and
     /// otherwise the same keys.
     Minimal,
+}
+
+impl Profile {
+    pub const ALL: [Self; 2] = [Self::Classic, Self::Minimal];
+
+    /// Its name as `profile` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Minimal => "minimal",
+        }
+    }
 }
 
 /// Everything a config file decides, with the profile applied and every
@@ -331,29 +347,20 @@ impl Default for Pointer {
     }
 }
 
-/// The double-click times a config may ask for. Faster than the shortest, a
-/// hand cannot click twice on purpose; slower than the longest, two clicks
-/// a person meant as two would open what they only meant to select.
-const DOUBLE_CLICK_RANGE: std::ops::RangeInclusive<u32> = 100..=2000;
-
-/// `double-click-ms` as written, if it is in [`DOUBLE_CLICK_RANGE`].
+/// `double-click-ms` as written, if it is in [`limits::DOUBLE_CLICK_MS`].
 fn double_click_ms(written: u32) -> Result<u32, Error> {
-    if DOUBLE_CLICK_RANGE.contains(&written) {
+    if limits::DOUBLE_CLICK_MS.contains(&written) {
         return Ok(written);
     }
     Err(invalid(
         "input.pointer.double-click-ms".to_owned(),
         format!(
             "{written} is outside {} to {} milliseconds",
-            DOUBLE_CLICK_RANGE.start(),
-            DOUBLE_CLICK_RANGE.end()
+            limits::DOUBLE_CLICK_MS.start(),
+            limits::DOUBLE_CLICK_MS.end()
         ),
     ))
 }
-
-/// The most workspaces along one side of the grid. Generous: past this, a
-/// grid is a typo, and a 1000x1000 one would be a million workspaces.
-const GRID_SIDE: u16 = 16;
 
 /// What to do with one output.
 #[derive(Debug, Clone, PartialEq)]
@@ -1238,9 +1245,6 @@ struct RawResistance {
     seams: Option<i32>,
 }
 
-/// More than this and an edge is a wall a person has to fight.
-const RESISTANCE_MAX: i32 = 128;
-
 /// Read wider than a percent, so that a value out of range is refused by its
 /// key rather than by serde.
 #[derive(Debug, Deserialize)]
@@ -1281,9 +1285,6 @@ struct RawFlip {
     scroll: Option<bool>,
 }
 
-/// Longer than this and a person would think edge flipping was broken.
-const FLIP_DELAY_MAX_MS: u64 = 5000;
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct RawTransition {
@@ -1300,9 +1301,6 @@ enum RawEffect {
     Wipe,
     Carousel,
 }
-
-/// Longer than this and a switch would feel stuck rather than shown.
-const TRANSITION_MAX_MS: u64 = 2000;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1654,11 +1652,15 @@ impl Raw {
             }
             if let Some(pointer) = input.pointer {
                 if let Some(accel) = pointer.accel
-                    && !(-1.0..=1.0).contains(&accel)
+                    && !limits::ACCEL.contains(&accel)
                 {
                     return Err(invalid(
                         "input.pointer.accel".to_owned(),
-                        format!("{accel} is outside -1 to 1"),
+                        format!(
+                            "{accel} is outside {} to {}",
+                            limits::ACCEL.start(),
+                            limits::ACCEL.end()
+                        ),
                     ));
                 }
                 config.pointer = Pointer {
@@ -1699,12 +1701,15 @@ impl Raw {
                 };
             }
             if let Some([columns, rows]) = workspaces.grid {
-                if !(1..=GRID_SIDE).contains(&columns) || !(1..=GRID_SIDE).contains(&rows) {
+                let side = limits::GRID_SIDE;
+                if !side.contains(&columns) || !side.contains(&rows) {
                     return Err(invalid(
                         "workspaces.grid".to_owned(),
                         format!(
-                            "[{columns}, {rows}] is not a grid; each side is 1 to {GRID_SIDE} \
-                             workspaces, columns first"
+                            "[{columns}, {rows}] is not a grid; each side is {} to {} \
+                             workspaces, columns first",
+                            side.start(),
+                            side.end()
                         ),
                     ));
                 }
@@ -1716,10 +1721,13 @@ impl Raw {
             }
             if let Some(flip) = workspaces.flip {
                 if let Some(delay) = flip.delay_ms {
-                    if delay > FLIP_DELAY_MAX_MS {
+                    if !limits::FLIP_DELAY_MS.contains(&delay) {
                         return Err(invalid(
                             "workspaces.flip.delay-ms".to_owned(),
-                            format!("{delay} is more than {FLIP_DELAY_MAX_MS} milliseconds"),
+                            format!(
+                                "{delay} is more than {} milliseconds",
+                                limits::FLIP_DELAY_MS.end()
+                            ),
                         ));
                     }
                     config.flipping.delay_ms = delay;
@@ -1747,10 +1755,13 @@ impl Raw {
                             "0 is no transition: write effect = \"none\"".to_owned(),
                         ));
                     }
-                    if length > TRANSITION_MAX_MS {
+                    if !limits::TRANSITION_MS.contains(&length) {
                         return Err(invalid(
                             key,
-                            format!("{length} is more than {TRANSITION_MAX_MS} milliseconds"),
+                            format!(
+                                "{length} is more than {} milliseconds",
+                                limits::TRANSITION_MS.end()
+                            ),
                         ));
                     }
                     config.transitioning.duration_ms = Some(length);
@@ -1760,10 +1771,15 @@ impl Raw {
 
         if let Some(snap) = self.snap {
             if let Some(threshold) = snap.threshold {
-                if !(1..=64).contains(&threshold) {
+                let range = limits::SNAP_THRESHOLD;
+                if !range.contains(&threshold) {
                     return Err(invalid(
                         "snap.threshold".to_owned(),
-                        format!("{threshold} is outside 1 to 64 pixels"),
+                        format!(
+                            "{threshold} is outside {} to {} pixels",
+                            range.start(),
+                            range.end()
+                        ),
                     ));
                 }
                 config.snapping.threshold = threshold;
@@ -1779,10 +1795,15 @@ impl Raw {
                 let Some(value) = value else {
                     continue;
                 };
-                if !(0..=RESISTANCE_MAX).contains(&value) {
+                let range = limits::RESISTANCE;
+                if !range.contains(&value) {
                     return Err(invalid(
                         format!("resistance.{key}"),
-                        format!("{value} is outside 0 to {RESISTANCE_MAX} pixels"),
+                        format!(
+                            "{value} is outside {} to {} pixels",
+                            range.start(),
+                            range.end()
+                        ),
                     ));
                 }
                 *into = value;
@@ -1874,11 +1895,21 @@ impl Raw {
 
 impl RawOpacity {
     fn apply(self, mut opacity: Opacity) -> Result<Opacity, Error> {
+        let range = limits::OPACITY;
         let percent = |key: String, value: i64| {
             u8::try_from(value)
                 .ok()
-                .filter(|percent| (1..=OPAQUE).contains(percent))
-                .ok_or_else(|| invalid(key, format!("{value} is outside 1 to {OPAQUE} percent")))
+                .filter(|percent| range.contains(percent))
+                .ok_or_else(|| {
+                    invalid(
+                        key,
+                        format!(
+                            "{value} is outside {} to {} percent",
+                            range.start(),
+                            range.end()
+                        ),
+                    )
+                })
         };
         for (key, value, into) in [
             ("step", self.step, &mut opacity.step),
@@ -1959,22 +1990,25 @@ impl RawDecorations {
             }
         };
         if let Some(title) = self.title_height {
-            decorations.title = pixels("title-height", title, 8..=96)?;
+            decorations.title = pixels("title-height", title, limits::TITLE_HEIGHT)?;
         }
         if let Some(border) = self.border {
-            decorations.border = pixels("border", border, 0..=32)?;
+            decorations.border = pixels("border", border, limits::BORDER)?;
         }
         if let Some(radius) = self.corner_radius {
-            decorations.radius = pixels("corner-radius", radius, 0..=16)?;
+            decorations.radius = pixels("corner-radius", radius, limits::CORNER_RADIUS)?;
         }
         if let Some(written) = self.animation {
             let length = |key: &str, ms: u32| {
-                if ms <= 1000 {
+                if limits::ANIMATION_MS.contains(&ms) {
                     Ok(ms)
                 } else {
                     Err(invalid(
                         format!("decorations.animation.{key}"),
-                        format!("{ms} is more than 1000 milliseconds; 0 is none"),
+                        format!(
+                            "{ms} is more than {} milliseconds; 0 is none",
+                            limits::ANIMATION_MS.end()
+                        ),
                     ))
                 }
             };
@@ -1988,22 +2022,27 @@ impl RawDecorations {
         if let Some(written) = self.shadow {
             let shadow = &mut decorations.shadow;
             if let Some(size) = written.size {
-                shadow.size = pixels("shadow.size", size, 0..=64)?;
+                shadow.size = pixels("shadow.size", size, limits::SHADOW_SIZE)?;
             }
             if let Some([x, y]) = written.offset {
                 shadow.offset = (
-                    pixels("shadow.offset", x, -32..=32)?,
-                    pixels("shadow.offset", y, -32..=32)?,
+                    pixels("shadow.offset", x, limits::SHADOW_OFFSET)?,
+                    pixels("shadow.offset", y, limits::SHADOW_OFFSET)?,
                 );
             }
             if let Some(opacity) = written.opacity {
+                let range = limits::SHADOW_OPACITY;
                 shadow.opacity = u8::try_from(opacity)
                     .ok()
-                    .filter(|opacity| *opacity <= 100)
+                    .filter(|_| range.contains(&opacity))
                     .ok_or_else(|| {
                         invalid(
                             "decorations.shadow.opacity".to_owned(),
-                            format!("{opacity} is outside 0 to 100 percent"),
+                            format!(
+                                "{opacity} is outside {} to {} percent",
+                                range.start(),
+                                range.end()
+                            ),
                         )
                     })?;
             }
@@ -2018,7 +2057,7 @@ impl RawDecorations {
         if let Some(agent) = self.agent {
             let look = &mut decorations.agent;
             if let Some(outline) = agent.outline {
-                look.outline = pixels("agent.outline", outline, 0..=8)?;
+                look.outline = pixels("agent.outline", outline, limits::AGENT_OUTLINE)?;
             }
             let written = [
                 ("focused", agent.focused, &mut look.focused),
@@ -2166,10 +2205,15 @@ fn theme(written: Option<RawTheme>, decorations: Option<&RawDecorations>) -> Res
         font.family = Family::parse(&family);
     }
     if let Some(size) = written.font_size {
-        if !(10..=20).contains(&size) {
+        let range = limits::FONT_SIZE;
+        if !range.contains(&size) {
             return Err(invalid(
                 "theme.font-size".to_owned(),
-                format!("{size} is outside 10 to 20 pixels"),
+                format!(
+                    "{size} is outside {} to {} pixels",
+                    range.start(),
+                    range.end()
+                ),
             ));
         }
         font.size = size;
@@ -2186,11 +2230,15 @@ fn theme(written: Option<RawTheme>, decorations: Option<&RawDecorations>) -> Res
         ));
     }
     if let Some(size) = written.cursor_size
-        && !(8..=128).contains(&size)
+        && !limits::CURSOR_SIZE.contains(&size)
     {
         return Err(invalid(
             "theme.cursor-size".to_owned(),
-            format!("{size} is outside 8 to 128 pixels"),
+            format!(
+                "{size} is outside {} to {} pixels",
+                limits::CURSOR_SIZE.start(),
+                limits::CURSOR_SIZE.end()
+            ),
         ));
     }
 
@@ -2354,7 +2402,7 @@ impl RawRule {
 impl RawKeyboard {
     fn apply(self, mut keyboard: Keyboard) -> Result<Keyboard, Error> {
         let positive = |key: &str, value: i32| {
-            if value > 0 {
+            if limits::REPEAT.contains(&value) {
                 Ok(value)
             } else {
                 Err(invalid(
@@ -2556,6 +2604,73 @@ mod tests {
     fn the_minimal_profile_focuses_under_the_pointer() {
         let config = parse(r#"profile = "minimal""#, SEAT).unwrap();
         assert_eq!(config.focus.model, FocusModel::Sloppy);
+    }
+
+    /// The settings app writes each choice it offers with the value's
+    /// `key()`: every word must be one this parser reads back as that value.
+    #[test]
+    fn every_word_a_page_offers_reads_back_as_its_value() {
+        let read = |text: String| parse(&text, SEAT).unwrap_or_else(|e| panic!("{text}: {e}"));
+        let panel = |text: String| read(text).shell.panel.expect("a panel");
+        for profile in Profile::ALL {
+            let text = format!("profile = \"{}\"", profile.key());
+            assert_eq!(read(text).profile, profile);
+        }
+        for model in FocusModel::ALL {
+            let text = format!("[focus]\nmodel = \"{}\"", model.key());
+            assert_eq!(read(text).focus.model, model);
+        }
+        for mode in perspicax_policy::Mode::ALL {
+            let text = format!("[workspaces]\nmode = \"{}\"", mode.key());
+            assert_eq!(read(text).workspaces.mode, mode);
+        }
+        for effect in Effect::ALL {
+            let text = format!("[workspaces.transition]\neffect = \"{}\"", effect.key());
+            assert_eq!(read(text).transitioning.effect, effect);
+        }
+        for switching in Switching::ALL {
+            let text = format!("[input.keyboard]\nswitching = \"{}\"", switching.key());
+            assert_eq!(read(text).keyboard.switching, switching);
+        }
+        for scheme in ColorScheme::ALL {
+            let text = format!("[theme]\ncolor-scheme = \"{}\"", scheme.key());
+            assert_eq!(read(text).theme.apps.color_scheme, Some(scheme));
+        }
+        for contrast in Contrast::ALL {
+            let text = format!("[theme]\ncontrast = \"{}\"", contrast.key());
+            assert_eq!(read(text).theme.apps.contrast, Some(contrast));
+        }
+        for motion in Motion::ALL {
+            let text = format!("[theme]\nmotion = \"{}\"", motion.key());
+            assert_eq!(read(text).theme.motion, motion);
+        }
+        for mode in WallpaperMode::ALL {
+            let text = format!("[shell]\nwallpaper-mode = \"{}\"", mode.key());
+            assert_eq!(read(text).shell.wallpaper.expect("a wallpaper").mode, mode);
+        }
+        for untrusted in UntrustedLaunchers::ALL {
+            let text = format!("[shell]\nuntrusted-launchers = \"{}\"", untrusted.key());
+            assert_eq!(read(text).shell.untrusted_launchers, untrusted);
+        }
+        for edge in Edge::ALL {
+            let text = format!("[shell.panel]\nedge = \"{}\"", edge.key());
+            assert_eq!(panel(text).edge, edge);
+        }
+        for align in Align::ALL {
+            let text = format!(
+                "[shell.panel]\nwidth = \"50%\"\nalign = \"{}\"",
+                align.key()
+            );
+            assert_eq!(panel(text).align, align);
+        }
+        for taskbar in TaskbarScope::ALL {
+            let text = format!("[shell.panel]\ntaskbar = \"{}\"", taskbar.key());
+            assert_eq!(panel(text).taskbar, taskbar);
+        }
+        for item in Item::ALL {
+            let text = format!("[shell.panel]\nitems = [\"{}\"]", item.key());
+            assert_eq!(panel(text).items, [item]);
+        }
     }
 
     #[test]

@@ -31,12 +31,14 @@
 //! was read, the edits are made again on top of what it wrote.
 
 mod edit;
+mod fields;
 mod file;
 mod fix;
 mod judge;
 mod keys;
 mod layout;
 mod pressed;
+mod xkb;
 
 use std::{
     io,
@@ -45,9 +47,11 @@ use std::{
 
 use perspicax_config::{Spelled, Trigger};
 
+pub use crate::fields::{Field, Kind, Section, Setting, Source, sections, settings};
 pub use crate::judge::{Installed, Judge};
 pub use crate::keys::{Binding, Mark, bindings};
 pub use crate::pressed::{Pressed, key_name, pressed};
+pub use crate::xkb::{Entry, Layout, Registry, edits as layout_edits, layouts};
 
 /// How many times a write is made again over a file another program keeps
 /// rewriting, before it gives up.
@@ -87,6 +91,8 @@ pub enum Value {
     Float(f64),
     String(String),
     Strings(Vec<String>),
+    /// `[4, 1]`: a grid's columns and rows, a shadow's offset.
+    Integers(Vec<i64>),
 }
 
 /// One change to the file.

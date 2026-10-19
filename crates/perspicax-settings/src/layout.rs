@@ -30,7 +30,7 @@
 
 use std::ops::Range;
 
-use toml_edit::{Document as Parsed, DocumentMut, Item, Key, Table};
+use toml_edit::{Document as Parsed, DocumentMut, Item, Key, Table, TableLike};
 
 /// Make room in `text` for `leaf` in `table` before a set writes it: give
 /// the table a header of its own, then uncomment the key's example if its
@@ -38,6 +38,9 @@ use toml_edit::{Document as Parsed, DocumentMut, Item, Key, Table};
 /// header -- a table made of dotted keys, or a path through a value -- and
 /// the caller's toml_edit insert does what it always did.
 pub(crate) fn make_room(text: &str, table: &[&str], leaf: &str) -> String {
+    if table.is_empty() {
+        return room_at_the_top(text, leaf);
+    }
     let text = match header_of(text, table) {
         Header::Line(_) => text.to_owned(),
         Header::Absent => give_header(text, table),
@@ -46,14 +49,76 @@ pub(crate) fn make_room(text: &str, table: &[&str], leaf: &str) -> String {
     fill_key(&text, table, leaf)
 }
 
+/// Make room for `leaf` at the top of the file, above every table: its
+/// commented-out example there filled, or else a line made for it after the
+/// file's opening paragraph of comments. toml_edit would put a top-level key
+/// above that paragraph in a file that has none yet, because it hangs a
+/// file's opening comments on the first table's header. Where the file has a
+/// top-level key already, toml_edit adds the new one after it, and that is
+/// left to it.
+fn room_at_the_top(text: &str, leaf: &str) -> String {
+    let Ok(before) = text.parse::<toml::Table>() else {
+        return text.to_owned();
+    };
+    let Ok(parsed) = Parsed::parse(text) else {
+        return text.to_owned();
+    };
+    if before.contains_key(leaf) || parsed.as_table().iter().any(|(_, item)| item.is_value()) {
+        return text.to_owned();
+    }
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let first_header = (0..lines.len())
+        .find(|&i| is_header(lines[i]))
+        .unwrap_or(lines.len());
+    for (i, line) in lines.iter().enumerate().take(first_header) {
+        let Some(live) = uncomment(line) else {
+            continue;
+        };
+        if declares(&live) != Some(Declares::Key(vec![leaf.to_owned()])) {
+            continue;
+        }
+        let candidate = splice(text, i..i + 1, Some(&live));
+        if adds_only(&before, &candidate, &[], Some(leaf)) {
+            return candidate;
+        }
+    }
+    let blank = |i: usize| lines.get(i).is_none_or(|line| line.trim().is_empty());
+    let comments = lines[..first_header]
+        .iter()
+        .take_while(|line| uncomment(line).is_some())
+        .count();
+    let at = if comments > 0 && comments < first_header && blank(comments) {
+        comments + 1
+    } else {
+        0
+    };
+    // A value of any kind holds the place: the set replaces it, keeping the
+    // spacing the line was made with.
+    let mut made = format!("{} = \"\"\n", Key::new(leaf));
+    if !blank(at) {
+        made.push('\n');
+    }
+    let candidate = splice(text, at..at, Some(&made));
+    if adds_only(&before, &candidate, &[], Some(leaf)) {
+        candidate
+    } else {
+        text.to_owned()
+    }
+}
+
 /// Remove everything at `path` from `text` -- a key, or a whole table --
 /// then retire the headers that left empty: each table under `path`,
-/// deepest first, then each ancestor on the way back up.
+/// deepest first, then each ancestor on the way back up. A key inside a
+/// table written inline (`flip = { edge = true }`) is taken out of it, and
+/// the table, once empty, goes with its line.
 ///
 /// # Errors
 ///
 /// A path through a value, named by the segment that is not a table.
 pub(crate) fn remove(text: &str, path: &[&str]) -> Result<String, String> {
+    if through_inline(text, path) {
+        return remove_inline(text, path);
+    }
     let mut text = text.to_owned();
     // One value at a time: a span is good for the text it was parsed from
     // and no other, so every deletion re-parses.
@@ -67,6 +132,56 @@ pub(crate) fn remove(text: &str, path: &[&str]) -> Result<String, String> {
         text = retire_if_empty(&text, &table);
     }
     Ok(text)
+}
+
+/// Whether `path` leads into a table written inline.
+fn through_inline(text: &str, path: &[&str]) -> bool {
+    let Ok(doc) = Parsed::parse(text) else {
+        return false;
+    };
+    let Some((_, parents)) = path.split_last() else {
+        return false;
+    };
+    let mut table: &dyn TableLike = doc.as_table();
+    for seg in parents {
+        match table.get(seg) {
+            Some(Item::Value(toml_edit::Value::InlineTable(_))) => return true,
+            Some(item) => match item.as_table_like() {
+                Some(next) => table = next,
+                None => return false,
+            },
+            None => return false,
+        }
+    }
+    false
+}
+
+/// [`remove`] for a key in a table written inline: toml_edit takes it out,
+/// and a table it leaves empty is removed in turn.
+fn remove_inline(text: &str, path: &[&str]) -> Result<String, String> {
+    let mut doc = text
+        .parse::<DocumentMut>()
+        .map_err(|error| error.to_string())?;
+    let Some((leaf, parents)) = path.split_last() else {
+        return Ok(text.to_owned());
+    };
+    let mut table: &mut dyn TableLike = doc.as_table_mut();
+    for seg in parents {
+        let Some(next) = table.get_mut(seg) else {
+            return Ok(text.to_owned());
+        };
+        table = next
+            .as_table_like_mut()
+            .ok_or_else(|| format!("`{seg}` in `{}` is not a table", path.join(".")))?;
+    }
+    table.remove(leaf);
+    let emptied = table.is_empty();
+    let text = doc.to_string();
+    if emptied {
+        remove(&text, parents)
+    } else {
+        Ok(text)
+    }
 }
 
 /// What one line of TOML, read on its own, declares.

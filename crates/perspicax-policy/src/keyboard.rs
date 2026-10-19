@@ -21,6 +21,19 @@ pub enum Switching {
     Window,
 }
 
+impl Switching {
+    pub const ALL: [Self; 2] = [Self::Global, Self::Window];
+
+    /// Its name as `[input.keyboard] switching` writes it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Window => "window",
+        }
+    }
+}
+
 /// The layout each window was last typed in, counted from 0.
 #[derive(Debug, Clone)]
 pub struct LayoutMemory<W> {

@@ -332,6 +332,13 @@ impl Bindings {
         self.keys.iter().map(|(chord, action)| (chord, action))
     }
 
+    /// The modifiers that turn a press on a window into a drag, or `None`
+    /// for no modifier-drag.
+    #[must_use]
+    pub fn drag_mods(&self) -> Option<Mods> {
+        self.drag
+    }
+
     /// Make `mods` the modifier that turns a press on a window into a drag.
     #[must_use]
     pub fn drag_with(mut self, mods: Mods) -> Self {

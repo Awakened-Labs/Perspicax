@@ -38,6 +38,13 @@ impl Colour {
         Some(Self::rgb(byte(0)?, byte(2)?, byte(4)?))
     }
 
+    /// `"#rrggbb"`, in lower case: the inverse of [`parse`](Self::parse).
+    #[must_use]
+    pub fn hex(self) -> String {
+        let Self { r, g, b } = self;
+        format!("#{r:02x}{g:02x}{b:02x}")
+    }
+
     /// Black or white, whichever reads better written on this colour: the
     /// title's ink, so a person who picks a light titlebar does not also have
     /// to pick dark text for it.

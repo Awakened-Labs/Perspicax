@@ -787,3 +787,95 @@ fn a_reload_reads_what_another_program_wrote() {
     assert!(doc.reload().unwrap());
     assert_eq!(doc.text(), edited);
 }
+
+/// `text` with `edits` made, as a fresh file: what is on disk after.
+fn written_after(name: &str, text: &str, edits: &[Edit]) -> String {
+    let scratch = Scratch::new(name);
+    let path = scratch.config(text);
+    Document::open(&path).unwrap().apply(edits, &takes).unwrap();
+    read(&path)
+}
+
+#[test]
+fn a_top_level_key_goes_after_the_opening_comment_not_above_it() {
+    let minimal = || set(&[], "profile", Value::String("minimal".to_owned()));
+    let keys = "# What my keys do\n[keys]\n\"Logo+t\" = { spawn = [\"foot\"] }\n";
+    assert_eq!(
+        written_after(
+            "top-paragraph",
+            &format!("# Mine.\n# Mostly the profile's.\n\n{keys}"),
+            &[minimal()]
+        ),
+        format!("# Mine.\n# Mostly the profile's.\n\nprofile = \"minimal\"\n\n{keys}"),
+        "after the file's opening paragraph"
+    );
+    assert_eq!(
+        written_after("top-header-comment", keys, &[minimal()]),
+        format!("profile = \"minimal\"\n\n{keys}"),
+        "a comment on the first table is that table's"
+    );
+    assert_eq!(
+        written_after(
+            "top-beside",
+            &format!("# Mine.\n\ndrag = \"Logo\"\n\n{keys}"),
+            &[minimal()]
+        ),
+        format!("# Mine.\n\ndrag = \"Logo\"\nprofile = \"minimal\"\n\n{keys}"),
+        "beside a top-level key already written"
+    );
+}
+
+#[test]
+fn a_commented_out_top_level_example_is_filled_where_it_stands() {
+    let text = "# Mine.\n\n# drag = \"Alt\"      # the classic's\n\n[snap]\ndrag = false\n";
+    assert_eq!(
+        written_after(
+            "top-example",
+            text,
+            &[set(&[], "drag", Value::String("Logo".to_owned()))]
+        ),
+        "# Mine.\n\ndrag = \"Logo\"      # the classic's\n\n[snap]\ndrag = false\n"
+    );
+}
+
+#[test]
+fn a_key_in_an_inline_table_is_changed_in_place() {
+    let scratch = Scratch::new("inline");
+    let path = scratch.config("[workspaces]\nflip = { edge = true }   # mine\nwrap = true\n");
+    let mut doc = Document::open(&path).unwrap();
+    let delay = set(&["workspaces", "flip"], "delay-ms", Value::Integer(500));
+    doc.apply(&[delay], &takes).unwrap();
+    assert_eq!(
+        read(&path),
+        "[workspaces]\nflip = { edge = true, delay-ms = 500 }   # mine\nwrap = true\n"
+    );
+    let reset = |leaf| Edit::Reset {
+        key: Key::new(&["workspaces", "flip"], leaf),
+    };
+    doc.apply(&[reset("edge")], &takes).unwrap();
+    assert_eq!(
+        read(&path),
+        "[workspaces]\nflip = { delay-ms = 500 }   # mine\nwrap = true\n"
+    );
+    doc.apply(&[reset("delay-ms")], &takes).unwrap();
+    assert_eq!(
+        read(&path),
+        "[workspaces]\nwrap = true\n",
+        "an emptied inline table goes with its line"
+    );
+}
+
+#[test]
+fn a_pair_is_written_as_an_array_of_integers() {
+    let after = written_after(
+        "pair",
+        "[workspaces]\nwrap = true\n",
+        &[set(&["workspaces"], "grid", Value::Integers(vec![3, 2]))],
+    );
+    assert_eq!(after, "[workspaces]\nwrap = true\ngrid = [3, 2]\n");
+    let grid = perspicax_config::parse(&after, EVERYTHING)
+        .unwrap()
+        .workspaces
+        .grid;
+    assert_eq!((grid.columns, grid.rows), (3, 2));
+}

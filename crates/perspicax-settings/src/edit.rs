@@ -2,7 +2,7 @@
 //! they made the change in an editor.
 
 use perspicax_config::{Built, Spelled, Trigger};
-use toml_edit::{DocumentMut, InlineTable, Item, Table};
+use toml_edit::{DocumentMut, InlineTable, Item, Table, TableLike};
 
 use crate::{Edit, Reason, Value, layout};
 
@@ -110,36 +110,46 @@ fn binding(text: &str, trigger: Trigger) -> Option<String> {
 /// Set `leaf` in `table` to `value`, filling the file's own example for it
 /// where there is one.
 fn set(text: &str, table: &[&str], leaf: &str, value: toml_edit::Value) -> Result<String, String> {
-    let text = if table.is_empty() {
-        text.to_owned()
-    } else {
-        layout::make_room(text, table, leaf)
-    };
+    let text = layout::make_room(text, table, leaf);
     let mut doc = text
         .parse::<DocumentMut>()
         .map_err(|error| error.to_string())?;
-    replace_value(descend(&mut doc, table)?, leaf, value);
+    let (table, inline) = descend(&mut doc, table)?;
+    let added = !table.contains_key(leaf);
+    replace_value(table, leaf, value);
+    // toml_edit leaves the space before an inline table's `}` on the value
+    // that had been last, so a key added there is laid out afresh, as
+    // toml_edit lays out a table it writes inline itself.
+    if inline && added {
+        table.fmt();
+    }
     Ok(doc.to_string())
 }
 
 /// Walk (making as needed) the tables of `path`, returning the innermost.
 /// [`layout::make_room`] has usually given the file their headers already;
-/// making one here is the fallback for a table it could not, one made of
-/// dotted keys. A table made here is implicit, so it prints no header until
-/// it holds a key.
-fn descend<'a>(doc: &'a mut DocumentMut, path: &[&str]) -> Result<&'a mut Table, String> {
-    let mut table = doc.as_table_mut();
+/// making one here is the fallback for a table it could not: one made of
+/// dotted keys, or one written inline (`flip = { edge = true }`), which
+/// stays inline. A table made here is implicit, so it prints no header
+/// until it holds a key. Also whether the innermost is written inline.
+fn descend<'a>(
+    doc: &'a mut DocumentMut,
+    path: &[&str],
+) -> Result<(&'a mut dyn TableLike, bool), String> {
+    let mut table: &mut dyn TableLike = doc.as_table_mut();
+    let mut inline = false;
     for seg in path {
-        let entry = table.entry(seg).or_insert_with(|| {
+        if !table.contains_key(seg) {
             let mut implicit = Table::new();
             implicit.set_implicit(true);
-            Item::Table(implicit)
-        });
-        table = entry
-            .as_table_mut()
-            .ok_or_else(|| format!("`{seg}` in `{}` is not a table", path.join(".")))?;
+            table.insert(seg, Item::Table(implicit));
+        }
+        let not_a_table = || format!("`{seg}` in `{}` is not a table", path.join("."));
+        let item = table.get_mut(seg).ok_or_else(not_a_table)?;
+        inline = inline || item.is_inline_table();
+        table = item.as_table_like_mut().ok_or_else(not_a_table)?;
     }
-    Ok(table)
+    Ok((table, inline))
 }
 
 /// Put `value` at `leaf`, changing the value and nothing else on its line.
@@ -149,7 +159,7 @@ fn descend<'a>(doc: &'a mut DocumentMut, path: &[&str]) -> Result<&'a mut Table,
 /// So an existing value hands its decor -- the spacing around it and the
 /// comment after it -- to its replacement. The spacing before the `=` is the
 /// key's, which stays as it was, and so does an alignment.
-fn replace_value(table: &mut Table, leaf: &str, mut value: toml_edit::Value) {
+fn replace_value(table: &mut dyn TableLike, leaf: &str, mut value: toml_edit::Value) {
     match table.get_mut(leaf) {
         Some(Item::Value(old)) => {
             *value.decor_mut() = old.decor().clone();
@@ -168,6 +178,7 @@ fn toml(value: &Value) -> toml_edit::Value {
         Value::Float(value) => (*value).into(),
         Value::String(value) => value.as_str().into(),
         Value::Strings(values) => strings(values),
+        Value::Integers(values) => toml_edit::Value::Array(values.iter().copied().collect()),
     }
 }
 

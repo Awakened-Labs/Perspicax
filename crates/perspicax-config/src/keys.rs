@@ -102,7 +102,11 @@ const BUTTON_CODES: std::ops::RangeInclusive<u32> = 0x100..=0x2ff;
 
 /// Parse modifiers alone, as `drag = "Alt"` writes them. `"none"` is no
 /// modifier-drag at all, returned as `None`.
-pub(crate) fn modifiers(text: &str) -> Result<Option<Mods>, String> {
+///
+/// # Errors
+///
+/// Why `text` is no set of modifiers, naming the part that is not one.
+pub fn modifiers(text: &str) -> Result<Option<Mods>, String> {
     if text.eq_ignore_ascii_case("none") {
         return Ok(None);
     }
@@ -304,6 +308,17 @@ pub fn spell_trigger(written: Trigger) -> Option<String> {
     };
     trigger(&text)
         .is_ok_and(|read| read == written)
+        .then_some(text)
+}
+
+/// `drag` as a person writes it: `"Alt"`, `"Ctrl+Logo"`, or `"none"` for no
+/// modifier-drag. `None` where no file can write it: a drag with no
+/// modifier held.
+#[must_use]
+pub fn spell_modifiers(drag: Option<Mods>) -> Option<String> {
+    let text = drag.map_or_else(|| "none".to_owned(), spelled);
+    modifiers(&text)
+        .is_ok_and(|read| read == drag)
         .then_some(text)
 }
 
@@ -541,6 +556,20 @@ mod tests {
             ..Mods::default()
         };
         assert_eq!(spelled(held), "Ctrl+Logo");
+    }
+
+    #[test]
+    fn every_drag_modifier_set_spells_and_reads_back() {
+        for mods in every_mods().filter(|&mods| mods != Mods::default()) {
+            let written = spell_modifiers(Some(mods)).expect("a spelling");
+            assert_eq!(modifiers(&written), Ok(Some(mods)), "{written}");
+        }
+        assert_eq!(spell_modifiers(None).as_deref(), Some("none"));
+        assert_eq!(
+            spell_modifiers(Some(Mods::default())),
+            None,
+            "a drag needs a modifier"
+        );
     }
 
     /// Every set of modifiers, none to all four.
