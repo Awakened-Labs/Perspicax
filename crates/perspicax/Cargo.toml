@@ -84,3 +84,5 @@ rmcp.workspace = true
 # application as small as a Wayland one can be, written in the test.
 smithay-client-toolkit.workspace = true
 wayland-client.workspace = true
+# The agent interface's test leaves a read of the wire pending, as rmcp does.
+tokio = { workspace = true, features = ["io-util"] }
