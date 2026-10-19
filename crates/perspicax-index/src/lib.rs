@@ -47,7 +47,7 @@ use perspicax_node::{Node, NodeId, ObservedNode, Origin, Rect, SurfaceId, Visibi
 
 pub use crate::{
     cache::{Delta, Index},
-    host::{HostFacts, Judgement, Layer, SurfaceFacts, SurfaceKind, Tally, judge},
+    host::{HostFacts, Judgement, Layer, SurfaceFacts, SurfaceKind, Tally, judge, judge_window},
     id::Interner,
     join::{Evidence, Finding, Join, SurfaceClaim, WindowClaim, join},
     receipt::{DamageWitness, Receipt, Verb, WindowReceipt, WindowVerb, WindowWitness},
