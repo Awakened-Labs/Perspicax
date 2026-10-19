@@ -267,12 +267,17 @@ impl Bindings {
             )
     }
 
-    /// Bind a chord, replacing whatever it meant before. A later layer (a
-    /// user's config over a profile) overrides an earlier one this way.
+    /// Bind a chord, replacing whatever it meant before, where it stands. A
+    /// later layer (a user's config over a profile) overrides an earlier one
+    /// this way. Binding a chord to what it already does changes nothing,
+    /// not even the order: so two tables are equal when they mean the same,
+    /// which is how the settings app knows a binding is already so.
     #[must_use]
     pub fn bind(mut self, chord: Chord, action: Action) -> Self {
-        self.keys.retain(|(bound, _)| *bound != chord);
-        self.keys.push((chord, action));
+        match self.keys.iter_mut().find(|(bound, _)| *bound == chord) {
+            Some((_, bound)) => *bound = action,
+            None => self.keys.push((chord, action)),
+        }
         self
     }
 
@@ -322,7 +327,7 @@ impl Bindings {
         self
     }
 
-    /// Every binding, in the order they were made.
+    /// Every binding, in the order each chord was first bound.
     pub fn iter(&self) -> impl Iterator<Item = (&Chord, &Action)> {
         self.keys.iter().map(|(chord, action)| (chord, action))
     }
@@ -492,6 +497,18 @@ mod tests {
         assert_eq!(
             bindings.resolve(Mods::alt(), &[Keysym::F4]),
             Some(&Action::CycleFocus)
+        );
+    }
+
+    #[test]
+    fn binding_a_chord_to_what_it_already_does_changes_nothing() {
+        let chord = Chord {
+            mods: Mods::alt(),
+            key: Keysym::F4,
+        };
+        assert_eq!(
+            Bindings::classic().bind(chord, Action::Close),
+            Bindings::classic()
         );
     }
 

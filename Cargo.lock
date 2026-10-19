@@ -1644,6 +1644,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "perspicax-settings"
+version = "0.1.0"
+dependencies = [
+ "perspicax-config",
+ "perspicax-policy",
+ "thiserror 2.0.20",
+ "toml",
+ "toml_edit",
+]
+
+[[package]]
 name = "perspicax-shell"
 version = "0.1.0"
 dependencies = [
@@ -2659,6 +2670,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 

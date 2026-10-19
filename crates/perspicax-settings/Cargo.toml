@@ -1,0 +1,30 @@
+[package]
+name = "perspicax-settings"
+description = "The settings app's writer: edits config.toml in place, keeping the person's comments, order and alignment, and writes only a file the installed perspicax takes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+# The writer lives here, not in perspicax-config, so that crate stays parse-only
+# and the compositor's graph never sees toml_edit.
+[dependencies]
+perspicax-config = { path = "../perspicax-config", version = "0.1.0" }
+thiserror.workspace = true
+# Parse only, as perspicax-config has it: what two texts mean is compared as
+# plain tables, which ignore layout.
+toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
+# The writer: a document that keeps every comment, blank and space it was
+# parsed with, and prints them back. `display` is that printing.
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
+
+[dev-dependencies]
+# A chord no config can spell, which `trigger` cannot make.
+perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
