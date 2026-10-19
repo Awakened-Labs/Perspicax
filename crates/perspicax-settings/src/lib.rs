@@ -30,6 +30,7 @@
 //! ever hears a whole file arrive. If another program wrote the file since it
 //! was read, the edits are made again on top of what it wrote.
 
+mod access;
 mod edit;
 mod fields;
 mod file;
@@ -48,6 +49,7 @@ use std::{
 
 use perspicax_config::{Spelled, Trigger};
 
+pub use crate::access::{Grant, grants, rule_words, socket_words};
 pub use crate::fields::{Field, Kind, Section, Setting, Source, sections, settings};
 pub use crate::judge::{Installed, Judge};
 pub use crate::keys::{Binding, Mark, bindings};

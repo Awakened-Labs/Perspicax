@@ -14,12 +14,13 @@
 use std::{path::Path, time::Duration};
 
 use eframe::egui::{self, Ui};
-use perspicax_config::{Built, Config};
+use perspicax_config::{AgentSocket, Built, Config};
 use perspicax_settings::{
-    Applied, Binding, Document, Edit, Reason, Refused, Registry, Rule, Section, Setting,
+    Applied, Binding, Document, Edit, Grant, Reason, Refused, Registry, Rule, Section, Setting,
 };
 
 use crate::{
+    access,
     capture::Channel,
     fields, keys,
     monitors::{self, Monitor, Monitors, Seen},
@@ -68,6 +69,10 @@ pub(crate) struct App {
     outputs: outputs::Page,
     /// The last change to the monitors, waiting to be kept.
     countdown: Option<Countdown>,
+    /// Who may reach past their own windows, and what an agent may do, as
+    /// the file stands: shown, never written.
+    grants: Vec<Grant>,
+    socket: AgentSocket,
     shown: Shown,
     /// What the last change did.
     notice: Option<Notice>,
@@ -82,6 +87,7 @@ enum Shown {
     /// The behaviour page at this place in [`App::sections`].
     Section(usize),
     Outputs,
+    Protocols,
 }
 
 enum Notice {
@@ -131,6 +137,8 @@ impl App {
             seen,
             outputs: outputs::Page::default(),
             countdown: None,
+            grants: Vec::new(),
+            socket: AgentSocket::default(),
             shown: Shown::Keys,
             notice: None,
             focused: true,
@@ -154,6 +162,8 @@ impl App {
         });
         let config = parsed
             .unwrap_or_else(|| Config::profile(perspicax_config::Profile::Classic, EVERYTHING));
+        self.grants = perspicax_settings::grants(text, &config);
+        self.socket = config.agent.socket.clone();
         let layouts = config.keyboard.layout.split(',').count();
         self.names = perspicax_config::action_names(
             config.workspaces.grid.len(),
@@ -293,6 +303,7 @@ impl App {
                     titles.push((Shown::Outputs, "Outputs"));
                 }
             }
+            titles.push((Shown::Protocols, "Protocols"));
             for (page, title) in titles {
                 if ui.selectable_label(self.shown == page, title).clicked() {
                     chosen = Some(page);
@@ -379,6 +390,12 @@ impl App {
                 if let Some(apply) = self.outputs.ui(ui, &view) {
                     let now = ui.input(|i| i.time);
                     self.apply_outputs(&apply, now);
+                }
+                None
+            }
+            Shown::Protocols => {
+                if access::ui(ui, &self.grants, &self.socket) {
+                    open(self.document.path());
                 }
                 None
             }

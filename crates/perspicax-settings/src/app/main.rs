@@ -14,6 +14,7 @@
 //! No agent may drive it: the file it writes is what holds an agent back.
 //! perspicax refuses to hand it to one, whatever was granted.
 
+mod access;
 mod capture;
 mod fields;
 mod fonts;

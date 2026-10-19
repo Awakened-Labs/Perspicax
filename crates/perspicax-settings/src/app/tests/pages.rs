@@ -69,6 +69,8 @@ fn every_page_is_one_click_away() {
     }
     open(&mut harness, "Outputs");
     harness.get_by_label_contains("Nothing is written until Apply");
+    open(&mut harness, "Protocols");
+    harness.get_by_label(crate::access::WHY);
     open(&mut harness, "Keys");
     harness.get_by_label("Add a binding…");
     assert_eq!(read(&path), "");
@@ -315,4 +317,33 @@ fn a_layout_picked_from_xkbs_list_writes_layout_and_variant_together() {
         read(&path),
         "[input.keyboard]\nlayout = \"us,ru\"\nvariant = \",phonetic\"\n"
     );
+}
+
+#[test]
+fn the_protocols_page_shows_each_rule_and_whose_it_is() {
+    let scratch = Scratch::new("protocols");
+    let (_, harness) = page(
+        &scratch,
+        "[protocols]\nscreencopy = [\"/usr/bin/grim\"]\n\n[agent]\nsocket = false\n",
+        "Protocols",
+    );
+    harness.get_by_label("/usr/bin/grim");
+    harness.get_by_label("yours; the profile's is grim, wf-recorder, xdg-desktop-portal-wlr");
+    harness.get_by_label("wlr-randr, kanshi, wdisplays, nwg-displays, perspicax-settings");
+    harness.get_by_label("none, whatever `--mcp-socket` says");
+    harness.get_by_label("none: not offered");
+}
+
+#[test]
+fn the_protocols_page_has_nothing_to_change() {
+    let scratch = Scratch::new("protocols-read");
+    let text = "[protocols]\nworkspace = \"off\"\n";
+    let path = scratch.config(text);
+    let (judge, judged) = counting();
+    let mut harness = window(&path, judge, None);
+    open(&mut harness, "Protocols");
+    for role in [Role::CheckBox, Role::RadioButton, Role::TextInput] {
+        assert_eq!(harness.query_all_by_role(role).count(), 0, "{role:?}");
+    }
+    assert_eq!((read(&path).as_str(), judged.get()), (text, 0));
 }
