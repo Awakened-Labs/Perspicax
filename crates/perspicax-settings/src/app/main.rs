@@ -13,8 +13,10 @@
 //! perspicax refuses to hand it to one, whatever was granted.
 
 mod capture;
+mod fields;
 mod fonts;
 mod keys;
+mod layouts;
 #[cfg(test)]
 mod tests;
 mod window;
@@ -23,12 +25,16 @@ use std::{path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 use eframe::egui;
-use perspicax_settings::{Document, Installed, Judge as _};
+use perspicax_settings::{Document, Installed, Judge as _, Registry};
 
 use crate::window::{App, Judge};
 
 #[derive(Parser)]
-#[command(version, about)]
+#[command(
+    version,
+    about = "perspicax's settings, written into its config file in place: a chord bound by \
+             pressing it, and every other setting on a page of its own."
+)]
 struct Cli {
     /// The config file to write. By default the session's own
     /// (`$PERSPICAX_CONFIG`), or else `$XDG_CONFIG_HOME/perspicax/config.toml`.
@@ -65,9 +71,15 @@ fn main() -> ExitCode {
             )
         }),
     };
-    let font = perspicax_config::parse(document.text(), window::EVERYTHING)
-        .map(|config| config.theme.font)
+    let config = perspicax_config::parse(document.text(), window::EVERYTHING).ok();
+    let font = config
+        .as_ref()
+        .map(|config| config.theme.font.clone())
         .unwrap_or_default();
+    let rules = config
+        .map(|config| config.keyboard.rules)
+        .unwrap_or_default();
+    let registry = Registry::find(|name| std::env::var(name).ok(), &rules);
     let fonts = fonts::definitions(&font);
 
     let options = eframe::NativeOptions {
@@ -88,7 +100,7 @@ fn main() -> ExitCode {
             let woken = ctx.clone();
             let capture = capture::Wayland::connect(move || woken.request_repaint())
                 .map(|channel| Box::new(channel) as Box<dyn capture::Channel>);
-            Ok(Box::new(App::new(document, judge, capture)))
+            Ok(Box::new(App::new(document, judge, capture, registry)))
         }),
     );
     match ran {

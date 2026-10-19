@@ -1,4 +1,4 @@
-//! The window: the file, what the session makes of it, and the page.
+//! The window: the file, what the session makes of it, and the pages.
 //!
 //! Every change is one [`Document::apply`], so what is written is only ever
 //! a file the installed perspicax takes. The file is read again whenever
@@ -9,9 +9,11 @@ use std::path::Path;
 
 use eframe::egui::{self, Ui};
 use perspicax_config::{Built, Config};
-use perspicax_settings::{Applied, Binding, Document, Edit, Reason, Refused};
+use perspicax_settings::{
+    Applied, Binding, Document, Edit, Reason, Refused, Registry, Section, Setting,
+};
 
-use crate::{capture::Channel, keys};
+use crate::{capture::Channel, fields, keys};
 
 /// What decides that a file may be written: the installed perspicax, or a
 /// test's stand-in.
@@ -38,10 +40,26 @@ pub(crate) struct App {
     names: Vec<String>,
     pies: Vec<String>,
     keys: keys::Page,
+    /// The behaviour pages, and each one's keys as the file stands: none
+    /// where perspicax refuses the file before it can be read.
+    sections: Vec<Section>,
+    settings: Vec<Vec<Setting>>,
+    fields: fields::Page,
+    /// xkb's layouts, where they could be found.
+    registry: Option<Registry>,
+    shown: Shown,
     /// What the last change did.
     notice: Option<Notice>,
     /// Whether the window had the keyboard when last drawn.
     focused: bool,
+}
+
+/// The page on show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shown {
+    Keys,
+    /// The behaviour page at this place in [`App::sections`].
+    Section(usize),
 }
 
 enum Notice {
@@ -56,6 +74,7 @@ impl App {
         document: Document,
         judge: Judge,
         capture: Result<Box<dyn Channel>, String>,
+        registry: Option<Registry>,
     ) -> Self {
         let mut app = Self {
             document,
@@ -66,6 +85,11 @@ impl App {
             names: Vec::new(),
             pies: Vec::new(),
             keys: keys::Page::default(),
+            sections: perspicax_settings::sections(),
+            settings: Vec::new(),
+            fields: fields::Page::default(),
+            registry,
+            shown: Shown::Keys,
             notice: None,
             focused: true,
         };
@@ -78,8 +102,15 @@ impl App {
         let text = self.document.text();
         self.standing = self.document.check(&self.judge).err();
         self.rows = perspicax_settings::bindings(text).unwrap_or_default();
-        let config = perspicax_config::parse(text, EVERYTHING)
-            .unwrap_or_else(|_| Config::profile(perspicax_config::Profile::Classic, EVERYTHING));
+        let parsed = perspicax_config::parse(text, EVERYTHING).ok();
+        self.settings = parsed.as_ref().map_or_else(Vec::new, |config| {
+            self.sections
+                .iter()
+                .map(|section| perspicax_settings::settings(text, config, section))
+                .collect()
+        });
+        let config = parsed
+            .unwrap_or_else(|| Config::profile(perspicax_config::Profile::Classic, EVERYTHING));
         let layouts = config.keyboard.layout.split(',').count();
         self.names = perspicax_config::action_names(
             config.workspaces.grid.len(),
@@ -94,18 +125,65 @@ impl App {
 
     /// Make `edits`, and say what came of it.
     fn apply(&mut self, edits: &[Edit]) {
-        self.notice = Some(match self.document.apply(edits, &self.judge) {
+        let applied = self.document.apply(edits, &self.judge);
+        self.fields.settled(applied.as_ref().err());
+        self.notice = Some(match applied {
             Ok(applied) => Notice::Applied(applied),
             Err(refused) => Notice::Refused(refused),
         });
         self.refresh();
     }
 
+    /// Show `page`: what is typed on the page left is written first, and a
+    /// capture the Keys page waits for is given up.
+    fn show_page(&mut self, page: Shown) {
+        if page == self.shown {
+            return;
+        }
+        if let Shown::Section(at) = self.shown
+            && let Some(edits) = self.sections.get(at).and_then(|s| self.fields.flush(s))
+        {
+            self.apply(&edits);
+        }
+        if self.shown == Shown::Keys
+            && let Ok(channel) = &mut self.capture
+        {
+            self.keys.give_up(channel.as_mut());
+        }
+        self.fields.forget();
+        self.shown = page;
+    }
+
+    /// The side panel: every page, by its title.
+    fn pages(&mut self, ui: &mut Ui) {
+        let mut chosen = None;
+        egui::Panel::left("pages").show(ui, |ui| {
+            ui.add_space(6.0);
+            let titles = std::iter::once((Shown::Keys, "Keys")).chain(
+                self.sections
+                    .iter()
+                    .enumerate()
+                    .map(|(at, section)| (Shown::Section(at), section.title)),
+            );
+            for (page, title) in titles {
+                if ui.selectable_label(self.shown == page, title).clicked() {
+                    chosen = Some(page);
+                }
+            }
+        });
+        if let Some(page) = chosen {
+            self.show_page(page);
+        }
+    }
+
     pub(crate) fn show(&mut self, ui: &mut Ui) {
         let focused = ui.input(|i| i.focused);
         if focused && !self.focused {
             match self.document.reload() {
-                Ok(true) => self.refresh(),
+                Ok(true) => {
+                    self.fields.forget();
+                    self.refresh();
+                }
                 Ok(false) => {}
                 Err(error) => self.notice = Some(Notice::Unreadable(error.to_string())),
             }
@@ -121,10 +199,25 @@ impl App {
                 }
             });
         });
+        self.pages(ui);
         egui::CentralPanel::default().show(ui, |ui| {
             let fixed = self.standing(ui);
             let mut edits = self.notice(ui).or(fixed);
-            if !self.standing_is_unreadable() {
+            if !self.standing_is_unreadable()
+                && let Some(more) = self.page(ui)
+            {
+                edits = Some(more);
+            }
+            if let Some(edits) = edits {
+                self.apply(&edits);
+            }
+        });
+    }
+
+    /// The page on show, and what it says to write.
+    fn page(&mut self, ui: &mut Ui) -> Option<Vec<Edit>> {
+        match self.shown {
+            Shown::Keys => {
                 let view = keys::View {
                     rows: &self.rows,
                     names: &self.names,
@@ -134,14 +227,15 @@ impl App {
                     Ok(channel) => Ok(channel.as_mut()),
                     Err(why) => Err(why.as_str()),
                 };
-                if let Some(more) = self.keys.ui(ui, &view, capture) {
-                    edits = Some(more);
-                }
+                self.keys.ui(ui, &view, capture)
             }
-            if let Some(edits) = edits {
-                self.apply(&edits);
+            Shown::Section(at) => {
+                let section = self.sections.get(at)?;
+                let settings = self.settings.get(at)?;
+                self.fields
+                    .ui(ui, section, settings, self.registry.as_ref())
             }
-        });
+        }
     }
 
     /// Whether the file is one nothing here can show: not TOML, or refused

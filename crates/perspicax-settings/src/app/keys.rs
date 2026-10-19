@@ -140,6 +140,12 @@ impl Page {
         self.editing = Editing::Capturing(Capturing::new(from, waiting));
     }
 
+    /// The page is left: a capture that waits is given up, or the
+    /// compositor would take the next key typed on another page as a chord.
+    pub(crate) fn give_up(&mut self, channel: &mut (dyn Channel + 'static)) {
+        self.leave(Editing::Nothing, &mut Ok(channel));
+    }
+
     /// Leave whatever is being done, giving up a capture that waits.
     fn leave(&mut self, next: Editing, capture: &mut Capture<'_>) {
         if let (Editing::Capturing(Capturing { waiting: true, .. }), Ok(channel)) =
