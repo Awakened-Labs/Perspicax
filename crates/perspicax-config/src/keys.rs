@@ -14,6 +14,10 @@
 //! two spellings, a name ([`BUTTONS`]) and X's number (`Mouse8`), so that a
 //! Fluxbox `keys` line carries over, and a button with neither can be named
 //! by its Linux code (`Button275`).
+//!
+//! Both ways, as `actions` does for actions: [`trigger`] reads an entry, and
+//! [`spell_trigger`] writes one back, for the settings app. A spelling is
+//! only ever given when reading it back is the same chord.
 
 use perspicax_policy::{Button, Chord, Gesture, Keysym, Mods, MouseChord, Wheel};
 
@@ -110,7 +114,7 @@ pub(crate) fn modifiers(text: &str) -> Result<Option<Mods>, String> {
 
 /// What a `[keys]` entry binds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Trigger {
+pub enum Trigger {
     Chord(Chord),
     /// `"Logo"` on its own: pressed and let go with nothing else in between.
     /// See [`perspicax_policy::LogoTap`].
@@ -120,7 +124,12 @@ pub(crate) enum Trigger {
 /// Parse a `[keys]` entry: `"Mod+Mod+Key"`, or a lone `"Logo"` for a tap.
 /// Other modifiers cannot be tapped: Ctrl, Alt and Shift on their own are
 /// pressed far too often on the way to a chord.
-pub(crate) fn trigger(text: &str) -> Result<Trigger, String> {
+///
+/// # Errors
+///
+/// Why `text` binds nothing: an unknown modifier or key name, a modifier
+/// other than Logo on its own, or no key at all.
+pub fn trigger(text: &str) -> Result<Trigger, String> {
     let lone = text.trim();
     let mut mods = Mods::default();
     if modifier(lone, &mut mods).is_ok() {
@@ -261,19 +270,71 @@ fn x_button(number: u32) -> Option<Gesture> {
     }
 }
 
-/// Modifiers as a person writes them, in a fixed order: `Ctrl+Alt`.
+/// Modifiers as a person writes them, in a fixed order with Shift last, as
+/// the README writes them: `Ctrl+Alt`, `Logo+Shift`.
 pub(crate) fn spelled(mods: Mods) -> String {
     [
         (mods.ctrl, "Ctrl"),
         (mods.alt, "Alt"),
-        (mods.shift, "Shift"),
         (mods.logo, "Logo"),
+        (mods.shift, "Shift"),
     ]
     .into_iter()
     .filter(|&(held, _)| held)
     .map(|(_, name)| name)
     .collect::<Vec<_>>()
     .join("+")
+}
+
+/// A `[keys]` entry as a person writes it: `"Logo+Shift+Return"`, or
+/// `"Logo"` for a tap. `None` where the key has no spelling (see
+/// [`spell_chord`]).
+#[must_use]
+pub fn spell_trigger(written: Trigger) -> Option<String> {
+    let text = match written {
+        Trigger::LogoTap => "Logo".to_owned(),
+        Trigger::Chord(chord) => {
+            let key = spell_key(chord.key)?;
+            match spelled(chord.mods) {
+                mods if mods.is_empty() => key,
+                mods => format!("{mods}+{key}"),
+            }
+        }
+    };
+    trigger(&text)
+        .is_ok_and(|read| read == written)
+        .then_some(text)
+}
+
+/// A chord as a person writes it, the modifiers in their fixed order:
+/// `"Logo+Shift+Return"`.
+///
+/// `None` for a key this config has no way to write yet -- a keypad key,
+/// `F13`, a capital letter, the plus key with nothing held -- which is as
+/// much as to say that chord cannot be bound yet.
+#[must_use]
+pub fn spell_chord(chord: Chord) -> Option<String> {
+    spell_trigger(Trigger::Chord(chord))
+}
+
+/// A key as a person writes it: the first of its names in [`NAMED`], or else
+/// the character it makes, when that is one a person can see.
+///
+/// The spelling is kept only when [`keysym`] reads it back as the same key.
+/// xkb gives the keypad's `1` the character `1`, and a binding written `1` is
+/// the number row's: without the check, capturing the one would bind the
+/// other.
+fn spell_key(sym: Keysym) -> Option<String> {
+    let text = NAMED
+        .iter()
+        .find(|&&(_, named)| named == sym)
+        .map(|&(name, _)| name.to_owned())
+        .or_else(|| {
+            sym.key_char()
+                .filter(|made| !made.is_control() && !made.is_whitespace())
+                .map(String::from)
+        })?;
+    keysym(&text).is_ok_and(|read| read == sym).then_some(text)
 }
 
 fn modifier(name: &str, mods: &mut Mods) -> Result<(), String> {
@@ -446,6 +507,97 @@ mod tests {
             ..Mods::default()
         };
         assert_eq!(spelled(held), "Ctrl+Logo");
+    }
+
+    /// Every set of modifiers, none to all four.
+    fn every_mods() -> impl Iterator<Item = Mods> {
+        (0..16).map(|bits: u8| Mods {
+            ctrl: bits & 1 != 0,
+            alt: bits & 2 != 0,
+            shift: bits & 4 != 0,
+            logo: bits & 8 != 0,
+        })
+    }
+
+    /// The keys a person can write: every name, and every character on a US
+    /// keyboard but the capitals, which the file reads as lower case.
+    fn writable_keys() -> impl Iterator<Item = Keysym> {
+        let named = NAMED.iter().map(|&(_, sym)| sym);
+        let typed = ('!'..='~')
+            .filter(|made| !made.is_ascii_uppercase())
+            .map(Keysym::from_char);
+        named.chain(typed)
+    }
+
+    #[test]
+    fn every_named_key_is_spelled_its_first_way() {
+        for &(name, sym) in NAMED {
+            let first = NAMED.iter().find(|&&(_, named)| named == sym).unwrap().0;
+            assert_eq!(spell_key(sym).as_deref(), Some(first), "{name}");
+        }
+        assert_eq!(spell_key(Keysym::Return).as_deref(), Some("Return"));
+        assert_eq!(spell_key(Keysym::space).as_deref(), Some("Space"));
+    }
+
+    #[test]
+    fn every_printable_ascii_key_but_a_capital_spells_as_itself_and_back() {
+        for made in ('!'..='~').filter(|made| !made.is_ascii_uppercase()) {
+            let sym = Keysym::from_char(made);
+            assert_eq!(spell_key(sym), Some(made.to_string()), "{made}");
+        }
+    }
+
+    #[test]
+    fn a_capital_a_keypad_key_and_f13_have_no_spelling() {
+        for sym in [Keysym::A, Keysym::KP_Enter, Keysym::KP_1, Keysym::F13] {
+            assert_eq!(spell_key(sym), None, "{sym:?}");
+        }
+    }
+
+    #[test]
+    fn a_letter_of_another_alphabet_spells_as_itself() {
+        assert_eq!(spell_key(Keysym::Cyrillic_shorti).as_deref(), Some("й"));
+    }
+
+    #[test]
+    fn a_chord_spells_its_modifiers_in_the_readmes_order() {
+        let spelled = |text| spell_chord(chord(text).unwrap()).unwrap();
+        assert_eq!(spelled("shift+logo+return"), "Logo+Shift+Return");
+        assert_eq!(spelled("alt+ctrl+Delete"), "Ctrl+Alt+Delete");
+        assert_eq!(spelled("Super+A"), "Logo+a");
+        assert_eq!(spelled("Ctrl++"), "Ctrl++");
+        assert_eq!(spelled("F1"), "F1");
+    }
+
+    #[test]
+    fn the_plus_key_alone_has_no_spelling() {
+        let plus = Chord {
+            mods: Mods::default(),
+            key: Keysym::plus,
+        };
+        assert_eq!(spell_chord(plus), None);
+    }
+
+    #[test]
+    fn every_spelled_chord_reads_back_as_itself() {
+        for mods in every_mods() {
+            for key in writable_keys() {
+                let written = Chord { mods, key };
+                match spell_chord(written) {
+                    Some(text) => assert_eq!(chord(&text), Ok(written), "{text}"),
+                    None => assert!(
+                        mods == Mods::default() && key == Keysym::plus,
+                        "{written:?} has no spelling"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_logo_tap_is_spelled_logo() {
+        assert_eq!(spell_trigger(Trigger::LogoTap).as_deref(), Some("Logo"));
+        assert_eq!(trigger("Logo"), Ok(Trigger::LogoTap));
     }
 
     #[test]

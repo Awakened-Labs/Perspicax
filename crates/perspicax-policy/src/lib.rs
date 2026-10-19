@@ -16,6 +16,7 @@
 //! integers.
 //!
 //! The decisions, by module: focus and what a chord means (`focus`, `binds`);
+//! the two chords no binding can take (`hatch`);
 //! what a button, a double-click or the wheel means where the pointer is
 //! (`mouse`);
 //! where a window goes and how big (`geometry`); where each program's window
@@ -40,6 +41,7 @@ mod flip;
 mod focus;
 mod frame;
 mod geometry;
+mod hatch;
 mod heads;
 mod keyboard;
 mod layout;
@@ -71,6 +73,7 @@ pub use crate::{
         DRAG_THRESHOLD, Edges, Rect, anchor, carry, clear_of, dragged, edges_near, neighbour,
         place, resize, settle, unmaximized_at,
     },
+    hatch::{Hatch, hatch},
     heads::{Head, HeadChange, HeadMode, ModeChoice, Rejection, check_heads},
     keyboard::{LayoutMemory, Switching},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},

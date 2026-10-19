@@ -40,8 +40,8 @@
 use std::time::Duration;
 
 use perspicax_policy::{
-    Action, Button, Drag, FrameButton, Mods, Part, Resting, arrival, candidates, edge_at,
-    edges_near, is_double, is_logo,
+    Action, Button, Drag, FrameButton, Hatch, Mods, Part, Resting, arrival, candidates, edge_at,
+    edges_near, hatch, is_double, is_logo,
 };
 use smithay::{
     backend::{
@@ -65,13 +65,7 @@ use smithay::{
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
 };
 
-use super::{
-    super::{
-        Running,
-        hatch::{self, Hatch},
-    },
-    Lit, Session, settings,
-};
+use super::{super::Running, Lit, Session, settings};
 use crate::{
     framed::Framed,
     mouse::{Hit, Scrolled, Travelled},
@@ -212,7 +206,8 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
             // While locked, only the escape hatches and the layout keys: a
             // binding that opened a terminal over the lock screen would be an
             // unlock, while a password is typed in a layout too.
-            let taken = hatch::classify(modifiers, keysym.modified_sym(), &raw)
+            let made = std::iter::once(keysym.modified_sym());
+            let taken = hatch(mods(modifiers), made.chain(raw.iter().copied()))
                 .map(Taken::Hatch)
                 .or_else(|| {
                     let layout = modifiers.serialized.layout_effective;
@@ -261,7 +256,7 @@ fn escape(state: &mut Compositor, hatch: Hatch) {
         }
         Hatch::Vt(vt) => {
             tracing::info!(vt, "switching VT");
-            if let Err(error) = session.seat.change_vt(vt) {
+            if let Err(error) = session.seat.change_vt(i32::from(vt)) {
                 tracing::warn!(vt, %error, "could not switch VT");
             }
         }

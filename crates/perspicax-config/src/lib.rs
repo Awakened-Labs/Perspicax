@@ -23,8 +23,11 @@
 //! entries, which the shell lists in its menus and the session starts in
 //! [`autostart`](mod@autostart), by the same rules. And the [`menu`]
 //! vocabulary, which the menu file, the start menu and a pie are written in.
-//! And [`locate`]: where a path written in the file points.
+//! And [`locate`]: where a path written in the file points. And
+//! [`find_program`]: where perspicax's own programs are, so that the session
+//! and `perspicax config check` find the same shell.
 
+mod actions;
 pub mod autostart;
 pub mod desktop;
 mod keys;
@@ -37,17 +40,20 @@ mod swaylock;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsStr,
     path::{Path, PathBuf},
 };
 
 use perspicax_policy::{
     Access, Action, Animation, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction,
-    Drag, Effect, Face, Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Keysym, Mods,
-    MouseBindings, MouseChord, OPAQUE, Opacity, Place, Program, Protocol, Remembering, Resistance,
-    Rule, Shadow, Shape, Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
+    Drag, Effect, Face, Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Hatch, Keysym,
+    Mods, MouseBindings, MouseChord, OPAQUE, Opacity, Place, Program, Protocol, Remembering,
+    Resistance, Rule, Shadow, Shape, Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
 };
 use serde::Deserialize;
 
+pub use crate::actions::{Spelled, spell_action};
+pub use crate::keys::{Trigger, spell_chord, spell_trigger, trigger};
 use crate::shell::RawShell;
 pub use crate::shell::{
     Align, Edge, Item, Leave, Panel, PanelOutputs, PanelWidth, Shell, ShellBuilt, TaskbarScope,
@@ -770,6 +776,28 @@ pub fn locate(written: &Path, config: Option<&Path>, home: Option<&Path>) -> Pat
     }
 }
 
+/// Where one of perspicax's own programs is: `name` in `beside`, the folder
+/// the running binary is in, where `cargo build` and a package both put the
+/// pair; then in the first folder of `path` that has one. Only a file that
+/// may be run counts.
+#[must_use]
+pub fn find_program(name: &str, beside: Option<&Path>, path: Option<&OsStr>) -> Option<PathBuf> {
+    let on_path = path.into_iter().flat_map(std::env::split_paths);
+    beside
+        .map(Path::to_owned)
+        .into_iter()
+        .chain(on_path)
+        .map(|folder| folder.join(name))
+        .find(|candidate| runnable(candidate))
+}
+
+/// Whether `path` is a file that may be run.
+fn runnable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    path.metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
 /// Read and parse a config file. A file that does not exist is the classic
 /// profile: nobody should have to write a config to log in.
 ///
@@ -1333,6 +1361,23 @@ fn drag_taken(bindings: &Bindings, chord: &MouseChord, drag_from: &str) -> Strin
     )
 }
 
+/// Why a `[keys]` entry for an escape hatch is refused. The compositor takes
+/// those chords before it looks at a binding, so one written here could
+/// never fire, and a `"none"` could never hand the chord to the client.
+fn hatch_taken(trigger: keys::Trigger) -> Option<String> {
+    let keys::Trigger::Chord(chord) = trigger else {
+        return None;
+    };
+    let does = match perspicax_policy::hatch(chord.mods, [chord.key])? {
+        Hatch::Exit => "ends the session".to_owned(),
+        Hatch::Vt(vt) => format!("switches to VT {vt}"),
+    };
+    Some(format!(
+        "{does} before any binding is looked at, so no config can bind or unbind it; choose \
+         another chord"
+    ))
+}
+
 /// A binding's value: an action's name, `{ spawn = [...] }` or
 /// `{ pie = "..." }`.
 #[derive(Debug, Deserialize)]
@@ -1511,14 +1556,25 @@ impl Raw {
         // The first key written to change the sound, to refuse with the
         // shell off.
         let mut volume_written = None;
+        let mut written_as = Vec::new();
         for (written, action) in self.keys {
-            let trigger = keys::trigger(&written)
-                .map_err(|reason| invalid(format!("keys.{written}"), reason))?;
-            let action = action_for(action, &pies)
-                .map_err(|reason| invalid(format!("keys.{written}"), reason))?;
-            if matches!(action, Some(Action::Volume(_))) && volume_written.is_none() {
-                volume_written = Some(format!("keys.{written}"));
+            let key = format!("keys.{written}");
+            let trigger = keys::trigger(&written).map_err(|reason| invalid(key.clone(), reason))?;
+            if let Some(reason) = hatch_taken(trigger) {
+                return Err(invalid(key, reason));
             }
+            if let Some((_, first)) = written_as.iter().find(|(seen, _)| *seen == trigger) {
+                return Err(invalid(
+                    key,
+                    format!("is the same as `{first}`, already written; write it once"),
+                ));
+            }
+            let action =
+                action_for(action, &pies).map_err(|reason| invalid(key.clone(), reason))?;
+            if matches!(action, Some(Action::Volume(_))) && volume_written.is_none() {
+                volume_written = Some(key);
+            }
+            written_as.push((trigger, written));
             config.bindings = match (trigger, action) {
                 (keys::Trigger::Chord(chord), Some(action)) => config.bindings.bind(chord, action),
                 (keys::Trigger::Chord(chord), None) => config.bindings.unbind(chord),
@@ -2378,112 +2434,20 @@ fn cycle(outputs: &[OutputRule]) -> Option<&str> {
 /// The action a binding's value names. `pies` are the pies
 /// `[shell.pie.menus]` names, which a `{ pie = "..." }` must be one of.
 fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Action>, String> {
-    Ok(Some(match action {
-        RawAction::Spawn(RawSpawn { spawn, .. }) if spawn.is_empty() => {
-            return Err("`spawn` needs a program".to_owned());
-        }
-        RawAction::Spawn(RawSpawn { spawn, agent }) => Action::Spawn {
-            command: spawn,
-            agent,
-        },
-        RawAction::Pie(RawOpenPie { pie }) if pies.contains(&pie) => Action::Pie(pie),
-        RawAction::Pie(RawOpenPie { pie }) if pies.is_empty() => {
-            return Err(format!(
-                "there is no pie `{pie}`: write it in `[shell.pie.menus]`"
-            ));
-        }
-        RawAction::Pie(RawOpenPie { pie }) => {
-            let named: Vec<&str> = pies.iter().map(String::as_str).collect();
-            return Err(format!(
-                "there is no pie `{pie}`; `[shell.pie.menus]` names {}",
-                named.join(", ")
-            ));
-        }
-        RawAction::Named(name) => match name.as_str() {
-            "none" => return Ok(None),
-            "close" => Action::Close,
-            "cycle-focus" => Action::CycleFocus,
-            "move-to-next-output" => Action::MoveToOutput(Towards::Next),
-            "move-to-previous-output" => Action::MoveToOutput(Towards::Previous),
-            "reload" => Action::Reload,
-            "toggle-sticky" => Action::ToggleSticky,
-            "toggle-maximize" => Action::ToggleMaximize,
-            "minimize" => Action::Minimize,
-            "shade" => Action::Shade,
-            "unshade" => Action::Unshade,
-            "toggle-shade" => Action::ToggleShade,
-            "next-tab" => Action::CycleTab { forward: true },
-            "previous-tab" => Action::CycleTab { forward: false },
-            "tab-with-previous" => Action::TabWithPrevious,
-            "detach-tab" => Action::DetachTab,
-            "start-menu" => Action::StartMenu,
-            "root-menu" => Action::RootMenu,
-            "next-layout" => Action::CycleLayout { forward: true },
-            "previous-layout" => Action::CycleLayout { forward: false },
-            "next-workspace" => Action::CycleWorkspace { forward: true },
-            "previous-workspace" => Action::CycleWorkspace { forward: false },
-            "opacity-up" => Action::OpacityUp,
-            "opacity-down" => Action::OpacityDown,
-            "opacity-reset" => Action::OpacityReset,
-            "toggle-agent" => Action::ToggleAgent,
-            "revoke-agent-all" => Action::RevokeAgents,
-            "volume-up" => Action::Volume(VolumeKey::Up),
-            "volume-down" => Action::Volume(VolumeKey::Down),
-            "volume-mute" => Action::Volume(VolumeKey::Mute),
-            "mic-mute" => Action::Volume(VolumeKey::MicMute),
-            other => directed(other).or_else(|| numbered(other)).ok_or_else(|| {
-                format!(
-                    "`{other}` is not an action; use close, cycle-focus, reload, \
-                         toggle-sticky, toggle-maximize, minimize, \
-                         shade, unshade, toggle-shade, next-tab, previous-tab, \
-                         tab-with-previous, detach-tab, start-menu, root-menu, \
-                         next-layout, previous-layout, layout-<1-4>, \
-                         next-workspace, previous-workspace, \
-                         opacity-up, opacity-down, opacity-reset, \
-                         toggle-agent, revoke-agent-all, \
-                         volume-up, volume-down, volume-mute, mic-mute, \
-                         move-to-next-output, move-to-previous-output, \
-                         move-to-output-<side>, workspace-<side>, workspace-<number>, \
-                         send-to-workspace-<side>, carry-to-workspace-<side>, snap-<side>, \
-                         none, {{ spawn = [...] }}, or \
-                         {{ pie = \"<name>\" }}, where <side> is left, right, up or down"
-                )
-            })?,
-        },
-    }))
+    Spelled::from(action).read(pies)
 }
 
-/// An action that takes a side: `workspace-left`, `move-to-output-down`.
-fn directed(name: &str) -> Option<Action> {
-    let (verb, side) = name.rsplit_once('-')?;
-    let direction = match side {
-        "left" => Direction::Left,
-        "right" => Direction::Right,
-        "up" => Direction::Up,
-        "down" => Direction::Down,
-        _ => return None,
-    };
-    Some(match verb {
-        "workspace" => Action::Workspace(direction),
-        "send-to-workspace" => Action::SendToWorkspace(direction),
-        "carry-to-workspace" => Action::CarryToWorkspace(direction),
-        "move-to-output" => Action::MoveToOutput(Towards::Side(direction)),
-        "snap" => Action::Snap(direction),
-        _ => return None,
-    })
-}
-
-/// `workspace-3`. Any positive number is accepted here: whether the grid has
-/// that many is a question for the grid, which a later reload may change.
-/// `layout-2`, from 1 to 4: xkb holds four layouts at most, and whether the
-/// keymap has that many is the keymap's question.
-fn numbered(name: &str) -> Option<Action> {
-    if let Some(layout) = name.strip_prefix("layout-") {
-        let number: u8 = layout.parse().ok()?;
-        return (1..=4).contains(&number).then_some(Action::Layout(number));
+impl From<RawAction> for Spelled {
+    fn from(action: RawAction) -> Self {
+        match action {
+            RawAction::Named(name) => Self::Name(name),
+            RawAction::Spawn(RawSpawn { spawn, agent }) => Self::Spawn {
+                command: spawn,
+                agent,
+            },
+            RawAction::Pie(RawOpenPie { pie }) => Self::Pie(pie),
+        }
     }
-    let number: u16 = name.strip_prefix("workspace-")?.parse().ok()?;
-    (number > 0).then_some(Action::GoToWorkspace(number))
 }
 
 /// `"WxH"` or `"WxH@Hz"`.
@@ -2625,6 +2589,146 @@ mod tests {
     fn an_unknown_action_is_named() {
         let error = parse("[keys]\n\"Alt+x\" = \"explode\"", SEAT).unwrap_err();
         assert!(error.to_string().contains("`explode`"), "{error}");
+    }
+
+    /// A fresh folder for one test, emptied when it ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("perspicax-config-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("a scratch folder");
+            Self(dir)
+        }
+
+        /// A folder in it holding a program called `name`, with `mode`.
+        fn program(&self, folder: &str, name: &str, mode: u32) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt as _;
+            let folder = self.0.join(folder);
+            std::fs::create_dir_all(&folder).expect("a folder");
+            let program = folder.join(name);
+            std::fs::write(&program, "").expect("a program");
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(mode))
+                .expect("its mode");
+            folder
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn the_program_beside_perspicax_comes_before_the_one_on_path() {
+        let scratch = Scratch::new("beside");
+        let beside = scratch.program("bin", "perspicax-shell", 0o755);
+        let installed = scratch.program("usr-bin", "perspicax-shell", 0o755);
+        let path = std::env::join_paths([&installed]).unwrap();
+        assert_eq!(
+            find_program("perspicax-shell", Some(&beside), Some(&path)),
+            Some(beside.join("perspicax-shell"))
+        );
+        assert_eq!(
+            find_program("perspicax-shell", Some(&scratch.0), Some(&path)),
+            Some(installed.join("perspicax-shell")),
+            "and with none beside, the one on PATH"
+        );
+    }
+
+    #[test]
+    fn a_file_that_may_not_be_run_is_not_the_program() {
+        let scratch = Scratch::new("mode");
+        let beside = scratch.program("bin", "perspicax-shell", 0o644);
+        assert_eq!(find_program("perspicax-shell", Some(&beside), None), None);
+    }
+
+    /// The key and the reason a `[keys]` table is refused for.
+    fn keys_refused(table: &str) -> (String, String) {
+        match parse(&format!("[keys]\n{table}"), SEAT) {
+            Err(Error::Invalid { key, reason }) => (key, reason),
+            other => panic!("{table}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_escape_hatch_chord_is_refused_naming_what_it_does() {
+        let (key, reason) = keys_refused("\"Ctrl+Alt+F2\" = \"close\"");
+        assert_eq!(key, "keys.Ctrl+Alt+F2");
+        assert!(
+            reason.starts_with("switches to VT 2 before any binding"),
+            "{reason}"
+        );
+        let (key, reason) = keys_refused("\"Ctrl+Alt+BackSpace\" = \"close\"");
+        assert_eq!(key, "keys.Ctrl+Alt+BackSpace");
+        assert!(
+            reason.starts_with("ends the session before any binding"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn an_escape_hatch_chord_cannot_be_unbound_either() {
+        let (_, reason) = keys_refused("\"Ctrl+Alt+F3\" = \"none\"");
+        assert!(
+            reason.contains("no config can bind or unbind it"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_hatch_with_more_modifiers_held_is_still_a_hatch() {
+        let (_, reason) = keys_refused("\"Ctrl+Alt+Shift+F12\" = \"close\"");
+        assert!(reason.starts_with("switches to VT 12"), "{reason}");
+    }
+
+    #[test]
+    fn ctrl_alt_with_another_key_is_still_bindable() {
+        let text = "[keys]\n\"Ctrl+Alt+Left\" = \"workspace-left\"\n\
+                    \"Ctrl+F2\" = \"close\"\n\"Alt+F2\" = \"minimize\"\n\
+                    \"Ctrl+Logo+BackSpace\" = \"reload\"";
+        let config = parse(text, SEAT).unwrap();
+        let ctrl_f2 = Mods {
+            ctrl: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(ctrl_f2, &[Keysym::F2]),
+            Some(&Action::Close)
+        );
+    }
+
+    #[test]
+    fn two_spellings_of_one_chord_in_keys_are_refused() {
+        let (key, reason) = keys_refused("\"Logo+a\" = \"close\"\n\"Super+A\" = \"minimize\"");
+        assert_eq!(key, "keys.Super+A");
+        assert_eq!(
+            reason,
+            "is the same as `Logo+a`, already written; write it once"
+        );
+    }
+
+    #[test]
+    fn two_spellings_of_the_logo_tap_are_refused() {
+        let (key, reason) = keys_refused("\"Logo\" = \"start-menu\"\n\"Super\" = \"none\"");
+        assert_eq!(key, "keys.Super");
+        assert!(reason.contains("`Logo`"), "{reason}");
+    }
+
+    #[test]
+    fn no_profile_binds_an_escape_hatch() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let config = Config::profile(profile, SEAT);
+            for (chord, action) in config.bindings.iter() {
+                assert_eq!(
+                    perspicax_policy::hatch(chord.mods, [chord.key]),
+                    None,
+                    "{profile:?} binds {chord:?} to {action:?}"
+                );
+            }
+        }
     }
 
     const SIDE: Gesture = Gesture::Press(perspicax_policy::Button::Side);

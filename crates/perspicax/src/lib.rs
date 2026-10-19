@@ -12,6 +12,7 @@
 pub mod act;
 pub mod attach;
 pub mod bus;
+pub mod check;
 pub mod desk;
 pub mod keep;
 pub mod lock;

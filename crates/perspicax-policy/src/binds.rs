@@ -1,9 +1,10 @@
 //! What a chord means.
 //!
 //! Resolution only. Which chords exist is config's decision (slice 5), and the
-//! two escape hatches (Ctrl+Alt+Backspace, Ctrl+Alt+F1–F12) are not here at
-//! all. The compositor takes those before a binding is ever consulted, which is
-//! what keeps a binding from shadowing them.
+//! two escape hatches (Ctrl+Alt+Backspace, Ctrl+Alt+F1–F12) are not bindings
+//! at all: they are [`crate::hatch`]'s. The compositor takes those before a
+//! binding is ever consulted, which is what keeps a binding from shadowing
+//! them.
 
 use xkeysym::Keysym;
 
