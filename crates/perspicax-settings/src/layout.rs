@@ -15,6 +15,11 @@
 //!   with nothing under it goes too, unless commented-out keys still sit in
 //!   its section: then it goes back to being a comment, so they keep their
 //!   header and stay safe to uncomment.
+//! - **An entry of an array of tables is a table found by its `name`.**
+//!   `[[output]]` holding `name = "DP-1"` is `output.DP-1`. A new one goes
+//!   after the last entry, or at the end of the file; one left holding only
+//!   its name is empty, and goes, or goes back to being a comment, header
+//!   and name together, as an emptied table does.
 //!
 //! Two rules keep a line edit from changing what the file means beyond what
 //! the write asked for. A line is classified by parsing it ([`declares`]),
@@ -30,7 +35,69 @@
 
 use std::ops::Range;
 
-use toml_edit::{Document as Parsed, DocumentMut, Item, Key, Table, TableLike};
+use toml_edit::{ArrayOfTables, Document as Parsed, DocumentMut, Item, Key, Table, TableLike};
+
+/// The arrays of tables a config holds, each entry found by its [`NAME`].
+/// Known here, not read from the file, because a file with no entry yet
+/// cannot say that `output` is an array.
+const ARRAYS: &[&[&str]] = &[&["output"]];
+
+/// The key an entry of an array of tables is found by.
+pub(crate) const NAME: &str = "name";
+
+/// `path` as the entry it names, if it names one: the array's path, and the
+/// entry's name.
+fn entry_of<'a>(path: &'a [&'a str]) -> Option<(&'a [&'a str], &'a str)> {
+    let (name, array) = path.split_last()?;
+    ARRAYS.contains(&array).then_some((array, *name))
+}
+
+/// The entry of `entries` named `name`.
+fn named<'a>(entries: &'a ArrayOfTables, name: &str) -> Option<&'a Table> {
+    entries
+        .iter()
+        .find(|entry| entry.get(NAME).and_then(Item::as_str) == Some(name))
+}
+
+/// The entry of `entries` named `name`, in plain TOML.
+fn named_plain<'a>(entries: &'a [toml::Value], name: &str) -> Option<&'a toml::Table> {
+    entries
+        .iter()
+        .filter_map(toml::Value::as_table)
+        .find(|entry| entry.get(NAME).and_then(toml::Value::as_str) == Some(name))
+}
+
+/// The table `path` leads to in `root`, stepping into an array's entry by
+/// its name; `None` where there is none yet.
+///
+/// # Errors
+///
+/// The segment that is a value, an inline table or an array of tables
+/// this module does not know, and so has no table to step into.
+fn walk<'a>(root: &'a Table, path: &[&str]) -> Result<Option<&'a Table>, String> {
+    let mut table = root;
+    let mut at = 0;
+    while let Some(seg) = path.get(at) {
+        at += 1;
+        let next = match table.get(seg) {
+            None => return Ok(None),
+            Some(Item::Table(next)) => next,
+            Some(Item::ArrayOfTables(entries)) if ARRAYS.contains(&&path[..at]) => {
+                let Some(name) = path.get(at) else {
+                    return Err((*seg).to_owned());
+                };
+                at += 1;
+                match named(entries, name) {
+                    Some(entry) => entry,
+                    None => return Ok(None),
+                }
+            }
+            Some(_) => return Err((*seg).to_owned()),
+        };
+        table = next;
+    }
+    Ok(Some(table))
+}
 
 /// Make room in `text` for `leaf` in `table` before a set writes it: give
 /// the table a header of its own, then uncomment the key's example if its
@@ -189,6 +256,8 @@ fn remove_inline(text: &str, path: &[&str]) -> Result<String, String> {
 enum Declares {
     /// A `[a.b]` header, as its path.
     Table(Vec<String>),
+    /// A `[[a.b]]` header: an entry of the array at its path.
+    Entry(Vec<String>),
     /// A `key = value` line, as its path: one segment, or a dotted key's.
     Key(Vec<String>),
 }
@@ -210,6 +279,9 @@ fn declares(line: &str) -> Option<Declares> {
                 item = next;
             }
             Item::Table(t) if t.is_empty() => return Some(Declares::Table(path)),
+            Item::ArrayOfTables(entries) if entries.iter().all(Table::is_empty) => {
+                return Some(Declares::Entry(path));
+            }
             _ => return None,
         }
     }
@@ -245,7 +317,7 @@ fn declares_table(line: &str, table: &[&str]) -> bool {
 
 /// A header, live or commented out: where a section ends.
 fn is_header(line: &str) -> bool {
-    let live = |l: &str| matches!(declares(l), Some(Declares::Table(_)));
+    let live = |l: &str| matches!(declares(l), Some(Declares::Table(_) | Declares::Entry(_)));
     live(line) || uncomment(line).is_some_and(|l| live(&l))
 }
 
@@ -273,14 +345,11 @@ fn header_of(text: &str, table: &[&str]) -> Header {
     let Ok(doc) = Parsed::parse(text) else {
         return Header::Unreachable;
     };
-    let mut current = doc.as_table();
-    for seg in table {
-        match current.get(seg) {
-            None => return Header::Absent,
-            Some(Item::Table(t)) => current = t,
-            Some(_) => return Header::Unreachable,
-        }
-    }
+    let current = match walk(doc.as_table(), table) {
+        Ok(Some(current)) => current,
+        Ok(None) => return Header::Absent,
+        Err(_) => return Header::Unreachable,
+    };
     if current.is_dotted() {
         return Header::Unreachable;
     }
@@ -296,6 +365,9 @@ fn give_header(text: &str, table: &[&str]) -> String {
     let Ok(before) = text.parse::<toml::Table>() else {
         return text.to_owned();
     };
+    if let Some((array, name)) = entry_of(table) {
+        return give_entry(text, &before, array, name);
+    }
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     for (i, line) in lines.iter().enumerate() {
         let Some(live) = uncomment(line) else {
@@ -319,6 +391,12 @@ fn give_header(text: &str, table: &[&str]) -> String {
 
 /// `text` with `[table]` after its last line, a blank line between.
 fn append_header(text: &str, table: &[&str]) -> String {
+    let path: Vec<String> = table.iter().map(|seg| Key::new(*seg).to_string()).collect();
+    append(text, &format!("[{}]\n", path.join(".")))
+}
+
+/// `text` with `lines` after its last line, a blank line between.
+fn append(text: &str, lines: &str) -> String {
     let mut out = text.to_owned();
     if !out.is_empty() {
         if !out.ends_with('\n') {
@@ -328,9 +406,83 @@ fn append_header(text: &str, table: &[&str]) -> String {
             out.push('\n');
         }
     }
-    let path: Vec<String> = table.iter().map(|seg| Key::new(*seg).to_string()).collect();
-    out.push_str(&format!("[{}]\n", path.join(".")));
+    out.push_str(lines);
     out
+}
+
+/// Give the array at `array` an entry named `name`: its commented-out
+/// example uncommented, header and name together, or else a new one after
+/// the last entry, or at the end of the file where there is none.
+fn give_entry(text: &str, before: &toml::Table, array: &[&str], name: &str) -> String {
+    let mut table = array.to_vec();
+    table.push(name);
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let names_it = |line: &str| {
+        uncomment(line)
+            .and_then(|live| live.parse::<toml::Table>().ok())
+            .is_some_and(|live| live.get(NAME).and_then(toml::Value::as_str) == Some(name))
+    };
+    for (i, line) in lines.iter().enumerate() {
+        let declares_entry = uncomment(line)
+            .is_some_and(|live| declares(&live) == Some(Declares::Entry(owned(array))));
+        if !declares_entry {
+            continue;
+        }
+        let Some(at) = section(&lines, i).find(|&j| names_it(lines[j])) else {
+            continue;
+        };
+        let mut candidate = lines
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect::<Vec<_>>();
+        for j in [i, at] {
+            candidate[j] = uncomment(lines[j]).unwrap_or_default();
+        }
+        let candidate = candidate.concat();
+        if adds_only(before, &candidate, &table, None) {
+            return candidate;
+        }
+    }
+    let header: Vec<String> = array.iter().map(|seg| Key::new(*seg).to_string()).collect();
+    let made = format!(
+        "[[{}]]\n{NAME} = {}\n",
+        header.join("."),
+        toml_edit::Value::from(name)
+    );
+    let candidate = match last_entry_ends(text, array) {
+        Some(end) => {
+            let blank = |i: usize| lines.get(i).is_none_or(|line| line.trim().is_empty());
+            let mut made = format!("\n{made}");
+            if !blank(end) {
+                made.push('\n');
+            }
+            splice(text, end..end, Some(&made))
+        }
+        None => append(text, &made),
+    };
+    if adds_only(before, &candidate, &table, None) {
+        candidate
+    } else {
+        text.to_owned()
+    }
+}
+
+/// The line after the last entry of the array at `array`: after its header,
+/// or its last value. Prose under it is the next table's, as often as not,
+/// so a new entry goes above that.
+fn last_entry_ends(text: &str, array: &[&str]) -> Option<usize> {
+    let doc = Parsed::parse(text).ok()?;
+    let (leaf, parents) = array.split_last()?;
+    let Item::ArrayOfTables(entries) = walk(doc.as_table(), parents).ok()??.get(leaf)? else {
+        return None;
+    };
+    let last = entries.iter().last()?;
+    let header = line_of(text, last.span()?.start);
+    let values = last
+        .iter()
+        .filter_map(|(key, _)| value_lines(text, last, key))
+        .map(|lines| lines.end);
+    Some(values.fold(header + 1, usize::max))
 }
 
 /// Uncomment `leaf`'s example in `table`'s section, if the table has no live
@@ -389,34 +541,81 @@ fn adds_only(before: &toml::Table, after: &str, table: &[&str], leaf: Option<&st
     expected == after
 }
 
-fn table_in<'a>(root: &'a toml::Table, path: &[&str]) -> Option<&'a toml::Table> {
-    path.iter()
-        .try_fold(root, |t, seg| t.get(*seg).and_then(toml::Value::as_table))
+/// The table at `path` in plain TOML, stepping into an array's entry by its
+/// name, as [`walk`] does in the person's.
+pub(crate) fn table_in<'a>(root: &'a toml::Table, path: &[&str]) -> Option<&'a toml::Table> {
+    let mut table = root;
+    let mut at = 0;
+    while let Some(seg) = path.get(at) {
+        at += 1;
+        let value = table.get(*seg)?;
+        table = if ARRAYS.contains(&&path[..at]) {
+            let name = path.get(at)?;
+            at += 1;
+            named_plain(value.as_array()?, name)?
+        } else {
+            value.as_table()?
+        };
+    }
+    Some(table)
 }
 
+/// [`table_in`], making each table and entry that is not there.
 fn make_table<'a>(root: &'a mut toml::Table, path: &[&str]) -> Option<&'a mut toml::Table> {
-    path.iter().try_fold(root, |t, seg| {
-        t.entry(*seg)
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-            .as_table_mut()
-    })
+    let mut table = root;
+    let mut at = 0;
+    while let Some(seg) = path.get(at) {
+        at += 1;
+        if ARRAYS.contains(&&path[..at]) {
+            let name = *path.get(at)?;
+            at += 1;
+            let entries = table
+                .entry(*seg)
+                .or_insert_with(|| toml::Value::Array(Vec::new()))
+                .as_array_mut()?;
+            let named =
+                |entry: &toml::Value| entry.get(NAME).and_then(toml::Value::as_str) == Some(name);
+            let found = match entries.iter().position(named) {
+                Some(found) => found,
+                None => {
+                    let mut entry = toml::Table::new();
+                    entry.insert(NAME.to_owned(), name.into());
+                    entries.push(toml::Value::Table(entry));
+                    entries.len() - 1
+                }
+            };
+            table = entries[found].as_table_mut()?;
+        } else {
+            table = table
+                .entry(*seg)
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                .as_table_mut()?;
+        }
+    }
+    Some(table)
 }
 
 /// The lines of the first live value at or under `path`, depth first.
+/// An entry's [`NAME`] is not among its values: it goes with the header.
 fn next_value(text: &str, path: &[&str]) -> Result<Option<Range<usize>>, String> {
     let doc = Parsed::parse(text).map_err(|error| error.to_string())?;
+    if entry_of(path).is_some() {
+        return Ok(match walk(doc.as_table(), path) {
+            Ok(Some(entry)) => entry
+                .iter()
+                .filter(|(key, _)| *key != NAME)
+                .find_map(|(key, _)| value_lines(text, entry, key)),
+            _ => None,
+        });
+    }
     let Some((leaf, parents)) = path.split_last() else {
         return Ok(None);
     };
-    let mut table = doc.as_table();
-    for seg in parents {
-        match table.get(seg) {
-            None => return Ok(None),
-            Some(Item::Table(t)) => table = t,
-            Some(_) => return Err(format!("`{seg}` in `{}` is not a table", path.join("."))),
-        }
+    match walk(doc.as_table(), parents) {
+        Ok(Some(table)) => Ok(value_lines(text, table, leaf)),
+        Ok(None) => Ok(None),
+        Err(seg) => Err(format!("`{seg}` in `{}` is not a table", path.join("."))),
     }
-    Ok(value_lines(text, table, leaf))
 }
 
 fn value_lines(text: &str, table: &Table, key: &str) -> Option<Range<usize>> {
@@ -433,12 +632,12 @@ fn value_lines(text: &str, table: &Table, key: &str) -> Option<Range<usize>> {
 
 /// Every table at or under `path`, deepest first.
 fn tables_under(text: &str, path: &[&str]) -> Vec<Vec<String>> {
-    fn walk(table: &Table, path: Vec<String>, out: &mut Vec<Vec<String>>) {
+    fn under(table: &Table, path: Vec<String>, out: &mut Vec<Vec<String>>) {
         for (key, item) in table {
             if let Item::Table(t) = item {
                 let mut child = path.clone();
                 child.push(key.to_owned());
-                walk(t, child, out);
+                under(t, child, out);
             }
         }
         out.push(path);
@@ -446,15 +645,11 @@ fn tables_under(text: &str, path: &[&str]) -> Vec<Vec<String>> {
     let Ok(doc) = Parsed::parse(text) else {
         return Vec::new();
     };
-    let mut current = doc.as_table();
-    for seg in path {
-        match current.get(seg) {
-            Some(Item::Table(t)) => current = t,
-            _ => return Vec::new(),
-        }
-    }
+    let Ok(Some(current)) = walk(doc.as_table(), path) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    walk(current, owned(path), &mut out);
+    under(current, owned(path), &mut out);
     out
 }
 
@@ -464,7 +659,8 @@ fn owned(path: &[&str]) -> Vec<String> {
 
 /// Retire `table`'s header if the table is empty: comment it out while
 /// commented-out keys remain in its section, else delete it with one blank
-/// line beside it.
+/// line beside it. An entry holding only its name is empty, and its name
+/// line goes with its header, or is commented out with it.
 fn retire_if_empty(text: &str, table: &[&str]) -> String {
     let Header::Line(header) = header_of(text, table) else {
         return text.to_owned();
@@ -472,25 +668,49 @@ fn retire_if_empty(text: &str, table: &[&str]) -> String {
     let Ok(doc) = text.parse::<toml::Table>() else {
         return text.to_owned();
     };
-    if !table_in(&doc, table).is_some_and(toml::Table::is_empty) {
+    let entry = entry_of(table).is_some();
+    let empty = |t: &toml::Table| t.keys().all(|key| entry && key == NAME);
+    if !table_in(&doc, table).is_some_and(empty) {
         return text.to_owned();
     }
+    let name = if entry {
+        Parsed::parse(text)
+            .ok()
+            .and_then(|doc| value_lines(text, walk(doc.as_table(), table).ok()??, NAME))
+    } else {
+        None
+    };
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let documented = section(&lines, header).any(|i| {
         uncomment(lines[i]).is_some_and(|l| matches!(declares(&l), Some(Declares::Key(_))))
     });
+    let mut doomed: Vec<usize> = std::iter::once(header)
+        .chain(name.into_iter().flatten())
+        .collect();
     if documented {
-        return splice(text, header..header + 1, Some(&comment_out(lines[header])));
+        let mut out: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+        for i in doomed {
+            out[i] = comment_out(lines[i]);
+        }
+        return out.concat();
     }
+    // The header and its name, with one blank line beside them where
+    // there is one on either side.
+    doomed.sort_unstable();
     let blank = |i: usize| lines.get(i).is_none_or(|l| l.trim().is_empty());
-    let doomed = if header > 0 && blank(header - 1) && blank(header + 1) {
-        header - 1..header + 1
-    } else if header == 0 && header + 1 < lines.len() && blank(header + 1) {
-        0..2
-    } else {
-        header..header + 1
-    };
-    splice(text, doomed, None)
+    let (first, last) = (doomed[0], doomed[doomed.len() - 1]);
+    let joined = last - first + 1 == doomed.len();
+    if joined && first > 0 && blank(first - 1) && blank(last + 1) {
+        doomed.push(first - 1);
+    } else if joined && first == 0 && last + 1 < lines.len() && blank(last + 1) {
+        doomed.push(last + 1);
+    }
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !doomed.contains(i))
+        .map(|(_, line)| *line)
+        .collect()
 }
 
 /// `text` with the lines in `range` replaced by `with`, or deleted.

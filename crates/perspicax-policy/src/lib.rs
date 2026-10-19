@@ -76,7 +76,7 @@ pub use crate::{
         place, resize, settle, unmaximized_at,
     },
     hatch::{Hatch, hatch},
-    heads::{Head, HeadChange, HeadMode, ModeChoice, Rejection, check_heads},
+    heads::{Head, HeadChange, HeadMode, ModeChoice, Rejection, SCALES, check_heads, pick_mode},
     keyboard::{LayoutMemory, Switching},
     layout::{Place, Screen, Side, arrange, intersects, overlapping, rescue},
     mouse::{Button, Clicks, Context, Gesture, MouseBindings, MouseChord, Wheel},

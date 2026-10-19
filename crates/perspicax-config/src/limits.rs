@@ -5,7 +5,7 @@
 
 use std::ops::RangeInclusive;
 
-use perspicax_policy::OPAQUE;
+use perspicax_policy::{OPAQUE, SCALES};
 
 /// `[workspaces] grid`, each side. Generous: past this, a grid is a typo,
 /// and a 1000x1000 one would be a million workspaces.
@@ -82,3 +82,6 @@ pub const PANEL_HEIGHT: RangeInclusive<u32> = 16..=128;
 
 /// `[shell.panel] width` written as a share of its monitor, in percent.
 pub const PANEL_SHARE: RangeInclusive<u32> = 1..=100;
+
+/// `[[output]] scale`, as a display tool may also ask for it.
+pub const SCALE: RangeInclusive<f64> = SCALES;

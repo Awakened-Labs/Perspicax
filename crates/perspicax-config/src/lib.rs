@@ -743,7 +743,8 @@ fn no_agent_settings(remedy: &str) -> String {
 /// moving monitors, speaking for the desktop shell and hearing the chord a
 /// person presses to bind are for the programs that are known to do it, by
 /// name, which anything can claim; a person who wants it tighter writes full
-/// paths.
+/// paths. The settings app reads the monitors it lists on its Outputs page:
+/// it writes `[[output]]` already, so that grants it nothing new.
 fn protocols(built: Built) -> Access {
     let only = |names: &[&str]| Rule::Only(names.iter().map(|name| Program::parse(name)).collect());
     Access::open()
@@ -757,7 +758,13 @@ fn protocols(built: Built) -> Access {
         )
         .with(
             Protocol::OutputManagement,
-            only(&["wlr-randr", "kanshi", "wdisplays", "nwg-displays"]),
+            only(&[
+                "wlr-randr",
+                "kanshi",
+                "wdisplays",
+                "nwg-displays",
+                SETTINGS_APP,
+            ]),
         )
         .with(Protocol::Shell, only(&["perspicax-shell"]))
         .with(Protocol::Settings, only(&[SETTINGS_APP]))
@@ -2439,15 +2446,19 @@ impl RawOutput {
         let mode = self
             .mode
             .as_deref()
-            .map(mode)
+            .map(str::parse)
             .transpose()
             .map_err(|reason| invalid(format!("{key}.mode"), reason))?;
         if let Some(scale) = self.scale
-            && !(0.5..=4.0).contains(&scale)
+            && !limits::SCALE.contains(&scale)
         {
             return Err(invalid(
                 format!("{key}.scale"),
-                format!("{scale} is outside 0.5 to 4"),
+                format!(
+                    "{scale} is outside {} to {}",
+                    limits::SCALE.start(),
+                    limits::SCALE.end()
+                ),
             ));
         }
         let place = self.place(&key)?;
@@ -2464,14 +2475,14 @@ impl RawOutput {
     /// and an `offset` only with a side to be offset along.
     fn place(&self, key: &str) -> Result<Place, Error> {
         let sides = [
-            ("left-of", Side::LeftOf, &self.left_of),
-            ("right-of", Side::RightOf, &self.right_of),
-            ("above", Side::Above, &self.above),
-            ("below", Side::Below, &self.below),
+            (Side::LeftOf, &self.left_of),
+            (Side::RightOf, &self.right_of),
+            (Side::Above, &self.above),
+            (Side::Below, &self.below),
         ];
         let mut written = sides
             .iter()
-            .filter_map(|(word, side, of)| of.as_ref().map(|of| (*word, *side, of)));
+            .filter_map(|(side, of)| of.as_ref().map(|of| (side.key(), *side, of)));
         let beside = written.next();
         if let Some((second, _, _)) = written.next() {
             return Err(invalid(
@@ -2557,18 +2568,25 @@ impl From<RawAction> for Spelled {
 }
 
 /// `"WxH"` or `"WxH@Hz"`.
-fn mode(text: &str) -> Result<Mode, String> {
-    let bad = || format!("`{text}` is not a mode; write it as 2560x1440 or 2560x1440@144");
-    let (size, refresh) = match text.split_once('@') {
-        Some((size, refresh)) => (size, Some(refresh.parse::<f64>().map_err(|_| bad())?)),
-        None => (text, None),
-    };
-    let (width, height) = size.split_once('x').ok_or_else(bad)?;
-    Ok(Mode {
-        width: width.trim().parse().map_err(|_| bad())?,
-        height: height.trim().parse().map_err(|_| bad())?,
-        refresh,
-    })
+/// A mode as `[[output]] mode` writes it: `"2560x1440"`, or with a refresh
+/// in Hz, `"2560x1440@143.912"`.
+impl std::str::FromStr for Mode {
+    /// Why it is not a mode, in the parser's words.
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        let bad = || format!("`{text}` is not a mode; write it as 2560x1440 or 2560x1440@144");
+        let (size, refresh) = match text.split_once('@') {
+            Some((size, refresh)) => (size, Some(refresh.parse::<f64>().map_err(|_| bad())?)),
+            None => (text, None),
+        };
+        let (width, height) = size.split_once('x').ok_or_else(bad)?;
+        Ok(Self {
+            width: width.trim().parse().map_err(|_| bad())?,
+            height: height.trim().parse().map_err(|_| bad())?,
+            refresh,
+        })
+    }
 }
 
 fn invalid(key: String, reason: String) -> Error {
@@ -5005,6 +5023,30 @@ mod tests {
         assert!(classic.admits(Protocol::Screencopy, Some("/usr/bin/grim")));
         assert!(!classic.admits(Protocol::Screencopy, Some("/usr/bin/firefox")));
         assert!(classic.admits(Protocol::OutputManagement, Some("/usr/bin/kanshi")));
+    }
+
+    #[test]
+    fn the_settings_app_may_read_the_monitors_by_default() {
+        let protocols = Config::profile(Profile::Classic, SEAT).protocols;
+        let app = format!("/usr/local/bin/{SETTINGS_APP}");
+        assert!(protocols.admits(Protocol::OutputManagement, Some(&app)));
+        assert!(!protocols.admits(Protocol::OutputManagement, Some("/usr/bin/firefox")));
+    }
+
+    #[test]
+    fn every_side_word_reads_back() {
+        for side in Side::ALL {
+            let text = format!("[[output]]\nname = \"A\"\n{} = \"B\"", side.key());
+            let config = parse(&text, SEAT).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(
+                config.outputs[0].place,
+                Place::Beside {
+                    side,
+                    of: "B".to_owned(),
+                    offset: 0
+                }
+            );
+        }
     }
 
     #[test]

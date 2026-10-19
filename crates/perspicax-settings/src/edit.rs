@@ -2,7 +2,7 @@
 //! they made the change in an editor.
 
 use perspicax_config::{Built, Spelled, Trigger};
-use toml_edit::{DocumentMut, InlineTable, Item, Table, TableLike};
+use toml_edit::{ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike};
 
 use crate::{Edit, Reason, Value, layout};
 
@@ -90,10 +90,7 @@ fn written(text: &str, path: &[&str]) -> bool {
     let Some((leaf, tables)) = path.split_last() else {
         return false;
     };
-    tables
-        .iter()
-        .try_fold(&root, |table, seg| table.get(*seg)?.as_table())
-        .is_some_and(|table| table.contains_key(*leaf))
+    layout::table_in(&root, tables).is_some_and(|table| table.contains_key(*leaf))
 }
 
 /// The `[keys]` entry for `trigger`, as the file spells it. Found by the
@@ -132,13 +129,18 @@ fn set(text: &str, table: &[&str], leaf: &str, value: toml_edit::Value) -> Resul
 /// dotted keys, or one written inline (`flip = { edge = true }`), which
 /// stays inline. A table made here is implicit, so it prints no header
 /// until it holds a key. Also whether the innermost is written inline.
+///
+/// In an array of tables, the segment after the array names an entry, as
+/// the layout finds one: `output.DP-1` is the `[[output]]` whose `name` is
+/// `DP-1`.
 fn descend<'a>(
     doc: &'a mut DocumentMut,
     path: &[&str],
 ) -> Result<(&'a mut dyn TableLike, bool), String> {
     let mut table: &mut dyn TableLike = doc.as_table_mut();
     let mut inline = false;
-    for seg in path {
+    let mut segs = path.iter();
+    while let Some(seg) = segs.next() {
         if !table.contains_key(seg) {
             let mut implicit = Table::new();
             implicit.set_implicit(true);
@@ -147,9 +149,30 @@ fn descend<'a>(
         let not_a_table = || format!("`{seg}` in `{}` is not a table", path.join("."));
         let item = table.get_mut(seg).ok_or_else(not_a_table)?;
         inline = inline || item.is_inline_table();
-        table = item.as_table_like_mut().ok_or_else(not_a_table)?;
+        table = match item {
+            Item::ArrayOfTables(entries) => {
+                let name = segs.next().ok_or_else(not_a_table)?;
+                entry(entries, name).ok_or_else(not_a_table)?
+            }
+            item => item.as_table_like_mut().ok_or_else(not_a_table)?,
+        };
     }
     Ok((table, inline))
+}
+
+/// The entry of `entries` named `name`, made at the end where there is
+/// none.
+fn entry<'a>(entries: &'a mut ArrayOfTables, name: &str) -> Option<&'a mut Table> {
+    let found = entries
+        .iter()
+        .position(|entry| entry.get(layout::NAME).and_then(Item::as_str) == Some(name));
+    let at = found.unwrap_or_else(|| {
+        let mut made = Table::new();
+        made.insert(layout::NAME, toml_edit::value(name));
+        entries.push(made);
+        entries.len() - 1
+    });
+    entries.get_mut(at)
 }
 
 /// Put `value` at `leaf`, changing the value and nothing else on its line.

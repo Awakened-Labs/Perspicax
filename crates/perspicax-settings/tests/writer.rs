@@ -11,8 +11,10 @@ use std::{
 };
 
 use perspicax_config::{Built, Error, Spelled, Trigger};
-use perspicax_policy::{Chord, Keysym, Mods};
-use perspicax_settings::{Applied, Document, Edit, Key, Reason, Refused, Value};
+use perspicax_policy::{Chord, Keysym, Mods, Side};
+use perspicax_settings::{
+    Applied, Document, Edit, Key, Placed, Reason, Refused, Rule, Value, output_edits, output_rules,
+};
 
 const FIXTURE: &str = include_str!("fixtures/commented.toml");
 
@@ -878,4 +880,212 @@ fn a_pair_is_written_as_an_array_of_integers() {
         .workspaces
         .grid;
     assert_eq!((grid.columns, grid.rows), (3, 2));
+}
+
+/// `name`'s entry, at `leaf`.
+fn output(name: &str, leaf: &str) -> Key {
+    Key::new(&["output", name], leaf)
+}
+
+#[test]
+fn an_output_entry_is_found_by_its_name_not_its_place() {
+    let text =
+        "[[output]]\nname = \"DP-1\"\nscale = 1.5\n\n[[output]]\nname = \"eDP-1\"\nscale = 0.9\n";
+    let scale = Edit::Set {
+        key: output("eDP-1", "scale"),
+        value: Value::Float(1.25),
+    };
+    assert_eq!(
+        written_after("output-named", text, &[scale]),
+        "[[output]]\nname = \"DP-1\"\nscale = 1.5\n\n[[output]]\nname = \"eDP-1\"\nscale = 1.25\n"
+    );
+}
+
+#[test]
+fn a_key_in_an_output_entry_keeps_its_comment() {
+    let text = "[[output]]\nname = \"eDP-1\"\nscale = 0.9         # the laptop, small\n";
+    let scale = Edit::Set {
+        key: output("eDP-1", "scale"),
+        value: Value::Float(1.0),
+    };
+    assert_eq!(
+        written_after("output-comment", text, &[scale]),
+        "[[output]]\nname = \"eDP-1\"\nscale = 1.0         # the laptop, small\n"
+    );
+}
+
+#[test]
+fn a_new_output_entry_goes_after_the_last_one() {
+    let text = "[[output]]\nname = \"eDP-1\"\nscale = 0.9\n\n# Who may reach past their windows.\n[protocols]\n";
+    let mode = Edit::Set {
+        key: output("DP-1", "mode"),
+        value: Value::String("2560x1440@144".to_owned()),
+    };
+    assert_eq!(
+        written_after("output-after", text, &[mode]),
+        "[[output]]\nname = \"eDP-1\"\nscale = 0.9\n\n[[output]]\nname = \"DP-1\"\n\
+         mode = \"2560x1440@144\"\n\n# Who may reach past their windows.\n[protocols]\n",
+        "above the next table's own comment"
+    );
+}
+
+#[test]
+fn the_first_output_entry_goes_at_the_end_of_the_file() {
+    let scale = Edit::Set {
+        key: output("DP-1", "scale"),
+        value: Value::Float(1.5),
+    };
+    assert_eq!(
+        written_after("output-first", "[agent]\nsocket = true\n", &[scale]),
+        "[agent]\nsocket = true\n\n[[output]]\nname = \"DP-1\"\nscale = 1.5\n"
+    );
+}
+
+#[test]
+fn resetting_an_entrys_last_key_takes_the_entry_out() {
+    let text = "[[output]]\nname = \"DP-1\"\nmode = \"2560x1440\"\n\n\
+                [[output]]\nname = \"eDP-1\"\nscale = 0.9\n\n[protocols]\n";
+    let reset = Edit::Reset {
+        key: output("eDP-1", "scale"),
+    };
+    assert_eq!(
+        written_after("output-emptied", text, &[reset]),
+        "[[output]]\nname = \"DP-1\"\nmode = \"2560x1440\"\n\n[protocols]\n"
+    );
+}
+
+#[test]
+fn forgetting_an_entry_takes_its_lines_and_nothing_else() {
+    let text = "# My monitors.\n[[output]]\nname = \"DP-1\"\nmode = \"2560x1440\"   # the big one\n\
+                scale = 1.25\n\n[[output]]\nname = \"eDP-1\"\nscale = 0.9\n";
+    let forget = Edit::Reset {
+        key: Key::new(&["output"], "DP-1"),
+    };
+    assert_eq!(
+        written_after("output-forget", text, &[forget]),
+        "# My monitors.\n\n[[output]]\nname = \"eDP-1\"\nscale = 0.9\n"
+    );
+}
+
+#[test]
+fn an_emptied_entry_with_commented_keys_is_commented_out_whole() {
+    let scratch = Scratch::new("output-commented");
+    let path =
+        scratch.config("[[output]]\nname = \"DP-1\"\nscale = 1.25\n# mode = \"2560x1440@144\"\n");
+    let mut doc = Document::open(&path).unwrap();
+    let reset = Edit::Reset {
+        key: output("DP-1", "scale"),
+    };
+    doc.apply(&[reset], &takes).unwrap();
+    assert_eq!(
+        read(&path),
+        "# [[output]]\n# name = \"DP-1\"\n# mode = \"2560x1440@144\"\n",
+        "its header and name kept for the example under them"
+    );
+    let mode = Edit::Set {
+        key: output("DP-1", "mode"),
+        value: Value::String("2560x1440@144".to_owned()),
+    };
+    doc.apply(&[mode], &takes).unwrap();
+    assert_eq!(
+        read(&path),
+        "[[output]]\nname = \"DP-1\"\nmode = \"2560x1440@144\"\n",
+        "and all three filled where they stand"
+    );
+}
+
+#[test]
+fn the_section_before_an_array_of_tables_ends_at_its_header() {
+    // `# scale = 2` is the entry's: were `[[output]]` not a header, it would
+    // be read as `[splash]`'s, and keep `[splash]` as a comment.
+    let text = "[splash]\nenabled = false\n\n[[output]]\nname = \"DP-1\"\n# scale = 2\n";
+    let reset = Edit::Reset {
+        key: Key::new(&["splash"], "enabled"),
+    };
+    assert_eq!(
+        written_after("output-section", text, &[reset]),
+        "[[output]]\nname = \"DP-1\"\n# scale = 2\n"
+    );
+}
+
+#[test]
+fn an_output_key_perspicax_refuses_is_offered_back_by_its_entrys_name() {
+    let scratch = Scratch::new("output-fix");
+    let path = scratch.config("[[output]]\nname = \"DP-1\"\nmode = \"2560x1440\"\nscale = 9.0\n");
+    let refused = Document::open(&path).unwrap().check(&takes).unwrap_err();
+    assert_eq!(
+        refused.fixes[0].edits,
+        [Edit::Reset {
+            key: output("DP-1", "scale")
+        }]
+    );
+}
+
+#[test]
+fn edits_turn_the_files_rules_into_the_staged_ones() {
+    let text = "[agent]\nsocket = true\n\n[[output]]\nname = \"DP-1\"\nmode = \"2560x1440\"   # mine\n\
+                \n[[output]]\nname = \"eDP-1\"\nbelow = \"DP-1\"\noffset = 300\nscale = 1.5\n";
+    let from = output_rules(text);
+    let staged = [
+        // Each key changed, and one rule more.
+        vec![
+            Rule {
+                enable: Some(false),
+                ..from[0].clone()
+            },
+            Rule {
+                place: Placed::At(0, 1440),
+                ..from[1].clone()
+            },
+            Rule {
+                mode: Some("1920x1080@60".to_owned()),
+                place: Placed::Beside {
+                    side: Side::LeftOf,
+                    of: "DP-1".to_owned(),
+                    offset: None,
+                },
+                ..Rule::new("HDMI-A-1")
+            },
+        ],
+        // One rule forgotten, and another's keys all taken out.
+        vec![Rule::new("eDP-1")],
+        // None at all.
+        vec![],
+    ];
+    for (n, to) in staged.into_iter().enumerate() {
+        let after = written_after(
+            &format!("output-staged-{n}"),
+            text,
+            &output_edits(&from, &to),
+        );
+        let said: Vec<Rule> = to
+            .into_iter()
+            .filter(|rule| *rule != Rule::new(&rule.name))
+            .collect();
+        assert_eq!(output_rules(&after), said, "{after}");
+        assert!(after.starts_with("[agent]\nsocket = true\n"), "{after}");
+    }
+}
+
+#[test]
+fn moving_from_a_position_to_beside_another_is_one_write() {
+    let scratch = Scratch::new("output-move");
+    let path = scratch.config("[[output]]\nname = \"eDP-1\"\nposition = [0, 1440]   # under\n");
+    let from = output_rules(&read(&path));
+    let to = [Rule {
+        place: Placed::Beside {
+            side: Side::Below,
+            of: "DP-1".to_owned(),
+            offset: Some(200),
+        },
+        ..from[0].clone()
+    }];
+    let applied = Document::open(&path)
+        .unwrap()
+        .apply(&output_edits(&from, &to), &takes);
+    assert_eq!(applied.unwrap(), Applied::Written);
+    assert_eq!(
+        read(&path),
+        "[[output]]\nname = \"eDP-1\"\nbelow = \"DP-1\"\noffset = 200\n"
+    );
 }

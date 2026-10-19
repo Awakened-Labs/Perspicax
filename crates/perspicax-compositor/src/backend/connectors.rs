@@ -11,6 +11,8 @@
 //! conservative one: an output that is still connected keeps its CRTC, so a
 //! monitor plugged in beside a working one never makes the working one blink.
 
+use perspicax_policy::{HeadMode, pick_mode};
+
 /// What a scan changes.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Changes<C, K> {
@@ -55,55 +57,8 @@ where
     Changes { gone, new, dark }
 }
 
-/// One mode a monitor offers: its size, refresh in Hz, and whether the
-/// monitor calls it preferred.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Offered {
-    pub width: u16,
-    pub height: u16,
-    pub refresh: f64,
-    pub preferred: bool,
-}
-
-/// Which offered mode to use, by index.
-///
-/// With no request, the monitor's preferred mode (or its first, for one that
-/// prefers none). With a request, the offered mode of that size whose refresh
-/// is nearest the one asked for, or the fastest at that size if no refresh was
-/// given: someone who writes `2560x1440` for a 144 Hz monitor means 144 Hz.
-/// A size the monitor does not offer falls back to preferred, and the caller
-/// says so, so a typo cannot leave a screen dark.
-pub(crate) fn pick_mode(
-    wanted: Option<(u16, u16, Option<f64>)>,
-    offered: &[Offered],
-) -> Option<(usize, bool)> {
-    let preferred = || {
-        offered
-            .iter()
-            .position(|mode| mode.preferred)
-            .or((!offered.is_empty()).then_some(0))
-    };
-    let Some((width, height, refresh)) = wanted else {
-        return preferred().map(|at| (at, true));
-    };
-    let sized = offered
-        .iter()
-        .enumerate()
-        .filter(|(_, mode)| mode.width == width && mode.height == height);
-    let chosen = match refresh {
-        Some(hz) => {
-            sized.min_by(|(_, a), (_, b)| (a.refresh - hz).abs().total_cmp(&(b.refresh - hz).abs()))
-        }
-        None => sized.max_by(|(_, a), (_, b)| a.refresh.total_cmp(&b.refresh)),
-    };
-    match chosen {
-        Some((at, _)) => Some((at, true)),
-        None => preferred().map(|at| (at, false)),
-    }
-}
-
 /// What a monitor's rule asks that only lighting it can give: whether it is
-/// on, and the mode it shows, as `pick_mode` takes it. A monitor with no
+/// on, and the mode it shows, as [`pick_mode`] takes it. A monitor with no
 /// rule is on, at its preferred mode.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Asked {
@@ -127,8 +82,8 @@ impl Default for Asked {
 ///
 /// `lit` is each lit monitor's ask, the modes it offers, and which of them it
 /// shows; `dark` is each dark one's ask.
-pub(crate) fn modeset(lit: &[(Asked, &[Offered], usize)], dark: &[Asked]) -> bool {
-    let changed = |&(asked, offered, showing): &(Asked, &[Offered], usize)| {
+pub(crate) fn modeset(lit: &[(Asked, &[HeadMode], usize)], dark: &[Asked]) -> bool {
+    let changed = |&(asked, offered, showing): &(Asked, &[HeadMode], usize)| {
         !asked.enable || pick_mode(asked.mode, offered).map(|(at, _)| at) != Some(showing)
     };
     lit.iter().any(changed) || dark.iter().any(|asked| asked.enable)
@@ -180,8 +135,8 @@ mod tests {
         assert_eq!(changes.dark, vec![2]);
     }
 
-    fn mode(width: u16, height: u16, refresh: f64, preferred: bool) -> Offered {
-        Offered {
+    fn mode(width: i32, height: i32, refresh: i32, preferred: bool) -> HeadMode {
+        HeadMode {
             width,
             height,
             refresh,
@@ -189,56 +144,18 @@ mod tests {
         }
     }
 
-    fn monitor() -> [Offered; 4] {
+    fn monitor() -> [HeadMode; 4] {
         [
-            mode(1920, 1080, 60.0, false),
-            mode(2560, 1440, 59.95, true),
-            mode(2560, 1440, 143.91, false),
-            mode(2560, 1440, 120.0, false),
+            mode(1920, 1080, 60_000, false),
+            mode(2560, 1440, 59_950, true),
+            mode(2560, 1440, 143_910, false),
+            mode(2560, 1440, 120_000, false),
         ]
-    }
-
-    #[test]
-    fn with_no_request_the_monitors_preferred_mode_is_used() {
-        assert_eq!(pick_mode(None, &monitor()), Some((1, true)));
-    }
-
-    #[test]
-    fn a_size_alone_takes_the_fastest_refresh_at_that_size() {
-        assert_eq!(
-            pick_mode(Some((2560, 1440, None)), &monitor()),
-            Some((2, true))
-        );
-    }
-
-    #[test]
-    fn a_refresh_takes_the_nearest_offered() {
-        assert_eq!(
-            pick_mode(Some((2560, 1440, Some(120.0))), &monitor()),
-            Some((3, true))
-        );
-        assert_eq!(
-            pick_mode(Some((2560, 1440, Some(144.0))), &monitor()),
-            Some((2, true))
-        );
-    }
-
-    #[test]
-    fn a_size_the_monitor_lacks_falls_back_to_preferred_and_says_so() {
-        assert_eq!(
-            pick_mode(Some((800, 600, None)), &monitor()),
-            Some((1, false))
-        );
-    }
-
-    #[test]
-    fn a_monitor_with_no_modes_has_nothing_to_pick() {
-        assert_eq!(pick_mode(None, &[]), None);
     }
 
     /// A monitor at its preferred 2560x1440 at 59.95 Hz, as a rule with none
     /// of its own lit it.
-    fn showing_preferred(modes: &[Offered]) -> (Asked, &[Offered], usize) {
+    fn showing_preferred(modes: &[HeadMode]) -> (Asked, &[HeadMode], usize) {
         (Asked::default(), modes, 1)
     }
 

@@ -73,9 +73,58 @@ pub enum Rejection {
     BadScale(String),
 }
 
-/// The smallest and largest scale a monitor may be given, as a config file's
-/// `[[output]] scale` allows.
-const SCALES: std::ops::RangeInclusive<f64> = 0.5..=4.0;
+/// The smallest and largest scale a monitor may be given: a display tool's
+/// request, and a config file's `[[output]] scale`.
+pub const SCALES: std::ops::RangeInclusive<f64> = 0.5..=4.0;
+
+/// Which of `offered` a monitor shows when asked for `wanted` (a width,
+/// height and refresh in Hz, as a config file writes a mode), by index, and
+/// whether that is what was asked.
+///
+/// With no request, the monitor's preferred mode (or its first, for one that
+/// prefers none). With a request, the offered mode of that size whose refresh
+/// is nearest the one asked for, or the fastest at that size if no refresh was
+/// given: someone who writes `2560x1440` for a 144 Hz monitor means 144 Hz.
+/// A size the monitor does not offer falls back to preferred, and the caller
+/// says so, so a typo cannot leave a screen dark.
+#[must_use]
+pub fn pick_mode(
+    wanted: Option<(u16, u16, Option<f64>)>,
+    offered: &[HeadMode],
+) -> Option<(usize, bool)> {
+    let preferred = || {
+        offered
+            .iter()
+            .position(|mode| mode.preferred)
+            .or((!offered.is_empty()).then_some(0))
+    };
+    let Some((width, height, refresh)) = wanted else {
+        return preferred().map(|at| (at, true));
+    };
+    let sized = offered
+        .iter()
+        .enumerate()
+        .filter(|(_, mode)| mode.width == i32::from(width) && mode.height == i32::from(height));
+    let chosen = match refresh {
+        Some(hz) => {
+            let off = |mode: &HeadMode| (mode.hertz() - hz).abs();
+            sized.min_by(|(_, a), (_, b)| off(a).total_cmp(&off(b)))
+        }
+        None => sized.max_by_key(|(_, mode)| mode.refresh),
+    };
+    match chosen {
+        Some((at, _)) => Some((at, true)),
+        None => preferred().map(|at| (at, false)),
+    }
+}
+
+impl HeadMode {
+    /// Its refresh in Hz, as a config file writes it.
+    #[must_use]
+    pub fn hertz(&self) -> f64 {
+        f64::from(self.refresh) / 1000.0
+    }
+}
 
 /// Whether `changes` can be carried out on `heads`. `custom_modes` is whether
 /// a monitor may be given a mode it does not list: true of a virtual one, not
@@ -226,5 +275,76 @@ mod tests {
             check_heads(&heads, &[scaled], false),
             Err(Rejection::BadScale("DP-1".to_owned()))
         );
+    }
+
+    fn mode(width: i32, height: i32, refresh: i32, preferred: bool) -> HeadMode {
+        HeadMode {
+            width,
+            height,
+            refresh,
+            preferred,
+        }
+    }
+
+    fn monitor() -> [HeadMode; 4] {
+        [
+            mode(1920, 1080, 60_000, false),
+            mode(2560, 1440, 59_950, true),
+            mode(2560, 1440, 143_910, false),
+            mode(2560, 1440, 120_000, false),
+        ]
+    }
+
+    #[test]
+    fn with_no_request_the_monitors_preferred_mode_is_used() {
+        assert_eq!(pick_mode(None, &monitor()), Some((1, true)));
+    }
+
+    #[test]
+    fn a_size_alone_takes_the_fastest_refresh_at_that_size() {
+        assert_eq!(
+            pick_mode(Some((2560, 1440, None)), &monitor()),
+            Some((2, true))
+        );
+    }
+
+    #[test]
+    fn a_refresh_takes_the_nearest_offered() {
+        assert_eq!(
+            pick_mode(Some((2560, 1440, Some(120.0))), &monitor()),
+            Some((3, true))
+        );
+        assert_eq!(
+            pick_mode(Some((2560, 1440, Some(144.0))), &monitor()),
+            Some((2, true))
+        );
+    }
+
+    #[test]
+    fn a_refresh_is_matched_in_hertz_not_millihertz() {
+        // 59.95 Hz is nearer 60 than 120 is; counted in millihertz against
+        // a refresh written in Hz, every mode would be thousands off, and
+        // the slowest would win.
+        assert_eq!(
+            pick_mode(Some((2560, 1440, Some(100.0))), &monitor()),
+            Some((3, true))
+        );
+        assert_eq!(
+            pick_mode(Some((2560, 1440, Some(60.0))), &monitor()),
+            Some((1, true))
+        );
+    }
+
+    #[test]
+    fn a_size_the_monitor_lacks_falls_back_to_preferred_and_says_so() {
+        assert_eq!(
+            pick_mode(Some((800, 600, None)), &monitor()),
+            Some((1, false))
+        );
+    }
+
+    #[test]
+    fn a_monitor_with_no_modes_has_nothing_to_pick() {
+        assert_eq!(pick_mode(None, &[]), None);
     }
 }

@@ -37,6 +37,7 @@ mod fix;
 mod judge;
 mod keys;
 mod layout;
+mod outputs;
 mod pressed;
 mod xkb;
 
@@ -50,6 +51,10 @@ use perspicax_config::{Spelled, Trigger};
 pub use crate::fields::{Field, Kind, Section, Setting, Source, sections, settings};
 pub use crate::judge::{Installed, Judge};
 pub use crate::keys::{Binding, Mark, bindings};
+pub use crate::outputs::{
+    Arranged, Placed, Rule, arranged, edits as output_edits, leaves_one_on, mode_shown, mode_word,
+    picked, rules as output_rules,
+};
 pub use crate::pressed::{Pressed, key_name, pressed};
 pub use crate::xkb::{Entry, Layout, Registry, edits as layout_edits, layouts};
 
@@ -60,6 +65,10 @@ const ATTEMPTS: usize = 3;
 /// Where a value lives: its table's path, then its own name. Never split on
 /// `.`, because a chord can hold one (`"Logo+."`), and so can an
 /// application's id (`org.gnome.Nautilus`).
+///
+/// An entry of an array of tables is named by its `name`: DP-1's scale is
+/// `Key::new(&["output", "DP-1"], "scale")`, and resetting
+/// `Key::new(&["output"], "DP-1")` takes DP-1's whole `[[output]]` out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Key {
     pub table: Vec<String>,
