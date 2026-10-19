@@ -34,7 +34,9 @@ mod edit;
 mod file;
 mod fix;
 mod judge;
+mod keys;
 mod layout;
+mod pressed;
 
 use std::{
     io,
@@ -44,6 +46,8 @@ use std::{
 use perspicax_config::{Spelled, Trigger};
 
 pub use crate::judge::{Installed, Judge};
+pub use crate::keys::{Binding, Mark, bindings};
+pub use crate::pressed::{Pressed, key_name, pressed};
 
 /// How many times a write is made again over a file another program keeps
 /// rewriting, before it gives up.
@@ -201,6 +205,41 @@ impl Document {
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Read the file again, as another program may have written it since.
+    /// Whether it changed.
+    ///
+    /// # Errors
+    ///
+    /// A file that is there and cannot be read: the text is then as it was.
+    pub fn reload(&mut self) -> io::Result<bool> {
+        let now = file::read(&self.path)?;
+        let changed = now != self.text;
+        self.text = now;
+        Ok(changed)
+    }
+
+    /// Whether the file, as it stands, would be taken: read here, then put
+    /// to `judge` as it is. What a session refused shows here, with the
+    /// fixes that would be taken.
+    ///
+    /// # Errors
+    ///
+    /// [`Refused`], as [`apply`](Self::apply) would refuse the file with no
+    /// edits made.
+    pub fn check(&self, judge: &impl Judge) -> Result<(), Refused> {
+        edit::edited(&self.text, &[])?;
+        if let Err(error) = perspicax_config::parse(&self.text, edit::EVERYTHING) {
+            return Err(Refused {
+                fixes: fix::fixes(&self.text, &[], &error),
+                reason: Reason::Config(error),
+            });
+        }
+        if self.path.exists() {
+            judge.judge(&self.path).map_err(Reason::Judged)?;
+        }
+        Ok(())
     }
 
     /// Make `edits` in order and write the file, if it says something new

@@ -30,7 +30,7 @@ use perspicax_config::{Profile, Shell, ShellBuilt};
 
 /// Set in the environment of every program a session on a seat starts: the
 /// config file the session read, which `perspicax lock` reads too.
-pub const CONFIG: &str = "PERSPICAX_CONFIG";
+pub const CONFIG: &str = perspicax_config::SESSION_CONFIG;
 
 /// Whether this runs inside a perspicax session, which draws the lock screen
 /// beneath the lock program: whether `PERSPICAX_CONFIG` is set, even empty.
@@ -45,10 +45,7 @@ pub fn in_session(var: impl Fn(&str) -> Option<String>) -> bool {
 ///
 /// `var` reads the environment, as [`crate::attach::socket_path`]'s does.
 pub fn config_path(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    var(CONFIG)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .or_else(perspicax_config::default_path)
+    perspicax_config::session_path(var)
 }
 
 /// What locking runs: the `[shell]` at `config`, or the classic profile's

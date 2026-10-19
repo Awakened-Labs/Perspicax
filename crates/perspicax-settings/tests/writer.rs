@@ -708,3 +708,82 @@ fn switching_to_minimal_with_panel_keys_offers_both_fixes_and_each_validates() {
         .unwrap();
     assert!(!read(&path).contains("[shell.panel]"));
 }
+
+#[test]
+fn a_file_the_session_refuses_is_refused_as_it_stands_with_its_fixes() {
+    // A switch to minimal made in an editor, as on 2026-10-07: the panel's
+    // keys stay, and minimal has no panel unless it is turned on.
+    let minimal = FIXTURE.replace("[shell.panel]\nenabled = true\n", "[shell.panel]\n");
+    let scratch = Scratch::new("check-refused");
+    let path = scratch.config(&minimal);
+    let doc = Document::open(&path).unwrap();
+    let refusal = doc.check(&takes).unwrap_err();
+    assert!(
+        matches!(&refusal.reason, Reason::Config(Error::Invalid { key, .. }) if key == "shell.panel"),
+        "{:?}",
+        refusal.reason
+    );
+    let says: Vec<&str> = refusal.fixes.iter().map(|fix| fix.says.as_str()).collect();
+    assert_eq!(
+        says,
+        [
+            "Turn the panel on: `enabled = true` in `[shell.panel]`",
+            "Reset `shell.panel` to the profile's",
+        ]
+    );
+    let mut doc = doc;
+    assert_eq!(
+        doc.apply(&refusal.fixes[0].edits, &takes).unwrap(),
+        Applied::Written
+    );
+    assert_eq!(doc.check(&takes).ok(), Some(()));
+}
+
+#[test]
+fn a_file_the_judge_refuses_as_it_stands_is_refused_in_its_words() {
+    let scratch = Scratch::new("check-judged");
+    let path = scratch.config(FIXTURE);
+    let asked = RefCell::new(Vec::new());
+    let judge = |candidate: &Path| {
+        asked.borrow_mut().push(candidate.to_owned());
+        Err("perspicax refuses it: `xwayland` is not built".to_owned())
+    };
+    let refusal = Document::open(&path).unwrap().check(&judge).unwrap_err();
+    assert!(
+        matches!(&refusal.reason, Reason::Judged(words) if words.contains("xwayland")),
+        "{:?}",
+        refusal.reason
+    );
+    assert_eq!(*asked.borrow(), [path], "the file itself is judged");
+    let missing = Document::open(scratch.0.join("nowhere.toml")).unwrap();
+    assert_eq!(
+        missing.check(&judge).ok(),
+        Some(()),
+        "no file is the classic profile"
+    );
+}
+
+#[test]
+fn a_file_that_is_not_toml_is_refused_with_no_fix() {
+    let scratch = Scratch::new("check-not-toml");
+    let path = scratch.config("[keys\n");
+    let refusal = Document::open(&path).unwrap().check(&takes).unwrap_err();
+    assert!(
+        matches!(refusal.reason, Reason::NotToml(_)),
+        "{:?}",
+        refusal.reason
+    );
+    assert_eq!(refusal.fixes, []);
+}
+
+#[test]
+fn a_reload_reads_what_another_program_wrote() {
+    let scratch = Scratch::new("reload");
+    let path = scratch.config(FIXTURE);
+    let mut doc = Document::open(&path).unwrap();
+    assert!(!doc.reload().unwrap(), "nothing changed");
+    let edited = format!("{FIXTURE}\n# vi was here\n");
+    fs::write(&path, &edited).unwrap();
+    assert!(doc.reload().unwrap());
+    assert_eq!(doc.text(), edited);
+}

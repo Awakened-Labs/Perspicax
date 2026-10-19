@@ -17,6 +17,8 @@ workspace = true
 # and the compositor's graph never sees toml_edit.
 [dependencies]
 perspicax-config = { path = "../perspicax-config", version = "0.1.0" }
+# The actions and chords the Keys page shows, and the press a capture hears.
+perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
 thiserror.workspace = true
 # Parse only, as perspicax-config has it: what two texts mean is compared as
 # plain tables, which ignore layout.
@@ -25,10 +27,55 @@ toml = { version = "1", default-features = false, features = ["std", "serde", "p
 # parsed with, and prints them back. `display` is that printing.
 toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
 
+# The app, behind `gui`.
+clap = { workspace = true, optional = true }
+# 0.35: 0.36 and later need rustc 1.95, and CI builds with 1.93. Drawn with
+# OpenGL through glutin, on Wayland only, read by screen readers through
+# AccessKit, and with no fonts of its own: the theme's are found on the
+# system, as the shell finds them.
+eframe = { version = "0.35", default-features = false, features = [
+    "accesskit",
+    "glow",
+    "wayland",
+], optional = true }
+# The theme's font, found as cosmic-text finds it for the shell: the same
+# version, and fonts.conf read for what sans-serif means here.
+fontdb = { version = "0.23", default-features = false, features = [
+    "std",
+    "fs",
+    "memmap",
+    "fontconfig",
+], optional = true }
+# The capture channel, on a connection of its own beside winit's.
+perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", features = ["client"], optional = true }
+# A program's command line, split into its words and joined back, as a shell
+# would.
+shlex = { version = "2", optional = true }
+wayland-client = { workspace = true, optional = true }
+
+[features]
+# The app's window, off by default. winit's Wayland support puts every
+# Wayland client in a build onto libwayland (EGL needs its `wl_display`), and
+# cargo turns a feature on for a whole build: so the app is built in a cargo
+# run of its own, and a workspace build leaves perspicax-shell and the
+# compositor's test clients on wayland-client's Rust backend.
+gui = [
+    "dep:clap",
+    "dep:eframe",
+    "dep:fontdb",
+    "dep:perspicax-protocols",
+    "dep:shlex",
+    "dep:wayland-client",
+]
+
+[[bin]]
+name = "perspicax-settings"
+path = "src/app/main.rs"
+required-features = ["gui"]
+
 [dev-dependencies]
-# A chord no config can spell, which `trigger` cannot make; and the key press
-# `examples/capture.rs` hears.
-perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
+# The app's pages, driven headless and found by what a screen reader hears.
+egui_kittest = "0.35"
 # `examples/capture.rs`: a window of its own, and the compositor's capture
 # channel beside it. The library speaks no Wayland.
 perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", features = ["client"] }

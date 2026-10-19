@@ -133,6 +133,18 @@ seat:
     - cargo clippy --locked --workspace --all-targets --features perspicax/capture -- -D warnings
     - cargo test --locked --workspace --features perspicax/desktop
 
+# The settings app's window, in a cargo run of its own. Its winit puts every
+# Wayland client in a build onto libwayland, so the jobs above, which build the
+# workspace, leave it and every crate it brings out. It links no system
+# library: libwayland, libEGL and xkbcommon are opened when it runs. No
+# compositor in a container, so its pages are driven headless, by kittest.
+settings:
+  stage: check
+  script:
+    - rustup component add clippy
+    - cargo clippy --locked -p perspicax-settings --all-targets --features gui -- -D warnings
+    - cargo test --locked -p perspicax-settings --features gui
+
 deny:
   stage: check
   cache:

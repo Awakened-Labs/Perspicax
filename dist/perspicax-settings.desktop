@@ -1,0 +1,17 @@
+# The settings app, as a launcher and the start menu list it. scripts/install.sh
+# writes Exec and TryExec as full paths when it installs this.
+#
+# Shown on any desktop: outside a perspicax session it still writes the file,
+# and a chord is typed rather than pressed. No OnlyShowIn=perspicax, which
+# desktop-file-validate refuses as a name nobody registered.
+[Desktop Entry]
+Type=Application
+Name=Perspicax Settings
+Comment=Keys and the rest of perspicax's config, written into config.toml in place
+Exec=perspicax-settings
+TryExec=perspicax-settings
+Icon=preferences-system
+Terminal=false
+Categories=Settings;DesktopSettings;
+Keywords=keys;bindings;shortcuts;config;
+StartupWMClass=perspicax-settings

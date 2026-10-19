@@ -118,6 +118,28 @@ jobs:
       - name: test
         run: cargo test --locked --workspace --features perspicax/desktop
 
+  # The settings app's window, in a cargo run of its own. Its winit puts every
+  # Wayland client in a build onto libwayland, so the jobs above, which build
+  # the workspace, leave it and every crate it brings out. It links no system
+  # library: libwayland, libEGL and xkbcommon are opened when it runs. No
+  # compositor on a runner, so its pages are driven headless, by kittest.
+  settings:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pin the toolchain
+        run: |
+          rustup toolchain install 1.93 --profile minimal --component clippy
+          rustup default 1.93
+          rustc --version && cargo --version
+
+      - name: clippy
+        run: cargo clippy --locked -p perspicax-settings --all-targets --features gui -- -D warnings
+
+      - name: test
+        run: cargo test --locked -p perspicax-settings --features gui
+
   deny:
     runs-on: ubuntu-24.04
     steps:

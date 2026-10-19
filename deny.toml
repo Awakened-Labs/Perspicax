@@ -98,6 +98,15 @@ allow = [
 #   - foldhash: Zlib, as slotmap is. hashbrown's default hasher, which
 #     accesskit_consumer turns on for the shell's trees; every hashbrown in
 #     the tree then takes it.
+#
+# Added 2026-10-19 with #57's settings app, drawn with eframe, under the same
+# rule. Its graph on Linux needs no line here; these two are Windows-only,
+# never built for this compositor, and read anyway:
+#
+#   - clipboard-win and error-code: BSL-1.0, the Boost licence. arboard,
+#     egui-winit's clipboard, takes them on Windows. It asks only that the
+#     notice travel with the source, and not even that with a binary; it has
+#     no reciprocal term.
 exceptions = [
     { crate = "encoding_rs", allow = ["BSD-3-Clause"] },
     { crate = "libloading", allow = ["ISC"] },
@@ -106,6 +115,8 @@ exceptions = [
     { crate = "tiny-skia-path", allow = ["BSD-3-Clause"] },
     { crate = "arrayref", allow = ["BSD-2-Clause"] },
     { crate = "foldhash", allow = ["Zlib"] },
+    { crate = "clipboard-win", allow = ["BSL-1.0"] },
+    { crate = "error-code", allow = ["BSL-1.0"] },
 ]
 # A crate with no licence expression at all is a licensing unknown, not a
 # permissive default.

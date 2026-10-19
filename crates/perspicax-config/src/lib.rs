@@ -52,7 +52,7 @@ use perspicax_policy::{
 };
 use serde::Deserialize;
 
-pub use crate::actions::{Spelled, spell_action};
+pub use crate::actions::{Spelled, action_names, spell_action};
 pub use crate::keys::{Trigger, spell_chord, spell_press, spell_trigger, trigger};
 use crate::shell::RawShell;
 pub use crate::shell::{
@@ -754,6 +754,24 @@ fn protocols(built: Built) -> Access {
         )
         .with(Protocol::Shell, only(&["perspicax-shell"]))
         .with(Protocol::Settings, only(&[SETTINGS_APP]))
+}
+
+/// Set in the environment of every program a session on a seat starts: the
+/// config file the session read. Empty for a session that read none.
+pub const SESSION_CONFIG: &str = "PERSPICAX_CONFIG";
+
+/// The config a program in the session reads: the session's own
+/// ([`SESSION_CONFIG`]), or else the one a session would read by default.
+/// `perspicax lock`, `perspicax config check` and the settings app each find
+/// it so.
+///
+/// `var` reads the environment.
+#[must_use]
+pub fn session_path(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    var(SESSION_CONFIG)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(default_path)
 }
 
 /// Where the config file lives: `$XDG_CONFIG_HOME/perspicax/config.toml`,

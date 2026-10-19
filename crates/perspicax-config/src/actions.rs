@@ -192,6 +192,22 @@ pub fn spell_action(action: &Action) -> Option<Spelled> {
     }
 }
 
+/// Every action a binding can name, as it names it: the words the settings
+/// app offers, from the tables the parser reads. In the order a person is
+/// told them, as an unknown name's message tells them, with each number and
+/// side written out: `workspace-1` to `workspace-{workspaces}`, and
+/// `layout-1` to `layout-{layouts}`, as far as a keymap can go.
+#[must_use]
+pub fn action_names(workspaces: u16, layouts: u8) -> Vec<String> {
+    let fixed = NAMED.iter().map(|&(text, _)| text.to_owned());
+    let layout = (*LAYOUTS.start()..=layouts.min(*LAYOUTS.end())).map(|n| format!("layout-{n}"));
+    let workspace = (1..=workspaces).map(|n| format!("workspace-{n}"));
+    let sided = SIDED
+        .iter()
+        .flat_map(|&(verb, _)| SIDES.iter().map(move |&(side, _)| format!("{verb}-{side}")));
+    fixed.chain(layout).chain(workspace).chain(sided).collect()
+}
+
 fn named(name: &str) -> Option<Action> {
     NAMED
         .iter()
@@ -428,6 +444,27 @@ mod tests {
     #[test]
     fn none_reads_as_no_action() {
         assert_eq!(Spelled::Name("none".to_owned()).read(&pies()), Ok(None));
+    }
+
+    #[test]
+    fn every_offered_action_name_reads_back_as_an_action_once() {
+        let names = action_names(6, 2);
+        let mut read = Vec::new();
+        for name in &names {
+            let action = Spelled::Name(name.clone()).read(&pies());
+            let Ok(Some(action)) = action else {
+                panic!("{name} reads as {action:?}");
+            };
+            assert!(!read.contains(&action), "{name} is offered twice");
+            read.push(action);
+        }
+        assert!(names.contains(&"workspace-6".to_owned()), "{names:?}");
+        assert!(!names.contains(&"workspace-7".to_owned()), "{names:?}");
+        assert!(names.contains(&"layout-2".to_owned()), "{names:?}");
+        assert!(!names.contains(&"layout-3".to_owned()), "{names:?}");
+        let fixed = NAMED.len() + SIDED.len() * SIDES.len();
+        assert_eq!(names.len(), fixed + 6 + 2);
+        assert_eq!(action_names(1, 9).len(), fixed + 1 + 4, "a fifth layout");
     }
 
     #[test]

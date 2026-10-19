@@ -1,8 +1,8 @@
 #!/bin/sh
 #
-# Install Perspicax as a session a display manager offers: both programs, the
-# session entry, and the settings portal's two files. `--help` says where each
-# goes, and the variables that move them.
+# Install Perspicax as a session a display manager offers: its three programs,
+# the session entry, the settings app's entry, and the settings portal's two
+# files. `--help` says where each goes, and the variables that move them.
 #
 # Run it as yourself. It builds first if it has to, through scripts/build.sh,
 # and asks sudo only for the folders you cannot write to:
@@ -40,6 +40,10 @@ built=${CARGO_TARGET_DIR:-$repo/target}/release
 # component. Without them there is a compositor that runs headless only and a
 # shell that draws nothing.
 SESSION_FEATURES=perspicax/desktop,perspicax-shell/full
+# The settings app, built in a cargo run of its own: its window puts every
+# Wayland client in a build onto libwayland, and the shell is kept off it.
+SETTINGS_FEATURES=perspicax-settings/gui
+APPDIR=${APPDIR:-$DATADIR/applications}
 
 # The features this run names -- --features, then PERSPICAX_BUILD_FEATURES --
 # spelled as build.sh spells them, and `from` for which of the two named them.
@@ -56,8 +60,9 @@ die() {
 
 usage() {
     cat <<'EOF'
-Install Perspicax as a session a display manager offers: perspicax and
-perspicax-shell, the session entry, and the settings portal's two files.
+Install Perspicax as a session a display manager offers: perspicax,
+perspicax-shell and perspicax-settings, the session entry, the settings app's
+entry, and the settings portal's two files.
 
 Usage:
   scripts/install.sh [--features <list>]
@@ -73,7 +78,8 @@ Flags:
                      perspicax/desktop,perspicax-shell/full, which is what it
                      builds when there is no build and nothing is named.
                      Overrides PERSPICAX_BUILD_FEATURES; --features '' builds
-                     without them.
+                     without them. perspicax-settings is built apart, with
+                     its own feature, whatever this names.
   -h, --help         Show this help and exit.
 
 Env:
@@ -85,6 +91,7 @@ Env:
   DATADIR     $PREFIX/share
   SESSIONDIR  $DATADIR/wayland-sessions
   PORTALDIR   $DATADIR/xdg-desktop-portal/portals
+  APPDIR      $DATADIR/applications, for the settings app's entry
 
 The portal's conf goes in $DATADIR/xdg-desktop-portal, where
 xdg-desktop-portal finds it under any XDG data folder.
@@ -119,7 +126,7 @@ while [ $# -gt 0 ]; do
 done
 
 missing=
-for program in perspicax perspicax-shell; do
+for program in perspicax perspicax-shell perspicax-settings; do
     [ -x "$built/$program" ] || missing=${missing:-$program}
 done
 
@@ -147,6 +154,7 @@ elif [ -n "$from" ] || [ -n "$missing" ]; then
             "$repo/scripts/build.sh" --release --features "$SESSION_FEATURES"
             ;;
     esac
+    "$repo/scripts/build.sh" --release -p perspicax-settings --features "$SETTINGS_FEATURES"
 fi
 
 # Whether a folder can be written: it, or the nearest folder above it that
@@ -164,7 +172,7 @@ writable() {
 sudo=
 if [ "$(id -u)" -ne 0 ]; then
     for folder in "$DESTDIR$BINDIR" "$DESTDIR$SESSIONDIR" "$DESTDIR$PORTALDIR" \
-        "$DESTDIR$DATADIR/xdg-desktop-portal"; do
+        "$DESTDIR$DATADIR/xdg-desktop-portal" "$DESTDIR$APPDIR"; do
         if [ -z "$sudo" ] && ! writable "$folder"; then
             echo "install.sh: you cannot write to $folder, so the copy uses sudo" >&2
             sudo=sudo
@@ -173,9 +181,11 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 $sudo install -d "$DESTDIR$BINDIR" "$DESTDIR$SESSIONDIR" "$DESTDIR$PORTALDIR" \
-    "$DESTDIR$DATADIR/xdg-desktop-portal"
-# Side by side: perspicax starts the shell from beside itself.
-$sudo install -m 755 "$built/perspicax" "$built/perspicax-shell" "$DESTDIR$BINDIR/"
+    "$DESTDIR$DATADIR/xdg-desktop-portal" "$DESTDIR$APPDIR"
+# Side by side: perspicax starts the shell from beside itself, and the
+# settings app finds the perspicax that checks what it writes there.
+$sudo install -m 755 "$built/perspicax" "$built/perspicax-shell" \
+    "$built/perspicax-settings" "$DESTDIR$BINDIR/"
 # Full paths, so the greeter finds the program whatever PATH it was given.
 # Written as you and copied by `install`, which is what sudo can run.
 entry=$(mktemp)
@@ -184,10 +194,14 @@ sed -e "s|^Exec=perspicax |Exec=$BINDIR/perspicax |" \
     -e "s|^TryExec=perspicax\$|TryExec=$BINDIR/perspicax|" \
     "$repo/dist/perspicax.desktop" >"$entry"
 $sudo install -m 644 "$entry" "$DESTDIR$SESSIONDIR/perspicax.desktop"
+sed -e "s|^Exec=perspicax-settings\$|Exec=$BINDIR/perspicax-settings|" \
+    -e "s|^TryExec=perspicax-settings\$|TryExec=$BINDIR/perspicax-settings|" \
+    "$repo/dist/perspicax-settings.desktop" >"$entry"
+$sudo install -m 644 "$entry" "$DESTDIR$APPDIR/perspicax-settings.desktop"
 $sudo install -m 644 "$repo/dist/perspicax.portal" "$DESTDIR$PORTALDIR/"
 $sudo install -m 644 "$repo/dist/perspicax-portals.conf" "$DESTDIR$DATADIR/xdg-desktop-portal/"
 
-echo "Installed perspicax and perspicax-shell in $BINDIR, and the session entry in $SESSIONDIR."
+echo "Installed perspicax, perspicax-shell and perspicax-settings in $BINDIR, the session entry in $SESSIONDIR, and the settings app's in $APPDIR."
 
 # Two folders that are read from one place only. Said rather than refused:
 # a package, or a machine whose greeter reads /usr/local, may want exactly this.
