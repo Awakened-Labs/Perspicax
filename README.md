@@ -1215,7 +1215,9 @@ it may act on is marked out.
 Monitors are placed relative to each other, so the layout survives one being
 unplugged: a monitor beside one that is missing goes to the right of the
 rest, and windows left on a monitor that goes away come onto the nearest one
-that remains. Only the outer edges of the desk flip and snap; between two
+that remains. A `position` or `offset` is at most 65536 pixels from 0 either
+way, which is further than any desk reaches; a display tool asking for one
+further, or for a mode wider or taller than that, is refused. Only the outer edges of the desk flip and snap; between two
 monitors the pointer passes through, and so does a window being moved unless
 `[resistance] seams` holds it there.
 
@@ -1242,7 +1244,8 @@ window is nor what the pointer finds would follow. X games keep the
 monitor's own resolution.
 
 None of that needs a second monitor to try. `--headless --size 2560x1440
---size 1920x1080` runs two virtual ones, which is what the live tests in
+--size 1920x1080` runs two virtual ones, each up to 65536 pixels a side,
+which is what the live tests in
 `crates/perspicax-compositor/tests/` do. On a seat, the kernel will light a
 connector with nothing plugged into it on request (`echo on | sudo tee
 /sys/class/drm/card1-HDMI-A-1/status`, and `detect` to undo it), and

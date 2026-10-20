@@ -888,6 +888,9 @@ pub struct Desk {
     /// How many configures the popups this client opened have had. Nothing
     /// is drawn in reply: a test paints a popup itself, once it may.
     pub popups_configured: usize,
+    /// Where each of those configures placed its popup, `(x, y, width,
+    /// height)` in its parent's window geometry, in order.
+    pub popups_placed: Vec<Geometry>,
     /// The serial of the last of them: one of the compositor's own, newer
     /// than any the client heard before it.
     pub popup_serial: Option<u32>,
@@ -980,6 +983,7 @@ impl Desk {
             layers_drawn: 0,
             undrawn: Vec::new(),
             popups_configured: 0,
+            popups_placed: Vec::new(),
             popup_serial: None,
             popups_done: 0,
         }
@@ -2896,6 +2900,9 @@ impl PopupHandler for Desk {
         configure: PopupConfigure,
     ) {
         self.popups_configured += 1;
+        let (x, y) = configure.position;
+        self.popups_placed
+            .push((x, y, configure.width, configure.height));
         self.popup_serial = Some(configure.serial);
     }
 

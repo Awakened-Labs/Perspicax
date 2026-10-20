@@ -249,6 +249,17 @@ fn a_scale_outside_its_range_is_refused_beside_its_field() {
 }
 
 #[test]
+fn a_place_past_the_world_is_refused_beside_its_field() {
+    let scratch = Scratch::new("outputs-far");
+    let (path, mut harness) = outputs(&scratch, "");
+    click(&mut harness, Role::RadioButton, "eDP-1 place: beside");
+    type_into(&mut harness, "eDP-1 offset", "70000");
+    click(&mut harness, Role::Button, "Apply");
+    harness.get_by_label("offset: 70000 is outside -65536 to 65536 pixels");
+    assert_eq!(read(&path), "");
+}
+
+#[test]
 fn a_file_change_to_the_outputs_drops_what_is_staged() {
     let scratch = Scratch::new("outputs-rebase");
     let (path, mut harness) = outputs(&scratch, "");

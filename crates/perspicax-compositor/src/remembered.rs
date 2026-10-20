@@ -25,7 +25,7 @@ use std::{
     time::Duration,
 };
 
-use perspicax_policy::{Places, Spot};
+use perspicax_policy::{FAR, Places, Spot};
 use serde::{Deserialize, Serialize};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 
@@ -60,7 +60,9 @@ struct Window {
 
 /// The places kept at `path`. None if there is no file yet; none, with a
 /// warning, if it cannot be read or is not one this perspicax wrote. Then it
-/// is written over at the next change.
+/// is written over at the next change. A place past the world's edge, which
+/// this perspicax never keeps, is a file changed by hand, and forgotten: a
+/// window opened there would carry its corner past an `i32` (#154).
 pub(crate) fn load(path: &Path) -> Places {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -76,13 +78,19 @@ pub(crate) fn load(path: &Path) -> Places {
     };
     match serde_json::from_str::<Kept>(&text) {
         Ok(kept) if kept.version == VERSION => {
-            Places::from_newest_first(kept.windows.into_iter().map(|window| {
-                let spot = Spot {
-                    output: window.output,
-                    at: (window.x, window.y),
-                };
-                (window.app, spot)
-            }))
+            let far = |at: i32| !(-FAR..=FAR).contains(&at);
+            Places::from_newest_first(
+                kept.windows
+                    .into_iter()
+                    .filter(|window| !far(window.x) && !far(window.y))
+                    .map(|window| {
+                        let spot = Spot {
+                            output: window.output,
+                            at: (window.x, window.y),
+                        };
+                        (window.app, spot)
+                    }),
+            )
         }
         Ok(kept) => {
             tracing::warn!(
@@ -281,6 +289,21 @@ mod tests {
         ]);
         save(&scratch.file(), &kept).expect("kept");
         assert_eq!(load(&scratch.file()), kept);
+    }
+
+    #[test]
+    fn a_place_kept_past_the_world_is_forgotten_when_read() {
+        let scratch = Scratch::new("far");
+        let kept = places(&[
+            ("foot", on("DP-1", i32::MAX, 0)),
+            ("firefox", on("DP-1", 40, -65536)),
+            ("ghostty", on("DP-1", 0, -65537)),
+        ]);
+        save(&scratch.file(), &kept).expect("kept");
+        assert_eq!(
+            load(&scratch.file()),
+            places(&[("firefox", on("DP-1", 40, -65536))])
+        );
     }
 
     #[test]

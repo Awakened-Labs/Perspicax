@@ -102,7 +102,8 @@ pub(crate) fn dismiss_all(root: &WlSurface) {
 
 /// Where the popups of the window or panel whose surface is `from` are
 /// measured from, in its coordinates: a window's geometry, which is the
-/// smithay `Window::geometry()` that draws it, and a panel's own corner.
+/// [`Framed::geometry`](crate::framed::Framed::geometry) that draws it, and
+/// a panel's own corner.
 fn frame(from: &WlSurface) -> Point<i32, Logical> {
     if get_role(from) == Some(XDG_TOPLEVEL_ROLE) {
         crate::geometry::window_geometry(from).map_or_else(Point::default, |geometry| geometry.loc)
@@ -113,7 +114,7 @@ fn frame(from: &WlSurface) -> Point<i32, Logical> {
 
 /// In a debug build, that a popup hangs where smithay's renderer draws it,
 /// and that it draws it once. `frame` is where smithay measures the popups
-/// of `hung.from` from: a window's `Window::geometry()` corner, a panel's
+/// of `hung.from` from: a window's `Framed::geometry()` corner, a panel's
 /// own. Every live test built with `capture` runs through here, so a
 /// placement that drifted from smithay's would fail them rather than
 /// misplace a menu's damage on a seat.

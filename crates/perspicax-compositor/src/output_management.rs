@@ -17,7 +17,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use perspicax_policy::{Head, HeadChange, ModeChoice, Protocol};
+use perspicax_policy::{FAR, Head, HeadChange, ModeChoice, Protocol};
 use smithay::{
     output::Output,
     reexports::{
@@ -547,6 +547,15 @@ impl Dispatch<ZwlrOutputConfigurationHeadV1, Configuring> for Compositor {
                 }
                 if width <= 0 || height <= 0 {
                     head.post_error(Error::InvalidCustomMode, "a mode of no size");
+                    return;
+                }
+                // No monitor is that big, and a window's width added to its
+                // far edge could be past an `i32` (#154).
+                if width > FAR || height > FAR {
+                    head.post_error(
+                        Error::InvalidCustomMode,
+                        format!("a mode of {width}x{height}: at most {FAR} a side"),
+                    );
                     return;
                 }
                 change.mode = Some(ModeChoice::Custom {

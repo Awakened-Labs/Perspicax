@@ -6,14 +6,15 @@
 //! monitor can be given any size, moved, scaled and turned off, and the desk
 //! the facts describe follows. Turning every monitor off is refused, a
 //! configuration built against a desk that has since changed is cancelled,
-//! and while the session is locked nothing is applied.
+//! and while the session is locked nothing is applied. Nor is a monitor
+//! moved past the world's edge, or given a mode wider than it (#154).
 //!
 //! Like the other live tests it binds a real Wayland socket, so it needs
 //! `XDG_RUNTIME_DIR`, and is `#[ignore]`d for `ci/live-tests.sh` to run.
 
 mod common;
 
-use common::{Session, until};
+use common::{Session, refused, until};
 use perspicax_compositor::{Backend, Virtual};
 use perspicax_node::Rect;
 use perspicax_policy::{Access, Place, Shape, Side};
@@ -197,5 +198,56 @@ fn nothing_is_applied_while_locked() {
     );
 
     desk.unlock();
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_monitor_moved_past_the_world_fails_its_configuration() {
+    let session = session("displays-far");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_displays(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.display_serial.is_some());
+
+    // At each end of an `i32`: arranging them, the desk is measured from
+    // the leftmost corner to the rightmost edge, past what an `i32` holds
+    // (#154).
+    let configuration = desk.configuration(&qh, None);
+    desk.enable(&configuration, "HEADLESS-1", &qh)
+        .set_position(i32::MIN, 0);
+    desk.enable(&configuration, "HEADLESS-2", &qh)
+        .set_position(i32::MAX, 0);
+    configuration.apply();
+    until(&mut queue, &mut desk, |desk| desk.configured.is_some());
+    assert_eq!(desk.configured, Some("failed"));
+    assert_eq!(
+        desk.head_named("HEADLESS-2").position,
+        (1280, 0),
+        "nothing moved"
+    );
+    assert!(!session.ended(), "the compositor is still running");
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_custom_mode_wider_than_the_world_is_a_protocol_error() {
+    let session = session("displays-far-mode");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_displays(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.display_serial.is_some());
+
+    let configuration = desk.configuration(&qh, None);
+    desk.enable(&configuration, "HEADLESS-1", &qh)
+        .set_custom_mode(i32::MAX, 1024, 60_000);
+    assert_eq!(
+        refused(&mut queue, &mut desk),
+        ("zwlr_output_configuration_head_v1".to_owned(), 3),
+        "invalid_custom_mode"
+    );
+    assert!(!session.ended(), "the compositor is still running");
+
+    let (desk, queue, ..) = session.client();
     session.stop((desk, queue));
 }

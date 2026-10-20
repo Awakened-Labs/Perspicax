@@ -5,7 +5,7 @@
 
 use std::ops::RangeInclusive;
 
-use perspicax_policy::{OPAQUE, SCALES};
+use perspicax_policy::{FAR, OPAQUE, SCALES};
 
 /// `[workspaces] grid`, each side. Generous: past this, a grid is a typo,
 /// and a 1000x1000 one would be a million workspaces.
@@ -19,6 +19,11 @@ pub const FLIP_DELAY_MS: RangeInclusive<u64> = 0..=5000;
 /// `effect = "none"`; longer than this and a switch would feel stuck rather
 /// than shown.
 pub const TRANSITION_MS: RangeInclusive<u64> = 1..=2000;
+
+/// `[[output]] position`, each of its two, and `offset`, in logical pixels:
+/// as far as the world goes (#154), which is further than any desk of
+/// monitors reaches.
+pub const OUTPUT_PLACE: RangeInclusive<i32> = -FAR..=FAR;
 
 /// `[snap] threshold`, in pixels from the edge.
 pub const SNAP_THRESHOLD: RangeInclusive<i32> = 1..=64;

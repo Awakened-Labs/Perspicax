@@ -58,6 +58,7 @@ perspicax-config = { path = "../perspicax-config", version = "0.1.0" }
 perspicax-index = { path = "../perspicax-index", version = "0.1.0" }
 perspicax-mcp = { path = "../perspicax-mcp", version = "0.1.0" }
 perspicax-node = { path = "../perspicax-node", version = "0.1.0" }
+perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
 
 # The USE flags. Each forwards to the crate that does the work, and `desktop` is
 # the set a person logging in from a TTY wants. None are default: the gates

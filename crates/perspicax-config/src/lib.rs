@@ -2472,7 +2472,8 @@ impl RawOutput {
     }
 
     /// At most one of `position`, `left-of`, `right-of`, `above` and `below`,
-    /// and an `offset` only with a side to be offset along.
+    /// and an `offset` only with a side to be offset along: each number within
+    /// [`limits::OUTPUT_PLACE`].
     fn place(&self, key: &str) -> Result<Place, Error> {
         let sides = [
             (Side::LeftOf, &self.left_of),
@@ -2484,6 +2485,27 @@ impl RawOutput {
             .iter()
             .filter_map(|(side, of)| of.as_ref().map(|of| (side.key(), *side, of)));
         let beside = written.next();
+        let range = limits::OUTPUT_PLACE;
+        let outside = |what: String, word: &str| {
+            invalid(
+                format!("{key}.{word}"),
+                format!(
+                    "{what} is outside {} to {} pixels",
+                    range.start(),
+                    range.end()
+                ),
+            )
+        };
+        if let Some([x, y]) = self.position
+            && !(range.contains(&x) && range.contains(&y))
+        {
+            return Err(outside(format!("[{x}, {y}]"), "position"));
+        }
+        if let Some(offset) = self.offset
+            && !range.contains(&offset)
+        {
+            return Err(outside(offset.to_string(), "offset"));
+        }
         if let Some((second, _, _)) = written.next() {
             return Err(invalid(
                 format!("{key}.{second}"),
@@ -3285,6 +3307,27 @@ mod tests {
     fn an_offset_with_no_side_is_refused() {
         let error = parse("[[output]]\nname = \"A\"\noffset = 10", SEAT).unwrap_err();
         assert!(error.to_string().contains("output.A.offset"), "{error}");
+    }
+
+    #[test]
+    fn an_output_position_past_the_world_is_refused_with_its_ends() {
+        let text = "[[output]]\nname = \"A\"\nposition = [2147483647, 0]";
+        let error = parse(text, SEAT).unwrap_err().to_string();
+        assert!(error.contains("output.A.position"), "{error}");
+        assert!(error.contains("-65536 to 65536"), "{error}");
+        let edge = "[[output]]\nname = \"A\"\nposition = [-65536, 65536]";
+        assert_eq!(
+            parse(edge, SEAT).unwrap().outputs[0].place,
+            Place::At(-65536, 65536)
+        );
+    }
+
+    #[test]
+    fn an_output_offset_past_the_world_is_refused_with_its_ends() {
+        let text = "[[output]]\nname = \"A\"\nright-of = \"B\"\noffset = -65537";
+        let error = parse(text, SEAT).unwrap_err().to_string();
+        assert!(error.contains("output.A.offset"), "{error}");
+        assert!(error.contains("-65536 to 65536"), "{error}");
     }
 
     #[test]

@@ -40,7 +40,7 @@ use smithay::{
     desktop::{LayerSurface, WindowSurfaceType, layer_map_for_output},
     output::Output,
     reexports::wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface},
-    utils::{Logical, Point, Rectangle},
+    utils::{Logical, Point, Rectangle, Size},
     wayland::{
         compositor::with_states,
         shell::{
@@ -442,7 +442,14 @@ impl Compositor {
         // against in a debug build (#106). Nothing is left instead.
         zone.size.w = zone.size.w.max(0);
         zone.size.h = zone.size.h.max(0);
-        Some(zone)
+        // Nor anywhere but on the monitor: a panel's room and margin can
+        // each be as wide as the world, and smithay moves the zone's corner
+        // past both, so that a new window would open off every monitor
+        // (#154). Off it, what is left is nothing at the nearest edge.
+        Some(
+            zone.intersection(area)
+                .unwrap_or_else(|| Rectangle::new(zone.loc.constrain(area), Size::default())),
+        )
     }
 
     /// The id of the layer surface this surface belongs to: the layer's own,

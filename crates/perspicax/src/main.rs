@@ -58,6 +58,7 @@ use perspicax::{
 };
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop, Virtual};
 use perspicax_config::{AgentSocket, Built};
+use perspicax_policy::FAR;
 use tracing_subscriber::{EnvFilter, filter::LevelFilter, fmt::writer::BoxMakeWriter};
 
 #[derive(Parser)]
@@ -851,7 +852,9 @@ fn dump_when_ready(facts: Facts, stop: Stop, after: Duration) {
 }
 
 /// `1920x1080` into a pair. Rejected rather than clamped: a compositor asked
-/// for a zero-sized output should say so, not quietly invent one.
+/// for a zero-sized output should say so, not quietly invent one; nor one
+/// wider or taller than the world (#154), whose far edge a window's width
+/// could carry past an `i32`.
 fn parse_size(raw: &str) -> Result<(i32, i32)> {
     let (width, height) = raw
         .split_once(['x', 'X'])
@@ -860,6 +863,9 @@ fn parse_size(raw: &str) -> Result<(i32, i32)> {
     let height: i32 = height.trim().parse().context("height")?;
     if width <= 0 || height <= 0 {
         bail!("an output must have a positive size, got {width}x{height}");
+    }
+    if width > FAR || height > FAR {
+        bail!("an output is at most {FAR} pixels a side, got {width}x{height}");
     }
     Ok((width, height))
 }
@@ -921,6 +927,15 @@ mod tests {
             parse(&["--headless", "--config", "perspicax.toml"]).err(),
             Some(ErrorKind::ArgumentConflict)
         );
+    }
+
+    #[test]
+    fn a_virtual_output_wider_than_the_world_is_refused() {
+        assert_eq!(parse_size("65536x65536").ok(), Some((FAR, FAR)));
+        for size in ["65537x1080", "1920x2147483647"] {
+            let error = parse_size(size).expect_err(size).to_string();
+            assert!(error.contains("at most 65536"), "{size}: {error}");
+        }
     }
 
     #[test]

@@ -208,6 +208,27 @@ pub(crate) fn rect(r: Rectangle<i32, Logical>) -> Rect {
     Rect::new(r.loc.x, r.loc.y, r.size.w, r.size.h)
 }
 
+/// Smithay's rectangle held to the world, as policy holds its own.
+pub(crate) fn in_world(r: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+    let held = perspicax_policy::in_world(rect(r));
+    Rectangle::new((held.x, held.y).into(), (held.w, held.h).into())
+}
+
+/// The monitor's `area`, in the coordinates a popup's positioner works in:
+/// its parent's, which sit at `parents` in a window whose geometry is at
+/// `window`. Held to the world, since a long enough chain of menus could
+/// carry it to where smithay 0.7.0 adds its width past an `i32` (#154).
+fn popup_target(
+    area: Rectangle<i32, Logical>,
+    parents: Point<i32, Logical>,
+    window: Point<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    let mut target = area;
+    target.loc -= parents;
+    target.loc -= window;
+    in_world(target)
+}
+
 impl Compositor {
     /// Where the next new window goes: cascaded on the output under the
     /// pointer, so a window opens on the monitor the person is looking at.
@@ -726,9 +747,7 @@ impl Compositor {
         };
         // The positioner works in the coordinates of the popup's parent, so
         // the output is expressed there too.
-        let mut target = area;
-        target.loc -= get_popup_toplevel_coords(&kind);
-        target.loc -= bounds.loc;
+        let target = popup_target(area, get_popup_toplevel_coords(&kind), bounds.loc);
         popup.with_pending_state(|pending| {
             pending.geometry = pending.positioner.get_unconstrained_geometry(target);
         });
@@ -1015,6 +1034,8 @@ pub(crate) fn surface_of(window: &Framed) -> Option<WlSurface> {
 
 #[cfg(test)]
 mod tests {
+    use perspicax_policy::FAR;
+
     use super::*;
 
     fn edges(top: bool, bottom: bool, left: bool, right: bool) -> Edges {
@@ -1024,6 +1045,25 @@ mod tests {
             left,
             right,
         }
+    }
+
+    #[test]
+    fn a_target_far_up_a_chain_of_menus_is_held_to_the_world() {
+        let area = Rectangle::new((0, 0).into(), (1280, 1024).into());
+        assert_eq!(
+            popup_target(area, (100, 20).into(), (10, 0).into()),
+            Rectangle::new((-110, -20).into(), (1280, 1024).into()),
+            "a menu's monitor, where its parent is"
+        );
+
+        // A chain of menus, each as far down and left of its parent as a
+        // positioner allows, can sit at `i32::MIN`: its monitor is then as
+        // far the other way, and its far edge past an `i32`.
+        let held = popup_target(area, (i32::MIN, i32::MIN).into(), (0, 0).into());
+        assert!(
+            held.loc.x + held.size.w <= FAR && held.loc.y + held.size.h <= FAR,
+            "{held:?} ends in the world"
+        );
     }
 
     #[test]

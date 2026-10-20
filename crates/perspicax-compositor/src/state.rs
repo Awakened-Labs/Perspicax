@@ -1154,7 +1154,7 @@ impl CompositorHandler for Compositor {
                     let frame = self
                         .window_for(&hung.from)
                         .map_or_else(smithay::utils::Point::default, |window| {
-                            Window::geometry(&window).loc
+                            window.geometry().loc
                         });
                     popup::check_hung_as_drawn(frame, _popup, hung);
                 }

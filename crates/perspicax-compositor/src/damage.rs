@@ -156,6 +156,9 @@ pub(crate) fn take(start: &WlSurface, at: Vec2, whole: Option<Rect>, releases: b
                     .filter_map(|damage| surface_local(damage, picture.as_ref()))
                     .collect()
             });
+            if !releases {
+                cut_to_picture(&mut current.damage, picture.as_ref());
+            }
             // How far the window reaches is measured from this, so it is
             // remembered before the buffer is released below.
             if picture != was {
@@ -180,6 +183,31 @@ pub(crate) fn take(start: &WlSurface, at: Vec2, whole: Option<Rect>, releases: b
         |_, _, _| true,
     );
     Taken { rects, own }
+}
+
+/// Cut the damage a surface named in its own coordinates to its `picture`,
+/// dropping what lands off it, and all of it without one: none of that
+/// changes a pixel.
+///
+/// Smithay 0.7.0's renderer turns such damage into its buffer's coordinates
+/// in `i32` (`Transform::transform_rect_in`), and only then cuts it to the
+/// buffer. Turned or flipped, a rectangle far off the picture overflows on
+/// the way: its width less its left edge less the buffer's width (#154).
+/// Holding the request to the world would not do, since a viewport that
+/// magnifies the buffer scales damage up first. Damage named in the buffer's
+/// pixels is left, as smithay cuts it before turning it.
+fn cut_to_picture(damage: &mut Vec<Damage>, picture: Option<&Picture>) {
+    let shown = picture.map(|picture| Rectangle::from_size(picture.size));
+    damage.retain_mut(|damage| match damage {
+        Damage::Surface(rect) => match shown.and_then(|shown| rect.intersection(shown)) {
+            Some(cut) => {
+                *rect = cut;
+                true
+            }
+            None => false,
+        },
+        Damage::Buffer(_) => true,
+    });
 }
 
 /// Clear what damage is left on `start` and every surface under it: what the

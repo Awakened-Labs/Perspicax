@@ -342,12 +342,8 @@ impl Compositor {
                 self.outline_of(window),
             ))
             .map(|strip| {
-                NodeRect::new(
-                    f64::from(strip.x),
-                    f64::from(strip.y),
-                    f64::from(strip.x + strip.w),
-                    f64::from(strip.y + strip.h),
-                )
+                let (x, y) = (f64::from(strip.x), f64::from(strip.y));
+                NodeRect::new(x, y, x + f64::from(strip.w), y + f64::from(strip.h))
             })
             .collect()
     }

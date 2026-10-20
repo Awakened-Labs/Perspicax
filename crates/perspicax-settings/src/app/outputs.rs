@@ -166,13 +166,19 @@ impl Draft {
 /// A whole number of pixels, as typed; nothing for an empty field where
 /// `optional`.
 fn pixels(text: &str, optional: bool) -> Result<Option<i32>, String> {
+    let range = limits::OUTPUT_PLACE;
     match text.trim() {
         "" if optional => Ok(None),
         "" => Err("write a whole number of pixels".to_owned()),
-        text => text
-            .parse()
-            .map(Some)
-            .map_err(|_| format!("`{text}` is not a whole number of pixels")),
+        text => match text.parse() {
+            Ok(pixels) if range.contains(&pixels) => Ok(Some(pixels)),
+            Ok(pixels) => Err(format!(
+                "{pixels} is outside {} to {} pixels",
+                range.start(),
+                range.end()
+            )),
+            Err(_) => Err(format!("`{text}` is not a whole number of pixels")),
+        },
     }
 }
 
