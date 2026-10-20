@@ -30,7 +30,7 @@ use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::Button;
 use smithay::{
     backend::input::{Axis, AxisSource, ButtonState, KeyState},
-    desktop::LayerSurface,
+    desktop::{LayerSurface, find_popup_root_surface},
     input::{
         keyboard::{FilterResult, KeyboardHandle, Keycode, Keysym, xkb},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
@@ -144,12 +144,13 @@ pub enum ActError {
     #[error("window {} holds the pointer: nothing was dispatched", by.0)]
     PointerCaptured { by: SurfaceId },
     /// A window's menu holds the pointer and keyboard -- one the person
-    /// opened, say -- and the act would go past it, to another application.
-    /// Nothing was dispatched: smithay's grab would have closed the menu
-    /// under the person for a click, and let a scroll reach nothing. `popup`
-    /// is the menu holding them, the submenu when one is open. Choosing from
-    /// it, or clicking anywhere in its own application, still goes ahead, as
-    /// it does for the person (#157).
+    /// opened, say -- and the act would go past it. Nothing was dispatched:
+    /// smithay's grab would have closed the menu under the person for a
+    /// click on another application, let a scroll there reach nothing, and
+    /// ignored the keyboard given to anything but the menu. `popup` is the
+    /// menu holding them, the submenu when one is open. Choosing from it,
+    /// clicking anywhere in its own application, and focusing its window,
+    /// still go ahead, as they do for the person (#157).
     ///
     /// A refusal, like [`ActError::FocusElsewhere`], decided here because
     /// only this loop knows what holds the pointer in the same turn as the
@@ -430,16 +431,28 @@ impl Compositor {
     /// would go past it. By smithay's own rule, a press on any other
     /// client's surface closes the menu, and a scroll there reaches nothing;
     /// the menu's own application, its window and its menus, takes the
-    /// pointer as it does the person's. `None` when no menu holds them,
+    /// pointer as it does the person's. The keyboard goes only to the menu
+    /// holding it: given to anything else, smithay ignores it, and a tab
+    /// brought forward would be raised over the menu, or put its window
+    /// away and the menu with it. `None` when no menu holds them,
     /// [`Compositor::held_menu_root`]'s answer: one dismissed but not yet
     /// destroyed holds nothing.
     fn menu_in_the_way(&self, action: &Action, target: &Target) -> Option<SurfaceId> {
         let root = self.held_menu_root()?;
-        let past = match action {
-            Action::Click { .. } | Action::Scroll { .. } => !target
+        let past = match (action, target) {
+            (Action::Click { .. } | Action::Scroll { .. }, _) => !target
                 .surface()
                 .is_some_and(|reached| reached.id().same_client_as(&root.id())),
-            Action::Focus | Action::Forward | Action::Type { .. } | Action::Close => false,
+            // Its own window is already the one in use, and the front of its
+            // group (#97); the menu holding the keyboard has it already.
+            (Action::Focus | Action::Forward, Target::Window(window)) => {
+                !shell::is_toplevel_of(window, &root)
+            }
+            (Action::Focus | Action::Forward, Target::Popup(placed)) => {
+                !find_popup_root_surface(&placed.popup).is_ok_and(|from| from == root)
+            }
+            (Action::Focus | Action::Forward, Target::Layer(..)) => true,
+            (Action::Type { .. } | Action::Close, _) => false,
         };
         if !past {
             return None;

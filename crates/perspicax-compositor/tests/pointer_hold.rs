@@ -28,13 +28,13 @@
 
 mod common;
 
-use common::{Desk, Session, until};
+use common::{Desk, Session, configured, heard, until};
 use perspicax_compositor::{ActError, Backend, Command, Host, Virtual};
 use perspicax_index::{Action as Verb, HostFacts, PointerButton};
 use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::{Access, Action, Grid, Mode, Shape};
-use smithay_client_toolkit::shell::{WaylandSurface, wlr_layer::Layer};
-use wayland_client::{EventQueue, QueueHandle, globals::GlobalList};
+use smithay_client_toolkit::shell::{WaylandSurface, wlr_layer::Layer, xdg::XdgSurface as _};
+use wayland_client::{EventQueue, Proxy as _, QueueHandle, globals::GlobalList};
 use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_pointer_constraints_v1::Lifetime;
 
 type Client = (Desk, EventQueue<Desk>, QueueHandle<Desk>, GlobalList);
@@ -529,6 +529,74 @@ fn an_agent_cannot_take_a_pointer_a_game_holds() {
         desk.buttons.is_empty() && desk.scrolls == 0,
         "nothing reached it"
     );
+
+    session.stop((desk, queue));
+}
+
+/// A game that holds the pointer and opens a menu of its own is named
+/// first (#157). Its hold outlasts the menu, and only the person ends it,
+/// where an agent told of the menu could choose from it. So focus on the
+/// game's other window, refused for the menu as well, is refused naming
+/// the game; the game itself may still be focused.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_game_holding_the_pointer_is_named_before_its_own_menu() {
+    let session = session("hold-and-menu", (1280, 800));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_pointer(&globals, &qh);
+    desk.bind_relative(&globals, &qh);
+    let ear = desk.bind_keyboard(&globals, &qh);
+    for (n, title) in ["game", "other"].into_iter().enumerate() {
+        desk.open_window(&qh, title, title);
+        until(&mut queue, &mut desk, |desk| desk.has_drawn(n));
+    }
+    session.wait_for(|facts| {
+        ["game", "other"].iter().all(|title| {
+            facts
+                .surfaces()
+                .iter()
+                .any(|surface| surface.title.as_deref() == Some(*title))
+        })
+    });
+    session.perform(Action::CycleFocus);
+    let mut client = (desk, queue, qh, globals);
+    lock_over(&mut client, &session, 0, (10, 10), Lifetime::Persistent);
+    let (mut desk, mut queue, qh, _) = client;
+    let facts = session.facts.read();
+    let (game, other) = (titled(&facts, "game"), titled(&facts, "other"));
+
+    // A menu of the game, away from where its pointer is locked, taking the
+    // keyboard and the pointer.
+    let serial = desk.entered.expect("the pointer arrived");
+    let menu = desk.open_menu(
+        &qh,
+        desk.windows[0].xdg_surface(),
+        (200, 150),
+        (120, 80),
+        serial,
+    );
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&menu.wl_surface().id())
+    });
+    configured(&mut desk, &mut queue, 1);
+    desk.paint(menu.wl_surface(), (120, 80), 0xff33_6699);
+    menu.wl_surface().commit();
+    queue.flush().expect("sent");
+    session.wait_for(|facts| {
+        facts
+            .surfaces()
+            .iter()
+            .any(|surface| surface.mapped && surface.hangs_from() == Some(game))
+    });
+    settle(&session, &mut queue, &mut desk);
+    assert!(holding(&desk), "the hold let go: {:?}", desk.holds);
+
+    let host = Host::new(&session.facts, &session.requests);
+    assert_eq!(
+        host.act(other, &Verb::Focus).map(|_| ()),
+        Err(ActError::PointerCaptured { by: game })
+    );
+    assert!(host.act(game, &Verb::Focus).is_ok());
 
     session.stop((desk, queue));
 }

@@ -4,13 +4,15 @@
 //! A right-click menu takes the pointer and keyboard until it closes, and
 //! while it has them smithay's grab decides where input goes: the menu's
 //! own application takes the pointer as it would without the menu, and a
-//! press anywhere else closes the menu. Issue #157: an agent's act on
-//! another application went through that grab. Its click closed the
-//! person's menu, and only then reached the window it aimed at; its scroll
-//! reached nobody, and the menu stayed open. Each was reported as done. Now
-//! each is refused as `MenuOpen`, naming the menu, and the menu stays open.
-//! Choosing from it, or clicking anywhere in its own application, goes ahead
-//! as it does for the person.
+//! press anywhere else closes the menu; the keyboard goes to the menu alone.
+//! Issue #157: an agent's act on another application went through that
+//! grab. Its click closed the person's menu, and only then reached the
+//! window it aimed at; its scroll reached nobody, and the menu stayed open;
+//! its focus was ignored. Each was reported as done. Now each is refused as
+//! `MenuOpen`, naming the menu, and the menu stays open, as is bringing a
+//! tab forward, which gives it the keyboard. Choosing from the menu,
+//! clicking anywhere in its own application, and focusing its window, go
+//! ahead as they do for the person.
 //!
 //! With a person at the seat, where alone a menu takes the grab. Like the
 //! other live tests it binds a real Wayland socket, so it needs
@@ -22,6 +24,7 @@ use common::{Desk, Ear, Session, configured, heard, menu_with_the_keyboard, unti
 use perspicax_compositor::{ActError, Backend, Host};
 use perspicax_index::{Action as Verb, HostFacts, PointerButton, SurfaceKind};
 use perspicax_node::{Rect, SurfaceId};
+use perspicax_policy::Action;
 use smithay_client_toolkit::shell::xdg::{XdgSurface as _, popup::Popup};
 use wayland_client::{EventQueue, Proxy as _, QueueHandle, protocol::wl_surface::WlSurface};
 
@@ -427,6 +430,122 @@ fn the_persons_hand_is_named_before_the_menu() {
         host.act(apps.elsewhere, &click()).map(|_| ()),
         Err(ActError::MenuOpen { popup: menu })
     );
+    assert_eq!(apps.a.popups_done, 0, "the menu is still open");
+
+    apps.stop(session);
+}
+
+/// While a menu of "a" holds the keyboard, an agent's focus on anything but
+/// its window and the menu is refused, naming the menu: "b"'s window, popup
+/// and panel, and "a"'s other window. smithay's grab would have ignored it,
+/// and the keys stay in the menu. Before, each was reported as done, and
+/// the window recorded as focused, though it never was.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_agent_cannot_focus_past_a_menu() {
+    let session = seated("held-menu-focus");
+    let mut apps = Apps::with_the_menu(&session);
+    let host = Host::new(&session.facts, &session.requests);
+    let before = session.facts.read();
+
+    let refused = Err(ActError::MenuOpen { popup: apps.menu() });
+    for target in [apps.elsewhere, apps.tooltip, apps.panel, apps.own] {
+        assert_eq!(
+            host.act(target, &Verb::Focus).map(|_| ()),
+            refused,
+            "focus on {target:?}"
+        );
+    }
+
+    apps.settle();
+    assert!(apps.keys_on(apps.menu_surface()));
+    let after = session.facts.read();
+    for window in [apps.elsewhere, apps.own] {
+        let focused_at = |facts: &HostFacts| facts.surface(window).map(|w| w.focused_at);
+        assert_eq!(
+            focused_at(&after),
+            focused_at(&before),
+            "{window:?} recorded as focused"
+        );
+    }
+    assert_eq!(apps.a.popups_done, 0, "the menu is still open");
+
+    apps.stop(session);
+}
+
+/// The menu's own window may still be focused, and the menu itself: the
+/// window is already the one in use, and the menu holds the keys already.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_menus_own_window_and_the_menu_may_still_be_focused() {
+    let session = seated("held-menu-own-focus");
+    let mut apps = Apps::with_the_menu(&session);
+    let host = Host::new(&session.facts, &session.requests);
+
+    let focused = host.act(apps.page, &Verb::Focus).expect("its window");
+    assert_eq!(focused.focus_after, Some(apps.page));
+    host.act(apps.menu(), &Verb::Focus).expect("the menu");
+
+    apps.settle();
+    assert!(apps.keys_on(apps.menu_surface()));
+    assert_eq!(apps.a.popups_done, 0, "the menu is still open");
+
+    apps.stop(session);
+}
+
+/// A tab brought forward is given the keyboard, so past a menu it is
+/// refused as focus is: a tab behind the menu's window would put that
+/// window away, and its menu with it, and another application's would be
+/// raised over the menu. The menu's own window is the front of its group
+/// already, and bringing it forward does nothing.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn tab_forward_past_a_menu_is_refused() {
+    let session = seated("held-menu-forward");
+    let mut apps = Apps::start(&session);
+    // "page", focused, joins "own", the window focused before it, in front.
+    session.perform(Action::TabWithPrevious);
+    let (page, own) = (apps.page, apps.own);
+    session.wait_for(|facts| {
+        facts.surface(own).is_some_and(|own| !own.mapped)
+            && facts.surface(page).is_some_and(|page| page.mapped)
+    });
+    apps.open_the_menu(&session);
+    let host = Host::new(&session.facts, &session.requests);
+
+    let refused = Err(ActError::MenuOpen { popup: apps.menu() });
+    assert_eq!(host.act(own, &Verb::Forward).map(|_| ()), refused);
+    assert_eq!(
+        host.act(apps.elsewhere, &Verb::Forward).map(|_| ()),
+        refused
+    );
+    host.act(page, &Verb::Forward).expect("in front already");
+
+    apps.settle();
+    let facts = session.facts.read();
+    assert!(
+        facts.surface(page).is_some_and(|page| page.mapped),
+        "the menu's window is still in front"
+    );
+    assert_eq!(apps.a.popups_done, 0, "the menu is still open");
+
+    apps.stop(session);
+}
+
+/// Closing a window asks its client to, and gives nothing the pointer or
+/// the keyboard: past a menu it still goes ahead, and the menu stays open.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn window_close_still_reaches_past_a_menu() {
+    let session = seated("held-menu-close");
+    let mut apps = Apps::with_the_menu(&session);
+
+    Host::new(&session.facts, &session.requests)
+        .act(apps.elsewhere, &Verb::Close)
+        .expect("asked to close");
+    until(&mut apps.b_queue, &mut apps.b, |b| b.asked_to_close == 1);
+
+    apps.settle();
     assert_eq!(apps.a.popups_done, 0, "the menu is still open");
 
     apps.stop(session);

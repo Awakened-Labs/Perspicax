@@ -2936,10 +2936,11 @@ fn an_agent_cannot_close_an_x11_menu() {
 /// Issue #157: Xwayland is a client of its own. So while a Wayland window's
 /// menu holds the pointer and keyboard, an agent's click on an X11 window is
 /// refused, naming the menu, as one on any other application is: the press
-/// would close the menu under the person.
+/// would close the menu under the person. So is its focus, which smithay's
+/// grab would ignore.
 #[test]
 #[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
-fn an_agent_cannot_click_an_x11_window_past_a_wayland_menu() {
+fn an_agent_cannot_click_or_focus_an_x11_window_past_a_wayland_menu() {
     let x11 = X11::start(
         "x11-past-a-menu",
         Backend::headless((1280, 1024)).with_person(),
@@ -2967,10 +2968,9 @@ fn an_agent_cannot_click_an_x11_window_past_a_wayland_menu() {
         at: Rect::new(10.0, 10.0, 20.0, 20.0),
         button: PointerButton::Left,
     };
-    assert_eq!(
-        host.act(behind, &click).map(|_| ()),
-        Err(ActError::MenuOpen { popup: menu })
-    );
+    let refused = Err(ActError::MenuOpen { popup: menu });
+    assert_eq!(host.act(behind, &click).map(|_| ()), refused);
+    assert_eq!(host.act(behind, &Verb::Focus).map(|_| ()), refused);
     queue.roundtrip(&mut desk).expect("a round trip");
     assert_eq!(desk.popups_done, 0, "the menu is still open");
 
