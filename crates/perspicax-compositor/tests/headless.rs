@@ -9,17 +9,18 @@
 
 mod common;
 
-use std::{
-    io::ErrorKind,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
-use common::{Configured, Desk, Said, Session, until};
+use common::{Configured, Desk, Said, Session, connect, until};
 use perspicax_compositor::{Backend, Config, Error, Facts, Requests, Stop};
 use perspicax_index::Consent;
 use perspicax_policy::{Action, Direction};
 use smithay_client_toolkit::shell::WaylandSurface as _;
-use wayland_client::backend::WaylandError;
+use wayland_client::{
+    Connection, Dispatch, QueueHandle,
+    globals::{GlobalListContents, registry_queue_init},
+    protocol::wl_registry,
+};
 
 /// The smallest claim worth making automatically: it binds a socket, runs an
 /// event loop, and stops when it is told to. Everything else in this milestone
@@ -337,67 +338,126 @@ fn a_game_finds_what_it_turns_its_camera_with() {
     session.stop((desk, queue));
 }
 
-/// #101: a client that falls behind is held for, not cut off at once. This
-/// one asks for 30 000 frame callbacks in one commit, as the shell's pie
-/// could have, then reads nothing for a moment: the answers, a `done` and a
-/// `delete_id` for each, are some 720 KB, far past what the kernel holds for
-/// it. wayland-backend's buffer of 4 KB cut it off; a megabyte holds them
-/// until it reads, and it is sent every one.
+/// #101: a client that falls behind is held for, not cut off at once, as the
+/// shell was when something kept it from reading. This one asks for some
+/// 720 KB of globals, far past what the kernel holds for it, and reads
+/// nothing until all of it is sent. wayland-backend's own 4 KB cut it off; a
+/// megabyte holds what it asked for until it reads, and it is sent every one.
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
-fn a_client_that_reads_late_is_sent_every_frame_callback_it_asked_for() {
-    const ASKED: usize = 30_000;
-    let read = read_late("reads-late", ASKED);
-    assert_eq!(read, Ok(ASKED), "cut off for reading late");
+fn a_client_that_reads_late_is_sent_everything_it_asked_for() {
+    let late = read_late("reads-late", 720_000);
+    assert_eq!(late.read, Ok(late.owed), "cut off for reading late");
 }
 
 /// The other half: what waits for a client is held to a megabyte, so one
-/// that has fallen further behind is still cut off, and costs no more. These
-/// 80 000 answers are some 1.9 MB.
+/// that has fallen further behind is still cut off, and costs no more. This
+/// one is owed some 1.9 MB.
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_client_further_behind_than_a_megabyte_is_cut_off() {
-    let read = read_late("reads-too-late", 80_000);
-    assert!(read.is_err(), "held past a megabyte: {read:?}");
+    let late = read_late("reads-too-late", 1_900_000);
+    assert!(late.read.is_err(), "held past a megabyte: {:?}", late.read);
 }
 
-/// Open a window, ask for `asked` frame callbacks on it in one commit, read
-/// nothing for a moment while the compositor answers, then read: how many
-/// were answered, or what the connection said instead.
-fn read_late(name: &str, asked: usize) -> Result<usize, String> {
-    let session = Session::start(name, Backend::headless((800, 600)));
-    let (mut desk, mut queue, qh, _) = session.client();
-    desk.open_window(&qh, "late", "late");
-    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
-    let surface = desk.windows[0].wl_surface().clone();
-    let done = |desk: &Desk| {
-        desk.said_to(&surface)
-            .iter()
-            .filter(|said| **said == Said::Done)
-            .count()
-    };
-    let before = done(&desk);
+/// What a client that read late was owed, and what it read.
+struct Late {
+    /// The globals it asked to be told.
+    owed: usize,
+    /// How many it was told, or what the connection said instead.
+    read: Result<usize, String>,
+}
 
-    for _ in 0..asked {
-        surface.frame(&qh, surface.clone());
+/// Ask for registry after registry, each answered with every global there
+/// is, until what is owed comes to `bytes`; read nothing until the
+/// compositor has sent all of it, or cut the client off; then read.
+///
+/// Registries, not frame callbacks: each answer is some 2 KB, so a few
+/// hundred are enough. 80 000 frame callbacks cost wayland-client 20 s in a
+/// debug build, since it finds each new object's id by a scan from the
+/// first, and under load that outlasted the session (#142).
+///
+/// No timer can say when all of it is sent. Under load the compositor may
+/// not have read the asking yet, or may be halfway through answering, and
+/// a client that reads then is never far enough behind to be held or cut
+/// off (#142). A second client, a witness, can say. The compositor reads
+/// it only after all the asking, and answers each registry as it reads it,
+/// so once the witness's own is answered every answer is waiting for the
+/// late client, or it has been cut off. One round trip then reads them all,
+/// since each was waiting before it was asked.
+fn read_late(name: &str, bytes: usize) -> Late {
+    let session = Session::start(name, Backend::headless((800, 600)));
+    let connection = connect(session.socket());
+    let (globals, mut queue) =
+        registry_queue_init::<Asking>(&connection).expect("the late client's registry");
+    let qh = queue.handle();
+    // What one registry is told, and its size: each global is an event of
+    // its own, a header, its name, its interface's name, which gives its own
+    // length, ends in a NUL and is padded to four bytes, and its version.
+    let (told, size) = globals.contents().with_list(|list| {
+        let size: usize = list
+            .iter()
+            .map(|global| 20 + (global.interface.len() + 1).next_multiple_of(4))
+            .sum();
+        (list.len(), size)
+    });
+    let registries = bytes.div_ceil(size);
+    for _ in 0..registries {
+        connection.display().get_registry(&qh, ());
     }
-    surface.commit();
-    // The asking is 12 bytes a callback, more than the socket takes at once.
-    loop {
-        match queue.flush() {
-            Ok(()) => break,
-            Err(WaylandError::Io(error)) if error.kind() == ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) => panic!("could not ask: {error}"),
+    queue.flush().expect("could not ask");
+
+    let witness = connect(session.socket());
+    let (_, mut witnessed) =
+        registry_queue_init::<Asking>(&witness).expect("the witness's registry");
+
+    let mut late = Asking::default();
+    let read = queue
+        .roundtrip(&mut late)
+        .map(|_| late.told)
+        .map_err(|error| error.to_string());
+    // Still answering, so an error above was the late client cut off, not
+    // the compositor stopping.
+    witnessed
+        .roundtrip(&mut Asking::default())
+        .expect("the compositor stopped, so nothing was cut off");
+    session.stop(((queue, connection), (witnessed, witness)));
+    Late {
+        owed: registries * told,
+        read,
+    }
+}
+
+/// A client that only asks what globals there are, and counts what it is
+/// told on every registry but its first.
+#[derive(Default)]
+struct Asking {
+    told: usize,
+}
+
+impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Asking {
+    fn event(
+        _: &mut Self,
+        _: &wl_registry::WlRegistry,
+        _: wl_registry::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for Asking {
+    fn event(
+        asking: &mut Self,
+        _: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global { .. } = event {
+            asking.told += 1;
         }
     }
-    std::thread::sleep(Duration::from_millis(200));
-
-    let read = queue
-        .roundtrip(&mut desk)
-        .map(|_| done(&desk) - before)
-        .map_err(|error| error.to_string());
-    session.stop((desk, queue));
-    read
 }
