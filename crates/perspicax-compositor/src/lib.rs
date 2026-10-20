@@ -412,10 +412,20 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
             break Err(Error::Io(error));
         }
         state.popups.cleanup();
-        state.announce_layout();
         // Before the next dispatch can accept a client: see `reap_spawned`.
         state.reap_spawned();
         state.backend.reap();
+        // calloop runs idles only at the end of a dispatch, after its wait,
+        // and the clients were dispatched after that: what they just asked
+        // for once the loop is idle -- a monitor's next frame, a screencopy,
+        // a layout, a hold -- would wait out the next one, up to a frame on a
+        // still desktop (#130). Nothing is waited for here.
+        if let Err(error) = event_loop.dispatch(Some(Duration::ZERO), &mut state) {
+            break Err(Error::EventLoop(error.to_string()));
+        }
+        // After the idles: one of them follows the keyboard into a window's
+        // layout, and the shells hear of it in this turn.
+        state.announce_layout();
         // Each client of ours on its own, to see which have stopped reading;
         // then all of them, Xwayland included, as before.
         state.flush_each();

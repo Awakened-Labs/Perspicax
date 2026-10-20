@@ -12,8 +12,10 @@
 //!
 //! A transition is per monitor, on its [`Head`], so per output only the
 //! monitor that switched moves, and an unplugged one's goes with it. While
-//! one runs its head draws every frame ([`keep_moving`]). Once it ends, a
-//! quiet desktop costs nothing again.
+//! one runs its head draws every frame: each render asks to draw again, at
+//! the vblank, or at the refresh that stands in for one when a frame had
+//! nothing new ([`super::came`]). Once it ends, a quiet desktop costs nothing
+//! again.
 
 use std::time::Duration;
 
@@ -26,17 +28,11 @@ use smithay::{
         utils::CommitCounter,
     },
     output::Output,
-    reexports::{
-        calloop::{
-            LoopHandle,
-            timer::{TimeoutAction, Timer},
-        },
-        drm::control::crtc,
-    },
+    reexports::drm::control::crtc,
     utils::{Logical, Physical, Point, Rectangle, Size},
 };
 
-use super::{Elements, Head, Session, layer_elements, render, window_elements};
+use super::{Elements, Head, Session, layer_elements, window_elements};
 use crate::{
     backend::Running,
     framed::Framed,
@@ -130,7 +126,7 @@ impl Session {
 
 /// What the head on `crtc` draws of its transition at `now`: nothing once it
 /// is over. The other workspaces' windows are gathered only when the frame
-/// will be drawn: not behind the lock, nor while a frame is on its way.
+/// will be drawn: not behind the lock, nor while the seat is away.
 pub(super) fn prepare(state: &Compositor, crtc: crtc::Handle, now: u64) -> Prepared {
     let Running::Seat(session) = &state.backend else {
         return Prepared::default();
@@ -148,7 +144,7 @@ pub(super) fn prepare(state: &Compositor, crtc: crtc::Handle, now: u64) -> Prepa
     let Some(frame) = &prepared.frame else {
         return prepared;
     };
-    if !session.active || head.queued || state.lock.is_some() {
+    if !session.active || state.lock.is_some() {
         return prepared;
     }
     let output = &head.output;
@@ -321,35 +317,8 @@ fn snap(share: f64, side: i32) -> i32 {
     (share * f64::from(side) + 0.5).floor() as i32
 }
 
-/// Something on this head is moving: draw it again at the next chance. A
-/// frame queued brings a vblank, which draws again while the head is dirty.
-/// A frame with nothing new in it, or one that could not be queued, brings
-/// none, so a timer of one refresh stands in for it, one at a time.
-pub(super) fn keep_moving(head: &mut Head, handle: &LoopHandle<'static, Compositor>) {
-    head.dirty = true;
-    if head.queued || head.ticking {
-        return;
-    }
-    head.ticking = true;
-    let crtc = head.crtc;
-    let frame = frame_length(&head.output);
-    let armed = handle.insert_source(Timer::from_duration(frame), move |_, (), state| {
-        if let Running::Seat(session) = &mut state.backend
-            && let Some(head) = session.heads.iter_mut().find(|head| head.crtc == crtc)
-        {
-            head.ticking = false;
-            render(state, crtc);
-        }
-        TimeoutAction::Drop
-    });
-    if let Err(error) = armed {
-        tracing::warn!(%error, "a transition's next frame was not timed");
-        head.ticking = false;
-    }
-}
-
 /// How long one of the monitor's frames lasts, at its refresh rate.
-fn frame_length(output: &Output) -> Duration {
+pub(super) fn frame_length(output: &Output) -> Duration {
     match output.current_mode().map(|mode| mode.refresh) {
         Some(millihertz) if millihertz > 0 => {
             Duration::from_micros(1_000_000_000 / u64::from(millihertz.unsigned_abs()))

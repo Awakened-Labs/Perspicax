@@ -11,20 +11,26 @@
 //!
 //! # Frames
 //!
-//! Driven by vblank, not a timer. An output is in one of three states: idle,
-//! with a render *scheduled* for the next idle turn of the loop, or with a
-//! frame *queued* on the CRTC awaiting its vblank. A commit marks every output
-//! dirty and schedules the idle ones; a vblank renders again only if something
-//! was committed meanwhile. A quiet desktop therefore costs almost nothing --
-//! no wakeups at the refresh rate -- and a busy one is paced by the monitor.
+//! Driven by vblank, not a timer ([`Pace`]). A commit marks every output as
+//! owing a frame, and one waiting for nothing asks for the loop's next idle
+//! turn to render in. A frame queued on the CRTC awaits its vblank, and the
+//! vblank renders again only if something was committed meanwhile. A render
+//! with nothing new to show queues no frame and brings no vblank, so a timer
+//! of one refresh stands in for it. A quiet desktop therefore costs almost
+//! nothing -- no wakeups at the refresh rate -- and a busy one is paced by the
+//! monitor, whether or not what it draws shows anything new.
+//!
 //! Clients get their frame callbacks when their output is rendered, which is
-//! what makes them draw at the monitor's rate rather than the loop's. Which
+//! what makes them draw at the monitor's rate rather than the loop's. They
+//! get them from a render with nothing new in it too: a client covered by
+//! another, or one asking only for its callback, is drawn for at the
+//! monitor's rate as well, and not as fast as it can draw (#130). Which
 //! windows are on it is counted afresh at every render
 //! ([`Compositor::settle_outputs`]), so a window brought back onto a monitor
 //! is told it may draw as soon as it is drawn, whether or not another client
 //! has drawn since (#99).
 //!
-//! The one timer is a safety net, once a second ([`overdue`]): a window no
+//! The other timer is a safety net, once a second ([`overdue`]): a window no
 //! render told -- parked, rolled up to its titlebar, or on a monitor whose
 //! frame never came back -- is told anyway once it has waited that long, so
 //! no client waits forever.
@@ -73,6 +79,7 @@ use smithay::{
         calloop::{
             LoopHandle,
             channel::{self, Sender},
+            timer::{TimeoutAction, Timer},
         },
         drm::control::{Device as _, ModeTypeFlags, connector, crtc},
         input::Libinput,
@@ -85,7 +92,11 @@ use smithay::{
     },
 };
 
-use super::{Running, connectors, cursor::Cursor};
+use super::{
+    Running, connectors,
+    cursor::Cursor,
+    pace::{Cue, Drew, Pace},
+};
 use crate::{
     Error,
     backdrop::{self, Arrived},
@@ -247,19 +258,13 @@ struct Head {
     /// The modes the monitor offers, and which it is showing.
     modes: Vec<perspicax_policy::HeadMode>,
     mode: usize,
-    /// Something was committed since this output last rendered.
-    dirty: bool,
-    /// A render is waiting for the loop's next idle turn.
-    scheduled: bool,
-    /// A frame is on the CRTC, awaiting its vblank.
-    queued: bool,
+    /// When it draws next. See [`came`].
+    pace: Pace,
     /// A workspace switch being drawn here. See [`moving`].
     moving: Option<moving::Moving>,
     /// A wipe's bar, by the id it keeps from frame to frame, so the damage
     /// tracker sees one bar moving down rather than a new one each time.
     bar: Id,
-    /// A timer will draw the next frame of a transition, as no vblank will.
-    ticking: bool,
 }
 
 impl Session {
@@ -452,11 +457,10 @@ impl Session {
     /// surface overlaps.
     pub(crate) fn request_frames(&mut self) {
         for head in &mut self.heads {
-            head.dirty = true;
-            if !head.queued && !head.scheduled {
-                head.scheduled = true;
+            if head.pace.changed() {
                 let crtc = head.crtc;
-                self.handle.insert_idle(move |state| render(state, crtc));
+                self.handle
+                    .insert_idle(move |state| came(state, crtc, Cue::Turn));
             }
         }
     }
@@ -931,12 +935,9 @@ fn light(
         drm,
         modes: offered,
         mode: at,
-        dirty: true,
-        scheduled: false,
-        queued: false,
+        pace: Pace::default(),
         moving: None,
         bar: Id::new(),
-        ticking: false,
     }))
 }
 
@@ -957,9 +958,58 @@ impl Lit {
     }
 }
 
+/// What the monitor on `crtc` was waiting for came: draw it, if anything
+/// changed meanwhile. The one way a monitor draws -- at the loop's idle turn
+/// after a change, at the vblank of the frame it queued, or a refresh after
+/// one that queued nothing -- so its [`Pace`] sees every render.
+fn came(state: &mut Compositor, crtc: crtc::Handle, cue: Cue) {
+    let Running::Seat(session) = &mut state.backend else {
+        return;
+    };
+    let Some(head) = session.heads.iter_mut().find(|head| head.crtc == crtc) else {
+        return;
+    };
+    if !head.pace.came(cue) {
+        return;
+    }
+    let (drew, again) = render(state, crtc);
+    let Running::Seat(session) = &mut state.backend else {
+        return;
+    };
+    let Some(head) = session.heads.iter_mut().find(|head| head.crtc == crtc) else {
+        return;
+    };
+    if head.pace.drew(drew, again) {
+        time_a_refresh(head, &session.handle);
+    }
+}
+
+/// Stand in for the vblank a render that queued no frame will not bring:
+/// the monitor on `head` may draw again once a refresh has passed. Its
+/// clients were told they may draw again all the same, and one whose drawing
+/// changes nothing on screen would otherwise be drawn for, and told again,
+/// as fast as it can draw.
+fn time_a_refresh(head: &mut Head, handle: &LoopHandle<'static, Compositor>) {
+    let crtc = head.crtc;
+    let refresh = Timer::from_duration(moving::frame_length(&head.output));
+    let armed = handle.insert_source(refresh, move |_, (), state| {
+        came(state, crtc, Cue::Refresh);
+        TimeoutAction::Drop
+    });
+    if let Err(error) = armed {
+        tracing::warn!(output = head.output.name(), %error, "the next frame was not timed");
+        // Not waited for, then: what is owed is drawn with the next change.
+        if head.pace.came(Cue::Refresh) {
+            head.pace.drew(Drew::Nothing, false);
+        }
+    }
+}
+
 /// Render one output, queue it for scanout if anything changed, and let the
-/// clients on it draw again.
-fn render(state: &mut Compositor, crtc: crtc::Handle) {
+/// clients on it draw again. What it drew, and whether it should draw again
+/// at the next chance whatever changes: a workspace switch being drawn, or a
+/// light coming up or going out.
+fn render(state: &mut Compositor, crtc: crtc::Handle) -> (Drew, bool) {
     // Windows move under a still pointer, closed by a key, brought forward,
     // switched away or grown, and nothing tells the pointer: what is lit
     // follows what is under it now.
@@ -1017,12 +1067,11 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         ..
     } = state;
     let Running::Seat(session) = backend else {
-        return;
+        return (Drew::Nothing, false);
     };
     let Session {
         renderer,
         heads,
-        handle,
         active,
         cursor,
         preview,
@@ -1032,15 +1081,12 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
         ..
     } = &mut **session;
     let Some(head) = heads.iter_mut().find(|head| head.crtc == crtc) else {
-        return;
+        return (Drew::Nothing, false);
     };
-    head.scheduled = false;
-    if !*active || head.queued {
-        // Asleep, or a frame is already on the way; the vblank (or the
-        // resume) comes back here once it can do something.
-        return;
+    if !*active {
+        // Asleep: the resume draws everything again.
+        return (Drew::Nothing, false);
     }
-    head.dirty = false;
     if prepared.frame.is_none() {
         // Over, or none begun: the settled workspace, drawn as it is.
         head.moving = None;
@@ -1123,7 +1169,7 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
             },
             None => {
                 tracing::warn!(output = head.output.name(), "output is not mapped");
-                return;
+                return (Drew::Nothing, false);
             }
         },
     }
@@ -1137,10 +1183,9 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
             .and_then(|image| image.element(renderer))
             .map(Elements::Image),
     );
-    match head.drm.render_frame(renderer, &elements, ground, PLANES) {
+    let drew = match head.drm.render_frame(renderer, &elements, ground, PLANES) {
         Ok(frame) if !frame.is_empty => match head.drm.queue_frame(()) {
             Ok(()) => {
-                head.queued = true;
                 if let Some(since) = reset.take() {
                     tracing::info!(
                         output = head.output.name(),
@@ -1148,15 +1193,19 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
                         "the first frame is queued"
                     );
                 }
+                Drew::Queued
             }
-            Err(error) => tracing::warn!(output = head.output.name(), %error, "frame not queued"),
+            Err(error) => {
+                tracing::warn!(output = head.output.name(), %error, "frame not queued");
+                Drew::Unqueued
+            }
         },
-        Ok(_) => {}
-        Err(error) => tracing::warn!(output = head.output.name(), %error, "frame not rendered"),
-    }
-    if (prepared.frame.is_some() || animating) && lock.is_none() {
-        moving::keep_moving(head, handle);
-    }
+        Ok(_) => Drew::Unqueued,
+        Err(error) => {
+            tracing::warn!(output = head.output.name(), %error, "frame not rendered");
+            Drew::Unqueued
+        }
+    };
 
     // Whether or not anything changed: a client waiting on a callback for a
     // commit that damaged nothing still has to be told it may draw again. An
@@ -1183,6 +1232,10 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) {
     if let CursorImageStatus::Surface(surface) = status {
         send_frames_surface_tree(surface, &output, now, None, |_, _| Some(output.clone()));
     }
+    (
+        drew,
+        (prepared.frame.is_some() || animating) && lock.is_none(),
+    )
 }
 
 /// What `stack` shows, front to back, at `scale`: each layer surface and
@@ -1266,10 +1319,7 @@ fn vblank(state: &mut Compositor, crtc: crtc::Handle) {
     if let Err(error) = head.drm.frame_submitted() {
         tracing::warn!(output = head.output.name(), %error, "frame not submitted");
     }
-    head.queued = false;
-    if head.dirty {
-        render(state, crtc);
-    }
+    came(state, crtc, Cue::Vblank);
 }
 
 /// Another VT took the seat. Touch no device until it comes back.
@@ -1311,8 +1361,7 @@ fn resume(state: &mut Compositor) {
     // A Logo key let go on another VT never came back up here.
     session.logo_tap = perspicax_policy::LogoTap::default();
     for head in &mut session.heads {
-        // Whatever was queued when we left will never see its vblank.
-        head.queued = false;
+        head.pace.resumed();
     }
     rescan(state);
 }
