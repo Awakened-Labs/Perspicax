@@ -4,7 +4,8 @@
 //! A frame of the monitor, copied into the tool's own shared memory, shows a
 //! window's colour where the window is; a region shows just that part, and
 //! one without area fails. A buffer that is not what the frame described is
-//! a protocol error. A copy that waits for damage waits for a commit. While
+//! a protocol error. A copy that waits for damage waits for a commit, and is
+//! ready by the time the commit has been answered, not a frame later. While
 //! the session is locked every copy fails, and with `[protocols] screencopy
 //! = "off"` there is no global to ask.
 //!
@@ -22,11 +23,12 @@
 
 mod common;
 
-use common::{Desk, Session, advertised, around, copy_all, rgba, until};
+use common::{Desk, Session, WINDOW, advertised, around, copy_all, rgba, until};
 use perspicax_compositor::{Backend, Host, Virtual};
 use perspicax_index::{Action as Verb, HostFacts};
 use perspicax_node::Rect;
 use perspicax_policy::{Access, Protocol, Rule, Shape};
+use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::{EventQueue, QueueHandle, globals::GlobalList};
 
 const BLUE: u32 = 0xff33_6699;
@@ -220,6 +222,51 @@ fn a_copy_with_damage_waits_for_something_to_change() {
     desk.open_coloured(&qh, "blue", "blue", BLUE);
     until(&mut queue, &mut desk, |desk| desk.grabs[grab].ready);
     assert!(desk.grabs[grab].damaged);
+
+    session.stop((desk, queue));
+}
+
+/// The commit and the round trip's sync are taken in together, and the copy
+/// is made before the compositor waits again: what a client's requests ask
+/// for once the loop is idle -- this copy, or a monitor's next frame -- is
+/// not left for whatever wakes the loop next, up to a frame later (#130).
+/// One round trip, and never `until`, which would wait its way to a pass.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_copy_with_damage_is_ready_in_the_round_trip_that_brought_the_change() {
+    let session = session("screencopy-damage-at-once", Access::open());
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.open_coloured(&qh, "blue", "blue", BLUE);
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    let area = area(&session.wait_for(|facts| facts.surfaces().iter().any(|s| s.mapped)));
+    desk.bind_screencopy(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| !desk.outputs_empty());
+    let surface = desk.windows[0].wl_surface().clone();
+    let (x, y) = (
+        ((area.x0 + area.x1) / 2.0) as usize,
+        ((area.y0 + area.y1) / 2.0) as usize,
+    );
+
+    // More than once: a compositor that left the copy for its next turn
+    // passes whenever that turn beats this thread to the answer.
+    for colour in [RED, BLUE, RED, BLUE, RED] {
+        let grab = desk.grab(&qh, None, false);
+        until(&mut queue, &mut desk, |desk| desk.grabs[grab].buffer_done);
+        desk.copy(grab, 0, true);
+        queue.roundtrip(&mut desk).expect("dispatch");
+        queue.roundtrip(&mut desk).expect("dispatch");
+        assert!(!desk.grabs[grab].ready, "nothing has changed yet");
+
+        desk.paint(&surface, WINDOW, colour);
+        surface.commit();
+        queue.roundtrip(&mut desk).expect("the commit answered");
+        assert!(
+            desk.grabs[grab].ready,
+            "copied in the turn that took the commit in"
+        );
+        assert!(desk.grabs[grab].damaged);
+        assert_eq!(desk.grabbed(grab, x, y), rgba(colour), "what it committed");
+    }
 
     session.stop((desk, queue));
 }
