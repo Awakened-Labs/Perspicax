@@ -35,11 +35,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::{Session, heard, until};
+use common::{Session, heard, menu_with_the_keyboard, until};
 use perspicax_compositor::{
     ActError, Backend, Command, Config, Error, Facts, Host, Requests, Stop,
 };
-use perspicax_index::{Action as Verb, HostFacts, SurfaceFacts, judge};
+use perspicax_index::{Action as Verb, HostFacts, PointerButton, SurfaceFacts, judge};
 use perspicax_node::{Origin, Rect, Visibility, X11Basis};
 use perspicax_policy::{Action, Button, Focus, FocusModel, Mods, Opacity};
 use smithay_client_toolkit::shell::WaylandSurface as _;
@@ -2931,6 +2931,50 @@ fn an_agent_cannot_close_an_x11_menu() {
     assert!(x11.viewable(menu_window), "the menu was destroyed");
 
     x11.stop();
+}
+
+/// Issue #157: Xwayland is a client of its own. So while a Wayland window's
+/// menu holds the pointer and keyboard, an agent's click on an X11 window is
+/// refused, naming the menu, as one on any other application is: the press
+/// would close the menu under the person.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_agent_cannot_click_an_x11_window_past_a_wayland_menu() {
+    let x11 = X11::start(
+        "x11-past-a-menu",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    x11.open("behind");
+    let behind = id_of(&x11, "behind");
+    // A Wayland window opened after it, with the keyboard, and its menu.
+    let (mut desk, mut queue, qh, globals) = x11.session.client();
+    desk.bind_pointer(&globals, &qh);
+    let ear = desk.bind_keyboard(&globals, &qh);
+    desk.open_window(&qh, "page", "page");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    let page = id_of(&x11, "page");
+    let _menu = menu_with_the_keyboard(&x11.session, &mut desk, &mut queue, &qh, &ear, page);
+    let menu = x11
+        .facts()
+        .surfaces()
+        .iter()
+        .find(|surface| surface.mapped && surface.hangs_from() == Some(page))
+        .expect("the menu, described")
+        .id;
+    let host = Host::new(&x11.session.facts, &x11.session.requests);
+
+    let click = Verb::Click {
+        at: Rect::new(10.0, 10.0, 20.0, 20.0),
+        button: PointerButton::Left,
+    };
+    assert_eq!(
+        host.act(behind, &click).map(|_| ()),
+        Err(ActError::MenuOpen { popup: menu })
+    );
+    queue.roundtrip(&mut desk).expect("a round trip");
+    assert_eq!(desk.popups_done, 0, "the menu is still open");
+
+    x11.session.stop((desk, queue));
 }
 
 /// Issue #181: a window that places itself is not the window manager's to
