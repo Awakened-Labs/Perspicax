@@ -30,12 +30,12 @@ use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::Button;
 use smithay::{
     backend::input::{Axis, AxisSource, ButtonState, KeyState},
-    desktop::LayerSurface,
+    desktop::{LayerSurface, find_popup_root_surface},
     input::{
         keyboard::{FilterResult, KeyboardHandle, Keycode, Keysym, xkb},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    reexports::wayland_server::{Resource as _, protocol::wl_surface::WlSurface},
     utils::{Logical, Rectangle, SERIAL_COUNTER},
 };
 
@@ -50,6 +50,18 @@ enum Target {
     Popup(Box<crate::facts::PlacedPopup>),
 }
 
+impl Target {
+    /// The surface input aimed here goes to. An X11 window's is the one
+    /// Xwayland gave it: `None` until it has.
+    fn surface(&self) -> Option<WlSurface> {
+        match self {
+            Self::Window(window) => shell::surface_of(window),
+            Self::Layer(layer, _) => Some(layer.wl_surface().clone()),
+            Self::Popup(placed) => Some(placed.popup.wl_surface().clone()),
+        }
+    }
+}
+
 /// Where a pointer event goes: a point in global space, on a surface whose
 /// own origin is at `origin` in global space.
 struct Aim {
@@ -62,8 +74,9 @@ struct Aim {
 ///
 /// These sit below `perspicax_index::Refusal`, which answers the different
 /// question of whether an act should be *allowed*. Everything here is a
-/// statement about this compositor's ability to carry it out, but for
-/// [`ActError::FocusElsewhere`]: a refusal that only this loop can make.
+/// statement about this compositor's ability to carry it out, but for the
+/// refusals that only this loop can make: [`ActError::FocusElsewhere`],
+/// [`ActError::PointerCaptured`] and [`ActError::MenuOpen`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ActError {
     /// No surface with this id is mapped. It was destroyed, or never existed.
@@ -130,6 +143,20 @@ pub enum ActError {
     /// act. `perspicax` hands it to the agent as `Refusal::PointerCaptured`.
     #[error("window {} holds the pointer: nothing was dispatched", by.0)]
     PointerCaptured { by: SurfaceId },
+    /// A window's menu holds the pointer and keyboard -- one the person
+    /// opened, say -- and the act would go past it. Nothing was dispatched:
+    /// smithay's grab would have closed the menu under the person for a
+    /// click on another application, let a scroll there reach nothing, and
+    /// ignored the keyboard given to anything but the menu. `popup` is the
+    /// menu holding them, the submenu when one is open. Choosing from it,
+    /// clicking anywhere in its own application, and focusing its window,
+    /// still go ahead, as they do for the person (#157).
+    ///
+    /// A refusal, like [`ActError::FocusElsewhere`], decided here because
+    /// only this loop knows what holds the pointer in the same turn as the
+    /// act. `perspicax` hands it to the agent as `Refusal::MenuOpen`.
+    #[error("menu {} holds the pointer and keyboard: nothing was dispatched", popup.0)]
+    MenuOpen { popup: SurfaceId },
 }
 
 /// What the compositor did, as it alone can report it.
@@ -365,6 +392,13 @@ impl Compositor {
                 }),
         }
         .ok_or(ActError::NoSuchSurface(surface.0))?;
+        // A window's menu holding the pointer and keyboard keeps them until
+        // it closes: past it, an act would close it under the person or
+        // reach nothing. After the hold, which outlasts any menu and refuses
+        // every click: told of a menu, an agent can always choose from it.
+        if let Some(popup) = self.menu_in_the_way(action, &target) {
+            return Err(ActError::MenuOpen { popup });
+        }
         let focus_before = self.keyboard_owner();
 
         match (action, &target) {
@@ -391,6 +425,41 @@ impl Compositor {
             focus_before,
             focus_after: self.keyboard_owner(),
         })
+    }
+
+    /// The menu holding the pointer and keyboard, by its id, when `action`
+    /// would go past it. By smithay's own rule, a press on any other
+    /// client's surface closes the menu, and a scroll there reaches nothing;
+    /// the menu's own application, its window and its menus, takes the
+    /// pointer as it does the person's. The keyboard goes only to the menu
+    /// holding it: given to anything else, smithay ignores it, and a tab
+    /// brought forward would be raised over the menu, or put its window
+    /// away and the menu with it. `None` when no menu holds them,
+    /// [`Compositor::held_menu_root`]'s answer: one dismissed but not yet
+    /// destroyed holds nothing.
+    fn menu_in_the_way(&self, action: &Action, target: &Target) -> Option<SurfaceId> {
+        let root = self.held_menu_root()?;
+        let past = match (action, target) {
+            (Action::Click { .. } | Action::Scroll { .. }, _) => !target
+                .surface()
+                .is_some_and(|reached| reached.id().same_client_as(&root.id())),
+            // Its own window is already the one in use, and the front of its
+            // group (#97); the menu holding the keyboard has it already.
+            (Action::Focus | Action::Forward, Target::Window(window)) => {
+                !shell::is_toplevel_of(window, &root)
+            }
+            (Action::Focus | Action::Forward, Target::Popup(placed)) => {
+                !find_popup_root_surface(&placed.popup).is_ok_and(|from| from == root)
+            }
+            (Action::Focus | Action::Forward, Target::Layer(..)) => true,
+            (Action::Type { .. } | Action::Close, _) => false,
+        };
+        if !past {
+            return None;
+        }
+        // The keyboard is on the menu holding it, as `FocusElsewhere` names it.
+        self.keyboard_focus()
+            .and_then(|focus| self.popup_id(&focus))
     }
 
     /// Give this surface the keyboard: a window, or a layer surface that
@@ -429,41 +498,35 @@ impl Compositor {
     /// event: its centre in global space, on which surface, with that
     /// surface's origin.
     fn aim(&self, target: &Target, at: Rect) -> Option<Aim> {
-        match target {
-            Target::Window(window) => {
-                let (global, origin) = self.point_in(window, at);
-                Some(Aim {
-                    global,
-                    origin,
-                    surface: crate::shell::surface_of(window)?,
-                })
-            }
+        let surface = target.surface()?;
+        let (global, origin) = match target {
+            Target::Window(window) => self.point_in(window, at),
             // A menu's rect is in its window geometry, which begins its
             // geometry's offset into its surface, where smithay draws it.
             Target::Popup(placed) => {
                 let origin = (placed.buffer_origin.x, placed.buffer_origin.y);
                 let local = centre(at);
-                Some(Aim {
-                    global: (
+                (
+                    (
                         origin.0 + f64::from(placed.geometry.loc.x) + local.0,
                         origin.1 + f64::from(placed.geometry.loc.y) + local.1,
                     ),
                     origin,
-                    surface: placed.popup.wl_surface().clone(),
-                })
+                )
             }
             // A layer surface has no shadow and no frame: it is its own
             // rectangle, placed by the layer map.
-            Target::Layer(layer, placed) => {
+            Target::Layer(_, placed) => {
                 let origin = (f64::from(placed.loc.x), f64::from(placed.loc.y));
                 let local = centre(at);
-                Some(Aim {
-                    global: (origin.0 + local.0, origin.1 + local.1),
-                    origin,
-                    surface: layer.wl_surface().clone(),
-                })
+                ((origin.0 + local.0, origin.1 + local.1), origin)
             }
-        }
+        };
+        Some(Aim {
+            global,
+            origin,
+            surface,
+        })
     }
 
     /// Move the pointer onto a rect and press a button on it.

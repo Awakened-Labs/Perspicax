@@ -218,7 +218,7 @@ pub struct Refused {
     /// `other_workspace`, `inactive_tab`, `rolled_up`, `not_showing`,
     /// `unjudged`, `menu_unplaced`, `unplaced`, `unattributed`, `stale`,
     /// `no_capability`, `ambiguous_selector`, `not_found`, `not_a_window`,
-    /// `focus_elsewhere`, `pointer_captured`.
+    /// `focus_elsewhere`, `pointer_captured`, `menu_open`.
     pub kind: &'static str,
     /// The refusal in words.
     pub message: String,
@@ -258,6 +258,10 @@ pub struct Refused {
     /// node's window has open and that perspicax has not yet matched to its
     /// application's nodes. It usually clears within moments, once the
     /// application has been read since the menu opened; resolve again then.
+    ///
+    /// `menu_open`: the menu holding the pointer and keyboard, the submenu
+    /// when one is open, a `popup` in `window_list`. Choose from it, act on
+    /// its own application, or wait for it to close.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub popup: Option<u64>,
 }
@@ -285,6 +289,7 @@ impl From<&Refusal> for Refused {
                 Refusal::NotAWindow => "not_a_window",
                 Refusal::FocusElsewhere { .. } => "focus_elsewhere",
                 Refusal::PointerCaptured { .. } => "pointer_captured",
+                Refusal::MenuOpen { .. } => "menu_open",
             },
             message: refusal.to_string(),
             occluded_by: None,
@@ -306,7 +311,9 @@ impl From<&Refusal> for Refused {
                 refused.focused = focused.map(|surface| surface.0);
             }
             Refusal::PointerCaptured { by } => refused.captured_by = Some(by.0),
-            Refusal::MenuUnplaced { popup } => refused.popup = Some(popup.0),
+            Refusal::MenuUnplaced { popup } | Refusal::MenuOpen { popup } => {
+                refused.popup = Some(popup.0);
+            }
             _ => {}
         }
         refused
@@ -1142,6 +1149,22 @@ mod tests {
             serde_json::to_value(Refused::from(&unplaced)).unwrap(),
             serde_json::json!({"kind": "menu_unplaced",
             "message": "node belongs to a menu, and the open menu 9 has not been placed yet",
+            "popup": 9})
+        );
+    }
+
+    /// A menu holding the pointer and keyboard is named, so an agent can find
+    /// it in `window_list`, choose from it, or say what it is waiting for.
+    #[test]
+    fn menu_open_names_the_menu_holding_the_pointer() {
+        let held = Refusal::MenuOpen {
+            popup: SurfaceId(9),
+        };
+        assert_eq!(
+            serde_json::to_value(Refused::from(&held)).unwrap(),
+            serde_json::json!({"kind": "menu_open",
+            "message": "the open menu 9 holds the pointer and keyboard: choose from it, \
+                        or wait for it to close",
             "popup": 9})
         );
     }

@@ -171,6 +171,17 @@ pub enum Refusal {
     /// The host decides this too, for the reason it decides
     /// [`FocusElsewhere`](Refusal::FocusElsewhere).
     PointerCaptured { by: SurfaceId },
+    /// A window's menu holds the pointer and keyboard -- one the person
+    /// opened, say -- and the act would go past it: a click or a scroll on
+    /// another application, which would close the menu under the person or
+    /// reach nothing, or focus on anything but that window and its menus,
+    /// which the menu would keep from it (issue #157). `popup` is the menu
+    /// holding them. Choose from it, act on its own application, or wait for
+    /// it to close.
+    ///
+    /// The host decides this too, for the reason it decides
+    /// [`FocusElsewhere`](Refusal::FocusElsewhere).
+    MenuOpen { popup: SurfaceId },
 }
 
 impl core::fmt::Display for Refusal {
@@ -234,6 +245,12 @@ impl core::fmt::Display for Refusal {
                 f,
                 "surface {} holds the pointer, and only the person can take it back",
                 by.0
+            ),
+            Self::MenuOpen { popup } => write!(
+                f,
+                "the open menu {} holds the pointer and keyboard: choose from it, \
+                 or wait for it to close",
+                popup.0
             ),
         }
     }
@@ -735,6 +752,18 @@ mod tests {
         assert_eq!(
             held.to_string(),
             "surface 4 holds the pointer, and only the person can take it back"
+        );
+    }
+
+    #[test]
+    fn a_menu_holding_the_pointer_and_keyboard_is_refused_naming_it() {
+        let held = Refusal::MenuOpen {
+            popup: SurfaceId(9),
+        };
+        assert_eq!(
+            held.to_string(),
+            "the open menu 9 holds the pointer and keyboard: choose from it, \
+             or wait for it to close"
         );
     }
 

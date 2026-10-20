@@ -349,7 +349,12 @@ impl Perspicax {
                        -- so `click` and `scroll` anywhere, and `focus` or `window_focus` on \
                        any other window, would take it from under the person: only they can take it back, by \
                        leaving the game, and waiting for a pause will not help. The game \
-                       itself may still be focused and typed into.",
+                       itself may still be focused and typed into. `menu_open` means a \
+                       window's menu, named as `popup`, holds the pointer and keyboard -- one \
+                       the person opened, say -- so `click` and `scroll` on any other \
+                       application would close it under them or reach nothing, and `focus` on \
+                       anything but that window and its menus would be kept from it: choose \
+                       from the menu, act on its own application, or wait for it to close.",
         annotations(
             title = "Act on a control",
             read_only_hint = false,
@@ -426,7 +431,9 @@ impl Perspicax {
                        screen: a group on a workspace that is not showing is refused as \
                        `other_workspace`, a minimized one as `unmapped`, and one rolled up to \
                        its titlebar as `rolled_up`. Bringing a tab \
-                       forward hides the tab that was in front, so it needs consent for both.",
+                       forward hides the tab that was in front, so it needs consent for both. \
+                       While a window's menu holds the pointer and keyboard, any other tab is \
+                       refused as `menu_open`, naming the menu as `popup`: wait for it to close.",
         annotations(
             title = "Bring a tab forward",
             read_only_hint = false,
@@ -459,7 +466,9 @@ impl Perspicax {
                        none of it showing it is refused as `occluded`, `occluded_by` naming the \
                        window in front, and with none of it on a monitor as `off_screen`. \
                        `pointer_captured` means a game holds the pointer, and only the game \
-                       can be given the keyboard until the person leaves it.\n\n\
+                       can be given the keyboard until the person leaves it. `menu_open` means \
+                       a window's menu, named as `popup`, holds the keyboard, and only that \
+                       window can be given it until the menu closes.\n\n\
                        THE RECEIPT IS EVIDENCE, NOT A VERDICT. `focus_landed` says whether the \
                        keyboard is on the window afterwards, and can be false with nothing \
                        refused: while a launcher holds every key, no window takes it. \
@@ -1012,6 +1021,9 @@ mod tests {
         assert!(describing("act").contains("menu_unplaced"));
         assert!(describing("window_list").contains("kind: popup"));
         assert!(describing("act").contains("pointer_captured"));
+        assert!(describing("act").contains("menu_open"));
+        assert!(describing("window_focus").contains("menu_open"));
+        assert!(describing("tab_forward").contains("menu_open"));
         assert!(describing("act").contains("rolled_up"));
         assert!(describing("window_list").contains("shaded"));
         assert!(describing("tab_forward").contains("rolled_up"));
