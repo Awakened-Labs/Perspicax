@@ -15,6 +15,16 @@
 //! A window can go while a grab still holds it: closed, or unmapped by its
 //! client. The grab then goes on to the release with nothing in it: the
 //! window is not moved, not told, and not put back.
+//!
+//! A window being moved or resized is in the person's hand ([`Hand`]), and a
+//! switch of workspace takes it along. Anything else that takes it off
+//! screen, a minimize or its tab put behind another, takes it out of the
+//! hand, and a grab never puts back what something else took away: it moves,
+//! sizes and maps only a window still on screen. A resize is still told it
+//! is over, so its client stops resizing. A tab being dragged cannot come
+//! along without leaving its group behind, so a switch that parks it calls
+//! the drag off: it is not dropped, and waits with its group where it was
+//! picked up, as it does when the session locks.
 
 use perspicax_policy::{Edges, Rect, dragged, resize};
 use smithay::{
@@ -298,10 +308,20 @@ impl TabDragGrab {
         }
     }
 
-    /// Whether the tab is still one of the person's: on screen, or parked.
-    /// One that went mid-drag is never mapped again by it, nor dropped.
+    /// Whether the tab is still in the person's hand. Picked up, it is in
+    /// front of its group and on screen: one a switch parked with its
+    /// workspace, or that was minimized or went, has left the hand, and is
+    /// neither moved by it nor dropped. Before that it may be behind its
+    /// group, and so parked, but only a group on screen is picked from:
+    /// one parked by a switch, or a tab that went, is not brought forward.
     fn holds(&self, data: &Compositor) -> bool {
-        data.has_window(&self.tab)
+        let shown = |window: &Framed| data.space.element_location(window).is_some();
+        if self.home.is_some() {
+            return shown(&self.tab);
+        }
+        super::id_of(&self.tab)
+            .and_then(|id| data.any_window(data.tabs.front(id)))
+            .is_some_and(|front| shown(&front))
     }
 }
 
@@ -355,13 +375,16 @@ impl PointerGrab<Compositor> for TabDragGrab {
         handle.button(data, event);
         if handle.current_pressed().is_empty() {
             let at = handle.current_location();
-            // Taken before the grab is unset, which puts back a tab that
-            // was never dropped.
-            let home = self.home.take();
+            // One still in hand is dropped, its home taken first, since the
+            // grab being unset puts back a tab never dropped. One out of
+            // hand keeps its home, and is put back.
+            let dropped = if self.holds(data) {
+                self.home.take()
+            } else {
+                None
+            };
             handle.unset_grab(self, data, event.serial, event.time, true);
-            if let Some(home) = home
-                && self.holds(data)
-            {
+            if let Some(home) = dropped {
                 data.drop_tab(&self.tab, at, home);
             }
         }
@@ -373,18 +396,23 @@ impl PointerGrab<Compositor> for TabDragGrab {
         &self.start
     }
 
-    /// Ended with the tab still in hand, before its button came up: it is
-    /// dropped nowhere, and goes back to where it was picked up. Not if
-    /// something took it off screen meanwhile.
+    /// Ended before its button came up, or with the tab out of hand: it is
+    /// dropped nowhere, and goes back to where it was picked up. One parked
+    /// meanwhile waits there with its group, to be shown there; one that
+    /// went is left be.
     fn unset(&mut self, data: &mut Compositor) {
         data.tab_drop = None;
         let Some(home) = self.home.take() else {
             return;
         };
-        if data.space.element_location(&self.tab).is_none() {
+        if data.space.element_location(&self.tab).is_some() {
+            data.space.map_element(self.tab.clone(), home, false);
+        } else if data.has_window(&self.tab) {
+            placement(&self.tab, |placement| placement.parked = Some(home));
+            data.publish_facts();
+        } else {
             return;
         }
-        data.space.map_element(self.tab.clone(), home, false);
         #[cfg(feature = "xwayland")]
         if let Some(x11) = self.tab.x11_surface() {
             let _ = x11.configure(smithay::utils::Rectangle::new(home, x11.geometry().size));
