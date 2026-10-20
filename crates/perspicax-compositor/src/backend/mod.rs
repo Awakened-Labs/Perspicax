@@ -17,6 +17,8 @@
 mod connectors;
 #[cfg(any(feature = "seat", feature = "capture"))]
 pub(crate) mod cursor;
+#[cfg(any(feature = "seat", test))]
+mod pace;
 pub(crate) mod pointer;
 #[cfg(feature = "seat")]
 pub(crate) mod seat;
