@@ -259,9 +259,10 @@ pub struct Compositor {
     pub(crate) layout_memory: perspicax_policy::LayoutMemory<SurfaceId>,
     /// The names the keyboard's keymap was compiled from.
     pub(crate) keymap: crate::Keymap,
-    /// The window being moved with the pointer, while it is: an edge flip
-    /// takes it along to the next workspace.
-    pub(crate) dragging: Option<Framed>,
+    /// The window being moved or resized with the pointer, while it is:
+    /// every switch takes it along to the workspace its monitor shows, and an
+    /// edge flip carries one being moved.
+    pub(crate) hand: Option<shell::Hand>,
     /// How many times the pointer has jumped rather than moved: carried round
     /// the desk by an edge flip, or left where it was while the monitors
     /// moved under it. A move that sees this change knows its next motion is
@@ -445,7 +446,7 @@ impl Compositor {
             tabs: perspicax_policy::Groups::default(),
             layout_memory: perspicax_policy::LayoutMemory::default(),
             keymap: crate::Keymap::default(),
-            dragging: None,
+            hand: None,
             desk_jumps: 0,
             mouse,
             clicks: perspicax_policy::Clicks::default(),

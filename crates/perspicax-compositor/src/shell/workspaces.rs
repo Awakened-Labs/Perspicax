@@ -86,6 +86,11 @@ impl Compositor {
             .any(|kept| kept == window)
     }
 
+    /// The window in the person's hand: being moved or resized.
+    pub(crate) fn in_hand(&self) -> Option<&Framed> {
+        self.hand.as_ref().map(super::Hand::window)
+    }
+
     /// A window was put somewhere new: dragged, sent to another monitor, or
     /// rescued from one that was unplugged. Per output, it joins the
     /// workspace its new monitor shows, so it stays in front of the person
@@ -102,10 +107,10 @@ impl Compositor {
     /// a window closes, and so it does from a menu of that window's, which
     /// closes.
     ///
-    /// The window being dragged is put on whatever its monitor shows now
-    /// before it is judged: a switch with a window in hand takes it along, by
-    /// a key, a pager or an edge alike, rather than parking it under the
-    /// person's hand.
+    /// The window being moved or resized is put on whatever its monitor
+    /// shows now before it is judged: a switch with a window in hand takes it
+    /// along, by a key, a pager or an edge alike, rather than parking it under
+    /// the person's hand.
     pub(crate) fn show_what_belongs(&mut self) {
         let windows: Vec<Framed> = self.space.elements().chain(&self.parked).cloned().collect();
         for window in windows {
@@ -115,7 +120,7 @@ impl Compositor {
             let monitor = self.monitor_of(&window);
             let present = !Self::is_minimized(&window) && self.tabs.is_front(id);
             if present
-                && self.dragging.as_ref() == Some(&window)
+                && self.in_hand() == Some(&window)
                 && let Some(output) = &monitor
             {
                 self.workspaces.hold(id, output);
@@ -222,7 +227,7 @@ impl Compositor {
         };
         if !matches!(self.workspaces.home(id), Some(Home::On(_)))
             || carrying == Some(id)
-            || self.dragging.as_ref() == Some(window)
+            || self.in_hand() == Some(window)
         {
             return true;
         }
@@ -284,7 +289,7 @@ impl Compositor {
         let (Some(id), Some(output)) = (id_of(&window), self.monitor_of(&window)) else {
             return;
         };
-        let follow = follow || self.dragging.as_ref() == Some(&window);
+        let follow = follow || self.in_hand() == Some(&window);
         let moved = if follow {
             self.workspaces.carry(id, &output, direction)
         } else {

@@ -913,10 +913,13 @@ the left, which keeps the window on every workspace, and roll up, minimize,
 maximize and close at the right. It is flat, as Fluxbox's is: square
 corners, no shadow, and nothing animated, though a button still lights up
 under the pointer.
-In both, a window being dragged stays in hand: switching
-workspace by a key, a number, a pager or an edge takes it along, sending it
-to another workspace takes the person with it, and one minimized while held
-stays minimized. In both, a window's own menu, a right-click menu say, holds
+In both, a window being moved or resized stays in hand: switching
+workspace by a key, a number or a pager takes it along, as an edge does one
+being moved (resizing up to an edge never flips), sending it to another
+workspace takes the person with it, and one minimized while held stays
+minimized. A tab dragged with the middle button cannot come along without its
+group, so a switch calls the drag off, and the tab waits with its group where
+it was picked up. In both, a window's own menu, a right-click menu say, holds
 the keyboard while it is open, and a key on the window still works: Alt+F4,
 Alt+Tab, Logo+arrows and the rest close the menu first, as a click outside it
 would, then act on the window. A key that is not about the window, a layout
@@ -1076,7 +1079,7 @@ wrap = true
 [workspaces.flip]
 edge = true                    # rest the pointer on an outer edge of the desk
 delay-ms = 300
-while-dragging = true          # and take the window being dragged along
+while-dragging = true          # and take the window being moved along
 scroll = true                  # scroll over the desktop: down and right to the
                                # next one; see Mouse to turn it round
 
