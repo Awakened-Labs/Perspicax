@@ -8,6 +8,8 @@
 //! compositor carries out only a request [`check_heads`] accepted, so a typo in a
 //! kanshi profile is refused whole rather than half applied.
 
+use crate::geometry::FAR;
+
 /// One monitor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Head {
@@ -67,10 +69,14 @@ pub enum Rejection {
     UnknownMode(String),
     /// It asks for a mode of its own making, which this monitor cannot show.
     CustomModeUnsupported(String),
-    /// A custom mode of no size.
+    /// A custom mode of no size, or one wider or taller than the world.
     BadMode(String),
     /// A scale outside 0.5 to 4.
     BadScale(String),
+    /// A position further than the world's edge from the first monitor's
+    /// corner, either way: past where a sum of it and a width is an `i32`
+    /// (#154).
+    BadPosition(String),
 }
 
 /// The smallest and largest scale a monitor may be given: a display tool's
@@ -149,13 +155,19 @@ pub fn check_heads(
             Some(ModeChoice::Custom { .. }) if !custom_modes => {
                 return Err(Rejection::CustomModeUnsupported(head.name.clone()));
             }
-            Some(ModeChoice::Custom { width, height, .. }) if width <= 0 || height <= 0 => {
+            Some(ModeChoice::Custom { width, height, .. })
+                if !(1..=FAR).contains(&width) || !(1..=FAR).contains(&height) =>
+            {
                 return Err(Rejection::BadMode(head.name.clone()));
             }
             _ => {}
         }
         if change.scale.is_some_and(|scale| !SCALES.contains(&scale)) {
             return Err(Rejection::BadScale(head.name.clone()));
+        }
+        let far = |at: i32| !(-FAR..=FAR).contains(&at);
+        if change.position.is_some_and(|(x, y)| far(x) || far(y)) {
+            return Err(Rejection::BadPosition(head.name.clone()));
         }
     }
     let on = heads.iter().any(|head| {
@@ -262,6 +274,47 @@ mod tests {
             Err(Rejection::CustomModeUnsupported("HEADLESS-1".to_owned()))
         );
         assert_eq!(check_heads(&heads, &[custom], true), Ok(()));
+    }
+
+    #[test]
+    fn a_custom_mode_wider_than_the_world_is_refused() {
+        let heads = [head("HEADLESS-1", true)];
+        for (width, height) in [(FAR + 1, 720), (1280, i32::MAX)] {
+            let custom = HeadChange {
+                mode: Some(ModeChoice::Custom {
+                    width,
+                    height,
+                    refresh: 60_000,
+                }),
+                ..change("HEADLESS-1", true)
+            };
+            assert_eq!(
+                check_heads(&heads, &[custom], true),
+                Err(Rejection::BadMode("HEADLESS-1".to_owned())),
+                "{width}x{height}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_monitor_placed_past_the_world_is_refused() {
+        let heads = [head("DP-1", true), head("HDMI-A-1", true)];
+        for position in [(i32::MAX, 0), (0, i32::MIN), (FAR + 1, 0)] {
+            let placed = HeadChange {
+                position: Some(position),
+                ..change("HDMI-A-1", true)
+            };
+            assert_eq!(
+                check_heads(&heads, &[placed], false),
+                Err(Rejection::BadPosition("HDMI-A-1".to_owned())),
+                "{position:?}"
+            );
+        }
+        let at_the_edge = HeadChange {
+            position: Some((-FAR, FAR)),
+            ..change("HDMI-A-1", true)
+        };
+        assert_eq!(check_heads(&heads, &[at_the_edge], false), Ok(()));
     }
 
     #[test]

@@ -2934,6 +2934,7 @@ dependencies = [
  "perspicax-index",
  "perspicax-mcp",
  "perspicax-node",
+ "perspicax-policy",
  "rmcp",
  "rustix 1.1.4",
  "serde_json",
