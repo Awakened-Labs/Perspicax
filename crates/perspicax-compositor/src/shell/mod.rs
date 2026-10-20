@@ -60,7 +60,7 @@ use smithay::{
 
 use crate::{framed::Framed, state::Compositor};
 
-pub(crate) use grabs::{MoveGrab, ResizeGrab};
+pub(crate) use grabs::{Hand, MoveGrab, ResizeGrab};
 #[cfg(any(feature = "seat", feature = "capture"))]
 pub(crate) use opacity::alpha;
 pub(crate) use snap::SnapPreview;
@@ -627,7 +627,7 @@ impl Compositor {
         let grab = MoveGrab::new(start, window.clone(), origin, filled, self.desk_jumps);
         pointer.set_grab(self, grab, serial, Focus::Clear);
         // After, not before: replacing a grab unsets the one before it.
-        self.dragging = Some(window.clone());
+        self.hand = Some(Hand::Moving(window.clone()));
     }
 
     /// Take a maximized or snapped window out of its fill as a drag starts:
@@ -689,6 +689,8 @@ impl Compositor {
         };
         let grab = ResizeGrab::new(start, window.clone(), edges, rect(bounds));
         pointer.set_grab(self, grab, serial, Focus::Clear);
+        // After, as for a move: a window being resized is in hand too.
+        self.hand = Some(Hand::Resizing(window.clone()));
         // The arrow for these edges for the whole resize, however it began:
         // from a frame, with the drag modifier, or asked for by a client.
         self.cursor = CursorImageStatus::Named(resize_cursor(edges));

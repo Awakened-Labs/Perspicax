@@ -127,6 +127,24 @@ macro_rules! pass_through {
     };
 }
 
+/// The window in the person's hand, and what the hand is doing with it, from
+/// the grab's start until it is unset. Either way it goes where the person
+/// goes across a switch (see `Compositor::show_what_belongs`), but only a
+/// window being moved is carried across an edge of the desk: resizing up to
+/// one is not a push to the next workspace.
+pub(crate) enum Hand {
+    Moving(Framed),
+    Resizing(Framed),
+}
+
+impl Hand {
+    pub(crate) fn window(&self) -> &Framed {
+        match self {
+            Self::Moving(window) | Self::Resizing(window) => window,
+        }
+    }
+}
+
 /// Moving a window: it follows the pointer from where it was grabbed, and
 /// the edges of screens and panels hold it a while (see `shell::resist`).
 pub(crate) struct MoveGrab {
@@ -456,7 +474,7 @@ impl PointerGrab<Compositor> for MoveGrab {
     }
 
     fn unset(&mut self, data: &mut Compositor) {
-        data.dragging = None;
+        data.hand = None;
         if data.snap_preview.take().is_some() {
             data.backend.redraw();
         }
@@ -527,6 +545,7 @@ impl PointerGrab<Compositor> for ResizeGrab {
     /// The resize is over: the client is told, and its next commit is the
     /// last one anchored to the edge it was resized from.
     fn unset(&mut self, data: &mut Compositor) {
+        data.hand = None;
         if !self.holds(data) {
             return;
         }

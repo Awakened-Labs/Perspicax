@@ -73,7 +73,7 @@ use crate::{
     chord_capture::Heard,
     framed::Framed,
     mouse::{Hit, Scrolled, Travelled},
-    shell::{covers_panels, id_of},
+    shell::{Hand, covers_panels, id_of},
     state::Compositor,
 };
 
@@ -632,8 +632,10 @@ fn clock(state: &Compositor) -> u64 {
 /// has rested against an outer edge of the desk long enough. Returns where
 /// the pointer goes instead, across the desk, when it flipped.
 ///
-/// Off while a button is held, unless that button is dragging a window and
-/// the config says a drag flips too; then the window goes with it. Off over
+/// Off while a button is held, unless that button is moving a window and
+/// the config says a drag flips too; then the window goes with it. A window
+/// being resized is in hand too, but resizing it up to an edge is not a push
+/// to the next workspace. Off over
 /// the fullscreen window in use, while a window holds the pointer, and
 /// behind the lock screen.
 fn rest_at_edge(state: &mut Compositor, at: Point<f64, Logical>) -> Option<Point<f64, Logical>> {
@@ -641,7 +643,7 @@ fn rest_at_edge(state: &mut Compositor, at: Point<f64, Logical>) -> Option<Point
         return None;
     };
     let flipping = session.settings.flipping;
-    let carrying = state.dragging.is_some();
+    let carrying = matches!(state.hand, Some(Hand::Moving(_)));
     let edge = if flipping.edge_flips(resting(state, at, carrying)) {
         edge_at((at.x, at.y), &state.output_rects())
     } else {
@@ -675,7 +677,7 @@ fn rest_at_edge(state: &mut Compositor, at: Point<f64, Logical>) -> Option<Point
 }
 
 /// How the pointer at `at` is resting against an edge, for flipping;
-/// `carrying` when a window is being dragged.
+/// `carrying` when a window is being moved.
 fn resting(state: &Compositor, at: Point<f64, Logical>, carrying: bool) -> Resting {
     let grabbed = state
         .pointer

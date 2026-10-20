@@ -8,9 +8,11 @@
 //! drawing it on one workspace while they keep it on another, to vanish at
 //! the next switch. Sent away while held, it takes the person with it,
 //! because nothing held can be left behind. Per output, it goes with the
-//! monitor under it, which is not always the one it left.
+//! monitor under it, which is not always the one it left. A window being
+//! resized is as much in hand as one being moved, and goes along too.
 //!
-//! The person's hand is [`Command::Press`], a client asking to be moved, and
+//! The person's hand is [`Command::Press`], a client asking to be moved or
+//! resized, and
 //! [`Command::Motion`] and [`Command::Release`], which find what is under the
 //! pointer from the clients' buffers, so this needs the `capture` feature.
 //! Like the other live tests it binds a real Wayland socket, so it needs
@@ -26,6 +28,7 @@ use perspicax_index::HostFacts;
 use perspicax_node::Rect;
 use perspicax_policy::{Access, Action, Button, Direction, Grid, Mode, Mods, Place, Shape, Side};
 use wayland_client::{EventQueue, QueueHandle};
+use wayland_protocols::xdg::shell::client::xdg_toplevel::ResizeEdge;
 
 /// Where a window is, as the facts an agent reads tell it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +108,26 @@ fn take_held(session: &Session, desk: &mut Desk, queue: &mut EventQueue<Desk>) {
     desk.windows[1].move_(&seat, desk.pressed.expect("waited for"));
     // A move takes the pointer from every client.
     until(queue, desk, |desk| desk.pointed.is_none());
+}
+
+/// The person takes "held" by its client, which asks to be resized from
+/// `edge`, as a toolkit drawing its own frame does, and drags a little,
+/// keeping the button down.
+fn resize_held(session: &Session, desk: &mut Desk, queue: &mut EventQueue<Desk>, edge: ResizeEdge) {
+    let at = centre(geometry(&session.facts.read(), "held"));
+    desk.pressed = None;
+    session.command(Command::Press {
+        at,
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    until(queue, desk, |desk| desk.pressed.is_some());
+    let seat = desk.seat.clone().expect("our pointer's seat");
+    desk.windows[1].resize(&seat, desk.pressed.expect("waited for"), edge);
+    // A resize takes the pointer from every client.
+    until(queue, desk, |desk| desk.pointed.is_none());
+    session.command(Command::Motion { by: (-20, 0) });
+    until(queue, desk, |desk| desk.resizing);
 }
 
 /// The person letting go of it.
@@ -252,6 +275,59 @@ fn a_window_minimized_in_hand_stays_where_it_was_put_away() {
     session.perform(Action::CycleFocus);
     let back = session.wait_for(|facts| seen(facts, "held") == Seen::Shown);
     assert_eq!(geometry(&back, "held"), from);
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_being_resized_comes_along_when_a_key_switches_workspace() {
+    let session = session("in-hand-resized", Mode::Spanning);
+    let (mut desk, mut queue, _qh) = with_windows(&session);
+
+    // From its left edge, from which each of its commits is anchored.
+    resize_held(&session, &mut desk, &mut queue, ResizeEdge::Left);
+    session.perform(Action::Workspace(Direction::Right));
+    session.wait_for(|facts| {
+        seen(facts, "held") == Seen::Shown && seen(facts, "stays") == Seen::Away(1)
+    });
+
+    // Still in hand on workspace 2, resized on, and let go there.
+    session.command(Command::Motion { by: (-20, 0) });
+    release(&session);
+    until(&mut queue, &mut desk, |desk| !desk.resizing);
+
+    // Where it was let go, it stays: workspace 2's, not 1's.
+    session.perform(Action::Workspace(Direction::Left));
+    session.wait_for(|facts| {
+        seen(facts, "held") == Seen::Away(2) && seen(facts, "stays") == Seen::Shown
+    });
+    session.perform(Action::Workspace(Direction::Right));
+    session.wait_for(|facts| {
+        seen(facts, "held") == Seen::Shown && seen(facts, "stays") == Seen::Away(1)
+    });
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_sent_away_while_being_resized_takes_the_person_along() {
+    let session = session("in-hand-resized-sent", Mode::Spanning);
+    let (mut desk, mut queue, _qh) = with_windows(&session);
+
+    resize_held(&session, &mut desk, &mut queue, ResizeEdge::Left);
+    session.perform(Action::SendToWorkspace(Direction::Right));
+    session.wait_for(|facts| {
+        seen(facts, "held") == Seen::Shown && seen(facts, "stays") == Seen::Away(1)
+    });
+    release(&session);
+    until(&mut queue, &mut desk, |desk| !desk.resizing);
+
+    session.perform(Action::Workspace(Direction::Left));
+    session.wait_for(|facts| {
+        seen(facts, "held") == Seen::Away(2) && seen(facts, "stays") == Seen::Shown
+    });
 
     session.stop((desk, queue));
 }

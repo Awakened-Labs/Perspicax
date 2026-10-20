@@ -2277,7 +2277,6 @@ fn an_x11_window_on_a_workspace_not_showing_asking_to_be_normal_waits_there() {
     x11.stop();
 }
 
-/// One 1280 by 1024 monitor with two workspaces side by side.
 /// Issue #106: an X client's `WM_NORMAL_HINTS` may say its window is at
 /// least, or at most, a negative size, and smithay builds a `Size` of the
 /// hints as they are, which a debug build asserts against. A person resizing
@@ -2359,6 +2358,83 @@ fn an_x11_window_whose_size_hints_are_negative_resizes_as_one_with_none() {
     x11.stop();
 }
 
+/// Issue #123: an X11 window being resized is in the person's hand, as one
+/// being moved is, and a switch of workspace takes it along. Resized from its
+/// left edge, it is put where its right edge stays still at every motion,
+/// which, left behind on a workspace no longer showing, mapped it back.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_being_resized_comes_along_when_a_key_switches_workspace() {
+    let x11 = X11::start("x11-resized-along", two_workspaces().with_person());
+    x11.open("stays");
+    let window = x11.create_at("held", (0, 0, 320, 200), None);
+    x11.x
+        .change_window_attributes(
+            window,
+            &ChangeWindowAttributesAux::new()
+                .event_mask(EventMask::PROPERTY_CHANGE | EventMask::BUTTON_PRESS),
+        )
+        .expect("change_window_attributes")
+        .check()
+        .expect("the window's presses");
+    let (x, y) = x11.mapped(window, "held");
+
+    // The person's button down on the window, and once the X client has
+    // seen it, a request to be resized from its left edge.
+    x11.drain();
+    x11.session.command(Command::Press {
+        at: (x as i32 + 20, y as i32 + 20),
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    assert!(
+        eventually(Duration::from_secs(5), || {
+            matches!(x11.x.poll_for_event(), Ok(Some(Event::ButtonPress(_)))).then_some(())
+        })
+        .is_some(),
+        "the X client never saw the press"
+    );
+    let left = 7;
+    x11.ask(
+        window,
+        x11.atoms._NET_WM_MOVERESIZE,
+        [x as u32 + 20, y as u32 + 20, left, 1, 1],
+    );
+    // Pulled out a little at a time until the resize has begun.
+    let left_edge = || {
+        x11.facts()
+            .surfaces()
+            .iter()
+            .find(|surface| surface.title.as_deref() == Some("held"))
+            .map(|held| held.geometry.x0)
+    };
+    eventually(Duration::from_secs(10), || {
+        x11.session.command(Command::Motion { by: (-8, 0) });
+        thread::sleep(Duration::from_millis(50));
+        left_edge().filter(|now| *now < x)
+    })
+    .unwrap_or_else(|| panic!("never resized: {:?}", x11.facts()));
+
+    x11.perform(Action::Workspace(perspicax_policy::Direction::Right));
+    x11.surface_where("stays", |surface| surface.off_workspace == Some(1))
+        .unwrap_or_else(|| panic!("never switched: {:?}", x11.facts()));
+    x11.surface_where("held", |surface| surface.mapped)
+        .unwrap_or_else(|| panic!("left behind: {:?}", x11.facts()));
+
+    // Resized on, and let go on workspace 2, where it stays.
+    x11.session.command(Command::Motion { by: (-8, 0) });
+    x11.session.command(Command::Release {
+        button: Button::Left,
+    });
+    x11.perform(Action::Workspace(perspicax_policy::Direction::Left));
+    x11.surface_where("held", |surface| surface.off_workspace == Some(2))
+        .unwrap_or_else(|| panic!("not on workspace 2: {:?}", x11.facts()));
+
+    x11.stop();
+}
+
+/// One 1280 by 1024 monitor with two workspaces side by side.
 fn two_workspaces() -> Backend {
     Backend::Headless {
         outputs: vec![perspicax_compositor::Virtual::numbered(1, (1280, 1024))],
