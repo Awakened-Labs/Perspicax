@@ -506,3 +506,68 @@ fn layer_named<'a>(facts: &'a HostFacts, namespace: &str) -> Option<&'a SurfaceF
         matches!(&surface.kind, SurfaceKind::Layer { namespace: named, .. } if named == namespace)
     })
 }
+
+/// Damage named on a surface whose buffer is turned or magnified: smithay
+/// 0.7.0 turns it into the buffer's own coordinates in `i32` before cutting
+/// it to the buffer, and only a build that keeps buffers for a renderer --
+/// a seat, or `capture` -- does that.
+#[cfg(feature = "capture")]
+mod turned {
+    use wayland_client::protocol::wl_output::Transform;
+
+    use super::*;
+
+    const ORANGE: u32 = 0xffee_8822;
+    const MARKED: u32 = 0xff22_cc44;
+
+    #[test]
+    #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+    fn damage_far_off_a_turned_picture_is_dropped() {
+        let session = session("sizes-far-turned");
+        let (mut desk, mut queue, qh, _) = session.client();
+        settle(&session, &mut desk, &mut queue, &qh, "w");
+        let root = desk.windows[0].wl_surface().clone();
+        let (_placed, child) = desk.open_subsurface(&qh, &root, (40, 30), false);
+        root.commit();
+
+        // Upside down, the buffer's left edge is the surface's right one: its
+        // width less the damage's left edge less its width, in `i32`.
+        for transform in [Transform::_180, Transform::_90, Transform::Flipped] {
+            desk.paint_turned(&child, (120, 80), transform, ORANGE, (20, 10), MARKED);
+            child.damage(i32::MIN, i32::MIN, 1, 1);
+            child.commit();
+            queue.roundtrip(&mut desk).expect("the compositor answers");
+            assert!(
+                !session.ended(),
+                "{transform:?}: the compositor is still running"
+            );
+        }
+
+        session.stop((desk, queue));
+    }
+
+    #[test]
+    #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+    fn damage_far_off_a_magnified_picture_is_dropped() {
+        let session = session("sizes-far-magnified");
+        let (mut desk, mut queue, qh, globals) = session.client();
+        desk.bind_viewporter(&globals, &qh);
+        settle(&session, &mut desk, &mut queue, &qh, "w");
+        let root = desk.windows[0].wl_surface().clone();
+        let (_placed, child) = desk.open_subsurface(&qh, &root, (40, 30), false);
+        root.commit();
+
+        // A buffer 32768 wide shown 1 wide magnifies damage 32768 times on
+        // the way into it, so damage well inside the world lands past an
+        // `i32`, which smithay holds at `i32::MIN` before turning it.
+        let viewport = desk.viewport(&qh, &child);
+        viewport.set_destination(1, 1);
+        desk.paint_turned(&child, (32768, 1), Transform::_180, ORANGE, (1, 1), MARKED);
+        child.damage(-100_000, 0, 1, 1);
+        child.commit();
+        queue.roundtrip(&mut desk).expect("the compositor answers");
+        assert!(!session.ended(), "the compositor is still running");
+
+        session.stop((viewport, desk, queue));
+    }
+}
