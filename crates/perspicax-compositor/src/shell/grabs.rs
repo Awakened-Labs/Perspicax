@@ -222,12 +222,12 @@ impl ResizeGrab {
         }
     }
 
-    /// Whether the window is still one of the person's to resize: on screen,
-    /// or parked. One that went mid-resize is told nothing more, since to a
-    /// client that unmapped its window a configure is the answer it waits
-    /// for to map it again.
+    /// Whether the window is still on screen to be resized. One minimized or
+    /// put behind its group mid-resize has left the person's hand, as one
+    /// being moved does: it is asked for no new size, and so is never mapped
+    /// again by its commits (see [`Compositor::settle_resize`]).
     fn holds(&self, data: &Compositor) -> bool {
-        data.has_window(&self.window)
+        data.space.element_location(&self.window).is_some()
     }
 
     /// Ask the client for a size, marked as mid-resize or not.
@@ -544,9 +544,14 @@ impl PointerGrab<Compositor> for ResizeGrab {
 
     /// The resize is over: the client is told, and its next commit is the
     /// last one anchored to the edge it was resized from.
+    ///
+    /// A window parked mid-resize is told too, or its client would go on
+    /// resizing it. One that went is told nothing more, since to a client
+    /// that unmapped its window a configure is the answer it waits for to map
+    /// it again.
     fn unset(&mut self, data: &mut Compositor) {
         data.hand = None;
-        if !self.holds(data) {
+        if !data.has_window(&self.window) {
             return;
         }
         self.configure(false);

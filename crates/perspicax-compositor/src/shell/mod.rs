@@ -589,16 +589,27 @@ impl Compositor {
 
     /// The last commit of a resize from the left or top: move the window so
     /// its *opposite* edge stays still, at whatever size the client chose.
+    ///
+    /// A window parked mid-resize is never mapped from here: it is its place
+    /// to come back to that moves, so it comes back with that edge still
+    /// where it was.
     pub(crate) fn settle_resize(&mut self, window: &Framed) {
         let Some(resize) = placement(window, |placement| placement.resize) else {
             return;
         };
         let size = window.geometry().size;
-        let (x, y) = perspicax_policy::anchor(resize.start, resize.edges, (size.w, size.h));
-        if (resize.edges.left || resize.edges.top)
-            && self.space.element_location(window) != Some((x, y).into())
-        {
-            self.space.map_element(window.clone(), (x, y), false);
+        let at: Point<i32, Logical> =
+            perspicax_policy::anchor(resize.start, resize.edges, (size.w, size.h)).into();
+        if resize.edges.left || resize.edges.top {
+            match self.space.element_location(window) {
+                Some(now) if now != at => self.space.map_element(window.clone(), at, false),
+                Some(_) => {}
+                None => placement(window, |placement| {
+                    if placement.parked.is_some() {
+                        placement.parked = Some(at);
+                    }
+                }),
+            }
         }
         if resize.released {
             placement(window, |placement| placement.resize = None);

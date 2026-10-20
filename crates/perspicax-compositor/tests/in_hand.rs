@@ -9,7 +9,9 @@
 //! the next switch. Sent away while held, it takes the person with it,
 //! because nothing held can be left behind. Per output, it goes with the
 //! monitor under it, which is not always the one it left. A window being
-//! resized is as much in hand as one being moved, and goes along too.
+//! resized is as much in hand as one being moved, and goes along too. One
+//! minimized while held stays minimized, and a resize comes back with the
+//! edge it was not resized by where it was.
 //!
 //! The person's hand is [`Command::Press`], a client asking to be moved or
 //! resized, and
@@ -22,11 +24,12 @@
 
 mod common;
 
-use common::{Desk, Session, until};
+use common::{Desk, Said, Session, until};
 use perspicax_compositor::{Backend, Command, Virtual};
 use perspicax_index::HostFacts;
 use perspicax_node::Rect;
 use perspicax_policy::{Access, Action, Button, Direction, Grid, Mode, Mods, Place, Shape, Side};
+use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::{EventQueue, QueueHandle};
 use wayland_protocols::xdg::shell::client::xdg_toplevel::ResizeEdge;
 
@@ -328,6 +331,56 @@ fn a_window_sent_away_while_being_resized_takes_the_person_along() {
     session.wait_for(|facts| {
         seen(facts, "held") == Seen::Away(2) && seen(facts, "stays") == Seen::Shown
     });
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_minimized_while_being_resized_comes_back_with_its_far_edge_where_it_was() {
+    let session = session("in-hand-resized-minimized", Mode::Spanning);
+    let (mut desk, mut queue, _qh) = with_windows(&session);
+    let from = geometry(&session.facts.read(), "held");
+
+    // Pulled 20 out of its left edge, then put away while still held.
+    resize_held(&session, &mut desk, &mut queue, ResizeEdge::Left);
+    session.perform(Action::Minimize);
+    session.wait_for(|facts| seen(facts, "held") == Seen::Hidden);
+    let held = desk.windows[1].wl_surface().clone();
+    let told = desk.said_to(&held).len();
+
+    // Its client answers the end of the resize 100 narrower than it was,
+    // a size of its own: the hand pulled it out 40 more, which asks it for
+    // nothing now, so the end is the size last asked.
+    desk.declaring
+        .push((desk.windows[1].clone(), Some((0, 0, 300, 300))));
+    session.command(Command::Motion { by: (-40, 0) });
+    release(&session);
+    until(&mut queue, &mut desk, |desk| !desk.resizing);
+    let offered: Vec<_> = desk.said_to(&held)[told..]
+        .iter()
+        .filter_map(|said| match said {
+            Said::Configure(configured) => Some(configured.size),
+            _ => None,
+        })
+        .collect();
+    // Told the resize is over at the size it was last asked for on screen,
+    // and asked for no other.
+    assert!(
+        !offered.is_empty() && offered.iter().all(|size| *size == Some((420, 300))),
+        "asked for another size while put away: {offered:?}"
+    );
+
+    // Still put away, its right edge where it was, and brought back so.
+    let back = Rect {
+        x0: from.x0 + 100.0,
+        ..from
+    };
+    session
+        .wait_for(|facts| seen(facts, "held") == Seen::Hidden && geometry(facts, "held") == back);
+    session.perform(Action::CycleFocus);
+    let shown = session.wait_for(|facts| seen(facts, "held") == Seen::Shown);
+    assert_eq!(geometry(&shown, "held"), back);
 
     session.stop((desk, queue));
 }
