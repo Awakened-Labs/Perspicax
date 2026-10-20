@@ -38,6 +38,12 @@
 //! one with xdg-shell's `invalid_size` before smithay reads it -- but the
 //! rule stays, to hold once that check is smithay's own.
 //!
+//! Both are held to the world, the same way: a geometry with an edge
+//! further than [`perspicax_policy::FAR`] from the surface's corner, which
+//! a subsurface far out, a viewport or a buffer can stretch it to, is
+//! brought back to it (#154). The bounds themselves are left as smithay
+//! measures them, so the two still agree to the pixel.
+//!
 //! # What a window draws
 //!
 //! The same bounds are published on their own too ([`drawn`]), because a
@@ -302,6 +308,10 @@ fn opaque_in_root(states: &SurfaceData, placed: Rectangle<i32, Logical>) -> Vec<
 /// has drawn nothing has only what it declared, and one that has declared
 /// nothing either has no geometry: it is not on screen, and there is nothing
 /// to describe.
+///
+/// Held to the world, as [`Framed::geometry`](crate::framed::Framed::geometry)
+/// holds smithay's: no edge further from the surface's corner than
+/// [`perspicax_policy::FAR`] (#154).
 pub(crate) fn window_geometry(surface: &WlSurface) -> Option<Rectangle<i32, Logical>> {
     let (declared, bounds) = with_states(surface, |states| {
         let declared = states
@@ -315,14 +325,15 @@ pub(crate) fn window_geometry(surface: &WlSurface) -> Option<Rectangle<i32, Logi
     // rectangle turned inside out covers nothing too. `sizes` refuses both
     // before smithay takes them; this holds whoever checks.
     let declared = declared.filter(|declared| declared.size.w > 0 && declared.size.h > 0);
-    match bounds {
+    let geometry = match bounds {
         Some(bounds) => Some(
             declared
                 .and_then(|declared| declared.intersection(bounds))
                 .unwrap_or(bounds),
         ),
         None => declared,
-    }
+    };
+    geometry.map(crate::shell::in_world)
 }
 
 /// Everything the tree under `surface` draws, in its surface's own

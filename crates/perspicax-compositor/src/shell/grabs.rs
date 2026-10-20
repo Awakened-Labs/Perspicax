@@ -26,7 +26,7 @@
 //! the drag off: it is not dropped, and waits with its group where it was
 //! picked up, as it does when the session locks.
 
-use perspicax_policy::{Edges, Rect, dragged, resize};
+use perspicax_policy::{Edges, FAR, Rect, dragged, resize};
 use smithay::{
     input::pointer::{
         AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
@@ -258,8 +258,18 @@ impl ResizeGrab {
 }
 
 /// The smallest and largest size a window declared, `0` meaning no limit:
-/// from its xdg cached state, or an X client's size hints.
+/// from its xdg cached state, or an X client's size hints. Each side is held
+/// to the world's width (#154), since a frame's insets are added to it.
 pub(super) fn limits(window: &Framed) -> Option<(Size<i32, Logical>, Size<i32, Logical>)> {
+    declared_limits(window).map(|(min, max)| (held(min), held(max)))
+}
+
+/// A size limit no wider or taller than the world.
+fn held(limit: Size<i32, Logical>) -> Size<i32, Logical> {
+    (limit.w.min(FAR), limit.h.min(FAR)).into()
+}
+
+fn declared_limits(window: &Framed) -> Option<(Size<i32, Logical>, Size<i32, Logical>)> {
     if let Some(toplevel) = window.toplevel() {
         return Some(with_states(toplevel.wl_surface(), |states| {
             let mut cached = states.cached_state.get::<SurfaceCachedState>();

@@ -48,7 +48,7 @@ pub(crate) use drawn::{Stack, stack};
 #[cfg(any(feature = "seat", feature = "capture"))]
 mod drawn {
     use smithay::{
-        desktop::{LayerSurface, Space, layer_map_for_output, space::SpaceElement as _},
+        desktop::{LayerSurface, Space, layer_map_for_output},
         output::Output,
         utils::{Logical, Point},
         wayland::shell::wlr_layer::Layer,

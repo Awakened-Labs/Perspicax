@@ -62,6 +62,21 @@ fn settle(
     session.wait_for(|facts| titled(facts, title).is_some_and(|window| window.mapped));
 }
 
+/// [`settle`], for a window that declares no geometry: it is then all it
+/// draws, subsurfaces and all.
+fn settle_undeclared(
+    session: &Session,
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    qh: &QueueHandle<Desk>,
+    title: &str,
+) {
+    let drawn = desk.drawn;
+    desk.open_declaring(qh, title, None);
+    until(queue, desk, |desk| desk.drawn == drawn + 1);
+    session.wait_for(|facts| titled(facts, title).is_some_and(|window| window.mapped));
+}
+
 /// Once the compositor has taken in everything sent so far, wait until the
 /// window titled `title` is as `ready` says.
 fn becomes(
@@ -320,8 +335,9 @@ fn a_geometry_declared_at_i32_min_before_drawing_is_described() {
     desk.open_bare(&qh, "far");
     queue.roundtrip(&mut desk).expect("the compositor answers");
 
-    // Nothing is drawn, so the declared geometry is the window's as it is;
-    // its surface's corner is then 2^31 to the right of it.
+    // Nothing is drawn, so the declared geometry is the window's as it is,
+    // 2^31 left of its surface's corner: held to the world, as far left as
+    // that goes.
     let window = desk.blank[0].clone();
     window.xdg_surface().set_window_geometry(i32::MIN, 0, 1, 1);
     window.commit();
@@ -330,8 +346,8 @@ fn a_geometry_declared_at_i32_min_before_drawing_is_described() {
     });
     assert_eq!(
         far.buffer_origin.x - far.geometry.x0,
-        2_147_483_648.0,
-        "the surface's corner is where the client put it"
+        f64::from(FAR),
+        "the surface's corner is the world's width right of the geometry"
     );
     assert!(!session.ended(), "the compositor is still running");
 
@@ -496,6 +512,155 @@ fn an_exclusive_zone_past_the_world_is_taken_into_it() {
     panel.set_margin(1, 0, 0, 0);
     panel.commit();
     queue.roundtrip(&mut desk).expect("the compositor answers");
+    assert!(!session.ended(), "the compositor is still running");
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_frame_round_a_window_wider_than_the_world_is_held_to_it() {
+    let session = session("sizes-far-frame");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_viewporter(&globals, &qh);
+    desk.open_framed(&qh, "framed");
+    let window = desk.windows[0].clone();
+    desk.declaring.push((window, None));
+    until(&mut queue, &mut desk, |desk| desk.has_drawn(0));
+    becomes(&session, &mut desk, &mut queue, "framed", |w| {
+        w.mapped && !w.frame.is_empty()
+    });
+
+    // It declares no geometry, so it is all it shows: shown as wide as an
+    // `i32` goes, its frame's sides are that plus its borders, which policy
+    // adds in `i32`.
+    let surface = desk.windows[0].wl_surface().clone();
+    let viewport = desk.viewport(&qh, &surface);
+    viewport.set_destination(i32::MAX, 1);
+    surface.commit();
+    let framed = becomes(&session, &mut desk, &mut queue, "framed", |w| {
+        w.geometry.width() == f64::from(FAR)
+    });
+    assert!(!framed.frame.is_empty(), "still framed");
+    assert!(!session.ended(), "the compositor is still running");
+
+    session.stop((viewport, desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_subsurface_far_past_the_world_widens_its_window_only_to_it() {
+    let session = session("sizes-far-subsurface");
+    // The window declares no geometry, so it is all it draws; a subsurface
+    // far out stretches it as far as the world's edge, and no further.
+    for (at, width) in [((i32::MAX - 100, 0), FAR), ((-100_000, 0), FAR + 400)] {
+        let title = format!("{at:?}");
+        let (mut desk, mut queue, qh, _) = session.client();
+        settle_undeclared(&session, &mut desk, &mut queue, &qh, &title);
+        let root = desk.windows[0].wl_surface().clone();
+        let (_placed, child) = desk.open_subsurface(&qh, &root, at, false);
+        root.commit();
+        desk.paint(&child, (120, 80), 0xff00_00ff);
+        child.commit();
+        becomes(&session, &mut desk, &mut queue, &title, |w| {
+            w.geometry.width() == f64::from(width)
+        });
+        assert!(!session.ended(), "the compositor is still running");
+    }
+
+    let (desk, queue, ..) = session.client();
+    session.stop((desk, queue));
+}
+
+/// Where a menu hangs and where smithay draws it are reckoned from the
+/// corner of its window's geometry, by perspicax and by the space: held to
+/// the world, it must be held the same in both. A `capture` build checks
+/// they agree at every commit of the menu, and so panics if they don't.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_of_a_window_reaching_past_the_world_hangs_where_it_is_drawn() {
+    let session = session("sizes-far-menu");
+    let (mut desk, mut queue, qh, _) = session.client();
+    settle_undeclared(&session, &mut desk, &mut queue, &qh, "w");
+    let root = desk.windows[0].wl_surface().clone();
+    let (_placed, child) = desk.open_subsurface(&qh, &root, (-100_000, 0), false);
+    root.commit();
+    desk.paint(&child, (120, 80), 0xff00_00ff);
+    child.commit();
+    let window = becomes(&session, &mut desk, &mut queue, "w", |w| {
+        w.geometry.width() == f64::from(FAR + 400)
+    });
+
+    let menu = desk.open_popup(&qh, desk.windows[0].xdg_surface(), (10, 10), (100, 50));
+    until(&mut queue, &mut desk, |desk| desk.popups_configured == 1);
+    desk.paint(menu.wl_surface(), (100, 50), 0xffee_8822);
+    menu.wl_surface().commit();
+    queue.roundtrip(&mut desk).expect("the compositor answers");
+    let facts = session.wait_for(|facts| {
+        facts
+            .surfaces()
+            .iter()
+            .any(|surface| matches!(surface.kind, SurfaceKind::Popup { .. }) && surface.mapped)
+    });
+    let hung = facts
+        .surfaces()
+        .iter()
+        .find(|surface| matches!(surface.kind, SurfaceKind::Popup { .. }))
+        .expect("waited for");
+    assert_eq!(
+        (hung.geometry.x0, hung.geometry.y0),
+        (window.geometry.x0 + 10.0, window.geometry.y0 + 10.0),
+        "hung 10 into its window's geometry"
+    );
+    assert!(!session.ended(), "the compositor is still running");
+
+    session.stop((menu, desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_minimum_size_past_the_world_is_held_to_it() {
+    // With a person at the seat, a new window is settled on its monitor, no
+    // smaller than its client allows plus its frame, added up in `i32`.
+    let session = Session::start(
+        "sizes-far-least",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_framed(&qh, "framed");
+    let window = desk.windows[0].clone();
+    window.set_min_size(Some((u32::try_from(i32::MAX).unwrap(), 1)));
+    window.commit();
+    until(&mut queue, &mut desk, |desk| desk.drawn >= 1);
+    becomes(&session, &mut desk, &mut queue, "framed", |w| w.mapped);
+    assert!(!session.ended(), "the compositor is still running");
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_panel_asking_for_more_room_than_its_monitor_has_leaves_new_windows_on_it() {
+    let session = session("sizes-far-room");
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_panel(&qh, "panel", 30, 0xff33_6699);
+    until(&mut queue, &mut desk, |desk| desk.layers_drawn == 1);
+    // A zone and a margin each as far as the world goes: smithay moves the
+    // room left for windows down past both, twice the world's height.
+    let (panel, ..) = &desk.layers[0];
+    panel.set_exclusive_zone(i32::MAX);
+    panel.set_margin(i32::MAX, 0, 0, 0);
+    panel.commit();
+    queue.roundtrip(&mut desk).expect("the compositor answers");
+
+    settle(&session, &mut desk, &mut queue, &qh, "w");
+    let window = becomes(&session, &mut desk, &mut queue, "w", |w| w.mapped);
+    assert!(
+        window.geometry.y0 <= 1024.0,
+        "opened on the monitor: {:?}",
+        window.geometry
+    );
     assert!(!session.ended(), "the compositor is still running");
 
     session.stop((desk, queue));

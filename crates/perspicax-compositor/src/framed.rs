@@ -341,6 +341,22 @@ fn rgba(colour: perspicax_policy::Colour) -> [f32; 4] {
 pub(crate) struct Framed(Window);
 
 impl Framed {
+    /// The client's geometry, held to the world (#154): smithay's
+    /// `Window::geometry()`, its corner and far edges no further from the
+    /// surface's corner than [`perspicax_policy::FAR`].
+    ///
+    /// The space places and draws the window by this, so it is the same
+    /// answer [`crate::geometry::window_geometry`] gives the facts, and an
+    /// agent is told the window is where it is drawn. Everything that reads
+    /// a window's geometry through the space, or calls `geometry()` on a
+    /// `Framed`, which finds this before the `Window` it derefs to, gets it
+    /// held: a client's corner plus its width can be past an `i32`, and
+    /// what is reckoned from it, a frame round it or a resize of it, adds
+    /// more.
+    pub(crate) fn geometry(&self) -> Rectangle<i32, Logical> {
+        crate::shell::in_world(self.0.geometry())
+    }
+
     fn dress<T>(&self, f: impl FnOnce(&mut Dress) -> T) -> T {
         self.user_data()
             .insert_if_missing(|| RefCell::new(Dress::default()));
@@ -485,7 +501,7 @@ impl Framed {
             return None;
         }
         let grip = if height.is_some() { 0 } else { grip };
-        let mut outer = self.0.geometry();
+        let mut outer = self.geometry();
         if let Some(height) = height {
             outer.size.h = height;
         }
@@ -521,7 +537,7 @@ impl IsAlive for Framed {
 
 impl SpaceElement for Framed {
     fn geometry(&self) -> Rectangle<i32, Logical> {
-        SpaceElement::geometry(&self.0)
+        Framed::geometry(self)
     }
 
     /// The client's, its menus included, and the frame round it. Rolled up
@@ -535,7 +551,7 @@ impl SpaceElement for Framed {
                 .map_or(0, |share| drawn_height(self, share));
             return self
                 .outer_as(Some(height))
-                .unwrap_or_else(|| Rectangle::new(self.0.geometry().loc, Size::default()));
+                .unwrap_or_else(|| Rectangle::new(self.geometry().loc, Size::default()));
         }
         self.whole_bbox()
     }
@@ -604,7 +620,7 @@ impl Framed {
     {
         // `location` is where the surface's own origin goes; the client
         // geometry, which the frame is measured from, is offset within it.
-        let geometry = self.0.geometry();
+        let geometry = self.geometry();
         let origin = location + geometry.loc.to_physical_precise_round(scale);
         let height = match drawn.rolling {
             Some(share) => drawn_height(self, share),

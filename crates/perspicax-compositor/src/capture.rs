@@ -58,7 +58,7 @@ mod taking {
                 },
             },
         },
-        desktop::{LayerSurface, layer_map_for_output, space::SpaceElement},
+        desktop::{LayerSurface, layer_map_for_output},
         input::pointer::CursorImageStatus,
         utils::{
             Buffer as BufferCoord, Logical, Physical, Point, Rectangle, Scale, Size, Transform,
