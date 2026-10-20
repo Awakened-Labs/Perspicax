@@ -59,8 +59,9 @@ pub const DAMAGE_WINDOW: Duration = Duration::from_millis(200);
 /// it is covered, it is stale, the selector matched three things -- and every
 /// variant carries what would be needed to recover. An [`ActError`] is a
 /// statement about this compositor, and there is nothing an agent can do but
-/// report it -- except a keyboard held elsewhere, which the compositor alone
-/// can see in time and which arrives here as the refusal it is.
+/// report it -- except what the compositor alone can see in time, a keyboard
+/// held elsewhere, a game's hold on the pointer or a menu's, which arrives
+/// here as the refusal it is.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum Failure {
     /// The gate said no, and said why.
@@ -84,6 +85,8 @@ impl From<ActError> for Failure {
             // acts, and the agent has a remedy, if not a quick one: the
             // person has to leave the game.
             ActError::PointerCaptured { by } => Self::Refused(Refusal::PointerCaptured { by }),
+            // And again: the menu closes, chosen from or dismissed.
+            ActError::MenuOpen { popup } => Self::Refused(Refusal::MenuOpen { popup }),
             error => Self::Dispatch(error),
         }
     }
@@ -383,6 +386,15 @@ mod tests {
         assert_eq!(
             Failure::from(ActError::PointerCaptured { by }),
             Failure::Refused(Refusal::PointerCaptured { by })
+        );
+    }
+
+    #[test]
+    fn a_menu_holding_the_pointer_is_a_refusal_not_a_dispatch_failure() {
+        let popup = SurfaceId(9);
+        assert_eq!(
+            Failure::from(ActError::MenuOpen { popup }),
+            Failure::Refused(Refusal::MenuOpen { popup })
         );
     }
 
