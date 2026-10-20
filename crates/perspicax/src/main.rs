@@ -661,7 +661,7 @@ fn serve(
             .build()
             .context("no runtime for the agent interface")
             .and_then(|runtime| {
-                Ok(runtime.block_on(async {
+                Ok(run_then_let_go(runtime, async {
                     match interface {
                         Interface::Stdio(wire) => {
                             perspicax_mcp::serve_over(desk, wire.into_halves()).await
@@ -690,6 +690,34 @@ fn serve(
         }
     });
     ended
+}
+
+/// How long the agent interface's runtime is given, once a conversation is
+/// over, to finish what it still has running.
+const LET_GO_AFTER: Duration = Duration::from_millis(500);
+
+/// Run `conversation` on `runtime` to its end, then let the runtime go, waiting
+/// no longer than [`LET_GO_AFTER`] for what it still has running.
+///
+/// Dropping the runtime would wait for all of it, and on the wire that can be
+/// forever: `--mcp`'s reads run on its blocking pool, where nothing can call
+/// one off, and rmcp's loop has one pending nearly all the time. A
+/// conversation that ends with the client closing its end has seen that read
+/// return, and nothing is left to wait for. One that ends any other way leaves
+/// it waiting on the client, and until the client spoke again the error that
+/// ended it would go unlogged, `main` untold, and under `--headless` the stop
+/// unasked (issue #117).
+///
+/// A bound rather than no wait at all, for a reply still being written. A tool
+/// call still running on the pool gets the same bound: its answer has nobody
+/// left to go to, and its thread runs on, only no longer waited for.
+fn run_then_let_go<T>(
+    runtime: tokio::runtime::Runtime,
+    conversation: impl Future<Output = T>,
+) -> T {
+    let outcome = runtime.block_on(conversation);
+    runtime.shutdown_timeout(LET_GO_AFTER);
+    outcome
 }
 
 /// Turn accessibility on for this session, briefly borrowing a runtime to do
@@ -838,7 +866,10 @@ fn parse_size(raw: &str) -> Result<(i32, i32)> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::fd::OwnedFd;
+
     use clap::{CommandFactory as _, error::ErrorKind};
+    use tokio::io::AsyncReadExt as _;
 
     use super::*;
 
@@ -980,5 +1011,38 @@ mod tests {
             parse(&["config"]).is_err(),
             "config is not a verb on its own"
         );
+    }
+
+    #[test]
+    fn a_conversation_that_ends_with_a_read_of_the_wire_pending_still_ends() {
+        // The client's end of the wire, held open and silent: a read of the
+        // other end returns only once it is written to or closed.
+        let (input, client) = io::pipe().expect("a pipe for the wire");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let (tell, ended) = mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = run_then_let_go(runtime, async move {
+                // The wire as `Wire::into_halves` gives it, read as rmcp's
+                // loop reads it: in a `select!`, while something else ends
+                // the conversation.
+                let mut wire = tokio::fs::File::from_std(File::from(OwnedFd::from(input)));
+                let mut buffer = [0; 64];
+                tokio::select! {
+                    _ = wire.read(&mut buffer) => "the client spoke",
+                    () = tokio::time::sleep(Duration::from_millis(100)) => "the conversation ended",
+                }
+            });
+            let _ = tell.send(outcome);
+        });
+
+        // Far past the bound, so a busy machine cannot fail it: a runtime
+        // still waiting on the read would wait forever.
+        let outcome = ended.recv_timeout(Duration::from_secs(5));
+        // Closed only now, which lets go of a runtime still waiting on it.
+        drop(client);
+        assert_eq!(outcome, Ok("the conversation ended"));
     }
 }
