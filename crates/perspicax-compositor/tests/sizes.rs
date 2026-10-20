@@ -15,7 +15,8 @@
 //! what an `i32` holds: a region's far edge, a surface's corner behind a
 //! geometry at `i32::MIN`. Until #154 adding them panicked a debug build
 //! too, and wrapped round in a release one. Those tests send such numbers,
-//! and see them described where the client put them.
+//! and see them described where the client put them, or, where smithay
+//! adds them up itself, taken into the world (`perspicax_policy::FAR`) first.
 //!
 //! Like the other live tests these bind a real Wayland socket, so they need
 //! `XDG_RUNTIME_DIR`, and are `#[ignore]`d for `ci/live-tests.sh` to run.
@@ -24,10 +25,16 @@ mod common;
 
 use common::{Desk, Session, refused, until};
 use perspicax_compositor::Backend;
-use perspicax_index::{HostFacts, SurfaceFacts};
+use perspicax_index::{HostFacts, SurfaceFacts, SurfaceKind};
 use perspicax_node::Rect;
-use smithay_client_toolkit::shell::{WaylandSurface, wlr_layer::Layer, xdg::XdgSurface};
+use perspicax_policy::FAR;
+use smithay_client_toolkit::shell::{
+    WaylandSurface,
+    wlr_layer::Layer,
+    xdg::{XdgPositioner, XdgSurface},
+};
 use wayland_client::{EventQueue, QueueHandle};
+use wayland_protocols::xdg::shell::client::xdg_positioner;
 
 fn session(name: &str) -> Session {
     Session::start(name, Backend::headless((1280, 1024)))
@@ -329,4 +336,173 @@ fn a_geometry_declared_at_i32_min_before_drawing_is_described() {
     assert!(!session.ended(), "the compositor is still running");
 
     session.stop((desk, queue));
+}
+
+/// A positioner placing a popup of 100x50 from `anchor`, `(x, y, width,
+/// height)`, on its `edge`, growing towards `gravity`.
+fn positioned(
+    desk: &Desk,
+    anchor: (i32, i32, i32, i32),
+    edge: xdg_positioner::Anchor,
+    gravity: xdg_positioner::Gravity,
+) -> XdgPositioner {
+    let positioner = desk.positioner((0, 0), (100, 50));
+    positioner.set_anchor_rect(anchor.0, anchor.1, anchor.2, anchor.3);
+    positioner.set_anchor(edge);
+    positioner.set_gravity(gravity);
+    positioner
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_anchor_rectangle_at_the_edge_of_i32_is_taken_into_the_world() {
+    use xdg_positioner::{Anchor, Gravity};
+    let session = session("sizes-far-anchor");
+    // Smithay 0.7.0 adds the anchor rectangle's width, or half of it, to its
+    // corner in `i32` to find where a popup hangs from (#154).
+    let shapes = [
+        ((i32::MAX, 0, 1, 1), Anchor::Right, FAR + 1),
+        ((i32::MAX, 0, 2, 1), Anchor::None, FAR + 1 - 50),
+        ((1, 0, i32::MAX, 1), Anchor::Right, FAR + 1),
+        ((i32::MIN, 0, 1, 1), Anchor::Left, -FAR),
+    ];
+    for (anchor, edge, x) in shapes {
+        let title = format!("{anchor:?} {edge:?}");
+        let (mut desk, mut queue, qh, _) = session.client();
+        settle(&session, &mut desk, &mut queue, &qh, &title);
+        let positioner = positioned(&desk, anchor, edge, Gravity::BottomRight);
+        let gravity = if edge == Anchor::None {
+            Gravity::None
+        } else {
+            Gravity::BottomRight
+        };
+        positioner.set_gravity(gravity);
+        let menu = desk.open_popup_by(&qh, desk.windows[0].xdg_surface(), &positioner);
+        until(&mut queue, &mut desk, |desk| desk.popups_configured == 1);
+        assert_eq!(
+            desk.popups_placed[0].0, x,
+            "{title}: hung from the anchor where it meets the world's edge"
+        );
+        assert!(!session.ended(), "the compositor is still running");
+        drop(menu);
+    }
+
+    let (desk, queue, ..) = session.client();
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_offset_at_i32_min_is_taken_into_the_world() {
+    use xdg_positioner::{Anchor, Gravity};
+    let session = session("sizes-far-offset");
+    // Smithay 0.7.0 adds the offset to the anchor's point saturating, then
+    // takes the popup's width away from it in `i32`, to grow it leftwards.
+    // The anchor is at (10, 10).
+    for (offset, gravity, x) in [
+        ((i32::MIN, 0), Gravity::Left, 10 - FAR - 100),
+        ((i32::MIN, 0), Gravity::None, 10 - FAR - 50),
+        ((0, i32::MIN), Gravity::Top, 10 - 50),
+    ] {
+        let title = format!("{offset:?} {gravity:?}");
+        let (mut desk, mut queue, qh, _) = session.client();
+        settle(&session, &mut desk, &mut queue, &qh, &title);
+        let positioner = positioned(&desk, (10, 10, 1, 1), Anchor::TopLeft, gravity);
+        positioner.set_offset(offset.0, offset.1);
+        let menu = desk.open_popup_by(&qh, desk.windows[0].xdg_surface(), &positioner);
+        until(&mut queue, &mut desk, |desk| desk.popups_configured == 1);
+        assert_eq!(desk.popups_placed[0].0, x, "{title}");
+        assert!(!session.ended(), "the compositor is still running");
+        drop(menu);
+    }
+
+    let (desk, queue, ..) = session.client();
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_popup_size_past_the_world_is_taken_into_it() {
+    use xdg_positioner::{Anchor, Gravity};
+    // With a person at the seat, a popup is kept on its monitor, and smithay
+    // 0.7.0 measures how far it sticks out in `i32`: its corner plus its
+    // width.
+    let session = Session::start(
+        "sizes-far-popup",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let (mut desk, mut queue, qh, _) = session.client();
+    settle(&session, &mut desk, &mut queue, &qh, "w");
+    let positioner = positioned(&desk, (10, 0, 1, 1), Anchor::TopLeft, Gravity::BottomRight);
+    positioner.set_size(i32::MAX, 1);
+    let menu = desk.open_popup_by(&qh, desk.windows[0].xdg_surface(), &positioner);
+    until(&mut queue, &mut desk, |desk| desk.popups_configured == 1);
+    let (.., width, _) = desk.popups_placed[0];
+    assert!(width <= FAR, "as wide as the world at most: {width}");
+    assert!(!session.ended(), "the compositor is still running");
+
+    session.stop((menu, desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_layer_margin_at_i32_min_is_taken_into_the_world() {
+    let session = session("sizes-far-margin");
+    // Smithay 0.7.0 takes each anchored side's margin away from the room the
+    // layer has, in `i32`. The strip is anchored top, left and right across
+    // a monitor 1280 wide; a margin below 0 puts it past the monitor's edge,
+    // here as far as the world's. A side margin widens it, and it draws
+    // again as wide as it is told to be.
+    let (far, wide) = (-f64::from(FAR), f64::from(1280 + FAR));
+    for (top, right, left, at, redrawn) in [
+        (0, 0, i32::MIN, (far, 0.0, 1280.0), true),
+        (0, i32::MIN, 0, (0.0, 0.0, wide), true),
+        (i32::MIN, 0, 0, (0.0, far, 1280.0), false),
+    ] {
+        let namespace = format!("{top} {right} {left}");
+        let (mut desk, mut queue, qh, _) = session.client();
+        desk.open_strip(&qh, Layer::Top, &namespace, 30, 0xff33_6699);
+        until(&mut queue, &mut desk, |desk| desk.layers_drawn == 1);
+        let (strip, ..) = &desk.layers[0];
+        strip.set_margin(top, right, 0, left);
+        strip.commit();
+        if redrawn {
+            until(&mut queue, &mut desk, |desk| desk.layers_drawn == 2);
+        }
+        queue.roundtrip(&mut desk).expect("the compositor answers");
+        session.wait_for(|facts| {
+            layer_named(facts, &namespace).is_some_and(|strip| {
+                (strip.geometry.x0, strip.geometry.y0, strip.geometry.x1) == at
+            })
+        });
+        assert!(!session.ended(), "the compositor is still running");
+    }
+
+    let (desk, queue, ..) = session.client();
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_exclusive_zone_past_the_world_is_taken_into_it() {
+    let session = session("sizes-far-zone");
+    // Smithay 0.7.0 moves the room left for windows past a panel's zone and
+    // margin, adding the two in `i32`.
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_panel(&qh, "panel", 30, 0xff33_6699);
+    until(&mut queue, &mut desk, |desk| desk.layers_drawn == 1);
+    let (panel, ..) = &desk.layers[0];
+    panel.set_exclusive_zone(i32::MAX);
+    panel.set_margin(1, 0, 0, 0);
+    panel.commit();
+    queue.roundtrip(&mut desk).expect("the compositor answers");
+    assert!(!session.ended(), "the compositor is still running");
+
+    session.stop((desk, queue));
+}
+
+fn layer_named<'a>(facts: &'a HostFacts, namespace: &str) -> Option<&'a SurfaceFacts> {
+    facts.surfaces().iter().find(|surface| {
+        matches!(&surface.kind, SurfaceKind::Layer { namespace: named, .. } if named == namespace)
+    })
 }

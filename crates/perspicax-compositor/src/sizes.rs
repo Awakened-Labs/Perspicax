@@ -31,6 +31,31 @@
 //! protocol asks; a geometry without area, accepted until #106, is refused
 //! in a release build too.
 //!
+//! # Numbers past the world
+//!
+//! Smithay 0.7.0 also adds some of a client's numbers together in `i32`,
+//! each fine on its own: where a popup hangs from its anchor, and how much
+//! room the panels on a monitor leave. Two near `i32::MAX` panicked a debug
+//! build at the overflow, and wrapped round in a release one (#154). Their
+//! protocols allow any such number, so none is refused. A number further
+//! from 0 than [`FAR`], past anything a monitor shows, is taken back to it
+//! and the request answered as if the client had asked for that:
+//!
+//! | Request | Taken into the world |
+//! |---|---|
+//! | `xdg_positioner.set_size` | each side, to `FAR` at most |
+//! | `xdg_positioner.set_anchor_rect` | its corner, to `FAR` from 0 either way; each side, to `FAR` at most |
+//! | `xdg_positioner.set_offset` | each way, to `FAR` from 0 |
+//! | `zwlr_layer_surface_v1.set_margin` | each side, to `FAR` from 0 either way |
+//! | `zwlr_layer_surface_v1.set_exclusive_zone` | to `FAR` at most |
+//!
+//! A side below 1 is left as sent, for smithay to refuse as it does.
+//!
+//! That bounds what each layer adds, not what they add together: smithay
+//! carries the room one exclusive layer leaves on to the next, so some
+//! 11 000 of them on one monitor would still overflow it. Smithay master adds
+//! a layer's numbers saturating (Smithay/smithay#1759), which ends that.
+//!
 //! # When to delete this
 //!
 //! Each check goes once a smithay release carries its own, and the
@@ -39,6 +64,9 @@
 //! Smithay master has the region, geometry and min/max checks. The damage
 //! and parent size checks are in a pull request (Smithay/smithay#2200), and
 //! so are the pool's and the dmabuf's (#2197); the layer's is in none.
+//! The layer's numbers are held until a release carries #1759. Nothing
+//! upstream holds a positioner's yet: #2214, which would have, was closed
+//! unmerged.
 
 use smithay::{
     reexports::{
@@ -81,12 +109,15 @@ use smithay::{
     },
 };
 
+use perspicax_policy::FAR;
+
 use crate::state::Compositor;
 
 /// `delegate_dispatch!`, with a check first: the compositor's
 /// `Dispatch<$interface, $data>`, answered by smithay's `$smithay` unless
 /// `$refused` refuses the request. A check that refuses has already posted
-/// the protocol's error, where the protocol names one.
+/// the protocol's error, where the protocol names one; one that does not may
+/// have taken a number in the request into the world first.
 macro_rules! checked {
     ($interface:ty: $data:ty => $smithay:ty, $refused:path) => {
         const _: () = {
@@ -100,12 +131,12 @@ macro_rules! checked {
                     state: &mut Self,
                     client: &Client,
                     resource: &$interface,
-                    request: <$interface as Resource>::Request,
+                    mut request: <$interface as Resource>::Request,
                     data: &$data,
                     display: &DisplayHandle,
                     data_init: &mut DataInit<'_, Self>,
                 ) {
-                    if !$refused(resource, &request) {
+                    if !$refused(resource, &mut request) {
                         <$smithay as Dispatch<$interface, $data, Self>>::request(
                             state, client, resource, request, data, display, data_init,
                         );
@@ -132,6 +163,22 @@ fn has_area(width: i32, height: i32) -> bool {
     width > 0 && height > 0
 }
 
+/// Each of `values`, a coordinate, brought back to the world's edge if it
+/// is past it, either way.
+fn held<const N: usize>(values: [&mut i32; N]) {
+    for value in values {
+        *value = (*value).clamp(-FAR, FAR);
+    }
+}
+
+/// Each of `sides`, a size, brought back to the world's width if it is
+/// wider. One below 1 is left as it was sent, for smithay to refuse.
+fn sides_held<const N: usize>(sides: [&mut i32; N]) {
+    for side in sides {
+        *side = (*side).min(FAR);
+    }
+}
+
 // `delegate_compositor!`, but for `wl_surface` and `wl_region`.
 
 delegate_global_dispatch!(Compositor: [WlCompositor: ()] => CompositorState);
@@ -145,7 +192,7 @@ delegate_dispatch!(Compositor: [WlSubsurface: SubsurfaceUserData] => CompositorS
 
 /// Damage turned inside out names nothing, and is dropped, as smithay
 /// already drops it from `damage_buffer`.
-fn damage(_: &WlSurface, request: &wl_surface::Request) -> bool {
+fn damage(_: &WlSurface, request: &mut wl_surface::Request) -> bool {
     matches!(
         *request,
         wl_surface::Request::Damage { width, height, .. } if width < 0 || height < 0
@@ -154,7 +201,7 @@ fn damage(_: &WlSurface, request: &wl_surface::Request) -> bool {
 
 /// A rectangle without area adds nothing to a region and takes nothing from
 /// it, and is dropped.
-fn region(_: &WlRegion, request: &wl_region::Request) -> bool {
+fn region(_: &WlRegion, request: &mut wl_region::Request) -> bool {
     match *request {
         wl_region::Request::Add { width, height, .. }
         | wl_region::Request::Subtract { width, height, .. } => !has_area(width, height),
@@ -167,10 +214,32 @@ fn region(_: &WlRegion, request: &wl_region::Request) -> bool {
 
 delegate_global_dispatch!(Compositor: [XdgWmBase: ()] => XdgShellState);
 delegate_dispatch!(Compositor: [XdgWmBase: XdgWmBaseUserData] => XdgShellState);
-checked!(XdgPositioner: XdgPositionerUserData => XdgShellState, parent_size);
+checked!(XdgPositioner: XdgPositionerUserData => XdgShellState, positioner);
 delegate_dispatch!(Compositor: [XdgPopup: XdgShellSurfaceUserData] => XdgShellState);
 checked!(XdgSurface: XdgSurfaceUserData => XdgShellState, window_geometry);
 checked!(XdgToplevel: XdgShellSurfaceUserData => XdgShellState, limits);
+
+/// A positioner's corner, offset and sizes, held to the world, and its parent
+/// size checked.
+fn positioner(positioner: &XdgPositioner, request: &mut xdg_positioner::Request) -> bool {
+    match request {
+        xdg_positioner::Request::SetSize { width, height } => {
+            sides_held([width, height]);
+        }
+        xdg_positioner::Request::SetAnchorRect {
+            x,
+            y,
+            width,
+            height,
+        } => {
+            held([x, y]);
+            sides_held([width, height]);
+        }
+        xdg_positioner::Request::SetOffset { x, y } => held([x, y]),
+        _ => {}
+    }
+    parent_size(positioner, request)
+}
 
 /// A parent size turned inside out describes no parent. xdg-shell names no
 /// error for it, so the one the positioner's other sizes get, as smithay's
@@ -196,7 +265,7 @@ fn parent_size(positioner: &XdgPositioner, request: &xdg_positioner::Request) ->
 /// xdg-shell: "The width and height of the effective window geometry must
 /// be greater than zero. Setting an invalid size will raise an invalid_size
 /// error."
-fn window_geometry(xdg_surface: &XdgSurface, request: &xdg_surface::Request) -> bool {
+fn window_geometry(xdg_surface: &XdgSurface, request: &mut xdg_surface::Request) -> bool {
     let xdg_surface::Request::SetWindowGeometry { width, height, .. } = *request else {
         return false;
     };
@@ -212,7 +281,7 @@ fn window_geometry(xdg_surface: &XdgSurface, request: &xdg_surface::Request) -> 
 
 /// xdg-shell, of a minimum or maximum size: "Using strictly negative values
 /// for width or height will result in a invalid_size error." 0 is no limit.
-fn limits(toplevel: &XdgToplevel, request: &xdg_toplevel::Request) -> bool {
+fn limits(toplevel: &XdgToplevel, request: &mut xdg_toplevel::Request) -> bool {
     let (xdg_toplevel::Request::SetMinSize { width, height }
     | xdg_toplevel::Request::SetMaxSize { width, height }) = *request
     else {
@@ -232,7 +301,24 @@ fn limits(toplevel: &XdgToplevel, request: &xdg_toplevel::Request) -> bool {
 
 delegate_global_dispatch!(Compositor: [ZwlrLayerShellV1: WlrLayerShellGlobalData] => WlrLayerShellState);
 delegate_dispatch!(Compositor: [ZwlrLayerShellV1: ()] => WlrLayerShellState);
-checked!(ZwlrLayerSurfaceV1: WlrLayerSurfaceUserData => WlrLayerShellState, layer_size);
+checked!(ZwlrLayerSurfaceV1: WlrLayerSurfaceUserData => WlrLayerShellState, layer);
+
+/// A layer's margins and the room it keeps from windows, held to the world,
+/// and its size checked.
+fn layer(layer: &ZwlrLayerSurfaceV1, request: &mut zwlr_layer_surface_v1::Request) -> bool {
+    match request {
+        zwlr_layer_surface_v1::Request::SetMargin {
+            top,
+            right,
+            bottom,
+            left,
+        } => held([top, right, bottom, left]),
+        // Below 0 is not room: it asks to be put over other layers' rooms.
+        zwlr_layer_surface_v1::Request::SetExclusiveZone { zone } => sides_held([zone]),
+        _ => {}
+    }
+    layer_size(layer, request)
+}
 
 /// A layer's size is a `u32` on the wire and an `i32` in smithay, which
 /// casts one to the other: past `i32::MAX`, a side comes out negative. No
@@ -261,7 +347,7 @@ delegate_dispatch!(Compositor: [WlBuffer: ShmBufferUserData] => ShmState);
 /// A pool only grows, and has a size above 0. Smithay posts the error
 /// itself, but then resizes the pool anyway, unwrapping a `NonZeroUsize` of
 /// the size: at 0, a panic in any build (#153).
-fn pool_size(pool: &WlShmPool, request: &wl_shm_pool::Request) -> bool {
+fn pool_size(pool: &WlShmPool, request: &mut wl_shm_pool::Request) -> bool {
     let wl_shm_pool::Request::Resize { size } = *request else {
         return false;
     };
@@ -311,7 +397,7 @@ mod dmabuf {
     /// refused.
     fn buffer_size(
         params: &ZwpLinuxBufferParamsV1,
-        request: &zwp_linux_buffer_params_v1::Request,
+        request: &mut zwp_linux_buffer_params_v1::Request,
     ) -> bool {
         let (zwp_linux_buffer_params_v1::Request::Create { width, height, .. }
         | zwp_linux_buffer_params_v1::Request::CreateImmed { width, height, .. }) = *request

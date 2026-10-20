@@ -22,6 +22,35 @@ impl Rect {
     }
 }
 
+/// How far from 0 a coordinate or a size may be, in logical pixels, for the
+/// compositor to reason about it: the edge of the world.
+///
+/// 2^16 is past any monitor and any GPU's largest texture, and twice X11's
+/// whole coordinate space. A client may send any `i32` it likes, and an
+/// `i32` sum of two of those can overflow, so one past this is taken back to
+/// it where it comes in (#154). Then the few of them any sum here adds -- a
+/// location, a width, a frame's insets -- stay well inside an `i32`, and so
+/// does the size in bytes of a titlebar two worlds wide, drawn at scale 4.
+pub const FAR: i32 = 1 << 16;
+
+/// `rect` held to the world: each edge further than [`FAR`] from 0 brought
+/// back to it. At least a pixel is kept, so a rectangle wholly past an edge
+/// is the pixel at that edge, not nothing: what is held is still somewhere.
+/// Its far edges are found in `i64`, since a corner plus a width that a
+/// client sent can be past an `i32`.
+#[must_use]
+pub fn in_world(rect: Rect) -> Rect {
+    let held = |at: i32, size: i32| {
+        let far = i64::from(FAR);
+        let start = i64::from(at).clamp(-far, far - 1);
+        let end = (i64::from(at) + i64::from(size)).clamp(start + 1, far);
+        let side = |value: i64| i32::try_from(value).expect("within the world");
+        (side(start), side(end - start))
+    };
+    let ((x, w), (y, h)) = (held(rect.x, rect.w), held(rect.y, rect.h));
+    Rect::new(x, y, w, h)
+}
+
 /// Which edges of a window are being dragged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Edges {
@@ -290,6 +319,43 @@ mod tests {
         );
         assert!(dragged((100.0, 100.0), (106.0, 100.0)));
         assert!(dragged((100.0, 100.0), (96.0, 95.0)), "in any direction");
+    }
+
+    #[test]
+    fn a_rectangle_in_the_world_is_left_as_it_is() {
+        for rect in [
+            Rect::new(-40, 10, 400, 300),
+            Rect::new(-FAR, -FAR, 2 * FAR, 2 * FAR),
+        ] {
+            assert_eq!(in_world(rect), rect);
+        }
+    }
+
+    #[test]
+    fn a_rectangle_reaching_past_the_world_is_cut_at_its_edge() {
+        assert_eq!(
+            in_world(Rect::new(0, 0, i32::MAX, 1)),
+            Rect::new(0, 0, FAR, 1),
+            "its far edge, which an `i32` cannot hold"
+        );
+        assert_eq!(
+            in_world(Rect::new(i32::MIN, -10, i32::MAX, 20)),
+            Rect::new(-FAR, -10, FAR - 1, 20),
+            "its near edge, and its far one where it ends"
+        );
+    }
+
+    #[test]
+    fn a_rectangle_wholly_past_the_world_keeps_a_pixel_at_its_edge() {
+        assert_eq!(
+            in_world(Rect::new(i32::MIN, 0, 1, 1)),
+            Rect::new(-FAR, 0, 1, 1)
+        );
+        assert_eq!(
+            in_world(Rect::new(i32::MAX, i32::MAX, i32::MAX, 0)),
+            Rect::new(FAR - 1, FAR - 1, 1, 1),
+            "even one with no height"
+        );
     }
 
     const FHD: Rect = Rect {
