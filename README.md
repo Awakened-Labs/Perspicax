@@ -428,6 +428,19 @@ other window, which would take the game's keyboard and the pointer with it.
 Only the person ends a hold, so waiting for them to pause does not help; the
 game itself can still be focused and typed into.
 
+While a window's menu holds the pointer and keyboard, one the person opened
+with a right-click say, an agent's `click` and `scroll` on any other
+application are refused as `menu_open`, naming the menu as `popup`. A press
+there would close the menu under the person before it reached what was aimed
+at, and a scroll there would reach nothing. So are `focus`, `window_focus` and
+`tab_forward` on anything but that window and its menus: the menu keeps the
+keyboard, and a tab brought forward would be raised over it, or put its window
+away and the menu with it. The menu's own application can still be clicked
+and scrolled anywhere, as the person can, so choosing an item goes ahead, and
+so does typing at the menu. `window_close` still asks any window to close. The
+compositor makes the check in the same turn it would act, and it clears as
+soon as the menu closes, chosen from or dismissed.
+
 **A titlebar is pixels no client drew.** The frame perspicax draws around a
 window goes into the facts beside the window, so a node of another window
 under a titlebar is refused as `occluded`, naming the window the titlebar
@@ -463,7 +476,9 @@ forward; an agent can't yet
 popup: a surface of its own, drawn directly above the window or panel it hangs
 from, where it takes the pointer. So a control under an open menu is refused as
 `occluded`, naming the menu, whether it is another application's or one of the
-menu's own window: a click there would land on the menu. And a menu's own
+menu's own window: a click there would land on the menu. One that holds the
+pointer and keyboard also keeps an agent's acts off every other application
+until it closes, refused as `menu_open`. And a menu's own
 items are judged inside the menu, an item hanging past its window's edge
 included, and an agent's click on one lands on the menu. Toolkits disagree
 about where they measure a menu's items from: GTK 3 from the menu itself, GTK
