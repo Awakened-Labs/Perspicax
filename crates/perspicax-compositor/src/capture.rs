@@ -43,7 +43,7 @@ pub(crate) use taking::{Pixels, draw_output};
 #[cfg(feature = "capture")]
 mod taking {
     use perspicax_index::{Drawn, Shot, ShotTarget};
-    use perspicax_node::{Origin, Rect, SurfaceId};
+    use perspicax_node::{Origin, SurfaceId};
     use smithay::{
         backend::{
             allocator::Fourcc,
@@ -212,15 +212,6 @@ mod taking {
         (origin, permitted)
     }
 
-    fn logical(rect: Rectangle<i32, Logical>) -> Rect {
-        Rect::new(
-            f64::from(rect.loc.x),
-            f64::from(rect.loc.y),
-            f64::from(rect.loc.x + rect.size.w),
-            f64::from(rect.loc.y + rect.size.h),
-        )
-    }
-
     fn plan_output(state: &Compositor, name: Option<&str>) -> Result<Plan, ActError> {
         let space = &state.space;
         let output = match name {
@@ -245,7 +236,7 @@ mod taking {
             let (origin, _) = origin(state, id);
             let entry = Drawn {
                 surface: id,
-                rect: logical(rect),
+                rect: crate::damage::to_rect(rect),
                 origin,
             };
             if hidden {
@@ -374,7 +365,10 @@ mod taking {
             lower: Vec::new(),
             drawn: vec![Drawn {
                 surface: id,
-                rect: logical(Rectangle::new(geometry.loc - bbox.loc, geometry.size)),
+                rect: crate::damage::to_rect(Rectangle::new(
+                    geometry.loc - bbox.loc,
+                    geometry.size,
+                )),
                 origin,
             }],
             redacted: Vec::new(),

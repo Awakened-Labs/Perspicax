@@ -11,6 +11,12 @@
 //! compositor still running: `Session::stop` fails a test whose compositor
 //! panicked.
 //!
+//! The same audit found numbers each fine on their own whose sum is past
+//! what an `i32` holds: a region's far edge, a surface's corner behind a
+//! geometry at `i32::MIN`. Until #154 adding them panicked a debug build
+//! too, and wrapped round in a release one. Those tests send such numbers,
+//! and see them described where the client put them.
+//!
 //! Like the other live tests these bind a real Wayland socket, so they need
 //! `XDG_RUNTIME_DIR`, and are `#[ignore]`d for `ci/live-tests.sh` to run.
 
@@ -264,5 +270,63 @@ fn a_pool_resized_to_nothing_is_a_protocol_error() {
     }
 
     let (desk, queue, ..) = session.client();
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn an_opaque_region_at_the_edge_of_i32_is_described_as_sent() {
+    let session = session("sizes-far-region");
+    let (mut desk, mut queue, qh, _) = session.client();
+    settle(&session, &mut desk, &mut queue, &qh, "w");
+    let surface = desk.windows[0].wl_surface().clone();
+    let edge = f64::from(i32::MAX);
+
+    // Every number in it is one a client may send, and its far edge is one
+    // past what an `i32` holds (#154).
+    let region = desk.region();
+    region.add(i32::MAX, 0, 1, 1);
+    surface.set_opaque_region(Some(region.wl_region()));
+    surface.commit();
+    becomes(&session, &mut desk, &mut queue, "w", |w| {
+        w.opaque == [Rect::new(edge, 0.0, edge + 1.0, 1.0)]
+    });
+
+    // A subsurface's, which is measured into its window's at every commit.
+    let root = desk.windows[0].wl_surface().clone();
+    let (_placed, child) = desk.open_subsurface(&qh, &root, (40, 30), false);
+    root.commit();
+    desk.set_opaque(&child, (i32::MAX, i32::MAX, 1, 1));
+    desk.paint(&child, (120, 80), 0xff00_00ff);
+    child.commit();
+    queue.roundtrip(&mut desk).expect("the compositor answers");
+    assert!(!session.ended(), "the compositor is still running");
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_geometry_declared_at_i32_min_before_drawing_is_described() {
+    let session = session("sizes-far-geometry");
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_bare(&qh, "far");
+    queue.roundtrip(&mut desk).expect("the compositor answers");
+
+    // Nothing is drawn, so the declared geometry is the window's as it is;
+    // its surface's corner is then 2^31 to the right of it.
+    let window = desk.blank[0].clone();
+    window.xdg_surface().set_window_geometry(i32::MIN, 0, 1, 1);
+    window.commit();
+    let far = becomes(&session, &mut desk, &mut queue, "far", |w| {
+        w.geometry.width() == 1.0
+    });
+    assert_eq!(
+        far.buffer_origin.x - far.geometry.x0,
+        2_147_483_648.0,
+        "the surface's corner is where the client put it"
+    );
+    assert!(!session.ended(), "the compositor is still running");
+
     session.stop((desk, queue));
 }

@@ -34,7 +34,7 @@ use perspicax_node::{Origin, Rect, SurfaceId, Vec2};
 use smithay::{
     desktop::PopupKind,
     reexports::wayland_server::{Resource as _, protocol::wl_surface::WlSurface},
-    utils::IsAlive,
+    utils::{IsAlive, Logical, Point},
     wayland::{
         compositor::{RectangleKind, SurfaceAttributes, with_states},
         shell::xdg::XdgToplevelSurfaceData,
@@ -318,12 +318,8 @@ impl Compositor {
             HostFacts::bottom_to_top(surfaces, generation)
                 .with_consent(self.grants.consent().clone())
                 .with_outputs(self.output_rects().into_iter().map(|area| {
-                    Rect::new(
-                        f64::from(area.x),
-                        f64::from(area.y),
-                        f64::from(area.x + area.w),
-                        f64::from(area.y + area.h),
-                    )
+                    let (x, y) = (f64::from(area.x), f64::from(area.y));
+                    Rect::new(x, y, x + f64::from(area.w), y + f64::from(area.h))
                 })),
         );
         self.announce();
@@ -401,19 +397,14 @@ impl Compositor {
         } else {
             (None, None)
         };
-        let placed = Rect::new(
-            f64::from(location.x),
-            f64::from(location.y),
-            f64::from(location.x + geometry.size.w),
-            f64::from(location.y + geometry.size.h),
-        );
+        // In floating point, as everything a client's numbers are added to
+        // here is: each is any `i32` it likes (#154).
+        let placed =
+            crate::damage::to_rect(smithay::utils::Rectangle::new(location, geometry.size));
         // Surface-local (0,0) sits at the geometry's own offset *back* from
         // where we placed that geometry -- under CSD that is the shadow
         // margin, and it is where opaque regions are measured from.
-        let buffer_origin = Vec2::new(
-            f64::from(location.x - geometry.loc.x),
-            f64::from(location.y - geometry.loc.y),
-        );
+        let buffer_origin = back(location, geometry.loc);
 
         Some(SurfaceFacts {
             id,
@@ -484,11 +475,7 @@ impl Compositor {
         // from its corner, as `popup::hung` hangs them.
         let offset =
             crate::geometry::window_geometry(surface).map_or_else(Default::default, |g| g.loc);
-        let buffer_origin = Vec2::new(
-            f64::from(location.x - offset.x),
-            f64::from(location.y - offset.y),
-        );
-        self.placed_popups(surface, id, buffer_origin)
+        self.placed_popups(surface, id, back(location, offset))
     }
 
     /// The menu with this id, where smithay draws it now: hung from a window
@@ -628,16 +615,7 @@ impl Compositor {
         let placed = smithay::utils::Rectangle::new(location, size);
         let mut facts = match x11.wl_surface() {
             Some(surface) => self.plain_facts(id, &surface, placed),
-            None => SurfaceFacts::new(
-                id,
-                Rect::new(
-                    f64::from(location.x),
-                    f64::from(location.y),
-                    f64::from(location.x + size.w),
-                    f64::from(location.y + size.h),
-                ),
-            )
-            .unmapped(),
+            None => SurfaceFacts::new(id, crate::damage::to_rect(placed)).unmapped(),
         };
         if self.parked.contains(window) {
             facts.mapped = false;
@@ -734,7 +712,8 @@ fn opaque_of(surface: &WlSurface) -> Vec<Rect> {
     opaque
 }
 
-/// The `Add` rectangles of a region, in surface-local coordinates.
+/// The `Add` rectangles of a region, in surface-local coordinates, measured
+/// in floating point: a client may add one whose far edge is past `i32`.
 ///
 /// `Subtract` rectangles are dropped, and the direction of that error is the
 /// reason it is acceptable: ignoring a subtraction can only make this compositor
@@ -746,15 +725,17 @@ pub(crate) fn regions(region: &smithay::wayland::compositor::RegionAttributes) -
         .rects
         .iter()
         .filter(|(kind, _)| matches!(kind, RectangleKind::Add))
-        .map(|(_, rect)| {
-            Rect::new(
-                f64::from(rect.loc.x),
-                f64::from(rect.loc.y),
-                f64::from(rect.loc.x + rect.size.w),
-                f64::from(rect.loc.y + rect.size.h),
-            )
-        })
+        .map(|(_, rect)| crate::damage::to_rect(*rect))
         .collect()
+}
+
+/// Where a surface's corner is, `at` less the `offset` it sits back from
+/// there, in floating point.
+fn back(at: Point<i32, Logical>, offset: Point<i32, Logical>) -> Vec2 {
+    Vec2::new(
+        f64::from(at.x) - f64::from(offset.x),
+        f64::from(at.y) - f64::from(offset.y),
+    )
 }
 
 #[cfg(test)]
@@ -813,6 +794,23 @@ mod tests {
             ]
         );
         assert_eq!(facts.x11_display(), Some(2));
+    }
+
+    /// A region's rectangle is any four `i32`s a client likes, so its far
+    /// edges can be past what an `i32` holds: they are measured where they
+    /// are, not wrapped round to the other side, nor a panic (#154).
+    #[test]
+    fn regions_reaching_past_i32_are_measured_in_floating_point() {
+        let far = smithay::utils::Rectangle::new((i32::MAX, i32::MAX).into(), (1, 1).into());
+        let region = smithay::wayland::compositor::RegionAttributes {
+            rects: vec![(RectangleKind::Add, far)],
+        };
+        let edge = f64::from(i32::MAX);
+
+        assert_eq!(
+            regions(&region),
+            [Rect::new(edge, edge, edge + 1.0, edge + 1.0)]
+        );
     }
 
     /// A watcher that has gone is forgotten rather than told forever.
