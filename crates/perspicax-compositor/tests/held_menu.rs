@@ -20,7 +20,7 @@
 
 mod common;
 
-use common::{Desk, Ear, Session, configured, heard, menu_with_the_keyboard, until};
+use common::{Desk, Ear, Session, configured, heard, menu_with_the_keyboard_on, until};
 use perspicax_compositor::{ActError, Backend, Host};
 use perspicax_index::{Action as Verb, HostFacts, PointerButton, SurfaceKind};
 use perspicax_node::{Rect, SurfaceId};
@@ -111,10 +111,9 @@ fn opened(
 /// Two applications at the seat.
 ///
 /// "b" has a panel across the top, a window, "elsewhere", and a popup of it
-/// that holds nothing, as a tooltip does. "a" has two windows, "page" and
-/// then "own", with "page" given the keyboard back; and once
-/// [`Apps::open_the_menu`] has run, a menu of "page" holding the pointer
-/// and keyboard.
+/// that holds nothing, as a tooltip does. "a" has two windows, "own" and
+/// then "page", over it with the keyboard; and once [`Apps::open_the_menu`]
+/// has run, a menu of "page" holding the pointer and keyboard, over both.
 struct Apps {
     a: Desk,
     a_queue: EventQueue<Desk>,
@@ -156,13 +155,10 @@ impl Apps {
         let (mut a, mut a_queue, a_qh, a_globals) = session.client();
         a.bind_pointer(&a_globals, &a_qh);
         let ear = a.bind_keyboard(&a_globals, &a_qh);
-        let page = opened(session, &mut a, &mut a_queue, &a_qh, "page");
         let own = opened(session, &mut a, &mut a_queue, &a_qh, "own");
-        // "own" took the keyboard as it opened. Give it back to "page",
-        // whose menu takes it from there.
-        Host::new(&session.facts, &session.requests)
-            .act(page, &Verb::Focus)
-            .expect("focused");
+        // Over "own", with the keyboard as it opened, so that its menu is
+        // over "own" too, where an agent's click on the menu lands.
+        let page = opened(session, &mut a, &mut a_queue, &a_qh, "page");
         Self {
             a,
             a_queue,
@@ -183,13 +179,14 @@ impl Apps {
     /// Open the menu of "page" that holds the pointer and keyboard, as a
     /// right-click does, and wait for the facts to describe it.
     fn open_the_menu(&mut self, session: &Session) {
-        let menu = menu_with_the_keyboard(
+        let menu = menu_with_the_keyboard_on(
             session,
             &mut self.a,
             &mut self.a_queue,
             &self.a_qh,
             &self.ear,
             self.page,
+            1,
         );
         let page = self.page;
         let facts = session.wait_for(|facts| !popups_of(facts, page).is_empty());

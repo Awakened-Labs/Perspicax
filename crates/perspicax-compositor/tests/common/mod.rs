@@ -348,15 +348,29 @@ pub fn menu_with_the_keyboard(
     ear: &Ear,
     page: SurfaceId,
 ) -> Popup {
+    menu_with_the_keyboard_on(session, desk, queue, qh, ear, page, 0)
+}
+
+/// [`menu_with_the_keyboard`], on this client's `nth` window, `page` to the
+/// facts, rather than its first.
+pub fn menu_with_the_keyboard_on(
+    session: &Session,
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    qh: &QueueHandle<Desk>,
+    ear: &Ear,
+    page: SurfaceId,
+    nth: usize,
+) -> Popup {
     const MENU: u32 = 0xff33_6699;
-    let window = desk.windows[0].wl_surface().id();
+    let window = desk.windows[nth].wl_surface().id();
     until(queue, desk, |_| {
         heard(ear).entered.as_ref() == Some(&window)
     });
     let serial = heard(ear).enter_serial.expect("entered");
     let menu = desk.open_menu(
         qh,
-        desk.windows[0].xdg_surface(),
+        desk.windows[nth].xdg_surface(),
         (40, 30),
         (120, 80),
         serial,

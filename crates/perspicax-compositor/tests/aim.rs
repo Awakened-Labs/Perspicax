@@ -4,8 +4,8 @@
 //! geometry the client declared, inside any client-side shadow. The client is
 //! told about the pointer in surface space, where its buffer begins, which
 //! under a shadow is the shadow's width further out. So a click at window-space
-//! `(50, 50)` on a window whose geometry starts at `(26, 23)` in its buffer must
-//! arrive at `(76, 73)` -- Firefox's shape, on the seat where issue #45 found
+//! `(20, 20)` on a window whose geometry starts at `(26, 23)` in its buffer must
+//! arrive at `(46, 43)` -- Firefox's shape, on the seat where issue #45 found
 //! every Firefox click a shadow's width from its target.
 //!
 //! A seat and a headless build with `capture` computed that shadow from
@@ -99,29 +99,31 @@ fn a_click_in_window_space_lands_inside_the_shadow_a_window_declared() {
     assert_eq!(flush.buffer_origin, flush.geometry.origin().to_vec2());
 
     let host = Host::new(&facts, &requests);
-    let click = |surface: SurfaceId| {
+    let click = |surface: SurfaceId, at: Rect| {
         host.act(
             surface,
             &Action::Click {
-                at: Rect::new(40.0, 40.0, 60.0, 60.0),
+                at,
                 button: PointerButton::Left,
             },
         )
         .expect("dispatched");
     };
 
-    click(shadowed.id);
+    // In the corner "flush" leaves uncovered: it is cascaded over this one,
+    // from (32, 32).
+    click(shadowed.id, Rect::new(10.0, 10.0, 30.0, 30.0));
     until(&mut queue, &mut desk, |desk| {
         desk.presses("shadowed").len() == 1
     });
     assert_eq!(
         desk.presses("shadowed"),
-        [(76.0, 73.0)],
-        "the rect's centre, (50, 50) in window space, is the shadow's width \
+        [(46.0, 43.0)],
+        "the rect's centre, (20, 20) in window space, is the shadow's width \
          further into the buffer"
     );
 
-    click(flush.id);
+    click(flush.id, Rect::new(40.0, 40.0, 60.0, 60.0));
     until(&mut queue, &mut desk, |desk| {
         desk.presses("flush").len() == 1
     });

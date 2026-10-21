@@ -33,12 +33,13 @@ use wayland_client::{EventQueue, QueueHandle};
 
 const LEFT: u32 = Button::Left.code();
 
-/// A spot inside any of our windows, in window space.
+/// A spot inside any of our windows, in window space, and in the corner of
+/// "back" that "front", cascaded over it from (32, 32), leaves uncovered.
 const SPOT: Rect = Rect {
-    x0: 60.0,
-    y0: 50.0,
-    x1: 70.0,
-    y1: 60.0,
+    x0: 10.0,
+    y0: 10.0,
+    x1: 20.0,
+    y1: 20.0,
 };
 
 /// One monitor, with a person at it: only a person's press may start a move.
@@ -217,8 +218,16 @@ fn a_menu_holding_the_pointer_is_no_hand_on_it() {
     let _menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, page);
 
     // An item chosen from it, as an agent chooses one.
+    let menu = session
+        .facts
+        .read()
+        .surfaces()
+        .iter()
+        .find(|surface| surface.hangs_from() == Some(page))
+        .expect("described, once it drew")
+        .id;
     let host = Host::new(&session.facts, &session.requests);
-    assert!(host.act(page, &click()).is_ok());
+    assert!(host.act(menu, &click()).is_ok());
     until(&mut queue, &mut desk, |desk| desk.buttons.len() == 2);
 
     session.stop((desk, queue));
