@@ -41,7 +41,7 @@ use std::{net::Shutdown, path::PathBuf, thread};
 
 use common::{Desk, Session, connect};
 use perspicax_compositor::{ActError, Backend, Command, Host, Keymap, Virtual};
-use perspicax_index::{Action as Verb, HostFacts, Layer, PointerButton, SurfaceKind};
+use perspicax_index::{Action as Verb, HostFacts, Layer, PointerButton, Refusal, SurfaceKind};
 use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::{Access, Action, Ended, Place, Protocol, Rule, Shape, Side};
 use wayland_client::Connection;
@@ -1570,14 +1570,14 @@ fn an_agents_click_on_the_start_button_opens_it() {
 }
 
 /// The menus' surface is drawn over the whole monitor, the shell's panel
-/// included, though it leaves the panel out of where it takes clicks. A
-/// click there still reaches the panel; to an agent the panel is covered
-/// while a menu is open, on policy, because a surface covers everything it
-/// draws (#103). #146 would leave the panel undrawn over, and this would
-/// change with it.
+/// included, though it leaves the panel out of where it takes clicks. To an
+/// agent the panel is covered while a menu is open, on policy, because a
+/// surface covers everything it draws (#103), and an agent's click there is
+/// refused as it is sent, naming the menus' surface (#158). #146 would
+/// leave the panel undrawn over, and this would change with it.
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
-fn while_a_menu_is_open_its_panel_is_covered_to_an_agent_though_a_click_reaches_it() {
+fn while_a_menu_is_open_its_panel_is_covered_to_an_agent_and_its_click_refused() {
     use perspicax_index::{Judgement, judge};
     use perspicax_node::Visibility;
 
@@ -1605,10 +1605,22 @@ fn while_a_menu_is_open_its_panel_is_covered_to_an_agent_though_a_click_reaches_
         "covered by the clear part of the menus' surface, which says nothing about it"
     );
 
-    // A click there is not the menus' surface's: it reaches the button, and
-    // closes the menu.
-    click(&session, panel, start, PointerButton::Left);
-    session.wait_for(|facts| menu(facts).is_none());
+    // Judged again as it is sent, and refused as the gate would refuse it:
+    // nothing is sent, and the menu stays open.
+    assert_eq!(
+        Host::new(&session.facts, &session.requests)
+            .act(
+                panel,
+                &Verb::Click {
+                    at: button,
+                    button: PointerButton::Left,
+                },
+            )
+            .map(|_| ()),
+        Err(ActError::OutOfSight(Refusal::Occluded { by: menus }))
+    );
+    assert!(menu(&session.facts.read()).is_some(), "still open");
+    click_off_the_menu(&session, menus);
 
     shell.stop_with(session);
 }

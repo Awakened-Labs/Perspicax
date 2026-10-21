@@ -26,6 +26,13 @@
 //! never true at any instant. Currency is what the generation counter and the
 //! damage bookkeeping are for -- being *behind* is a state the index can detect
 //! and refuse on, whereas being *inconsistent* is not.
+//!
+//! Behind is not good enough for the moment an act lands. An agent's click is
+//! judged against the snapshot it read, and carried out on this thread later,
+//! by when a menu may have opened over what it aims at. So a click or a scroll
+//! is judged again here, against facts built in the turn that sends it
+//! (`Compositor::host_facts`), and refused if what it would land on can no
+//! longer be seen (#158).
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock, mpsc};
 
@@ -227,8 +234,26 @@ impl Compositor {
         let in_use = self.window_in_use();
         self.stack_fullscreen(in_use);
         self.generation += 1;
-        let generation = self.generation;
+        self.facts.publish(self.host_facts(in_use));
+        self.announce();
+    }
 
+    /// The facts as they stand, built whole and not published: what
+    /// [`Compositor::publish_facts`] publishes, and what an agent's click or
+    /// scroll is judged against again in the turn that sends it (#158).
+    ///
+    /// Built from what is drawn now. A few changes on screen publish nothing
+    /// of their own -- an X11 window's configure, a tab dragged over
+    /// another, the stacking that keyboard focus settles -- so the snapshot
+    /// last published is not always this. It carries the generation last
+    /// published: nothing that tells snapshots apart by it ever reads one
+    /// that was not published.
+    ///
+    /// `in_use` is the window in use, [`Compositor::window_in_use`], which
+    /// reads the keyboard: asked by the caller, outside smithay's keyboard
+    /// callbacks, so that this never reads it. This takes each layer map's
+    /// lock and `with_states` in turn, so it is never called under either.
+    pub(crate) fn host_facts(&self, in_use: Option<SurfaceId>) -> HostFacts {
         // `Space::elements()` iterates back to front, which is the order
         // `HostFacts::bottom_to_top` wants. The two agree by construction
         // rather than through a conversion somebody has to keep right.
@@ -314,15 +339,12 @@ impl Compositor {
             .chain(covers)
             .collect();
 
-        self.facts.publish(
-            HostFacts::bottom_to_top(surfaces, generation)
-                .with_consent(self.grants.consent().clone())
-                .with_outputs(self.output_rects().into_iter().map(|area| {
-                    let (x, y) = (f64::from(area.x), f64::from(area.y));
-                    Rect::new(x, y, x + f64::from(area.w), y + f64::from(area.h))
-                })),
-        );
-        self.announce();
+        HostFacts::bottom_to_top(surfaces, self.generation)
+            .with_consent(self.grants.consent().clone())
+            .with_outputs(self.output_rects().into_iter().map(|area| {
+                let (x, y) = (f64::from(area.x), f64::from(area.y));
+                Rect::new(x, y, x + f64::from(area.w), y + f64::from(area.h))
+            }))
     }
 
     /// Tell the clients that watch other programs' windows what changed.

@@ -25,8 +25,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop};
-use perspicax_index::{Action, HostFacts, PointerButton, SurfaceFacts};
+use perspicax_compositor::{ActError, Backend, Config, Facts, Host, Requests, Stop};
+use perspicax_index::{Action, HostFacts, PointerButton, Refusal, SurfaceFacts};
 use perspicax_node::{Rect, SurfaceId, Vec2};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -123,6 +123,17 @@ fn a_click_in_window_space_lands_inside_the_shadow_a_window_declared() {
          further into the buffer"
     );
 
+    // Where "flush" covers it, a click on "shadowed" is not sent at all:
+    // what the person sees there is "flush" (#158).
+    let under = Action::Click {
+        at: Rect::new(40.0, 40.0, 60.0, 60.0),
+        button: PointerButton::Left,
+    };
+    assert_eq!(
+        host.act(shadowed.id, &under).map(|_| ()),
+        Err(ActError::OutOfSight(Refusal::Occluded { by: flush.id }))
+    );
+
     click(flush.id, Rect::new(40.0, 40.0, 60.0, 60.0));
     until(&mut queue, &mut desk, |desk| {
         desk.presses("flush").len() == 1
@@ -132,6 +143,7 @@ fn a_click_in_window_space_lands_inside_the_shadow_a_window_declared() {
         [(50.0, 50.0)],
         "and a window with no shadow is pressed where it was asked"
     );
+    assert_eq!(desk.presses("shadowed").len(), 1, "and nothing under it");
 
     stop.request();
     drop((desk, queue));

@@ -22,8 +22,8 @@ mod common;
 
 use common::{Desk, Ear, Session, configured, heard, menu_with_the_keyboard_on, until};
 use perspicax_compositor::{ActError, Backend, Host};
-use perspicax_index::{Action as Verb, HostFacts, PointerButton, SurfaceKind};
-use perspicax_node::{Rect, SurfaceId};
+use perspicax_index::{Action as Verb, HostFacts, PointerButton, SurfaceKind, judge};
+use perspicax_node::{Rect, SurfaceId, Visibility};
 use perspicax_policy::Action;
 use smithay_client_toolkit::shell::xdg::{XdgSurface as _, popup::Popup};
 use wayland_client::{EventQueue, Proxy as _, QueueHandle, protocol::wl_surface::WlSurface};
@@ -261,6 +261,38 @@ fn an_agent_cannot_click_or_scroll_another_application_past_a_menu() {
     assert_eq!(apps.b.scrolls, 0, "no scroll reached b");
     assert_eq!(apps.a.popups_done, 0, "the menu is still open");
     assert!(apps.keys_on(apps.menu_surface()));
+
+    apps.stop(session);
+}
+
+/// A menu holding the pointer is named before what covers the node, as it
+/// is judged again as the click is sent (#158): told of the menu, an agent
+/// can choose from it, and a click anywhere on "b" would close it under the
+/// person. A spot of "elsewhere" under "own" is refused as the menu's.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_holding_the_pointer_is_named_before_what_covers_the_node() {
+    let session = seated("held-menu-covered");
+    let apps = Apps::with_the_menu(&session);
+    // "own" is cascaded over "elsewhere", 32 further in each way.
+    let covered = Rect::new(40.0, 40.0, 50.0, 50.0);
+    assert_eq!(
+        judge(&session.facts.read(), apps.elsewhere, covered).visibility,
+        Visibility::Occluded { by: apps.own }
+    );
+
+    assert_eq!(
+        Host::new(&session.facts, &session.requests)
+            .act(
+                apps.elsewhere,
+                &Verb::Click {
+                    at: covered,
+                    button: PointerButton::Left,
+                },
+            )
+            .map(|_| ()),
+        Err(ActError::MenuOpen { popup: apps.menu() })
+    );
 
     apps.stop(session);
 }

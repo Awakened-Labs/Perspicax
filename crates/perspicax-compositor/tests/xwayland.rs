@@ -39,7 +39,7 @@ use common::{Session, heard, menu_with_the_keyboard, until};
 use perspicax_compositor::{
     ActError, Backend, Command, Config, Error, Facts, Host, Requests, Stop,
 };
-use perspicax_index::{Action as Verb, HostFacts, PointerButton, SurfaceFacts, judge};
+use perspicax_index::{Action as Verb, HostFacts, PointerButton, Refusal, SurfaceFacts, judge};
 use perspicax_node::{Origin, Rect, Visibility, X11Basis};
 use perspicax_policy::{Action, Button, Focus, FocusModel, Mods, Opacity};
 use smithay_client_toolkit::shell::WaylandSurface as _;
@@ -2975,6 +2975,55 @@ fn an_agent_cannot_click_or_focus_an_x11_window_past_a_wayland_menu() {
     assert_eq!(desk.popups_done, 0, "the menu is still open");
 
     x11.session.stop((desk, queue));
+}
+
+/// Issue #158: an X application's menu places itself, and smithay follows it
+/// when it moves with nothing published: the facts last published still have
+/// it where it was. An agent's click on the window it moved over is judged
+/// against what is drawn now, in the turn that sends it, and refused, naming
+/// the menu. Judged against the facts last published, it landed under it.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_click_under_an_x11_menu_moved_over_it_since_is_refused_naming_the_menu() {
+    let x11 = X11::start("x11-judged-again", Backend::headless((1280, 800)));
+    let window = x11.open("page");
+    let page = id_of(&x11, "page");
+    let menu_window = x11.menu("menu", (900, 500), (120, 80));
+    let menu = id_of(&x11, "menu");
+    // In "page"'s window space, framed at (2, 26): (22, 46) to (42, 66) on
+    // the desk, under where the menu moves to.
+    let spot = Rect::new(20.0, 20.0, 40.0, 40.0);
+    assert_eq!(
+        judge(&x11.facts(), page, spot).visibility,
+        Visibility::Visible
+    );
+
+    x11.x
+        .configure_window(menu_window, &ConfigureWindowAux::new().x(10).y(40))
+        .expect("configure_window");
+    // Answered once the window manager has taken in everything sent before
+    // the question, the move included.
+    x11.settled(window);
+    assert_eq!(
+        judge(&x11.facts(), page, spot).visibility,
+        Visibility::Visible,
+        "nothing published the move"
+    );
+
+    let host = Host::new(&x11.session.facts, &x11.session.requests);
+    assert_eq!(
+        host.act(
+            page,
+            &Verb::Click {
+                at: spot,
+                button: PointerButton::Left,
+            },
+        )
+        .map(|_| ()),
+        Err(ActError::OutOfSight(Refusal::Occluded { by: menu }))
+    );
+
+    x11.stop();
 }
 
 /// Issue #181: a window that places itself is not the window manager's to
