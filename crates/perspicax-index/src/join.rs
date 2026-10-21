@@ -388,8 +388,8 @@ pub enum Frame {
 pub struct PopupClaim {
     /// The popup's surface.
     pub surface: SurfaceId,
-    /// The window or panel it hangs from.
-    pub from: SurfaceId,
+    /// The window or panel it hangs from, or `None` for a popup of nothing.
+    pub from: Option<SurfaceId>,
     /// The process that drew it, from its client's credentials.
     pub pid: Option<u32>,
     /// When it was put on screen. A menu read before then may be one that
@@ -562,7 +562,9 @@ fn eligible(popup: &PopupClaim, menu: &MenuClaim) -> bool {
         (menu.seen_at, popup.mapped_at),
         (Some(seen), Some(mapped)) if seen >= mapped
     );
-    let from = menu.under.is_none_or(|under| under.surface == popup.from);
+    let from = menu
+        .under
+        .is_none_or(|under| Some(under.surface) == popup.from);
     fresh && from && matches!((menu.pid, popup.pid), (Some(a), Some(b)) if a == b)
 }
 
@@ -893,7 +895,7 @@ mod tests {
         let (left, top, right, bottom) = shadow;
         PopupClaim {
             surface: SurfaceId(id),
-            from: WINDOW,
+            from: Some(WINDOW),
             pid: Some(PID),
             mapped_at: Some(opened),
             buffer_origin: Vec2::new(geometry.x0 - left, geometry.y0 - top),
@@ -1169,5 +1171,82 @@ mod tests {
         );
         assert!(joins.is_empty());
         assert_eq!(findings.len(), 2);
+    }
+
+    // X11 menus, as slice 1 of #159 measured them
+    // (`~/perspicax-test/issue-159/FINDINGS.md`): drawn with no shadow, the X
+    // window exactly the menu. GTK 3's name their window in
+    // `WM_TRANSIENT_FOR`; GTK 4's name none, and are popups of nothing.
+
+    /// An X11 menu as a popup: `at` in the window's space, no shadow, hung
+    /// from `from`.
+    fn x11_menu(id: u64, at: Rect, from: Option<SurfaceId>, opened: Instant) -> PopupClaim {
+        PopupClaim {
+            from,
+            ..popup(id, at, (0.0, 0.0, 0.0, 0.0), opened)
+        }
+    }
+
+    /// GTK 3's context menu under X11: its own untitled window, the menu
+    /// measured from the X window's corner, which is the menu's. Named or
+    /// not, the window it was opened from is not what binds it.
+    #[test]
+    fn an_x11_menu_window_of_its_own_binds_whatever_it_hangs_from() {
+        let (opened, read) = times();
+        for from in [Some(WINDOW), None] {
+            let context = x11_menu(5, rect(300.0, 200.0, 102.0, 86.0), from, opened);
+            assert_eq!(
+                joined(
+                    &[context],
+                    &[menu(&[40], rect(0.0, 0.0, 102.0, 86.0), None, read)]
+                ),
+                [(5, vec![40], Frame::Own, Vec2::ZERO)],
+                "from {from:?}"
+            );
+        }
+    }
+
+    /// GTK 4's popover under X11 hangs from nothing, and its menu hangs under
+    /// the window, measured in the window's frame, landing on it exactly. A
+    /// popup of nothing is no window's, so it is not bound: which window's
+    /// menu it is, nothing says.
+    #[test]
+    fn a_popup_of_nothing_binds_no_menu_under_a_window() {
+        let (opened, read) = times();
+        let popover = x11_menu(5, rect(23.0, 298.0, 109.0, 180.0), None, opened);
+        let (joins, findings) = join_popups(
+            core::slice::from_ref(&popover),
+            &[menu(
+                &[10],
+                rect(23.0, 298.0, 109.0, 180.0),
+                Some(under()),
+                read,
+            )],
+        );
+        assert!(joins.is_empty());
+        assert_eq!(
+            findings,
+            [MenuFinding::Unmatched {
+                popup: SurfaceId(5)
+            }]
+        );
+
+        // Hung from its window, the same menu binds.
+        let named = PopupClaim {
+            from: Some(WINDOW),
+            ..popover
+        };
+        assert_eq!(
+            joined(
+                &[named],
+                &[menu(
+                    &[10],
+                    rect(23.0, 298.0, 109.0, 180.0),
+                    Some(under()),
+                    read
+                )]
+            ),
+            [(5, vec![10], Frame::Window(WINDOW), Vec2::new(23.0, 298.0))]
+        );
     }
 }

@@ -569,7 +569,7 @@ impl Index {
         for surface in facts
             .surfaces()
             .iter()
-            .filter(|surface| surface.hangs_from().is_none())
+            .filter(|surface| !surface.is_popup())
         {
             let now = self.consent.permits(&surface.origin);
             let before = self

@@ -152,8 +152,10 @@ pub enum SurfaceKind {
     Popup {
         /// The window or panel it hangs from, through any menus between: a
         /// submenu's is its menu's. It may be a surface these facts do not
-        /// describe, such as a window that has drawn nothing yet.
-        from: SurfaceId,
+        /// describe, such as a window that has drawn nothing yet. `None` for
+        /// a popup of nothing: an X11 menu that names no window it was
+        /// opened from, as Steam's and GTK 4's do (issue #159).
+        from: Option<SurfaceId>,
     },
 }
 
@@ -504,16 +506,33 @@ impl SurfaceFacts {
     /// `mapped_at`.
     #[must_use]
     pub fn hung_from(mut self, from: SurfaceId, mapped_at: Instant) -> Self {
-        self.kind = SurfaceKind::Popup { from };
+        self.kind = SurfaceKind::Popup { from: Some(from) };
         self.mapped_at = Some(mapped_at);
         self
     }
 
-    /// The window or panel this surface hangs from, if it is a popup.
+    /// The same surface, a popup of nothing -- an X11 menu that names no
+    /// window it was opened from -- put on screen at `mapped_at`.
+    #[must_use]
+    pub fn hung_from_nothing(mut self, mapped_at: Instant) -> Self {
+        self.kind = SurfaceKind::Popup { from: None };
+        self.mapped_at = Some(mapped_at);
+        self
+    }
+
+    /// Whether it is a popup: a menu, a combo list or a tooltip, whatever it
+    /// hangs from, if anything.
+    #[must_use]
+    pub fn is_popup(&self) -> bool {
+        matches!(self.kind, SurfaceKind::Popup { .. })
+    }
+
+    /// The window or panel this surface hangs from, if it is a popup that
+    /// names one.
     #[must_use]
     pub fn hangs_from(&self) -> Option<SurfaceId> {
         match self.kind {
-            SurfaceKind::Popup { from } => Some(from),
+            SurfaceKind::Popup { from } => from,
             _ => None,
         }
     }
@@ -522,10 +541,12 @@ impl SurfaceFacts {
     /// can bind a menu to: a popup on screen. `None` for anything else.
     #[must_use]
     pub fn popup_claim(&self) -> Option<PopupClaim> {
-        let from = self.hangs_from().filter(|_| self.mapped)?;
+        if !self.is_popup() || !self.mapped {
+            return None;
+        }
         Some(PopupClaim {
             surface: self.id,
-            from,
+            from: self.hangs_from(),
             pid: self.claim().pid,
             mapped_at: self.mapped_at,
             buffer_origin: self.buffer_origin,
@@ -1685,6 +1706,36 @@ mod tests {
         let theirs = submenu.hung_from(SurfaceId(7), now);
         let facts = HostFacts::bottom_to_top([window(), left_half, other, theirs], 1);
         assert_eq!(seen(&facts), Visibility::Occluded { by: SurfaceId(6) });
+    }
+
+    /// An X11 menu that names no window it was opened from is a popup of
+    /// nothing: a popup all the same, hanging from nothing, and offered to
+    /// the menu join with no window to be measured against.
+    #[test]
+    fn a_popup_of_nothing_is_a_popup_hanging_from_nothing() {
+        let now = Instant::now();
+        let menu =
+            SurfaceFacts::new(SurfaceId(5), rect(0.0, 0.0, 100.0, 80.0)).hung_from_nothing(now);
+        assert!(menu.is_popup());
+        assert_eq!(menu.hangs_from(), None);
+        let claim = menu.popup_claim().expect("a popup on screen");
+        assert_eq!((claim.from, claim.mapped_at), (None, Some(now)));
+        assert_eq!(menu.unmapped().popup_claim(), None, "not on screen");
+
+        let window = window();
+        assert!(!window.is_popup());
+        assert_eq!(window.popup_claim(), None);
+    }
+
+    /// And it is no window's menu, so it hides whatever window it covers.
+    #[test]
+    fn a_popup_of_nothing_hides_the_window_it_covers() {
+        let now = Instant::now();
+        let left_half = SurfaceFacts::new(SurfaceId(3), rect(-10.0, -10.0, 250.0, 400.0));
+        let menu =
+            SurfaceFacts::new(SurfaceId(5), rect(240.0, 0.0, 400.0, 300.0)).hung_from_nothing(now);
+        let facts = HostFacts::bottom_to_top([window(), left_half, menu], 1);
+        assert_eq!(seen(&facts), Visibility::Occluded { by: SurfaceId(5) });
     }
 
     /// Menus hung from each other in a ring are no window's, and the walk up

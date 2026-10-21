@@ -86,8 +86,15 @@
 //! hit and given the pointer where they put themselves, and cover what is
 //! under them. Otherwise they are left to their client, as an X11 window
 //! manager leaves them ([`shell::places_itself`]): never focused, raised,
-//! moved, resized, closed, framed or listed, no binding acts on one, and what
-//! one asks of the window manager is not done (issue #181).
+//! moved, resized, closed, framed or listed on a taskbar, no binding acts on
+//! one, and what one asks of the window manager is not done (issue #181).
+//!
+//! To an agent, each is a popup, as a Wayland application's menu is (issue
+//! #159): it hangs from the window its `WM_TRANSIENT_FOR` names, through any
+//! menus between, as GTK 3 and Qt name the window a menu was opened from and
+//! a submenu its menu. One that names none -- Steam's, GTK 4's -- hangs from
+//! nothing. It came on screen when X mapped it, which makes it anew each
+//! time, so a menu read before then is never taken for it.
 //!
 //! The keyboard above all. Smithay gives an X11 window the keyboard by
 //! telling X: `SetInputFocus` of nothing for the window that had it, then of
@@ -110,6 +117,7 @@
 
 use std::{
     cell::RefCell,
+    collections::HashSet,
     os::fd::OwnedFd,
     process::Stdio,
     sync::{
@@ -117,7 +125,7 @@ use std::{
         atomic::{AtomicU32, Ordering},
         mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use perspicax_node::{Origin, SurfaceId, X11Basis, X11Origin};
@@ -697,6 +705,10 @@ impl Side {
 /// Where an X11 window's origin is kept, updated when XRes answers.
 type Attribution = RefCell<Option<X11Origin>>;
 
+/// When X mapped a window that places itself. Kept on the window, which each
+/// map makes anew, so it lives and dies with that map.
+struct MappedAt(Instant);
+
 impl Compositor {
     /// The origin of an X11 window, as far as it is known.
     pub(crate) fn x11_origin(window: &Framed) -> Origin {
@@ -762,6 +774,29 @@ impl Compositor {
         if let Some(ask) = &self.xwayland.ask {
             let _ = ask.send(x11.window_id());
         }
+    }
+
+    /// When X mapped this window, if it places itself.
+    pub(crate) fn override_mapped_at(window: &Framed) -> Option<Instant> {
+        window.user_data().get::<MappedAt>().map(|mapped| mapped.0)
+    }
+
+    /// The window or panel an X11 menu hangs from: the window its
+    /// `WM_TRANSIENT_FOR` names, through any menus between, since a submenu
+    /// names its menu. `None` for one that names no window this compositor
+    /// holds -- none at all, as Steam's and GTK 4's, the root, or a leader
+    /// that is never mapped -- and for menus that name each other.
+    pub(crate) fn x11_from(&self, x11: &X11Surface) -> Option<SurfaceId> {
+        let mut named = x11.is_transient_for()?;
+        let mut seen = HashSet::new();
+        while seen.insert(named) {
+            let window = self.x11_window_by_id(named)?;
+            if !shell::places_itself(&window) {
+                return shell::id_of(&window);
+            }
+            named = window.x11_surface()?.is_transient_for()?;
+        }
+        None
     }
 
     /// The mapped or parked window for the X window `id`.
@@ -869,11 +904,14 @@ impl XwmHandler for Compositor {
 
     fn new_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
-    /// A title or class changed: published now, as a Wayland window's is,
-    /// rather than whenever the window next draws.
+    /// A title or class changed, or the window a menu hangs from: published
+    /// now, as a Wayland window's is, rather than whenever the window next
+    /// draws.
     fn property_notify(&mut self, _xwm: XwmId, x11: X11Surface, property: WmWindowProperty) {
-        if matches!(property, WmWindowProperty::Title | WmWindowProperty::Class)
-            && self.x11_window(&x11).is_some()
+        if matches!(
+            property,
+            WmWindowProperty::Title | WmWindowProperty::Class | WmWindowProperty::TransientFor
+        ) && self.x11_window(&x11).is_some()
         {
             self.backend.redraw();
             self.publish_facts();
@@ -969,14 +1007,17 @@ impl XwmHandler for Compositor {
     }
 
     /// Menus and tooltips place themselves; the compositor only records
-    /// where, so they render, hit-test and occlude like anything else, and
-    /// otherwise leaves them to their client: see "Windows that place
-    /// themselves" above.
+    /// where, and when, so they render, hit-test and occlude like anything
+    /// else and are described as popups, and otherwise leaves them to their
+    /// client: see "Windows that place themselves" above.
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, x11: X11Surface) {
         let at = x11.geometry().loc;
         let window = Framed::from(Window::new_x11_window(x11.clone()));
         let id = self.mint_surface_id();
         window.user_data().insert_if_missing(|| id);
+        window
+            .user_data()
+            .insert_if_missing(|| MappedAt(Instant::now()));
         self.claim_x11(&window, &x11);
         self.space.map_element(window, at, false);
         self.backend.redraw();

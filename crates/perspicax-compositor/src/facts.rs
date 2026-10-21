@@ -483,7 +483,8 @@ impl Compositor {
     /// own `(0, 0)` is: where it was placed, back by its geometry's offset,
     /// as `facts_for` places it. A parked window is not in the space, and
     /// smithay draws none of its menus: it has none here. Nor has an X11
-    /// window, whose menus are windows of their own (issue #159).
+    /// window: its menus place themselves, and are described where X put
+    /// them, as popups of their own (`x11_facts`).
     fn window_placed(&self, window: &Framed) -> Vec<PlacedPopup> {
         let (Some(toplevel), Some(id), Some(location)) = (
             window.toplevel(),
@@ -572,7 +573,9 @@ impl Compositor {
         facts.mapped_at = self.popups_shown.get(&id).copied().filter(|_| facts.mapped);
         facts.damage_generation = self.damage_generation(id);
         facts.damage = self.damage_history(id);
-        facts.kind = SurfaceKind::Popup { from: placed.from };
+        facts.kind = SurfaceKind::Popup {
+            from: Some(placed.from),
+        };
         facts
     }
 
@@ -622,6 +625,12 @@ impl Compositor {
     /// window's own rectangle is the window. A window Xwayland has not yet
     /// given a surface is described, unmapped, so its nodes are refused
     /// rather than judged against nothing.
+    ///
+    /// One that places itself -- a menu, a tooltip -- is a popup, hung from
+    /// the window that opened it if it names one (issue #159). It stays where
+    /// X stacks it, which is where it is drawn: over every window when it
+    /// maps. No toolkit measured draws a shadow inside such a window, so its
+    /// rectangle is its window geometry too.
     #[cfg(feature = "xwayland")]
     fn x11_facts(
         &self,
@@ -648,6 +657,12 @@ impl Compositor {
         facts.shaded = crate::shell::is_shaded(window);
         facts.origin = Self::x11_origin(window);
         facts.title = Some(x11.title()).filter(|title| !title.is_empty());
+        if crate::shell::places_itself(window) {
+            facts.kind = SurfaceKind::Popup {
+                from: self.x11_from(x11),
+            };
+            facts.mapped_at = Self::override_mapped_at(window).filter(|_| facts.mapped);
+        }
         Some(facts)
     }
 

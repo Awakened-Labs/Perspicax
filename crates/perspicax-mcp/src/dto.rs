@@ -492,8 +492,10 @@ pub struct Window {
     /// `window_focus` and `window_type` are for windows only.
     pub kind: &'static str,
     /// For a popup, the window or panel it hangs from, through any menus
-    /// between. It is drawn directly above that, and covers what is under it,
-    /// that window's own nodes included.
+    /// between. It covers what is under it, that window's own nodes
+    /// included: a Wayland application's is drawn directly above its window,
+    /// an X11 application's where it puts itself. Absent for an X11 menu that
+    /// names no window it was opened from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<u64>,
     /// For a layer surface, which layer it stacks in: `background` and
@@ -612,14 +614,15 @@ impl Window {
         // this window and where it says its nodes are agree. A menu is
         // measured from the popup, not from a node, and only a menu bound as
         // one node has one to give.
-        let node = match facts.hangs_from() {
-            Some(_) => index
+        let node = if facts.is_popup() {
+            index
                 .menu_of(facts.id)
                 .and_then(|menu| match menu.roots[..] {
                     [only] => Some(only),
                     _ => None,
-                }),
-            None => index.window_node(facts.id),
+                })
+        } else {
+            index.window_node(facts.id)
         };
         Self {
             surface: facts.id.0,
@@ -1189,6 +1192,25 @@ mod tests {
                 .filter(|window| window.surface != 9)
                 .all(|window| window.from.is_none())
         );
+    }
+
+    /// An X11 menu that names no window it was opened from is listed as a
+    /// popup all the same, with no `from` on the wire at all.
+    #[test]
+    fn a_menu_of_nothing_is_listed_as_a_popup_from_nowhere() {
+        let menu = SurfaceFacts::new(
+            SurfaceId(9),
+            perspicax_node::Rect::new(0.0, 0.0, 120.0, 80.0),
+        )
+        .hung_from_nothing(std::time::Instant::now());
+        let facts = HostFacts::bottom_to_top(facts().surfaces().iter().cloned().chain([menu]), 1);
+        let windows = Window::all(&index(), &facts);
+        let listed = windows.iter().find(|window| window.surface == 9).unwrap();
+        assert_eq!(listed.kind, "popup");
+        assert_eq!(listed.node, None, "no menu is bound to it");
+        let wire = serde_json::to_value(listed).unwrap();
+        assert_eq!(wire["kind"], "popup");
+        assert!(wire.get("from").is_none(), "{wire}");
     }
 
     /// The claim this whole project is built to make, in the smallest form it

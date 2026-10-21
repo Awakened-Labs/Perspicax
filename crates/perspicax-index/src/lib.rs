@@ -113,6 +113,12 @@ pub enum Refusal {
     /// window has an open menu its nodes are not matched to, the nodes of its
     /// menus are refused rather than guessed at. It usually clears within
     /// moments, once the application has been read since the menu opened.
+    ///
+    /// An X11 menu that names no window it was opened from, as Steam's and
+    /// GTK 4's do, holds off every window of its application, and is never
+    /// matched to nodes under a window: only to a menu that is a window of
+    /// its own (issue #159). So a GTK 4 application's menus stay refused for
+    /// as long as one is open under X11.
     MenuUnplaced { popup: SurfaceId },
     /// The node is on a window, and its application gives no bounds for it:
     /// it did not answer when asked where the node is, or had nothing to say.
@@ -145,8 +151,10 @@ pub enum Refusal {
     /// panel, a wallpaper, a menu, a lock screen. They are part of the desk,
     /// and nothing closes them, brings them forward, focuses them or types
     /// into them by surface but their own program.
-    /// A picture of a menu is refused the same way: it is drawn as part of
-    /// its window's, which is the one to ask for.
+    /// A picture of a menu is refused the same way. A Wayland application's
+    /// menu is drawn as part of its window's picture, which is the one to ask
+    /// for; an X11 application's is in none, and only a picture of its
+    /// monitor shows it.
     NotAWindow,
     /// Typing was asked of a node whose window does not hold the keyboard.
     /// Keys go where focus is, so typing anyway would land them in `focused`
@@ -429,7 +437,7 @@ fn in_sight(visibility: &Visibility) -> Result<(), Refusal> {
 /// The [`Refusal`] saying why not.
 pub fn check_readable(facts: &HostFacts, surface: SurfaceId) -> Result<&SurfaceFacts, Refusal> {
     let window = facts.surface(surface).ok_or(Refusal::NotFound)?;
-    if window.hangs_from().is_some() {
+    if window.is_popup() {
         return Err(Refusal::NotAWindow);
     }
     match &window.origin {
@@ -1019,11 +1027,15 @@ mod tests {
                 SurfaceFacts::new(SurfaceId(4), area)
                     .owned_by(owned_by(10))
                     .hung_from(SurfaceId(2), std::time::Instant::now()),
+                // An X11 menu that names no window it was opened from.
+                SurfaceFacts::new(SurfaceId(5), area)
+                    .owned_by(owned_by(10))
+                    .hung_from_nothing(std::time::Instant::now()),
             ],
             1,
         )
         .with_consent(Consent::Everyone);
-        for id in 1..=4 {
+        for id in 1..=5 {
             for verb in [WindowVerb::Close, WindowVerb::Forward]
                 .into_iter()
                 .chain(keys())
@@ -1047,15 +1059,23 @@ mod tests {
                 SurfaceFacts::new(SurfaceId(2), area)
                     .owned_by(owned_by(10))
                     .hung_from(SurfaceId(1), std::time::Instant::now()),
+                // An X11 menu that names no window: in no window's picture,
+                // and still no window to picture on its own.
+                SurfaceFacts::new(SurfaceId(3), area)
+                    .owned_by(owned_by(10))
+                    .hung_from_nothing(std::time::Instant::now()),
             ],
             1,
         )
         .with_consent(Consent::Everyone);
         assert!(check_readable(&facts, SurfaceId(1)).is_ok());
-        assert_eq!(
-            check_readable(&facts, SurfaceId(2)).unwrap_err(),
-            Refusal::NotAWindow
-        );
+        for menu in [2, 3] {
+            assert_eq!(
+                check_readable(&facts, SurfaceId(menu)).unwrap_err(),
+                Refusal::NotAWindow,
+                "surface {menu}"
+            );
+        }
     }
 
     #[test]

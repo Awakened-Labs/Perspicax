@@ -201,10 +201,7 @@ impl App {
 
     /// The menus this application has open, as the host describes them.
     pub fn popups<'a>(&self, facts: &'a HostFacts) -> impl Iterator<Item = &'a SurfaceFacts> {
-        let pid = self.pid;
-        facts.surfaces().iter().filter(move |surface| {
-            surface.hangs_from().is_some() && surface.claim().pid == Some(pid)
-        })
+        popups_of(facts, self.pid)
     }
 
     /// Whether this application should be read again for a menu it has
@@ -467,6 +464,16 @@ async fn snapshot(
     })
 }
 
+/// The menus the application with `pid` has open: its popups, whatever
+/// they hang from, if anything. An X11 menu that names no window it was
+/// opened from is still its application's (issue #159).
+fn popups_of(facts: &HostFacts, pid: u32) -> impl Iterator<Item = &SurfaceFacts> {
+    facts
+        .surfaces()
+        .iter()
+        .filter(move |surface| surface.is_popup() && surface.claim().pid == Some(pid))
+}
+
 /// Every surface a window could have been drawn on, as claims to be weighed.
 ///
 /// Not a popup, however much it shares its window's process: offered as one,
@@ -476,7 +483,7 @@ fn surfaces(facts: &HostFacts) -> Vec<SurfaceClaim> {
     facts
         .surfaces()
         .iter()
-        .filter(|surface| surface.hangs_from().is_none())
+        .filter(|surface| !surface.is_popup())
         .map(SurfaceFacts::claim)
         .collect()
 }
@@ -788,6 +795,9 @@ mod tests {
             [
                 SurfaceFacts::new(SurfaceId(1), area),
                 SurfaceFacts::new(SurfaceId(5), area).hung_from(SurfaceId(1), Instant::now()),
+                // An X11 menu that names no window it was opened from: as
+                // much its window's process's, and as little a window.
+                SurfaceFacts::new(SurfaceId(6), area).hung_from_nothing(Instant::now()),
             ],
             1,
         );
@@ -797,6 +807,44 @@ mod tests {
                 .map(|claim| claim.surface)
                 .collect::<Vec<_>>(),
             [SurfaceId(1)]
+        );
+    }
+
+    /// An application's open menus are its popups, those that hang from
+    /// nothing included, and no one else's: what it is owed a read for,
+    /// and whose damage a read reconciles.
+    #[test]
+    fn an_applications_menus_are_its_popups_whatever_they_hang_from() {
+        let area = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let now = Instant::now();
+        let by = |pid| {
+            Origin::Process(Box::new(perspicax_node::ProcessOrigin {
+                pid,
+                exe: None,
+                cgroup: None,
+                sandbox: None,
+            }))
+        };
+        let facts = HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(SurfaceId(1), area).owned_by(by(9182)),
+                SurfaceFacts::new(SurfaceId(5), area)
+                    .hung_from(SurfaceId(1), now)
+                    .owned_by(by(9182)),
+                SurfaceFacts::new(SurfaceId(6), area)
+                    .hung_from_nothing(now)
+                    .owned_by(by(9182)),
+                SurfaceFacts::new(SurfaceId(7), area)
+                    .hung_from_nothing(now)
+                    .owned_by(by(4000)),
+            ],
+            1,
+        );
+        assert_eq!(
+            popups_of(&facts, 9182)
+                .map(|popup| popup.id)
+                .collect::<Vec<_>>(),
+            [SurfaceId(5), SurfaceId(6)]
         );
     }
 }
