@@ -158,13 +158,14 @@ impl Perspicax {
                        observed and clicked like a window, but not closed, brought forward, \
                        focused or typed into by surface.\n\n\
                        An open menu, combo list or tooltip is `kind: popup`, with `from` naming \
-                       the window or panel it hangs from. It is drawn directly above that, past \
-                       its edge if it hangs there, and covers what is under it, that window's \
-                       own controls included. Its items are its own nodes, and `bounds` for \
-                       them is relative to the popup's `bounds`, not its window's. It can be \
-                       observed and clicked, but not closed, brought forward, focused or typed \
-                       into by surface, or pictured on its own: it is in its window's \
-                       picture.\n\n\
+                       the window or panel it hangs from; an X11 application's that names none \
+                       has no `from`. It is drawn over that, past its edge if it hangs there, \
+                       and covers what is under it, that window's own controls included. Its \
+                       items are its own nodes, and `bounds` for them is relative to the \
+                       popup's `bounds`, not its window's. It can be observed and clicked, but \
+                       not closed, brought forward, focused or typed into by surface, or \
+                       pictured on its own: a Wayland application's is in its window's \
+                       picture, an X11 application's only in its monitor's.\n\n\
                        A window the person has made see-through carries `opacity`, the percent \
                        it is drawn at. What is behind it shows through in a `screenshot`, but \
                        it is still covered: translucency is for the person's eyes, and the \
@@ -339,7 +340,8 @@ impl Perspicax {
                        opening its menu. `rolled_up` means the person has rolled the control's \
                        window up to its titlebar: only they unroll it, and nothing you can do \
                        will show it. `menu_unplaced` means the control is part of a menu, \
-                       and its window has a menu open, `popup`, that perspicax has not yet \
+                       and its window, or its application, has a menu open, `popup`, that \
+                       perspicax has not yet \
                        matched to the application's controls: resolve it again in a moment, \
                        once the application has been read. `unplaced` means the application \
                        gives no bounds for the control, so where it is drawn cannot be known: \

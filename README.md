@@ -288,9 +288,11 @@ menu is `kind: layer`, with the `layer` it stacks in and the
 `kind: lock_cover`. A menu, a combo list or a tooltip an application opened is
 `kind: popup`, with `from` naming the window or panel it hangs from: drawn
 over it, and covering what is under it (see "A menu covers what is under it",
-below). An agent can read and click a panel or a menu as it would a window; a
-window verb aimed at one is refused as `not_a_window`. A window rolled up to
-its titlebar is `shaded: true`.
+below). An X11 application's has a `from` only if it names the window it was
+opened from: GTK 3's and Qt's do, Steam's and GTK 4's do not. An agent can
+read and click a panel or a menu as it would a window; a window verb aimed at
+one is refused as `not_a_window`. A window rolled up to its titlebar is
+`shaded: true`.
 
 An agent names a control and never a coordinate — the rectangle comes from the
 index and turning it into anything global is the compositor's job, so an agent
@@ -355,7 +357,11 @@ A control of a menu is refused as `menu_unplaced`, naming the open menu as
 to the application's controls. Toolkits measure a menu's controls from
 different places, and placed on the window they could be judged, and clicked,
 somewhere else entirely. It clears within moments, once the application has
-been read since the menu opened: resolve it again then.
+been read since the menu opened: resolve it again then. An X11 menu that names
+no window it was opened from holds off every menu of its application, and
+clears only if it is a window of its own in the application's tree, as GTK 3's
+context menu is: a GTK 4 application's menus stay refused under X11 for as
+long as one is open.
 
 A control its application gives no bounds for is refused as `unplaced`.
 Without a rectangle there is nothing to judge, and unlike `unjudged`, waiting
@@ -499,8 +505,12 @@ about where they measure a menu's items from: GTK 3 from the menu itself, GTK
 joins a menu to its items only when exactly one puts them on the menu; until
 it can, its window's menus are refused as `menu_unplaced`. A menu of a window
 that has drawn nothing yet covers what is under it all the same. An X11
-application's menus are still windows of their own
-([#159](https://github.com/Awakened-Labs/Perspicax/issues/159)).
+application's menus are popups too
+([#159](https://github.com/Awakened-Labs/Perspicax/issues/159)), drawn where
+they put themselves, over every window as they open. GTK 3 and Qt name the
+window a menu was opened from, and their menus are joined to their items as a
+Wayland application's are. Steam and GTK 4 name none, and such a menu is
+joined only to items that are a window of their own.
 
 **Text an application rendered is marked as such.** Every string reaches an
 agent under `untrusted_text`, beside the credentials of the process that drew
@@ -804,15 +814,19 @@ An X11 application's menus, tooltips and drag icons place themselves: they
 bypass the window manager (override-redirect, in X's terms), and are left to
 their application, as any X11 window manager leaves them. Each is drawn where
 it puts itself, over what it covers, and the pointer reaches it. But it is
-never focused, raised, moved, closed or listed, no binding acts on it, and it
+never focused, raised, moved or closed, nor listed on a taskbar, no binding
+acts on it, and it
 never takes the keyboard: not when the pointer reaches it, whatever the focus
 model, not when it is clicked, and never as the next window when one closes,
 a workspace switches or Alt+Tab cycles. Its keys reach it through the window
 it was opened from, which keeps the keyboard and stays the window in use, lit
 and undimmed, while the menu is open. Given the keyboard, as before #181, the
 window lost it and the application closed its menu: Steam's closed as soon as
-the pointer reached one. An agent sees such a menu as a window until #159, but
-cannot focus or close it. Two things are left:
+the pointer reached one. An agent sees each as a popup, as it sees a Wayland
+application's menu (#159): hung from the window its `WM_TRANSIENT_FOR` names,
+through any menus between, or from nothing when it names none. Unlike a
+Wayland application's, it is in no window's picture, and only a picture of its
+monitor shows it. Two things are left:
 - under sloppy or strict focus, a menu still closes if the pointer crosses
   another window on its way to an item (#183);
 - an X program that bypasses the window manager to take the keyboard for
