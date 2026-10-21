@@ -761,6 +761,9 @@ No binding can take them, so `[keys]` refuses either, `"none"` included.
 X11 applications run under an Xwayland the session starts (`xwayland = false`
 in the config turns it off), with `DISPLAY` set for everything it launches:
 `--spawn` programs and the autostart list start once Xwayland is ready.
+Headless starts none, so what CI runs needs no X server, unless
+`--xwayland` asks for it: `perspicax --headless --xwayland --spawn xterm`
+hosts an X11 program for an agent, in a build with the `xwayland` feature.
 Toolkits are asked for Wayland first, and allowed X11 after it (GTK is told
 `wayland,x11`, Qt `wayland;xcb`), so a program that will not use Wayland --
 Chromium or Electron in X11 mode, say -- opens on this Xwayland rather than

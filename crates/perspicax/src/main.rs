@@ -112,6 +112,14 @@ struct Cli {
     )]
     size: Vec<(i32, i32)>,
 
+    /// Start Xwayland too, for X11 programs an agent wants to host: each
+    /// `--spawn` command waits for it and is given its `DISPLAY`. Headless
+    /// only: a seat starts it as its config's `xwayland` says. Without it a
+    /// headless run needs no X server, which is what CI runs. Needs a build
+    /// with `--features xwayland` (or `desktop`).
+    #[arg(long, conflicts_with_all = ["seat", "session"])]
+    xwayland: bool,
+
     /// The session's config file, instead of
     /// `$XDG_CONFIG_HOME/perspicax/config.toml`. Seat only: headless reads no
     /// config, so what CI and an agent run is the same on every machine.
@@ -420,6 +428,20 @@ const BUILT: Built = Built {
     svg: cfg!(feature = "svg"),
 };
 
+/// Refuse `--xwayland` in a build that cannot start Xwayland. The compositor
+/// would ignore it, and every X11 program `--spawn` names would fail with no
+/// word of why.
+fn xwayland_built(cli: &Cli, built: Built) -> Result<()> {
+    if cli.xwayland && !built.xwayland {
+        bail!(
+            "--xwayland asks for Xwayland, and this perspicax was built without it; rebuild \
+             with the `xwayland` cargo feature (from the workspace root, `--features \
+             perspicax/desktop` builds a full session)"
+        );
+    }
+    Ok(())
+}
+
 /// Where the agent socket is served, if anywhere. Headless reads no config, so
 /// `--mcp-socket` says; a person's session reads `[agent] socket` in the file
 /// at `config_path` first, here, since the socket is bound before the seat is
@@ -494,6 +516,7 @@ fn run(cli: &Cli, wire: Option<Wire>) -> Result<()> {
     // cannot run is the one thing worth saying, and it should not arrive
     // after a registry has been started for nothing.
     backend.ensure_built()?;
+    xwayland_built(cli, BUILT)?;
 
     // Second, for the same reason: a socket another session is serving is a
     // reason not to start at all. The file is held to the end of this
@@ -569,7 +592,7 @@ fn run(cli: &Cli, wire: Option<Wire>) -> Result<()> {
             .then(|| session::windows_path(|name| std::env::var(name).ok()))
             .flatten(),
         socket: None,
-        xwayland: false,
+        xwayland: cli.xwayland,
     };
 
     // Created here rather than inside the compositor, because the thread that
@@ -927,6 +950,34 @@ mod tests {
             parse(&["--headless", "--config", "perspicax.toml"]).err(),
             Some(ErrorKind::ArgumentConflict)
         );
+    }
+
+    #[test]
+    fn only_headless_is_asked_for_xwayland_and_a_seat_starts_it_from_its_config() {
+        let headless = parse(&["--headless", "--xwayland"]).expect("--headless --xwayland");
+        assert!(headless.xwayland);
+        assert!(!parse(&["--headless"]).expect("--headless").xwayland);
+        for seat in ["--seat", "--session"] {
+            assert_eq!(
+                parse(&[seat, "--xwayland"]).err(),
+                Some(ErrorKind::ArgumentConflict),
+                "{seat}"
+            );
+        }
+    }
+
+    #[test]
+    fn xwayland_asked_of_a_build_without_it_is_refused_before_anything_starts() {
+        let asked = parse(&["--headless", "--xwayland"]).expect("--headless --xwayland");
+        let built = |xwayland| Built { xwayland, ..BUILT };
+        let error = xwayland_built(&asked, built(false)).expect_err("refused");
+        assert!(
+            error.to_string().contains("`xwayland` cargo feature"),
+            "{error}"
+        );
+        assert!(xwayland_built(&asked, built(true)).is_ok());
+        let unasked = parse(&["--headless"]).expect("--headless");
+        assert!(xwayland_built(&unasked, built(false)).is_ok());
     }
 
     #[test]
