@@ -778,6 +778,11 @@ impl Compositor {
     /// an X11 window that places itself, which an application's menu is,
     /// and which is on top of everything when it opens (#181).
     ///
+    /// Topmost in the stack, which is the order the windows were raised in:
+    /// the window raised last, whether or not one kept on top is drawn in
+    /// front of it (`shell::stacking`). The keyboard goes where it went
+    /// before any window was kept on top.
+    ///
     /// While the session is locked, or a launcher holds the keyboard,
     /// [`Self::focus_surface`] refuses the window the keyboard. Giving it to
     /// nothing is not refused, and need not be: no caller asks while a lock
@@ -1619,7 +1624,7 @@ impl SeatHandler for Compositor {
             .and_then(|surface| self.window_for(&self.menu_root(surface.clone())))
             .and_then(|window| shell::id_of(&window));
         // A fullscreen window covers the panels only while it is in use.
-        self.stack_fullscreen(window);
+        self.restack(window);
         // The window in use is typed in its own layout, when each has one.
         // Not here: smithay calls this from inside `set_focus`, holding the
         // keyboard, and reading or switching its layout now would wait on

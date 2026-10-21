@@ -1,0 +1,7 @@
+# Smithay's stack is the order windows were raised in, and a window kept on
+# top is drawn in front of it (#64): whatever asks what is in front reads the
+# stack as it is drawn, through `shell::as_drawn`.
+disallowed-methods = [
+    { path = "smithay::desktop::space::Space::element_under", reason = "reads the order windows were raised in; ask shell::window_under, which finds a window kept on top in front" },
+    { path = "smithay::desktop::space::Space::render_elements_for_output", reason = "draws the order windows were raised in, and every layer surface at the output's corner; draw from shell::stack" },
+]

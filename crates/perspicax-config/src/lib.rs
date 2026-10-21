@@ -4794,6 +4794,43 @@ mod tests {
     }
 
     #[test]
+    fn toggle_on_top_is_an_action_neither_profile_binds() {
+        let config = parse("[keys]\n\"Logo+t\" = \"toggle-on-top\"", SEAT).unwrap();
+        let logo = Mods {
+            logo: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            config.bindings.resolve(logo, &[Keysym::t]),
+            Some(&Action::ToggleOnTop)
+        );
+        let on_top = |action: &Action| *action == Action::ToggleOnTop;
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let config = Config::profile(profile, SEAT);
+            assert!(
+                !config.bindings.iter().any(|(_, action)| on_top(action)),
+                "{profile:?} binds a key to it"
+            );
+            assert!(
+                !config.bindings.tap().is_some_and(on_top),
+                "{profile:?}'s tap"
+            );
+            assert!(
+                !config
+                    .mouse
+                    .iter()
+                    .any(|(_, _, action)| action.is_some_and(on_top)),
+                "{profile:?} binds a button to it"
+            );
+        }
+        let error = parse("[keys]\n\"Logo+x\" = \"keep-above\"", SEAT).unwrap_err();
+        assert!(
+            error.to_string().contains("toggle-sticky, toggle-on-top"),
+            "the refusal lists it beside sticky: {error}"
+        );
+    }
+
+    #[test]
     fn opacity_is_three_actions_a_chord_can_have_and_neither_profile_binds() {
         let config = parse(
             "[keys]\n\"Logo+Page_Up\" = \"opacity-up\"\n\

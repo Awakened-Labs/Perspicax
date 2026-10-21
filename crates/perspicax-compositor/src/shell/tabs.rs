@@ -121,7 +121,9 @@ impl Compositor {
     )> {
         use perspicax_policy::Part;
         let dragged_id = id_of(dragged)?;
-        let window = self.space.elements().rev().find(|window| {
+        // As they are drawn: a titlebar under one kept on top is not dropped
+        // on through it.
+        let window = super::as_drawn(&self.space).rev().find(|window| {
             *window != dragged
                 && self
                     .space

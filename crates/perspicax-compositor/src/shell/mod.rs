@@ -64,9 +64,9 @@ pub(crate) use grabs::{Hand, MoveGrab, ResizeGrab};
 #[cfg(any(feature = "seat", feature = "capture"))]
 pub(crate) use opacity::alpha;
 pub(crate) use snap::SnapPreview;
-pub(crate) use stacking::covers_panels;
 #[cfg(any(feature = "seat", feature = "capture"))]
 pub(crate) use stacking::{Stack, stack};
+pub(crate) use stacking::{as_drawn, covers_panels, is_kept_on_top, window_under};
 pub(crate) use withdrawn::Withdrawn;
 #[cfg(feature = "seat")]
 pub(crate) use workspaces::Pictured;
@@ -113,6 +113,9 @@ pub(crate) struct Placement {
     /// How much of its client is drawn while it rolls up or down, from all
     /// of it, 1, to none: for the eye alone, `shaded` having changed already.
     pub(crate) roll: Option<perspicax_policy::Tween>,
+    /// Kept in front of the other windows by the person, whichever has the
+    /// keyboard. See `stacking`.
+    pub(crate) on_top: bool,
 }
 
 /// How a window fills its monitor.
@@ -176,6 +179,15 @@ pub(crate) fn is_shaded(window: &Framed) -> bool {
         .user_data()
         .get::<RefCell<Placement>>()
         .is_some_and(|cell| cell.borrow().shaded)
+}
+
+/// Whether the person keeps this window on top of the others. Only looks,
+/// as `is_shaded` does: a window with no record was never kept on top.
+pub(crate) fn is_on_top(window: &Framed) -> bool {
+    window
+        .user_data()
+        .get::<RefCell<Placement>>()
+        .is_some_and(|cell| cell.borrow().on_top)
 }
 
 /// How much of this window's client is drawn at `now_ms`, if it is rolling

@@ -687,9 +687,7 @@ fn resting(state: &Compositor, at: Point<f64, Logical>, carrying: bool) -> Resti
         Resting::Locked
     } else if state.hold().is_some() {
         Resting::Captured
-    } else if state
-        .space
-        .element_under(at)
+    } else if crate::shell::window_under(&state.space, at)
         .is_some_and(|(window, _)| covers_panels(window))
     {
         // Windows alone: a notification on the overlay layer, over the
