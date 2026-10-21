@@ -551,6 +551,7 @@ fn released_frame(state: &mut Compositor, at: Point<f64, Logical>) {
         FrameButton::Minimize => state.minimize(&window),
         FrameButton::Shade => state.toggle_shade(&window),
         FrameButton::Sticky => state.toggle_sticky(&window),
+        FrameButton::OnTop => state.toggle_on_top(&window),
     }
 }
 

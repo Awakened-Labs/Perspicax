@@ -629,7 +629,7 @@ impl Config {
 /// How a profile decorates windows, before the `[decorations]` table: the
 /// same frame in both, and their titlebars' buttons.
 fn decorations(profile: Profile) -> Decorations {
-    use FrameButton::{Close, Maximize, Minimize, Shade, Sticky};
+    use FrameButton::{Close, Maximize, Minimize, OnTop, Shade, Sticky};
     match profile {
         // Plasma's rounded corners, and a shadow under every window that
         // shows which is over which.
@@ -650,10 +650,11 @@ fn decorations(profile: Profile) -> Decorations {
             ..Decorations::default()
         },
         // Fluxbox's own titlebar, Stick at the left and the rest at the
-        // right, with the shade button the wheel over the title also works.
+        // right, with the shade button the wheel over the title also works;
+        // and beside Stick, keeping the window on top (#64).
         Profile::Minimal => Decorations {
-            buttons: Buttons::new(&[Sticky], &[Shade, Minimize, Maximize, Close])
-                .expect("five buttons, once each"),
+            buttons: Buttons::new(&[Sticky, OnTop], &[Shade, Minimize, Maximize, Close])
+                .expect("six buttons, once each"),
             ..Decorations::default()
         },
     }
@@ -1155,6 +1156,8 @@ struct RawIcons {
     unshade: Option<String>,
     stick: Option<String>,
     unstick: Option<String>,
+    on_top: Option<String>,
+    off_top: Option<String>,
     tint: Option<bool>,
 }
 
@@ -1169,6 +1172,8 @@ impl RawIcons {
             (Face::Unshade, self.unshade),
             (Face::Stick, self.stick),
             (Face::Unstick, self.unstick),
+            (Face::OnTop, self.on_top),
+            (Face::OffTop, self.off_top),
         ];
         let mut files = Vec::new();
         for (face, path) in written {
@@ -1202,6 +1207,7 @@ impl RawIcons {
 enum RawButton {
     Shade,
     Sticky,
+    OnTop,
     Minimize,
     Maximize,
     Close,
@@ -1212,6 +1218,7 @@ impl From<RawButton> for FrameButton {
         match button {
             RawButton::Shade => Self::Shade,
             RawButton::Sticky => Self::Sticky,
+            RawButton::OnTop => Self::OnTop,
             RawButton::Minimize => Self::Minimize,
             RawButton::Maximize => Self::Maximize,
             RawButton::Close => Self::Close,
@@ -2104,6 +2111,8 @@ const fn icon_key(face: Face) -> &'static str {
         Face::Unshade => "decorations.icons.unshade",
         Face::Stick => "decorations.icons.stick",
         Face::Unstick => "decorations.icons.unstick",
+        Face::OnTop => "decorations.icons.on-top",
+        Face::OffTop => "decorations.icons.off-top",
     }
 }
 
@@ -4002,7 +4011,7 @@ mod tests {
         use FrameButton::*;
         assert_eq!(
             ends(Config::profile(Profile::Minimal, SEAT).decorations.buttons),
-            (vec![Sticky], vec![Shade, Minimize, Maximize, Close])
+            (vec![Sticky, OnTop], vec![Shade, Minimize, Maximize, Close])
         );
         assert_eq!(
             ends(Config::profile(Profile::Classic, SEAT).decorations.buttons),
@@ -4082,7 +4091,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             ends(config.decorations.buttons),
-            (vec![], vec![Sticky, Close])
+            (vec![OnTop], vec![Sticky, Close])
         );
         let config = parse("[decorations]\nleft = [\"close\"]", SEAT).unwrap();
         assert_eq!(
@@ -4121,6 +4130,31 @@ mod tests {
         assert!(!icons.tint);
         let config = parse("[decorations.icons]\nstick = \"pin.png\"", SEAT).unwrap();
         assert!(config.icons.tint, "a mask by default");
+    }
+
+    /// Keeping a window on top is a button like the rest (#64): either end
+    /// may carry it, by its own name, and both its faces' pictures are read.
+    #[test]
+    fn on_top_is_a_button_either_end_may_carry_and_its_icons_are_read() {
+        use FrameButton::*;
+        let config = parse(
+            "[decorations]\nleft = [\"on-top\"]\nright = [\"close\"]\n\
+             [decorations.icons]\non-top = \"up.png\"\noff-top = \"down.png\"",
+            SEAT,
+        )
+        .unwrap();
+        assert_eq!(ends(config.decorations.buttons), (vec![OnTop], vec![Close]));
+        assert_eq!(config.icons.file(Face::OnTop), Some(Path::new("up.png")));
+        assert_eq!(config.icons.file(Face::OffTop), Some(Path::new("down.png")));
+        let config = parse("[decorations]\nright = [\"on-top\", \"close\"]", SEAT).unwrap();
+        assert_eq!(
+            ends(config.decorations.buttons),
+            (vec![], vec![OnTop, Close])
+        );
+        match parse("[decorations.icons]\noff-top = \" \"", SEAT) {
+            Err(Error::Invalid { key, .. }) => assert_eq!(key, "decorations.icons.off-top"),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// An SVG needs a build that draws SVG; one without it says which

@@ -124,6 +124,9 @@ pub(crate) struct TitleKey {
     pub(crate) shaded: bool,
     /// Whether it is on every workspace, which its sticky button shows.
     pub(crate) sticky: bool,
+    /// Whether it is kept in front of the other windows by the person,
+    /// which its on-top button shows.
+    pub(crate) on_top: bool,
     /// Whether it is maximized, which its maximize button shows as restore.
     pub(crate) maximized: bool,
     /// Which reading of the person's icons it is drawn from.
