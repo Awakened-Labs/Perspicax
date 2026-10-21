@@ -20,7 +20,8 @@
 //! agent, and the menu's own requests never give it the keyboard or move it,
 //! so the window it was opened from keeps the keyboard. The pointer's tests
 //! need `capture`, and put a focus policy in force with
-//! `Command::FocusPolicy`.
+//! `Command::FocusPolicy`. To an agent each is a popup (issue #159), hung
+//! from the window its `WM_TRANSIENT_FOR` names, or from nothing.
 //!
 //! The X client is this test process, speaking X11 through x11rb, so nothing
 //! beyond `Xwayland` itself has to be installed. Needs `XDG_RUNTIME_DIR` and
@@ -39,7 +40,9 @@ use common::{Session, heard, menu_with_the_keyboard, until};
 use perspicax_compositor::{
     ActError, Backend, Command, Config, Error, Facts, Host, Requests, Stop,
 };
-use perspicax_index::{Action as Verb, HostFacts, PointerButton, Refusal, SurfaceFacts, judge};
+use perspicax_index::{
+    Action as Verb, HostFacts, PointerButton, Refusal, SurfaceFacts, SurfaceKind, judge,
+};
 use perspicax_node::{Origin, Rect, Visibility, X11Basis};
 use perspicax_policy::{Action, Button, Focus, FocusModel, Mods, Opacity};
 use smithay_client_toolkit::shell::WaylandSurface as _;
@@ -751,6 +754,13 @@ impl X11 {
     /// input, so X would let it have the keyboard. Mapped, once the
     /// compositor has it on screen. Its presses are heard.
     fn menu(&self, title: &str, at: (i16, i16), size: (u16, u16)) -> u32 {
+        self.menu_over(title, at, size, None)
+    }
+
+    /// The same, naming `over` in `WM_TRANSIENT_FOR` before it maps, if
+    /// given: as GTK 3's and Qt's menus name the window they were opened
+    /// from, and their submenus the menu.
+    fn menu_over(&self, title: &str, at: (i16, i16), size: (u16, u16), over: Option<u32>) -> u32 {
         let window = self.x.generate_id().expect("an X id");
         self.x
             .create_window(
@@ -788,6 +798,9 @@ impl X11 {
                 &[self.atoms._NET_WM_WINDOW_TYPE_POPUP_MENU],
             )
             .expect("_NET_WM_WINDOW_TYPE");
+        if let Some(over) = over {
+            self.transient(window, over);
+        }
         self.x.map_window(window).expect("map_window");
         self.x.flush().expect("flush");
         self.surface_where(title, |surface| surface.mapped)
@@ -2929,6 +2942,172 @@ fn an_agent_cannot_close_an_x11_menu() {
         Err(ActError::NoSuchSurface(menu.0))
     );
     assert!(x11.viewable(menu_window), "the menu was destroyed");
+
+    x11.stop();
+}
+
+/// Issue #159: to an agent, an X application's menu is a popup, not a
+/// window, and one that names no window it was opened from, as Steam's do,
+/// hangs from nothing. It is described where X stacks it -- over the window
+/// that opened it, as it maps -- and said to have come on screen then, for
+/// the menu join.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_menu_naming_no_window_is_a_popup_of_nothing() {
+    let x11 = X11::start("x11-menu-of-nothing", Backend::headless((1280, 800)));
+    let asked = Instant::now();
+    steam_with_a_menu(&x11);
+    let steam = id_of(&x11, "steam");
+    let menu = id_of(&x11, "menu");
+    let facts = x11.facts();
+
+    let described = facts.surface(menu).expect("the menu, described");
+    assert_eq!(described.kind, SurfaceKind::Popup { from: None });
+    assert!(
+        described.mapped_at.is_some_and(|at| at >= asked),
+        "said when it came on screen: {:?}",
+        described.mapped_at
+    );
+    assert_eq!(
+        facts.surface(steam).expect("steam").kind,
+        SurfaceKind::Window
+    );
+    let place = |id| facts.surfaces().iter().position(|surface| surface.id == id);
+    assert!(
+        place(menu) > place(steam),
+        "drawn over the window that opened it"
+    );
+
+    x11.stop();
+}
+
+/// Issue #159: one that names the window it was opened from in
+/// `WM_TRANSIENT_FOR`, as GTK 3's and Qt's do, hangs from that window.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_menu_hangs_from_the_window_its_transient_for_names() {
+    let x11 = X11::start("x11-menu-transient", Backend::headless((1280, 800)));
+    let window = x11.open("page");
+    let page = id_of(&x11, "page");
+    x11.menu_over("menu", (60, 60), (120, 100), Some(window));
+
+    let menu = id_of(&x11, "menu");
+    assert_eq!(
+        x11.facts().surface(menu).expect("the menu").kind,
+        SurfaceKind::Popup { from: Some(page) }
+    );
+
+    x11.stop();
+}
+
+/// Issue #159: a submenu names its menu, as GTK 3's and Qt's do, and hangs
+/// from its menu's window, as a Wayland submenu does.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_submenu_hangs_from_its_menus_window() {
+    let x11 = X11::start("x11-submenu", Backend::headless((1280, 800)));
+    let window = x11.open("page");
+    let page = id_of(&x11, "page");
+    let menu = x11.menu_over("menu", (60, 60), (120, 100), Some(window));
+    x11.menu_over("submenu", (180, 60), (120, 100), Some(menu));
+
+    let submenu = id_of(&x11, "submenu");
+    assert_eq!(
+        x11.facts().surface(submenu).expect("the submenu").kind,
+        SurfaceKind::Popup { from: Some(page) }
+    );
+
+    x11.stop();
+}
+
+/// Issue #159: a menu that names its window once it has mapped is described
+/// again at once, as a new title is, and not whenever it next draws.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_menu_naming_its_window_once_mapped_is_described_again() {
+    let x11 = X11::start("x11-menu-transient-late", Backend::headless((1280, 800)));
+    let window = x11.open("page");
+    let page = id_of(&x11, "page");
+    let menu_window = x11.menu("menu", (60, 60), (120, 100));
+    let menu = id_of(&x11, "menu");
+    assert_eq!(
+        x11.facts().surface(menu).expect("the menu").kind,
+        SurfaceKind::Popup { from: None }
+    );
+
+    x11.transient(menu_window, window);
+    x11.x.flush().expect("flush");
+    assert!(
+        x11.surface_where("menu", |surface| surface.hangs_from() == Some(page))
+            .is_some(),
+        "never described as the page's: {:?}",
+        x11.facts()
+    );
+
+    x11.stop();
+}
+
+/// Issue #159: each map is a new popup, as each `xdg_popup` is, said to
+/// have come on screen then, so a menu read while it was up before is not
+/// taken for it. GTK 3 maps the same X window each time it opens a menu.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_menu_mapped_again_is_a_new_popup_on_screen_since() {
+    let x11 = X11::start("x11-menu-again", Backend::headless((1280, 800)));
+    let window = x11.open("page");
+    let menu_window = x11.menu_over("menu", (60, 60), (120, 100), Some(window));
+    let first = x11
+        .surface_where("menu", |surface| surface.mapped)
+        .expect("mapped");
+
+    x11.x.unmap_window(menu_window).expect("unmap_window");
+    x11.x.flush().expect("flush");
+    assert!(
+        eventually(Duration::from_secs(5), || {
+            x11.facts().surface(first.id).is_none().then_some(())
+        })
+        .is_some(),
+        "it never closed"
+    );
+    x11.x.map_window(menu_window).expect("map_window");
+    x11.x.flush().expect("flush");
+    let again = x11
+        .surface_where("menu", |surface| surface.mapped)
+        .expect("mapped again");
+
+    assert_ne!(again.id, first.id);
+    assert!(
+        again.mapped_at > first.mapped_at,
+        "{:?} then {:?}",
+        first.mapped_at,
+        again.mapped_at
+    );
+
+    x11.stop();
+}
+
+/// Issue #159: menus that name each other hang from nothing, and asking what
+/// they hang from ends: the compositor goes on to describe a window mapped
+/// after.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn x11_menus_naming_each_other_hang_from_nothing() {
+    let x11 = X11::start("x11-menus-in-a-ring", Backend::headless((1280, 800)));
+    let one = x11.menu("one", (60, 60), (120, 100));
+    let two = x11.menu_over("two", (200, 60), (120, 100), Some(one));
+    x11.transient(one, two);
+    x11.x.flush().expect("flush");
+    x11.open("after");
+
+    let facts = x11.facts();
+    for title in ["one", "two"] {
+        let menu = id_of(&x11, title);
+        assert_eq!(
+            facts.surface(menu).expect("described").kind,
+            SurfaceKind::Popup { from: None },
+            "{title}"
+        );
+    }
 
     x11.stop();
 }
