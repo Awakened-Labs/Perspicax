@@ -20,10 +20,10 @@
 
 mod common;
 
-use common::{Desk, Ear, Session, configured, heard, menu_with_the_keyboard, until};
+use common::{Desk, Ear, Session, configured, heard, menu_with_the_keyboard_on, until};
 use perspicax_compositor::{ActError, Backend, Host};
-use perspicax_index::{Action as Verb, HostFacts, PointerButton, SurfaceKind};
-use perspicax_node::{Rect, SurfaceId};
+use perspicax_index::{Action as Verb, HostFacts, PointerButton, SurfaceKind, judge};
+use perspicax_node::{Rect, SurfaceId, Visibility};
 use perspicax_policy::Action;
 use smithay_client_toolkit::shell::xdg::{XdgSurface as _, popup::Popup};
 use wayland_client::{EventQueue, Proxy as _, QueueHandle, protocol::wl_surface::WlSurface};
@@ -111,10 +111,9 @@ fn opened(
 /// Two applications at the seat.
 ///
 /// "b" has a panel across the top, a window, "elsewhere", and a popup of it
-/// that holds nothing, as a tooltip does. "a" has two windows, "page" and
-/// then "own", with "page" given the keyboard back; and once
-/// [`Apps::open_the_menu`] has run, a menu of "page" holding the pointer
-/// and keyboard.
+/// that holds nothing, as a tooltip does. "a" has two windows, "own" and
+/// then "page", over it with the keyboard; and once [`Apps::open_the_menu`]
+/// has run, a menu of "page" holding the pointer and keyboard, over both.
 struct Apps {
     a: Desk,
     a_queue: EventQueue<Desk>,
@@ -156,13 +155,10 @@ impl Apps {
         let (mut a, mut a_queue, a_qh, a_globals) = session.client();
         a.bind_pointer(&a_globals, &a_qh);
         let ear = a.bind_keyboard(&a_globals, &a_qh);
-        let page = opened(session, &mut a, &mut a_queue, &a_qh, "page");
         let own = opened(session, &mut a, &mut a_queue, &a_qh, "own");
-        // "own" took the keyboard as it opened. Give it back to "page",
-        // whose menu takes it from there.
-        Host::new(&session.facts, &session.requests)
-            .act(page, &Verb::Focus)
-            .expect("focused");
+        // Over "own", with the keyboard as it opened, so that its menu is
+        // over "own" too, where an agent's click on the menu lands.
+        let page = opened(session, &mut a, &mut a_queue, &a_qh, "page");
         Self {
             a,
             a_queue,
@@ -183,13 +179,14 @@ impl Apps {
     /// Open the menu of "page" that holds the pointer and keyboard, as a
     /// right-click does, and wait for the facts to describe it.
     fn open_the_menu(&mut self, session: &Session) {
-        let menu = menu_with_the_keyboard(
+        let menu = menu_with_the_keyboard_on(
             session,
             &mut self.a,
             &mut self.a_queue,
             &self.a_qh,
             &self.ear,
             self.page,
+            1,
         );
         let page = self.page;
         let facts = session.wait_for(|facts| !popups_of(facts, page).is_empty());
@@ -264,6 +261,38 @@ fn an_agent_cannot_click_or_scroll_another_application_past_a_menu() {
     assert_eq!(apps.b.scrolls, 0, "no scroll reached b");
     assert_eq!(apps.a.popups_done, 0, "the menu is still open");
     assert!(apps.keys_on(apps.menu_surface()));
+
+    apps.stop(session);
+}
+
+/// A menu holding the pointer is named before what covers the node, as it
+/// is judged again as the click is sent (#158): told of the menu, an agent
+/// can choose from it, and a click anywhere on "b" would close it under the
+/// person. A spot of "elsewhere" under "own" is refused as the menu's.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_holding_the_pointer_is_named_before_what_covers_the_node() {
+    let session = seated("held-menu-covered");
+    let apps = Apps::with_the_menu(&session);
+    // "own" is cascaded over "elsewhere", 32 further in each way.
+    let covered = Rect::new(40.0, 40.0, 50.0, 50.0);
+    assert_eq!(
+        judge(&session.facts.read(), apps.elsewhere, covered).visibility,
+        Visibility::Occluded { by: apps.own }
+    );
+
+    assert_eq!(
+        Host::new(&session.facts, &session.requests)
+            .act(
+                apps.elsewhere,
+                &Verb::Click {
+                    at: covered,
+                    button: PointerButton::Left,
+                },
+            )
+            .map(|_| ()),
+        Err(ActError::MenuOpen { popup: apps.menu() })
+    );
 
     apps.stop(session);
 }

@@ -41,7 +41,7 @@ use std::{net::Shutdown, path::PathBuf, thread};
 
 use common::{Desk, Session, connect};
 use perspicax_compositor::{ActError, Backend, Command, Host, Keymap, Virtual};
-use perspicax_index::{Action as Verb, HostFacts, Layer, PointerButton, SurfaceKind};
+use perspicax_index::{Action as Verb, HostFacts, Layer, PointerButton, Refusal, SurfaceKind};
 use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::{Access, Action, Ended, Place, Protocol, Rule, Shape, Side};
 use wayland_client::Connection;
@@ -425,6 +425,14 @@ fn click(session: &Session, surface: SurfaceId, (x, y): (f64, f64), button: Poin
             },
         )
         .expect("dispatched");
+}
+
+/// Close the open start menu as a click away from it does: on the clear
+/// part of the menus' surface, `menus`, at the far end of the monitor from
+/// the start button, which is under that surface too.
+fn click_off_the_menu(session: &Session, menus: SurfaceId) {
+    click(session, menus, (1200.0, 100.0), PointerButton::Left);
+    session.wait_for(|facts| menu(facts).is_none());
 }
 
 /// A config whose root menu is one item, `Marker`, that creates `marker`;
@@ -1079,6 +1087,8 @@ fn a_pies_running_application_brings_its_next_window_forward_each_time() {
     let config = "profile = \"minimal\"\n[shell.pie.menus]\nt = [{ running = true }]\n";
     let shell = Shell::start(&session, "pie-running", config);
     let facts = session.wait_for(|facts| desktops(facts).len() == 1);
+    // The pointer on the wallpaper, where the windows will open over it.
+    click(&session, desktop(&facts), (20.0, 20.0), PointerButton::Left);
     let (mut desk, mut queue, qh, globals) = session.client();
     desk.bind_taskbar(&globals, &qh);
     desk.open_window(&qh, "first", "slack");
@@ -1086,8 +1096,6 @@ fn a_pies_running_application_brings_its_next_window_forward_each_time() {
     common::until(&mut queue, &mut desk, |desk| {
         desk.task("first").is_some() && activated(desk, "second")
     });
-    // The pointer on the wallpaper, clear of the windows.
-    click(&session, desktop(&facts), (20.0, 20.0), PointerButton::Left);
 
     // One slot, slack's, standing for both windows: choosing it brings
     // forward the one after the window that has the keyboard, and again.
@@ -1384,14 +1392,13 @@ fn a_narrow_panels_start_button_opens_the_start_menu_above_it() {
     let start = (340.0 + PANEL_HEIGHT / 2.0, PANEL_HEIGHT / 2.0);
     click(&session, panel, start, PointerButton::Left);
     let facts = session.wait_for(|facts| menu(facts).is_some());
-    let (_, _, _, opaque) = menu(&facts).expect("waited for");
+    let (menus, _, _, opaque) = menu(&facts).expect("waited for");
     assert_eq!(
         (opaque[0].x0, opaque[0].y1),
         (340.0, 800.0 - PANEL_HEIGHT),
         "above the button, where the bar put it"
     );
-    click(&session, panel, start, PointerButton::Left);
-    session.wait_for(|facts| menu(facts).is_none());
+    click_off_the_menu(&session, menus);
 
     shell.stop_with(session);
 }
@@ -1548,7 +1555,7 @@ fn an_agents_click_on_the_start_button_opens_it() {
     let start = (PANEL_HEIGHT / 2.0, PANEL_HEIGHT / 2.0);
     click(&session, panel, start, PointerButton::Left);
     let facts = session.wait_for(|facts| menu(facts).is_some());
-    let (_, namespace, _, opaque) = menu(&facts).expect("waited for");
+    let (menus, namespace, _, opaque) = menu(&facts).expect("waited for");
     assert_eq!(namespace, "perspicax-menu-HEADLESS-1");
     assert_eq!(
         (opaque[0].x0, opaque[0].y1),
@@ -1556,23 +1563,21 @@ fn an_agents_click_on_the_start_button_opens_it() {
         "above the button"
     );
 
-    // The panel is still in reach with the menu open, and a second click
-    // on the button closes it.
-    click(&session, panel, start, PointerButton::Left);
-    session.wait_for(|facts| menu(facts).is_none());
+    // A click away from it closes it.
+    click_off_the_menu(&session, menus);
 
     shell.stop_with(session);
 }
 
 /// The menus' surface is drawn over the whole monitor, the shell's panel
-/// included, though it leaves the panel out of where it takes clicks. A
-/// click there still reaches the panel; to an agent the panel is covered
-/// while a menu is open, on policy, because a surface covers everything it
-/// draws (#103). #146 would leave the panel undrawn over, and this would
-/// change with it.
+/// included, though it leaves the panel out of where it takes clicks. To an
+/// agent the panel is covered while a menu is open, on policy, because a
+/// surface covers everything it draws (#103), and an agent's click there is
+/// refused as it is sent, naming the menus' surface (#158). #146 would
+/// leave the panel undrawn over, and this would change with it.
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
-fn while_a_menu_is_open_its_panel_is_covered_to_an_agent_though_a_click_reaches_it() {
+fn while_a_menu_is_open_its_panel_is_covered_to_an_agent_and_its_click_refused() {
     use perspicax_index::{Judgement, judge};
     use perspicax_node::Visibility;
 
@@ -1600,10 +1605,22 @@ fn while_a_menu_is_open_its_panel_is_covered_to_an_agent_though_a_click_reaches_
         "covered by the clear part of the menus' surface, which says nothing about it"
     );
 
-    // A click there is not the menus' surface's: it reaches the button, and
-    // closes the menu.
-    click(&session, panel, start, PointerButton::Left);
-    session.wait_for(|facts| menu(facts).is_none());
+    // Judged again as it is sent, and refused as the gate would refuse it:
+    // nothing is sent, and the menu stays open.
+    assert_eq!(
+        Host::new(&session.facts, &session.requests)
+            .act(
+                panel,
+                &Verb::Click {
+                    at: button,
+                    button: PointerButton::Left,
+                },
+            )
+            .map(|_| ()),
+        Err(ActError::OutOfSight(Refusal::Occluded { by: menus }))
+    );
+    assert!(menu(&session.facts.read()).is_some(), "still open");
+    click_off_the_menu(&session, menus);
 
     shell.stop_with(session);
 }
@@ -1653,10 +1670,9 @@ fn a_start_menu_written_in_the_config_is_what_its_button_opens_and_a_save_change
     loop {
         click(&session, panel, start, PointerButton::Left);
         let facts = session.wait_for(|facts| menu(facts).is_some());
-        let (_, _, _, opaque) = menu(&facts).expect("waited for");
+        let (menus, _, _, opaque) = menu(&facts).expect("waited for");
         let tall = opaque[0].y1 - opaque[0].y0;
-        click(&session, panel, start, PointerButton::Left);
-        session.wait_for(|facts| menu(facts).is_none());
+        click_off_the_menu(&session, menus);
         if tall > one_line {
             break;
         }
@@ -2326,14 +2342,14 @@ fn an_output_named_and_hidden_in_the_mixer_is_kept_for_the_person_alone_and_neve
             .is_some_and(|(_, now)| now.y1 - now.y0 <= tall - 28.0 - 20.0 - 3.0 * 28.0 + 24.0)
     });
 
-    // A press on the output, the mixer open, closes it and switches: to
-    // nothing but "one", with "two" hidden.
-    click(
-        &session,
-        panel,
-        (1280.0 - 30.0 - 5.0, PANEL_HEIGHT / 2.0),
-        PointerButton::Left,
-    );
+    // The person's press on the output, the mixer open, closes it and
+    // switches: to nothing but "one", with "two" hidden. To an agent the
+    // panel is under the mixer's surface while it is open.
+    session.command(Command::Click {
+        at: (1280 - 30 - 5, 800 - 20),
+        button: perspicax_policy::Button::Left,
+        mods: perspicax_policy::Mods::default(),
+    });
     session.wait_for(|facts| mixer(facts).is_none());
     thread::sleep(Duration::from_millis(500));
     assert_eq!(sound.pactl(&["get-default-sink"]).trim(), "one");
@@ -2582,7 +2598,13 @@ fn the_mixer_opens_from_its_button_mutes_and_sets_the_volume_and_closes() {
     until(&["get-sink-volume", "one"], "/  50% /");
 
     // Its button closes it again, for good, and a press off it does too.
-    click(&session, panel, button, PointerButton::Left);
+    // The person's press: to an agent the panel is under the mixer's
+    // surface while it is open.
+    session.command(Command::Click {
+        at: (1280 - 30 - 15, 800 - 20),
+        button: perspicax_policy::Button::Left,
+        mods: perspicax_policy::Mods::default(),
+    });
     session.wait_for(|facts| mixer(facts).is_none());
     thread::sleep(Duration::from_millis(300));
     assert!(
@@ -2601,8 +2623,8 @@ fn the_mixer_opens_from_its_button_mutes_and_sets_the_volume_and_closes() {
     session.wait_for(|facts| mixer(facts).is_none());
 
     // Open, the panel is still the panel's to a person's hand, which goes
-    // by what is under it, not an agent's, which names its surface: a press
-    // on its speaker closes the mixer and brings the sound back.
+    // by what is under it: a press on its speaker closes the mixer and
+    // brings the sound back.
     click(&session, panel, button, PointerButton::Left);
     session.wait_for(|facts| mixer(facts).is_some());
     session.command(Command::Click {
@@ -2834,7 +2856,8 @@ fn the_mixer_meters_what_plays_tests_an_output_and_stops_metering_once_closed() 
             })
     });
 
-    click(&session, panel, button, PointerButton::Left);
+    // A press off it closes it.
+    click(&session, surface, (100.0, 100.0), PointerButton::Left);
     session.wait_for(|facts| mixer(facts).is_none());
     sound.until(|sound| meters(sound) == 0);
 

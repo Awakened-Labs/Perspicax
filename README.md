@@ -441,6 +441,19 @@ so does typing at the menu. `window_close` still asks any window to close. The
 compositor makes the check in the same turn it would act, and it clears as
 soon as the menu closes, chosen from or dismissed.
 
+**A click is judged twice.** The gate judges a node against the facts as they
+stood when the agent's call read them, and the compositor carries the act out
+a moment later, on its own thread. In between, a menu can open over the node,
+often one the agent's last act opened, or a window be raised over it, or the
+node move out of view. A click aimed at the node's own surface would still
+reach it, through what the person now sees there. So the compositor judges a
+`click` or a `scroll` again, against its own facts as they stand, in the same
+turn that sends the events, and refuses it as the gate would: `occluded`,
+naming what covers the node now, `clipped`, `off_screen` and the rest. Nothing
+is sent, and the facts the agent reads next already show what was in the way.
+`focus` and `type` aim at no pixel and are not judged again; typing checks the
+keyboard instead.
+
 **A titlebar is pixels no client drew.** The frame perspicax draws around a
 window goes into the facts beside the window, so a node of another window
 under a titlebar is refused as `occluded`, naming the window the titlebar

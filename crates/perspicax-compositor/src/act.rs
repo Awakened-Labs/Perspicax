@@ -13,9 +13,12 @@
 //!   where it came from, so nothing downstream can refuse it. That is what makes
 //!   this work on stock GTK and Qt with no cooperation, and it is why the gate
 //!   in `perspicax-index` has to hold: it is the only place the question can be asked.
-//!   Except one: where a key goes is decided by keyboard focus, which only
-//!   this loop can compare with the target in the same turn it presses the
-//!   key. So typing checks it here, in [`Compositor::act`], and nowhere else.
+//!   Except two, which only this loop can answer in the same turn it sends
+//!   the events. Where a key goes is decided by keyboard focus, so typing
+//!   checks it here, in [`Compositor::act`], and nowhere else. And what a
+//!   click or a scroll lands on is whatever is drawn there now, which may be
+//!   a menu opened since the gate judged it: so the gate's own question is
+//!   asked again here, of facts built in that turn (#158).
 //! - **Coordinates arrive in window space and leave global.** An accessibility
 //!   bridge cannot know where its window is -- measured, not assumed, and
 //!   recorded as risk #1 -- so every rect that reaches this module is relative
@@ -25,7 +28,7 @@
 
 use std::{collections::HashMap, time::Instant};
 
-use perspicax_index::{Action, PointerButton};
+use perspicax_index::{Action, PointerButton, Refusal};
 use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::Button;
 use smithay::{
@@ -76,7 +79,8 @@ struct Aim {
 /// question of whether an act should be *allowed*. Everything here is a
 /// statement about this compositor's ability to carry it out, but for the
 /// refusals that only this loop can make: [`ActError::FocusElsewhere`],
-/// [`ActError::PointerCaptured`] and [`ActError::MenuOpen`].
+/// [`ActError::PointerCaptured`], [`ActError::MenuOpen`] and
+/// [`ActError::OutOfSight`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ActError {
     /// No surface with this id is mapped. It was destroyed, or never existed.
@@ -157,6 +161,21 @@ pub enum ActError {
     /// act. `perspicax` hands it to the agent as `Refusal::MenuOpen`.
     #[error("menu {} holds the pointer and keyboard: nothing was dispatched", popup.0)]
     MenuOpen { popup: SurfaceId },
+    /// A click or a scroll aimed at something the person can no longer see.
+    /// The gate judged it against the facts as the agent read them; by the
+    /// time this loop came to send the events, a menu had opened over it, a
+    /// window had been raised over it, or it had moved out of view (#158).
+    /// Nothing was dispatched: with the pointer's focus given explicitly, the
+    /// click would still have reached the node's surface, at a point the
+    /// person sees something else on.
+    ///
+    /// The gate's own refusal, `perspicax_index::check_rect`, asked again of
+    /// facts this loop built in the same turn ([`Compositor::host_facts`]),
+    /// from its own measurements: a plain headless build, where smithay has
+    /// no buffer sizes to hit-test with, refuses the same. `perspicax` hands
+    /// it to the agent unchanged.
+    #[error("judged again as it was sent, {0}: nothing was dispatched")]
+    OutOfSight(Refusal),
 }
 
 /// What the compositor did, as it alone can report it.
@@ -398,6 +417,13 @@ impl Compositor {
         // every click: told of a menu, an agent can always choose from it.
         if let Some(popup) = self.menu_in_the_way(action, &target) {
             return Err(ActError::MenuOpen { popup });
+        }
+        // Last, nearest the events: whether the person can see what a click
+        // or a scroll lands on, now. The gate asked it of the facts the agent
+        // read, and a menu or a window may have opened over it since (#158).
+        if let Action::Click { at, .. } | Action::Scroll { at, .. } = action {
+            let now = self.host_facts(self.window_in_use());
+            perspicax_index::check_rect(&now, surface, *at).map_err(ActError::OutOfSight)?;
         }
         let focus_before = self.keyboard_owner();
 

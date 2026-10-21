@@ -22,7 +22,9 @@
 //!   resolve  ── selector -> node        perspicax-index   (NotFound / Ambiguous)
 //!   gate     ── may we act on it?       perspicax-index   (Stale / Occluded / ...)
 //!   mark     ── damage generation now   host       (before, never after)
-//!   dispatch ── verb + rect -> action   host       (the compositor's thread)
+//!   dispatch ── verb + rect -> action   host       (the compositor's thread,
+//!                                                   which judges a click or a
+//!                                                   scroll again as it sends it)
 //!   wait     ── the damage window       here
 //!   witness  ── what changed, and where perspicax-index   (region-scoped)
 //! ```
@@ -60,8 +62,8 @@ pub const DAMAGE_WINDOW: Duration = Duration::from_millis(200);
 /// variant carries what would be needed to recover. An [`ActError`] is a
 /// statement about this compositor, and there is nothing an agent can do but
 /// report it -- except what the compositor alone can see in time, a keyboard
-/// held elsewhere, a game's hold on the pointer or a menu's, which arrives
-/// here as the refusal it is.
+/// held elsewhere, a game's hold on the pointer or a menu's, or a node covered
+/// since the gate judged it, which arrives here as the refusal it is.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum Failure {
     /// The gate said no, and said why.
@@ -87,6 +89,9 @@ impl From<ActError> for Failure {
             ActError::PointerCaptured { by } => Self::Refused(Refusal::PointerCaptured { by }),
             // And again: the menu closes, chosen from or dismissed.
             ActError::MenuOpen { popup } => Self::Refused(Refusal::MenuOpen { popup }),
+            // The gate's own refusal, asked again as the click was sent:
+            // what covers the node now, or why else it cannot be seen.
+            ActError::OutOfSight(refusal) => Self::Refused(refusal),
             error => Self::Dispatch(error),
         }
     }
@@ -396,6 +401,18 @@ mod tests {
             Failure::from(ActError::MenuOpen { popup }),
             Failure::Refused(Refusal::MenuOpen { popup })
         );
+    }
+
+    /// Covered since the gate judged it, a node is refused as the gate would
+    /// have refused it: the agent is told what covers it now.
+    #[test]
+    fn a_node_out_of_sight_at_dispatch_is_the_gates_own_refusal() {
+        for refusal in [Refusal::Occluded { by: SurfaceId(4) }, Refusal::Clipped] {
+            assert_eq!(
+                Failure::from(ActError::OutOfSight(refusal.clone())),
+                Failure::Refused(refusal)
+            );
+        }
     }
 
     #[test]

@@ -4,8 +4,8 @@
 //! geometry the client declared, inside any client-side shadow. The client is
 //! told about the pointer in surface space, where its buffer begins, which
 //! under a shadow is the shadow's width further out. So a click at window-space
-//! `(50, 50)` on a window whose geometry starts at `(26, 23)` in its buffer must
-//! arrive at `(76, 73)` -- Firefox's shape, on the seat where issue #45 found
+//! `(20, 20)` on a window whose geometry starts at `(26, 23)` in its buffer must
+//! arrive at `(46, 43)` -- Firefox's shape, on the seat where issue #45 found
 //! every Firefox click a shadow's width from its target.
 //!
 //! A seat and a headless build with `capture` computed that shadow from
@@ -25,8 +25,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop};
-use perspicax_index::{Action, HostFacts, PointerButton, SurfaceFacts};
+use perspicax_compositor::{ActError, Backend, Config, Facts, Host, Requests, Stop};
+use perspicax_index::{Action, HostFacts, PointerButton, Refusal, SurfaceFacts};
 use perspicax_node::{Rect, SurfaceId, Vec2};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -99,29 +99,42 @@ fn a_click_in_window_space_lands_inside_the_shadow_a_window_declared() {
     assert_eq!(flush.buffer_origin, flush.geometry.origin().to_vec2());
 
     let host = Host::new(&facts, &requests);
-    let click = |surface: SurfaceId| {
+    let click = |surface: SurfaceId, at: Rect| {
         host.act(
             surface,
             &Action::Click {
-                at: Rect::new(40.0, 40.0, 60.0, 60.0),
+                at,
                 button: PointerButton::Left,
             },
         )
         .expect("dispatched");
     };
 
-    click(shadowed.id);
+    // In the corner "flush" leaves uncovered: it is cascaded over this one,
+    // from (32, 32).
+    click(shadowed.id, Rect::new(10.0, 10.0, 30.0, 30.0));
     until(&mut queue, &mut desk, |desk| {
         desk.presses("shadowed").len() == 1
     });
     assert_eq!(
         desk.presses("shadowed"),
-        [(76.0, 73.0)],
-        "the rect's centre, (50, 50) in window space, is the shadow's width \
+        [(46.0, 43.0)],
+        "the rect's centre, (20, 20) in window space, is the shadow's width \
          further into the buffer"
     );
 
-    click(flush.id);
+    // Where "flush" covers it, a click on "shadowed" is not sent at all:
+    // what the person sees there is "flush" (#158).
+    let under = Action::Click {
+        at: Rect::new(40.0, 40.0, 60.0, 60.0),
+        button: PointerButton::Left,
+    };
+    assert_eq!(
+        host.act(shadowed.id, &under).map(|_| ()),
+        Err(ActError::OutOfSight(Refusal::Occluded { by: flush.id }))
+    );
+
+    click(flush.id, Rect::new(40.0, 40.0, 60.0, 60.0));
     until(&mut queue, &mut desk, |desk| {
         desk.presses("flush").len() == 1
     });
@@ -130,6 +143,7 @@ fn a_click_in_window_space_lands_inside_the_shadow_a_window_declared() {
         [(50.0, 50.0)],
         "and a window with no shadow is pressed where it was asked"
     );
+    assert_eq!(desk.presses("shadowed").len(), 1, "and nothing under it");
 
     stop.request();
     drop((desk, queue));

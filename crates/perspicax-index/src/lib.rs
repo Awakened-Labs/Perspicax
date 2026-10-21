@@ -379,8 +379,28 @@ pub fn check_actable(node: &ObservedNode) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// The gate for the rect a pointer event lands on, asked again where the
+/// act is dispatched: whether `rect`, in `surface`'s window space, can be
+/// seen in these facts, refused as [`check_actable`] would refuse a node
+/// judged there.
+///
+/// The gate judges a node against the facts as they were when the agent
+/// read them, and a host carries the act out later, on its own thread. In
+/// between a menu can open over the node, or a window be raised over it,
+/// and a click aimed at the node's surface would still reach it, at a
+/// point the person now sees something else on (#158). A host asks this of
+/// its own facts in the same step that sends the events, so nothing can
+/// come between the two.
+///
+/// # Errors
+///
+/// The [`Refusal`] saying why the rect is not in sight.
+pub fn check_rect(facts: &HostFacts, surface: SurfaceId, rect: Rect) -> Result<(), Refusal> {
+    in_sight(&judge(facts, surface, rect).visibility)
+}
+
 /// What a verdict on whether something can be seen refuses, if anything:
-/// one mapping, for a node's verdict and a window's alike. Only
+/// one mapping, for a node's verdict, a window's and a rect's alike. Only
 /// [`Visible`](Visibility::Visible) passes, and `Unknown` fails closed as
 /// [`Unjudged`](Refusal::Unjudged).
 fn in_sight(visibility: &Visibility) -> Result<(), Refusal> {
@@ -1196,5 +1216,51 @@ mod tests {
             check_window(&facts, SurfaceId(1), &WindowVerb::Forward),
             Err(Refusal::NoCapability { .. })
         ));
+    }
+
+    /// A rect is judged in its window's space, wherever the window is, and
+    /// refused as a node judged there would be: covered, naming what is in
+    /// front; past its window's edge; off every monitor; on a window
+    /// minimized; or on a surface these facts do not hold, failing closed.
+    #[test]
+    fn a_rect_is_in_sight_only_where_the_person_can_see_it() {
+        let away = || SurfaceFacts::new(SurfaceId(1), Rect::new(100.0, 100.0, 500.0, 400.0));
+        let spot = Rect::new(10.0, 10.0, 20.0, 20.0);
+        // Over the spot as global space would read it, and clear of it in
+        // the window's own.
+        let corner =
+            SurfaceFacts::new(SurfaceId(2), Rect::new(0.0, 0.0, 50.0, 50.0)).owned_by(owned_by(20));
+        let over = SurfaceFacts::new(SurfaceId(3), Rect::new(105.0, 105.0, 125.0, 125.0))
+            .owned_by(owned_by(20));
+        assert_eq!(
+            check_rect(&desk(away(), [corner]), SurfaceId(1), spot),
+            Ok(())
+        );
+
+        let refused = [
+            (
+                desk(away(), [over]),
+                spot,
+                Refusal::Occluded { by: SurfaceId(3) },
+            ),
+            (
+                desk(away(), []),
+                Rect::new(390.0, 290.0, 410.0, 310.0),
+                Refusal::Clipped,
+            ),
+            (
+                desk(away(), []).with_outputs([Rect::new(1000.0, 0.0, 2000.0, 1000.0)]),
+                spot,
+                Refusal::OffScreen,
+            ),
+            (desk(away().unmapped(), []), spot, Refusal::Unmapped),
+        ];
+        for (facts, rect, refusal) in refused {
+            assert_eq!(check_rect(&facts, SurfaceId(1), rect), Err(refusal));
+        }
+        assert_eq!(
+            check_rect(&desk(away(), []), SurfaceId(9), spot),
+            Err(Refusal::Unjudged)
+        );
     }
 }
