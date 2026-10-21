@@ -388,8 +388,8 @@ pub enum Frame {
 pub struct PopupClaim {
     /// The popup's surface.
     pub surface: SurfaceId,
-    /// The window or panel it hangs from.
-    pub from: SurfaceId,
+    /// The window or panel it hangs from, or `None` for a popup of nothing.
+    pub from: Option<SurfaceId>,
     /// The process that drew it, from its client's credentials.
     pub pid: Option<u32>,
     /// When it was put on screen. A menu read before then may be one that
@@ -562,7 +562,9 @@ fn eligible(popup: &PopupClaim, menu: &MenuClaim) -> bool {
         (menu.seen_at, popup.mapped_at),
         (Some(seen), Some(mapped)) if seen >= mapped
     );
-    let from = menu.under.is_none_or(|under| under.surface == popup.from);
+    let from = menu
+        .under
+        .is_none_or(|under| Some(under.surface) == popup.from);
     fresh && from && matches!((menu.pid, popup.pid), (Some(a), Some(b)) if a == b)
 }
 
@@ -893,7 +895,7 @@ mod tests {
         let (left, top, right, bottom) = shadow;
         PopupClaim {
             surface: SurfaceId(id),
-            from: WINDOW,
+            from: Some(WINDOW),
             pid: Some(PID),
             mapped_at: Some(opened),
             buffer_origin: Vec2::new(geometry.x0 - left, geometry.y0 - top),

@@ -612,14 +612,15 @@ impl Window {
         // this window and where it says its nodes are agree. A menu is
         // measured from the popup, not from a node, and only a menu bound as
         // one node has one to give.
-        let node = match facts.hangs_from() {
-            Some(_) => index
+        let node = if facts.is_popup() {
+            index
                 .menu_of(facts.id)
                 .and_then(|menu| match menu.roots[..] {
                     [only] => Some(only),
                     _ => None,
-                }),
-            None => index.window_node(facts.id),
+                })
+        } else {
+            index.window_node(facts.id)
         };
         Self {
             surface: facts.id.0,

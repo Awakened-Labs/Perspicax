@@ -232,10 +232,9 @@ fn the_menus_of_a_panel_its_client_unmaps_are_dismissed() {
     menu.wl_surface().commit();
     queue.flush().expect("sent");
     session.wait_for(|facts| {
-        facts
-            .surfaces()
-            .iter()
-            .any(|surface| surface.kind == SurfaceKind::Popup { from: panel } && surface.mapped)
+        facts.surfaces().iter().any(|surface| {
+            surface.kind == SurfaceKind::Popup { from: Some(panel) } && surface.mapped
+        })
     });
 
     unmap_layer(&mut desk, &mut queue, 0);
@@ -534,7 +533,7 @@ fn a_menu_refused_while_its_panel_was_away_does_not_come_back_with_it() {
         facts
             .surfaces()
             .iter()
-            .all(|surface| surface.kind != SurfaceKind::Popup { from: back }),
+            .all(|surface| surface.kind != SurfaceKind::Popup { from: Some(back) }),
         "the refused menu came back with its panel: {facts:?}"
     );
 

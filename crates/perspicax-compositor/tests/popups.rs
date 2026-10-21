@@ -624,7 +624,7 @@ fn a_menu_is_a_surface_of_its_own_directly_above_its_window() {
 
     let facts = session.facts.read();
     let window = facts.surface(page).expect("described");
-    assert_eq!(shown.kind, SurfaceKind::Popup { from: page });
+    assert_eq!(shown.kind, SurfaceKind::Popup { from: Some(page) });
     assert_eq!(place(&facts, shown.id), place(&facts, page) + 1);
     assert_eq!(
         shown.geometry,
@@ -688,7 +688,12 @@ fn a_node_of_another_window_under_a_menu_is_covered_by_it() {
     queue.flush().expect("sent");
     let facts = session.wait_for(|facts| popups(facts).iter().any(|popup| popup.mapped));
     let shown = popups(&facts)[0].clone();
-    assert_eq!(shown.kind, SurfaceKind::Popup { from: above.id });
+    assert_eq!(
+        shown.kind,
+        SurfaceKind::Popup {
+            from: Some(above.id)
+        }
+    );
 
     let window = facts.surface(beneath).expect("described");
     let global = rect(
@@ -762,7 +767,11 @@ fn menus_stack_as_smithay_draws_them() {
         .find(|popup| popup.id != first.id)
         .cloned()
         .expect("waited for");
-    assert_eq!(sub.kind, SurfaceKind::Popup { from: page }, "its window's");
+    assert_eq!(
+        sub.kind,
+        SurfaceKind::Popup { from: Some(page) },
+        "its window's"
+    );
     assert_eq!(place(&facts, first.id), place(&facts, page) + 1);
     assert_eq!(place(&facts, sub.id), place(&facts, first.id) + 1);
     assert_eq!(
@@ -819,7 +828,12 @@ fn a_panels_menu_is_a_surface_above_the_panel() {
     queue.flush().expect("sent");
     let facts = session.wait_for(|facts| popups(facts).iter().any(|popup| popup.mapped));
     let shown = popups(&facts)[0].clone();
-    assert_eq!(shown.kind, SurfaceKind::Popup { from: panel.id });
+    assert_eq!(
+        shown.kind,
+        SurfaceKind::Popup {
+            from: Some(panel.id)
+        }
+    );
     assert_eq!(place(&facts, shown.id), place(&facts, panel.id) + 1);
     assert_eq!(
         shown.geometry,

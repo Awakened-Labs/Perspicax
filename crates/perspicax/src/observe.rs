@@ -202,9 +202,10 @@ impl App {
     /// The menus this application has open, as the host describes them.
     pub fn popups<'a>(&self, facts: &'a HostFacts) -> impl Iterator<Item = &'a SurfaceFacts> {
         let pid = self.pid;
-        facts.surfaces().iter().filter(move |surface| {
-            surface.hangs_from().is_some() && surface.claim().pid == Some(pid)
-        })
+        facts
+            .surfaces()
+            .iter()
+            .filter(move |surface| surface.is_popup() && surface.claim().pid == Some(pid))
     }
 
     /// Whether this application should be read again for a menu it has
@@ -476,7 +477,7 @@ fn surfaces(facts: &HostFacts) -> Vec<SurfaceClaim> {
     facts
         .surfaces()
         .iter()
-        .filter(|surface| surface.hangs_from().is_none())
+        .filter(|surface| !surface.is_popup())
         .map(SurfaceFacts::claim)
         .collect()
 }

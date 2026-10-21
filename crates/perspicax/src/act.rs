@@ -267,7 +267,7 @@ fn seen(
                 .filter(|facts| {
                     before.surface(facts.id).is_none()
                         && facts.origin == now.origin
-                        && facts.hangs_from().is_none()
+                        && !facts.is_popup()
                 })
                 .map(|facts| facts.id)
                 .collect(),

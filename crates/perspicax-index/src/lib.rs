@@ -429,7 +429,7 @@ fn in_sight(visibility: &Visibility) -> Result<(), Refusal> {
 /// The [`Refusal`] saying why not.
 pub fn check_readable(facts: &HostFacts, surface: SurfaceId) -> Result<&SurfaceFacts, Refusal> {
     let window = facts.surface(surface).ok_or(Refusal::NotFound)?;
-    if window.hangs_from().is_some() {
+    if window.is_popup() {
         return Err(Refusal::NotAWindow);
     }
     match &window.origin {

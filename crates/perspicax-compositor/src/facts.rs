@@ -572,7 +572,9 @@ impl Compositor {
         facts.mapped_at = self.popups_shown.get(&id).copied().filter(|_| facts.mapped);
         facts.damage_generation = self.damage_generation(id);
         facts.damage = self.damage_history(id);
-        facts.kind = SurfaceKind::Popup { from: placed.from };
+        facts.kind = SurfaceKind::Popup {
+            from: Some(placed.from),
+        };
         facts
     }
 
