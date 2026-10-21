@@ -292,7 +292,8 @@ below). An X11 application's has a `from` only if it names the window it was
 opened from: GTK 3's and Qt's do, Steam's and GTK 4's do not. An agent can
 read and click a panel or a menu as it would a window; a window verb aimed at
 one is refused as `not_a_window`. A window rolled up to its titlebar is
-`shaded: true`.
+`shaded: true`, and one the person keeps on top of the others is
+`on_top: true`, as are its dialogs and menus, kept there with it.
 
 An agent names a control and never a coordinate — the rectangle comes from the
 index and turning it into anything global is the compositor's job, so an agent

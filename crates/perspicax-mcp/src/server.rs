@@ -174,7 +174,11 @@ impl Perspicax {
                        true`. Only its titlebar is drawn, along the top of its `bounds`, and it \
                        covers only that: what is under the rest of it shows, and can be acted \
                        on. Its own controls are refused as `rolled_up` until the person unrolls \
-                       it, and so are `window_focus` and `window_type` on it.",
+                       it, and so are `window_focus` and `window_type` on it.\n\n\
+                       A window the person keeps in front of the others carries `on_top: \
+                       true`, and so do its dialogs and menus, kept there with it. Every \
+                       window raised or given the keyboard since is still behind it, so what \
+                       it covers stays covered until it moves or the person lets it go.",
         annotations(title = "List windows", read_only_hint = true, open_world_hint = false)
     )]
     pub async fn window_list(&self) -> Result<CallToolResult, McpError> {
@@ -330,7 +334,9 @@ impl Perspicax {
                        A refusal is not a failure of this tool. It names what is in the way and \
                        what would clear it: `occluded_by` is the surface in front of the node, \
                        and the refusal clears when that moves off it or the person brings the \
-                       node's window in front; narrow an `ambiguous_selector`; `focus` the \
+                       node's window in front, unless it is `on_top` in `window_list`, which \
+                       stays in front until the person lets it go; narrow an \
+                       `ambiguous_selector`; `focus` the \
                        target of a `focus_elsewhere`. `stale` \
                        means the application changed the control since it was read: perspicax \
                        reads it again on its own, and again later if the application is too \
@@ -1028,6 +1034,8 @@ mod tests {
         assert!(describing("tab_forward").contains("menu_open"));
         assert!(describing("act").contains("rolled_up"));
         assert!(describing("window_list").contains("shaded"));
+        assert!(describing("window_list").contains("on_top"));
+        assert!(describing("act").contains("on_top"));
         assert!(describing("tab_forward").contains("rolled_up"));
         assert!(describing("window_list").contains("window_focus"));
         assert!(describing("act").contains("window_type"));
