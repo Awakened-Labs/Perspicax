@@ -2978,10 +2978,10 @@ fn an_agent_cannot_click_or_focus_an_x11_window_past_a_wayland_menu() {
 }
 
 /// Issue #158: an X application's menu places itself, and smithay follows it
-/// when it moves with nothing published: the facts last published still have
-/// it where it was. An agent's click on the window it moved over is judged
-/// against what is drawn now, in the turn that sends it, and refused, naming
-/// the menu. Judged against the facts last published, it landed under it.
+/// when it moves with nothing published, so the facts last published can
+/// still have it where it was. An agent's click on the window it moved over
+/// is judged against what is drawn now, in the turn that sends it, and
+/// refused, naming the menu. Judged against those facts, it landed under it.
 #[test]
 #[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
 fn a_click_under_an_x11_menu_moved_over_it_since_is_refused_naming_the_menu() {
@@ -3002,13 +3002,13 @@ fn a_click_under_an_x11_menu_moved_over_it_since_is_refused_naming_the_menu() {
         .configure_window(menu_window, &ConfigureWindowAux::new().x(10).y(40))
         .expect("configure_window");
     // Answered once the window manager has taken in everything sent before
-    // the question, the move included.
+    // the question, the move included. Without `capture`, nothing has
+    // published the move by then in most runs (8 of 10, measured for #158),
+    // Xwayland having nothing to draw for it, and those runs tell facts
+    // built from facts read. Something can have, as it nearly always has
+    // with `capture`, whose frames bring commits: then a click judged
+    // against facts read is refused too.
     x11.settled(window);
-    assert_eq!(
-        judge(&x11.facts(), page, spot).visibility,
-        Visibility::Visible,
-        "nothing published the move"
-    );
 
     let host = Host::new(&x11.session.facts, &x11.session.requests);
     assert_eq!(
