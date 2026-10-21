@@ -589,13 +589,15 @@ fn open_and_show(
     smithay_client_toolkit::shell::xdg::popup::Popup,
     SurfaceFacts,
 ) {
+    // Known before it is opened: read after, the new one may be among them
+    // already, and never be waited for.
+    let known: Vec<SurfaceId> = popups(&session.facts.read()).iter().map(|p| p.id).collect();
     let menu = desk.open_popup(qh, desk.windows[0].xdg_surface(), at, size);
     let configured_before = desk.popups_configured;
     configured(desk, queue, configured_before + 1);
     desk.paint(menu.wl_surface(), size, MENU);
     menu.wl_surface().commit();
     queue.flush().expect("sent");
-    let known: Vec<SurfaceId> = popups(&session.facts.read()).iter().map(|p| p.id).collect();
     let facts = session.wait_for(|facts| {
         popups(facts)
             .iter()
