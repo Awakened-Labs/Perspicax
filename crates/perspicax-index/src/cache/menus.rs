@@ -158,28 +158,43 @@ impl Index {
     /// refused as [`MenuUnplaced`](crate::Refusal::MenuUnplaced), naming the
     /// open menu. Only nodes their application says are shown: a hidden one
     /// is refused for that, which says more.
+    ///
+    /// A popup of nothing names no window, so it holds off every window of
+    /// its application: its nodes could hang under any of them, measured from
+    /// the menu itself (issue #159).
     pub(super) fn unplaced(&self, facts: &HostFacts) -> HashMap<NodeId, SurfaceId> {
         let mut open: HashMap<SurfaceId, SurfaceId> = HashMap::new();
+        let mut of_nothing: HashMap<u32, SurfaceId> = HashMap::new();
         for surface in facts.surfaces() {
-            if let Some(from) = surface.hangs_from()
-                && surface.mapped
-                && !self.menus.contains_key(&surface.id)
-            {
-                open.entry(from).or_insert(surface.id);
+            if !surface.is_popup() || !surface.mapped || self.menus.contains_key(&surface.id) {
+                continue;
+            }
+            match (surface.hangs_from(), surface.claim().pid) {
+                (Some(from), _) => {
+                    open.entry(from).or_insert(surface.id);
+                }
+                (None, Some(pid)) => {
+                    of_nothing.entry(pid).or_insert(surface.id);
+                }
+                // No window, and no application to say whose: nothing here
+                // could have been measured from it.
+                (None, None) => {}
             }
         }
-        if open.is_empty() {
+        if open.is_empty() && of_nothing.is_empty() {
             return HashMap::new();
         }
         self.nodes
             .iter()
             .filter_map(|(id, node)| {
                 let surface = node.surface?;
-                let window = facts
-                    .surface(surface)
+                let described = facts.surface(surface);
+                let window = described
                     .and_then(SurfaceFacts::hangs_from)
                     .unwrap_or(surface);
-                let popup = *open.get(&window)?;
+                let popup = *open
+                    .get(&window)
+                    .or_else(|| of_nothing.get(&described?.claim().pid?))?;
                 (!node.node.is_hidden() && self.in_menu(*id)).then_some((*id, popup))
             })
             .collect()
@@ -810,5 +825,134 @@ mod tests {
             Visibility::Unknown
         );
         assert!(tally.unjudged >= 3);
+    }
+
+    // X11 menus, as slice 1 of #159 measured them
+    // (`~/perspicax-test/issue-159/FINDINGS.md`). GTK 4's name no window
+    // they were opened from: popups of nothing.
+
+    /// GTK 4's popover as X11 has it: no window named, the X window exactly
+    /// the menu's picture, and the menu under the window, in its frame.
+    fn gtk4_of_nothing(opened: Instant) -> (Index, SurfaceFacts) {
+        let (index, _) = gtk4(opened);
+        let (x, y, w, h) = GTK4_POPOVER;
+        let popover = popup(
+            rect(x - 3.0, y - 2.0, w + 6.0, h + 6.0),
+            (0.0, 0.0, 0.0, 0.0),
+            opened,
+        )
+        .hung_from_nothing(opened);
+        (index, popover)
+    }
+
+    /// Another application's window beside the first, with a menu of its
+    /// own in its tree.
+    fn another_with_a_menu(index: &mut Index) -> SurfaceFacts {
+        index.ingest_snapshot([
+            node(200, Role::Application, None, &[20]),
+            node(20, Role::Window, Some(rect(0.0, 0.0, 300.0, 300.0)), &[21]),
+            node(21, Role::Menu, Some(rect(10.0, 20.0, 40.0, 20.0)), &[]),
+        ]);
+        index.join_subtree(NodeId(20), SurfaceId(2), &process(PID + 1));
+        SurfaceFacts::new(SurfaceId(2), rect(600.0, 26.0, 300.0, 300.0)).owned_by(process(PID + 1))
+    }
+
+    /// A popup of nothing names no window to hold off, so while it is open
+    /// and unbound it holds off every menu of its application, and only its
+    /// application's. Its menu hangs under a window, so nothing binds it: a
+    /// GTK 4 application's menus stay refused under X11, as decided (#159).
+    #[test]
+    fn while_a_popup_of_nothing_is_open_and_unbound_its_applications_menus_are_refused() {
+        let opened = Instant::now();
+        let (mut index, popover) = gtk4_of_nothing(opened);
+        let beside = another_with_a_menu(&mut index);
+        let facts = desk([beside, window(), popover]);
+        assert_eq!(
+            bind(&mut index, &facts),
+            [MenuFinding::Unmatched { popup: POPUP }]
+        );
+        index.judge(&facts);
+
+        for item in [3, 4, 5] {
+            assert_eq!(
+                index.actable(NodeId(item)).unwrap_err(),
+                Refusal::MenuUnplaced { popup: POPUP },
+                "node {item}"
+            );
+        }
+        assert!(
+            index.actable(NodeId(7)).is_ok(),
+            "its window's own nodes are judged as ever"
+        );
+        assert!(
+            index.actable(NodeId(21)).is_ok(),
+            "another application's menu is not its to hold"
+        );
+    }
+
+    /// One no application owns holds off nothing: there is no saying whose
+    /// menus it could be.
+    #[test]
+    fn a_popup_of_nothing_nobody_owns_holds_off_no_menu() {
+        let opened = Instant::now();
+        let (mut index, popover) = gtk4_of_nothing(opened);
+        let facts = desk([window(), popover.owned_by(Origin::Unattributed)]);
+        index.judge(&facts);
+        assert_ne!(
+            index.actable(NodeId(3)).unwrap_err(),
+            Refusal::MenuUnplaced { popup: POPUP }
+        );
+    }
+
+    /// GTK 3's context menu as X11 has it: no shadow, the X window exactly
+    /// the menu, which is an untitled window of its own measured from it. A
+    /// menu that is a window of its own binds to a popup of nothing, and its
+    /// items are measured from the menu's corner.
+    #[test]
+    fn a_popup_of_nothing_is_bound_to_a_menu_that_is_a_window_of_its_own() {
+        let opened = Instant::now();
+        let mut index = Index::new();
+        index.ingest_snapshot([
+            node(100, Role::Application, None, &[1, 8]),
+            node(1, Role::Window, Some(rect(0.0, 0.0, 400.0, 300.0)), &[]),
+            node(8, Role::Window, Some(rect(0.0, 0.0, 102.0, 86.0)), &[9]),
+            node(9, Role::Menu, Some(rect(0.0, 0.0, 102.0, 86.0)), &[10]),
+            node(10, Role::MenuItem, Some(rect(0.0, 30.0, 102.0, 26.0)), &[]),
+        ]);
+        index.join_subtree(NodeId(1), WINDOW, &process(PID));
+        let context = popup(
+            rect(300.0, 200.0, 102.0, 86.0),
+            (0.0, 0.0, 0.0, 0.0),
+            opened,
+        )
+        .hung_from_nothing(opened);
+        let facts = desk([window(), context]);
+        assert!(bind(&mut index, &facts).is_empty());
+        index.judge(&facts);
+
+        assert_eq!(index.window_origin(POPUP), Some(Vec2::ZERO));
+        assert_eq!(
+            index.window_bounds(NodeId(10)),
+            Some(rect(0.0, 30.0, 102.0, 26.0))
+        );
+        assert!(index.actable(NodeId(10)).is_ok());
+    }
+
+    /// A popup of nothing is no window, so one opening is no news of a grant
+    /// either.
+    #[test]
+    fn a_popup_of_nothing_opening_is_not_announced_as_a_grant() {
+        let opened = Instant::now();
+        let (mut index, popover) = gtk4_of_nothing(opened);
+        let granted = |facts: HostFacts| facts.with_consent(Consent::Granted(vec![PID]));
+        index.judge(&granted(desk([window()])));
+        index.take_deltas();
+        index.judge(&granted(desk([window(), popover])));
+        assert!(
+            !index
+                .take_deltas()
+                .iter()
+                .any(|delta| matches!(delta, Delta::Granted { .. }))
+        );
     }
 }

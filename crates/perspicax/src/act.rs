@@ -168,7 +168,9 @@ pub fn act(
 /// surface that is gone by the time this is read. The window the menu hung
 /// from keeps a copy of what it drew, its closing included, where it was drawn
 /// (#42), so that is read in the menu's place: from its own mark, at the
-/// rect's place in that window.
+/// rect's place in that window. An X11 window keeps no such copy of its
+/// menu's: what is read there is only what the window itself drew, often
+/// nothing. A menu that hung from nothing is quiet once it is gone.
 fn witness(marked: &HostFacts, after: &HostFacts, surface: SurfaceId, rect: Rect) -> DamageWitness {
     let read = |facts: &SurfaceFacts, before: u64, rect: Rect| {
         let frames = facts.damage_generation.saturating_sub(before);
@@ -368,6 +370,55 @@ mod tests {
                 ITEM
             ),
             DamageWitness::Quiet
+        );
+    }
+
+    /// An X11 menu that names no window it hung from leaves no copy of
+    /// itself anywhere: once the act has closed it, there is nothing to read,
+    /// whatever the window under it drew.
+    #[test]
+    fn a_receipt_on_a_menu_of_nothing_the_act_closed_is_quiet() {
+        let window_before = [(1, Rect::new(0.0, 0.0, 400.0, 300.0))];
+        let marked = HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(SurfaceId(1), Rect::new(0.0, 0.0, 400.0, 300.0))
+                    .damaging(window_before),
+                SurfaceFacts::new(SurfaceId(5), Rect::new(0.0, 200.0, 120.0, 280.0))
+                    .hung_from_nothing(Instant::now())
+                    .damaging([(1, Rect::new(0.0, 0.0, 120.0, 80.0))]),
+            ],
+            1,
+        );
+        let drawn_there = [window_before[0], (2, Rect::new(0.0, 200.0, 120.0, 280.0))];
+        assert_eq!(
+            witness(&marked, &menu_desk(&drawn_there, None), SurfaceId(5), ITEM),
+            DamageWitness::Quiet
+        );
+    }
+
+    /// A window that stays open when asked to close may have put up a
+    /// dialog beside it, and that is what `appeared` lists. A menu that
+    /// opened meanwhile is no such dialog, whatever it hangs from.
+    #[test]
+    fn closing_a_window_counts_a_new_window_as_appeared_and_no_menu() {
+        let area = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let now = Instant::now();
+        let window = SurfaceFacts::new(SurfaceId(1), area);
+        let before = HostFacts::bottom_to_top([window.clone()], 1);
+        let after = HostFacts::bottom_to_top(
+            [
+                window,
+                SurfaceFacts::new(SurfaceId(2), area),
+                SurfaceFacts::new(SurfaceId(5), area).hung_from(SurfaceId(1), now),
+                SurfaceFacts::new(SurfaceId(6), area).hung_from_nothing(now),
+            ],
+            2,
+        );
+        assert_eq!(
+            seen(&WindowVerb::Close, &before, &after, SurfaceId(1)),
+            WindowWitness::StillOpen {
+                appeared: vec![SurfaceId(2)]
+            }
         );
     }
 
