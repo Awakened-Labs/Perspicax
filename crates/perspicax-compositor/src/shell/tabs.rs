@@ -274,15 +274,17 @@ impl Compositor {
     ///
     /// A group has one state, and the tab coming forward takes all of it,
     /// dropping its own: the rect it would be restored to, whether it is
-    /// maximized or tiled, how opaque the person's keys made it, and whether
-    /// it is rolled up to its titlebar. With none from the keys, each tab
-    /// follows its own application's rule. A tab that was maximized while it
-    /// was in front otherwise came back maximized into a group that had
-    /// since been restored, and restoring it went back to its own stale rect.
+    /// maximized or tiled, how opaque the person's keys made it, whether it
+    /// is rolled up to its titlebar, and whether it is kept on top of the
+    /// other windows. With none from the keys, each tab follows its own
+    /// application's rule. A tab that was maximized while it was in front
+    /// otherwise came back maximized into a group that had since been
+    /// restored, and restoring it went back to its own stale rect.
     ///
     /// The tab going behind keeps no shade, so one taken out of the group
-    /// comes out unrolled, as in Fluxbox. One that draws its own frame has
-    /// no titlebar of ours to roll up to, and comes forward unrolled, and the
+    /// comes out unrolled, as in Fluxbox, and is not kept on top, so it comes
+    /// out among the other windows. One that draws its own frame has no
+    /// titlebar of ours to roll up to, and comes forward unrolled, and the
     /// group with it.
     fn bring_forward(&mut self, front: &Framed, place: &Framed) {
         let (Some(id), Some(from)) = (id_of(front), id_of(place)) else {
@@ -293,15 +295,17 @@ impl Compositor {
             .element_location(place)
             .or_else(|| placement(place, |placement| placement.parked));
         let size = extent_size(place);
-        // The shade is taken, not copied, so that no tab behind keeps one,
-        // and is given back below when `front` is `place`.
-        let (zone, restore, opacity, shaded, roll) = placement(place, |placement| {
+        // The shade and being kept on top are taken, not copied, so that no
+        // tab behind keeps either, and are given back below when `front` is
+        // `place`.
+        let (zone, restore, opacity, shaded, roll, on_top) = placement(place, |placement| {
             (
                 placement.snapped,
                 placement.restore,
                 placement.opacity,
                 std::mem::take(&mut placement.shaded),
                 placement.roll.take(),
+                std::mem::take(&mut placement.on_top),
             )
         });
         let shaded = shaded && Self::is_server_decorated(front);
@@ -324,6 +328,7 @@ impl Compositor {
             placement.opacity = opacity;
             placement.shaded = shaded;
             placement.roll = roll;
+            placement.on_top = on_top;
         });
 
         let toplevel = front.toplevel().cloned();

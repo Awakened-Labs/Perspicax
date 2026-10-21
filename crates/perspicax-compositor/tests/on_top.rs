@@ -4,11 +4,11 @@
 //! as they would be drawn: a window kept on top is in front of every other
 //! window, whichever is raised or has the keyboard, under the panels, and
 //! under the fullscreen window in use. What it covers is judged covered by
-//! it, and a dialog of it is kept on top with it. Cycling focus walks the
-//! windows as it did before any was kept on top, and the keyboard goes back
-//! where it went then. The binding is carried out with [`Session::perform`];
-//! the titlebar's button needs a seat. X11's dialogs and menus are in
-//! `xwayland.rs`.
+//! it, a dialog of it is kept on top with it, and a tab group is kept as
+//! one. Cycling focus walks the windows as it did before any was kept on
+//! top, and the keyboard goes back where it went then. The binding is
+//! carried out with [`Session::perform`]; the titlebar's button needs a
+//! seat. X11's dialogs and menus are in `xwayland.rs`.
 //!
 //! Like the other live tests it binds a real Wayland socket, so it needs
 //! `XDG_RUNTIME_DIR`, and is `#[ignore]`d for `ci/live-tests.sh` to run.
@@ -451,6 +451,75 @@ fn a_dialog_is_kept_on_top_with_its_window_and_let_go_with_it() {
     activate(&session, &mut desk, &mut queue, "window");
     let facts = toggle(&session, "window", false);
     assert!(!surface(&facts, "dialog").on_top, "let go with it");
+
+    session.stop((desk, queue));
+}
+
+/// "first" kept on top, with "second" made a tab of it and in front, under
+/// "other", raised since.
+fn a_group_kept_on_top(name: &str) -> (Session, Desk, EventQueue<Desk>, QueueHandle<Desk>) {
+    let (session, mut desk, mut queue, qh) = windows(name, &["first", "second", "other"]);
+    activate(&session, &mut desk, &mut queue, "first");
+    toggle(&session, "first", true);
+    activate(&session, &mut desk, &mut queue, "second");
+    session.perform(Action::TabWithPrevious);
+    session.wait_for(|facts| !surface(facts, "first").mapped);
+    activate(&session, &mut desk, &mut queue, "other");
+    (session, desk, queue, qh)
+}
+
+/// A group is kept on top as one, as it rolls up as one (#60): the tab
+/// coming forward takes it, and none behind keeps it.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_tab_group_kept_on_top_stays_in_front_and_a_tab_coming_forward_comes_kept_on_top() {
+    let (session, mut desk, mut queue, _qh) = a_group_kept_on_top("on-top-tabs");
+
+    let facts = session.wait_for(|_| true);
+    assert_eq!(
+        stacked(&facts),
+        ["other", "second"],
+        "joining it, kept on top"
+    );
+    assert!(surface(&facts, "second").on_top);
+    assert!(!surface(&facts, "first").on_top, "no tab behind keeps it");
+
+    activate(&session, &mut desk, &mut queue, "second");
+    session.perform(Action::CycleTab { forward: true });
+    session.wait_for(|facts| surface(facts, "first").mapped);
+    activate(&session, &mut desk, &mut queue, "other");
+    let facts = session.wait_for(|_| true);
+    assert_eq!(
+        stacked(&facts),
+        ["other", "first"],
+        "coming forward, kept on top"
+    );
+    assert!(surface(&facts, "first").on_top);
+    assert!(!surface(&facts, "second").on_top);
+
+    session.stop((desk, queue));
+}
+
+/// As a tab taken out of a group rolled up comes out unrolled (#60), one
+/// taken out of a group kept on top comes out among the other windows, and
+/// the group is still kept.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_tab_taken_out_of_a_group_kept_on_top_comes_out_among_the_others() {
+    let (session, mut desk, mut queue, _qh) = a_group_kept_on_top("on-top-detach");
+    activate(&session, &mut desk, &mut queue, "second");
+
+    session.perform(Action::DetachTab);
+
+    let facts = session.wait_for(|facts| surface(facts, "first").mapped);
+    assert!(!surface(&facts, "second").on_top, "taken out, it is let go");
+    assert!(surface(&facts, "first").on_top, "the group is still kept");
+    assert_eq!(
+        stacked(&facts).last().map(String::as_str),
+        Some("first"),
+        "with the keyboard, the one taken out is behind the group: {:?}",
+        stacked(&facts)
+    );
 
     session.stop((desk, queue));
 }
