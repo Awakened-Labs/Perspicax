@@ -32,6 +32,13 @@
 //! sorts its whole stack by z-index at every raise, and the order the
 //! windows were raised in would have been lost with it.
 //!
+//! A dialog or a menu stands with the window it hangs from. One of a window
+//! kept on top is kept on top with it: worked out afresh each time from the
+//! window it hangs from, never copied, so it is let go with its window. An
+//! X11 menu, which is a window of its own here, is raised over the panels
+//! with the fullscreen window it hangs from, as an xdg menu, drawn with its
+//! window, always was; it was drawn under it, out of sight.
+//!
 //! So whatever asks what is in front reads the stack through [`as_drawn`]:
 //! the screen and pictures, through [`stack`]; the pointer, through
 //! [`window_under`]; and the facts an agent is judged by. None of them can
@@ -60,6 +67,12 @@ use crate::{framed::Framed, state::Compositor};
 const AMONG_WINDOWS: u8 = RenderZindex::Shell as u8;
 /// Over the `top` layer, where the panels are, and under `overlay`.
 const OVER_PANELS: u8 = RenderZindex::Top as u8 + 1;
+
+/// How many windows up [`Compositor::keeps_on_top`] looks: a dialog of a
+/// dialog of a window is three. Smithay refuses an xdg window that would be
+/// its own parent's parent, but nothing stops X11 windows naming each other
+/// in `WM_TRANSIENT_FOR`, and the walk would go round them for ever.
+const DEEPEST: usize = 8;
 
 /// Whether a window has been raised over the panels: the fullscreen window
 /// the person is using.
@@ -225,10 +238,33 @@ fn is_fullscreen(window: &Framed) -> bool {
 }
 
 impl Compositor {
+    /// The window `window` is a dialog or a menu of, mapped or parked: its
+    /// xdg parent, or the window its X11 `WM_TRANSIENT_FOR` names, through
+    /// any menus between.
+    fn hangs_from(&self, window: &Framed) -> Option<Framed> {
+        if let Some(toplevel) = window.toplevel() {
+            return self.window_for(&toplevel.parent()?);
+        }
+        #[cfg(feature = "xwayland")]
+        if let Some(x11) = window.x11_surface() {
+            let id = self.x11_from(x11)?;
+            return self.window_for_id(id).or_else(|| self.parked_with(id));
+        }
+        None
+    }
+
+    /// Whether `window` is kept in front of the other windows: by the
+    /// person, or with the window it hangs from, and so on up.
+    fn keeps_on_top(&self, window: &Framed) -> bool {
+        std::iter::successors(Some(window.clone()), |window| self.hangs_from(window))
+            .take(DEEPEST)
+            .any(|window| super::is_on_top(&window))
+    }
+
     /// Work out which windows are kept on top, raise `focused`, the window
     /// in use -- the one with the keyboard, or whose own menu has it -- over
-    /// the panels if it is fullscreen, and put every other window back among
-    /// the windows.
+    /// the panels if it is fullscreen, with its X11 menus, and put every
+    /// other window back among the windows.
     ///
     /// Told which window is in use rather than asking: while the seat is
     /// reporting a change of focus it holds the keyboard, and asking it then
@@ -237,28 +273,48 @@ impl Compositor {
         // Parked windows too: a workspace sliding in draws its own.
         let mut redraw = false;
         for window in self.space.elements().chain(&self.parked) {
-            redraw |= mark_kept(window, super::is_on_top(window));
+            redraw |= mark_kept(window, self.keeps_on_top(window));
         }
-        let mut changed = false;
+        let raised = focused
+            .and_then(|id| self.window_for_id(id))
+            .filter(is_fullscreen)
+            .as_ref()
+            .and_then(id_of);
+        // What moved: whether a window did, and the menus of the window in
+        // use that did, back to front.
+        let (mut moved, mut menus) = (false, Vec::new());
         for window in self.space.elements() {
-            let over = focused.is_some() && id_of(window) == focused && is_fullscreen(window);
+            let menu = super::places_itself(window);
+            let stands_with = if menu {
+                self.hangs_from(window).as_ref().and_then(id_of)
+            } else {
+                id_of(window)
+            };
+            let over = raised.is_some() && stands_with == raised;
             let z = if over { OVER_PANELS } else { AMONG_WINDOWS };
-            if window.z_index() != z {
-                window.override_z_index(z);
-                changed = true;
+            if window.z_index() == z {
+                continue;
+            }
+            window.override_z_index(z);
+            if !menu {
+                moved = true;
+            } else if focused.is_some() && stands_with == focused {
+                menus.push(window.clone());
             }
         }
-        if changed {
-            // Smithay sorts its stack by z-index only when a window is
-            // raised. Raising the focused window both sorts a newly raised
-            // one over the rest and, when a fullscreen window was lowered
-            // because the person moved on, keeps the window they moved to
-            // above it.
-            if let Some(window) = focused.and_then(|id| self.window_for_id(id)) {
-                self.space.raise_element(&window, false);
-            }
+        // Smithay sorts its stack by z-index only when a window is raised.
+        // Raising the focused window both sorts a newly raised one over the
+        // rest and, when a fullscreen window was lowered because the person
+        // moved on, keeps the window they moved to above it. Its menus go
+        // over it again; a menu of the window they left stays under the
+        // window they moved to, with its own.
+        if moved && let Some(window) = focused.and_then(|id| self.window_for_id(id)) {
+            self.space.raise_element(&window, false);
         }
-        if changed || redraw {
+        for menu in &menus {
+            self.space.raise_element(menu, false);
+        }
+        if moved || !menus.is_empty() || redraw {
             self.backend.redraw();
         }
     }

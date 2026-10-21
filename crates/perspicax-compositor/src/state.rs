@@ -1285,6 +1285,14 @@ impl XdgShellHandler for Compositor {
         self.publish_facts();
     }
 
+    /// A window given a parent, or another, is kept on top with it or let
+    /// go (`shell::stacking`). It may be given one after it shows, with
+    /// nothing drawn after that would publish it.
+    fn parent_changed(&mut self, _surface: ToplevelSurface) {
+        self.backend.redraw();
+        self.publish_facts();
+    }
+
     fn app_id_changed(&mut self, _surface: ToplevelSurface) {
         // An application that names itself after it maps comes under its
         // rule in `[opacity]` now.

@@ -4,9 +4,11 @@
 //! as they would be drawn: a window kept on top is in front of every other
 //! window, whichever is raised or has the keyboard, under the panels, and
 //! under the fullscreen window in use. What it covers is judged covered by
-//! it. Cycling focus walks the windows as it did before any was kept on top,
-//! and the keyboard goes back where it went then. The binding is carried out
-//! with [`Session::perform`]; the titlebar's button needs a seat.
+//! it, and a dialog of it is kept on top with it. Cycling focus walks the
+//! windows as it did before any was kept on top, and the keyboard goes back
+//! where it went then. The binding is carried out with [`Session::perform`];
+//! the titlebar's button needs a seat. X11's dialogs and menus are in
+//! `xwayland.rs`.
 //!
 //! Like the other live tests it binds a real Wayland socket, so it needs
 //! `XDG_RUNTIME_DIR`, and is `#[ignore]`d for `ci/live-tests.sh` to run.
@@ -382,6 +384,73 @@ fn the_keyboard_goes_back_to_the_window_raised_last_as_before() {
         "to the window raised last, not the one kept on top in front of it"
     );
     assert_eq!(stacked(&facts), ["other", "kept"]);
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_dialog_of_a_window_kept_on_top_opens_in_front_of_it_and_is_kept_on_top_with_it() {
+    let (session, mut desk, mut queue, qh) = kept_under_another("on-top-dialog");
+    desk.open_dialog(&qh, "dialog", "kept", 0);
+    until(&mut queue, &mut desk, |desk| desk.drawn == 3);
+    let facts = session.wait_for(|facts| focused_last(facts).as_deref() == Some("dialog"));
+
+    assert_eq!(stacked(&facts), ["other", "kept", "dialog"]);
+    assert!(surface(&facts, "dialog").on_top, "with its window");
+    activate(&session, &mut desk, &mut queue, "other");
+    assert_eq!(
+        stacked(&session.wait_for(|_| true)),
+        ["other", "kept", "dialog"],
+        "the other raised, both are still in front of it"
+    );
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_given_a_parent_kept_on_top_after_it_shows_is_kept_on_top_with_it() {
+    let (session, mut desk, mut queue, qh) = kept_under_another("on-top-parent-later");
+    desk.open_window(&qh, "dialog", "kept");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 3);
+    let facts = session.wait_for(|facts| focused_last(facts).as_deref() == Some("dialog"));
+    assert_eq!(stacked(&facts), ["other", "dialog", "kept"], "not yet");
+
+    let parent = desk.windows[0].clone();
+    desk.windows[2].set_parent(Some(&parent));
+    queue.flush().expect("sent");
+
+    // Nothing is drawn after: the parent alone has to be heard.
+    let facts = session.wait_for(|facts| surface(facts, "dialog").on_top);
+    assert_eq!(stacked(&facts), ["other", "kept", "dialog"]);
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_dialog_is_kept_on_top_with_its_window_and_let_go_with_it() {
+    let (session, mut desk, mut queue, qh) = windows("on-top-dialog-follows", &["window", "other"]);
+    activate(&session, &mut desk, &mut queue, "window");
+    desk.open_dialog(&qh, "dialog", "window", 0);
+    until(&mut queue, &mut desk, |desk| desk.drawn == 3);
+    session.wait_for(|facts| focused_last(facts).as_deref() == Some("dialog"));
+    // Raised over its own dialog, as ever.
+    activate(&session, &mut desk, &mut queue, "window");
+
+    toggle(&session, "window", true);
+    session.wait_for(|facts| surface(facts, "dialog").on_top);
+    activate(&session, &mut desk, &mut queue, "other");
+    assert_eq!(
+        stacked(&session.wait_for(|_| true)),
+        ["other", "dialog", "window"],
+        "both in front of the other, as they were stacked"
+    );
+
+    activate(&session, &mut desk, &mut queue, "window");
+    let facts = toggle(&session, "window", false);
+    assert!(!surface(&facts, "dialog").on_top, "let go with it");
 
     session.stop((desk, queue));
 }
