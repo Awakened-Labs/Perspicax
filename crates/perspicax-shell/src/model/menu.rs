@@ -142,6 +142,15 @@ impl Item {
         }
     }
 
+    /// The tick or the dot beside it, if it is an item that is on or off.
+    #[cfg(feature = "tray")]
+    pub(crate) fn mark(&self) -> Option<Mark> {
+        match &self.does {
+            Does::Tell(choice) => choice.mark,
+            _ => None,
+        }
+    }
+
     /// Whether it is a line between groups of items rather than an item.
     pub(crate) fn is_separator(&self) -> bool {
         matches!(self.does, Does::Separator)

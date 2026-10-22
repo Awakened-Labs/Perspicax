@@ -359,36 +359,30 @@ mod menus {
     }
 
     /// A menu item, as `item` is: chosen by a click, or moved to by focus,
-    /// unless it is greyed out.
+    /// unless it is greyed out; and a check box or a radio button, toggled
+    /// as its mark is, if it has one.
     fn entry(item: &Item) -> Node {
+        let mut entry = Node::new(Role::MenuItem);
+        entry.set_label(item.label.as_str());
         #[cfg(feature = "tray")]
-        if let crate::model::menu::Does::Tell(choice) = item.does {
+        if let Some(mark) = item.mark() {
             use accesskit::Toggled;
 
             use crate::model::menu::Mark;
 
-            let (role, on) = match choice.mark {
-                Some(Mark::Check(on)) => (Role::MenuItemCheckBox, Some(on)),
-                Some(Mark::Radio(on)) => (Role::MenuItemRadio, Some(on)),
-                None => (Role::MenuItem, None),
+            let (role, on) = match mark {
+                Mark::Check(on) => (Role::MenuItemCheckBox, on),
+                Mark::Radio(on) => (Role::MenuItemRadio, on),
             };
-            let mut entry = Node::new(role);
-            entry.set_label(item.label.as_str());
-            if let Some(on) = on {
-                entry.set_toggled(if on { Toggled::True } else { Toggled::False });
-            }
-            if choice.enabled {
-                entry.add_action(Action::Click);
-                entry.add_action(Action::Focus);
-            } else {
-                entry.set_disabled();
-            }
-            return entry;
+            entry.set_role(role);
+            entry.set_toggled(if on { Toggled::True } else { Toggled::False });
         }
-        let mut entry = Node::new(Role::MenuItem);
-        entry.set_label(item.label.as_str());
-        entry.add_action(Action::Click);
-        entry.add_action(Action::Focus);
+        if item.choosable() {
+            entry.add_action(Action::Click);
+            entry.add_action(Action::Focus);
+        } else {
+            entry.set_disabled();
+        }
         entry
     }
 
@@ -564,6 +558,100 @@ mod menus {
                 (Role::SearchInput, "Search".to_owned())
             );
             assert_eq!(node(&tree, TYPED).value(), Some(""));
+        }
+
+        #[cfg(feature = "tray")]
+        #[test]
+        fn a_marked_item_is_a_check_box_or_a_radio_button_toggled_as_drawn() {
+            use accesskit::Toggled;
+
+            use crate::model::menu::{Choice, Item, Mark, Menu};
+
+            let item = |label: &str, enabled: bool, mark: Option<Mark>| Item {
+                label: label.to_owned(),
+                icon: None,
+                keywords: Vec::new(),
+                does: Does::Tell(Choice {
+                    id: 0,
+                    enabled,
+                    mark,
+                }),
+            };
+            let mut state = State::new(Menu::default(), Menu::default());
+            state.update(
+                Event::TrayMenu {
+                    key: 7,
+                    name: "Network".to_owned(),
+                    menu: Menu {
+                        items: vec![
+                            item("Notifications", true, Some(Mark::Check(true))),
+                            item("Sounds", true, Some(Mark::Check(false))),
+                            item("Fast", true, Some(Mark::Radio(true))),
+                            item("Slow", true, Some(Mark::Radio(false))),
+                            item("Connected", false, None),
+                            item("Quit", true, None),
+                        ],
+                    },
+                    output: "DP-1".to_owned(),
+                    area: layout::Rect::new(0, 0, 800, 560),
+                    button: layout::Rect::new(700, 560, 30, 40),
+                    edge: perspicax_config::Edge::Bottom,
+                },
+                &mut Monospace(8.0),
+            );
+            let view = state.view().unwrap();
+            let tree = menu("perspicax-menu-DP-1", None, Some(&view));
+            let first = node(&tree, ROOT).children()[0];
+            assert_eq!(node(&tree, first).label(), Some("Network"));
+            let entries: Vec<_> = node(&tree, first)
+                .children()
+                .iter()
+                .map(|&id| {
+                    let entry = node(&tree, id);
+                    (
+                        entry.label().unwrap_or_default(),
+                        entry.role(),
+                        entry.toggled(),
+                        entry.is_disabled(),
+                        entry.supports_action(Action::Click),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                entries,
+                [
+                    (
+                        "Notifications",
+                        Role::MenuItemCheckBox,
+                        Some(Toggled::True),
+                        false,
+                        true
+                    ),
+                    (
+                        "Sounds",
+                        Role::MenuItemCheckBox,
+                        Some(Toggled::False),
+                        false,
+                        true
+                    ),
+                    (
+                        "Fast",
+                        Role::MenuItemRadio,
+                        Some(Toggled::True),
+                        false,
+                        true
+                    ),
+                    (
+                        "Slow",
+                        Role::MenuItemRadio,
+                        Some(Toggled::False),
+                        false,
+                        true
+                    ),
+                    ("Connected", Role::MenuItem, None, true, false),
+                    ("Quit", Role::MenuItem, None, false, true),
+                ]
+            );
         }
 
         #[test]
