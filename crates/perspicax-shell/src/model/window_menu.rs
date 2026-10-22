@@ -9,7 +9,7 @@
 //! no such channel offers only what the taskbar's protocol can ask:
 //! Minimize, or Restore for a window put away; Maximize or Unmaximize; and
 //! Close. Shade is greyed out for a window that cannot roll up, one that
-//! draws its own frame or fills the monitor, and Send to workspace is there
+//! draws its own frame or is fullscreen, and Send to workspace is there
 //! only for a window with a workspace of its own and somewhere else to go.
 //! The marks stand where icons would, so the items have none.
 //!

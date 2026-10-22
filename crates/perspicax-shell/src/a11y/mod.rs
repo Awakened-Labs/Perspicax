@@ -799,7 +799,7 @@ mod panels {
     /// `Button` that opens a menu, expanded while the start menu is `open`.
     /// The taskbar is a `TabList` of a `Tab` for each window, named by its
     /// title, the one with the keyboard selected and a minimized one
-    /// described so; the pager is a `TabList` of a `Tab` for each workspace,
+    /// described so, whose context menu is its window's menu; the pager is a `TabList` of a `Tab` for each workspace,
     /// the one showing selected. The tray is a `Group` of a `Button` for
     /// each status icon, named as its program names it, that opens a menu
     /// if it has one. The clock is a `Status` whose value is the
@@ -869,6 +869,8 @@ mod panels {
                         if task.minimized {
                             tab.set_description("Minimized");
                         }
+                        #[cfg(feature = "menus")]
+                        tab.add_action(Action::ShowContextMenu);
                         (node_of(TASK, task.serial), tab)
                     });
                     (TASKBAR, tab_list("Taskbar", tabs, &mut nodes))
@@ -1582,6 +1584,11 @@ mod panels {
             );
             assert_eq!(part_of(mail), Some(Part::Task(7)), "known by its serial");
             assert!(node(&tree, mail).supports_action(Action::Click));
+            assert_eq!(
+                node(&tree, mail).supports_action(Action::ShowContextMenu),
+                cfg!(feature = "menus"),
+                "its window's menu, with the menus"
+            );
 
             let pager = node(&tree, PAGER);
             assert_eq!(

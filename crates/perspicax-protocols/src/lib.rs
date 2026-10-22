@@ -7,9 +7,9 @@
 //!   `perspicax-shell`: that the person asked for a menu, that the config
 //!   changed, that the session should end, from version 2 the keyboard's
 //!   layouts and which is in use, from version 3 that the person asked for
-//!   a pie, from version 4 a volume key, and from version 5 what the person
-//!   chose in a window's menu: sticky, on top, rolled up, sent to a
-//!   workspace. The shell's surfaces, taskbar and pager all speak standard
+//!   a pie, from version 4 a volume key, and from version 5 what is made
+//!   of each window and what the person chose in its menu: sticky, on top,
+//!   rolled up, sent to a workspace. The shell's surfaces, taskbar and pager all speak standard
 //!   protocols, so any piece of it can be replaced by a program that knows
 //!   nothing of this one; a window's menu names the window and the
 //!   workspace by the handles those protocols gave it.

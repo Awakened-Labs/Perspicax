@@ -20,8 +20,8 @@
     What passes between perspicax and perspicax-shell that no standard
     protocol carries: the person asked for a menu or a pie, or pressed a
     volume key, the config changed, the session should end, the keyboard's
-    layouts and which is in use, and what the person chose in a window's
-    menu.
+    layouts and which is in use, what is made of each window, and what the
+    person chose in a window's menu.
 
     Everything else the shell does, it does as any other client would.
     Its wallpaper, panel and menus are layer-shell surfaces, its taskbar
