@@ -297,8 +297,8 @@ mod menus {
 
     /// The menus' surface: a window named `namespace` covering it, holding
     /// a `Menu` for each open menu, each holding a `MenuItem` for each line
-    /// that is not a separator, named as drawn: one its program greyed out
-    /// disabled, and one with a tick or a dot a `MenuItemCheckBox` or a
+    /// that is not a separator, named as drawn: one greyed out disabled,
+    /// and one with a tick or a dot a `MenuItemCheckBox` or a
     /// `MenuItemRadio`, toggled as drawn. The focus is the line the keyboard
     /// is on, or the root menu.
     pub(crate) fn menu(
@@ -359,36 +359,30 @@ mod menus {
     }
 
     /// A menu item, as `item` is: chosen by a click, or moved to by focus,
-    /// unless it is greyed out.
+    /// unless it is greyed out; and a check box or a radio button, toggled
+    /// as its mark is, if it has one.
     fn entry(item: &Item) -> Node {
-        #[cfg(feature = "tray")]
-        if let crate::model::menu::Does::Tell(choice) = item.does {
+        let mut entry = Node::new(Role::MenuItem);
+        entry.set_label(item.label.as_str());
+        #[cfg(any(feature = "tray", feature = "panel"))]
+        if let Some(mark) = item.mark() {
             use accesskit::Toggled;
 
             use crate::model::menu::Mark;
 
-            let (role, on) = match choice.mark {
-                Some(Mark::Check(on)) => (Role::MenuItemCheckBox, Some(on)),
-                Some(Mark::Radio(on)) => (Role::MenuItemRadio, Some(on)),
-                None => (Role::MenuItem, None),
+            let (role, on) = match mark {
+                Mark::Check(on) => (Role::MenuItemCheckBox, on),
+                Mark::Radio(on) => (Role::MenuItemRadio, on),
             };
-            let mut entry = Node::new(role);
-            entry.set_label(item.label.as_str());
-            if let Some(on) = on {
-                entry.set_toggled(if on { Toggled::True } else { Toggled::False });
-            }
-            if choice.enabled {
-                entry.add_action(Action::Click);
-                entry.add_action(Action::Focus);
-            } else {
-                entry.set_disabled();
-            }
-            return entry;
+            entry.set_role(role);
+            entry.set_toggled(if on { Toggled::True } else { Toggled::False });
         }
-        let mut entry = Node::new(Role::MenuItem);
-        entry.set_label(item.label.as_str());
-        entry.add_action(Action::Click);
-        entry.add_action(Action::Focus);
+        if item.choosable() {
+            entry.add_action(Action::Click);
+            entry.add_action(Action::Focus);
+        } else {
+            entry.set_disabled();
+        }
         entry
     }
 
@@ -566,6 +560,156 @@ mod menus {
             assert_eq!(node(&tree, TYPED).value(), Some(""));
         }
 
+        /// The items of menu `of` as they are told: `[x]` or `[ ]` before a
+        /// check box, `(*)` or `( )` before a radio button, and `(disabled)`
+        /// after one greyed out, which is then the one not to be clicked.
+        #[cfg(any(feature = "tray", feature = "panel"))]
+        fn told(tree: &TreeUpdate, of: NodeId) -> Vec<String> {
+            use accesskit::Toggled;
+
+            node(tree, of)
+                .children()
+                .iter()
+                .map(|&id| {
+                    let entry = node(tree, id);
+                    let label = entry.label().unwrap_or_default();
+                    let mark = match (entry.role(), entry.toggled()) {
+                        (Role::MenuItemCheckBox, Some(Toggled::True)) => "[x] ",
+                        (Role::MenuItemCheckBox, Some(Toggled::False)) => "[ ] ",
+                        (Role::MenuItemRadio, Some(Toggled::True)) => "(*) ",
+                        (Role::MenuItemRadio, Some(Toggled::False)) => "( ) ",
+                        (Role::MenuItem, None) => "",
+                        other => panic!("{label}: {other:?}"),
+                    };
+                    assert_eq!(
+                        entry.is_disabled(),
+                        !entry.supports_action(Action::Click),
+                        "{label}: clicked unless disabled"
+                    );
+                    let greyed = if entry.is_disabled() {
+                        " (disabled)"
+                    } else {
+                        ""
+                    };
+                    format!("{mark}{label}{greyed}")
+                })
+                .collect()
+        }
+
+        #[cfg(feature = "tray")]
+        #[test]
+        fn a_marked_item_is_a_check_box_or_a_radio_button_toggled_as_drawn() {
+            use crate::model::menu::{Choice, Item, Mark, Menu};
+
+            let item = |label: &str, enabled: bool, mark: Option<Mark>| Item {
+                label: label.to_owned(),
+                icon: None,
+                keywords: Vec::new(),
+                does: Does::Tell(Choice {
+                    id: 0,
+                    enabled,
+                    mark,
+                }),
+            };
+            let mut state = State::new(Menu::default(), Menu::default());
+            state.update(
+                Event::TrayMenu {
+                    key: 7,
+                    name: "Network".to_owned(),
+                    menu: Menu {
+                        items: vec![
+                            item("Notifications", true, Some(Mark::Check(true))),
+                            item("Sounds", true, Some(Mark::Check(false))),
+                            item("Fast", true, Some(Mark::Radio(true))),
+                            item("Slow", true, Some(Mark::Radio(false))),
+                            item("Connected", false, None),
+                            item("Quit", true, None),
+                        ],
+                    },
+                    output: "DP-1".to_owned(),
+                    area: layout::Rect::new(0, 0, 800, 560),
+                    button: layout::Rect::new(700, 560, 30, 40),
+                    edge: perspicax_config::Edge::Bottom,
+                },
+                &mut Monospace(8.0),
+            );
+            let view = state.view().unwrap();
+            let tree = menu("perspicax-menu-DP-1", None, Some(&view));
+            let first = node(&tree, ROOT).children()[0];
+            assert_eq!(node(&tree, first).label(), Some("Network"));
+            assert_eq!(
+                told(&tree, first),
+                [
+                    "[x] Notifications",
+                    "[ ] Sounds",
+                    "(*) Fast",
+                    "( ) Slow",
+                    "Connected (disabled)",
+                    "Quit",
+                ]
+            );
+        }
+
+        #[cfg(feature = "panel")]
+        #[test]
+        fn a_windows_menu_is_told_as_it_is_drawn() {
+            use crate::model::{
+                menu::Menu,
+                tasks::{Placing, Window},
+                window_menu,
+            };
+
+            let placing = Placing {
+                on_top: true,
+                homed: true,
+                workspace: Some(1),
+                ..Placing::default()
+            };
+            let mut state = State::new(Menu::default(), Menu::default());
+            state.update(
+                Event::TaskMenu {
+                    serial: 4,
+                    name: "Editor".to_owned(),
+                    menu: window_menu::build(
+                        &Window::<()>::default(),
+                        Some(&placing),
+                        &[(1, "1"), (2, "2")],
+                    ),
+                    output: "DP-1".to_owned(),
+                    area: layout::Rect::new(0, 0, 800, 560),
+                    button: layout::Rect::new(200, 560, 160, 40),
+                    edge: perspicax_config::Edge::Bottom,
+                },
+                &mut Monospace(8.0),
+            );
+            state.update(Event::Choose(vec![3]), &mut Monospace(8.0));
+            let view = state.view().unwrap();
+            let tree = menu("perspicax-menu-DP-1", None, Some(&view));
+            let menus = node(&tree, ROOT).children();
+            assert_eq!(
+                node(&tree, menus[0]).label(),
+                Some("Editor"),
+                "named for its window"
+            );
+            assert_eq!(
+                told(&tree, menus[0]),
+                [
+                    "[ ] Sticky",
+                    "[x] Always on top",
+                    "[ ] Shade (disabled)",
+                    "Send to workspace",
+                    "Minimize",
+                    "Maximize",
+                    "Close",
+                ]
+            );
+            assert_eq!(
+                told(&tree, menus[1]),
+                ["(*) 1", "( ) 2"],
+                "the workspace it is on, of its monitor's"
+            );
+        }
+
         #[test]
         fn an_items_node_and_its_route_are_one_another() {
             for route in [vec![0], vec![3, 0, 7], vec![4094, 1, 2, 3, 4]] {
@@ -655,7 +799,7 @@ mod panels {
     /// `Button` that opens a menu, expanded while the start menu is `open`.
     /// The taskbar is a `TabList` of a `Tab` for each window, named by its
     /// title, the one with the keyboard selected and a minimized one
-    /// described so; the pager is a `TabList` of a `Tab` for each workspace,
+    /// described so, whose context menu is its window's menu; the pager is a `TabList` of a `Tab` for each workspace,
     /// the one showing selected. The tray is a `Group` of a `Button` for
     /// each status icon, named as its program names it, that opens a menu
     /// if it has one. The clock is a `Status` whose value is the
@@ -725,6 +869,8 @@ mod panels {
                         if task.minimized {
                             tab.set_description("Minimized");
                         }
+                        #[cfg(feature = "menus")]
+                        tab.add_action(Action::ShowContextMenu);
                         (node_of(TASK, task.serial), tab)
                     });
                     (TASKBAR, tab_list("Taskbar", tabs, &mut nodes))
@@ -1438,6 +1584,11 @@ mod panels {
             );
             assert_eq!(part_of(mail), Some(Part::Task(7)), "known by its serial");
             assert!(node(&tree, mail).supports_action(Action::Click));
+            assert_eq!(
+                node(&tree, mail).supports_action(Action::ShowContextMenu),
+                cfg!(feature = "menus"),
+                "its window's menu, with the menus"
+            );
 
             let pager = node(&tree, PAGER);
             assert_eq!(

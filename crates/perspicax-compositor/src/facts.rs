@@ -360,6 +360,7 @@ impl Compositor {
         self.sync_toplevels();
         self.sync_workspaces();
         self.sync_heads();
+        self.shells.windows_changed();
     }
 
     /// What a window's facts say about where it belongs, beyond where it

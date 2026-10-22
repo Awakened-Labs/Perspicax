@@ -585,6 +585,16 @@ impl Panels {
         Some(Rect::new(strip.x + at.x, strip.y + at.y, at.w, at.h))
     }
 
+    /// Where on `monitor` the task of window `serial` is, on the panel of
+    /// the monitor named `name`.
+    #[cfg(feature = "menus")]
+    pub(super) fn task_at(&self, name: &str, serial: u64, monitor: Rect) -> Option<Rect> {
+        let strip = self.strip(name, monitor)?;
+        let bar = self.each.iter().find(|bar| bar.name == name)?;
+        let at = bar.placed.task(serial)?;
+        Some(Rect::new(strip.x + at.x, strip.y + at.y, at.w, at.h))
+    }
+
     /// Where on `monitor` the start button of the panel on the monitor named
     /// `name` is, if it has one.
     #[cfg(feature = "menus")]
@@ -894,7 +904,7 @@ fn start_icon(shell: &Shell, config: Option<&Path>) -> Option<String> {
 }
 
 /// What a window's task is called: its title, or with none, its app id.
-fn title<O>(window: &Window<O>) -> String {
+pub(super) fn title<O>(window: &Window<O>) -> String {
     [&window.title, &window.app_id]
         .into_iter()
         .find(|name| !name.is_empty())
@@ -946,23 +956,28 @@ impl App {
                 }
                 return;
             }
-            #[cfg(feature = "tray")]
+            use crate::update::Which;
+
             let was_open = self.menus.open_menu();
             // Anything else on a panel closes the menus, as a press anywhere
-            // off them does; a press on the tray icon whose menu is open
-            // does only that.
+            // off them does; a press on the tray icon whose menu is open, or
+            // a right-click on the task whose menu is open, does only that.
             self.menu_event(crate::update::Event::PanelPress);
-            #[cfg(feature = "tray")]
-            if let Some(Part::Tray(key)) = part
-                && was_open == Some(crate::update::Which::Tray(key))
-            {
-                return;
+            match (part, was_open) {
+                #[cfg(feature = "tray")]
+                (Some(Part::Tray(key)), Some(Which::Tray(open))) if key == open => return,
+                (Some(Part::Task(serial)), Some(Which::Task(open)))
+                    if serial == open && button == Button::Right =>
+                {
+                    return;
+                }
+                _ => {}
             }
         }
         #[cfg(not(feature = "menus"))]
         let _ = name;
         match part {
-            Some(Part::Task(serial)) => self.press_task(serial, button),
+            Some(Part::Task(serial)) => self.press_task(name, serial, button),
             Some(Part::Workspace(serial)) => self.press_workspace(serial, button),
             #[cfg(feature = "tray")]
             Some(Part::Tray(key)) => self.press_status(name, key, button),
@@ -986,8 +1001,9 @@ impl App {
 }
 
 /// An assistive technology's click on a panel: on its start button, a task
-/// or a workspace, sent on to the shell's loop as a left click there; or a
-/// step or a setting of the mixer's volume.
+/// or a workspace, sent on to the shell's loop as a left click there; its
+/// asking for a task's context menu, as a right click there; or a step or a
+/// setting of the mixer's volume.
 struct Press {
     output: String,
     actions: Sender<Asked>,
@@ -995,18 +1011,20 @@ struct Press {
 
 impl accesskit::ActionHandler for Press {
     fn do_action(&mut self, request: accesskit::ActionRequest) {
+        #[cfg(feature = "audio")]
         use accesskit::Action;
 
         let Some(part) = a11y::part_of(request.target_node) else {
             return;
         };
-        let asked = match request.action {
-            Action::Click => Asked::Panel {
+        let asked = match (request.action, button_of(request.action)) {
+            (_, Some(button)) => Asked::Panel {
                 output: self.output.clone(),
                 part,
+                button,
             },
             #[cfg(feature = "audio")]
-            Action::Increment | Action::Decrement | Action::SetValue => {
+            (Action::Increment | Action::Decrement | Action::SetValue, _) => {
                 match volume_asked(part, request.action, request.data) {
                     Some(change) => Asked::Volume(change),
                     None => return,
@@ -1017,6 +1035,17 @@ impl accesskit::ActionHandler for Press {
         if self.actions.send(asked).is_err() {
             tracing::debug!("the shell is stopping; the press is dropped");
         }
+    }
+}
+
+/// The button an assistive technology's `action` presses where it asks:
+/// the left for a click, and the right for a context menu, which is what a
+/// person's right click opens.
+fn button_of(action: accesskit::Action) -> Option<Button> {
+    match action {
+        accesskit::Action::Click => Some(Button::Left),
+        accesskit::Action::ShowContextMenu => Some(Button::Right),
+        _ => None,
     }
 }
 
@@ -1046,14 +1075,26 @@ fn volume_asked(
     }
 }
 
-#[cfg(all(test, feature = "audio"))]
+#[cfg(test)]
 mod tests {
-    use accesskit::{Action, ActionData};
+    use accesskit::Action;
+    #[cfg(feature = "audio")]
+    use accesskit::ActionData;
+    #[cfg(feature = "audio")]
     use perspicax_config::mixer::Piece;
 
     use super::*;
+    #[cfg(feature = "audio")]
     use crate::model::sound::Change;
 
+    #[test]
+    fn an_assistive_technologys_context_menu_is_a_right_click() {
+        assert_eq!(button_of(Action::Click), Some(Button::Left));
+        assert_eq!(button_of(Action::ShowContextMenu), Some(Button::Right));
+        assert_eq!(button_of(Action::Focus), None);
+    }
+
+    #[cfg(feature = "audio")]
     #[test]
     fn the_volume_sliders_steps_and_setting_are_changes_to_the_volume() {
         let volume = Part::Mixer(Piece::Volume);

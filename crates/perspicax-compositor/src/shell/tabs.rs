@@ -40,6 +40,15 @@ impl Compositor {
         (front != id).then_some(front)
     }
 
+    /// The tab in front of `window`'s group, or `window` itself: what a
+    /// group is made sticky, kept on top or rolled up through, since a tab
+    /// coming forward takes those from the one it replaces.
+    pub(crate) fn front_of(&self, window: &Framed) -> Framed {
+        self.behind_tab(window)
+            .and_then(|front| self.any_window(front))
+            .unwrap_or_else(|| window.clone())
+    }
+
     /// Whether `window` is in a tab group.
     pub(crate) fn is_tabbed(&self, window: &Framed) -> bool {
         id_of(window).is_some_and(|id| self.tabs.tabs(id).is_some())

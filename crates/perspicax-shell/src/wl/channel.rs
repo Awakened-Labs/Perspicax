@@ -6,19 +6,26 @@
 //! it is the one open. The layouts, from version 2, are what the panel's
 //! indicator shows. A pie, from version 3, opens by name where perspicax
 //! says the pointer is. A volume key, from version 4, changes the sound as
-//! the mixer would.
+//! the mixer would. What is made of each window, from version 5, is what
+//! its menu shows, and what is chosen there is asked back.
 
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
+#[cfg(all(feature = "panel", feature = "menus"))]
+use perspicax_shell_v1::{WindowCapabilities, WindowState};
+#[cfg(all(feature = "panel", feature = "menus"))]
+use wayland_client::WEnum;
 use wayland_client::{Connection, Dispatch, QueueHandle, globals::GlobalList, protocol::wl_output};
 
 use super::{App, watch};
+#[cfg(all(feature = "panel", feature = "menus"))]
+use crate::model::tasks::Placing;
 
 /// Bind the channel, if this compositor offers it to us. One that does not
 /// is not perspicax, or is a perspicax whose `[protocols] shell` rule leaves
 /// this program out; the shell still draws, and its menus open only by
 /// pointer.
 pub(super) fn bind(globals: &GlobalList, qh: &QueueHandle<App>) -> Option<PerspicaxShellV1> {
-    let bound = globals.bind::<PerspicaxShellV1, _, _>(qh, 1..=4, ()).ok();
+    let bound = globals.bind::<PerspicaxShellV1, _, _>(qh, 1..=5, ()).ok();
     if bound.is_none() {
         tracing::info!("the compositor offers no perspicax_shell_v1; no menu will open on a key");
     }
@@ -169,6 +176,19 @@ impl Dispatch<PerspicaxShellV1, ()> for App {
                 app.channel = None;
                 #[cfg(feature = "menus")]
                 app.menus.set_log_out(false);
+                #[cfg(all(feature = "panel", feature = "menus"))]
+                app.panels.tasks.unplace_all();
+            }
+            #[cfg(all(feature = "panel", feature = "menus"))]
+            Event::ToplevelState {
+                toplevel,
+                state,
+                capabilities,
+                workspace,
+            } => {
+                let workspace = workspace.and_then(|ws| app.workspaces.model.serial_of(&ws));
+                let placing = placing(state, capabilities, workspace);
+                app.panels.tasks.place(&toplevel, placing);
             }
             #[cfg(feature = "panel")]
             Event::Layout { name, short, .. } => app.panels.layouts.layout(name, short),
@@ -184,5 +204,63 @@ impl Dispatch<PerspicaxShellV1, ()> for App {
             }
             _ => {}
         }
+    }
+}
+
+/// Where a window stands, from what perspicax told: its `state` and its
+/// `capabilities`, with any bit a later version adds left out, and the
+/// serial of the `workspace` it is on.
+#[cfg(all(feature = "panel", feature = "menus"))]
+fn placing(
+    state: WEnum<WindowState>,
+    capabilities: WEnum<WindowCapabilities>,
+    workspace: Option<u64>,
+) -> Placing {
+    let state = match state {
+        WEnum::Value(state) => state,
+        WEnum::Unknown(bits) => WindowState::from_bits_truncate(bits),
+    };
+    let capabilities = match capabilities {
+        WEnum::Value(capabilities) => capabilities,
+        WEnum::Unknown(bits) => WindowCapabilities::from_bits_truncate(bits),
+    };
+    Placing {
+        sticky: state.contains(WindowState::Sticky),
+        on_top: state.contains(WindowState::OnTop),
+        shaded: state.contains(WindowState::Shaded),
+        homed: capabilities.contains(WindowCapabilities::Workspace),
+        shadeable: capabilities.contains(WindowCapabilities::Shade),
+        workspace,
+    }
+}
+
+#[cfg(all(test, feature = "panel", feature = "menus"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_windows_state_is_read_bit_by_bit_leaving_out_a_later_versions() {
+        let later = 8;
+        let told = placing(
+            WEnum::Unknown(WindowState::OnTop.bits() | later),
+            WEnum::Unknown(WindowCapabilities::Shade.bits() | later),
+            Some(3),
+        );
+        assert_eq!(
+            told,
+            Placing {
+                on_top: true,
+                shadeable: true,
+                workspace: Some(3),
+                ..Placing::default()
+            }
+        );
+        let told = placing(
+            WEnum::Value(WindowState::Sticky | WindowState::Shaded),
+            WEnum::Value(WindowCapabilities::Workspace),
+            None,
+        );
+        assert!(told.sticky && told.shaded && !told.on_top);
+        assert!(told.homed && !told.shadeable);
     }
 }

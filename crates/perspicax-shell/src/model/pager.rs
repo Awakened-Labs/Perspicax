@@ -187,13 +187,45 @@ impl<G: PartialEq, W: PartialEq, O: PartialEq> Pager<G, W, O> {
     /// workspace the compositor gives no place takes the next column along
     /// the first row.
     pub(crate) fn on(&self, output: &O) -> Vec<(&Workspace<W>, (u32, u32))> {
-        let Some(group) = self
-            .groups
+        self.groups
             .iter()
             .find(|group| group.outputs.contains(output))
-        else {
+            .map_or_else(Vec::new, |group| self.laid_out(group))
+    }
+
+    /// The workspaces of the group workspace `serial` is in, as a pager
+    /// showing that group shows them: where a window on it can be sent.
+    #[cfg(all(feature = "menus", feature = "panel"))]
+    pub(crate) fn beside(&self, serial: u64) -> Vec<(&Workspace<W>, (u32, u32))> {
+        let Some(workspace) = self.workspaces.iter().find(|ws| ws.serial == serial) else {
             return Vec::new();
         };
+        self.groups
+            .iter()
+            .find(|group| group.workspaces.contains(&workspace.handle))
+            .map_or_else(Vec::new, |group| self.laid_out(group))
+    }
+
+    /// The serial of the workspace `handle` is.
+    #[cfg(all(feature = "menus", feature = "panel"))]
+    pub(crate) fn serial_of(&self, handle: &W) -> Option<u64> {
+        self.workspaces
+            .iter()
+            .find(|ws| ws.handle == *handle)
+            .map(|ws| ws.serial)
+    }
+
+    /// The handle of workspace `serial`, to ask things of it by.
+    #[cfg(all(feature = "menus", feature = "panel"))]
+    pub(crate) fn handle_of(&self, serial: u64) -> Option<&W> {
+        self.workspaces
+            .iter()
+            .find(|ws| ws.serial == serial)
+            .map(|ws| &ws.handle)
+    }
+
+    /// `group`'s workspaces, each with its column and row, row by row.
+    fn laid_out(&self, group: &Group<G, W, O>) -> Vec<(&Workspace<W>, (u32, u32))> {
         let mut shown: Vec<_> = group
             .workspaces
             .iter()
@@ -335,6 +367,27 @@ mod tests {
             None,
             "showing, but by a name that is not a number"
         );
+    }
+
+    #[cfg(all(feature = "menus", feature = "panel"))]
+    #[test]
+    fn a_workspace_is_beside_those_of_its_own_group() {
+        let mut each = Paged::default();
+        grid(&mut each, 1, &["DP-1"], 10, 2);
+        grid(&mut each, 2, &["HDMI-A-1"], 20, 3);
+        let serial = each.serial_of(&21).expect("told of");
+        assert_eq!(each.handle_of(serial), Some(&21));
+        let beside: Vec<u32> = each
+            .beside(serial)
+            .iter()
+            .map(|(workspace, _)| workspace.handle)
+            .collect();
+        assert_eq!(beside, [20, 21, 22], "its own monitor's, in order");
+
+        each.workspace(&21, Told::Removed);
+        assert_eq!(each.serial_of(&21), None);
+        assert_eq!(each.handle_of(serial), None);
+        assert!(each.beside(serial).is_empty(), "gone");
     }
 
     #[cfg(feature = "panel")]

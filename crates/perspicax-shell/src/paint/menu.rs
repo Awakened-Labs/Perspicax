@@ -8,9 +8,9 @@
 //! submenu is open in a paler one. What a person typed sits on a
 //! line of its own above the rest, behind a magnifying glass; the start
 //! menu's line is there before anything is typed, saying what it is for.
-//! In a tray icon's menu, an item its program greyed out is written faint,
-//! and one that is on or off has a box, ticked when on, or a ring, with a
-//! dot when on, where an icon would be. The shapes are drawn rather than
+//! In a tray icon's menu or a window's, an item greyed out is written
+//! faint, and one that is on or off has a box, ticked when on, or a ring,
+//! with a dot when on, where an icon would be. The shapes are drawn rather than
 //! taken from a font, so they show with any font, or none.
 
 use tiny_skia::{LineCap, PathBuilder, PixmapMut, Stroke, Transform};
@@ -118,11 +118,8 @@ pub(crate) fn paint(
                 }
                 colours.ink
             };
-            #[cfg(feature = "tray")]
-            if let Does::Tell(crate::model::menu::Choice {
-                mark: Some(drawn), ..
-            }) = line.item.does
-            {
+            #[cfg(any(feature = "tray", feature = "panel"))]
+            if let Some(drawn) = line.item.mark() {
                 mark(canvas, px(icon_box(line.rect)), s, drawn, ink);
             }
             if let Some(image) = line
@@ -186,7 +183,7 @@ fn chevron(canvas: &mut PixmapMut<'_>, place: Rect, s: f32, ink: [u8; 4]) {
 
 /// A box, ticked if it is on, or a ring, with a dot in it if it is on,
 /// centred in `place`.
-#[cfg(feature = "tray")]
+#[cfg(any(feature = "tray", feature = "panel"))]
 fn mark(
     canvas: &mut PixmapMut<'_>,
     place: Rect,
@@ -412,5 +409,64 @@ mod tests {
             OPENED,
             "paler once the keyboard is in its submenu"
         );
+    }
+
+    #[cfg(feature = "tray")]
+    #[test]
+    fn a_marked_item_has_a_box_or_a_ring_where_an_icon_would_be() {
+        use crate::model::menu::{Choice, Item, Mark, Menu};
+
+        let item = |label: &str, mark: Option<Mark>| Item {
+            label: label.to_owned(),
+            icon: None,
+            keywords: Vec::new(),
+            does: Does::Tell(Choice {
+                id: 0,
+                enabled: true,
+                mark,
+            }),
+        };
+        let mut state = State::new(Menu::default(), Menu::default());
+        state.update(
+            Event::TrayMenu {
+                key: 7,
+                name: "Network".to_owned(),
+                menu: Menu {
+                    items: vec![
+                        item("Notifications", Some(Mark::Check(true))),
+                        item("Sounds", Some(Mark::Check(false))),
+                        item("Fast", Some(Mark::Radio(true))),
+                        item("Slow", Some(Mark::Radio(false))),
+                        item("Quit", None),
+                    ],
+                },
+                output: "DP-1".to_owned(),
+                area: Rect::new(0, 0, 400, 260),
+                button: Rect::new(300, 260, 30, 40),
+                edge: perspicax_config::Edge::Bottom,
+            },
+            &mut Monospace(8.0),
+        );
+        let boxes: Vec<Rect> = state.view().unwrap().menus[0]
+            .lines
+            .iter()
+            .map(|line| icon_box(line.rect))
+            .collect();
+        let [ticked, unticked, on, off, plain]: [Rect; 5] =
+            boxes.try_into().expect("a line for each item");
+        let picture = painted(&state, 1);
+        let inked = |place: Rect| {
+            (place.y..place.bottom())
+                .flat_map(|y| (place.x..place.right()).map(move |x| (x, y)))
+                .filter(|&(x, y)| pixel(&picture, x, y) != BACKGROUND)
+                .count()
+        };
+        let centre = |place: Rect| pixel(&picture, place.x + place.w / 2, place.y + place.h / 2);
+        assert!(inked(unticked) > 0, "a box");
+        assert!(inked(ticked) > inked(unticked), "with a tick in it when on");
+        assert!(inked(off) > 0, "a ring");
+        assert_eq!(centre(off), BACKGROUND, "empty when off");
+        assert_ne!(centre(on), BACKGROUND, "with a dot in it when on");
+        assert_eq!(inked(plain), 0, "and nothing beside the rest");
     }
 }

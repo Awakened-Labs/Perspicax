@@ -426,6 +426,7 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         // After the idles: one of them follows the keyboard into a window's
         // layout, and the shells hear of it in this turn.
         state.announce_layout();
+        state.announce_windows();
         // Each client of ours on its own, to see which have stopped reading;
         // then all of them, Xwayland included, as before.
         state.flush_each();

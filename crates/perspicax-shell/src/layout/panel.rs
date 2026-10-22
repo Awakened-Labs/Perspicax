@@ -543,6 +543,15 @@ impl Placed {
             .map(|&(_, rect)| rect)
     }
 
+    /// Where the task of window `serial` is, if the panel shows it.
+    #[cfg(feature = "menus")]
+    pub(crate) fn task(&self, serial: u64) -> Option<Rect> {
+        self.tasks
+            .iter()
+            .find(|(task, _)| task.serial == serial)
+            .map(|&(_, rect)| rect)
+    }
+
     /// Where `item` is, if the panel holds it.
     pub(crate) fn item(&self, wanted: Item) -> Option<Rect> {
         self.items

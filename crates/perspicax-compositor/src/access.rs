@@ -59,6 +59,9 @@ impl crate::state::Compositor {
     /// Put new rules in force, and withdraw what they no longer allow from
     /// the clients that hold it.
     pub(crate) fn set_access(&mut self, access: Access) {
+        // What a shell is told of a window rests on the handles its taskbar
+        // and its pager hold, which a narrowed rule takes back.
+        self.shells.windows_changed();
         for protocol in self.gate.set(access) {
             match protocol {
                 Protocol::Workspace => self.revoke_pager(),

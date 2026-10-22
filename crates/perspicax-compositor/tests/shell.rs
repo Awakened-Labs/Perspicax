@@ -19,7 +19,8 @@
 //! start button, or the start menu's key, opens the start menu standing on
 //! it. The start menu holds, and its button wears, what `[shell.start-menu]`
 //! says, and a save changes them while the shell runs. Its taskbar lists the windows, and a click on one brings it forward,
-//! puts it away or closes it; its pager shows the workspaces, follows a
+//! puts it away or closes it, and a right-click opens its window's menu
+//! beside it, whose choice is made of the window; its pager shows the workspaces, follows a
 //! switch, and switches on a click. Its tray shows a program's status icon
 //! once the program registers it, asks the program for what a click on it
 //! is for, opens its menu and tells the program what was chosen in it.
@@ -1791,6 +1792,79 @@ fn an_agents_click_on_a_task_brings_its_window_forward() {
     // And a middle click asks the second to close.
     click(&session, panel, (second, 20.0), PointerButton::Middle);
     common::until(&mut queue, &mut desk, |desk| desk.asked_to_close == 1);
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
+/// A person's right click on a task opens its window's menu beside it, and
+/// what is chosen there is made of the window. A second right click on the
+/// task only closes the menu, and the menu goes with its window. The clicks
+/// are a person's, since an agent's on a panel a menu covers is refused.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_right_click_on_a_task_opens_its_windows_menu_whose_choice_is_made_of_it() {
+    use perspicax_policy::{Button, Mods};
+    use perspicax_protocols::shell::v1::client::perspicax_shell_v1::WindowState;
+
+    let session = Session::start("shell-window-menu", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "window-menu", CLASSIC);
+    session.wait_for(|facts| panels(facts).len() == 1);
+    // A client of the test's own, told what is made of each window as the
+    // shell is.
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.bind_pager(&globals, &qh);
+    desk.bind_shell(&globals, &qh);
+    desk.open_framed(&qh, "framed");
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.told_of("framed").0.is_some()
+    });
+    let task = (PANEL_HEIGHT + TASK / 2.0) as i32;
+    until_colour(
+        &session,
+        ((task + TASK as i32 / 2 - 4) as usize, 800 - 30),
+        LIT,
+    );
+    let press = |at: (i32, i32), button: Button| {
+        session.command(Command::Click {
+            at,
+            button,
+            mods: Mods::default(),
+        });
+    };
+
+    press((task, 780), Button::Right);
+    let facts = session.wait_for(|facts| menu(facts).is_some());
+    let (_, namespace, _, opaque) = menu(&facts).expect("waited for");
+    assert_eq!(namespace, "perspicax-menu-HEADLESS-1");
+    assert_eq!(opaque[0].y1, 800.0 - PANEL_HEIGHT, "standing on the panel");
+    assert_eq!(opaque[0].x0, PANEL_HEIGHT, "at its task's left end");
+
+    // Its first line, 5 below its top and 30 high, is Sticky.
+    let sticky = (middle(opaque[0]).0 as i32, opaque[0].y0 as i32 + 20);
+    press(sticky, Button::Left);
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.told_of("framed")
+            .0
+            .is_some_and(|told| told.state.contains(WindowState::Sticky))
+    });
+    session.wait_for(|facts| menu(facts).is_none());
+
+    press((task, 780), Button::Right);
+    session.wait_for(|facts| menu(facts).is_some());
+    press((task, 780), Button::Right);
+    session.wait_for(|facts| menu(facts).is_none());
+    // Opened again, it would be up within a turn or two of either loop.
+    thread::sleep(std::time::Duration::from_millis(500));
+    assert!(menu(&session.facts.read()).is_none(), "and it stays shut");
+
+    press((task, 780), Button::Right);
+    session.wait_for(|facts| menu(facts).is_some());
+    desk.windows.remove(0);
+    common::until(&mut queue, &mut desk, |desk| desk.task("framed").is_none());
+    session.wait_for(|facts| menu(facts).is_none());
 
     drop((desk, queue));
     shell.stop_with(session);

@@ -312,11 +312,12 @@ pub(crate) enum Asked {
     #[cfg(feature = "menus")]
     Menu(crate::update::Event),
     /// To press `part` of the panel of the monitor of connector name
-    /// `output`, as a left click would.
+    /// `output` with `button`, as a person's click would.
     #[cfg(feature = "panel")]
     Panel {
         output: String,
         part: crate::layout::panel::Part,
+        button: crate::model::Button,
     },
     /// To open the desktop folder's icon that is this node of its tree.
     #[cfg(feature = "icons")]
@@ -514,9 +515,11 @@ impl App {
             #[cfg(feature = "menus")]
             Asked::Menu(event) => self.menu_event(event),
             #[cfg(feature = "panel")]
-            Asked::Panel { output, part } => {
-                self.panel_pressed(&output, Some(part), crate::model::Button::Left);
-            }
+            Asked::Panel {
+                output,
+                part,
+                button,
+            } => self.panel_pressed(&output, Some(part), button),
             #[cfg(feature = "icons")]
             Asked::OpenIcon(node) => {
                 if let Some(run) = self.desktops.open(node) {
@@ -602,6 +605,8 @@ impl App {
                 },
                 #[cfg(feature = "tray")]
                 Effect::Tell { key, id } => self.tell_status(key, id),
+                #[cfg(feature = "panel")]
+                Effect::Window { serial, verb } => self.act_on_window(serial, verb),
                 Effect::Redraw => {}
             }
         }

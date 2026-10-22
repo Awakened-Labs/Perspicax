@@ -12,12 +12,16 @@
 //! is where every application can always be found, and one written in
 //! place of the rest can still find them all by typing (`search = "all"`).
 //! A tray icon's menu is its program's, and what is
-//! chosen in it is told back to that program.
+//! chosen in it is told back to that program. A window's menu is built
+//! from what perspicax tells of the window, and what is chosen in it is
+//! asked of perspicax.
 
 use std::path::PathBuf;
 
 use perspicax_config::{Leave, Shell, start_menu::Search};
 
+#[cfg(feature = "panel")]
+use super::window_menu::Verb;
 use super::{
     apps::{App, Run},
     categories::Category,
@@ -56,6 +60,15 @@ pub(crate) enum Does {
     /// a tray icon's menu, which its program builds and answers itself.
     #[cfg(feature = "tray")]
     Tell(Choice),
+    /// Make the window whose menu it is so: a window's menu.
+    #[cfg(feature = "panel")]
+    Window {
+        verb: Verb,
+        /// Greyed out: shown, and not to be chosen.
+        enabled: bool,
+        /// A tick or a dot beside it, saying whether the window is so.
+        mark: Option<Mark>,
+    },
     /// Nothing: a line between groups of items.
     Separator,
 }
@@ -73,7 +86,7 @@ pub(crate) struct Choice {
 }
 
 /// What stands beside an item that is on or off.
-#[cfg(feature = "tray")]
+#[cfg(any(feature = "tray", feature = "panel"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mark {
     /// A tick, on or off by itself.
@@ -132,13 +145,27 @@ impl Item {
     }
 
     /// Whether it can be chosen: everything but a separator, and an item
-    /// its program greyed out.
+    /// greyed out.
     pub(crate) fn choosable(&self) -> bool {
         match &self.does {
             Does::Separator => false,
             #[cfg(feature = "tray")]
             Does::Tell(choice) => choice.enabled,
+            #[cfg(feature = "panel")]
+            Does::Window { enabled, .. } => *enabled,
             _ => true,
+        }
+    }
+
+    /// The tick or the dot beside it, if it is an item that is on or off.
+    #[cfg(any(feature = "tray", feature = "panel"))]
+    pub(crate) fn mark(&self) -> Option<Mark> {
+        match &self.does {
+            #[cfg(feature = "tray")]
+            Does::Tell(choice) => choice.mark,
+            #[cfg(feature = "panel")]
+            Does::Window { mark, .. } => *mark,
+            _ => None,
         }
     }
 
@@ -227,6 +254,8 @@ impl Menu {
                 Does::LogOut | Does::Separator => {}
                 #[cfg(feature = "tray")]
                 Does::Tell(_) => {}
+                #[cfg(feature = "panel")]
+                Does::Window { .. } => {}
             }
             route.pop();
         }

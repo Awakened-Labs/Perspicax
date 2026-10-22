@@ -60,7 +60,7 @@ use smithay::{
 
 use perspicax_node::SurfaceId;
 
-use super::{id_of, placement};
+use super::{id_of, is_on_top, placement};
 use crate::{framed::Framed, state::Compositor};
 
 /// A window's z-index among the windows: smithay's default.
@@ -320,15 +320,16 @@ impl Compositor {
     }
 
     /// Keep `window` in front of the other windows, or let it go back among
-    /// them: the person's, by a binding or the window's own titlebar button.
-    /// Raised either way, as a click on it would raise it, so a window kept
-    /// on top is in front of the others kept on top, and one let go is in
-    /// front of the windows it goes back among rather than lost behind them.
-    pub(crate) fn toggle_on_top(&mut self, window: &Framed) {
-        let on_top = placement(window, |placement| {
-            placement.on_top = !placement.on_top;
-            placement.on_top
-        });
+    /// them, if it is not so already: the person's, by a binding or the
+    /// window's own titlebar button. Raised either way, as a click on it
+    /// would raise it, so a window kept on top is in front of the others
+    /// kept on top, and one let go is in front of the windows it goes back
+    /// among rather than lost behind them.
+    pub(crate) fn set_on_top(&mut self, window: &Framed, on_top: bool) {
+        if is_on_top(window) == on_top {
+            return;
+        }
+        placement(window, |placement| placement.on_top = on_top);
         tracing::debug!(id = ?id_of(window), on_top, "kept on top, or let go");
         self.space.raise_element(window, false);
         self.backend.redraw();
@@ -336,5 +337,11 @@ impl Compositor {
         // top, and the pointer then finds what is now in front of it.
         self.publish_facts();
         self.repoint();
+    }
+
+    /// Keep `window` in front of the other windows, or let it go back among
+    /// them if it is kept there.
+    pub(crate) fn toggle_on_top(&mut self, window: &Framed) {
+        self.set_on_top(window, !is_on_top(window));
     }
 }

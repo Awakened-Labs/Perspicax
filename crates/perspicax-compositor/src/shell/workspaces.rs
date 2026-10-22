@@ -306,11 +306,23 @@ impl Compositor {
         }
     }
 
-    /// Put `window` on every workspace, or back on the one its monitor
-    /// shows: the focused window, by a key, or the one whose sticky button
-    /// was pressed, which need not have the keyboard. A window never given
-    /// a workspace is on every one already, and stays so.
-    pub(crate) fn toggle_sticky(&mut self, window: &Framed) {
+    /// Move `window` onto workspace `to`, leaving the person where they are:
+    /// a window menu's choice. A sticky window is on that one alone from
+    /// then on. Nothing for the workspace it is on already.
+    pub(crate) fn send_window_to(&mut self, window: &Framed, to: Cell) {
+        if let Some(id) = id_of(window)
+            && self.workspaces.send_to(id, to).is_some()
+        {
+            self.workspace_changed();
+        }
+    }
+
+    /// Put `window` on every workspace (`sticky`), or back on the one its
+    /// monitor shows, if it is not so already: the focused window, by a key,
+    /// or the one whose sticky button was pressed, which need not have the
+    /// keyboard. A window never given a workspace is on every one already,
+    /// and stays so.
+    pub(crate) fn set_sticky(&mut self, window: &Framed, sticky: bool) {
         let (Some(id), Some(output)) = (id_of(window), self.monitor_of(window)) else {
             return;
         };
@@ -321,8 +333,16 @@ impl Compositor {
             );
             return;
         }
-        self.workspaces.toggle_sticky(id, &output);
-        self.workspace_changed();
+        if self.workspaces.set_sticky(id, &output, sticky) {
+            self.workspace_changed();
+        }
+    }
+
+    /// Put `window` on every workspace, or a sticky one back on the one its
+    /// monitor shows.
+    pub(crate) fn toggle_sticky(&mut self, window: &Framed) {
+        let sticky = id_of(window).and_then(|id| self.workspaces.home(id)) != Some(Home::Sticky);
+        self.set_sticky(window, sticky);
     }
 
     /// Whether `window` is on every workspace, which its sticky button

@@ -362,6 +362,17 @@ impl<W: Copy + PartialEq, O: Clone + PartialEq> Workspaces<W, O> {
             Home::Sticky => self.current(output),
         };
         let to = self.grid.step(from, direction)?;
+        self.send_to(window, to)
+    }
+
+    /// Move a window onto workspace `to`, leaving the person where they are:
+    /// a window menu's choice. A sticky window stops being sticky. `None`
+    /// for a window this has not heard of, a workspace that does not exist,
+    /// or the one the window is on already.
+    pub fn send_to(&mut self, window: W, to: Cell) -> Option<Cell> {
+        if to.0 >= self.grid.len() || self.home(window)? == Home::On(to) {
+            return None;
+        }
         self.set(window, Home::On(to));
         Some(to)
     }
@@ -374,15 +385,17 @@ impl<W: Copy + PartialEq, O: Clone + PartialEq> Workspaces<W, O> {
         Some(to)
     }
 
-    /// Make a window sticky, or put a sticky one back on the current
-    /// workspace.
-    pub fn toggle_sticky(&mut self, window: W, output: &O) {
-        let home = match self.home(window) {
-            Some(Home::Sticky) => Home::On(self.current(output)),
-            Some(Home::On(_)) => Home::Sticky,
-            None => return,
+    /// Put a window on every workspace, or a sticky one back on the one
+    /// `output` shows. Whether that changed where it lives: it does not for
+    /// a window this has not heard of, nor for one that is so already.
+    pub fn set_sticky(&mut self, window: W, output: &O, sticky: bool) -> bool {
+        let home = match (self.home(window), sticky) {
+            (Some(Home::On(_)), true) => Home::Sticky,
+            (Some(Home::Sticky), false) => Home::On(self.current(output)),
+            (None, _) | (Some(Home::Sticky), true) | (Some(Home::On(_)), false) => return false,
         };
         self.set(window, home);
+        true
     }
 
     /// Put `window` wherever `with` lives: a tab coming to the front of its
@@ -605,13 +618,62 @@ mod tests {
     }
 
     #[test]
+    fn sending_a_window_to_a_workspace_leaves_the_person_where_they_are() {
+        let mut desk = spanning();
+        desk.add(1, &"DP-1");
+        assert_eq!(desk.send_to(1, Cell(3)), Some(Cell(3)));
+        assert_eq!(desk.home(1), Some(Home::On(Cell(3))));
+        assert_eq!(desk.current(&"DP-1"), Cell(0));
+        assert!(!desk.shows(1, &"DP-1"));
+        assert!(desk.take_switches().is_empty(), "nobody went anywhere");
+    }
+
+    #[test]
+    fn sending_a_window_where_it_is_or_off_the_grid_is_nothing() {
+        let mut desk = spanning();
+        desk.add(1, &"DP-1");
+        assert_eq!(desk.send_to(1, Cell(0)), None, "on it already");
+        assert_eq!(desk.send_to(1, Cell(4)), None, "no such workspace");
+        assert_eq!(desk.send_to(7, Cell(1)), None, "no such window");
+        assert_eq!(desk.home(1), Some(Home::On(Cell(0))));
+    }
+
+    #[test]
+    fn sending_a_sticky_window_to_a_workspace_unsticks_it_there() {
+        let mut desk = spanning();
+        desk.add(1, &"DP-1");
+        desk.set_sticky(1, &"DP-1", true);
+        assert_eq!(
+            desk.send_to(1, Cell(0)),
+            Some(Cell(0)),
+            "even the one showing"
+        );
+        assert_eq!(desk.home(1), Some(Home::On(Cell(0))));
+        desk.set_sticky(1, &"DP-1", true);
+        assert_eq!(desk.send_to(1, Cell(2)), Some(Cell(2)));
+        assert!(!desk.shows(1, &"DP-1"));
+    }
+
+    #[test]
+    fn setting_sticky_says_whether_it_changed() {
+        let mut desk = spanning();
+        desk.add(1, &"DP-1");
+        assert!(!desk.set_sticky(1, &"DP-1", false), "on one already");
+        assert!(desk.set_sticky(1, &"DP-1", true));
+        assert!(!desk.set_sticky(1, &"DP-1", true), "sticky already");
+        assert_eq!(desk.home(1), Some(Home::Sticky));
+        assert!(!desk.set_sticky(7, &"DP-1", true), "no such window");
+        assert_eq!(desk.home(7), None);
+    }
+
+    #[test]
     fn a_sticky_window_is_on_every_workspace_until_unstuck() {
         let mut desk = spanning();
         desk.add(1, &"DP-1");
-        desk.toggle_sticky(1, &"DP-1");
+        assert!(desk.set_sticky(1, &"DP-1", true));
         desk.switch(&"DP-1", Direction::Right);
         assert!(desk.shows(1, &"DP-1"));
-        desk.toggle_sticky(1, &"DP-1");
+        assert!(desk.set_sticky(1, &"DP-1", false));
         assert_eq!(
             desk.home(1),
             Some(Home::On(Cell(1))),
@@ -663,7 +725,7 @@ mod tests {
     fn a_sticky_window_in_hand_stays_sticky() {
         let mut desk = spanning();
         desk.add(1, &"DP-1");
-        desk.toggle_sticky(1, &"DP-1");
+        desk.set_sticky(1, &"DP-1", true);
         desk.switch(&"DP-1", Direction::Right);
         desk.hold(1, &"DP-1");
         assert_eq!(desk.home(1), Some(Home::Sticky));

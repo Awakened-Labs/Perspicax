@@ -22,7 +22,7 @@
 //! when it binds it ([`Compositor::enter_workspaces`]). That is so even while
 //! the session is locked: it is only what the pager was told before.
 
-use perspicax_policy::{Cell, GroupView, Protocol};
+use perspicax_policy::{Cell, GroupView, Mode, Protocol};
 use smithay::{
     output::Output,
     reexports::{
@@ -40,6 +40,7 @@ use smithay::{
 
 use crate::{
     access::{Filtered, Gate},
+    framed::Framed,
     state::Compositor,
 };
 
@@ -162,6 +163,50 @@ impl Compositor {
             }
             admitted
         });
+    }
+
+    /// The workspace a client's handle names, for `window` to be sent to:
+    /// its cell, while the client is admitted to the pager's protocol, if
+    /// it is of the group `window` is in. Per output that is its monitor's,
+    /// so a window is sent among its monitor's workspaces and stays there.
+    pub(crate) fn cell_for(
+        &self,
+        client: &Client,
+        workspace: &ExtWorkspaceHandleV1,
+        window: &Framed,
+    ) -> Option<Cell> {
+        if !self.gate.admits(Protocol::Workspace, client) {
+            return None;
+        }
+        let named = workspace.data::<Named>()?;
+        (named.group == self.group_of(window)?).then_some(named.cell)
+    }
+
+    /// The handle `client`'s pager holds on workspace `cell` of `window`'s
+    /// group, if it holds one.
+    pub(crate) fn workspace_held_by(
+        &self,
+        client: &Client,
+        window: &Framed,
+        cell: Cell,
+    ) -> Option<ExtWorkspaceHandleV1> {
+        let group = self.group_of(window)?;
+        self.pager
+            .managers
+            .iter()
+            .filter(|manager| manager.manager.client().as_ref() == Some(client))
+            .flat_map(|manager| &manager.workspaces)
+            .find(|(held_group, held_cell, _)| *held_group == group && *held_cell == cell)
+            .map(|(_, _, handle)| handle.clone())
+    }
+
+    /// The group of workspaces `window` is among, by its name: the one
+    /// spanning every monitor, or its monitor's own.
+    fn group_of(&self, window: &Framed) -> Option<String> {
+        match self.workspaces.shape().mode {
+            Mode::Spanning => Some(SPANNING.to_owned()),
+            Mode::PerOutput => self.monitor_of(window),
+        }
     }
 
     /// The grid as a pager sees it, over the monitors there are.
@@ -352,6 +397,8 @@ impl GlobalDispatch<ExtWorkspaceManagerV1, Filtered> for Compositor {
         let outputs: Vec<Output> = state.space.outputs().cloned().collect();
         send(display, &mut manager, &[], &state.pager.sent, &outputs);
         state.pager.managers.push(manager);
+        // A shell names a window's workspace by its pager's handle on it.
+        state.shells.windows_changed();
     }
 
     fn can_view(client: Client, global: &Filtered) -> bool {

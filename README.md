@@ -1239,8 +1239,9 @@ their own windows: a taskbar's list of windows (`foreign-toplevel-list`, and
 `foreign-toplevel-management` to activate and close them), a pager
 (`workspace`), a screenshot tool (`screencopy`), a display tool
 (`output-management`), the desktop shell (`shell`), which is told when a
-key asks for a menu or a pie or changes the volume, and may end the session,
-and the settings app (`settings`), which hears the next chord pressed, to
+key asks for a menu or a pie or changes the volume, and what is made of each
+window, and may end the session, or make a window sticky, keep it on top, roll
+it up or send it to a workspace, and the settings app (`settings`), which hears the next chord pressed, to
 bind it. Listing windows and workspaces is open by default; reading pixels,
 moving monitors, speaking for the shell and hearing a chord are for the
 usual programs, by name. The settings app is among the display tools, to
@@ -1256,7 +1257,7 @@ says, all of them are inert while the screen is locked.
 | `ext-workspace-v1` | `workspace` | waybar `ext/workspaces` | switches ignored | everything removed, manager finished |
 | `wlr-screencopy-unstable-v1` v3 (shm) | `screencopy` | grim, wf-recorder, xdg-desktop-portal-wlr | every copy fails | waiting frames fail |
 | `wlr-output-management-unstable-v1` v4 | `output-management` | wlr-randr, kanshi, wdisplays; perspicax-settings, to list | every configuration fails | manager finished |
-| `perspicax-shell-v1` (perspicax's own) | `shell` | perspicax-shell | told nothing; log-out ignored | finished |
+| `perspicax-shell-v1` (perspicax's own) | `shell` | perspicax-shell | told nothing; requests ignored | finished |
 | `perspicax-settings-v1` (perspicax's own) | `settings` | perspicax-settings | nothing captured; a capture waiting is cancelled | a capture waiting is cancelled |
 
 A rule a reload changes applies to the next client that looks, with no
@@ -1469,13 +1470,29 @@ them; none is on by default. The profiles turn on what the build has:
 | Root menu | `menus` | right-click on the wallpaper, or a key or button bound to `root-menu` | the same | overlay, `perspicax-menu-<output>`, while open | a `Menu` "Root menu" of `MenuItem`s |
 | Panel | `panel` | along the bottom of every monitor | none | top, `perspicax-panel-<output>` | a `Toolbar` "Panel" holding what follows |
 | Start button and menu | `menus` | the panel's first item; a tap of Logo | — | the panel's; its menu as the root menu's | a `Button` "Start"; a `Menu` "Start menu", with a search line unless `search = "none"` |
-| Taskbar | `panel` | each monitor's own windows | — | the panel's | a `TabList` "Taskbar", the window in use selected |
+| Taskbar | `panel` | each monitor's own windows; a right-click, a window's menu (with `menus`) | — | the panel's; a window's menu as the root menu's | a `TabList` "Taskbar", the window in use selected, each `Tab`'s context menu its window's; a `Menu` named for the window, its ticks and dots `MenuItemCheckBox`es and `MenuItemRadio`s |
 | Pager | `panel` | the workspaces | — | the panel's | a `TabList` "Workspaces", the one showing selected |
 | Keyboard layout | `panel` | before the tray, with two layouts or more | — | the panel's | a `Button` "Keyboard layout", the layout's name its value |
 | Tray | `tray` (with `panel`, `menus`) | before the mixer | — | the panel's; its menus as the root menu's | a `Group` "Tray" of a `Button` for each icon, named by its tooltip |
 | Mixer | `audio` (with `panel`, `menus`) | before the clock; the volume keys | the volume keys | the panel's; overlay, `perspicax-mixer-<output>`, while open; the volume shown, overlay, `perspicax-osd`, a moment | a `Group` "Sound" of a node for each piece; a `Dialog` "Sound"; a `Status` "Volume" |
 | Clock | `panel` | the time, last | — | the panel's | a `Status` "Clock", the time its value |
 | Pies | `pie` (with `menus`, `panel`) | a key or button bound to `{ pie = "<name>" }` | the same | overlay, `perspicax-pie-<output>`, while open | a `Menu` named for the pie of a `MenuItem` for each slot, the one pointed at selected |
+
+A right-click on a task opens its window's menu beside it, as a tray icon's
+opens beside the icon: Sticky, Always on top and Shade, ticked as the window
+is; Send to workspace, the workspaces of the window's monitor with the one it
+is on dotted, while the window has a workspace of its own and another to go
+to; then Minimize or Restore, Maximize or Unmaximize, and Close. Each item
+says what the window is to be, so a key that changed the window while the
+menu was open does not turn the choice around. Shade is greyed out for a
+window that draws its own frame, or is fullscreen. The shell asks
+perspicax for the first four over `perspicax-shell-v1`, from version 5, and
+the window for the rest over the taskbar's protocol, so a shell perspicax
+tells nothing of its windows offers those alone. The menu does not yet open
+from a titlebar ([#240](https://github.com/Awakened-Labs/Perspicax/issues/240)),
+from an application's own titlebar
+([#241](https://github.com/Awakened-Labs/Perspicax/issues/241)) or from a key
+([#239](https://github.com/Awakened-Labs/Perspicax/issues/239)).
 
 An agent reads the shell as it reads any application. On a seat it cannot
 click it: like everything else the person's session starts, the shell gets no

@@ -40,7 +40,7 @@ use smithay::{
             zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
             zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
         },
-        wayland_server::{DisplayHandle, Resource, protocol::wl_output::WlOutput},
+        wayland_server::{Client, DisplayHandle, Resource, protocol::wl_output::WlOutput},
     },
     wayland::{compositor::with_states, shell::xdg::XdgToplevelSurfaceData},
 };
@@ -117,6 +117,18 @@ impl Toplevels {
             managers: Vec::new(),
             run,
         }
+    }
+
+    /// Every window `client` holds a taskbar's handle on, by its id, with
+    /// the handle: the first it holds, if it holds more than one.
+    pub(crate) fn handles_of(
+        &self,
+        client: &Client,
+    ) -> Vec<(SurfaceId, ZwlrForeignToplevelHandleV1)> {
+        self.known
+            .iter()
+            .filter_map(|(&id, known)| Some((id, wlr::held_by(known, client)?)))
+            .collect()
     }
 
     fn identifier(&self, id: SurfaceId) -> String {
