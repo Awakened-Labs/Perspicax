@@ -533,13 +533,17 @@ impl Drop for Bus {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        // What is left: the socket of a daemon that was killed, the
-        // accessibility bus's folder, which that bus empties on its way out,
-        // and the one the daemon makes for services a program installs while
-        // it runs, which it leaves. Folders are removed only empty, so one
-        // still holding something stays, to say so.
-        let _ = fs::remove_file(self.folder.join("bus"));
-        for made in ["at-spi", "dbus-1/services", "dbus-1"] {
+        // What is left, each by name: the socket of a daemon that was killed;
+        // the accessibility bus's folder, which that bus empties on its way
+        // out; the one the daemon makes for services a program installs while
+        // it runs, which it leaves; and dconf's note of the settings those
+        // services read. Folders are removed only empty, never a tree: one
+        // still holding something stays, to say so, and a folder a service
+        // mounted -- the document portal's `doc` -- is never emptied through.
+        for file in ["bus", "dconf/user"] {
+            let _ = fs::remove_file(self.folder.join(file));
+        }
+        for made in ["at-spi", "dbus-1/services", "dbus-1", "dconf"] {
             let _ = fs::remove_dir(self.folder.join(made));
         }
         if let Err(error) = fs::remove_dir(&self.folder) {
@@ -773,10 +777,20 @@ impl Registry {
             tracing::debug!("an accessibility registry is already running");
             return Ok(Self(None));
         }
+        Self::start().context("no accessibility registry is running")
+    }
 
+    /// Start an accessibility registry, whether or not one is running: on a
+    /// bus of the session's own ([`Bus`]), one already running is the
+    /// person's, serving their accessibility bus rather than this one's.
+    ///
+    /// # Errors
+    ///
+    /// When none can be started.
+    pub fn start() -> Result<Self> {
         let registry = find_registry(Path::new("/")).with_context(|| {
             format!(
-                "no accessibility registry is running, and there is no {REGISTRY} to start in {}",
+                "there is no {REGISTRY} to start in {}",
                 REGISTRY_FOLDERS.join(", ")
             )
         })?;
@@ -787,12 +801,7 @@ impl Registry {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .with_context(|| {
-                format!(
-                    "no accessibility registry is running, and {} could not be started",
-                    registry.display()
-                )
-            })?;
+            .with_context(|| format!("{} could not be started", registry.display()))?;
         tracing::info!(pid = child.id(), "started an accessibility registry");
 
         // Give it a moment to claim its bus name. A client that asks before it

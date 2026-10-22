@@ -99,6 +99,22 @@ struct Cli {
     #[arg(long)]
     session: bool,
 
+    /// Run under a session bus of its own, though there is one already: a
+    /// `dbus-daemon` perspicax starts, in `$XDG_RUNTIME_DIR/perspicax-bus-PID`,
+    /// and stops on the way out. It ends with perspicax however perspicax
+    /// ends, killed included, and takes everything it started with it.
+    ///
+    /// `--mcp` starts one without being asked when there is no session bus at
+    /// all. Either way, nothing of the agent's wire is given to it, nor to
+    /// anything it starts, which a bus somebody else started for perspicax
+    /// cannot promise: `dbus-run-session` keeps its own copy of whatever it
+    /// passes on, for as long as the run lasts.
+    ///
+    /// What it starts is given that folder for its runtime folder and none of
+    /// your displays, so its accessibility bus cannot take your desktop's.
+    #[arg(long, conflicts_with = "session")]
+    own_bus: bool,
+
     /// A virtual output's size, as `WIDTHxHEIGHT`. Repeat it for more than one
     /// monitor: they are named `HEADLESS-1`, `HEADLESS-2`, ... and placed left
     /// to right in the order given. Every global rectangle the index reports
@@ -165,9 +181,11 @@ struct Cli {
     /// A wire something else was given first is refused before anything
     /// starts: a stderr that is the wire too (`2>&1`), or a session bus
     /// daemon holding it, as `dbus-run-session -- perspicax --mcp` leaves it,
-    /// to hand on to every service the bus starts. Pass perspicax the wire on
-    /// fds 3 and 4 inside `dbus-run-session` instead, as the README shows, or
-    /// use `--mcp-socket`.
+    /// to hand on to every service the bus starts. For a bus of its own, run
+    /// it with no bus around it and `--own-bus`, or with no session bus at
+    /// all, where it starts one unasked; or use `--mcp-socket`. Not inside
+    /// `dbus-run-session` in any form: it keeps a copy of the wire it passes
+    /// on, fds 3 and 4 included, for as long as the run lasts.
     ///
     /// Nor may another process running as you take the wire: perspicax keeps
     /// them all out of itself, so none can reopen the wire through `/proc`,
@@ -331,8 +349,21 @@ fn main() -> Result<()> {
     }
 
     // Before the log is opened and before anything is started, because when it
-    // works nothing after it runs: this process becomes `dbus-run-session`,
-    // which runs it again under a bus of its own.
+    // works nothing after it runs: this process runs itself again, with the
+    // address of a bus of its own in its environment (issue #161). The process
+    // that carries on finds the bus `Due`, and starts it once the wire is kept.
+    let own = session::own_bus(
+        cli.own_bus,
+        cli.mcp,
+        |name| std::env::var(name).ok(),
+        std::process::id(),
+    )?;
+    if let session::OwnBus::Asked(folder) = &own {
+        return Err(session::run_again_on_a_bus_of_its_own(folder));
+    }
+
+    // Likewise: this process becomes `dbus-run-session`, which runs it again
+    // under a bus of its own.
     let bus = if cli.session {
         session::ensure_bus()
     } else {
@@ -341,7 +372,8 @@ fn main() -> Result<()> {
 
     // Before anything is started and before any thread runs, so that nothing
     // inherits the agent's wire or is half-way through a line on it; and after
-    // the bus, whose `dbus-run-session` would run this again without it.
+    // the buses, each of which runs this process again: the copies taken here
+    // are closed on exec, and the process run again would have none.
     let wire = cli
         .mcp
         .then(Wire::take)
@@ -397,10 +429,11 @@ fn main() -> Result<()> {
                 .from_env_lossy(),
         )
         .init();
-    let own_bus = cli.session && bus.is_ok() && std::env::var_os(session::BUS_STARTED).is_some();
+    let from_run_session =
+        cli.session && bus.is_ok() && std::env::var_os(session::BUS_STARTED).is_some();
     match bus {
         Err(error) => tracing::warn!("{error:#}; the session goes on without a bus"),
-        Ok(()) if own_bus => {
+        Ok(()) if from_run_session => {
             tracing::info!("the session bus is this session's own, from dbus-run-session");
         }
         Ok(()) => {}
@@ -410,17 +443,42 @@ fn main() -> Result<()> {
         tracing::warn!("{error:#}: logging to stderr instead");
     }
 
-    let ended = run(&cli, wire);
+    // A bus of its own is started here, on the main thread, whose end the
+    // kernel stops it with, and held to the very end, past the accessibility
+    // bus's stop below. Not before a wire the bus perspicax was started on
+    // holds too is refused: `dbus-run-session -- perspicax --mcp --own-bus`
+    // hands that bus's daemon the wire as surely as without the flag.
+    let own = match own {
+        session::OwnBus::Due(folder) => {
+            if let Some(wire) = &wire
+                && let Some(outer) = std::env::var(session::OUTER_BUS)
+                    .ok()
+                    .filter(|outer| !outer.is_empty())
+            {
+                refuse_a_bus_holding(wire, Some(&outer))?;
+            }
+            let this = std::env::current_exe()
+                .context("no path to this program, to start a bus of its own with")?;
+            Some(session::Bus::start(&folder, &this)?)
+        }
+        // One asked for has been run again for it, above, and never gets here.
+        session::OwnBus::Unasked | session::OwnBus::Asked(_) => None,
+    };
+    let own_bus = from_run_session || own.is_some();
+
+    let ended = run(&cli, wire, own.is_some());
     // Said on stderr too, as `main`'s error always is, but a session's is
     // looked for in its log, beside whatever led up to it.
     if to_file && let Err(error) = &ended {
         tracing::error!("{error:#}");
     }
     // While the bus is still up to say who serves it: `dbus-run-session` takes
-    // the bus down only once this process has gone.
+    // the bus down only once this process has gone, and a bus of its own is
+    // stopped just after.
     if own_bus && let Err(error) = stop_accessibility_bus() {
         tracing::warn!("{error:#}");
     }
+    drop(own);
     ended
 }
 
@@ -502,8 +560,9 @@ fn agent_socket(cli: &Cli, config_path: Option<&Path>) -> Result<Option<PathBuf>
 }
 
 /// Everything once there is a log: the run, from its first child to its end.
-/// `wire` is the agent's, under `--mcp`.
-fn run(cli: &Cli, wire: Option<Wire>) -> Result<()> {
+/// `wire` is the agent's, under `--mcp`, and `own_bus` whether the session bus
+/// is one `main` started for it.
+fn run(cli: &Cli, wire: Option<Wire>, own_bus: bool) -> Result<()> {
     let backend = if cli.on_seat() {
         Backend::Seat
     } else {
@@ -545,17 +604,25 @@ fn run(cli: &Cli, wire: Option<Wire>) -> Result<()> {
 
     // Third, and before the registry, whose start makes the bus start the
     // accessibility bus: a session bus holding the agent's wire would hand it
-    // to that, and to everything else it starts (issue #52).
+    // to that, and to everything else it starts (issue #52). Asked of a bus of
+    // its own too, which holds none of it, so that one which ever did would be
+    // refused rather than served on.
     if let Some(wire) = &wire {
-        refuse_a_bus_holding(wire)?;
+        refuse_a_bus_holding(wire, None)?;
     }
 
     // Before anything is spawned, and in this order. A registry that arrives
-    // after its clients is a registry GTK has already given up on.
+    // after its clients is a registry GTK has already given up on. On a bus of
+    // its own, one already running is the person's, for their bus, not this.
     //
     // Without one, an agent run headless has nothing to read, and stops. A
     // person's session is still a session, and says so.
-    let _registry = match session::Registry::ensure() {
+    let registry = if own_bus {
+        session::Registry::start()
+    } else {
+        session::Registry::ensure()
+    };
+    let _registry = match registry {
         Ok(registry) => Some(registry),
         Err(error) if cli.on_seat() => {
             tracing::warn!("{error:#}");
@@ -617,8 +684,16 @@ fn run(cli: &Cli, wire: Option<Wire>) -> Result<()> {
     let requests = Requests::new();
 
     if cli.on_seat() {
+        // A bus of its own started what it started so far, the accessibility
+        // bus above all, in a runtime folder of its own (`session::Bus`). What
+        // it starts from now on -- a portal, the keyring's prompt -- is the
+        // person's to see, and finds its displays' sockets in theirs.
+        let runtime = own_bus
+            .then(|| std::env::var("XDG_RUNTIME_DIR").ok())
+            .flatten()
+            .map(|dir| ("XDG_RUNTIME_DIR".to_owned(), dir));
         bus::start(
-            bus::Options::session([desktop, agent_env].concat()),
+            bus::Options::session([desktop, agent_env, runtime.into_iter().collect()].concat()),
             facts.watch_session(),
         );
     }
@@ -773,20 +848,22 @@ fn enable_accessibility() -> Result<()> {
 }
 
 /// Refuse to serve the agent on a wire the session bus's daemon holds too
-/// (issue #52).
+/// (issue #52): the bus at `address`, or the session's own when `None`.
 ///
 /// `dbus-run-session -- perspicax --mcp` gives its bus daemon the wire before
 /// this process runs, where [`Wire::take`] cannot reach it, and the daemon
 /// gives it to every service it starts: one a hosted program asks for by name,
 /// or writes a `.service` file for, could print a reply perspicax did not send.
+/// The way out is a bus of perspicax's own, which nothing has given the wire;
+/// `main` asks this of the bus it was started on before it starts one.
 ///
 /// Served all the same when there is no bus, or it cannot be told whether the
 /// daemon holds the wire. A daemon that does was started beside this process,
 /// as its user, and answers; one that will not say, or that this process cannot
 /// look into, is a bus somebody else runs, and a systemd user manager's prints
 /// to the journal.
-fn refuse_a_bus_holding(wire: &Wire) -> Result<()> {
-    let (pid, fd) = match bus_holding(wire) {
+fn refuse_a_bus_holding(wire: &Wire, address: Option<&str>) -> Result<()> {
+    let (pid, fd) = match bus_holding(wire, address) {
         Ok(Some(held)) => held,
         Ok(None) => return Ok(()),
         Err(error) => {
@@ -801,25 +878,33 @@ fn refuse_a_bus_holding(wire: &Wire) -> Result<()> {
     bail!(
         "the session bus's daemon (pid {pid}) holds the agent's wire as its {held}, as \
          `dbus-run-session -- perspicax --mcp` leaves it, and every service the bus starts \
-         would hold it too: any of them could print a reply perspicax did not send. Give the \
-         wire to perspicax alone, on fds 3 and 4,\n\n    \
-         dbus-run-session -- sh -c 'exec perspicax --mcp … <&3 >&4 3<&- 4>&-' 3<&0 4>&1 \
-         </dev/null >&2\n\n\
-         or serve the agent on a socket, with `--mcp-socket PATH` and `perspicax attach PATH` \
-         as its MCP server"
+         would hold it too: any of them could print a reply perspicax did not send. Run \
+         perspicax with no bus around it, and `--own-bus` if it needs one of its own: it \
+         starts that bus itself, and gives it nothing of the wire. Not inside \
+         `dbus-run-session` in any form, fds 3 and 4 included: it keeps a copy of whatever \
+         it passes on, for as long as the run lasts. Or serve the agent on a socket, with \
+         `--mcp-socket PATH` and `perspicax attach PATH` as its MCP server"
     )
 }
 
-/// The session bus daemon's pid and which of its descriptors 0, 1 and 2 is
-/// open on `wire`; `None` when there is no bus, or the daemon holds none of
-/// it. Briefly borrows a runtime to ask, as [`enable_accessibility`] does.
-fn bus_holding(wire: &Wire) -> Result<Option<(u32, u8)>> {
+/// The bus daemon's pid, for the bus at `address` or the session's own, and
+/// which of its descriptors 0, 1 and 2 is open on `wire`; `None` when there is
+/// no bus, or the daemon holds none of it. Briefly borrows a runtime to ask,
+/// as [`enable_accessibility`] does.
+fn bus_holding(wire: &Wire, address: Option<&str>) -> Result<Option<(u32, u8)>> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("no runtime to ask the session bus with")?
         .block_on(async {
-            let Ok(connection) = zbus::Connection::session().await else {
+            let connection = match address {
+                Some(address) => match zbus::connection::Builder::address(address) {
+                    Ok(builder) => builder.build().await,
+                    Err(error) => Err(error),
+                },
+                None => zbus::Connection::session().await,
+            };
+            let Ok(connection) = connection else {
                 tracing::debug!("no session bus to hold the agent's wire");
                 return Ok(None);
             };
