@@ -267,6 +267,12 @@ enum Command {
         #[command(subcommand)]
         verb: ConfigVerb,
     },
+
+    /// Not for people: the start of a session's own bus, which becomes
+    /// `dbus-daemon` listening on ADDRESS once it has asked to be stopped
+    /// when the session, PARENT, ends (`session::become_bus_daemon`).
+    #[command(hide = true)]
+    BusDaemon { parent: u32, address: String },
 }
 
 #[derive(Subcommand)]
@@ -297,8 +303,14 @@ impl Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Before anything else, because it is nothing else: no session, no log,
-    // nothing started, only a length of wire to one that is running.
+    // Before anything else, because it is nothing else: this process becomes
+    // the daemon of a session's own bus, or says why it could not.
+    if let Some(Command::BusDaemon { parent, address }) = &cli.command {
+        return Err(session::become_bus_daemon(*parent, address));
+    }
+
+    // Likewise: no session, no log, nothing started, only a length of wire to
+    // one that is running.
     if let Some(Command::Attach { socket }) = &cli.command {
         let path = attach::socket_path(socket.clone(), |name| std::env::var(name).ok())?;
         return attach::attach(&path);

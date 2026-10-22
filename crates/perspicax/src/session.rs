@@ -40,12 +40,15 @@ use std::{
     env,
     ffi::OsString,
     fs::{self, DirBuilder, File, OpenOptions},
-    io,
-    os::unix::{
-        ffi::OsStrExt as _,
-        fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _},
-        net::UnixStream,
-        process::CommandExt as _,
+    io::{self, BufRead as _},
+    os::{
+        fd::AsRawFd as _,
+        unix::{
+            ffi::OsStrExt as _,
+            fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _},
+            net::UnixStream,
+            process::CommandExt as _,
+        },
     },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -419,6 +422,195 @@ pub fn run_again_on_a_bus_of_its_own(folder: &Path) -> anyhow::Error {
     )
     .exec();
     anyhow::Error::from(error).context("could not run this program again on a bus of its own")
+}
+
+/// What the daemon of a bus of the session's own is started with in place of
+/// what it would inherit, and so what every service it starts on request
+/// inherits too: `folder` for its runtime folder, and no display.
+///
+/// The accessibility bus is why. `at-spi-bus-launcher` serves it at
+/// `$XDG_RUNTIME_DIR/at-spi/bus`, and a `dbus-daemon` binding a socket first
+/// removes any socket already at its path. Given the person's runtime folder,
+/// the launcher this bus starts would take the socket of the person's own
+/// accessibility bus from under it, and delete it on the way out; given a
+/// `DISPLAY`, it would write its address on that display's root window, over
+/// theirs. Nor should anything this bus starts find the person's desktop to
+/// draw on, which their `WAYLAND_DISPLAY` would be. A seat tells the bus its
+/// own displays once they are up ([`crate::bus`]).
+fn daemon_env(folder: &Path) -> Changes {
+    vec![
+        ("XDG_RUNTIME_DIR", Some(folder.into())),
+        ("DISPLAY", None),
+        ("WAYLAND_DISPLAY", None),
+    ]
+}
+
+/// How long a bus of the session's own has to stop before it is killed. It
+/// takes milliseconds.
+const OWN_BUS_DEADLINE: Duration = Duration::from_secs(1);
+
+/// A bus of the session's own ([`own_bus`]): a `dbus-daemon` this process
+/// started, listening in its folder, and stopped when this is dropped or this
+/// process ends, however it ends.
+#[derive(Debug)]
+pub struct Bus {
+    daemon: Child,
+    folder: PathBuf,
+}
+
+impl Bus {
+    /// Start the session's own bus, in `folder`, and wait until it is
+    /// listening.
+    ///
+    /// It is started as `perspicax bus-daemon` ([`become_bus_daemon`]), where
+    /// `perspicax` is this program, or in a test the one built beside it. That
+    /// makes it a daemon the kernel stops when this process ends: perspicax
+    /// handles no signal, and an agent's client may well send it one. What the
+    /// kernel watches is the thread that started it, so this is called on the
+    /// main thread, which lasts as long as the process does.
+    ///
+    /// The daemon reads nothing and prints to this process's stderr, as every
+    /// program the session starts does, and so does every service it starts
+    /// on request: none of them is given the agent's wire, nor anything else
+    /// of this process's.
+    ///
+    /// # Errors
+    ///
+    /// When the folder cannot be made, or is not this user's alone, or when
+    /// the daemon cannot be started, or ends before it is listening.
+    pub fn start(folder: &Path, perspicax: &Path) -> Result<Self> {
+        make_own_folder(folder)?;
+        let (said, saying) = io::pipe().context("no pipe for the bus to say its address on")?;
+        let mut daemon = {
+            let mut command = Command::new(perspicax);
+            command
+                .arg("bus-daemon")
+                .arg(std::process::id().to_string())
+                .arg(bus_address(folder));
+            changed(&mut command, daemon_env(folder))
+                .stdin(Stdio::null())
+                .stdout(saying)
+                .stderr(Stdio::inherit())
+                .spawn()
+            // The command goes here, and this process's copy of the pipe's far
+            // end with it: the read below ends when the daemon's copy does.
+        }
+        .with_context(|| format!("could not start {} bus-daemon", perspicax.display()))?;
+
+        // dbus-daemon says its address once it is listening, ending the line.
+        // Anything less is a daemon that ended first, or never began.
+        let mut line = String::new();
+        let read = io::BufReader::new(said).read_line(&mut line);
+        if read.is_err() || !line.ends_with('\n') {
+            let ended = daemon
+                .wait()
+                .map_or_else(|error| error.to_string(), |status| status.to_string());
+            bail!("the bus perspicax started for itself ended ({ended}) before it was listening");
+        }
+        tracing::info!(pid = daemon.id(), folder = %folder.display(), "started a bus of its own");
+        Ok(Self {
+            daemon,
+            folder: folder.to_owned(),
+        })
+    }
+}
+
+impl Drop for Bus {
+    fn drop(&mut self) {
+        // Asked first, as the accessibility bus is: a daemon that stops of
+        // its own accord removes its socket on the way out.
+        let _ = kill_process(Pid::from_child(&self.daemon), Signal::TERM);
+        let deadline = Instant::now() + OWN_BUS_DEADLINE;
+        while matches!(self.daemon.try_wait(), Ok(None)) {
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    pid = self.daemon.id(),
+                    "the bus of its own was asked to stop, and is still running: killed"
+                );
+                let _ = self.daemon.kill();
+                let _ = self.daemon.wait();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // What is left: the socket of a daemon that was killed, the
+        // accessibility bus's folder, which that bus empties on its way out,
+        // and the one the daemon makes for services a program installs while
+        // it runs, which it leaves. Folders are removed only empty, so one
+        // still holding something stays, to say so.
+        let _ = fs::remove_file(self.folder.join("bus"));
+        for made in ["at-spi", "dbus-1/services", "dbus-1"] {
+            let _ = fs::remove_dir(self.folder.join(made));
+        }
+        if let Err(error) = fs::remove_dir(&self.folder) {
+            tracing::debug!(%error, folder = %self.folder.display(), "the bus's folder stays");
+        }
+    }
+}
+
+/// Make `folder`, the person's alone, or take one this user made so, as a
+/// session killed with the same pid would have left it.
+fn make_own_folder(folder: &Path) -> Result<()> {
+    let error = match DirBuilder::new().mode(0o700).create(folder) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if error.kind() == io::ErrorKind::AlreadyExists
+        && fs::symlink_metadata(folder).is_ok_and(|found| {
+            found.is_dir()
+                && found.uid() == rustix::process::getuid().as_raw()
+                && found.permissions().mode() & 0o777 == 0o700
+        })
+    {
+        return Ok(());
+    }
+    Err(error).with_context(|| {
+        format!(
+            "could not make {} for a bus of its own, the person's alone",
+            folder.display()
+        )
+    })
+}
+
+/// Become the daemon of a bus of a session's own, listening on `address`, for
+/// `parent`, the session that started this process ([`Bus::start`]): what
+/// `perspicax bus-daemon` does.
+///
+/// A step on the way rather than a program of its own. It asks the kernel to
+/// stop this process when `parent` ends, which only a process can ask for
+/// itself, and then becomes `dbus-daemon`, which keeps what was asked. One
+/// started for a session that has already gone ends at once.
+///
+/// The daemon says its address once it is listening on what is stdout here,
+/// moved to a descriptor of its own that it closes once it has said it. So
+/// what is left on stdout is stderr, for every service the bus starts to
+/// inherit, as the session's own programs print there.
+///
+/// Returns only when it could not be done, saying why.
+pub fn become_bus_daemon(parent: u32, address: &str) -> anyhow::Error {
+    let became = || -> Result<io::Error> {
+        rustix::process::set_parent_process_death_signal(Some(Signal::TERM))
+            .context("could not ask to be stopped with the session")?;
+        // Asked too late, if the session has already gone: nothing would
+        // stop this then.
+        if u32::try_from(Pid::as_raw(rustix::process::getppid())).ok() != Some(parent) {
+            bail!("the session that started this bus (pid {parent}) has gone");
+        }
+        let saying = rustix::io::fcntl_dupfd_cloexec(io::stdout(), 3)
+            .context("could not keep stdout for the bus's address")?;
+        rustix::io::fcntl_setfd(&saying, rustix::io::FdFlags::empty())
+            .context("could not pass the bus's address on")?;
+        rustix::stdio::dup2_stdout(io::stderr()).context("could not print to stderr")?;
+        Ok(Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--nopidfile"])
+            .arg(format!("--address={address}"))
+            .arg(format!("--print-address={}", saying.as_raw_fd()))
+            .exec())
+    };
+    match became() {
+        Ok(error) => anyhow::Error::from(error).context("could not run dbus-daemon"),
+        Err(error) => error,
+    }
 }
 
 /// The accessibility bus's name on the session bus.
@@ -911,6 +1103,24 @@ mod tests {
             Some(Some("")),
             "said, and empty, so an outer session's is not inherited"
         );
+    }
+
+    #[test]
+    fn a_bus_is_kept_in_a_folder_the_person_alone_may_enter() {
+        let scratch = Scratch::new("bus-folder");
+        let made = scratch.0.join("made");
+        make_own_folder(&made).expect("a new folder");
+        assert_eq!(mode(&made), 0o700);
+        make_own_folder(&made).expect("one of ours, left by a session killed");
+
+        let open = scratch.0.join("open");
+        fs::create_dir(&open).expect("a folder");
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).expect("its mode");
+        assert!(make_own_folder(&open).is_err(), "one others may enter");
+
+        let link = scratch.0.join("link");
+        std::os::unix::fs::symlink(&made, &link).expect("a link");
+        assert!(make_own_folder(&link).is_err(), "a link, to anywhere");
     }
 
     #[test]
