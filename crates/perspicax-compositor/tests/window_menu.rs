@@ -9,6 +9,13 @@
 //! the taskbar's protocol; and where each monitor has workspaces of its
 //! own, a window stays on its monitor, whichever is named.
 //!
+//! The shell is told, of each window it holds a taskbar's handle on, what it
+//! is made, what can be made of it and the workspace it is on, by its
+//! pager's handle: once it holds the handles, whichever it bound first, and
+//! again as any of it changes, whatever changed it, and only then. A tab
+//! behind another is told its group's. A shell bound at version 4 is told
+//! none of it, and none is told while the session is locked.
+//!
 //! Each request is carried out as it is read, and the facts are published
 //! before the next is, so a roundtrip after one is as far as there is to
 //! wait to see that it did nothing.
@@ -18,14 +25,16 @@
 
 mod common;
 
-use common::{Desk, Session, until};
+use common::{Desk, Session, WindowTold, until};
 use perspicax_compositor::{Backend, Command, Virtual};
 use perspicax_index::{HostFacts, SurfaceFacts};
 use perspicax_policy::{
     Access, Action, Direction, Grid, Mode, Place, Program, Protocol, Rule, Shape, Side,
 };
-use perspicax_protocols::shell::v1::client::perspicax_shell_v1::PerspicaxShellV1;
-use wayland_client::{EventQueue, QueueHandle};
+use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{
+    PerspicaxShellV1, WindowCapabilities, WindowState,
+};
+use wayland_client::{EventQueue, QueueHandle, globals::GlobalList};
 use wayland_protocols::ext::workspace::v1::client::ext_workspace_handle_v1::ExtWorkspaceHandleV1;
 use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1;
 
@@ -77,14 +86,23 @@ fn one_monitor(columns: u16, rows: u16) -> Backend {
 }
 
 /// A shell, its taskbar and its pager, bound as perspicax-shell binds them.
-fn shell_on(name: &str, backend: Backend) -> (Session, Desk, EventQueue<Desk>, QueueHandle<Desk>) {
+fn shell_on(
+    name: &str,
+    backend: Backend,
+) -> (
+    Session,
+    Desk,
+    EventQueue<Desk>,
+    QueueHandle<Desk>,
+    GlobalList,
+) {
     let session = Session::start(name, backend);
     let (mut desk, mut queue, qh, globals) = session.client();
     desk.bind_shell(&globals, &qh);
     desk.bind_taskbar(&globals, &qh);
     desk.bind_pager(&globals, &qh);
     until(&mut queue, &mut desk, |desk| desk.pager_done > 0);
-    (session, desk, queue, qh)
+    (session, desk, queue, qh, globals)
 }
 
 /// Open a window of this title, its frame its own or (`framed`) ours, and
@@ -115,7 +133,7 @@ fn windows(
     backend: Backend,
     titles: &[&str],
 ) -> (Session, Desk, EventQueue<Desk>, QueueHandle<Desk>) {
-    let (session, mut desk, mut queue, qh) = shell_on(name, backend);
+    let (session, mut desk, mut queue, qh, _) = shell_on(name, backend);
     for title in titles {
         open(&session, &mut desk, &mut queue, &qh, title, false);
     }
@@ -249,7 +267,7 @@ fn the_shell_keeps_a_window_on_top_and_lets_it_go() {
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn the_shell_rolls_up_a_window_framed_here_and_not_one_that_draws_its_own_frame() {
-    let (session, mut desk, mut queue, qh) = shell_on("menu-shade", one_monitor(1, 1));
+    let (session, mut desk, mut queue, qh, _) = shell_on("menu-shade", one_monitor(1, 1));
     open(&session, &mut desk, &mut queue, &qh, "own", false);
     open(&session, &mut desk, &mut queue, &qh, "framed", true);
     let shell = shell(&desk);
@@ -393,4 +411,216 @@ fn nothing_is_done_while_the_session_is_locked_nor_for_a_shell_the_taskbar_or_pa
     );
 
     session.stop(((desk, queue), (locker, locker_queue)));
+}
+
+/// What the shell was last told of the window of this title, once it has
+/// been told and `ready` holds of it.
+fn told(
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    title: &str,
+    ready: impl Fn(&WindowTold) -> bool,
+) -> WindowTold {
+    until(queue, desk, |desk| {
+        desk.told_of(title).0.is_some_and(&ready)
+    });
+    desk.told_of(title).0.expect("told").clone()
+}
+
+/// The name of the workspace the shell was told a window is on.
+fn named<'a>(desk: &'a Desk, told: &WindowTold) -> Option<&'a str> {
+    told.workspace
+        .as_ref()
+        .and_then(|workspace| desk.workspace_named(workspace))
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_shell_is_told_of_each_window_once_it_holds_its_handles_whichever_it_bound_first() {
+    let (session, mut desk, mut queue, _qh) = windows("told-bound", one_monitor(2, 1), &["window"]);
+    let window = told(&mut desk, &mut queue, "window", |_| true);
+    assert_eq!(window.state, WindowState::empty());
+    assert_eq!(
+        window.capabilities,
+        WindowCapabilities::Workspace,
+        "its frame its own: nothing to roll up"
+    );
+    assert_eq!(named(&desk, &window), Some("1"));
+
+    // A shell coming later is told too, whichever of the three it binds
+    // last: perspicax-shell's own order, the channel, the pager, the
+    // taskbar; the pager last; and the channel last.
+    let orders = [
+        ["shell", "pager", "taskbar"],
+        ["shell", "taskbar", "pager"],
+        ["taskbar", "pager", "shell"],
+    ];
+    let mut late = Vec::new();
+    for order in orders {
+        let (mut other, mut other_queue, other_qh, other_globals) = session.client();
+        for global in order {
+            match global {
+                "shell" => other.bind_shell(&other_globals, &other_qh),
+                "pager" => other.bind_pager(&other_globals, &other_qh),
+                _ => other.bind_taskbar(&other_globals, &other_qh),
+            }
+            other_queue.roundtrip(&mut other).expect("bound");
+        }
+        let seen = told(&mut other, &mut other_queue, "window", |told| {
+            told.workspace.is_some()
+        });
+        assert_eq!(
+            (seen.state, seen.capabilities, named(&other, &seen)),
+            (window.state, window.capabilities, Some("1")),
+            "bound in the order {order:?}"
+        );
+        late.push((other, other_queue));
+    }
+
+    // Told again only of a change: one the facts carry, that it is not
+    // told, is none.
+    session.perform(Action::OpacityDown);
+    session.wait_for(|facts| surface(facts, "window").drawn_opacity.is_some());
+    carried_out(&session, &mut desk, &mut queue);
+    queue.roundtrip(&mut desk).expect("the compositor answers");
+    assert_eq!(desk.told_of("window").1, 1, "told once");
+
+    session.stop(((desk, queue), late));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn what_a_shell_is_told_of_a_window_follows_the_keys_and_the_window() {
+    let (session, mut desk, mut queue, qh, _) = shell_on("told-keys", one_monitor(2, 1));
+    open(&session, &mut desk, &mut queue, &qh, "framed", true);
+    let all = WindowCapabilities::Workspace | WindowCapabilities::Shade;
+    let first = told(&mut desk, &mut queue, "framed", |_| true);
+    assert_eq!(first.capabilities, all, "framed here: it rolls up");
+
+    session.perform(Action::ToggleSticky);
+    let sticky = told(&mut desk, &mut queue, "framed", |told| {
+        told.state.contains(WindowState::Sticky)
+    });
+    assert_eq!(sticky.workspace, None, "on every workspace, so on none");
+    session.perform(Action::ToggleOnTop);
+    told(&mut desk, &mut queue, "framed", |told| {
+        told.state == WindowState::Sticky | WindowState::OnTop
+    });
+    session.perform(Action::ToggleShade);
+    told(&mut desk, &mut queue, "framed", |told| {
+        told.state.contains(WindowState::Shaded)
+    });
+    session.perform(Action::ToggleSticky);
+    let back = told(&mut desk, &mut queue, "framed", |told| {
+        !told.state.contains(WindowState::Sticky)
+    });
+    assert_eq!(named(&desk, &back), Some("1"), "on the one showing");
+
+    // Fullscreen, it unrolls and cannot roll up.
+    handle(&desk, "framed").set_fullscreen(None);
+    queue.flush().expect("sent");
+    let full = told(&mut desk, &mut queue, "framed", |told| {
+        !told.capabilities.contains(WindowCapabilities::Shade)
+    });
+    assert!(!full.state.contains(WindowState::Shaded));
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_tab_behind_another_is_told_its_groups_state() {
+    let (session, mut desk, mut queue, _qh) =
+        windows("told-tabs", one_monitor(2, 1), &["first", "second"]);
+    session.perform(Action::TabWithPrevious);
+    session.wait_for(|facts| !surface(facts, "first").mapped);
+    session.perform(Action::ToggleSticky);
+    for title in ["first", "second"] {
+        told(&mut desk, &mut queue, title, |told| {
+            told.state.contains(WindowState::Sticky)
+        });
+    }
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_shell_bound_at_version_4_is_told_nothing_of_windows() {
+    let session = Session::start("told-v4", one_monitor(2, 1));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_shell_v4(&globals, &qh);
+    desk.bind_taskbar(&globals, &qh);
+    desk.bind_pager(&globals, &qh);
+    open(&session, &mut desk, &mut queue, &qh, "window", false);
+    session.perform(Action::ToggleSticky);
+    session.wait_for(|facts| surface(facts, "window").workspace.is_none());
+    carried_out(&session, &mut desk, &mut queue);
+    queue.roundtrip(&mut desk).expect("the compositor answers");
+    assert!(desk.windows_told.is_empty(), "{:?}", desk.windows_told);
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_shell_is_told_nothing_while_locked_and_what_changed_once_unlocked() {
+    // A person at the desk, so the window's own fullscreen is done while
+    // the taskbar's requests, like the shell's, wait for the lock to lift.
+    let (session, mut desk, mut queue, qh, _) =
+        shell_on("told-locked", one_monitor(2, 1).with_person());
+    open(&session, &mut desk, &mut queue, &qh, "framed", true);
+    told(&mut desk, &mut queue, "framed", |told| {
+        told.capabilities.contains(WindowCapabilities::Shade)
+    });
+
+    let (mut locker, mut locker_queue, locker_qh, locker_globals) = session.client();
+    locker.lock(&locker_globals, &locker_qh);
+    until(&mut locker_queue, &mut locker, |locker| locker.locked);
+    desk.windows[0].set_fullscreen(None);
+    queue.flush().expect("sent");
+    session.wait_for(|facts| surface(facts, "framed").frame.is_empty());
+    carried_out(&session, &mut desk, &mut queue);
+    queue.roundtrip(&mut desk).expect("the compositor answers");
+    assert_eq!(desk.told_of("framed").1, 1, "nothing while locked");
+
+    locker.unlock();
+    locker_queue.flush().expect("sent");
+    told(&mut desk, &mut queue, "framed", |told| {
+        !told.capabilities.contains(WindowCapabilities::Shade)
+    });
+
+    session.stop(((desk, queue), (locker, locker_queue)));
+}
+
+/// A workspace is named by the pager's handle on it: with the pager taken
+/// back there is none to name, and bound again, the new one is named.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_is_told_on_no_workspace_while_the_pager_is_taken_back() {
+    let (session, mut desk, mut queue, qh, globals) = shell_on("told-pager", one_monitor(2, 1));
+    open(&session, &mut desk, &mut queue, &qh, "window", false);
+    let first = told(&mut desk, &mut queue, "window", |told| {
+        told.workspace.is_some()
+    });
+
+    session.command(Command::Protocols(Access::open().with(
+        Protocol::Workspace,
+        Rule::Only(vec![Program::parse("waybar")]),
+    )));
+    until(&mut queue, &mut desk, |desk| desk.pager_finished);
+    told(&mut desk, &mut queue, "window", |told| {
+        told.workspace.is_none()
+    });
+
+    session.command(Command::Protocols(Access::open()));
+    queue.roundtrip(&mut desk).expect("the compositor answers");
+    desk.bind_pager(&globals, &qh);
+    let again = told(&mut desk, &mut queue, "window", |told| {
+        told.workspace.is_some()
+    });
+    assert_ne!(again.workspace, first.workspace, "the new pager's handle");
+    assert_eq!(named(&desk, &again), Some("1"));
+
+    session.stop((desk, queue));
 }

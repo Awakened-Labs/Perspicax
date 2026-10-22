@@ -180,6 +180,51 @@
 
     <!-- Version 5: a window's menu. -->
 
+    <enum name="window_state" bitfield="true" since="5">
+      <description summary="what a window is made">
+        What the person made of a window, by a key, a titlebar button or
+        its menu, beyond what the taskbar's own protocol tells. A bit a
+        later version adds is sent only to a shell bound at that version.
+      </description>
+      <entry name="sticky" value="1" summary="on every workspace"/>
+      <entry name="on_top" value="2" summary="kept in front of the other windows"/>
+      <entry name="shaded" value="4" summary="rolled up to its titlebar"/>
+    </enum>
+
+    <enum name="window_capabilities" bitfield="true" since="5">
+      <description summary="what can be made of a window">
+        Which of the requests below can act on a window, so that a menu
+        need not offer what would do nothing.
+      </description>
+      <entry name="workspace" value="1"
+             summary="it has a workspace of its own: set_sticky and send_to_workspace act"/>
+      <entry name="shade" value="2"
+             summary="its frame is the compositor's and it is not fullscreen: set_shaded acts"/>
+    </enum>
+
+    <event name="toplevel_state" since="5">
+      <description summary="what a window is made, and where it is">
+        Sent for each window this client holds a handle on, from
+        zwlr_foreign_toplevel_manager_v1, once that handle has had its
+        first done; and again whenever any of it changes, at most once a
+        turn of the compositor's loop, so that a menu opened shows the
+        window as it is. A tab behind another is told its group's, as the
+        tab in front holds it. Nothing is sent while the session is locked,
+        and what changed meanwhile is told once it is unlocked.
+
+        The workspace is this client's handle on it, from
+        ext_workspace_manager_v1: null for a sticky window, for one with no
+        workspace of its own, and while this client holds no handle on it.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"
+           summary="the window"/>
+      <arg name="state" type="uint" enum="window_state" summary="what it is made"/>
+      <arg name="capabilities" type="uint" enum="window_capabilities"
+           summary="what can be made of it"/>
+      <arg name="workspace" type="object" interface="ext_workspace_handle_v1"
+           allow-null="true" summary="the workspace it is on"/>
+    </event>
+
     <request name="set_sticky" since="5">
       <description summary="put a window on every workspace, or on one">
         The person chose Sticky in a window's menu. The compositor puts the

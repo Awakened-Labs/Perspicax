@@ -179,11 +179,34 @@ impl Compositor {
             return None;
         }
         let named = workspace.data::<Named>()?;
-        let group = match self.workspaces.shape().mode {
-            Mode::Spanning => SPANNING.to_owned(),
-            Mode::PerOutput => self.monitor_of(window)?,
-        };
-        (named.group == group).then_some(named.cell)
+        (named.group == self.group_of(window)?).then_some(named.cell)
+    }
+
+    /// The handle `client`'s pager holds on workspace `cell` of `window`'s
+    /// group, if it holds one.
+    pub(crate) fn workspace_held_by(
+        &self,
+        client: &Client,
+        window: &Framed,
+        cell: Cell,
+    ) -> Option<ExtWorkspaceHandleV1> {
+        let group = self.group_of(window)?;
+        self.pager
+            .managers
+            .iter()
+            .filter(|manager| manager.manager.client().as_ref() == Some(client))
+            .flat_map(|manager| &manager.workspaces)
+            .find(|(held_group, held_cell, _)| *held_group == group && *held_cell == cell)
+            .map(|(_, _, handle)| handle.clone())
+    }
+
+    /// The group of workspaces `window` is among, by its name: the one
+    /// spanning every monitor, or its monitor's own.
+    fn group_of(&self, window: &Framed) -> Option<String> {
+        match self.workspaces.shape().mode {
+            Mode::Spanning => Some(SPANNING.to_owned()),
+            Mode::PerOutput => self.monitor_of(window),
+        }
     }
 
     /// The grid as a pager sees it, over the monitors there are.
@@ -374,6 +397,8 @@ impl GlobalDispatch<ExtWorkspaceManagerV1, Filtered> for Compositor {
         let outputs: Vec<Output> = state.space.outputs().cloned().collect();
         send(display, &mut manager, &[], &state.pager.sent, &outputs);
         state.pager.managers.push(manager);
+        // A shell names a window's workspace by its pager's handle on it.
+        state.shells.windows_changed();
     }
 
     fn can_view(client: Client, global: &Filtered) -> bool {

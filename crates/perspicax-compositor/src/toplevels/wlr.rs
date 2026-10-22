@@ -235,6 +235,8 @@ impl GlobalDispatch<ZwlrForeignToplevelManagerV1, Filtered> for Compositor {
             }
         }
         toplevels.managers.push(manager);
+        // A shell is told of the windows it holds these handles on.
+        state.shells.windows_changed();
     }
 
     fn can_view(client: Client, global: &Filtered) -> bool {

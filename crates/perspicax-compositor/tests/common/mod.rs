@@ -629,6 +629,17 @@ pub enum Told {
     Reconfigure,
 }
 
+/// What the shell channel told of one window, from version 5.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowTold {
+    /// The handle the taskbar holds on it.
+    pub toplevel: ObjectId,
+    pub state: perspicax_shell_v1::WindowState,
+    pub capabilities: perspicax_shell_v1::WindowCapabilities,
+    /// The handle the pager holds on its workspace.
+    pub workspace: Option<ObjectId>,
+}
+
 /// What the compositor said to one of the client's surfaces, in the order
 /// it said it: which monitor it is on, when it may draw again, how to look,
 /// and, to a layer, that it is done.
@@ -876,6 +887,8 @@ pub struct Desk {
     pub configured: Option<&'static str>,
     pub shell: Option<PerspicaxShellV1>,
     pub told: Vec<Told>,
+    /// What the shell channel told of the windows, in the order it told it.
+    pub windows_told: Vec<WindowTold>,
     pub shell_finished: bool,
     /// The keyboard's layouts as the shell channel last listed them, each
     /// its name and short label, and the one in use.
@@ -984,6 +997,7 @@ impl Desk {
             configured: None,
             shell: None,
             told: Vec::new(),
+            windows_told: Vec::new(),
             shell_finished: false,
             layouts: Vec::new(),
             listing: Vec::new(),
@@ -1617,6 +1631,29 @@ impl Desk {
         titles
     }
 
+    /// What the shell channel last told of the window the taskbar knows by
+    /// this title, and how many times it told of it.
+    pub fn told_of(&self, title: &str) -> (Option<&WindowTold>, usize) {
+        let Some(task) = self.task(title) else {
+            return (None, 0);
+        };
+        let id = task.handle.id();
+        let told: Vec<&WindowTold> = self
+            .windows_told
+            .iter()
+            .filter(|told| told.toplevel == id)
+            .collect();
+        (told.last().copied(), told.len())
+    }
+
+    /// The name of the workspace whose pager handle this is.
+    pub fn workspace_named(&self, handle: &ObjectId) -> Option<&str> {
+        self.paged
+            .iter()
+            .find(|paged| paged.handle.id() == *handle)
+            .map(|paged| paged.name.as_str())
+    }
+
     /// Click a window in the taskbar.
     pub fn activate(&self, title: &str) {
         let seat = self.seat.as_ref().expect("bind_taskbar first");
@@ -2236,6 +2273,26 @@ impl Dispatch<PerspicaxShellV1, ()> for Desk {
                 desk.told.push(Told::Volume(key));
             }
             Event::Reconfigure => desk.told.push(Told::Reconfigure),
+            Event::ToplevelState {
+                toplevel,
+                state,
+                capabilities,
+                workspace,
+            } => {
+                use perspicax_shell_v1::{WindowCapabilities, WindowState};
+                desk.windows_told.push(WindowTold {
+                    toplevel: toplevel.id(),
+                    state: match state {
+                        WEnum::Value(state) => state,
+                        WEnum::Unknown(bits) => WindowState::from_bits_truncate(bits),
+                    },
+                    capabilities: match capabilities {
+                        WEnum::Value(capabilities) => capabilities,
+                        WEnum::Unknown(bits) => WindowCapabilities::from_bits_truncate(bits),
+                    },
+                    workspace: workspace.map(|workspace| workspace.id()),
+                });
+            }
             Event::Finished => desk.shell_finished = true,
             Event::Layout { name, short, .. } => {
                 desk.layout_events += 1;

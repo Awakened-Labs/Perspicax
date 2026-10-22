@@ -24,6 +24,16 @@
 //! that is so already is left alone; each goes through what the person's
 //! key would, on the tab in front for a tab behind it.
 //!
+//! And a shell of version 5 is told, of each window it holds a taskbar's
+//! handle on, what the person made of it (sticky, on top, rolled up), what
+//! can be made of it, and its workspace by the shell's pager's handle, as
+//! that changes: so a menu shows the window as it is. Like the layouts it is
+//! a difference from what each shell was last told, worked out once a turn
+//! of the loop, but only after something it depends on may have changed: a
+//! publication of the facts, which follows every change to a window, or a
+//! shell, taskbar or pager bound, or the rules changed. What a shell was told
+//! is kept with its binding, and goes with it.
+//!
 //! When a save changes the config's `[shell]` table, every shell is told to
 //! read it again, and applies it in place.
 //!
@@ -41,11 +51,17 @@
 //! request from a client no longer admitted, or made while locked, is
 //! ignored.
 
+use std::{
+    collections::BTreeMap,
+    sync::{Mutex, PoisonError},
+};
+
 use perspicax_node::SurfaceId;
-use perspicax_policy::{Protocol, VolumeKey};
+use perspicax_policy::{Home, Protocol, VolumeKey};
 use perspicax_protocols::shell::v1::server::perspicax_shell_v1::{self, PerspicaxShellV1};
 use smithay::{
     reexports::{
+        wayland_protocols::ext::workspace::v1::server::ext_workspace_handle_v1::ExtWorkspaceHandleV1,
         wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
         wayland_server::{
             Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
@@ -59,6 +75,7 @@ use crate::{
     Keymap,
     access::{Filtered, Gate},
     framed::Framed,
+    shell::{Fill, id_of, is_on_top, is_shaded},
     state::Compositor,
 };
 
@@ -78,6 +95,25 @@ pub(crate) struct Shells {
     /// The keymap and the layout in use, as the shells were last told them.
     /// `None`: tell them everything.
     told: Option<(Keymap, u32)>,
+    /// Something the shells are told of the windows may have changed since
+    /// they were: work out what did at the next turn of the loop.
+    stale: bool,
+}
+
+/// What one shell was last told of each window, by the window's id: kept
+/// with its binding, so it goes with it.
+#[derive(Default)]
+pub(crate) struct WindowsTold(Mutex<BTreeMap<SurfaceId, Standing>>);
+
+/// What a shell is told of a window: by the handle the shell holds on it,
+/// what the person made of it, what can be made of it, and the handle the
+/// shell holds on its workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Standing {
+    toplevel: ZwlrForeignToplevelHandleV1,
+    state: perspicax_shell_v1::WindowState,
+    capabilities: perspicax_shell_v1::WindowCapabilities,
+    workspace: Option<ExtWorkspaceHandleV1>,
 }
 
 impl Shells {
@@ -91,6 +127,12 @@ impl Shells {
             },
         );
         Self::default()
+    }
+
+    /// Something the shells are told of the windows may have changed: a
+    /// window, the handles a taskbar or a pager holds, the rules.
+    pub(crate) fn windows_changed(&mut self) {
+        self.stale = true;
     }
 }
 
@@ -214,6 +256,86 @@ impl Compositor {
         self.shells.told = Some((self.keymap.clone(), active));
     }
 
+    /// Tell every shell of version 5 what changed, of the windows it holds a
+    /// taskbar's handle on, since it was last told: what each is made, what
+    /// can be made of it and the workspace it is on. Called each turn of the
+    /// loop, and does anything only once [`Shells::windows_changed`] said
+    /// something may have; nothing while the session is locked, and what
+    /// changed meanwhile is told once it is unlocked.
+    pub(crate) fn announce_windows(&mut self) {
+        if !self.shells.stale || self.lock.is_some() {
+            return;
+        }
+        self.shells.stale = false;
+        for shell in &self.shells.bound {
+            if shell.version() < perspicax_shell_v1::EVT_TOPLEVEL_STATE_SINCE {
+                continue;
+            }
+            let (Ok(client), Some(told)) = (
+                self.display.get_client(shell.id()),
+                shell.data::<WindowsTold>(),
+            ) else {
+                continue;
+            };
+            // Only objects of the shell's own: wayland-backend refuses, by
+            // a panic, to send another client's.
+            let now: BTreeMap<SurfaceId, Standing> = self
+                .toplevels
+                .handles_of(&client)
+                .into_iter()
+                .filter_map(|(id, toplevel)| {
+                    let window = self.any_window(id)?;
+                    Some((id, self.standing(&client, toplevel, &window)))
+                })
+                .collect();
+            let mut told = told.0.lock().unwrap_or_else(PoisonError::into_inner);
+            for (id, standing) in &now {
+                if told.get(id) != Some(standing) {
+                    shell.toplevel_state(
+                        &standing.toplevel,
+                        standing.state,
+                        standing.capabilities,
+                        standing.workspace.as_ref(),
+                    );
+                }
+            }
+            *told = now;
+        }
+    }
+
+    /// What `client`, holding the handle `toplevel` on `window`, is told of
+    /// it: its group's, as the tab in front holds it.
+    fn standing(
+        &self,
+        client: &Client,
+        toplevel: ZwlrForeignToplevelHandleV1,
+        window: &Framed,
+    ) -> Standing {
+        use perspicax_shell_v1::{WindowCapabilities, WindowState};
+        let front = self.front_of(window);
+        let home = id_of(&front).and_then(|id| self.workspaces.home(id));
+        let mut state = WindowState::empty();
+        state.set(WindowState::Sticky, home == Some(Home::Sticky));
+        state.set(WindowState::OnTop, is_on_top(&front));
+        state.set(WindowState::Shaded, is_shaded(&front));
+        let mut capabilities = WindowCapabilities::empty();
+        capabilities.set(WindowCapabilities::Workspace, home.is_some());
+        capabilities.set(
+            WindowCapabilities::Shade,
+            Self::is_server_decorated(&front) && Self::filling(&front) != Some(Fill::Fullscreen),
+        );
+        let workspace = match home {
+            Some(Home::On(cell)) => self.workspace_held_by(client, &front, cell),
+            _ => None,
+        };
+        Standing {
+            toplevel,
+            state,
+            capabilities,
+            workspace,
+        }
+    }
+
     /// Whether process `pid` holds the channel, and so hears a
     /// `reconfigure`.
     #[cfg_attr(not(feature = "seat"), expect(dead_code, reason = "the seat's"))]
@@ -272,11 +394,13 @@ impl GlobalDispatch<PerspicaxShellV1, Filtered> for Compositor {
         _global: &Filtered,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        let shell = data_init.init(resource, ());
+        let shell = data_init.init(resource, WindowsTold::default());
         state.shells.bound.push(shell);
         // Every shell is told the layouts again, the new one among them: a
         // list replaces the one before, and a shell binds seldom.
         state.shells.told = None;
+        // And the new one the windows it already holds handles on.
+        state.shells.windows_changed();
     }
 
     fn can_view(client: Client, global: &Filtered) -> bool {
@@ -284,13 +408,13 @@ impl GlobalDispatch<PerspicaxShellV1, Filtered> for Compositor {
     }
 }
 
-impl Dispatch<PerspicaxShellV1, ()> for Compositor {
+impl Dispatch<PerspicaxShellV1, WindowsTold> for Compositor {
     fn request(
         state: &mut Self,
         client: &Client,
         _shell: &PerspicaxShellV1,
         request: perspicax_shell_v1::Request,
-        _data: &(),
+        _data: &WindowsTold,
         _display: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
@@ -338,7 +462,12 @@ impl Dispatch<PerspicaxShellV1, ()> for Compositor {
         }
     }
 
-    fn destroyed(state: &mut Self, _client: ClientId, shell: &PerspicaxShellV1, _data: &()) {
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        shell: &PerspicaxShellV1,
+        _data: &WindowsTold,
+    ) {
         state.shells.bound.retain(|held| held != shell);
     }
 }
