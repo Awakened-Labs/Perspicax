@@ -22,7 +22,7 @@
 //! when it binds it ([`Compositor::enter_workspaces`]). That is so even while
 //! the session is locked: it is only what the pager was told before.
 
-use perspicax_policy::{Cell, GroupView, Protocol};
+use perspicax_policy::{Cell, GroupView, Mode, Protocol};
 use smithay::{
     output::Output,
     reexports::{
@@ -40,6 +40,7 @@ use smithay::{
 
 use crate::{
     access::{Filtered, Gate},
+    framed::Framed,
     state::Compositor,
 };
 
@@ -162,6 +163,27 @@ impl Compositor {
             }
             admitted
         });
+    }
+
+    /// The workspace a client's handle names, for `window` to be sent to:
+    /// its cell, while the client is admitted to the pager's protocol, if
+    /// it is of the group `window` is in. Per output that is its monitor's,
+    /// so a window is sent among its monitor's workspaces and stays there.
+    pub(crate) fn cell_for(
+        &self,
+        client: &Client,
+        workspace: &ExtWorkspaceHandleV1,
+        window: &Framed,
+    ) -> Option<Cell> {
+        if !self.gate.admits(Protocol::Workspace, client) {
+            return None;
+        }
+        let named = workspace.data::<Named>()?;
+        let group = match self.workspaces.shape().mode {
+            Mode::Spanning => SPANNING.to_owned(),
+            Mode::PerOutput => self.monitor_of(window)?,
+        };
+        (named.group == group).then_some(named.cell)
     }
 
     /// The grid as a pager sees it, over the monitors there are.

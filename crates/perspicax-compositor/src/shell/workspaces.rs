@@ -306,6 +306,17 @@ impl Compositor {
         }
     }
 
+    /// Move `window` onto workspace `to`, leaving the person where they are:
+    /// a window menu's choice. A sticky window is on that one alone from
+    /// then on. Nothing for the workspace it is on already.
+    pub(crate) fn send_window_to(&mut self, window: &Framed, to: Cell) {
+        if let Some(id) = id_of(window)
+            && self.workspaces.send_to(id, to).is_some()
+        {
+            self.workspace_changed();
+        }
+    }
+
     /// Put `window` on every workspace (`sticky`), or back on the one its
     /// monitor shows, if it is not so already: the focused window, by a key,
     /// or the one whose sticky button was pressed, which need not have the

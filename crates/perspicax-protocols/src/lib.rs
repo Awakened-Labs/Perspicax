@@ -7,9 +7,12 @@
 //!   `perspicax-shell`: that the person asked for a menu, that the config
 //!   changed, that the session should end, from version 2 the keyboard's
 //!   layouts and which is in use, from version 3 that the person asked for
-//!   a pie, and from version 4 a volume key. The shell's surfaces, taskbar
-//!   and pager all speak standard protocols, so any piece of it can be
-//!   replaced by a program that knows nothing of this one.
+//!   a pie, from version 4 a volume key, and from version 5 what the person
+//!   chose in a window's menu: sticky, on top, rolled up, sent to a
+//!   workspace. The shell's surfaces, taskbar and pager all speak standard
+//!   protocols, so any piece of it can be replaced by a program that knows
+//!   nothing of this one; a window's menu names the window and the
+//!   workspace by the handles those protocols gave it.
 //! - `perspicax-settings-v1` (see `protocols/perspicax-settings-v1.xml`),
 //!   to `perspicax-settings`: the next chord the person presses, as the
 //!   compositor reads it, for the app to bind.
@@ -22,9 +25,10 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// One protocol's two sides, generated from its XML at `$xml`, a path from
-/// this crate's root.
+/// this crate's root, naming the objects of the standard protocols at
+/// `$imports` as `wayland-protocols-wlr` names `wayland-protocols`' own.
 macro_rules! generated {
-    ($xml:tt) => {
+    ($xml:tt, [$($imports:path),*]) => {
         #[cfg(feature = "client")]
         pub use self::generated::client;
         #[cfg(feature = "server")]
@@ -64,9 +68,11 @@ macro_rules! generated {
                 //! The program's side.
                 use wayland_client;
                 use wayland_client::protocol::*;
+                $(use $imports::{client::*};)*
 
                 pub mod __interfaces {
                     use wayland_client::protocol::__interfaces::*;
+                    $(use $imports::{client::__interfaces::*};)*
                     wayland_scanner::generate_interfaces!($xml);
                 }
                 use self::__interfaces::*;
@@ -79,9 +85,11 @@ macro_rules! generated {
                 //! The compositor's side.
                 use wayland_server;
                 use wayland_server::protocol::*;
+                $(use $imports::{server::*};)*
 
                 pub mod __interfaces {
                     use wayland_server::protocol::__interfaces::*;
+                    $(use $imports::{server::__interfaces::*};)*
                     wayland_scanner::generate_interfaces!($xml);
                 }
                 use self::__interfaces::*;
@@ -93,11 +101,18 @@ macro_rules! generated {
 }
 
 /// `perspicax-shell-v1`: menus and pies asked for, a config changed, a
-/// session ended, the keyboard's layouts, the volume keys.
+/// session ended, the keyboard's layouts, the volume keys, a window made
+/// sticky, kept on top, rolled up or sent to a workspace.
 pub mod shell {
-    /// `perspicax_shell_v1`, whose interface is at version 4.
+    /// `perspicax_shell_v1`, whose interface is at version 5.
     pub mod v1 {
-        generated!("protocols/perspicax-shell-v1.xml");
+        generated!(
+            "protocols/perspicax-shell-v1.xml",
+            [
+                wayland_protocols::ext::workspace::v1,
+                wayland_protocols_wlr::foreign_toplevel::v1
+            ]
+        );
     }
 }
 
@@ -107,6 +122,6 @@ pub mod settings {
     /// `perspicax_settings_v1` and `perspicax_chord_capture_v1`, at
     /// version 1.
     pub mod v1 {
-        generated!("protocols/perspicax-settings-v1.xml");
+        generated!("protocols/perspicax-settings-v1.xml", []);
     }
 }

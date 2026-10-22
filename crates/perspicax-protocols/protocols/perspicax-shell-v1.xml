@@ -20,13 +20,16 @@
     What passes between perspicax and perspicax-shell that no standard
     protocol carries: the person asked for a menu or a pie, or pressed a
     volume key, the config changed, the session should end, the keyboard's
-    layouts and which is in use.
+    layouts and which is in use, and what the person chose in a window's
+    menu.
 
     Everything else the shell does, it does as any other client would.
     Its wallpaper, panel and menus are layer-shell surfaces, its taskbar
     speaks wlr-foreign-toplevel-management and its pager ext-workspace.
     That keeps this protocol small, and every piece of the shell
-    replaceable by a program that speaks only the standard ones.
+    replaceable by a program that speaks only the standard ones. A
+    window's menu names the window and the workspace by the handles those
+    two gave it, so this protocol has no names of its own for either.
 
     The global is privileged: the compositor offers it only to the
     programs its [protocols] shell rule admits, and withdraws it, with
@@ -34,7 +37,7 @@
     is locked the compositor sends nothing and ignores every request.
   </description>
 
-  <interface name="perspicax_shell_v1" version="4">
+  <interface name="perspicax_shell_v1" version="5">
     <description summary="a shell's binding to the compositor">
       Bound once by a shell. Several shells may bind it; each is told the
       same things.
@@ -174,5 +177,70 @@
       </description>
       <arg name="key" type="uint" enum="volume_key" summary="what to change"/>
     </event>
+
+    <!-- Version 5: a window's menu. -->
+
+    <request name="set_sticky" since="5">
+      <description summary="put a window on every workspace, or on one">
+        The person chose Sticky in a window's menu. The compositor puts the
+        window on every workspace, or, with sticky 0, back on the one its
+        monitor shows, as the toggle-sticky binding does.
+
+        The window is named by the handle this client holds on it, from
+        zwlr_foreign_toplevel_manager_v1. A tab behind another is in its
+        group's place: what is asked of it is done to the tab in front. A
+        window that is so already, one with no workspace of its own, a
+        handle the compositor has closed, and a client no longer admitted
+        to foreign-toplevel-management are each ignored, as every request
+        is while the session is locked.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"
+           summary="the window"/>
+      <arg name="sticky" type="uint" summary="1 for every workspace, 0 for one"/>
+    </request>
+
+    <request name="set_on_top" since="5">
+      <description summary="keep a window in front of the others, or not">
+        The person chose Always on top in a window's menu. The compositor
+        keeps the window in front of the other windows, or, with on_top 0,
+        lets it go back among them, as the toggle-on-top binding does, and
+        raises it either way. Ignored as set_sticky is.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"
+           summary="the window"/>
+      <arg name="on_top" type="uint" summary="1 to keep it in front, 0 to let it go"/>
+    </request>
+
+    <request name="set_shaded" since="5">
+      <description summary="roll a window up to its titlebar, or down">
+        The person chose Shade in a window's menu. The compositor rolls the
+        window up to its titlebar, or, with shaded 0, back down, drawn
+        rolling as the toggle-shade binding draws it. Only a window whose
+        frame the compositor draws, and that is not fullscreen, rolls up.
+        Ignored as set_sticky is.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"
+           summary="the window"/>
+      <arg name="shaded" type="uint" summary="1 to roll it up, 0 to roll it down"/>
+    </request>
+
+    <request name="send_to_workspace" since="5">
+      <description summary="move a window to a workspace, and stay">
+        The person chose a workspace in a window's menu. The compositor
+        moves the window there and leaves the view where it is, as the
+        send-to-workspace binding does; a sticky window is on that one
+        alone from then on.
+
+        The workspace is named by the handle this client holds on it, from
+        ext_workspace_manager_v1. When each monitor has workspaces of its
+        own, a workspace of another monitor's is ignored: the window stays
+        on its monitor. Otherwise ignored as set_sticky is, and so is the
+        workspace the window is on already.
+      </description>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"
+           summary="the window"/>
+      <arg name="workspace" type="object" interface="ext_workspace_handle_v1"
+           summary="where it goes"/>
+    </request>
   </interface>
 </protocol>

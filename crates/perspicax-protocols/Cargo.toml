@@ -29,12 +29,27 @@ wayland-server = { version = "0.31", optional = true }
 # What the scanner writes a bitfield enum with, as `wayland-protocols` has
 # it: `perspicax-settings-v1`'s modifiers. Already in the tree. MIT or Apache-2.0.
 bitflags = "2"
+# The standard protocols whose objects `perspicax-shell-v1` names: the
+# taskbar's handle on a window (wlr-foreign-toplevel-management) and the
+# pager's on a workspace (ext-workspace, in staging). The versions smithay
+# re-exports and the shell binds, so a handle is the same type on either
+# side. MIT.
+wayland-protocols = { workspace = true, features = ["staging"] }
+wayland-protocols-wlr = { workspace = true }
 
 [features]
 # The compositor's side.
-server = ["dep:wayland-server"]
+server = [
+    "dep:wayland-server",
+    "wayland-protocols/server",
+    "wayland-protocols-wlr/server",
+]
 # The shell's side.
-client = ["dep:wayland-client"]
+client = [
+    "dep:wayland-client",
+    "wayland-protocols/client",
+    "wayland-protocols-wlr/client",
+]
 
 [package.metadata.docs.rs]
 all-features = true

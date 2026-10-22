@@ -16,6 +16,14 @@
 //! shell, which holds the sound server's ear: perspicax has no volume of
 //! its own. A shell bound earlier is not told, as for a pie.
 //!
+//! From version 5 the shell may make a window sticky, keep it on top, roll
+//! it up or send it to a workspace: what the person chose in its menu. It
+//! names the window by the handle its taskbar holds, and the workspace by
+//! its pager's, so each names one only while the shell is still admitted to
+//! that protocol too. A request says what the window is to be, and a window
+//! that is so already is left alone; each goes through what the person's
+//! key would, on the tab in front for a tab behind it.
+//!
 //! When a save changes the config's `[shell]` table, every shell is told to
 //! read it again, and applies it in place.
 //!
@@ -33,11 +41,16 @@
 //! request from a client no longer admitted, or made while locked, is
 //! ignored.
 
+use perspicax_node::SurfaceId;
 use perspicax_policy::{Protocol, VolumeKey};
 use perspicax_protocols::shell::v1::server::perspicax_shell_v1::{self, PerspicaxShellV1};
 use smithay::{
-    reexports::wayland_server::{
-        Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, backend::ClientId,
+    reexports::{
+        wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+        wayland_server::{
+            Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
+            backend::ClientId,
+        },
     },
     utils::Point,
 };
@@ -45,6 +58,7 @@ use smithay::{
 use crate::{
     Keymap,
     access::{Filtered, Gate},
+    framed::Framed,
     state::Compositor,
 };
 
@@ -70,7 +84,7 @@ impl Shells {
     /// Advertise the global, filtered by `gate`.
     pub(crate) fn new(display: &DisplayHandle, gate: &Gate) -> Self {
         display.create_global::<Compositor, PerspicaxShellV1, _>(
-            4,
+            5,
             Filtered {
                 gate: gate.clone(),
                 protocol: Protocol::Shell,
@@ -212,6 +226,24 @@ impl Compositor {
         })
     }
 
+    /// The window a client names by its handle on it from the taskbar's
+    /// protocol, while the client is admitted to that protocol: the tab in
+    /// front, for a tab behind it. None once the window has closed.
+    fn named_window(
+        &self,
+        client: &Client,
+        toplevel: &ZwlrForeignToplevelHandleV1,
+    ) -> Option<Framed> {
+        if !self
+            .gate
+            .admits(Protocol::ForeignToplevelManagement, client)
+        {
+            return None;
+        }
+        let window = self.any_window(*toplevel.data::<SurfaceId>()?)?;
+        Some(self.front_of(&window))
+    }
+
     /// Withdraw the channel from every shell the rules no longer admit.
     pub(crate) fn revoke_shell(&mut self) {
         let gate = self.gate.clone();
@@ -275,6 +307,31 @@ impl Dispatch<PerspicaxShellV1, ()> for Compositor {
             perspicax_shell_v1::Request::SetLayout { index } if may => {
                 if state.layouts().is_some_and(|(_, count)| index < count) {
                     state.lock_layout(index);
+                }
+            }
+            perspicax_shell_v1::Request::SetSticky { toplevel, sticky } if may => {
+                if let Some(window) = state.named_window(client, &toplevel) {
+                    state.set_sticky(&window, sticky != 0);
+                }
+            }
+            perspicax_shell_v1::Request::SetOnTop { toplevel, on_top } if may => {
+                if let Some(window) = state.named_window(client, &toplevel) {
+                    state.set_on_top(&window, on_top != 0);
+                }
+            }
+            perspicax_shell_v1::Request::SetShaded { toplevel, shaded } if may => {
+                if let Some(window) = state.named_window(client, &toplevel) {
+                    state.roll(&window, shaded != 0);
+                }
+            }
+            perspicax_shell_v1::Request::SendToWorkspace {
+                toplevel,
+                workspace,
+            } if may => {
+                if let Some(window) = state.named_window(client, &toplevel)
+                    && let Some(cell) = state.cell_for(client, &workspace, &window)
+                {
+                    state.send_window_to(&window, cell);
                 }
             }
             _ => {}
