@@ -61,6 +61,7 @@ use super::{
     App, Asked,
     canvas::{Canvas, whole},
     pager::Model,
+    tooltip::{Tip, Tips},
     watch,
 };
 #[cfg(feature = "menus")]
@@ -77,6 +78,7 @@ use crate::{
         tasks::{Tasks, Window},
     },
     paint::{self, Kit},
+    tooltip::{Effect, Event},
 };
 
 /// What every panel's namespace starts with, before its monitor's name.
@@ -140,6 +142,8 @@ pub(super) struct Panels {
     /// Where an assistive technology's press of something on a panel is
     /// sent.
     actions: Sender<Asked>,
+    /// The tooltip of what the pointer rests on.
+    tips: Tips,
 }
 
 /// One monitor's panel.
@@ -181,6 +185,7 @@ impl Panels {
         config: Option<&Path>,
         actions: Sender<Asked>,
         taskbar: Option<ZwlrForeignToplevelManagerV1>,
+        qh: QueueHandle<App>,
     ) -> Self {
         let clock = Clock::new(shell.panel.as_ref().map_or("%H:%M", |panel| &panel.clock));
         Self {
@@ -215,6 +220,7 @@ impl Panels {
             shown_at: None,
             stale: false,
             actions,
+            tips: Tips::new(qh),
         }
     }
 
@@ -288,6 +294,7 @@ impl Panels {
     ) {
         let Some(panel) = &self.panel else {
             self.each.clear();
+            self.tips.forget();
             return;
         };
         let monitors: Vec<_> = outputs
@@ -309,6 +316,13 @@ impl Panels {
             .map(str::to_owned)
             .collect();
         self.each.retain(|bar| wanted.contains(&bar.name));
+        if self
+            .tips
+            .on()
+            .is_some_and(|on| !wanted.iter().any(|name| name == on))
+        {
+            self.tips.forget();
+        }
         for (output, name, _, scale) in monitors {
             if wanted.contains(&name) && !self.each.iter().any(|bar| bar.name == name) {
                 let namespace = format!("{NAMESPACE}{name}");
@@ -370,6 +384,11 @@ impl Panels {
     }
 
     pub(super) fn closed(&mut self, layer: &LayerSurface) {
+        self.tips.closed(layer);
+        let gone = self.each.iter().find(|bar| bar.layer == *layer);
+        if gone.is_some_and(|bar| self.tips.on() == Some(bar.name.as_str())) {
+            self.tips.forget();
+        }
         self.each.retain(|bar| bar.layer != *layer);
     }
 
@@ -382,6 +401,9 @@ impl Panels {
         layer: &LayerSurface,
         configure: &LayerSurfaceConfigure,
     ) {
+        if self.tips.configure(canvas, kit, layer, configure) {
+            return;
+        }
         let Some(at) = self.each.iter().position(|bar| bar.layer == *layer) else {
             return;
         };
@@ -491,6 +513,71 @@ impl Panels {
             .iter()
             .find(|bar| bar.layer.wl_surface() == surface)?;
         Some((&bar.name, bar.placed.at(point)))
+    }
+
+    /// Whether `surface` is a panel's.
+    pub(super) fn owns(&self, surface: &wl_surface::WlSurface) -> bool {
+        self.each
+            .iter()
+            .any(|bar| bar.layer.wl_surface() == surface)
+    }
+
+    /// The monitor of the panel that is `surface`, and the part at `point`
+    /// with a tooltip, if any, if `surface` is a panel's.
+    pub(super) fn tip_at(
+        &self,
+        surface: &wl_surface::WlSurface,
+        point: (f64, f64),
+    ) -> Option<(String, Option<Part>)> {
+        let bar = self
+            .each
+            .iter()
+            .find(|bar| bar.layer.wl_surface() == surface)?;
+        let part = bar
+            .placed
+            .at(point)
+            .filter(|&part| bar.placed.tip(part).is_some());
+        Some((bar.name.clone(), part))
+    }
+
+    /// Pass `event` to the tooltips, and show the tip it calls for or take
+    /// it away. What it calls for, the waiting for the pointer to rest
+    /// among it, which is the caller's to do.
+    pub(super) fn tip(&mut self, canvas: &mut Canvas, kit: &mut Kit, event: Event) -> Vec<Effect> {
+        let effects = self.tips.send(event);
+        for effect in &effects {
+            match effect {
+                Effect::Show { bar, part } => self.show_tip(canvas, kit, bar, *part),
+                Effect::Hide => self.tips.hide(),
+                Effect::Wait | Effect::Stop => {}
+            }
+        }
+        effects
+    }
+
+    /// Show the tip of `part` of the bar of the monitor named `name`, off
+    /// that bar, as it was last drawn; if it is not there now, none.
+    fn show_tip(&mut self, canvas: &mut Canvas, kit: &mut Kit, name: &str, part: Part) {
+        let shown = self.panel.as_ref().and_then(|panel| {
+            let bar = self.each.iter().find(|bar| bar.name == name)?;
+            let (width, height) = bar.size?;
+            let (words, rect) = bar.placed.tip(part)?;
+            let size = (width as i32, height as i32);
+            let place =
+                crate::layout::tooltip::place(words, rect, size, panel.edge, &mut kit.fonts);
+            let tip = Tip {
+                words: words.to_owned(),
+                place,
+                edge: panel.edge,
+                height: size.1,
+                scale: bar.scale,
+            };
+            Some((bar, tip))
+        });
+        match shown {
+            Some((bar, tip)) => self.tips.show(canvas, kit, (&bar.name, &bar.output), tip),
+            None => self.tips.hide(),
+        }
     }
 
     /// The edge the panels are along, if there are panels.

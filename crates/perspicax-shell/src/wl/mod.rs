@@ -34,6 +34,8 @@ mod pie;
 mod seat;
 #[cfg(feature = "panel")]
 mod taskbar;
+#[cfg(feature = "panel")]
+mod tooltip;
 #[cfg(feature = "tray")]
 mod tray;
 mod watch;
@@ -167,9 +169,12 @@ pub(crate) fn run(
             config.as_deref(),
             actions.clone(),
             taskbar::bind(&globals, &qh),
+            qh.clone(),
         ),
         #[cfg(feature = "panel")]
         ticking: None,
+        #[cfg(feature = "panel")]
+        tip_waiting: None,
         #[cfg(feature = "tray")]
         tray: tray::Tray::new(bus, news),
         #[cfg(feature = "audio")]
@@ -266,6 +271,10 @@ pub(crate) struct App {
     /// The timer that moves the clock on.
     #[cfg(feature = "panel")]
     ticking: Option<calloop::RegistrationToken>,
+    /// The timer that ends the wait for the pointer to rest on a part of a
+    /// panel, to show its tooltip.
+    #[cfg(feature = "panel")]
+    tip_waiting: Option<calloop::RegistrationToken>,
     /// Other programs' status icons, from the session bus.
     #[cfg(feature = "tray")]
     tray: tray::Tray,
@@ -593,6 +602,8 @@ impl App {
         );
         #[cfg(feature = "tray")]
         self.menu_opened(self.menus.open_menu());
+        #[cfg(feature = "panel")]
+        self.tips_covered();
         for effect in effects {
             match effect {
                 Effect::Run(run) => self.start(&run),
@@ -619,6 +630,7 @@ impl App {
         let effects = self
             .pies
             .send(&mut self.canvas, &qh, &self.outputs, &mut self.kit, event);
+        self.tips_covered();
         for effect in effects {
             match effect {
                 crate::pie::Effect::Run(run) => self.start(&run),

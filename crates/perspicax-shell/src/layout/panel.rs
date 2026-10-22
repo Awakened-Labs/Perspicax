@@ -534,6 +534,19 @@ impl Placed {
             .or_else(mixer)
     }
 
+    /// What the tooltip of `part` says, and where `part` is, if it has one
+    /// and the panel shows it: a task's is its window's whole title.
+    pub(crate) fn tip(&self, part: Part) -> Option<(&str, Rect)> {
+        match part {
+            Part::Task(serial) => self
+                .tasks
+                .iter()
+                .find(|(task, _)| task.serial == serial)
+                .map(|(task, rect)| (task.title.as_str(), *rect)),
+            _ => None,
+        }
+    }
+
     /// Where the tray's icon of `key` is, if the panel shows it.
     #[cfg(feature = "tray")]
     pub(crate) fn tray_icon(&self, key: u64) -> Option<Rect> {
@@ -773,6 +786,25 @@ mod tests {
         );
         assert_eq!(placed.at((1300.0, 20.0)), None);
         assert_eq!(placed.item(Item::Start), Some(Rect::new(0, 0, 40, 40)));
+    }
+
+    #[test]
+    fn a_tasks_tip_is_its_whole_title_and_the_start_button_and_a_cell_have_none() {
+        let items = [Item::Start, Item::Taskbar, Item::Pager, Item::Clock];
+        let mut holding = holding(2, &[(0, 0)]);
+        holding.tasks[1].title = "A title far wider than its task, cut short there".to_owned();
+        let placed = lay_out(&items, holding, PANEL, FULL, &mut Monospace(8.0));
+        assert_eq!(
+            placed.tip(Part::Task(1)),
+            Some((
+                "A title far wider than its task, cut short there",
+                placed.tasks[1].1
+            ))
+        );
+        assert_eq!(placed.tip(Part::Task(7)), None, "a window not shown");
+        assert_eq!(placed.tip(Part::Start), None);
+        assert_eq!(placed.tip(Part::Workspace(100)), None);
+        assert_eq!(placed.tip(Part::Layout), None);
     }
 
     #[cfg(feature = "tray")]

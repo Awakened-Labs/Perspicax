@@ -351,7 +351,7 @@ fn menu(facts: &HostFacts) -> Option<(SurfaceId, String, Rect, Vec<Rect>)> {
             SurfaceKind::Layer {
                 layer: Layer::Overlay,
                 namespace,
-            } if surface.mapped => Some((
+            } if surface.mapped && namespace.starts_with("perspicax-menu-") => Some((
                 surface.id,
                 namespace.clone(),
                 surface.geometry,
@@ -1919,6 +1919,181 @@ fn a_taskbar_without_titles_gives_each_window_its_icon_and_a_save_brings_titles_
     until_colour(&session, face(PANEL_HEIGHT + 2.0 * TASK), FACE);
     let facts = session.wait_for(|facts| panels(facts).len() == 1);
     assert_eq!(panels(&facts)[0].1, panel, "redrawn in place");
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
+/// A panel's tooltip, if one is up and drawn on: its id, its namespace, and
+/// where it is.
+#[cfg(feature = "capture")]
+fn tooltip(facts: &HostFacts) -> Option<(SurfaceId, String, Rect)> {
+    facts
+        .surfaces()
+        .iter()
+        .find_map(|surface| match &surface.kind {
+            SurfaceKind::Layer {
+                layer: Layer::Overlay,
+                namespace,
+            } if surface.mapped && namespace.starts_with("perspicax-tooltip-") => {
+                Some((surface.id, namespace.clone(), surface.geometry))
+            }
+            _ => None,
+        })
+}
+
+/// A task showing its icon alone, and how tall a tooltip is and how far it
+/// stands off the bar.
+#[cfg(feature = "capture")]
+const ICON: f64 = 36.0;
+#[cfg(feature = "capture")]
+const TIP: f64 = 28.0;
+#[cfg(feature = "capture")]
+const TIP_GAP: f64 = 4.0;
+
+/// A session named `name` and the shell `shell` on it, the classic panel
+/// with `panel` written in its `[shell.panel]` and its tasks icons alone,
+/// listing two windows, "first" and "second", the second with the keyboard;
+/// and the client the windows are of. The panel has drawn them, as read
+/// `row` pixels down the monitor.
+#[cfg(feature = "capture")]
+fn two_icons(
+    (name, shell): (&str, &str),
+    panel: &str,
+    row: usize,
+) -> (Session, Shell, Desk, wayland_client::EventQueue<Desk>) {
+    let session = Session::start(name, Backend::headless((1280, 800)));
+    let config = format!("{CLASSIC}[shell.panel]\ntask-titles = false\n{panel}");
+    let shell = Shell::start(&session, shell, &config);
+    session.wait_for(|facts| panels(facts).len() == 1);
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.open_coloured(&qh, "first", "first", 0xffff_8000);
+    desk.open_coloured(&qh, "second", "second", 0xff00_80ff);
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.task("first").is_some() && activated(desk, "second")
+    });
+    until_colour(
+        &session,
+        ((PANEL_HEIGHT + 2.0 * ICON) as usize - 4, row),
+        LIT,
+    );
+    (session, shell, desk, queue)
+}
+
+/// The middle of `rect`, across.
+#[cfg(feature = "capture")]
+fn across(rect: Rect) -> f64 {
+    (rect.x0 + rect.x1) / 2.0
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn resting_on_a_task_shows_its_title_above_the_bar_and_moving_on_moves_it_at_once() {
+    use std::time::{Duration, Instant};
+
+    let (session, shell, desk, queue) = two_icons(("shell-tip", "tip"), "", 800 - 30);
+
+    // From the origin, where the pointer starts, to rest on the first task.
+    let first = PANEL_HEIGHT + ICON / 2.0;
+    let moved = Instant::now();
+    session.command(Command::Motion {
+        by: (first as i32, 780),
+    });
+    let facts = session.wait_for(|facts| tooltip(facts).is_some());
+    assert!(
+        moved.elapsed() >= Duration::from_millis(600),
+        "shown before the pointer rested: {:?}",
+        moved.elapsed()
+    );
+    let (tip, namespace, rect) = tooltip(&facts).expect("a tip");
+    assert_eq!(namespace, "perspicax-tooltip-HEADLESS-1");
+    let foot = 800.0 - PANEL_HEIGHT - TIP_GAP;
+    assert_eq!(
+        (rect.y0, rect.y1),
+        (foot - TIP, foot),
+        "standing off the bar"
+    );
+    assert!(
+        (across(rect) - first).abs() <= 1.0,
+        "over its task: {rect:?}"
+    );
+
+    // Onto the second: the same tip, moved there, never taken away to wait
+    // again.
+    session.command(Command::Motion {
+        by: (ICON as i32, 0),
+    });
+    let facts = session.wait_for(|facts| {
+        tooltip(facts).is_some_and(|(_, _, rect)| (across(rect) - (first + ICON)).abs() <= 1.0)
+    });
+    assert_eq!(tooltip(&facts).expect("a tip").0, tip, "the same surface");
+
+    // Off the bar, it goes.
+    session.command(Command::Motion { by: (0, -100) });
+    session.wait_for(|facts| tooltip(facts).is_none());
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_press_or_a_menu_takes_a_tooltip_away() {
+    use std::time::Duration;
+
+    use perspicax_policy::{Button, Mods};
+
+    let (session, shell, mut desk, mut queue) =
+        two_icons(("shell-tip-press", "tip-press"), "", 800 - 30);
+    let first = PANEL_HEIGHT + ICON / 2.0;
+    session.command(Command::Motion {
+        by: (first as i32, 780),
+    });
+    session.wait_for(|facts| tooltip(facts).is_some());
+
+    // A press on the task takes its tip away, and while the pointer rests
+    // there it stays away.
+    session.command(Command::Click {
+        at: (first as i32, 780),
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    common::until(&mut queue, &mut desk, |desk| activated(desk, "first"));
+    session.wait_for(|facts| tooltip(facts).is_none());
+    thread::sleep(Duration::from_secs(1));
+    assert!(
+        tooltip(&session.wait_for(|_| true)).is_none(),
+        "the task pressed shows none"
+    );
+
+    // The other's shows; the start menu opening takes it away.
+    session.command(Command::Motion {
+        by: (ICON as i32, 0),
+    });
+    session.wait_for(|facts| tooltip(facts).is_some());
+    session.perform(Action::StartMenu);
+    session.wait_for(|facts| menu(facts).is_some() && tooltip(facts).is_none());
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_top_panels_tooltip_hangs_below_it() {
+    let (session, shell, desk, queue) =
+        two_icons(("shell-tip-top", "tip-top"), "edge = \"top\"\n", 10);
+    session.command(Command::Motion {
+        by: ((PANEL_HEIGHT + ICON / 2.0) as i32, 20),
+    });
+    let facts = session.wait_for(|facts| tooltip(facts).is_some());
+    let (_, _, rect) = tooltip(&facts).expect("a tip");
+    let top = PANEL_HEIGHT + TIP_GAP;
+    assert_eq!((rect.y0, rect.y1), (top, top + TIP), "hanging off the bar");
 
     drop((desk, queue));
     shell.stop_with(session);

@@ -44,6 +44,8 @@ mod model;
 mod paint;
 #[cfg(feature = "pie")]
 mod pie;
+#[cfg(feature = "panel")]
+mod tooltip;
 #[cfg(feature = "tray")]
 mod tray;
 #[cfg(feature = "menus")]

@@ -419,6 +419,7 @@ impl App {
         if self.panels.mixer_open(open_on) {
             self.panels_changed();
         }
+        self.tips_covered();
         self.follow_meters();
         for effect in effects {
             match effect {

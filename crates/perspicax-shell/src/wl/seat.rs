@@ -339,6 +339,12 @@ impl PointerHandler for App {
                 PointerEventKind::Press { .. } if on_menus => self.menu_event(Event::Press(at)),
                 #[cfg(feature = "menus")]
                 PointerEventKind::Release { .. } if on_menus => self.menu_event(Event::Release(at)),
+                #[cfg(feature = "panel")]
+                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } if !on_menus => {
+                    self.panel_pointed(&event.surface, at);
+                }
+                #[cfg(feature = "panel")]
+                PointerEventKind::Leave { .. } if !on_menus => self.panel_left(&event.surface),
                 PointerEventKind::Press {
                     button: code, time, ..
                 } if !on_menus => {
@@ -367,6 +373,7 @@ impl App {
         #[cfg(feature = "panel")]
         if let Some((name, part)) = self.panels.at(surface, at) {
             let name = name.to_owned();
+            self.tip_event(crate::tooltip::Event::Press);
             self.panel_pressed(&name, part, button);
             return;
         }
