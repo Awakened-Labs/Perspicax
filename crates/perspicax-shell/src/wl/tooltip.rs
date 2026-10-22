@@ -29,6 +29,7 @@ use super::{App, canvas::Canvas, watch};
 use crate::{
     layout::{
         Rect,
+        panel::Part,
         tooltip::{TALL, margins},
     },
     paint::{self, Kit},
@@ -92,6 +93,16 @@ impl Tips {
     /// The monitor whose bar the tip stands off, if one shows.
     pub(super) fn on(&self) -> Option<&str> {
         self.shown.as_ref().map(|shown| shown.bar.as_str())
+    }
+
+    /// The bar the pointer is on, and where on it.
+    pub(super) fn pointer(&self) -> Option<(&str, (f64, f64))> {
+        self.state.pointer()
+    }
+
+    /// The bar whose tip shows, and the part it is for.
+    pub(super) fn shown(&self) -> Option<(&str, Part)> {
+        self.state.shown()
     }
 
     /// Show `tip` off the bar of the monitor named `bar`, which is
@@ -208,7 +219,7 @@ impl App {
             return;
         };
         self.tip_event(Event::Covered(self.covered()));
-        self.tip_event(Event::Motion { bar, part });
+        self.tip_event(Event::Motion { bar, at, part });
     }
 
     /// The pointer left `surface`: if it is a panel's, it is off the bar.

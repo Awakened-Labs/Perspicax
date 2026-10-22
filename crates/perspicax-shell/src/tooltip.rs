@@ -16,6 +16,12 @@
 //! keeps the part it was on from showing its tip again until the pointer has
 //! been off it, so a task just clicked is not covered by its title a moment
 //! later.
+//!
+//! What is under a pointer that has not moved changes too: a task closes and
+//! the next slides under it, or the clock widens and moves the tasks along.
+//! The bar, drawn again, says what is under it now ([`Event::Under`]), and
+//! the tip follows as if the pointer had moved there, but no wait starts:
+//! only the pointer resting starts one.
 
 use std::time::Duration;
 
@@ -25,11 +31,18 @@ use crate::layout::panel::Part;
 pub(crate) const DELAY: Duration = Duration::from_millis(700);
 
 /// Something that happened.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Event {
     /// The pointer came onto the bar of the monitor named `bar`, or moved on
-    /// it, and is over `part`, a part with a tip, or over none.
-    Motion { bar: String, part: Option<Part> },
+    /// it, to `at` in the bar's own coordinates, and is over `part`, a part
+    /// with a tip, or over none.
+    Motion {
+        bar: String,
+        at: (f64, f64),
+        part: Option<Part>,
+    },
+    /// The bar the pointer is on was drawn again, and `part` is under it now.
+    Under(Option<Part>),
     /// It left the bar.
     Leave,
     /// A button went down on the bar.
@@ -71,6 +84,8 @@ pub(crate) struct State {
 struct On {
     /// The monitor's connector name.
     bar: String,
+    /// Where on the bar it is.
+    at: (f64, f64),
     /// The part with a tip it is over, if any.
     under: Option<Part>,
     /// Waiting for it to rest.
@@ -85,9 +100,10 @@ struct On {
 }
 
 impl On {
-    fn new(bar: String) -> Self {
+    fn new(bar: String, at: (f64, f64)) -> Self {
         Self {
             bar,
+            at,
             under: None,
             waiting: false,
             shown: None,
@@ -117,10 +133,22 @@ impl On {
 }
 
 impl State {
+    /// The bar the pointer is on, and where on it.
+    pub(crate) fn pointer(&self) -> Option<(&str, (f64, f64))> {
+        self.on.as_ref().map(|on| (on.bar.as_str(), on.at))
+    }
+
+    /// The bar whose tip shows, and the part it is for.
+    pub(crate) fn shown(&self) -> Option<(&str, Part)> {
+        let on = self.on.as_ref()?;
+        Some((on.bar.as_str(), on.shown?))
+    }
+
     /// Handle `event`.
     pub(crate) fn update(&mut self, event: Event) -> Vec<Effect> {
         match event {
-            Event::Motion { bar, part } => self.moved(bar, part),
+            Event::Motion { bar, at, part } => self.moved(bar, at, part),
+            Event::Under(part) => self.point_at(part, false),
             Event::Leave | Event::Off => self.on.take().map_or_else(Vec::new, |mut on| on.quiet()),
             Event::Press => self.on.as_mut().map_or_else(Vec::new, |on| {
                 on.pressed = on.under;
@@ -137,36 +165,54 @@ impl State {
         }
     }
 
-    /// The pointer moved on the bar of the monitor named `bar`, over `part`.
-    fn moved(&mut self, bar: String, part: Option<Part>) -> Vec<Effect> {
+    /// The pointer moved to `at` on the bar of the monitor named `bar`, over
+    /// `part`.
+    fn moved(&mut self, bar: String, at: (f64, f64), part: Option<Part>) -> Vec<Effect> {
         let mut effects = Vec::new();
         if self.on.as_ref().is_some_and(|on| on.bar != bar) {
             effects = self.update(Event::Leave);
         }
-        let on = self.on.get_or_insert_with(|| On::new(bar));
+        self.on.get_or_insert_with(|| On::new(bar, at)).at = at;
+        effects.extend(self.point_at(part, true));
+        effects
+    }
+
+    /// The pointer is over `part` now: `moved` there, or still while it came
+    /// under it. A tip shown follows it; only a move starts a wait.
+    fn point_at(&mut self, part: Option<Part>, moved: bool) -> Vec<Effect> {
+        let Some(on) = self.on.as_mut() else {
+            return Vec::new();
+        };
         on.under = part;
         if on.pressed != part {
             on.pressed = None;
         }
         if self.covered {
-            return effects;
+            return Vec::new();
         }
         let tip = on.tip();
         if on.warm {
-            if on.shown != tip {
-                on.shown = tip;
-                effects.push(tip.map_or(Effect::Hide, |part| Effect::Show {
-                    bar: on.bar.clone(),
-                    part,
-                }));
+            if on.shown == tip {
+                return Vec::new();
             }
+            on.shown = tip;
+            return vec![tip.map_or(Effect::Hide, |part| Effect::Show {
+                bar: on.bar.clone(),
+                part,
+            })];
+        }
+        if !moved {
+            // A wait running goes on, and shows whatever is under the
+            // pointer when it ends.
+            Vec::new()
         } else if tip.is_some() {
             on.waiting = true;
-            effects.push(Effect::Wait);
+            vec![Effect::Wait]
         } else if std::mem::take(&mut on.waiting) {
-            effects.push(Effect::Stop);
+            vec![Effect::Stop]
+        } else {
+            Vec::new()
         }
-        effects
     }
 
     /// The wait is over: show the tip of what the pointer is over, if it
@@ -202,6 +248,7 @@ mod tests {
     fn over_on(state: &mut State, bar: &str, part: Option<Part>) -> Vec<Effect> {
         state.update(Event::Motion {
             bar: bar.to_owned(),
+            at: (50.0, 20.0),
             part,
         })
     }
@@ -355,6 +402,57 @@ mod tests {
         let mut state = showing(FIRST);
         assert_eq!(state.update(Event::Off), [Effect::Hide]);
         assert_eq!(over(&mut state, Some(FIRST)), [Effect::Wait], "cold again");
+    }
+
+    #[test]
+    fn what_comes_under_a_still_pointer_moves_or_hides_a_tip_but_never_starts_a_wait() {
+        let mut state = showing(FIRST);
+        let under = |state: &mut State, part| state.update(Event::Under(part));
+        assert_eq!(under(&mut state, Some(FIRST)), [], "the same");
+        assert_eq!(
+            under(&mut state, Some(SECOND)),
+            [show(SECOND)],
+            "slid under"
+        );
+        assert_eq!(under(&mut state, None), [Effect::Hide], "nothing under");
+        assert_eq!(under(&mut state, Some(FIRST)), [show(FIRST)], "still warm");
+
+        let mut cold = State::default();
+        assert_eq!(under(&mut cold, Some(FIRST)), [], "not on a bar");
+        assert_eq!(over(&mut cold, None), []);
+        assert_eq!(under(&mut cold, Some(FIRST)), [], "no wait");
+        assert_eq!(cold.update(Event::Due), []);
+
+        let mut waiting = State::default();
+        assert_eq!(over(&mut waiting, Some(FIRST)), [Effect::Wait]);
+        assert_eq!(under(&mut waiting, Some(SECOND)), [], "the wait goes on");
+        assert_eq!(
+            waiting.update(Event::Due),
+            [show(SECOND)],
+            "and shows what is under it as it ends"
+        );
+    }
+
+    #[test]
+    fn a_still_pointer_on_a_part_pressed_shows_nothing_new() {
+        let mut state = showing(FIRST);
+        assert_eq!(state.update(Event::Press), [Effect::Hide]);
+        assert_eq!(state.update(Event::Under(Some(SECOND))), [], "cold");
+        assert_eq!(state.update(Event::Due), []);
+        assert_eq!(
+            over(&mut state, Some(SECOND)),
+            [Effect::Wait],
+            "until it moves"
+        );
+    }
+
+    #[test]
+    fn the_pointer_and_the_tip_shown_are_known_on_their_bar() {
+        let mut state = showing(FIRST);
+        assert_eq!(state.pointer(), Some(("HDMI-A-1", (50.0, 20.0))));
+        assert_eq!(state.shown(), Some(("HDMI-A-1", FIRST)));
+        state.update(Event::Leave);
+        assert_eq!((state.pointer(), state.shown()), (None, None));
     }
 
     #[test]

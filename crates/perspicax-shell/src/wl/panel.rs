@@ -849,7 +849,38 @@ impl Panels {
             open,
             layout,
         ));
+        self.tip_drawn(canvas, kit, at);
         watch::slow("drawing a panel", started.elapsed());
+    }
+
+    /// Panel `at` was drawn again: the tip follows what is under the
+    /// pointer now if it is on that bar, and shows what the part it is for
+    /// says now, where it is now.
+    fn tip_drawn(&mut self, canvas: &mut Canvas, kit: &mut Kit, at: usize) {
+        let bar = &self.each[at];
+        let under = self
+            .tips
+            .pointer()
+            .filter(|&(name, _)| name == bar.name)
+            .map(|(_, point)| {
+                bar.placed
+                    .at(point)
+                    .filter(|&part| bar.placed.tip(part).is_some())
+            });
+        if let Some(part) = under {
+            // A tip shown or hidden; never a wait, which only a move starts.
+            self.tip(canvas, kit, Event::Under(part));
+        }
+        let name = &self.each[at].name;
+        if let Some(part) = self
+            .tips
+            .shown()
+            .filter(|&(on, _)| on == name)
+            .map(|(_, part)| part)
+        {
+            let name = name.clone();
+            self.show_tip(canvas, kit, &name, part);
+        }
     }
 }
 

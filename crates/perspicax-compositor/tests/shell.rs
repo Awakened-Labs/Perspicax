@@ -2084,6 +2084,44 @@ fn a_press_or_a_menu_takes_a_tooltip_away() {
 #[cfg(feature = "capture")]
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_tooltip_follows_its_windows_title_and_the_task_that_slides_under_a_still_pointer() {
+    const LONGER: &str = "first, and now a title a good deal longer";
+
+    let (session, shell, mut desk, mut queue) =
+        two_icons(("shell-tip-follows", "tip-follows"), "", 800 - 30);
+    let wide = |rect: Rect| rect.x1 - rect.x0;
+    session.command(Command::Motion {
+        by: ((PANEL_HEIGHT + ICON / 2.0) as i32, 780),
+    });
+    let facts = session.wait_for(|facts| tooltip(facts).is_some());
+    let (tip, _, first) = tooltip(&facts).expect("a tip");
+
+    // The window retitled, its tip says so where it stands, on the same
+    // surface.
+    desk.windows[0].set_title(LONGER);
+    common::until(&mut queue, &mut desk, |desk| desk.task(LONGER).is_some());
+    let facts = session.wait_for(|facts| {
+        tooltip(facts).is_some_and(|(_, _, rect)| wide(rect) > wide(first) + 40.0)
+    });
+    let (retitled, _, longer) = tooltip(&facts).expect("a tip");
+    assert_eq!(retitled, tip, "the same surface");
+
+    // Closed, the second's task slides under the pointer, and the tip goes
+    // with it.
+    drop(desk.windows.remove(0));
+    common::until(&mut queue, &mut desk, |desk| desk.task(LONGER).is_none());
+    let facts = session.wait_for(|facts| {
+        tooltip(facts).is_some_and(|(_, _, rect)| wide(rect) < wide(longer) - 40.0)
+    });
+    assert_eq!(tooltip(&facts).expect("a tip").0, tip, "the same surface");
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_top_panels_tooltip_hangs_below_it() {
     let (session, shell, desk, queue) =
         two_icons(("shell-tip-top", "tip-top"), "edge = \"top\"\n", 10);
