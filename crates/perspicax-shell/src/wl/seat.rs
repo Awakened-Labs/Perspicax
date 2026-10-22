@@ -15,6 +15,10 @@
 //! buttons on the menus' surface, and every key while it has the keyboard,
 //! are the menus'; on a pie's, with the wheel, they are the pie's.
 //!
+//! The pointer coming onto a panel, moving on it and leaving it are followed
+//! for its tooltips (see [`crate::tooltip`]), and a press on it takes the
+//! one shown away.
+//!
 //! The pointer is drawn as the cursor theme's arrow on every surface of the
 //! shell's, rather than as whatever the last window left it as.
 

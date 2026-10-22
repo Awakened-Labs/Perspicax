@@ -1470,10 +1470,10 @@ them; none is on by default. The profiles turn on what the build has:
 | Root menu | `menus` | right-click on the wallpaper, or a key or button bound to `root-menu` | the same | overlay, `perspicax-menu-<output>`, while open | a `Menu` "Root menu" of `MenuItem`s |
 | Panel | `panel` | along the bottom of every monitor | none | top, `perspicax-panel-<output>` | a `Toolbar` "Panel" holding what follows |
 | Start button and menu | `menus` | the panel's first item; a tap of Logo | — | the panel's; its menu as the root menu's | a `Button` "Start"; a `Menu` "Start menu", with a search line unless `search = "none"` |
-| Taskbar | `panel` | each monitor's own windows; a right-click, a window's menu (with `menus`) | — | the panel's; a window's menu as the root menu's | a `TabList` "Taskbar", the window in use selected, each `Tab`'s context menu its window's; a `Menu` named for the window, its ticks and dots `MenuItemCheckBox`es and `MenuItemRadio`s |
+| Taskbar | `panel` | each monitor's own windows; a right-click, a window's menu (with `menus`); resting on one, its whole title | — | the panel's; a window's menu as the root menu's; the tooltip, overlay, `perspicax-tooltip-<output>`, while the pointer rests | a `TabList` "Taskbar", the window in use selected, each `Tab`'s context menu its window's; a `Menu` named for the window, its ticks and dots `MenuItemCheckBox`es and `MenuItemRadio`s; nothing more for the tooltip |
 | Pager | `panel` | the workspaces | — | the panel's | a `TabList` "Workspaces", the one showing selected |
 | Keyboard layout | `panel` | before the tray, with two layouts or more | — | the panel's | a `Button` "Keyboard layout", the layout's name its value |
-| Tray | `tray` (with `panel`, `menus`) | before the mixer | — | the panel's; its menus as the root menu's | a `Group` "Tray" of a `Button` for each icon, named by its tooltip |
+| Tray | `tray` (with `panel`, `menus`) | before the mixer; resting on an icon, its program's name for it | — | the panel's; its menus as the root menu's; its tooltip as a task's | a `Group` "Tray" of a `Button` for each icon, named by its tooltip |
 | Mixer | `audio` (with `panel`, `menus`) | before the clock; the volume keys | the volume keys | the panel's; overlay, `perspicax-mixer-<output>`, while open; the volume shown, overlay, `perspicax-osd`, a moment | a `Group` "Sound" of a node for each piece; a `Dialog` "Sound"; a `Status` "Volume" |
 | Clock | `panel` | the time, last | — | the panel's | a `Status` "Clock", the time its value |
 | Pies | `pie` (with `menus`, `panel`) | a key or button bound to `{ pie = "<name>" }` | the same | overlay, `perspicax-pie-<output>`, while open | a `Menu` named for the pie of a `MenuItem` for each slot, the one pointed at selected |
@@ -1493,6 +1493,22 @@ from a titlebar ([#240](https://github.com/Awakened-Labs/Perspicax/issues/240)),
 from an application's own titlebar
 ([#241](https://github.com/Awakened-Labs/Perspicax/issues/241)) or from a key
 ([#239](https://github.com/Awakened-Labs/Perspicax/issues/239)).
+
+The pointer resting 0.7 s on a task or a status icon shows what it is in a
+tooltip: the window's whole title, which a task showing its icon alone, or
+its title cut short, does not; and the program's name for its icon, its
+StatusNotifierItem tooltip's title, else its title. The tooltip stands just
+off the bar, above a panel along the bottom and below one along the top,
+centred on what it is for and kept on the monitor. Moving to another task or
+icon moves it at once, and it follows what comes under a pointer that has
+not moved: a window retitled, or the next task sliding along as one closes.
+Leaving the bar, a press, or a menu, the mixer or a pie opening takes it
+away, and what was pressed shows none until the pointer has been off it. It
+takes no click and never the keyboard, and has no accessibility tree: what it
+says is already the name of the `Tab` or `Button` it is for. While it shows,
+an agent sees its surface, `perspicax-tooltip-<output>` on the overlay
+layer, covering the strip beside the bar it stands on.
+`[shell.panel] tooltips = false` turns tooltips off.
 
 An agent reads the shell as it reads any application. On a seat it cannot
 click it: like everything else the person's session starts, the shell gets no
@@ -1545,6 +1561,8 @@ taskbar = "all"                # every window on every panel; "this-output"
                                # lists each monitor's own
 task-titles = false            # each task its icon alone; true, by default,
                                # writes its window's title beside it
+tooltips = false               # no tooltip on resting on a task or a status
+                               # icon; true, by default, shows what it is
 items = ["start", "taskbar", "pager", "layout", "tray", "mixer", "clock"]
 clock = "%a %e %b %H:%M"       # as strftime writes it
 ```

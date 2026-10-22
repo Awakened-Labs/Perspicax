@@ -26,6 +26,11 @@
 //! the panels again once the loop has nothing else to do, so a batch of it
 //! is drawn once.
 //!
+//! While the pointer rests on a task or a status icon, a tooltip stands off
+//! its bar, on a surface of its own (see `tooltip`). Each time a bar is
+//! drawn, its tooltip follows what is under the pointer there now, and says
+//! what that says now.
+//!
 //! A panel showing the mixer's moving bars keeps its last picture, and
 //! moves the bars by drawing them alone over it, once each time the monitor
 //! shows the last: the compositor takes in their slot and nothing else, and
