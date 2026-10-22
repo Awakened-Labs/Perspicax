@@ -42,6 +42,7 @@ use std::{
     fs::{self, DirBuilder, File, OpenOptions},
     io,
     os::unix::{
+        ffi::OsStrExt as _,
         fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _},
         net::UnixStream,
         process::CommandExt as _,
@@ -243,6 +244,181 @@ pub fn ensure_bus() -> Result<()> {
         .env(BUS_STARTED, "1")
         .exec();
     Err(error).context("no session bus, and dbus-run-session could not be run to start one")
+}
+
+/// Set, to this process's own pid, in the environment of the process
+/// [`run_again_on_a_bus_of_its_own`] runs in this one's place: the bus its
+/// `DBUS_SESSION_BUS_ADDRESS` names is this process's to start.
+///
+/// A pid rather than a flag, because every program the session starts
+/// inherits it, and each of them -- a perspicax among them -- has a pid of its
+/// own, so none takes the bus for one it has to start.
+pub const OWN_BUS: &str = "PERSPICAX_OWN_BUS";
+
+/// Set beside [`OWN_BUS`] to the bus the session was started on, so that its
+/// daemon can still be asked whether it holds the agent's wire:
+/// `dbus-run-session -- perspicax --mcp --own-bus` hands that daemon the wire
+/// as surely as without the flag. Empty when there was none, rather than left
+/// out, since what is left out is inherited.
+pub const OUTER_BUS: &str = "PERSPICAX_OUTER_BUS";
+
+/// Whether a session is to have a bus of its own, and the folder it is kept
+/// in ([`own_bus`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum OwnBus {
+    /// Not asked for: the session's bus, if it has one, is the one it was
+    /// given.
+    Unasked,
+    /// Asked for: this process is to run itself again with the bus's address
+    /// in its environment ([`run_again_on_a_bus_of_its_own`]).
+    Asked(PathBuf),
+    /// This process was run again for it, and starts it.
+    Due(PathBuf),
+}
+
+/// The longest path of a socket dbus-daemon will listen on: its own limit, a
+/// few bytes inside the kernel's, so that the same address serves on every
+/// system it is built for.
+const SOCKET_PATH_MAX: usize = 99;
+
+/// Whether a session is to have a bus of its own (issue #161): asked for with
+/// `--own-bus`, which `asked` is, or under `--mcp`, which `mcp` is, by a session
+/// with no bus at all ([`has_bus`]). `pid` is this process's, and `var` reads
+/// the environment, as [`has_bus`]'s does.
+///
+/// A bus somebody else starts for perspicax holds whatever it was given.
+/// `dbus-run-session` keeps its own copy of every descriptor it passes on, the
+/// agent's wire among them, for as long as the run lasts, and any process
+/// running as the same user can reopen that copy through its `/proc`. A bus
+/// perspicax starts is given nothing of the wire, and nothing else holds it.
+///
+/// It is kept in a folder of its own in `$XDG_RUNTIME_DIR`, which is the
+/// person's alone, named for this process. Under `--mcp`, a session with
+/// nowhere to keep one goes on without a bus, as it always has: only the flag
+/// is refused.
+///
+/// # Errors
+///
+/// `--own-bus` with no runtime folder, or one whose path leaves no room for
+/// the bus's sockets.
+pub fn own_bus(
+    asked: bool,
+    mcp: bool,
+    var: impl Fn(&str) -> Option<String>,
+    pid: u32,
+) -> Result<OwnBus> {
+    let due = var(OWN_BUS).is_some_and(|owner| owner == pid.to_string());
+    let wanted = asked || mcp && !has_bus(&var);
+    if !(due || wanted) {
+        return Ok(OwnBus::Unasked);
+    }
+    // The XDG spec's rule: a relative folder is no folder at all.
+    let folder = var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(format!("perspicax-bus-{pid}")));
+    // Room for the longest socket the folder holds, the accessibility bus's,
+    // which `at-spi-bus-launcher` serves in the runtime folder it is given; and
+    // a name an address carries as it is, since zbus reads an escaped one as
+    // it is written, and would look for a socket nobody serves.
+    let fits = |folder: &Path| {
+        folder.join("at-spi/bus").as_os_str().len() <= SOCKET_PATH_MAX
+            && folder.as_os_str().as_bytes().iter().all(|&byte| {
+                matches!(byte, b'-' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'/' | b'.')
+            })
+    };
+    Ok(match folder {
+        Some(folder) if fits(&folder) && due => OwnBus::Due(folder),
+        Some(folder) if fits(&folder) => OwnBus::Asked(folder),
+        _ if !asked && !due => OwnBus::Unasked,
+        Some(folder) => bail!(
+            "a bus of its own is kept in {}, too long a path for its sockets, or one a bus \
+             address would have to escape; set XDG_RUNTIME_DIR to a short, plain one",
+            folder.display()
+        ),
+        None => bail!(
+            "--own-bus keeps its bus in XDG_RUNTIME_DIR, which is unset or not a whole path; \
+             set it"
+        ),
+    })
+}
+
+/// The address of the bus kept in `folder`, one [`own_bus`] chose: its socket,
+/// `bus`, in a name that needs no escaping.
+fn bus_address(folder: &Path) -> String {
+    format!("unix:path={}", folder.join("bus").display())
+}
+
+/// Variables a process is started with in place of the ones it would inherit:
+/// each set to its value, or removed where there is none.
+type Changes = Vec<(&'static str, Option<OsString>)>;
+
+/// Start `command` with `changes` made to what it inherits.
+fn changed(command: &mut Command, changes: Changes) -> &mut Command {
+    for (name, value) in changes {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    command
+}
+
+/// What this process is run again with, for a bus of its own in `folder`
+/// ([`run_again_on_a_bus_of_its_own`]): the bus's address, and [`OWN_BUS`] and
+/// [`OUTER_BUS`] to say whose it is and which it replaces. `var` reads the
+/// environment, as [`has_bus`]'s does.
+fn own_bus_env(folder: &Path, pid: u32, var: impl Fn(&str) -> Option<String>) -> Changes {
+    vec![
+        ("DBUS_SESSION_BUS_ADDRESS", Some(bus_address(folder).into())),
+        (OWN_BUS, Some(pid.to_string().into())),
+        (
+            OUTER_BUS,
+            Some(var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default().into()),
+        ),
+        // What `dbus-run-session` takes away from the program it starts, each
+        // naming something of a bus other than its own.
+        ("DBUS_SESSION_BUS_PID", None),
+        ("DBUS_SESSION_BUS_WINDOWID", None),
+        ("DBUS_STARTER_ADDRESS", None),
+        ("DBUS_STARTER_BUS_TYPE", None),
+        // And the accessibility bus, which a toolkit takes from here before it
+        // asks the session bus for it: the person's, not this session's.
+        ("AT_SPI_BUS_ADDRESS", None),
+    ]
+}
+
+/// Run this process again for a bus of its own in `folder`, with that bus's
+/// address in its environment ([`own_bus_env`]). The bus itself is started by
+/// the process that carries on, which finds it [`OwnBus::Due`].
+///
+/// Run again rather than started here, because the environment is the one
+/// place every reader of the session bus looks -- zbus, the accessibility
+/// libraries, and every program the session starts -- and a process may not
+/// change its own while anything could be reading it. A bus address passed by
+/// hand instead would have to reach each of them, and one that was missed
+/// would quietly use the person's bus.
+///
+/// Called before anything is logged or started, as [`ensure_bus`] is, and for
+/// the same reason. Nothing changes but the environment: the same pid, the same
+/// parent, and the same descriptors, the agent's wire among them, still on fds
+/// 0 and 1 for the process that carries on to take.
+///
+/// Returns only when it could not be done, saying why.
+pub fn run_again_on_a_bus_of_its_own(folder: &Path) -> anyhow::Error {
+    let this = match env::current_exe() {
+        Ok(this) => this,
+        Err(error) => {
+            return anyhow::Error::from(error)
+                .context("no path to this program to run it again on a bus of its own");
+        }
+    };
+    let error = changed(
+        Command::new(this).args(env::args_os().skip(1)),
+        own_bus_env(folder, std::process::id(), |name| env::var(name).ok()),
+    )
+    .exec();
+    anyhow::Error::from(error).context("could not run this program again on a bus of its own")
 }
 
 /// The accessibility bus's name on the session bus.
@@ -592,6 +768,149 @@ mod tests {
         drop(listening);
         assert!(scratch.0.join("bus").exists(), "the socket stays behind");
         assert!(!has_bus(scratch.env(&runtime)));
+    }
+
+    /// This process's pid, as [`own_bus`] is given it, in the tests below.
+    const PID: u32 = 4242;
+
+    #[test]
+    fn a_bus_of_its_own_is_one_asked_for_or_one_an_agent_has_none_without() {
+        let scratch = Scratch::new("own-bus");
+        let folder = scratch.0.join("perspicax-bus-4242");
+        let own = |asked, mcp, vars: &[(&str, &str)]| {
+            own_bus(asked, mcp, scratch.env(vars), PID).expect("a decision")
+        };
+        let runtime = ("XDG_RUNTIME_DIR", "{}");
+        let a_bus = ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/x");
+
+        assert_eq!(own(false, false, &[runtime]), OwnBus::Unasked);
+        assert_eq!(own(true, false, &[runtime]), OwnBus::Asked(folder.clone()));
+        assert_eq!(
+            own(true, true, &[runtime, a_bus]),
+            OwnBus::Asked(folder.clone()),
+            "asked for, though there is a bus"
+        );
+        assert_eq!(own(false, true, &[runtime]), OwnBus::Asked(folder.clone()));
+        assert_eq!(
+            own(false, true, &[runtime, a_bus]),
+            OwnBus::Unasked,
+            "an agent's session with a bus keeps it"
+        );
+        assert_eq!(
+            own(false, false, &[runtime, a_bus]),
+            OwnBus::Unasked,
+            "nor does a session with no agent get one unasked"
+        );
+    }
+
+    #[test]
+    fn the_bus_is_due_in_the_process_run_again_for_it_and_no_other() {
+        let scratch = Scratch::new("due-bus");
+        let folder = scratch.0.join("perspicax-bus-4242");
+        let own = |asked, mcp, owner: &str| {
+            own_bus(
+                asked,
+                mcp,
+                scratch.env(&[("XDG_RUNTIME_DIR", "{}"), (OWN_BUS, owner)]),
+                PID,
+            )
+            .expect("a decision")
+        };
+        for (asked, mcp) in [(true, false), (false, true), (false, false)] {
+            assert_eq!(
+                own(asked, mcp, "4242"),
+                OwnBus::Due(folder.clone()),
+                "--own-bus {asked}, --mcp {mcp}"
+            );
+        }
+        // A program the session started inherits the marker, and is not the
+        // process it names.
+        assert_eq!(own(false, false, "17"), OwnBus::Unasked);
+        assert_eq!(own(true, false, "17"), OwnBus::Asked(folder));
+    }
+
+    #[test]
+    fn with_nowhere_to_keep_one_the_flag_is_refused_and_an_agent_goes_on_without() {
+        // No folder, one named relatively, and one too long for the
+        // accessibility bus's socket inside it.
+        let long = format!("/{}", "r".repeat(69));
+        for dir in [None, Some("run/user/1000"), Some(long.as_str())] {
+            let error = own_bus(true, false, runtime(dir), PID).expect_err("nowhere");
+            assert!(error.to_string().contains("XDG_RUNTIME_DIR"), "{error}");
+            assert_eq!(
+                own_bus(false, true, runtime(dir), PID).expect("no bus, as before"),
+                OwnBus::Unasked,
+                "XDG_RUNTIME_DIR = {dir:?}"
+            );
+        }
+        // The longest that leaves room: `at-spi/bus` makes it 99 bytes.
+        let longest = format!("/{}", "r".repeat(68));
+        assert!(matches!(
+            own_bus(true, false, runtime(Some(&longest)), PID),
+            Ok(OwnBus::Asked(_))
+        ));
+    }
+
+    #[test]
+    fn a_folder_an_address_would_have_to_escape_is_nowhere_to_keep_one() {
+        assert_eq!(
+            bus_address(Path::new("/run/user/1000/perspicax-bus-42")),
+            "unix:path=/run/user/1000/perspicax-bus-42/bus"
+        );
+        // Each a path zbus would read as written, escapes and all.
+        for dir in [
+            "/tmp/a folder",
+            "/tmp/a,b",
+            "/tmp/a=b",
+            "/tmp/a%b",
+            "/tmp/a;b",
+            "/tmp/\u{e9}",
+        ] {
+            let error = own_bus(true, false, runtime(Some(dir)), PID).expect_err("unescaped");
+            assert!(error.to_string().contains("XDG_RUNTIME_DIR"), "{error}");
+        }
+        assert!(matches!(
+            own_bus(true, false, runtime(Some("/run/user/1000/a-b_c.d")), PID),
+            Ok(OwnBus::Asked(_))
+        ));
+    }
+
+    fn changes<'a>(changes: &'a Changes, name: &str) -> Option<Option<&'a str>> {
+        changes
+            .iter()
+            .find(|(changed, _)| *changed == name)
+            .map(|(_, value)| value.as_deref().and_then(std::ffi::OsStr::to_str))
+    }
+
+    #[test]
+    fn run_again_it_is_told_its_bus_whose_it_is_and_the_one_it_replaced() {
+        let folder = Path::new("/run/user/1000/perspicax-bus-42");
+        let outer = "unix:path=/tmp/dbus-outer,guid=0123";
+        let again = own_bus_env(folder, 42, |name| {
+            (name == "DBUS_SESSION_BUS_ADDRESS").then(|| outer.to_owned())
+        });
+        assert_eq!(
+            changes(&again, "DBUS_SESSION_BUS_ADDRESS"),
+            Some(Some("unix:path=/run/user/1000/perspicax-bus-42/bus"))
+        );
+        assert_eq!(changes(&again, OWN_BUS), Some(Some("42")));
+        assert_eq!(changes(&again, OUTER_BUS), Some(Some(outer)));
+        for gone in [
+            "DBUS_SESSION_BUS_PID",
+            "DBUS_SESSION_BUS_WINDOWID",
+            "DBUS_STARTER_ADDRESS",
+            "DBUS_STARTER_BUS_TYPE",
+            "AT_SPI_BUS_ADDRESS",
+        ] {
+            assert_eq!(changes(&again, gone), Some(None), "{gone}");
+        }
+
+        let unwrapped = own_bus_env(folder, 42, |_| None);
+        assert_eq!(
+            changes(&unwrapped, OUTER_BUS),
+            Some(Some("")),
+            "said, and empty, so an outer session's is not inherited"
+        );
     }
 
     #[test]
