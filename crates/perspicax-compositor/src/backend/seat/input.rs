@@ -551,6 +551,7 @@ fn released_frame(state: &mut Compositor, at: Point<f64, Logical>) {
         FrameButton::Minimize => state.minimize(&window),
         FrameButton::Shade => state.toggle_shade(&window),
         FrameButton::Sticky => state.toggle_sticky(&window),
+        FrameButton::OnTop => state.toggle_on_top(&window),
     }
 }
 
@@ -687,9 +688,7 @@ fn resting(state: &Compositor, at: Point<f64, Logical>, carrying: bool) -> Resti
         Resting::Locked
     } else if state.hold().is_some() {
         Resting::Captured
-    } else if state
-        .space
-        .element_under(at)
+    } else if crate::shell::window_under(&state.space, at)
         .is_some_and(|(window, _)| covers_panels(window))
     {
         // Windows alone: a notification on the overlay layer, over the

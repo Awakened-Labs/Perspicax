@@ -108,6 +108,7 @@ impl Titles {
             shades: Compositor::is_server_decorated(window),
             shaded: crate::shell::is_shaded(window),
             sticky: bar.sticky,
+            on_top: crate::shell::is_on_top(window),
             maximized: bar.maximized,
             icons: self.icons.generation(),
         };
@@ -312,6 +313,8 @@ struct Toggles {
     shaded: bool,
     /// On every workspace.
     stuck: bool,
+    /// Kept in front of the other windows.
+    on_top: bool,
     maximized: bool,
 }
 
@@ -321,6 +324,7 @@ impl Toggles {
         match button {
             FrameButton::Shade => self.shaded,
             FrameButton::Sticky => self.stuck,
+            FrameButton::OnTop => self.on_top,
             FrameButton::Maximize => self.maximized,
             FrameButton::Minimize | FrameButton::Close => false,
         }
@@ -332,6 +336,7 @@ impl TitleKey {
         Toggles {
             shaded: self.shaded,
             stuck: self.sticky,
+            on_top: self.on_top,
             maximized: self.maximized,
         }
     }
@@ -339,12 +344,14 @@ impl TitleKey {
 
 /// Draw `button`'s symbol, centred in `place`, in pixels of a buffer
 /// `width` wide: a cross to close, a square to maximize, a bar along the
-/// bottom to minimize, one along the top to roll up, and a pin, a ring on a
-/// short stem, to keep the window on every workspace.
+/// bottom to minimize, one along the top to roll up, a pin, a ring on a
+/// short stem, to keep the window on every workspace, and a triangle
+/// pointing up to keep it in front of the others.
 ///
 /// Each toggle shows its state, as `toggles` has it. Rolled up already, a
 /// chevron under the shade button's bar points down, the way it unrolls.
-/// On every workspace, the pin's head is filled. Maximized, two squares, one
+/// On every workspace, the pin's head is filled, and kept on top, the
+/// triangle. Maximized, two squares, one
 /// behind the other, restore it. Each pixel is inked by how much of it the
 /// shape covers, so the diagonals of the cross and the chevron, and the
 /// pin's ring, are smooth.
@@ -367,6 +374,8 @@ fn draw_button(
     let (arm, point) = ((half * 0.7, -half * 0.25), (0.0, half * 0.6));
     // The pin's ring, above the middle, and how big round it is.
     let (ring, round) = (-half * 0.3, half * 0.7);
+    // The triangle's point, at the top, and its base, along the bottom.
+    let (apex, base) = ((0.0, -half), half);
     // How far inside a square's edge a point is, as maximize's square is
     // drawn, or nowhere for a point outside it. Restore's two are offset
     // from the middle, the one in front down and to the left.
@@ -409,6 +418,13 @@ fn draw_button(
                 edge.abs()
             };
             head.min(segment((x, y), (0.0, ring + round), (0.0, half)))
+        }
+        FrameButton::OnTop => {
+            let edge = segment((x, y), apex, (-half, base))
+                .min(segment((x, y), (-half, base), (half, base)))
+                .min(segment((x, y), (half, base), apex));
+            let inside = y <= base && x.abs() * 2.0 <= y + half;
+            if toggles.on_top && inside { 0.0 } else { edge }
         }
         _ => f32::INFINITY,
     };
@@ -513,6 +529,7 @@ mod tests {
             shades: true,
             shaded: false,
             sticky: false,
+            on_top: false,
             maximized: false,
             icons: 0,
         };
@@ -582,6 +599,7 @@ mod tests {
             shades: true,
             shaded: false,
             sticky: false,
+            on_top: false,
             maximized: false,
             icons: 0,
         };
@@ -612,6 +630,7 @@ mod tests {
             shades: true,
             shaded: false,
             sticky: false,
+            on_top: false,
             maximized: false,
             icons: 0,
         };
@@ -655,6 +674,7 @@ mod tests {
             shades: true,
             shaded,
             sticky: false,
+            on_top: false,
             maximized: false,
             icons: 0,
         };
@@ -719,11 +739,20 @@ mod tests {
         );
     }
 
-    /// minimal's bar: sticky at the left, the other four at the right.
+    /// Fluxbox's own bar, minimal's until #64: sticky at the left, the
+    /// other four at the right.
     fn fluxbox() -> perspicax_policy::Buttons {
         use FrameButton::*;
         perspicax_policy::Buttons::new(&[Sticky], &[Shade, Minimize, Maximize, Close])
             .expect("five buttons, once each")
+    }
+
+    /// minimal's bar: sticky and on top at the left, the other four at the
+    /// right.
+    fn minimal() -> perspicax_policy::Buttons {
+        use FrameButton::*;
+        perspicax_policy::Buttons::new(&[Sticky, OnTop], &[Shade, Minimize, Maximize, Close])
+            .expect("six buttons, once each")
     }
 
     /// No fonts, so all that is drawn is the buttons.
@@ -750,6 +779,7 @@ mod tests {
             shades: true,
             shaded: false,
             sticky: false,
+            on_top: false,
             maximized: false,
             icons: 0,
         }
@@ -962,6 +992,43 @@ mod tests {
         assert!(
             outside(&stuck, width, place) == outside(&loose, width, place),
             "the rest is as it was"
+        );
+    }
+
+    /// Kept on top, the triangle is filled: more ink, where it is, and none
+    /// of the rest of the bar changes. Pointing up, it is narrower above the
+    /// middle than below. Buttons need no fonts, so this runs anywhere.
+    #[test]
+    fn the_on_top_button_is_a_triangle_filled_while_kept_on_top() {
+        let mut titles = fontless();
+        let (loose, (width, _)) = titles.pixels(&bar(minimal()));
+        let (kept, _) = titles.pixels(&TitleKey {
+            on_top: true,
+            ..bar(minimal())
+        });
+        let place = place_of(minimal(), FrameButton::OnTop);
+        assert!(ink_in(&loose, width, place) > 0, "outlined while it is not");
+        assert!(
+            ink_in(&kept, width, place) > ink_in(&loose, width, place) * 3 / 2,
+            "filled: {} against {}",
+            ink_in(&kept, width, place),
+            ink_in(&loose, width, place)
+        );
+        assert!(
+            outside(&kept, width, place) == outside(&loose, width, place),
+            "the rest is as it was"
+        );
+        let wide = |row: i32| {
+            (place.x..place.x + place.w)
+                .filter(|column| kept[((row * width + column) * 4 + 3) as usize] > 0)
+                .count()
+        };
+        let middle = place.y + place.h / 2;
+        assert!(
+            wide(middle - 3) < wide(middle + 3),
+            "pointing up: {} above, {} below",
+            wide(middle - 3),
+            wide(middle + 3)
         );
     }
 

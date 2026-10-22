@@ -108,6 +108,16 @@
 //! pointer grab is invisible here, so sloppy focus still follows the pointer
 //! across another window on its way to a menu item (issue #183).
 //!
+//! # Kept on top
+//!
+//! A window the person keeps on top (issue #64) is kept there in what is
+//! drawn, hit and told an agent, and its dialogs and menus with it, by the
+//! window their `WM_TRANSIENT_FOR` names (`shell::stacking`). X is told none
+//! of it. Smithay does not list `_NET_WM_STATE_ABOVE` as supported, so no
+//! client asks to be kept on top that way and none is told it is; X's own
+//! stacking order is not made to match, and a window asking to be restacked
+//! (`configure_request`'s `Reorder`) is not answered either (issue #236).
+//!
 //! # Started eagerly, not lazily
 //!
 //! Smithay 0.7 creates the X11 sockets and starts the server in one call, with

@@ -564,6 +564,12 @@ pub struct Window {
     /// `window_type` on it. Absent when it is not.
     #[serde(skip_serializing_if = "core::ops::Not::not")]
     pub shaded: bool,
+    /// Kept in front of the other windows: by the person, or with the window
+    /// it is a dialog or a menu of. A window raised since, or given the
+    /// keyboard, is still behind it, and what it covers stays covered until
+    /// it moves or the person lets it go. Absent when it is not.
+    #[serde(skip_serializing_if = "core::ops::Not::not")]
+    pub on_top: bool,
 }
 
 /// A window's tab group: every tab, and which is in front.
@@ -646,6 +652,7 @@ impl Window {
             }),
             opacity: facts.drawn_opacity,
             shaded: facts.shaded,
+            on_top: facts.on_top,
         }
     }
 }
@@ -1292,6 +1299,21 @@ mod tests {
         let wire = serde_json::to_value(&windows).unwrap();
         assert_eq!(wire[0]["shaded"], true);
         assert!(wire[1].get("shaded").is_none(), "{}", wire[1]);
+    }
+
+    #[test]
+    fn a_window_kept_on_top_says_so_and_any_other_is_silent() {
+        let facts = HostFacts::bottom_to_top(
+            [
+                SurfaceFacts::new(WINDOW, Rect::new(0.0, 0.0, 400.0, 300.0)).kept_on_top(),
+                SurfaceFacts::new(OVERLAY, Rect::new(100.0, 100.0, 300.0, 250.0)),
+            ],
+            1,
+        );
+        let windows = Window::all(&index(), &facts);
+        let wire = serde_json::to_value(&windows).unwrap();
+        assert_eq!(wire[0]["on_top"], true);
+        assert!(wire[1].get("on_top").is_none(), "{}", wire[1]);
     }
 
     /// The window node is the shallowest node on its surface, and finding it

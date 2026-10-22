@@ -3713,3 +3713,140 @@ fn an_x11_window_left_hanging_off_its_monitor_reopens_slid_onto_that_monitor() {
 
     x11.stop();
 }
+
+/// Issue #64: "kept", given the keyboard and kept on top, under "other",
+/// which has taken the keyboard and the top of the stack since.
+fn kept_on_top_under_another(name: &str) -> (X11, u32) {
+    let x11 = X11::start(name, Backend::headless((1280, 800)).with_person());
+    let kept = with_the_keyboard(&x11, "kept");
+    x11.perform(Action::ToggleOnTop);
+    x11.surface_where("kept", |surface| surface.on_top)
+        .unwrap_or_else(|| panic!("never kept on top: {:?}", x11.facts()));
+    with_the_keyboard(&x11, "other");
+    assert!(x11.on_top("kept"), "not in front: {:?}", x11.facts());
+    (x11, kept)
+}
+
+/// A window titled `title`, opened, once it has the keyboard.
+fn with_the_keyboard(x11: &X11, title: &str) -> u32 {
+    let window = x11.open(title);
+    eventually(Duration::from_secs(5), || {
+        (x11.focus() == window).then_some(())
+    })
+    .unwrap_or_else(|| panic!("{title} never took the keyboard"));
+    window
+}
+
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_menu_of_a_window_kept_on_top_opens_in_front_of_it() {
+    let (x11, kept) = kept_on_top_under_another("x11-on-top-menu");
+
+    x11.menu_over("menu", (40, 40), (120, 80), Some(kept));
+
+    assert!(x11.on_top("menu"), "behind its window: {:?}", x11.facts());
+    assert!(
+        x11.surface_where("menu", |surface| surface.on_top)
+            .is_some(),
+        "never said to be kept on top with its window"
+    );
+    x11.stop();
+}
+
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_dialog_of_a_window_kept_on_top_opens_in_front_of_it() {
+    let (x11, kept) = kept_on_top_under_another("x11-on-top-dialog");
+
+    let dialog = x11.create_at("dialog", (0, 0, 200, 120), None);
+    x11.transient(dialog, kept);
+    x11.mapped(dialog, "dialog");
+
+    assert!(x11.on_top("dialog"), "behind its window: {:?}", x11.facts());
+    assert!(
+        x11.surface_where("dialog", |surface| surface.on_top)
+            .is_some(),
+        "never said to be kept on top with its window"
+    );
+    x11.stop();
+}
+
+/// Smithay refuses an xdg window that would be its own parent's parent,
+/// but nothing stops X11 windows naming each other: each is a dialog of the
+/// other, and asking whether either is kept on top went round them.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn x11_windows_naming_each_other_in_transient_for_are_kept_on_top_without_hanging() {
+    let x11 = X11::start(
+        "x11-on-top-each-other",
+        Backend::headless((1280, 800)).with_person(),
+    );
+    let one = x11.create_at("one", (0, 0, 320, 200), None);
+    let two = x11.create_at("two", (40, 40, 320, 200), None);
+    x11.transient(one, two);
+    x11.transient(two, one);
+    x11.mapped(one, "one");
+    x11.mapped(two, "two");
+    eventually(Duration::from_secs(5), || {
+        (x11.focus() == two).then_some(())
+    })
+    .expect("two never took the keyboard");
+
+    x11.perform(Action::ToggleOnTop);
+    x11.surface_where("one", |surface| surface.on_top)
+        .unwrap_or_else(|| panic!("never kept on top with two: {:?}", x11.facts()));
+    x11.perform(Action::ToggleOnTop);
+    x11.surface_where("one", |surface| !surface.on_top)
+        .unwrap_or_else(|| panic!("never let go with two: {:?}", x11.facts()));
+    x11.stop();
+}
+
+/// "video", with the keyboard, made fullscreen at its own asking.
+fn fullscreen_video(x11: &X11) -> u32 {
+    let video = with_the_keyboard(x11, "video");
+    x11.ask_state(video, ADD, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    x11.surface_where("video", |surface| {
+        rect_of(surface) == (0.0, 0.0, 1280.0, 800.0)
+    })
+    .unwrap_or_else(|| panic!("never filled its monitor: {:?}", x11.facts()));
+    video
+}
+
+/// Issue #64: an X11 menu stands where its window stands. The fullscreen
+/// window in use is over the panels, and its menus were left under it, out
+/// of sight, where an xdg menu is drawn with its window.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_menu_of_the_fullscreen_window_in_use_is_drawn_over_it() {
+    let x11 = X11::start(
+        "x11-fullscreen-menu",
+        Backend::headless((1280, 800)).with_person(),
+    );
+    let video = fullscreen_video(&x11);
+
+    x11.menu_over("menu", (40, 40), (120, 80), Some(video));
+
+    assert!(x11.on_top("menu"), "under its window: {:?}", x11.facts());
+    x11.stop();
+}
+
+/// The person leaves a fullscreen window with its menu up for a window
+/// that opens and takes the keyboard: it comes in front of both, the menu
+/// going back under it with its window. Cycling focus would raise the
+/// window it lands on again after; this one is raised by nothing else.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_menu_of_a_fullscreen_window_left_for_another_goes_back_under_it_with_it() {
+    let x11 = X11::start(
+        "x11-fullscreen-menu-left",
+        Backend::headless((1280, 800)).with_person(),
+    );
+    let video = fullscreen_video(&x11);
+    x11.menu_over("menu", (40, 40), (120, 80), Some(video));
+    assert!(x11.on_top("menu"), "under its window: {:?}", x11.facts());
+
+    with_the_keyboard(&x11, "other");
+
+    assert!(x11.on_top("other"), "under the menu: {:?}", x11.facts());
+    x11.stop();
+}

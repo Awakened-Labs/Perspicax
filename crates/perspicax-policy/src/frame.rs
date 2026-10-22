@@ -519,6 +519,9 @@ pub enum FrameButton {
     Shade,
     /// Keep the window on every workspace, or take it back to one.
     Sticky,
+    /// Keep the window in front of the others, or let it go back among
+    /// them.
+    OnTop,
     Minimize,
     Maximize,
     Close,
@@ -526,13 +529,14 @@ pub enum FrameButton {
 
 impl FrameButton {
     /// Every button, in the order the issue that let a person choose them
-    /// listed them.
-    pub const ALL: [Self; 5] = [
+    /// listed them, and the one #64 added after.
+    pub const ALL: [Self; 6] = [
         Self::Shade,
         Self::Sticky,
         Self::Minimize,
         Self::Maximize,
         Self::Close,
+        Self::OnTop,
     ];
 
     /// Its name as `[decorations] left` and `right` write it.
@@ -541,6 +545,7 @@ impl FrameButton {
         match self {
             Self::Shade => "shade",
             Self::Sticky => "sticky",
+            Self::OnTop => "on-top",
             Self::Minimize => "minimize",
             Self::Maximize => "maximize",
             Self::Close => "close",
@@ -565,11 +570,14 @@ pub enum Face {
     Stick,
     /// Sticky, while on every workspace.
     Unstick,
+    OnTop,
+    /// On top, while kept in front of the others.
+    OffTop,
 }
 
 impl Face {
     /// Every face, a button's and then its toggled one's.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::Close,
         Self::Minimize,
         Self::Maximize,
@@ -578,6 +586,8 @@ impl Face {
         Self::Unshade,
         Self::Stick,
         Self::Unstick,
+        Self::OnTop,
+        Self::OffTop,
     ];
 
     /// Its name as `[decorations.icons]` writes it.
@@ -592,12 +602,14 @@ impl Face {
             Self::Unshade => "unshade",
             Self::Stick => "stick",
             Self::Unstick => "unstick",
+            Self::OnTop => "on-top",
+            Self::OffTop => "off-top",
         }
     }
 
     /// The face `button` shows, `on` being whether its toggle is: the
-    /// window maximized, rolled up, or on every workspace. Close and
-    /// minimize toggle nothing, and show one face either way.
+    /// window maximized, rolled up, on every workspace, or kept on top.
+    /// Close and minimize toggle nothing, and show one face either way.
     #[must_use]
     pub const fn of(button: FrameButton, on: bool) -> Self {
         match (button, on) {
@@ -609,6 +621,8 @@ impl Face {
             (FrameButton::Shade, true) => Self::Unshade,
             (FrameButton::Sticky, false) => Self::Stick,
             (FrameButton::Sticky, true) => Self::Unstick,
+            (FrameButton::OnTop, false) => Self::OnTop,
+            (FrameButton::OnTop, true) => Self::OffTop,
         }
     }
 }
@@ -1262,8 +1276,8 @@ mod tests {
         assert_eq!(at(488.0, 3), Some(Part::Button(FrameButton::Close)));
     }
 
-    /// minimal's bar, Fluxbox's: sticky at the left, the other four at the
-    /// right.
+    /// Fluxbox's own bar, minimal's until #64: sticky at the left, the other
+    /// four at the right.
     fn fluxbox() -> Buttons {
         use FrameButton::*;
         Buttons::new(&[Sticky], &[Shade, Minimize, Maximize, Close]).unwrap()
@@ -1331,6 +1345,28 @@ mod tests {
             ],
             "what is kept closes up to the end it is at"
         );
+    }
+
+    /// minimal's bar puts on top beside sticky, and so beside the title: of
+    /// the buttons as near it, the one on the left, it goes first.
+    #[test]
+    fn an_on_top_button_is_let_go_first_on_a_narrow_minimal_bar() {
+        use FrameButton::*;
+        let minimal = Buttons::new(&[Sticky, OnTop], &[Shade, Minimize, Maximize, Close]).unwrap();
+        let on = |width| {
+            buttons_in(Rect::new(100, 76, width, 24), &minimal, true)
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        let all = on(400);
+        assert_eq!(all.len(), 6);
+        assert!(
+            all.contains(&(OnTop, Rect::new(124, 76, 24, 24))),
+            "beside sticky, at the title's left: {all:?}"
+        );
+        let fewer: Vec<_> = on(120).into_iter().map(|(button, _)| button).collect();
+        assert_eq!(fewer.len(), 5);
+        assert!(!fewer.contains(&OnTop), "{fewer:?}");
     }
 
     /// Close is kept first wherever it is: at the far left, as on a Mac, or
@@ -1407,6 +1443,7 @@ mod tests {
         assert_eq!(Decorations::default().buttons, today);
         assert_eq!(Buttons::default().left().count(), 0);
         assert!(!Buttons::default().contains(FrameButton::Sticky));
+        assert!(!Buttons::default().contains(FrameButton::OnTop));
     }
 
     #[test]
@@ -1421,7 +1458,7 @@ mod tests {
         );
         assert!(
             Buttons::new(&FrameButton::ALL, &[]).is_ok(),
-            "all five at one end"
+            "all six at one end"
         );
     }
 
@@ -1484,13 +1521,16 @@ mod tests {
         assert_eq!(Face::of(Shade, true), Face::Unshade);
         assert_eq!(Face::of(Sticky, true), Face::Unstick);
         assert_eq!(Face::of(Sticky, false), Face::Stick);
+        assert_eq!(Face::of(OnTop, false), Face::OnTop);
+        assert_eq!(Face::of(OnTop, true), Face::OffTop);
         assert_eq!(Face::of(Close, true), Face::of(Close, false));
         assert_eq!(Face::of(Minimize, true), Face::Minimize);
         let keys: Vec<_> = Face::ALL.iter().map(|face| face.key()).collect();
         assert_eq!(
             keys,
             [
-                "close", "minimize", "maximize", "restore", "shade", "unshade", "stick", "unstick"
+                "close", "minimize", "maximize", "restore", "shade", "unshade", "stick", "unstick",
+                "on-top", "off-top"
             ]
         );
     }

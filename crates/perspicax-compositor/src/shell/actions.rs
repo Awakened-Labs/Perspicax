@@ -104,6 +104,11 @@ impl Compositor {
                     self.toggle_sticky(&window);
                 }
             }
+            Action::ToggleOnTop => {
+                if let Some(window) = focused {
+                    self.toggle_on_top(&window);
+                }
+            }
             Action::Snap(direction) => self.snap_focused(*direction),
             Action::Reload => self.reload(),
             Action::StartMenu => self.ask_shell(crate::shell_protocol::Menu::Start),

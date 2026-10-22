@@ -232,7 +232,7 @@ impl Compositor {
         // so this is where it is settled whether one covers the panels: the
         // window in use, through any menu of its own that has the keyboard.
         let in_use = self.window_in_use();
-        self.stack_fullscreen(in_use);
+        self.restack(in_use);
         self.generation += 1;
         self.facts.publish(self.host_facts(in_use));
         self.announce();
@@ -254,9 +254,12 @@ impl Compositor {
     /// callbacks, so that this never reads it. This takes each layer map's
     /// lock and `with_states` in turn, so it is never called under either.
     pub(crate) fn host_facts(&self, in_use: Option<SurfaceId>) -> HostFacts {
-        // `Space::elements()` iterates back to front, which is the order
-        // `HostFacts::bottom_to_top` wants. The two agree by construction
-        // rather than through a conversion somebody has to keep right.
+        // `as_drawn` iterates back to front, as the windows are drawn: the
+        // order `HostFacts::bottom_to_top` wants, with a window kept on top
+        // in front of the others whichever was raised last. The facts, the
+        // screen and the pointer all read it there, and agree by
+        // construction rather than through a conversion somebody has to keep
+        // right.
         //
         // Parked windows first, as unmapped: below everything, and judged
         // `Unmapped` (minimized) or `OtherWorkspace` rather than forgotten,
@@ -274,10 +277,9 @@ impl Compositor {
         let below = self.layers_in(&crate::layers::BELOW);
         let top = self.layers_in(&crate::layers::TOP);
         let overlay = self.layers_in(&crate::layers::OVERLAY);
-        let (raised, windows): (Vec<&crate::framed::Framed>, Vec<_>) = self
-            .space
-            .elements()
-            .partition(|window| crate::shell::covers_panels(window));
+        let (raised, windows): (Vec<&crate::framed::Framed>, Vec<_>) =
+            crate::shell::as_drawn(&self.space)
+                .partition(|window| crate::shell::covers_panels(window));
         // How see-through each window on screen is drawn, for an agent
         // puzzled by a picture. Never judged by: see `drawn_opacity`.
         //
@@ -289,6 +291,10 @@ impl Compositor {
         let window = |window: &crate::framed::Framed| {
             let facts = self.facts_for(window).map(|facts| {
                 let mut facts = self.grouped(window, facts);
+                // Here, for a Wayland window and an X11 one alike, and as
+                // `restack` worked it out: kept on top by the person, or
+                // with the window it hangs from.
+                facts.on_top = crate::shell::is_kept_on_top(window);
                 if facts.mapped {
                     facts.drawn_opacity = Some(self.opacity_of(window, in_use))
                         .filter(|&percent| percent < perspicax_policy::OPAQUE);
@@ -451,6 +457,8 @@ impl Compositor {
             behind_tab: hidden.1,
             // Rolled up, its frame is the bar alone, and covers only that.
             shaded: crate::shell::is_shaded(window),
+            // Set by `host_facts`, which every window passes through.
+            on_top: false,
             // A parked window draws nothing, frame included.
             frame: if parked {
                 Vec::new()
@@ -611,6 +619,7 @@ impl Compositor {
             off_workspace: None,
             behind_tab: None,
             shaded: false,
+            on_top: false,
             frame: Vec::new(),
             // Layers and lock covers are drawn as their clients drew them.
             drawn_opacity: None,

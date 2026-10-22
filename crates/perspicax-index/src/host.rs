@@ -311,6 +311,11 @@ pub struct SurfaceFacts {
     /// Not a reason to call it unmapped. An unmapped surface covers nothing
     /// at all, and its titlebar is still there over whatever is under it.
     pub shaded: bool,
+    /// Kept in front of the other windows: by the person, or with the window
+    /// it is a dialog or a menu of. Nothing is judged by it, for the order of
+    /// the surfaces already has it in front; it says why a window raised
+    /// since is still covered by this one.
+    pub on_top: bool,
     /// What the host drew around this surface, in global space: a titlebar
     /// and a border, outside `geometry`, and, round a window an agent may act
     /// on where consent is by grant, the line marking it out.
@@ -372,6 +377,7 @@ impl SurfaceFacts {
             off_workspace: None,
             behind_tab: None,
             shaded: false,
+            on_top: false,
             frame: Vec::new(),
             drawn_opacity: None,
             app_id: None,
@@ -445,6 +451,13 @@ impl SurfaceFacts {
     #[must_use]
     pub fn rolled_up(mut self) -> Self {
         self.shaded = true;
+        self
+    }
+
+    /// The same surface, kept in front of the other windows.
+    #[must_use]
+    pub fn kept_on_top(mut self) -> Self {
+        self.on_top = true;
         self
     }
 

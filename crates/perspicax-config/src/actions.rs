@@ -34,6 +34,7 @@ const NAMED: &[(&str, Action)] = &[
     ("cycle-focus", Action::CycleFocus),
     ("reload", Action::Reload),
     ("toggle-sticky", Action::ToggleSticky),
+    ("toggle-on-top", Action::ToggleOnTop),
     ("toggle-maximize", Action::ToggleMaximize),
     ("minimize", Action::Minimize),
     ("shade", Action::Shade),
@@ -168,6 +169,7 @@ pub fn spell_action(action: &Action) -> Option<Spelled> {
         | Action::MoveToOutput(Towards::Next | Towards::Previous)
         | Action::CycleWorkspace { .. }
         | Action::ToggleSticky
+        | Action::ToggleOnTop
         | Action::ToggleMaximize
         | Action::Minimize
         | Action::Shade
@@ -276,6 +278,7 @@ mod tests {
             Action::CycleWorkspace { forward: true },
             Action::CycleWorkspace { forward: false },
             Action::ToggleSticky,
+            Action::ToggleOnTop,
             Action::ToggleMaximize,
             Action::Minimize,
             Action::Shade,
@@ -364,10 +367,11 @@ mod tests {
             Action::ToggleAgent => 28,
             Action::RevokeAgents => 29,
             Action::Volume(_) => 30,
+            Action::ToggleOnTop => 31,
         }
     }
 
-    const VARIANTS: usize = 31;
+    const VARIANTS: usize = 32;
 
     fn pies() -> BTreeSet<String> {
         BTreeSet::from(["launchers".to_owned()])

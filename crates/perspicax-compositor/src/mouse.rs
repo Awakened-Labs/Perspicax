@@ -91,7 +91,7 @@ pub(crate) fn under(state: &Compositor, at: Point<f64, Logical>) -> Option<Hit> 
     };
     // `raised`: only a window over the panels, the fullscreen one in use.
     let window = |raised: bool| {
-        let (window, location) = state.space.element_under(at)?;
+        let (window, location) = crate::shell::window_under(&state.space, at)?;
         if raised && !crate::shell::covers_panels(window) {
             return None;
         }
@@ -167,7 +167,7 @@ impl Compositor {
     /// desktop, as the wallpaper is.
     pub(crate) fn over_desktop(&self, at: Point<f64, Logical>) -> bool {
         self.layer_surface_under(&layers::ABOVE, at).is_none()
-            && self.space.element_under(at).is_none()
+            && crate::shell::window_under(&self.space, at).is_none()
     }
 
     /// Where `hit` is, as far as a binding cares. A panel or a menu is in no

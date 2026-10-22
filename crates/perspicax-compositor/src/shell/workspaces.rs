@@ -35,7 +35,7 @@ use smithay::{
 };
 
 #[cfg(feature = "seat")]
-use super::covers_panels;
+use super::{covers_panels, is_kept_on_top};
 use super::{extent_size, id_of, placement};
 use crate::{framed::Framed, state::Compositor};
 
@@ -48,6 +48,7 @@ pub(crate) struct Pictured {
     /// A fullscreen window that was in use when it was left, still over the
     /// panels.
     pub(crate) raised: Vec<(Framed, Point<i32, Logical>)>,
+    /// The other windows, those kept on top in front.
     pub(crate) windows: Vec<(Framed, Point<i32, Logical>)>,
 }
 
@@ -208,6 +209,11 @@ impl Compositor {
                 pictured.windows.push(piece);
             }
         }
+        // As they will be drawn once it is shown (`super::as_drawn`): those
+        // kept on top in front, each kind in the order it was raised in.
+        pictured
+            .windows
+            .sort_by_key(|(window, _)| !is_kept_on_top(window));
         pictured
     }
 

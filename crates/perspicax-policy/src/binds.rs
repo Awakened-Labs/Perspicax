@@ -64,6 +64,11 @@ pub enum Action {
     CarryToWorkspace(Direction),
     /// Put the focused window on every workspace, or back on one.
     ToggleSticky,
+    /// Keep the focused window in front of the other windows, whichever has
+    /// the keyboard, or let it go back among them. Raising another window
+    /// raises it behind those kept on top; cycling focus still walks every
+    /// window in turn.
+    ToggleOnTop,
     /// Snap the focused window towards a side: halves, quarters, maximized,
     /// stepping as Windows does. See [`crate::keyed`].
     Snap(Direction),
@@ -172,6 +177,7 @@ impl Action {
             | Self::SendToWorkspace(_)
             | Self::CarryToWorkspace(_)
             | Self::ToggleSticky
+            | Self::ToggleOnTop
             | Self::Snap(_)
             | Self::ToggleMaximize
             | Self::Minimize
@@ -678,6 +684,7 @@ mod tests {
             Action::SendToWorkspace(Direction::Right),
             Action::CarryToWorkspace(Direction::Right),
             Action::ToggleSticky,
+            Action::ToggleOnTop,
             Action::Snap(Direction::Left),
             Action::ToggleMaximize,
             Action::Minimize,

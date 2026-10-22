@@ -292,7 +292,8 @@ below). An X11 application's has a `from` only if it names the window it was
 opened from: GTK 3's and Qt's do, Steam's and GTK 4's do not. An agent can
 read and click a panel or a menu as it would a window; a window verb aimed at
 one is refused as `not_a_window`. A window rolled up to its titlebar is
-`shaded: true`.
+`shaded: true`, and one the person keeps on top of the others is
+`on_top: true`, as are its dialogs and menus, kept there with it.
 
 An agent names a control and never a coordinate — the rectangle comes from the
 index and turning it into anything global is the compositor's job, so an agent
@@ -954,8 +955,9 @@ stops at the edge of the desk, so a window grabbed nearer than that to the
 side it is pushed towards, as a titlebar is to the top, stays on screen.
 It does not snap. The wheel over a titlebar rolls its window up to it, and
 down again, as Openbox does. Its titlebar is Fluxbox's: a sticky button at
-the left, which keeps the window on every workspace, and roll up, minimize,
-maximize and close at the right. It is flat, as Fluxbox's is: square
+the left, which keeps the window on every workspace, then a triangle, which
+keeps it on top of the others, and roll up, minimize, maximize and close at
+the right. It is flat, as Fluxbox's is: square
 corners, no shadow, and nothing animated, though a button still lights up
 under the pointer.
 In both, a window being moved or resized stays in hand: switching
@@ -995,6 +997,21 @@ roll up: one that draws its own has no titlebar of perspicax's to roll up to,
 and no button. An X11 window rolls up too, but is not told it has
 (`_NET_WM_STATE_SHADED`).
 
+In both, a window can be kept on top of the others: by `toggle-on-top` bound
+to a key, which neither profile binds, or by the triangle beside sticky on
+`minimal`'s titlebar, filled while the window is kept. It is drawn in front of
+every window that is not kept on top, whichever of them is raised or has the
+keyboard, and of two kept on top, the one raised last is in front. Nothing
+else changes: Alt+Tab walks every window in turn as it did, each taking the
+keyboard, and a window closing gives the keyboard to the one raised last. Its
+dialogs and menus are kept on top with it, and let go with it. The panels stay
+over it, and a fullscreen window covers it while it is the one in use. A tab
+group is kept on top as one, and a tab taken out of it comes out among the
+others. A menu of a window that is not kept on top opens behind one that is,
+where they overlap (#234). An X11 window is kept on top as any other, but is
+not told it is, and an X11 application cannot keep a window of its own on top
+by asking (`_NET_WM_STATE_ABOVE`, #236).
+
 In both, a workspace switch slides: the new workspace comes in from the side
 the person went towards, across a wrap too, and along the grid for a switch by
 number, a pager or a scroll. `[workspaces.transition]` picks another effect:
@@ -1017,30 +1034,32 @@ another. `[theme] motion = "reduced"` makes every switch instant, whatever
 In both, a titlebar's buttons are a person's to choose, and where:
 `[decorations] left` and `right` list them, from the bar's left, with the
 title or the tabs between, as Fluxbox's `titlebar.left` and `titlebar.right`
-do. There are five, `shade`, `sticky`, `minimize`, `maximize` and `close`,
-each at one end at most, and either end may have none. Writing one end alone
-keeps the profile's other, but for any button the written end took. A bar
-too narrow for them all keeps close the longest, so a narrow window can still
-be closed, and lets the others go from beside the title outwards, the
+do. There are six, `shade`, `sticky`, `on-top`, `minimize`, `maximize` and
+`close`, each at one end at most, and either end may have none. Writing one
+end alone keeps the profile's other, but for any button the written end took.
+A bar too narrow for them all keeps close the longest, so a narrow window can
+still be closed, and lets the others go from beside the title outwards, the
 left-hand one first of two as near it. A button acts on its own window,
 whether or not it has the keyboard. Each that toggles shows which way it is:
-the sticky pin filled while the window is on every workspace, maximize as two
-squares, restore, while it is maximized, and shade with a chevron pointing
-down while it is rolled up. Under the pointer, a button is lit behind its
-shape, in the bar's own ink, faintly, and less faintly pressed; close goes
-red, `title-close-hover` in the palette. A press dragged off a button goes
-out, and does nothing.
+the sticky pin filled while the window is on every workspace, the on-top
+triangle filled while it is kept on top, maximize as two squares, restore,
+while it is maximized, and shade with a chevron pointing down while it is
+rolled up. Under the pointer, a button is lit behind its shape, in the bar's
+own ink, faintly, and less faintly pressed; close goes red,
+`title-close-hover` in the palette. A press dragged off a button goes out, and
+does nothing.
 
 A button can be drawn from a picture of your own, by what a press of it then
 does: `[decorations.icons]` names a PNG, or an SVG in a build with the `svg`
 feature, for `close`, `minimize`, `maximize`, `restore` (maximize, while
-maximized), `shade`, `unshade`, `stick` and `unstick`. A picture is a mask by
-default, drawn in the bar's ink by its alpha, so it reads on every bar and
-in every theme; `tint = false` draws it in its own colours. A PNG is shrunk to
-its button, never enlarged, and an SVG drawn at its button's own size, so it
-is crisp at any scale. One that cannot be read is said once in the log, and
-the button keeps its own shape, never an empty square. They are read again
-at every save, found as a wallpaper is.
+maximized), `shade`, `unshade`, `stick`, `unstick`, `on-top` and `off-top`
+(on-top, while kept on top). A picture is a mask by default, drawn in the
+bar's ink by its alpha, so it reads on every bar and in every theme;
+`tint = false` draws it in its own colours. A PNG is shrunk to its button,
+never enlarged, and an SVG drawn at its button's own size, so it is crisp at
+any scale. One that cannot be read is said once in the log, and the button
+keeps its own shape, never an empty square. They are read again at every save,
+found as a wallpaper is.
 
 `corner-radius` rounds a titlebar's top corners, square for a maximized
 window, whose bar meets the screen's own corners, and `[decorations.shadow]`
@@ -1098,6 +1117,8 @@ autoraise = false
 "Logo+F12" = "volume-up"       # or "volume-down", "volume-mute", "mic-mute":
                                # the shell's; both profiles bind the XF86Audio
                                # keys to them, see The mixer
+"Logo+t" = "toggle-on-top"     # keep the focused window in front of the
+                               # others, or let it go; neither profile binds it
 "Logo" = "none"                # Logo alone is a tap: pressed, let go, nothing
                                # in between; no other modifier can be tapped
 
