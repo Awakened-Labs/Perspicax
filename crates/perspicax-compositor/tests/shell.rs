@@ -2122,6 +2122,42 @@ fn a_tooltip_follows_its_windows_title_and_the_task_that_slides_under_a_still_po
 #[cfg(feature = "capture")]
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn with_tooltips_off_resting_on_a_task_shows_none_and_a_save_turns_them_on_and_off() {
+    use std::time::Duration;
+
+    let (session, shell, desk, queue) =
+        two_icons(("shell-tip-off", "tip-off"), "tooltips = false\n", 800 - 30);
+    session.command(Command::Motion {
+        by: ((PANEL_HEIGHT + ICON / 2.0) as i32, 780),
+    });
+    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        tooltip(&session.wait_for(|_| true)).is_none(),
+        "none, rested well past the wait"
+    );
+
+    // Saved on, the next move shows one.
+    let icons = format!("{CLASSIC}[shell.panel]\ntask-titles = false\n");
+    shell.rewrite(&icons);
+    session.command(Command::ReconfigureShell);
+    let tip = || {
+        session.command(Command::Motion { by: (1, 0) });
+        session.wait_for(|facts| tooltip(facts).is_some());
+    };
+    tip();
+
+    // Saved off, the one shown goes at once, the pointer still.
+    shell.rewrite(&format!("{icons}tooltips = false\n"));
+    session.command(Command::ReconfigureShell);
+    session.wait_for(|facts| tooltip(facts).is_none());
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_top_panels_tooltip_hangs_below_it() {
     let (session, shell, desk, queue) =
         two_icons(("shell-tip-top", "tip-top"), "edge = \"top\"\n", 10);

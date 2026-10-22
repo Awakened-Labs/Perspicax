@@ -522,13 +522,22 @@ impl Panels {
             .any(|bar| bar.layer.wl_surface() == surface)
     }
 
+    /// Whether the panels show tooltips.
+    pub(super) fn tooltips(&self) -> bool {
+        self.panel.as_ref().is_some_and(|panel| panel.tooltips)
+    }
+
     /// The monitor of the panel that is `surface`, and the part at `point`
-    /// with a tooltip, if any, if `surface` is a panel's.
+    /// with a tooltip, if any, if `surface` is a panel's and the panels show
+    /// tooltips.
     pub(super) fn tip_at(
         &self,
         surface: &wl_surface::WlSurface,
         point: (f64, f64),
     ) -> Option<(String, Option<Part>)> {
+        if !self.tooltips() {
+            return None;
+        }
         let bar = self
             .each
             .iter()

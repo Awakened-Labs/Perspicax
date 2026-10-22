@@ -209,6 +209,9 @@ pub struct Panel {
     /// Each task shows its window's title beside its icon. Without, it shows
     /// its icon alone, and is no wider than that needs.
     pub task_titles: bool,
+    /// The pointer resting on a task or a status icon shows what it is in a
+    /// tooltip: a window's whole title, a program's name for its icon.
+    pub tooltips: bool,
     /// What it holds, in order from the left.
     pub items: Vec<Item>,
     /// The clock's format, as strftime writes it.
@@ -499,6 +502,7 @@ impl Panel {
             outputs: PanelOutputs::All,
             taskbar: TaskbarScope::ThisOutput,
             task_titles: true,
+            tooltips: true,
             items: items
                 .into_iter()
                 .filter(|item| match item {
@@ -548,6 +552,7 @@ struct RawPanel {
     outputs: Option<RawOutputs>,
     taskbar: Option<TaskbarScope>,
     task_titles: Option<bool>,
+    tooltips: Option<bool>,
     items: Option<Vec<Item>>,
     clock: Option<String>,
 }
@@ -858,6 +863,7 @@ impl RawPanel {
             || self.outputs.is_some()
             || self.taskbar.is_some()
             || self.task_titles.is_some()
+            || self.tooltips.is_some()
             || self.items.is_some()
             || self.clock.is_some();
         let had = profile.is_some();
@@ -900,6 +906,9 @@ impl RawPanel {
         }
         if let Some(titles) = self.task_titles {
             panel.task_titles = titles;
+        }
+        if let Some(tooltips) = self.tooltips {
+            panel.tooltips = tooltips;
         }
         if let Some(items) = self.items {
             if let Some(twice) = twice(&items) {
@@ -1320,6 +1329,7 @@ mod tests {
             "width = 600",
             "width = \"60%\"\nalign = \"left\"",
             "task-titles = false",
+            "tooltips = false",
         ] {
             let error = minimal(key).unwrap_err();
             assert!(
@@ -1387,6 +1397,30 @@ mod tests {
         .unwrap();
         assert!(!minimal.panel.unwrap().task_titles);
         assert!(panel("task-titles = \"no\"").is_err(), "true or false");
+    }
+
+    #[test]
+    fn the_panels_tooltips_are_on_unless_turned_off() {
+        let panel = |keys: &str| {
+            shell(&format!("[shell.panel]\n{keys}"), ShellBuilt::FULL)
+                .map(|shell| shell.panel.unwrap())
+        };
+        assert!(panel("").unwrap().tooltips, "on, by default");
+        assert!(!panel("tooltips = false").unwrap().tooltips);
+        assert!(panel("tooltips = true").unwrap().tooltips);
+        let without = panel("items = [\"start\", \"clock\"]\ntooltips = false").unwrap();
+        assert!(
+            !without.tooltips,
+            "kept for a taskbar or tray put back later, as `task-titles` is"
+        );
+        let minimal = shell(
+            "profile = \"minimal\"\n[shell.panel]\nenabled = true\ntooltips = false",
+            ShellBuilt::FULL,
+        )
+        .unwrap();
+        assert!(!minimal.panel.unwrap().tooltips);
+        assert!(panel("tooltips = \"off\"").is_err(), "true or false");
+        assert!(panel("tooltip = false").is_err(), "a typo is refused");
     }
 
     #[test]

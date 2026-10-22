@@ -429,6 +429,10 @@ impl App {
                 &self.workspaces.model,
             );
             self.keep_time();
+            // Tooltips turned off take the one shown, and any wait, with them.
+            if !self.panels.tooltips() {
+                self.tip_event(crate::tooltip::Event::Off);
+            }
             // The taskbar's icons, from the new icon theme, or everything in
             // the new colours. The menus are drawn afresh each time one opens.
             if theme_changed || looks_changed {
