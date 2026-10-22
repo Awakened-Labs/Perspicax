@@ -585,6 +585,16 @@ impl Panels {
         Some(Rect::new(strip.x + at.x, strip.y + at.y, at.w, at.h))
     }
 
+    /// Where on `monitor` the task of window `serial` is, on the panel of
+    /// the monitor named `name`.
+    #[cfg(feature = "menus")]
+    pub(super) fn task_at(&self, name: &str, serial: u64, monitor: Rect) -> Option<Rect> {
+        let strip = self.strip(name, monitor)?;
+        let bar = self.each.iter().find(|bar| bar.name == name)?;
+        let at = bar.placed.task(serial)?;
+        Some(Rect::new(strip.x + at.x, strip.y + at.y, at.w, at.h))
+    }
+
     /// Where on `monitor` the start button of the panel on the monitor named
     /// `name` is, if it has one.
     #[cfg(feature = "menus")]
@@ -894,7 +904,7 @@ fn start_icon(shell: &Shell, config: Option<&Path>) -> Option<String> {
 }
 
 /// What a window's task is called: its title, or with none, its app id.
-fn title<O>(window: &Window<O>) -> String {
+pub(super) fn title<O>(window: &Window<O>) -> String {
     [&window.title, &window.app_id]
         .into_iter()
         .find(|name| !name.is_empty())
@@ -946,23 +956,28 @@ impl App {
                 }
                 return;
             }
-            #[cfg(feature = "tray")]
+            use crate::update::Which;
+
             let was_open = self.menus.open_menu();
             // Anything else on a panel closes the menus, as a press anywhere
-            // off them does; a press on the tray icon whose menu is open
-            // does only that.
+            // off them does; a press on the tray icon whose menu is open, or
+            // a right-click on the task whose menu is open, does only that.
             self.menu_event(crate::update::Event::PanelPress);
-            #[cfg(feature = "tray")]
-            if let Some(Part::Tray(key)) = part
-                && was_open == Some(crate::update::Which::Tray(key))
-            {
-                return;
+            match (part, was_open) {
+                #[cfg(feature = "tray")]
+                (Some(Part::Tray(key)), Some(Which::Tray(open))) if key == open => return,
+                (Some(Part::Task(serial)), Some(Which::Task(open)))
+                    if serial == open && button == Button::Right =>
+                {
+                    return;
+                }
+                _ => {}
             }
         }
         #[cfg(not(feature = "menus"))]
         let _ = name;
         match part {
-            Some(Part::Task(serial)) => self.press_task(serial, button),
+            Some(Part::Task(serial)) => self.press_task(name, serial, button),
             Some(Part::Workspace(serial)) => self.press_workspace(serial, button),
             #[cfg(feature = "tray")]
             Some(Part::Tray(key)) => self.press_status(name, key, button),

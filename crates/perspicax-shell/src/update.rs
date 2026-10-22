@@ -12,7 +12,10 @@
 //! for the other puts it in its place. With a tray there is a third, any
 //! tray icon's, beside its icon: its program's own menu, read when it was
 //! asked for, in which nothing is searched for, and whose choice is told to
-//! the program rather than carried out here.
+//! the program rather than carried out here. With a panel there is a
+//! fourth, any window's, beside its task: what can be made of the window,
+//! in which nothing is searched for either, and whose choice is asked of
+//! the window.
 //!
 //! A menu works the way menus do on any desktop. The pointer selects the
 //! item under it, and a submenu opens as soon as the pointer is on its item;
@@ -26,6 +29,8 @@
 
 use perspicax_config::Edge;
 
+#[cfg(feature = "panel")]
+use crate::model::window_menu::Verb;
 use crate::{
     layout::{
         Measure, Rect,
@@ -98,6 +103,21 @@ pub(crate) enum Event {
         button: Rect,
         edge: Edge,
     },
+    /// A window's menu, to open beside its task, `button` on a panel along
+    /// `edge`: a right-click on it. `name` is what the window is called.
+    #[cfg(feature = "panel")]
+    TaskMenu {
+        serial: u64,
+        name: String,
+        menu: Menu,
+        output: String,
+        area: Rect,
+        button: Rect,
+        edge: Edge,
+    },
+    /// The window of this serial closed.
+    #[cfg(feature = "panel")]
+    TaskClosed(u64),
     /// A button went down on a panel, off its start button.
     #[cfg_attr(
         not(feature = "panel"),
@@ -134,6 +154,9 @@ pub(crate) enum Effect {
     /// chosen.
     #[cfg(feature = "tray")]
     Tell { key: u64, id: i32 },
+    /// Ask `verb` of the window of `serial`: a choice in its menu.
+    #[cfg(feature = "panel")]
+    Window { serial: u64, verb: Verb },
 }
 
 /// Which menu.
@@ -146,6 +169,9 @@ pub(crate) enum Which {
     /// The program's of the tray icon of this key.
     #[cfg(feature = "tray")]
     Tray(u64),
+    /// The window's of this serial, from its task.
+    #[cfg(feature = "panel")]
+    Task(u64),
 }
 
 /// What the shell's menus are doing.
@@ -165,6 +191,9 @@ struct Trees {
     /// The last tray icon's menu asked for, and what the icon is called.
     #[cfg(feature = "tray")]
     tray: (String, Menu),
+    /// The last window's menu asked for, and what the window is called.
+    #[cfg(feature = "panel")]
+    task: (String, Menu),
 }
 
 /// The menus while they are open.
@@ -254,6 +283,8 @@ impl State {
                 finds: Finds::Itself,
                 #[cfg(feature = "tray")]
                 tray: (String::new(), Menu::default()),
+                #[cfg(feature = "panel")]
+                task: (String::new(), Menu::default()),
             },
             open: None,
         }
@@ -287,7 +318,7 @@ impl State {
     }
 
     /// Which menu is open, if one is.
-    #[cfg(feature = "tray")]
+    #[cfg(any(feature = "tray", feature = "panel"))]
     pub(crate) fn open_menu(&self) -> Option<Which> {
         self.open.as_ref().map(|open| open.which)
     }
@@ -334,6 +365,29 @@ impl State {
                     self.open(Which::Tray(key), output, area, Anchor::Button(button, edge));
                 if opened.is_empty() { closed } else { opened }
             }
+            #[cfg(feature = "panel")]
+            Event::TaskMenu {
+                serial,
+                name,
+                menu,
+                output,
+                area,
+                button,
+                edge,
+            } => {
+                self.trees.task = (name, menu);
+                self.open(
+                    Which::Task(serial),
+                    output,
+                    area,
+                    Anchor::Button(button, edge),
+                )
+            }
+            #[cfg(feature = "panel")]
+            Event::TaskClosed(serial) => match &self.open {
+                Some(open) if open.which == Which::Task(serial) => self.close(),
+                _ => Vec::new(),
+            },
             Event::PanelPress => self.close(),
             Event::Motion(at) => self.hover(at),
             Event::Press(at) => self.press(at),
@@ -650,6 +704,18 @@ impl State {
                 effects.push(Effect::Tell { key, id: choice.id });
                 effects
             }
+            #[cfg(feature = "panel")]
+            &Does::Window { verb, enabled, .. } => {
+                let Which::Task(serial) = open.which else {
+                    return Vec::new();
+                };
+                if !enabled {
+                    return Vec::new();
+                }
+                let mut effects = self.close();
+                effects.push(Effect::Window { serial, verb });
+                effects
+            }
             Does::Open(_) => self.select(level, line, how),
             Does::Separator => Vec::new(),
         }
@@ -705,6 +771,8 @@ impl Trees {
             Which::Start => &self.start,
             #[cfg(feature = "tray")]
             Which::Tray(_) => &self.tray.1,
+            #[cfg(feature = "panel")]
+            Which::Task(_) => &self.task.1,
         }
     }
 
@@ -715,6 +783,8 @@ impl Trees {
             Which::Start => "Start menu",
             #[cfg(feature = "tray")]
             Which::Tray(_) => &self.tray.0,
+            #[cfg(feature = "panel")]
+            Which::Task(_) => &self.task.0,
         }
     }
 }
@@ -735,25 +805,30 @@ impl Open {
 
     /// Whether the first menu has a search line: the start menu always
     /// does unless it finds nothing, and the root menu once something has
-    /// been typed. A tray icon's never does: it starts no programs to find.
+    /// been typed. A tray icon's or a window's never does: it starts no
+    /// programs to find.
     fn searching(&self, trees: &Trees) -> bool {
         match self.which {
             Which::Start => self.finds(trees),
             Which::Root => !self.query.is_empty(),
             #[cfg(feature = "tray")]
             Which::Tray(_) => false,
+            #[cfg(feature = "panel")]
+            Which::Task(_) => false,
         }
     }
 
     /// Whether typing looks for programs in it: in any but a tray icon's,
-    /// whose items are its program's and start none, or a start menu
-    /// written to find nothing.
+    /// whose items are its program's and start none, a window's, or a
+    /// start menu written to find nothing.
     fn finds(&self, trees: &Trees) -> bool {
         match self.which {
             Which::Start => !matches!(trees.finds, Finds::Nothing),
             Which::Root => true,
             #[cfg(feature = "tray")]
             Which::Tray(_) => false,
+            #[cfg(feature = "panel")]
+            Which::Task(_) => false,
         }
     }
 
@@ -1497,5 +1572,118 @@ mod tests {
             "an empty menu closes the one open, and opens nothing"
         );
         assert!(!shell.state.is_open());
+    }
+
+    /// The menu of window 4, "Editor", on workspace 1 of 2 and drawing its
+    /// own frame, beside its task on a panel along the bottom.
+    #[cfg(feature = "panel")]
+    fn task_menu() -> Event {
+        use crate::model::{
+            tasks::{Placing, Window},
+            window_menu,
+        };
+
+        let placing = Placing {
+            homed: true,
+            workspace: Some(10),
+            ..Placing::default()
+        };
+        Event::TaskMenu {
+            serial: 4,
+            name: "Editor".to_owned(),
+            menu: window_menu::build(
+                &Window::<()>::default(),
+                Some(&placing),
+                &[(10, "1"), (11, "2")],
+            ),
+            output: "DP-1".to_owned(),
+            area: ABOVE_PANEL,
+            button: TASK,
+            edge: Edge::Bottom,
+        }
+    }
+
+    /// Where the task of window 4 is on the panel.
+    #[cfg(feature = "panel")]
+    const TASK: Rect = Rect::new(200, 760, 160, 40);
+
+    #[cfg(feature = "panel")]
+    #[test]
+    fn a_task_menu_opens_beside_its_task_and_its_choice_is_the_windows() {
+        let mut shell = Shell::new();
+        shell.start_button();
+        assert_eq!(
+            shell.send(task_menu()),
+            [Effect::Redraw],
+            "in the start menu's place"
+        );
+        let view = shell.state.view().expect("open");
+        assert_eq!(view.name, "Editor", "named for its window");
+        assert_eq!(view.query, None, "with no search line");
+        let rect = view.menus[0].rect;
+        assert!(
+            rect.bottom() == TASK.y && rect.x == TASK.x,
+            "above the task: {rect:?}"
+        );
+        assert_eq!(shell.state.open_menu(), Some(Which::Task(4)));
+        assert_eq!(shell.state.start_open_on(), None);
+        assert_eq!(
+            shell.key(Key::Text("s".to_owned())),
+            [],
+            "nothing to search"
+        );
+        assert_eq!(
+            shell.click(shell.middle_of("Shade")),
+            [],
+            "greyed out, as it cannot roll up"
+        );
+        assert!(shell.state.is_open());
+
+        let sticky = shell.middle_of("Sticky");
+        assert_eq!(
+            shell.click(sticky),
+            [
+                Effect::Redraw,
+                Effect::Window {
+                    serial: 4,
+                    verb: Verb::Sticky(true)
+                }
+            ],
+            "closed, and the window asked"
+        );
+        assert!(!shell.state.is_open());
+
+        shell.send(task_menu());
+        shell.send(Event::Motion(shell.middle_of("Send to workspace")));
+        assert_eq!(
+            shell.shown()[1],
+            ["1", "2"],
+            "its monitor's workspaces beside it"
+        );
+        assert_eq!(
+            shell.click(shell.middle_of("2")),
+            [
+                Effect::Redraw,
+                Effect::Window {
+                    serial: 4,
+                    verb: Verb::SendTo(11)
+                }
+            ]
+        );
+    }
+
+    #[cfg(feature = "panel")]
+    #[test]
+    fn a_task_menu_closes_when_its_window_does() {
+        let mut shell = Shell::new();
+        shell.send(task_menu());
+        assert_eq!(shell.send(Event::TaskClosed(5)), [], "another window");
+        assert!(shell.state.is_open());
+        assert_eq!(shell.send(Event::TaskClosed(4)), [Effect::Redraw]);
+        assert!(!shell.state.is_open());
+
+        shell.start_button();
+        assert_eq!(shell.send(Event::TaskClosed(4)), [], "nor any other menu");
+        assert!(shell.state.is_open());
     }
 }

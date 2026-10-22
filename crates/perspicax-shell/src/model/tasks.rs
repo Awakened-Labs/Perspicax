@@ -10,6 +10,11 @@
 //! another, as a dialog does, is not listed: it comes forward with the
 //! window it belongs to.
 //!
+//! perspicax tells its own shell more of each window, from version 5 of its
+//! channel: where it stands among the workspaces and the other windows, and
+//! what can be made of it. That is what a window's menu shows, and it is kept
+//! apart from what is listed, so that it never draws a panel again.
+//!
 //! Generic over the handle the compositor gave each window and the monitors
 //! it names, so that the shell keeps its Wayland objects here and a test
 //! keeps numbers and names.
@@ -36,6 +41,9 @@ struct Toplevel<H, O> {
     now: Option<Window<O>>,
     /// As told since.
     pending: Window<O>,
+    /// As perspicax last told it; `None` until it does.
+    #[cfg(feature = "menus")]
+    placing: Option<Placing>,
 }
 
 /// A window, as a taskbar lists it.
@@ -48,8 +56,31 @@ pub(crate) struct Window<O> {
     /// It has the keyboard.
     pub(crate) active: bool,
     pub(crate) minimized: bool,
+    pub(crate) maximized: bool,
     /// It belongs to another window.
     pub(crate) child: bool,
+}
+
+/// Where a window stands, and what can be made of it, as perspicax tells
+/// its shell: what a window's menu marks, and what it offers.
+#[cfg(feature = "menus")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Placing {
+    /// On every workspace.
+    pub(crate) sticky: bool,
+    /// Kept in front of the other windows.
+    pub(crate) on_top: bool,
+    /// Rolled up to its titlebar.
+    pub(crate) shaded: bool,
+    /// It has a workspace of its own, or is on every one: it can be made
+    /// sticky, or sent to another.
+    pub(crate) homed: bool,
+    /// It can be rolled up: its frame is perspicax's, and it is not
+    /// fullscreen.
+    pub(crate) shadeable: bool,
+    /// The workspace it is on, by its serial in the pager; `None` for a
+    /// sticky window, or one on none the pager knows.
+    pub(crate) workspace: Option<u64>,
 }
 
 /// One fact the compositor told of a window.
@@ -61,10 +92,11 @@ pub(crate) enum Told<O> {
     OutputEnter(O),
     /// It is no longer on this monitor.
     OutputLeave(O),
-    /// Whether it has the keyboard, and whether it is minimized.
+    /// Whether it has the keyboard, is minimized, and is maximized.
     State {
         active: bool,
         minimized: bool,
+        maximized: bool,
     },
     /// Whether it belongs to another window.
     Parent(bool),
@@ -84,6 +116,9 @@ pub(crate) enum Ask {
     Minimize,
     /// Ask it to close, which it may decline.
     Close,
+    /// Open its menu, of what can be made of it.
+    #[cfg(feature = "menus")]
+    Menu,
 }
 
 impl<H, O> Default for Tasks<H, O> {
@@ -103,6 +138,7 @@ impl<O> Default for Window<O> {
             outputs: Vec::new(),
             active: false,
             minimized: false,
+            maximized: false,
             child: false,
         }
     }
@@ -117,6 +153,8 @@ impl<H: PartialEq, O: Clone + PartialEq> Tasks<H, O> {
             serial: self.next,
             now: None,
             pending: Window::default(),
+            #[cfg(feature = "menus")]
+            placing: None,
         });
         self.next += 1;
     }
@@ -138,9 +176,14 @@ impl<H: PartialEq, O: Clone + PartialEq> Tasks<H, O> {
                 }
             }
             Told::OutputLeave(output) => pending.outputs.retain(|on| *on != output),
-            Told::State { active, minimized } => {
+            Told::State {
+                active,
+                minimized,
+                maximized,
+            } => {
                 pending.active = active;
                 pending.minimized = minimized;
+                pending.maximized = maximized;
             }
             Told::Parent(child) => pending.child = child,
             Told::Done => {
@@ -209,12 +252,46 @@ impl<H: PartialEq, O: Clone + PartialEq> Tasks<H, O> {
     }
 
     /// The handle to ask window `serial` things by, while it is open.
-    #[cfg(feature = "pie")]
+    #[cfg(any(feature = "pie", feature = "menus"))]
     pub(crate) fn handle(&self, serial: u64) -> Option<&H> {
         self.each
             .iter()
             .find(|known| known.serial == serial && known.now.is_some())
             .map(|known| &known.handle)
+    }
+
+    /// Take in what perspicax told of the window `handle` is: where it
+    /// stands, and what can be made of it.
+    #[cfg(feature = "menus")]
+    pub(crate) fn place(&mut self, handle: &H, placing: Placing) {
+        if let Some(toplevel) = self.each.iter_mut().find(|known| known.handle == *handle) {
+            toplevel.placing = Some(placing);
+        }
+    }
+
+    /// Forget where every window stands, as when perspicax stops telling.
+    #[cfg(feature = "menus")]
+    pub(crate) fn unplace_all(&mut self) {
+        for toplevel in &mut self.each {
+            toplevel.placing = None;
+        }
+    }
+
+    /// Window `serial`, while it is open, and where it stands if perspicax
+    /// has said: what its menu is made from.
+    #[cfg(feature = "menus")]
+    pub(crate) fn window(&self, serial: u64) -> Option<(&Window<O>, Option<&Placing>)> {
+        let toplevel = self.each.iter().find(|known| known.serial == serial)?;
+        Some((toplevel.now.as_ref()?, toplevel.placing.as_ref()))
+    }
+
+    /// The serial of the window `handle` is.
+    #[cfg(feature = "menus")]
+    pub(crate) fn serial_of(&self, handle: &H) -> Option<u64> {
+        self.each
+            .iter()
+            .find(|known| known.handle == *handle)
+            .map(|known| known.serial)
     }
 
     /// Every window shown so far.
@@ -226,7 +303,8 @@ impl<H: PartialEq, O: Clone + PartialEq> Tasks<H, O> {
 
     /// What pressing `button` on the task of window `serial` asks of it,
     /// with the handle to ask it by. A left click brings a window forward,
-    /// or puts it away if it is forward already; a middle click closes it.
+    /// or puts it away if it is forward already; a middle click closes it;
+    /// a right click opens its menu.
     pub(crate) fn pressed(&self, serial: u64, button: Button) -> Option<(&H, Ask)> {
         let toplevel = self.each.iter().find(|known| known.serial == serial)?;
         let window = toplevel.now.as_ref()?;
@@ -234,7 +312,11 @@ impl<H: PartialEq, O: Clone + PartialEq> Tasks<H, O> {
             Button::Left if window.active && !window.minimized => Ask::Minimize,
             Button::Left => Ask::Activate,
             Button::Middle => Ask::Close,
-            Button::Right | Button::Other => return None,
+            #[cfg(feature = "menus")]
+            Button::Right => Ask::Menu,
+            #[cfg(not(feature = "menus"))]
+            Button::Right => return None,
+            Button::Other => return None,
         };
         Some((&toplevel.handle, ask))
     }
@@ -360,7 +442,11 @@ mod tests {
         let mut tasks = Windows::default();
         opened(&mut tasks, 1, "Editor", "DP-1");
         opened(&mut tasks, 2, "Mail", "DP-1");
-        let state = |active, minimized| Told::State { active, minimized };
+        let state = |active, minimized| Told::State {
+            active,
+            minimized,
+            maximized: false,
+        };
         tasks.tell(&2, state(true, false));
         tasks.tell(&2, Told::Done);
 
@@ -395,7 +481,64 @@ mod tests {
             tasks.pressed(editor, Button::Middle),
             Some((&1, Ask::Close))
         );
-        assert_eq!(tasks.pressed(editor, Button::Right), None);
+        assert_eq!(tasks.pressed(editor, Button::Other), None);
+    }
+
+    #[cfg(feature = "menus")]
+    #[test]
+    fn right_click_opens_the_windows_menu() {
+        let mut tasks = Windows::default();
+        opened(&mut tasks, 1, "Editor", "DP-1");
+        let editor = serial(&tasks, "Editor");
+        assert_eq!(tasks.pressed(editor, Button::Right), Some((&1, Ask::Menu)));
+    }
+
+    #[cfg(feature = "menus")]
+    #[test]
+    fn where_a_window_stands_is_kept_apart_from_what_is_listed() {
+        let mut tasks = Windows::default();
+        opened(&mut tasks, 1, "Editor", "DP-1");
+        let editor = serial(&tasks, "Editor");
+        assert_eq!(tasks.serial_of(&1), Some(editor));
+        assert_eq!(
+            tasks.window(editor).map(|(_, placing)| placing),
+            Some(None),
+            "nothing told yet"
+        );
+
+        let placing = Placing {
+            sticky: true,
+            homed: true,
+            ..Placing::default()
+        };
+        tasks.place(&1, placing);
+        assert_eq!(
+            tasks.window(editor).map(|(_, placing)| placing),
+            Some(Some(&placing))
+        );
+        assert!(!tasks.tell(&1, Told::Done), "nothing listed changed");
+
+        tasks.tell(
+            &1,
+            Told::State {
+                active: true,
+                minimized: false,
+                maximized: true,
+            },
+        );
+        assert!(tasks.tell(&1, Told::Done));
+        let (window, _) = tasks.window(editor).expect("open");
+        assert!(window.maximized && window.active);
+
+        tasks.unplace_all();
+        assert_eq!(
+            tasks.window(editor).map(|(_, placing)| placing),
+            Some(None),
+            "forgotten when perspicax stops telling"
+        );
+        tasks.tell(&1, Told::Closed);
+        assert_eq!(tasks.window(editor), None);
+        assert_eq!(tasks.serial_of(&1), None);
     }
 
     #[test]

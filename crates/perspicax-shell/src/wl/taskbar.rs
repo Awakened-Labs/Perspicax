@@ -6,7 +6,16 @@
 //! windows, and are otherwise as they were. Bringing a window forward,
 //! putting it away and closing it are the compositor's to do, as a person's
 //! click or key would.
+//!
+//! A right-click on a task opens its window's menu beside it, built from
+//! what perspicax tells its own shell of the window, if it does. What is
+//! chosen there is asked of the window by this protocol where it can be:
+//! minimize, restore, maximize and close. Making it sticky, keeping it on
+//! top, rolling it up and sending it to a workspace are asked of perspicax,
+//! over its channel from version 5.
 
+#[cfg(feature = "menus")]
+use perspicax_config::Edge;
 use wayland_client::{Connection, Dispatch, QueueHandle, event_created_child, globals::GlobalList};
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
@@ -14,9 +23,16 @@ use wayland_protocols_wlr::foreign_toplevel::v1::client::{
 };
 
 use super::App;
+#[cfg(feature = "menus")]
+use super::panel::title;
 use crate::model::{
     Button,
     tasks::{Ask, Told},
+};
+#[cfg(feature = "menus")]
+use crate::{
+    model::window_menu::{self, Verb},
+    update::{Event as MenuEvent, Which},
 };
 
 /// Bind the taskbar's protocol, if the compositor offers it to us.
@@ -34,18 +50,29 @@ pub(super) fn bind(
 }
 
 impl App {
-    /// A button went down on the task of window `serial`.
-    pub(super) fn press_task(&mut self, serial: u64, button: Button) {
+    /// A button went down on the task of window `serial`, on the panel of
+    /// the monitor named `name`.
+    pub(super) fn press_task(&mut self, name: &str, serial: u64, button: Button) {
         let Some((handle, ask)) = self.panels.tasks.pressed(serial, button) else {
             return;
         };
         match ask {
-            Ask::Activate => match self.seat.state.seats().next() {
-                Some(seat) => handle.activate(&seat),
-                None => tracing::debug!("no seat to bring a window forward with"),
-            },
+            Ask::Activate => self.bring_forward(handle),
             Ask::Minimize => handle.set_minimized(),
             Ask::Close => handle.close(),
+            #[cfg(feature = "menus")]
+            Ask::Menu => self.open_task_menu(name, serial),
+        }
+        #[cfg(not(feature = "menus"))]
+        let _ = name;
+    }
+
+    /// Bring the window of `handle` forward: show it, minimized or not, and
+    /// give it the keyboard.
+    fn bring_forward(&self, handle: &ZwlrForeignToplevelHandleV1) {
+        match self.seat.state.seats().next() {
+            Some(seat) => handle.activate(&seat),
+            None => tracing::debug!("no seat to bring a window forward with"),
         }
     }
 }
@@ -55,13 +82,96 @@ impl App {
     /// pie's choice.
     #[cfg(feature = "pie")]
     pub(super) fn activate_window(&self, serial: u64) {
-        let Some(handle) = self.panels.tasks.handle(serial) else {
-            tracing::debug!(serial, "a window the pie chose has gone");
+        match self.panels.tasks.handle(serial) {
+            Some(handle) => self.bring_forward(handle),
+            None => tracing::debug!(serial, "a window the pie chose has gone"),
+        }
+    }
+}
+
+#[cfg(feature = "menus")]
+impl App {
+    /// Open the menu of window `serial` beside its task, on the panel of
+    /// the monitor named `name`. It offers the workspaces of the group the
+    /// window is on, or with none, of the group on its monitor.
+    fn open_task_menu(&mut self, name: &str, serial: u64) {
+        let Some(output) = self.output_named(name) else {
             return;
         };
-        match self.seat.state.seats().next() {
-            Some(seat) => handle.activate(&seat),
-            None => tracing::debug!("no seat to bring a window forward with"),
+        let Some(button) = self.panels.task_at(name, serial, self.monitor(&output)) else {
+            return;
+        };
+        let Some((window, placing)) = self.panels.tasks.window(serial) else {
+            return;
+        };
+        let pager = &self.workspaces.model;
+        let group = match placing.and_then(|placing| placing.workspace) {
+            Some(workspace) => pager.beside(workspace),
+            None => pager.on(window.outputs.first().unwrap_or(&output)),
+        };
+        let workspaces: Vec<(u64, &str)> = group
+            .iter()
+            .map(|(workspace, _)| (workspace.serial, workspace.name.as_str()))
+            .collect();
+        let menu = window_menu::build(window, placing, &workspaces);
+        let called = title(window);
+        let area = self.area(&output);
+        let edge = self.panels.edge().unwrap_or(Edge::Bottom);
+        self.menu_event(MenuEvent::TaskMenu {
+            serial,
+            name: called,
+            menu,
+            output: name.to_owned(),
+            area,
+            button,
+            edge,
+        });
+    }
+
+    /// Ask `verb` of window `serial`, chosen in its menu.
+    pub(super) fn act_on_window(&self, serial: u64, verb: Verb) {
+        use perspicax_protocols::shell::v1::client::perspicax_shell_v1 as shell;
+        use wayland_client::Proxy;
+
+        let Some(handle) = self.panels.tasks.handle(serial) else {
+            tracing::debug!(serial, "a window chosen for in its menu has gone");
+            return;
+        };
+        // perspicax's channel, if it is bound at a version that has `since`.
+        let channel = |since| {
+            self.channel
+                .as_ref()
+                .filter(|channel| channel.version() >= since)
+        };
+        match verb {
+            Verb::Minimize => handle.set_minimized(),
+            Verb::Restore => self.bring_forward(handle),
+            Verb::Maximize(true) => handle.set_maximized(),
+            Verb::Maximize(false) => handle.unset_maximized(),
+            Verb::Close => handle.close(),
+            Verb::Sticky(sticky) => {
+                if let Some(channel) = channel(shell::REQ_SET_STICKY_SINCE) {
+                    channel.set_sticky(handle, sticky.into());
+                }
+            }
+            Verb::OnTop(on_top) => {
+                if let Some(channel) = channel(shell::REQ_SET_ON_TOP_SINCE) {
+                    channel.set_on_top(handle, on_top.into());
+                }
+            }
+            Verb::Shade(shaded) => {
+                if let Some(channel) = channel(shell::REQ_SET_SHADED_SINCE) {
+                    channel.set_shaded(handle, shaded.into());
+                }
+            }
+            Verb::SendTo(workspace) => {
+                if let (Some(channel), Some(workspace)) = (
+                    channel(shell::REQ_SEND_TO_WORKSPACE_SINCE),
+                    self.workspaces.model.handle_of(workspace),
+                ) {
+                    channel.send_to_workspace(handle, workspace);
+                }
+            }
         }
     }
 }
@@ -84,6 +194,11 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for App {
                 app.panels.taskbar = None;
                 if app.panels.tasks.clear() {
                     app.panels_changed();
+                }
+                // A window's menu goes with the windows.
+                #[cfg(feature = "menus")]
+                if let Some(Which::Task(serial)) = app.menus.open_menu() {
+                    app.menu_event(MenuEvent::TaskClosed(serial));
                 }
             }
             _ => {}
@@ -122,6 +237,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for App {
                 Told::State {
                     active: states.contains(&State::Activated),
                     minimized: states.contains(&State::Minimized),
+                    maximized: states.contains(&State::Maximized),
                 }
             }
             Event::Parent { parent } => Told::Parent(parent.is_some()),
@@ -130,11 +246,18 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for App {
             _ => return,
         };
         let closed = matches!(told, Told::Closed);
+        // Its menu goes with it.
+        #[cfg(feature = "menus")]
+        let gone = closed.then(|| app.panels.tasks.serial_of(handle)).flatten();
         if app.panels.tasks.tell(handle, told) {
             app.panels_changed();
         }
         if closed {
             handle.destroy();
+        }
+        #[cfg(feature = "menus")]
+        if let Some(serial) = gone {
+            app.menu_event(MenuEvent::TaskClosed(serial));
         }
     }
 }

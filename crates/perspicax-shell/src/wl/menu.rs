@@ -181,7 +181,7 @@ impl Menus {
     }
 
     /// Which menu is open, if one is.
-    #[cfg(feature = "tray")]
+    #[cfg(any(feature = "tray", feature = "panel"))]
     pub(super) fn open_menu(&self) -> Option<crate::update::Which> {
         self.state.open_menu()
     }

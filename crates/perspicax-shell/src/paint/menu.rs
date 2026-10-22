@@ -8,9 +8,9 @@
 //! submenu is open in a paler one. What a person typed sits on a
 //! line of its own above the rest, behind a magnifying glass; the start
 //! menu's line is there before anything is typed, saying what it is for.
-//! In a tray icon's menu, an item its program greyed out is written faint,
-//! and one that is on or off has a box, ticked when on, or a ring, with a
-//! dot when on, where an icon would be. The shapes are drawn rather than
+//! In a tray icon's menu or a window's, an item greyed out is written
+//! faint, and one that is on or off has a box, ticked when on, or a ring,
+//! with a dot when on, where an icon would be. The shapes are drawn rather than
 //! taken from a font, so they show with any font, or none.
 
 use tiny_skia::{LineCap, PathBuilder, PixmapMut, Stroke, Transform};
@@ -118,7 +118,7 @@ pub(crate) fn paint(
                 }
                 colours.ink
             };
-            #[cfg(feature = "tray")]
+            #[cfg(any(feature = "tray", feature = "panel"))]
             if let Some(drawn) = line.item.mark() {
                 mark(canvas, px(icon_box(line.rect)), s, drawn, ink);
             }
@@ -183,7 +183,7 @@ fn chevron(canvas: &mut PixmapMut<'_>, place: Rect, s: f32, ink: [u8; 4]) {
 
 /// A box, ticked if it is on, or a ring, with a dot in it if it is on,
 /// centred in `place`.
-#[cfg(feature = "tray")]
+#[cfg(any(feature = "tray", feature = "panel"))]
 fn mark(
     canvas: &mut PixmapMut<'_>,
     place: Rect,

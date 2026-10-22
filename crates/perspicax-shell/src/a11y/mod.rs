@@ -297,8 +297,8 @@ mod menus {
 
     /// The menus' surface: a window named `namespace` covering it, holding
     /// a `Menu` for each open menu, each holding a `MenuItem` for each line
-    /// that is not a separator, named as drawn: one its program greyed out
-    /// disabled, and one with a tick or a dot a `MenuItemCheckBox` or a
+    /// that is not a separator, named as drawn: one greyed out disabled,
+    /// and one with a tick or a dot a `MenuItemCheckBox` or a
     /// `MenuItemRadio`, toggled as drawn. The focus is the line the keyboard
     /// is on, or the root menu.
     pub(crate) fn menu(
@@ -364,7 +364,7 @@ mod menus {
     fn entry(item: &Item) -> Node {
         let mut entry = Node::new(Role::MenuItem);
         entry.set_label(item.label.as_str());
-        #[cfg(feature = "tray")]
+        #[cfg(any(feature = "tray", feature = "panel"))]
         if let Some(mark) = item.mark() {
             use accesskit::Toggled;
 
@@ -560,11 +560,45 @@ mod menus {
             assert_eq!(node(&tree, TYPED).value(), Some(""));
         }
 
+        /// The items of menu `of` as they are told: `[x]` or `[ ]` before a
+        /// check box, `(*)` or `( )` before a radio button, and `(disabled)`
+        /// after one greyed out, which is then the one not to be clicked.
+        #[cfg(any(feature = "tray", feature = "panel"))]
+        fn told(tree: &TreeUpdate, of: NodeId) -> Vec<String> {
+            use accesskit::Toggled;
+
+            node(tree, of)
+                .children()
+                .iter()
+                .map(|&id| {
+                    let entry = node(tree, id);
+                    let label = entry.label().unwrap_or_default();
+                    let mark = match (entry.role(), entry.toggled()) {
+                        (Role::MenuItemCheckBox, Some(Toggled::True)) => "[x] ",
+                        (Role::MenuItemCheckBox, Some(Toggled::False)) => "[ ] ",
+                        (Role::MenuItemRadio, Some(Toggled::True)) => "(*) ",
+                        (Role::MenuItemRadio, Some(Toggled::False)) => "( ) ",
+                        (Role::MenuItem, None) => "",
+                        other => panic!("{label}: {other:?}"),
+                    };
+                    assert_eq!(
+                        entry.is_disabled(),
+                        !entry.supports_action(Action::Click),
+                        "{label}: clicked unless disabled"
+                    );
+                    let greyed = if entry.is_disabled() {
+                        " (disabled)"
+                    } else {
+                        ""
+                    };
+                    format!("{mark}{label}{greyed}")
+                })
+                .collect()
+        }
+
         #[cfg(feature = "tray")]
         #[test]
         fn a_marked_item_is_a_check_box_or_a_radio_button_toggled_as_drawn() {
-            use accesskit::Toggled;
-
             use crate::model::menu::{Choice, Item, Mark, Menu};
 
             let item = |label: &str, enabled: bool, mark: Option<Mark>| Item {
@@ -603,54 +637,76 @@ mod menus {
             let tree = menu("perspicax-menu-DP-1", None, Some(&view));
             let first = node(&tree, ROOT).children()[0];
             assert_eq!(node(&tree, first).label(), Some("Network"));
-            let entries: Vec<_> = node(&tree, first)
-                .children()
-                .iter()
-                .map(|&id| {
-                    let entry = node(&tree, id);
-                    (
-                        entry.label().unwrap_or_default(),
-                        entry.role(),
-                        entry.toggled(),
-                        entry.is_disabled(),
-                        entry.supports_action(Action::Click),
-                    )
-                })
-                .collect();
             assert_eq!(
-                entries,
+                told(&tree, first),
                 [
-                    (
-                        "Notifications",
-                        Role::MenuItemCheckBox,
-                        Some(Toggled::True),
-                        false,
-                        true
-                    ),
-                    (
-                        "Sounds",
-                        Role::MenuItemCheckBox,
-                        Some(Toggled::False),
-                        false,
-                        true
-                    ),
-                    (
-                        "Fast",
-                        Role::MenuItemRadio,
-                        Some(Toggled::True),
-                        false,
-                        true
-                    ),
-                    (
-                        "Slow",
-                        Role::MenuItemRadio,
-                        Some(Toggled::False),
-                        false,
-                        true
-                    ),
-                    ("Connected", Role::MenuItem, None, true, false),
-                    ("Quit", Role::MenuItem, None, false, true),
+                    "[x] Notifications",
+                    "[ ] Sounds",
+                    "(*) Fast",
+                    "( ) Slow",
+                    "Connected (disabled)",
+                    "Quit",
                 ]
+            );
+        }
+
+        #[cfg(feature = "panel")]
+        #[test]
+        fn a_windows_menu_is_told_as_it_is_drawn() {
+            use crate::model::{
+                menu::Menu,
+                tasks::{Placing, Window},
+                window_menu,
+            };
+
+            let placing = Placing {
+                on_top: true,
+                homed: true,
+                workspace: Some(1),
+                ..Placing::default()
+            };
+            let mut state = State::new(Menu::default(), Menu::default());
+            state.update(
+                Event::TaskMenu {
+                    serial: 4,
+                    name: "Editor".to_owned(),
+                    menu: window_menu::build(
+                        &Window::<()>::default(),
+                        Some(&placing),
+                        &[(1, "1"), (2, "2")],
+                    ),
+                    output: "DP-1".to_owned(),
+                    area: layout::Rect::new(0, 0, 800, 560),
+                    button: layout::Rect::new(200, 560, 160, 40),
+                    edge: perspicax_config::Edge::Bottom,
+                },
+                &mut Monospace(8.0),
+            );
+            state.update(Event::Choose(vec![3]), &mut Monospace(8.0));
+            let view = state.view().unwrap();
+            let tree = menu("perspicax-menu-DP-1", None, Some(&view));
+            let menus = node(&tree, ROOT).children();
+            assert_eq!(
+                node(&tree, menus[0]).label(),
+                Some("Editor"),
+                "named for its window"
+            );
+            assert_eq!(
+                told(&tree, menus[0]),
+                [
+                    "[ ] Sticky",
+                    "[x] Always on top",
+                    "[ ] Shade (disabled)",
+                    "Send to workspace",
+                    "Minimize",
+                    "Maximize",
+                    "Close",
+                ]
+            );
+            assert_eq!(
+                told(&tree, menus[1]),
+                ["(*) 1", "( ) 2"],
+                "the workspace it is on, of its monitor's"
             );
         }
 

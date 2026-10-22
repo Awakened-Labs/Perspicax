@@ -602,6 +602,8 @@ impl App {
                 },
                 #[cfg(feature = "tray")]
                 Effect::Tell { key, id } => self.tell_status(key, id),
+                #[cfg(feature = "panel")]
+                Effect::Window { serial, verb } => self.act_on_window(serial, verb),
                 Effect::Redraw => {}
             }
         }
