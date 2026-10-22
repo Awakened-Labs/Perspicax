@@ -313,6 +313,20 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tray")]
+    #[test]
+    fn a_status_icon_is_browsed_as_a_task_is() {
+        let mut state = showing(FIRST);
+        assert_eq!(over(&mut state, None), [Effect::Hide], "the gap between");
+        assert_eq!(
+            over(&mut state, Some(Part::Tray(7))),
+            [show(Part::Tray(7))],
+            "at once, the bar warm"
+        );
+        assert_eq!(state.update(Event::Press), [Effect::Hide]);
+        assert_eq!(over(&mut state, Some(Part::Tray(7))), [], "pressed");
+    }
+
     #[test]
     fn another_bar_is_a_fresh_start() {
         let mut state = showing(FIRST);

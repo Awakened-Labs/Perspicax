@@ -2301,6 +2301,36 @@ fn an_item_on_the_bus_appears_in_the_tray() {
 #[cfg(feature = "capture")]
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn resting_on_a_status_icon_shows_its_programs_title_kept_on_the_monitor() {
+    let session = Session::start("shell-tray-tip", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "tray-tip", TRAY_LAST);
+    session.wait_for(|facts| panels(facts).len() == 1);
+    let notifier = notifier::Notifier::register(&shell.bus.address);
+    until_colour(&session, (STATUS.0 as usize, 800 - 20), notifier::MAGENTA);
+
+    // From the origin, where the pointer starts, to rest on the icon at the
+    // panel's right end: its tip stands off the bar, short of the monitor's
+    // side.
+    session.command(Command::Motion {
+        by: (STATUS.0 as i32, 800 - 20),
+    });
+    let facts = session.wait_for(|facts| tooltip(facts).is_some());
+    let (_, namespace, rect) = tooltip(&facts).expect("a tip");
+    assert_eq!(namespace, "perspicax-tooltip-HEADLESS-1");
+    assert_eq!(rect.y1, 800.0 - PANEL_HEIGHT - TIP_GAP, "off the bar");
+    assert!(rect.x1 <= 1280.0 - 4.0, "kept on the monitor: {rect:?}");
+    assert!(
+        rect.x0 < STATUS.0 && STATUS.0 < rect.x1,
+        "over its icon: {rect:?}"
+    );
+
+    notifier.leave();
+    shell.stop_with(session);
+}
+
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_tray_menu_choice_is_sent_back() {
     let session = Session::start("shell-tray-menu", Backend::headless((1280, 800)));
     let shell = Shell::start(&session, "tray-menu", TRAY_LAST);

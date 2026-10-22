@@ -87,10 +87,11 @@ fn of(properties: &HashMap<String, OwnedValue>) -> Read {
     let menu = said("Menu").filter(|path| !NO_MENU.contains(&path.as_str()));
     let name = |text: Option<String>| text.filter(|name| !name.trim().is_empty());
     let item = Item {
-        // The tooltip's title is what a person reads on hovering, and is
-        // often the program's full name where its title is a short id:
-        // VLC's title is "vlc", its tooltip's "VLC media player". A blank
-        // one, or none, falls back to the title, then the id.
+        // The tooltip's title is what a person reads on hovering, in the
+        // panel's own tooltip, and is often the program's full name where its
+        // title is a short id: VLC's title is "vlc", its tooltip's "VLC media
+        // player". A blank one, or none, falls back to the title, then the
+        // id.
         title: name(tooltip())
             .or_else(|| name(said("Title")))
             .or_else(|| name(said("Id")))

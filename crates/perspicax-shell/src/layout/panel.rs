@@ -535,7 +535,8 @@ impl Placed {
     }
 
     /// What the tooltip of `part` says, and where `part` is, if it has one
-    /// and the panel shows it: a task's is its window's whole title.
+    /// and the panel shows it: a task's is its window's whole title, and a
+    /// status icon's what its program calls it.
     pub(crate) fn tip(&self, part: Part) -> Option<(&str, Rect)> {
         match part {
             Part::Task(serial) => self
@@ -543,6 +544,12 @@ impl Placed {
                 .iter()
                 .find(|(task, _)| task.serial == serial)
                 .map(|(task, rect)| (task.title.as_str(), *rect)),
+            #[cfg(feature = "tray")]
+            Part::Tray(key) => self
+                .tray
+                .iter()
+                .find(|(icon, _)| icon.key == key)
+                .map(|(icon, rect)| (icon.title.as_str(), *rect)),
             _ => None,
         }
     }
@@ -845,6 +852,12 @@ mod tests {
         );
         assert_eq!(placed.tray_icon(9), Some(placed.tray[1].1));
         assert_eq!(placed.tray_icon(8), None);
+        assert_eq!(
+            placed.tip(Part::Tray(9)),
+            Some(("Icon 9", placed.tray[1].1)),
+            "its tip what it is called"
+        );
+        assert_eq!(placed.tip(Part::Tray(8)), None);
 
         let empty = lay_out(
             &[Item::Start, Item::Tray, Item::Clock],
