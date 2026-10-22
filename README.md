@@ -243,25 +243,39 @@ before it ran, so it refuses to serve on one, before it starts anything:
   every program perspicax starts prints there.
 - **A session bus given the wire.** `dbus-run-session -- perspicax --mcp`
   gives it to the bus daemon, which gives it to every service it starts,
-  including one a program asks for by name. To run under a bus of its own,
-  give perspicax the wire alone, on fds 3 and 4, which `dbus-run-session` does
-  not pass on to its daemon:
-
-  ```sh
-  dbus-run-session -- sh -c 'exec perspicax --headless --mcp <&3 >&4 3<&- 4>&-' \
-      3<&0 4>&1 </dev/null >&2
-  ```
-
-  With named files for the wire, the inner shell can open them itself
-  instead: `sh -c 'exec perspicax --seat --mcp < mcp.in >> mcp.out'`. Or serve
-  the agent on a socket ([An agent inside the
-  session](#an-agent-inside-the-session)).
+  including one a program asks for by name. Asking for a bus of its own
+  (below) inside it is refused the same way, since the bus perspicax was
+  started on holds the wire all the same.
 
 A terminal never counts, so `perspicax --headless --mcp` typed in one is
 served, and neither does `/dev/null`. A bus that will not say which process
 serves it, or whose daemon perspicax cannot look into, is served with a
 warning in the log: a daemon given the wire was started beside perspicax, as
 its user, and answers.
+
+**A bus of its own** is the way to run under a session bus nobody else
+started. `perspicax --headless --mcp --own-bus` starts one itself: a
+`dbus-daemon` that reads nothing and prints to perspicax's stderr, as every
+program perspicax starts does, and that is given none of the wire. With no
+session bus at all, as with `ssh host perspicax --headless --mcp`, `--mcp`
+starts one without being asked. The bus lives in
+`$XDG_RUNTIME_DIR/perspicax-bus-<pid>`, which is also the runtime folder of
+everything it starts, and none of them is told your displays. That keeps the
+accessibility bus it starts from taking your desktop's: at-spi puts its
+socket in the runtime folder, and binding it removes any socket already
+there. The bus ends when perspicax ends, however it ends, `kill -9` included,
+and takes everything it started with it. A perspicax that ends of its own
+accord removes the folder too, unless one of those programs left a file in
+it. A killed one leaves it behind.
+
+Don't run perspicax under `dbus-run-session` in any form, not even with the
+wire handed to it on fds 3 and 4, which `dbus-run-session` does not give its
+daemon. `dbus-run-session` keeps its own copy of every descriptor it passes
+on, for as long as the run lasts. A process running as you can reopen a pipe
+through that copy (`/proc/<pid>/fd/4`) and write a reply perspicax did not
+send, and perspicax cannot tell that copy from the client's own end. Or serve
+the agent on a socket ([An agent inside the
+session](#an-agent-inside-the-session)).
 
 **Nor can a program take the wire.** By default any process running as you
 may reach into any other of yours. It can reopen a pipe or a file another
@@ -1438,8 +1452,9 @@ its config waits for the file to be saved again. A save that changes
 `[shell]` reaches it in place, without a restart. The tray needs a D-Bus
 session bus, and a text-console login has none: start the session under one,
 `dbus-run-session -- perspicax --seat`, or as `perspicax --session`, which
-starts one itself. With `--mcp`, keep the agent's wire from that bus, as
-[What acting looks like](#what-acting-looks-like) shows.
+starts one itself. With `--mcp`, `perspicax --seat --mcp --own-bus` instead,
+so that bus holds nothing of the agent's wire: see [What acting looks
+like](#what-acting-looks-like).
 
 The session tells its bus what it is and where its displays are, so that a
 program D-Bus starts on request -- a keyring's unlock prompt, a notification

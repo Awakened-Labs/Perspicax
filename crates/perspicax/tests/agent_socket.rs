@@ -3,7 +3,8 @@
 //! session serving one conversation after another while it runs on (issue #30).
 //! And `--mcp`'s wire, which nothing but the agent interface reaches (#43),
 //! which perspicax refuses to serve on when the session bus holds it too
-//! (#52), and which no other process may take from it (#118).
+//! (#52), which no other process may take from it (#118), and which a bus of
+//! perspicax's own holds none of, and leaves with the run (#161).
 //!
 //! The refusals need nothing but a filesystem, because the socket is bound
 //! before the accessibility registry is touched, and `attach` is tested against
@@ -567,7 +568,7 @@ fn a_wire_the_session_bus_holds_too_is_refused_before_anything_starts() {
     let status = exited(&mut session, PATIENCE);
     let said = said.recv_timeout(PATIENCE).expect("its stderr closes");
     assert!(!status.success(), "{said}");
-    for named in ["session bus", "pid ", "3<&0 4>&1", "--mcp-socket"] {
+    for named in ["session bus", "pid ", "--own-bus", "--mcp-socket"] {
         assert!(said.contains(named), "the refusal says {named:?}: {said}");
     }
     assert_eq!(
@@ -577,65 +578,293 @@ fn a_wire_the_session_bus_holds_too_is_refused_before_anything_starts() {
     );
 }
 
-/// The way the refusal above says to keep the wire from the bus: given to
-/// perspicax alone, on fds 3 and 4, which `dbus-run-session` does not pass on
-/// to its daemon. Served, and closed once perspicax has gone, which it would
-/// not be while the bus or a service it started still held it.
-#[test]
-#[ignore = "needs a live accessibility bus"]
-fn a_wire_kept_from_the_session_bus_is_served() {
-    let mut session = Command::new("sh")
-        .args([
-            "-c",
-            r#"exec dbus-run-session -- sh -c 'exec "$0" --headless --mcp <&3 >&4 3<&- 4>&-' "$1" 3<&0 4>&1 </dev/null >&2"#,
-            "sh",
-            env!("CARGO_BIN_EXE_perspicax"),
-        ])
+/// A run started as `perspicax --headless --mcp --own-bus`, or with no
+/// session bus to be found, which starts one of its own unasked (issue #161),
+/// kept in `runtime` and spoken to on piped stdin and stdout.
+fn on_a_bus_of_its_own(runtime: &Path, asked: bool) -> Child {
+    perspicax()
+        .args(["--headless", "--mcp"])
+        .args(asked.then_some("--own-bus"))
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("sh");
-    let said = everything(session.stderr.take().expect("its stderr"));
-    let said = move || {
-        said.recv_timeout(Duration::from_secs(1))
-            .unwrap_or_default()
-    };
-    let (tell, answers) = mpsc::channel::<String>();
-    let stdout = session.stdout.take().expect("its stdout");
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if tell.send(line).is_err() {
-                break;
-            }
-        }
-    });
+        .expect("perspicax starts")
+}
 
+/// The device and inode of the file `fd` of process `pid` is open on: a
+/// pipe's, which both its ends share.
+fn file_of(pid: &str, fd: impl std::fmt::Display) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let file = fs::metadata(format!("/proc/{pid}/fd/{fd}")).ok()?;
+    Some((file.dev(), file.ino()))
+}
+
+/// Every process descended from `pid`, as `/proc` says now.
+fn descendants(pid: u32) -> Vec<u32> {
+    let parents: Vec<(u32, u32)> = fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let child = entry.file_name().to_str()?.parse().ok()?;
+            let stat = fs::read_to_string(entry.path().join("stat")).ok()?;
+            let parent = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?;
+            Some((child, parent.parse().ok()?))
+        })
+        .collect();
+    let mut found = vec![pid];
+    let mut at = 0;
+    while let Some(&parent) = found.get(at) {
+        found.extend(
+            parents
+                .iter()
+                .filter(|&&(_, of)| of == parent)
+                .map(|&(child, _)| child),
+        );
+        at += 1;
+    }
+    found.split_off(1)
+}
+
+/// Every process running in `folder`, as its `XDG_RUNTIME_DIR` says: a bus
+/// of its own, and everything that bus started, which inherits it. Found this
+/// way and not by parent, since dbus-daemon leaves the services it starts to
+/// whoever adopts orphans.
+fn running_in(folder: &Path) -> Vec<u32> {
+    let mut said = b"XDG_RUNTIME_DIR=".to_vec();
+    said.extend(folder.as_os_str().as_encoded_bytes());
+    fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse().ok()?;
+            let environ = fs::read(entry.path().join("environ")).ok()?;
+            environ
+                .split(|byte| *byte == 0)
+                .any(|var| var == said)
+                .then_some(pid)
+        })
+        .collect()
+}
+
+/// What process `pid` runs, as its command line says it.
+fn command_line(pid: u32) -> String {
+    fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|line| String::from_utf8_lossy(&line).replace('\0', " "))
+        .unwrap_or_default()
+}
+
+/// Whether `pid` is a process that has not ended: a zombie has.
+fn running(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            let state = stat.rsplit_once(')')?.1.split_whitespace().next()?;
+            Some(state != "Z")
+        })
+        .unwrap_or(false)
+}
+
+/// Remove, each by name, what a bus leaves in the runtime folder it is given,
+/// then the folder: what `session::Bus` removes on its way out.
+fn tidy(folder: &Path) {
+    for file in ["bus", "dconf/user"] {
+        let _ = fs::remove_file(folder.join(file));
+    }
+    for made in ["at-spi", "dbus-1/services", "dbus-1", "dconf"] {
+        let _ = fs::remove_dir(folder.join(made));
+    }
+    let _ = fs::remove_dir(folder);
+}
+
+/// The way the refusal above says to run under a bus of its own (issue #161):
+/// with `--own-bus`, or with no session bus at all, perspicax starts one. The
+/// run is served, and nothing it started holds any of the wire: not the bus's
+/// daemon, nor what the bus started, the accessibility bus among them. There
+/// is no `dbus-run-session` around it to keep a copy, as the fd 3 and 4 form
+/// this replaces left one. The run's end takes the bus, and everything it
+/// started, with it, and leaves its folder gone.
+#[test]
+#[ignore = "needs dbus-daemon and a live accessibility bus"]
+fn a_bus_of_its_own_holds_none_of_the_wire_and_goes_with_the_run() {
+    for asked in [true, false] {
+        let scratch = Scratch::new();
+        let runtime = scratch.join("");
+        let mut session = on_a_bus_of_its_own(&runtime, asked);
+        let folder = scratch.join(&format!("perspicax-bus-{}", session.id()));
+        let mut asking = session.stdin.take().expect("its stdin");
+        let answers = BufReader::new(session.stdout.take().expect("its stdout"));
+        let wire = [
+            file_of("self", asking.as_raw_fd()).expect("the requests' pipe"),
+            file_of("self", answers.get_ref().as_raw_fd()).expect("the replies' pipe"),
+        ];
+        let said = everything(session.stderr.take().expect("its stderr"));
+        let (tell, replies) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for line in answers.lines().map_while(Result::ok) {
+                if tell.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+
+        writeln!(asking, "{}", initialize()).expect("perspicax is listening");
+        let Ok(line) = replies.recv_timeout(PATIENCE) else {
+            let _ = session.kill();
+            let said = said.recv_timeout(PATIENCE).unwrap_or_default();
+            panic!("--own-bus {asked}: no answer to initialize: {said}");
+        };
+        let answer: Value = serde_json::from_str(&line)
+            .unwrap_or_else(|error| panic!("not JSON on the wire ({error}): {line}"));
+        assert_eq!(answer["id"], 1, "{line}");
+
+        // Answering, the run has its bus, and the accessibility bus is up on
+        // it, in the bus's own folder rather than the person's: the registry
+        // is started, and that started it, before the agent is served.
+        let in_folder = running_in(&folder);
+        let lines: Vec<_> = in_folder.iter().map(|&pid| command_line(pid)).collect();
+        for program in ["dbus-daemon ", "at-spi-bus-launcher"] {
+            assert!(
+                lines.iter().any(|line| line.contains(program)),
+                "--own-bus {asked}: no {program} in its folder among {lines:?}"
+            );
+        }
+        let started = [descendants(session.id()), in_folder].concat();
+        for &pid in &started {
+            let held = fs::read_dir(format!("/proc/{pid}/fd"))
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .find(|fd| {
+                    file_of(&pid.to_string(), fd.file_name().display())
+                        .is_some_and(|file| wire.contains(&file))
+                });
+            assert!(
+                held.is_none(),
+                "{} holds the wire, as its fd {:?}",
+                command_line(pid),
+                held.map(|fd| fd.file_name())
+            );
+        }
+
+        drop(asking);
+        let status = exited(&mut session, PATIENCE);
+        assert!(status.success(), "--own-bus {asked}: {status}");
+        match replies.recv_timeout(PATIENCE) {
+            Err(mpsc::RecvTimeoutError::Disconnected) => {}
+            other => panic!("the wire carried more, or never closed: {other:?}"),
+        }
+        eventually("what the run started is still running", || {
+            !started.iter().any(|&pid| running(pid))
+        });
+        assert!(!folder.exists(), "{} is still there", folder.display());
+    }
+}
+
+/// A run that is killed takes its bus with it too (issue #161), and
+/// everything the bus started. perspicax handles no signal, and an agent's
+/// client may send it one, so the kernel stops the bus's daemon when perspicax
+/// ends, and the daemon removes its socket on its way out. Its folder stays,
+/// for nobody is left to remove it.
+///
+/// Not what perspicax started itself, which is its own to stop and a killed
+/// perspicax stops nothing: the accessibility registry, above all, which runs
+/// on with both its buses gone. The test stops that one itself.
+#[test]
+#[ignore = "needs dbus-daemon and a live accessibility bus"]
+fn a_bus_of_its_own_goes_with_a_run_that_is_killed() {
+    let scratch = Scratch::new();
+    let mut session = on_a_bus_of_its_own(&scratch.join(""), true);
+    let folder = scratch.join(&format!("perspicax-bus-{}", session.id()));
     let mut asking = session.stdin.take().expect("its stdin");
+    let mut answers = BufReader::new(session.stdout.take().expect("its stdout"));
     writeln!(asking, "{}", initialize()).expect("perspicax is listening");
-    writeln!(
-        asking,
-        "{}",
-        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })
-    )
-    .expect("perspicax is listening");
-    let Ok(line) = answers.recv_timeout(PATIENCE) else {
-        let _ = session.kill();
-        panic!("no answer to initialize: {}", said());
-    };
-    let answer: Value = serde_json::from_str(&line)
-        .unwrap_or_else(|error| panic!("not JSON on the wire ({error}): {line}"));
-    assert_eq!(answer["id"], 1, "{line}");
-    assert_eq!(
-        answer["result"]["serverInfo"]["name"], "perspicax",
-        "{line}"
+    let mut line = String::new();
+    answers
+        .read_line(&mut line)
+        .expect("an answer to initialize");
+    assert!(line.contains("\"id\":1"), "{line}");
+    let the_bus_started = running_in(&folder);
+    let lines: Vec<_> = the_bus_started
+        .iter()
+        .map(|&pid| command_line(pid))
+        .collect();
+    for program in ["dbus-daemon ", "at-spi-bus-launcher"] {
+        assert!(
+            lines.iter().any(|line| line.contains(program)),
+            "no {program} in its folder among {lines:?}"
+        );
+    }
+    let started = descendants(session.id());
+
+    session.kill().expect("perspicax killed");
+    session.wait().expect("perspicax reaped");
+    eventually("what the killed run's bus started is still running", || {
+        !the_bus_started.iter().any(|&pid| running(pid))
+    });
+    assert!(
+        !folder.join("bus").exists(),
+        "the bus's socket is still there"
     );
 
-    drop(asking);
-    let status = exited(&mut session, PATIENCE);
-    assert!(status.success(), "{status}");
-    match answers.recv_timeout(PATIENCE) {
-        Err(mpsc::RecvTimeoutError::Disconnected) => {}
-        other => panic!("the wire carried more, or never closed: {other:?}"),
+    for &pid in &started {
+        if running(pid)
+            && let Some(pid) = i32::try_from(pid)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+        {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+        }
     }
+    tidy(&folder);
+}
+
+/// `dbus-run-session -- perspicax --mcp --own-bus` hands the wire to the outer
+/// bus's daemon, flag or no flag, so it is refused as without the flag, and
+/// before a bus of its own is started for nothing (issue #161).
+#[test]
+#[ignore = "starts a session bus of its own"]
+fn a_wire_the_bus_it_was_started_on_holds_is_refused_though_it_asks_for_its_own() {
+    let scratch = Scratch::new();
+    let mut session = Command::new("dbus-run-session")
+        .arg("--")
+        .arg(env!("CARGO_BIN_EXE_perspicax"))
+        .args(["--headless", "--mcp", "--own-bus", "--run-for", "5"])
+        // Where the outer bus keeps what it makes, too.
+        .env("XDG_RUNTIME_DIR", scratch.join(""))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("dbus-run-session, which a session with a bus has");
+    let wire = everything(session.stdout.take().expect("its stdout"));
+    let said = everything(session.stderr.take().expect("its stderr"));
+    let mut asking = session.stdin.take().expect("its stdin");
+    let _ = writeln!(asking, "{}", initialize());
+    drop(asking);
+
+    let status = exited(&mut session, PATIENCE);
+    let said = said.recv_timeout(PATIENCE).expect("its stderr closes");
+    assert!(!status.success(), "{said}");
+    for named in ["session bus", "pid ", "--own-bus", "--mcp-socket"] {
+        assert!(said.contains(named), "the refusal says {named:?}: {said}");
+    }
+    assert_eq!(
+        wire.recv_timeout(PATIENCE).expect("the wire closes"),
+        "",
+        "the wire carried something"
+    );
+    let own: Vec<_> = fs::read_dir(scratch.join(""))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .filter(|name| name.to_string_lossy().starts_with("perspicax-bus-"))
+        .collect();
+    assert!(own.is_empty(), "a bus of its own was started: {own:?}");
+    tidy(&scratch.join(""));
 }

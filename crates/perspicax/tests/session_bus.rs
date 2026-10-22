@@ -566,6 +566,84 @@ fn the_bus_names_its_own_daemon() {
     assert_eq!(daemon.expect("an answer"), bus.daemon.id());
 }
 
+/// Issue #161: a bus of the session's own, started as perspicax starts it.
+/// It listens in a folder of its own, and its daemon reads nothing and prints
+/// to the session's stderr, which is all every service it starts inherits. It
+/// is told that folder for its runtime folder and no display, so the
+/// accessibility bus it starts cannot take the person's. Dropped, it stops and
+/// leaves nothing behind.
+#[test]
+#[ignore = "starts a dbus-daemon of its own"]
+fn a_bus_of_its_own_listens_in_its_folder_holds_nothing_and_goes_with_its_session() {
+    let runtime_dir = scratch("own");
+    std::fs::create_dir(&runtime_dir).expect("a runtime folder");
+    let folder = runtime_dir.join("perspicax-bus-1");
+    let own = session::Bus::start(&folder, Path::new(env!("CARGO_BIN_EXE_perspicax")))
+        .expect("a bus of its own");
+
+    let runtime = runtime();
+    let address = format!("unix:path={}", folder.join("bus").display());
+    let connection = runtime
+        .block_on(async {
+            zbus::connection::Builder::address(address.as_str())?
+                .build()
+                .await
+        })
+        .expect("a connection to the bus of its own");
+    let daemon = runtime
+        .block_on(session::bus_daemon(&connection))
+        .expect("the bus names its daemon");
+
+    let link = |pid: &str, fd: u8| {
+        std::fs::read_link(format!("/proc/{pid}/fd/{fd}"))
+            .map(|link| link.display().to_string())
+            .unwrap_or_default()
+    };
+    let stderr = link("self", 2);
+    let pid = daemon.to_string();
+    assert_eq!(link(&pid, 0), "/dev/null");
+    assert_eq!(link(&pid, 1), stderr, "its stdout");
+    assert_eq!(link(&pid, 2), stderr, "its stderr");
+
+    let environ = std::fs::read(format!("/proc/{daemon}/environ")).expect("its environment");
+    let environ: Vec<_> = environ
+        .split(|byte| *byte == 0)
+        .map(String::from_utf8_lossy)
+        .collect();
+    let runtime_folder = format!("XDG_RUNTIME_DIR={}", folder.display());
+    assert!(
+        environ.contains(&runtime_folder.as_str().into()),
+        "{environ:?}"
+    );
+    for display in ["DISPLAY=", "WAYLAND_DISPLAY="] {
+        assert!(
+            !environ.iter().any(|var| var.starts_with(display)),
+            "{display} {environ:?}"
+        );
+    }
+
+    drop(connection);
+    drop(own);
+    assert!(!running(daemon), "its daemon, {daemon}, is still running");
+    assert!(!folder.exists(), "{} is still there", folder.display());
+    std::fs::remove_dir(&runtime_dir).ok();
+}
+
+/// The start of a bus for a session that has already gone ends at once,
+/// rather than running on with nothing left to stop it.
+#[test]
+fn a_bus_for_a_session_already_gone_is_never_started() {
+    // Process 1 started nothing here: the test's own parent did.
+    let ended = Command::new(env!("CARGO_BIN_EXE_perspicax"))
+        .args(["bus-daemon", "1", "unix:path=/nonexistent/perspicax-bus"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("perspicax runs");
+    let said = String::from_utf8_lossy(&ended.stderr);
+    assert!(!ended.status.success(), "{said}");
+    assert!(said.contains("has gone"), "{said}");
+}
+
 /// Whether `pid` is a process that has not ended: a zombie has, and waits only
 /// for whoever reaps it.
 fn running(pid: u32) -> bool {
