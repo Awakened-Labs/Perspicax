@@ -22,7 +22,8 @@
 //!
 //! Everything it draws is also described on the accessibility bus, through
 //! AccessKit, one tree per surface, so an agent reads the shell as it reads
-//! any application.
+//! any application. A panel's tooltip alone has none: what it says is
+//! already the name of the task or status icon it is for.
 //!
 //! [`run`] is the whole shell. The binary calls it with the person's session;
 //! the compositor's live tests call it on a thread, with a connection to a
@@ -44,6 +45,8 @@ mod model;
 mod paint;
 #[cfg(feature = "pie")]
 mod pie;
+#[cfg(feature = "panel")]
+mod tooltip;
 #[cfg(feature = "tray")]
 mod tray;
 #[cfg(feature = "menus")]

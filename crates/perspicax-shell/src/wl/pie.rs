@@ -121,6 +121,11 @@ impl Pies {
             .map(|written| image::locate(written, config, self.home.as_deref()));
     }
 
+    /// Whether a pie is open.
+    pub(super) fn is_open(&self) -> bool {
+        self.shown.is_some()
+    }
+
     /// Whether `surface` is the pie's.
     pub(super) fn owns(&self, surface: &wl_surface::WlSurface) -> bool {
         self.shown

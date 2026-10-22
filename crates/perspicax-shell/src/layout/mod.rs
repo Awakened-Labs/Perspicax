@@ -16,6 +16,8 @@ pub(crate) mod osd;
 pub(crate) mod panel;
 #[cfg(feature = "pie")]
 pub(crate) mod pie;
+#[cfg(feature = "panel")]
+pub(crate) mod tooltip;
 
 /// The text's size, in menus and on panels, unless the theme says another.
 pub(crate) const TEXT: f32 = 14.0;

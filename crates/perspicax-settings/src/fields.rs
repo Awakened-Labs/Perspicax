@@ -1112,6 +1112,13 @@ fn panel() -> Section {
             ),
             Field::new(
                 TABLE,
+                "tooltips",
+                "The pointer resting on a task or a status icon shows what it is",
+                Kind::Switch,
+                read(|p| on(p.tooltips)),
+            ),
+            Field::new(
+                TABLE,
                 "items",
                 "What it holds, from the left",
                 Kind::List(words(Item::ALL.map(Item::key))),

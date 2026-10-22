@@ -19,6 +19,8 @@ pub(crate) mod pie;
 pub(crate) mod sound;
 #[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) mod text;
+#[cfg(feature = "panel")]
+pub(crate) mod tooltip;
 #[cfg(feature = "wallpaper")]
 pub(crate) mod wallpaper;
 

@@ -1,5 +1,7 @@
 //! What an agent reads of the shell: one accessibility tree per surface,
-//! served on the accessibility bus by AccessKit.
+//! served on the accessibility bus by AccessKit. A panel's tooltip has
+//! none: what it says is already the name of the `Tab` or `Button` it is
+//! for, in the panel's tree.
 //!
 //! Each tree's root is a `Window` named after its surface's layer namespace,
 //! `perspicax-desktop-DP-1`. perspicax joins an accessibility window to a

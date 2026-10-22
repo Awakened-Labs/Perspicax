@@ -84,7 +84,7 @@ impl Canvas {
     }
 
     /// Have `layer` take no clicks at all: they go to what is under it.
-    #[cfg(feature = "audio")]
+    #[cfg(feature = "panel")]
     pub(super) fn take_no_clicks(&self, layer: &LayerSurface) {
         if let Ok(nowhere) = Region::new(&self.compositor) {
             layer

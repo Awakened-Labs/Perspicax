@@ -30,7 +30,8 @@ pub(crate) const ITEM_PATH: &str = "/StatusNotifierItem";
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Item {
     /// What it is called: its tooltip's title, or its title, or its id,
-    /// whichever is first not blank.
+    /// whichever is first not blank. Its button's name, and what the panel's
+    /// tooltip says while the pointer rests on it.
     pub(crate) title: String,
     pub(crate) status: Status,
     pub(crate) icon: Icon,

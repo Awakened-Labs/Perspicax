@@ -15,6 +15,10 @@
 //! buttons on the menus' surface, and every key while it has the keyboard,
 //! are the menus'; on a pie's, with the wheel, they are the pie's.
 //!
+//! The pointer coming onto a panel, moving on it and leaving it are followed
+//! for its tooltips (see [`crate::tooltip`]), and a press on it takes the
+//! one shown away.
+//!
 //! The pointer is drawn as the cursor theme's arrow on every surface of the
 //! shell's, rather than as whatever the last window left it as.
 
@@ -339,6 +343,12 @@ impl PointerHandler for App {
                 PointerEventKind::Press { .. } if on_menus => self.menu_event(Event::Press(at)),
                 #[cfg(feature = "menus")]
                 PointerEventKind::Release { .. } if on_menus => self.menu_event(Event::Release(at)),
+                #[cfg(feature = "panel")]
+                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } if !on_menus => {
+                    self.panel_pointed(&event.surface, at);
+                }
+                #[cfg(feature = "panel")]
+                PointerEventKind::Leave { .. } if !on_menus => self.panel_left(&event.surface),
                 PointerEventKind::Press {
                     button: code, time, ..
                 } if !on_menus => {
@@ -367,6 +377,7 @@ impl App {
         #[cfg(feature = "panel")]
         if let Some((name, part)) = self.panels.at(surface, at) {
             let name = name.to_owned();
+            self.tip_event(crate::tooltip::Event::Press);
             self.panel_pressed(&name, part, button);
             return;
         }
