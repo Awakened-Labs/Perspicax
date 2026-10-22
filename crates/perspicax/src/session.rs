@@ -546,21 +546,49 @@ impl Drop for Bus {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        // What is left, each by name: the socket of a daemon that was killed;
-        // the accessibility bus's folder, which that bus empties on its way
-        // out; the one the daemon makes for services a program installs while
-        // it runs, which it leaves; and dconf's note of the settings those
-        // services read. Folders are removed only empty, never a tree: one
-        // still holding something stays, to say so, and a folder a service
-        // mounted -- the document portal's `doc` -- is never emptied through.
+        // What is left: the socket of a daemon that was killed, and dconf's
+        // note of the settings the bus's services read, each by name; then
+        // the folders those services made and emptied on their way out --
+        // the accessibility bus's, gvfs's, the daemon's own for services a
+        // program installs. Nothing else: one still holding something stays,
+        // to say so.
         for file in ["bus", "dconf/user"] {
             let _ = fs::remove_file(self.folder.join(file));
         }
-        for made in ["at-spi", "dbus-1/services", "dbus-1", "dconf"] {
-            let _ = fs::remove_dir(self.folder.join(made));
-        }
+        remove_empty_folders(&self.folder, OWN_BUS_FOLDER_DEPTH);
         if let Err(error) = fs::remove_dir(&self.folder) {
             tracing::debug!(%error, folder = %self.folder.display(), "the bus's folder stays");
+        }
+    }
+}
+
+/// How deep in a bus's folder [`remove_empty_folders`] looks: deeper than any
+/// service nests what it makes, and shallow enough that a folder made to be
+/// deep costs nothing.
+const OWN_BUS_FOLDER_DEPTH: usize = 8;
+
+/// Remove every empty folder in `folder`, `depth` deep, the deepest first, so
+/// that one holding only empty folders goes too. `folder` itself stays.
+///
+/// Only folders, and only empty ones, as `rmdir` removes them: a file, or a
+/// link, keeps the folder it is in. Never through a link, nor into another
+/// filesystem -- a folder a service mounted there, as the document portal and
+/// gvfs mount theirs in the runtime folder they are given, is never looked
+/// into, let alone emptied.
+fn remove_empty_folders(folder: &Path, depth: usize) {
+    let Some(deeper) = depth.checked_sub(1) else {
+        return;
+    };
+    let Ok(here) = fs::symlink_metadata(folder) else {
+        return;
+    };
+    for entry in fs::read_dir(folder).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if fs::symlink_metadata(&path)
+            .is_ok_and(|found| found.is_dir() && found.dev() == here.dev())
+        {
+            remove_empty_folders(&path, deeper);
+            let _ = fs::remove_dir(&path);
         }
     }
 }
@@ -1143,6 +1171,35 @@ mod tests {
         let link = scratch.0.join("link");
         std::os::unix::fs::symlink(&made, &link).expect("a link");
         assert!(make_own_folder(&link).is_err(), "a link, to anywhere");
+    }
+
+    #[test]
+    fn what_the_buss_services_emptied_goes_and_what_they_left_stays() {
+        let scratch = Scratch::new("bus-leftovers");
+        let folder = scratch.0.join("perspicax-bus-1");
+        for made in ["at-spi", "dbus-1/services", "gvfsd", "kept"] {
+            fs::create_dir_all(folder.join(made)).expect("a folder");
+        }
+        fs::write(folder.join("kept/note"), "").expect("a file");
+        let elsewhere = scratch.0.join("elsewhere/empty");
+        fs::create_dir_all(&elsewhere).expect("a folder outside");
+        std::os::unix::fs::symlink(&elsewhere, folder.join("link")).expect("a link");
+
+        remove_empty_folders(&folder, OWN_BUS_FOLDER_DEPTH);
+        for gone in ["at-spi", "dbus-1", "gvfsd"] {
+            assert!(!folder.join(gone).exists(), "{gone} is still there");
+        }
+        assert!(folder.join("kept/note").exists(), "a file a service left");
+        assert!(
+            fs::symlink_metadata(folder.join("link")).is_ok(),
+            "a link, which is no folder"
+        );
+        assert!(elsewhere.exists(), "the folder the link leads to");
+
+        let deep = scratch.0.join("deep");
+        fs::create_dir_all(deep.join("1/2/3")).expect("folders");
+        remove_empty_folders(&deep, 2);
+        assert!(deep.join("1/2/3").exists(), "deeper than asked");
     }
 
     #[test]

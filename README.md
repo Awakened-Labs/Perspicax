@@ -265,7 +265,8 @@ accessibility bus it starts from taking your desktop's: at-spi puts its
 socket in the runtime folder, and binding it removes any socket already
 there. The bus ends when perspicax ends, however it ends, `kill -9` included,
 and takes everything it started with it. A perspicax that ends of its own
-accord removes the folder too. A killed one leaves it behind.
+accord removes the folder too, unless one of those programs left a file in
+it. A killed one leaves it behind.
 
 Don't run perspicax under `dbus-run-session` in any form, not even with the
 wire handed to it on fds 3 and 4, which `dbus-run-session` does not give its
