@@ -36,7 +36,9 @@
 //! It needs `XDG_RUNTIME_DIR` set, which is where the Wayland socket goes. Over
 //! SSH that is `export XDG_RUNTIME_DIR=/run/user/$(id -u)`, the same variable
 //! `perspicax-probe` needs for the accessibility bus and for the same reason: a login
-//! shell has a session, and an SSH command does not.
+//! shell has a session, and an SSH command does not. Nor does an SSH command
+//! have a session bus, and under `--mcp` perspicax then starts one of its own
+//! there, as `--own-bus` asks it to whether or not there is one.
 //!
 //! Set `RUST_LOG=info` for a running account of clients connecting and windows
 //! mapping; headless, that log is the only way to watch a compositor that

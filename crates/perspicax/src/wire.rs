@@ -25,6 +25,14 @@
 //! [`Wire::held_by`] say when another holder is there, and the run is refused
 //! rather than served on a wire it cannot keep.
 //!
+//! A holder it cannot see is not refused, and there is one it cannot tell
+//! from the client: `dbus-run-session` keeps its own copy of whatever it
+//! passes on, the wire on fds 3 and 4 included, for as long as the run lasts,
+//! where any process running as this user can reopen it through `/proc`
+//! (issue #161). A pipe's two ends are one file, so that copy and the client's
+//! own end look alike. So a bus is had the other way round: this process
+//! starts its own ([`crate::session::Bus`]), and gives it nothing of the wire.
+//!
 //! Nor may a copy be *taken* without being given (issue #118). By default the
 //! kernel lets any process running as this user reopen a pipe this one holds
 //! through `/proc/<pid>/fd/<n>`, take a descriptor whole with `pidfd_getfd`, or
@@ -61,8 +69,10 @@ impl Wire {
     ///
     /// Called before anything is started and before any thread runs, so that
     /// nothing has inherited the wire or is part-way through a line on it.
-    /// After a `dbus-run-session` that would run this process again, never
-    /// before: the copies are closed on exec, and its child would have none.
+    /// After whatever would run this process again for a bus -- a
+    /// `dbus-run-session`, or this process itself for one of its own -- never
+    /// before: the copies are closed on exec, and the process run again would
+    /// have none.
     ///
     /// # Errors
     ///

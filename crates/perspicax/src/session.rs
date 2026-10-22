@@ -35,6 +35,18 @@
 //! Under `--mcp`, the bus is asked which process serves it ([`bus_daemon`]),
 //! since a daemon given the agent's wire would pass it on to every service it
 //! starts.
+//!
+//! And a session may have a bus of its own, which it starts itself
+//! ([`own_bus`], [`Bus`]): asked for with `--own-bus`, or under `--mcp` when
+//! there is no bus at all. A bus somebody else starts for it holds whatever it
+//! was given -- `dbus-run-session` keeps a copy of everything it passes on, the
+//! agent's wire included, for the whole run -- where one this process starts
+//! is given nothing of it (issue #161). The process runs itself again first,
+//! for the bus's address to be in its own environment, the one place every
+//! reader of the session bus looks ([`run_again_on_a_bus_of_its_own`]). The
+//! bus is kept in a runtime folder of its own, so the accessibility bus it
+//! starts cannot take the person's, and it goes when this process goes,
+//! however that happens ([`become_bus_daemon`]).
 
 use std::{
     env,
@@ -392,8 +404,9 @@ fn own_bus_env(folder: &Path, pid: u32, var: impl Fn(&str) -> Option<String>) ->
 }
 
 /// Run this process again for a bus of its own in `folder`, with that bus's
-/// address in its environment ([`own_bus_env`]). The bus itself is started by
-/// the process that carries on, which finds it [`OwnBus::Due`].
+/// address in its environment, and [`OWN_BUS`] and [`OUTER_BUS`] beside it.
+/// The bus itself is started by the process that carries on, which finds it
+/// [`OwnBus::Due`].
 ///
 /// Run again rather than started here, because the environment is the one
 /// place every reader of the session bus looks -- zbus, the accessibility
