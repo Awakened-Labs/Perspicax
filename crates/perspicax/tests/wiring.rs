@@ -1,10 +1,10 @@
-//! `perspicax claude-code`, run as a person runs it, against a Claude Code
-//! that is a stand-in: a script on a `PATH` of the test's own, writing down
-//! what it was asked.
+//! `perspicax claude-code` and `perspicax ennius`, run as a person runs them,
+//! against a Claude Code and an ennius that are stand-ins: scripts on a
+//! `PATH` of the test's own, writing down what they were asked.
 //!
 //! The binary is run with nothing of the environment it was started from
 //! but a home folder and that `PATH`, so a test run inside a session, beside a
-//! real Claude Code, touches neither.
+//! real Claude Code or ennius, touches neither.
 
 use std::{
     fs,
@@ -46,9 +46,40 @@ impl Scratch {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("its mode");
     }
 
-    /// What the stand-in was asked, a line a command.
+    /// A stand-in `ennius`, which answers `tools list` with `servers`, and
+    /// `config show` with a grant of `tools` that its config file lists, and
+    /// writes every other command line it is given to `ennius.log`, after
+    /// the environment perspicax asked it in.
+    fn ennius(&self, servers: &str, tools: &str) {
+        let path = self.0.join("bin/ennius");
+        let show = format!(
+            r#"{{"config":{{"interactive":{{"grant":{{"tools":{tools}}}}}}},"provenance":{{"interactive.grant.tools":"user"}}}}"#
+        );
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh
+\
+                 case \"$*\" in\n\
+                 '--json tools list') printf '%s\\n' '{{\"tools\":[],\"mcp_servers\":{servers}}}' ;;\n\
+                 '--json config show') printf '%s\\n' '{show}' ;;\n\
+                 *) printf '%s %s %s\\n' \"$ENNIUS_DISABLE_KEYRING\" \"$ENNIUS_DISABLE_ANALYTICS\" \"$*\" >> '{}' ;;\n\
+                 esac\n",
+                self.0.join("ennius.log").display()
+            ),
+        )
+        .expect("an ennius");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("its mode");
+    }
+
+    /// What the stand-in `claude` was asked, a line a command.
     fn asked(&self) -> Vec<String> {
-        fs::read_to_string(self.0.join("claude.log"))
+        self.log("claude.log")
+    }
+
+    /// The lines a stand-in wrote to `name`.
+    fn log(&self, name: &str) -> Vec<String> {
+        fs::read_to_string(self.0.join(name))
             .unwrap_or_default()
             .lines()
             .map(str::to_owned)
@@ -172,4 +203,58 @@ fn uninstalling_takes_out_what_runs_perspicax_attach() {
     let output = scratch.perspicax(&["claude-code", "uninstall"]);
     assert_eq!(output.status.code(), Some(0), "{}", said(&output));
     assert_eq!(scratch.asked(), ["mcp remove -s user perpicax"]);
+}
+
+#[test]
+fn installing_into_ennius_adds_the_server_and_grants_its_tools_with_no_keyring() {
+    let scratch = Scratch::new();
+    scratch.ennius("[]", r#"["read_file"]"#);
+    let output = scratch.perspicax(&["ennius", "install"]);
+    assert_eq!(output.status.code(), Some(0), "{}", said(&output));
+    let asked = scratch.log("ennius.log");
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(
+        asked[0],
+        format!(
+            "1 1 --json tools mcp add perspicax -- {} attach",
+            this().display()
+        ),
+        "asked with the keyring and analytics off"
+    );
+    assert!(
+        asked[1].starts_with("1 1 --json config grant add --tool mcp:perspicax:act --tool"),
+        "{asked:?}"
+    );
+    assert_eq!(
+        asked[1].matches("--tool mcp:perspicax:").count(),
+        11,
+        "{asked:?}"
+    );
+}
+
+#[test]
+fn enniuss_status_says_what_is_missing_and_is_no_failure() {
+    let scratch = Scratch::new();
+    scratch.ennius(
+        &format!(
+            r#"[{{"server":"perspicax","command":"{}","args":["attach"],"enabled":true,"lifetime":"ephemeral"}}]"#,
+            this().display()
+        ),
+        r#"["mcp:perspicax:observe"]"#,
+    );
+    let output = scratch.perspicax(&["ennius", "status"]);
+    assert_eq!(output.status.code(), Some(0), "{}", said(&output));
+    let text = said(&output);
+    assert!(
+        text.contains("server  ok    wired as `perspicax`"),
+        "{text}"
+    );
+    assert!(
+        text.contains("grant   warn  1 of 11 granted; missing act,"),
+        "{text}"
+    );
+    assert!(
+        scratch.log("ennius.log").is_empty(),
+        "status changes nothing"
+    );
 }

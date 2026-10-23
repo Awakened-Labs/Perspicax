@@ -662,8 +662,37 @@ program has gone, keeping its name and the rest of its entry. It adds no
 second one, since the desktop holds one conversation at a time. Two ways in,
 or a `perspicax` that is something else, are refused, naming them.
 
-It passes the client closing its stdin on as the end of the conversation, and
-ends when the session closes the connection. Like `--mcp`, it keeps every
+ennius starts an MCP server only for a session granted one of its tools, and
+denies a session every tool it was not granted. For ennius:
+
+```sh
+perspicax ennius install
+```
+
+This adds `perspicax attach` to ennius's `[tools.mcp]`. It also grants every
+tool perspicax serves, as `mcp:perspicax:act` and so on, to the sessions that
+`ennius tui`, `chat` and the GUI start (`[interactive.grant] tools`). Both
+steps go through ennius's own `ennius tools mcp add` and `ennius config grant
+add`.
+
+- **No grant into ennius's defaults.** A config that does not list
+  `[interactive.grant] tools` is given no grant. ennius writes a grant as the
+  whole list, so a grant written there would replace ennius's own default
+  tools rather than add to them. List them there first.
+- **Another name is kept.** A server already wired under another name keeps
+  that name, and its grants go under it.
+- **Status and uninstall.** `perspicax ennius status` says what is missing,
+  and `uninstall` takes out the server and its grants.
+- **Inside the session only.** `attach` finds the session through
+  `PERSPICAX_MCP_SOCKET`, so ennius reaches the desktop when it is started
+  inside the session, from a terminal or the start menu, and not otherwise.
+- **Older ennius.** An ennius from before its #193 takes up an `mcp:` grant in
+  `agent run` only, and `status` says so.
+- **One at a time.** Claude Code and ennius wired together take turns at the
+  desktop's one conversation.
+
+`perspicax attach` passes the client closing its stdin on as the end of the
+conversation, and ends when the session closes the connection. Like `--mcp`, it keeps every
 other process out of itself, so no program can take the wire through it.
 `perspicax attach PATH` names a socket instead. Anything else that joins stdio to a Unix socket will do, with
 OpenBSD netcat's `-N` for the first of those: `nc -N -U "$PERSPICAX_MCP_SOCKET"`,

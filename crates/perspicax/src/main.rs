@@ -57,7 +57,7 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use perspicax::{
-    attach, bus, check, claude_code, desk::Desk, keep::keep_current, lock, observe, report,
+    attach, bus, check, claude_code, desk::Desk, ennius, keep::keep_current, lock, observe, report,
     session, wire::Wire,
 };
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop, Virtual};
@@ -304,6 +304,22 @@ enum Command {
         verb: WiringVerb,
     },
 
+    /// ennius, told how to reach the desktop: `perspicax attach` among its
+    /// `[tools.mcp]`, and each tool perspicax serves granted to the sessions
+    /// it starts, `[interactive.grant] tools`, as `mcp:NAME:TOOL`.
+    ///
+    /// Written through ennius's own `tools mcp` and `config grant`, asked
+    /// with `--json`, the keyring left alone. A grant is never written into
+    /// ennius's built-in default, which it would replace rather than add to:
+    /// that step waits until the config lists its tools. A server that runs
+    /// `perspicax attach` is perspicax's whatever it is called, and its grants
+    /// go under that name. Each verb prints a row a step and exits 1 if any
+    /// failed.
+    Ennius {
+        #[command(subcommand)]
+        verb: WiringVerb,
+    },
+
     /// Not for people: the start of a session's own bus, which becomes
     /// `dbus-daemon` listening on ADDRESS once it has asked to be stopped
     /// when the session, PARENT, ends (`session::become_bus_daemon`).
@@ -400,6 +416,21 @@ fn main() -> Result<()> {
             }
             WiringVerb::Status => claude_code::status(var),
             WiringVerb::Uninstall { dry_run } => claude_code::uninstall(dry_run, var),
+        };
+        std::process::exit(report::print(&rows));
+    }
+
+    // Likewise: a word with ennius, through its own command line.
+    if let Some(Command::Ennius { verb }) = &cli.command {
+        let var = |name: &str| std::env::var(name).ok();
+        let rows = match *verb {
+            WiringVerb::Install { dry_run } => {
+                let this = std::env::current_exe()
+                    .context("no path to this program, to tell ennius to run")?;
+                ennius::install(&this, dry_run, var)
+            }
+            WiringVerb::Status => ennius::status(var),
+            WiringVerb::Uninstall { dry_run } => ennius::uninstall(dry_run, var),
         };
         std::process::exit(report::print(&rows));
     }
@@ -1233,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn wiring_claude_code_needs_no_session_and_a_verb() {
+    fn wiring_claude_code_or_ennius_needs_no_session_and_a_verb() {
         let verb = |cli: Cli| match cli.command {
             Some(Command::ClaudeCode { verb }) => verb,
             _ => panic!("not claude-code"),
@@ -1258,6 +1289,14 @@ mod tests {
             parse(&["claude-code"]).is_err(),
             "claude-code is not a verb"
         );
+        assert!(matches!(
+            parse(&["ennius", "install", "--dry-run"])
+                .expect("ennius install")
+                .command,
+            Some(Command::Ennius {
+                verb: WiringVerb::Install { dry_run: true }
+            })
+        ));
         assert_eq!(
             parse(&["--seat", "claude-code", "status"]).err(),
             Some(ErrorKind::ArgumentConflict)

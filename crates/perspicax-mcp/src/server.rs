@@ -86,6 +86,19 @@ impl Perspicax {
         }
     }
 
+    /// The tools it serves, by name, in name order: what a client that
+    /// grants tools one by one, as ennius does, grants it.
+    #[must_use]
+    pub fn tool_names() -> Vec<String> {
+        let mut names: Vec<String> = Self::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Read the index and the host's facts, and project them into something.
     ///
     /// The adapter for [`Desktop::read`]'s visitor, which is `FnMut` because it
@@ -983,14 +996,8 @@ mod tests {
     /// on.
     #[test]
     fn the_tool_list_is_the_eleven_shipped() {
-        let mut names: Vec<String> = Perspicax::tool_router()
-            .list_all()
-            .into_iter()
-            .map(|tool| tool.name.to_string())
-            .collect();
-        names.sort();
         assert_eq!(
-            names,
+            Perspicax::tool_names(),
             [
                 "act",
                 "deltas",
