@@ -5,7 +5,9 @@
 //! `ConnectionClosed`, the same as a hang-up's (#101). The one sign it does
 //! give is a flush that cannot write: the kernel's buffer to the client is
 //! full, so the client has read nothing for a while. What waits for it is
-//! then held, up to `MOST_UNREAD`, and past that it is cut off.
+//! then held, up to `MOST_UNREAD`, and past that it is cut off. The pointer's
+//! motion, which used to get it there, is owed to it from that first flush,
+//! told or not, and paid once a flush goes through (see [`crate::owed`]).
 //!
 //! A client reading through a burst can fill that buffer for a moment, so a
 //! stall is told only once it has lasted [`TOLD_AFTER`], and its end only if
@@ -68,6 +70,16 @@ impl Stall {
         }
     }
 
+    /// Whether the client has read nothing since a flush to it first could
+    /// not write: [`Self::behind`], for whoever needs no length.
+    pub(crate) fn stalled(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .since
+            .is_some()
+    }
+
     /// How long the client has read nothing at `now`, if it has stopped.
     pub(crate) fn behind(&self, now: Instant) -> Option<Duration> {
         let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -93,7 +105,9 @@ mod tests {
     fn a_client_is_stalled_from_its_first_full_flush_until_one_goes_through() {
         let stall = Stall::default();
         let start = Instant::now();
+        assert!(!stall.stalled());
         assert_eq!(stall.flushed(&full(), start), None);
+        assert!(stall.stalled(), "from the first, told or not");
         assert_eq!(stall.flushed(&full(), start + ms(500)), None);
         assert_eq!(
             stall.flushed(&full(), start + ms(1000)),
@@ -106,6 +120,7 @@ mod tests {
         );
         assert_eq!(stall.flushed(&Ok(()), start + ms(4000)), None, "and over");
         assert_eq!(stall.behind(start + ms(4000)), None);
+        assert!(!stall.stalled());
     }
 
     #[test]

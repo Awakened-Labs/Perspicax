@@ -368,14 +368,8 @@ struct Late {
     read: Result<usize, String>,
 }
 
-/// Ask for registry after registry, each answered with every global there
-/// is, until what is owed comes to `bytes`; read nothing until the
+/// Fall behind by `bytes` ([`common::fall_behind`]); read nothing until the
 /// compositor has sent all of it, or cut the client off; then read.
-///
-/// Registries, not frame callbacks: each answer is some 2 KB, so a few
-/// hundred are enough. 80 000 frame callbacks cost wayland-client 20 s in a
-/// debug build, since it finds each new object's id by a scan from the
-/// first, and under load that outlasted the session (#142).
 ///
 /// No timer can say when all of it is sent. Under load the compositor may
 /// not have read the asking yet, or may be halfway through answering, and
@@ -390,22 +384,7 @@ fn read_late(name: &str, bytes: usize) -> Late {
     let connection = connect(session.socket());
     let (globals, mut queue) =
         registry_queue_init::<Asking>(&connection).expect("the late client's registry");
-    let qh = queue.handle();
-    // What one registry is told, and its size: each global is an event of
-    // its own, a header, its name, its interface's name, which gives its own
-    // length, ends in a NUL and is padded to four bytes, and its version.
-    let (told, size) = globals.contents().with_list(|list| {
-        let size: usize = list
-            .iter()
-            .map(|global| 20 + (global.interface.len() + 1).next_multiple_of(4))
-            .sum();
-        (list.len(), size)
-    });
-    let registries = bytes.div_ceil(size);
-    for _ in 0..registries {
-        connection.display().get_registry(&qh, ());
-    }
-    queue.flush().expect("could not ask");
+    let owed = common::fall_behind(&connection, &globals, &queue.handle(), bytes);
 
     let witness = connect(session.socket());
     let (_, mut witnessed) =
@@ -422,10 +401,7 @@ fn read_late(name: &str, bytes: usize) -> Late {
         .roundtrip(&mut Asking::default())
         .expect("the compositor stopped, so nothing was cut off");
     session.stop(((queue, connection), (witnessed, witness)));
-    Late {
-        owed: registries * told,
-        read,
-    }
+    Late { owed, read }
 }
 
 /// A client that only asks what globals there are, and counts what it is
