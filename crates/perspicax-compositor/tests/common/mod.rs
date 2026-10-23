@@ -610,7 +610,7 @@ pub struct PagedGroup {
 }
 
 /// A monitor bound again by `Desk::bind_outputs_again`, beside the one
-/// `OutputState` holds.
+/// `OutputState` holds; or a pointer of `Desk::bind_spare_pointers`.
 pub struct Spare;
 
 /// One screencopy frame, as grim would see it.
@@ -921,6 +921,7 @@ pub struct Desk {
     pub relative_motions: Vec<((f64, f64), (f64, f64))>,
     /// Everything the pointer told us, in order, frames included.
     pub pointing: Vec<Pointing>,
+    spare_pointers: Vec<wl_pointer::WlPointer>,
     relative: Option<(RelativePointerState, ZwpRelativePointerV1)>,
     constraints: Option<PointerConstraintsState>,
     /// The hold on the pointer asked for last, until `release`.
@@ -1037,6 +1038,7 @@ impl Desk {
             motions: Vec::new(),
             relative_motions: Vec::new(),
             pointing: Vec::new(),
+            spare_pointers: Vec::new(),
             relative: None,
             constraints: None,
             held: None,
@@ -1789,6 +1791,15 @@ impl Desk {
                 .expect("wl_seat")
         });
         self.pointer = Some(seat.get_pointer(qh, ()));
+    }
+
+    /// `n` more pointers on the seat `bind_pointer` bound, which nothing
+    /// here hears. Each is told everything our own is, so a client that
+    /// reads nothing falls behind `n + 1` times as fast for the same motion.
+    pub fn bind_spare_pointers(&mut self, qh: &QueueHandle<Self>, n: usize) {
+        let seat = self.seat.as_ref().expect("bind_pointer first");
+        self.spare_pointers
+            .extend((0..n).map(|_| seat.get_pointer(qh, Spare)));
     }
 
     /// A keyboard of our own, on the seat already bound or a new one, and
@@ -2850,6 +2861,18 @@ impl Dispatch<wl_seat::WlSeat, ()> for Desk {
         _: &wl_seat::WlSeat,
         _: wl_seat::Event,
         _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_pointer::WlPointer, Spare> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &wl_pointer::WlPointer,
+        _: wl_pointer::Event,
+        _: &Spare,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {

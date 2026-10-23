@@ -13,7 +13,10 @@
 //! Each client here falls behind first, by registries, past what the kernel
 //! holds for it, so its stall has begun before the pointer moves: what it
 //! hears after is exactly what it is sent. A second client, a witness, says
-//! when the compositor has done what it was asked (#142).
+//! when the compositor has done what it was asked (#142). Each holds spare
+//! pointers too, every one told each motion, so that a few thousand motions
+//! are past a megabyte: each of the compositor's costs a turn of its own
+//! work, and 16 000 outlasted the session at nice 15 beside a busy core.
 //!
 //! The person's mouse is [`Command::Motion`] and [`Command::Click`], which
 //! find what is under the pointer from the clients' buffers, so this needs
@@ -44,6 +47,10 @@ const BEHIND: usize = 720_000;
 /// to 1024 of a channel's messages in a dispatch.
 const BATCH: usize = 1000;
 
+/// Pointers of a frozen client's own besides the one it hears: with them a
+/// motion is 284 bytes, nine motions and frames and the mouse's own.
+const SPARE_POINTERS: usize = 8;
+
 /// A window under the pointer, its client frozen, and a witness.
 struct Frozen {
     session: Session,
@@ -70,6 +77,7 @@ impl Frozen {
         let (mut desk, mut queue, qh, globals) = client_over(&connection);
         desk.bind_pointer(&globals, &qh);
         desk.bind_relative(&globals, &qh);
+        desk.bind_spare_pointers(&qh, SPARE_POINTERS);
         desk.open_window(&qh, "frozen", "frozen");
         until(&mut queue, &mut desk, |desk| desk.has_drawn(0));
         // Drawn is not yet described: a motion before the window is in the
@@ -168,15 +176,15 @@ fn jiggle(n: usize) -> Vec<(i32, i32)> {
     [(1, 0), (-1, 0)].repeat(n)
 }
 
-/// 16 000 motions, each 60 bytes with the mouse's own and a frame: on top
-/// of the 720 KB it is behind, past a megabyte and what the kernel holds,
-/// where it was cut off. It is owed one motion instead, and a press
-/// brings it, before the press, where the press was.
+/// 4 000 motions, each 284 bytes to its nine pointers: on top of the 720 KB
+/// it is behind, past a megabyte and what the kernel holds, where it was
+/// cut off. It is owed one motion instead, and a press brings it, before
+/// the press, where the press was.
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_frozen_client_under_a_moving_pointer_is_owed_one_motion_not_cut_off() {
     let mut frozen = Frozen::new("frozen-moved-over");
-    let mut moves = jiggle(8_000);
+    let mut moves = jiggle(2_000);
     moves.extend([(30, 0), (0, 20)]);
     frozen.moved(&moves);
     let click = (frozen.at.0 - 50, frozen.at.1 - 40);
