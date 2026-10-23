@@ -59,7 +59,9 @@ use wayland_client::{
     backend::{ObjectId, WaylandError},
     event_created_child,
     globals::{GlobalList, registry_queue_init},
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_subsurface, wl_surface},
+    protocol::{
+        wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_subsurface, wl_surface,
+    },
 };
 use wayland_protocols::ext::{
     foreign_toplevel_list::v1::client::{
@@ -388,6 +390,44 @@ pub fn menu_with_the_keyboard_on(
     menu
 }
 
+/// Ask for registry after registry on `connection`, each answered with every
+/// global in `globals`, until what is owed comes to `bytes`, and send the
+/// asking. A client that reads nothing meanwhile is that far behind once
+/// the compositor has read it, which a second client's round trip, a
+/// witness, says: the compositor answers each registry as it reads it, and
+/// reads the witness only after. Returns how many globals it is owed.
+///
+/// Registries, not frame callbacks: each answer is some 2 KB, so a few
+/// hundred are enough. 80 000 frame callbacks cost wayland-client 20 s in a
+/// debug build, since it finds each new object's id by a scan from the
+/// first, and under load that outlasted the session (#142).
+pub fn fall_behind<D>(
+    connection: &Connection,
+    globals: &GlobalList,
+    qh: &QueueHandle<D>,
+    bytes: usize,
+) -> usize
+where
+    D: Dispatch<wl_registry::WlRegistry, ()> + 'static,
+{
+    // What one registry is told, and its size: each global is an event of
+    // its own, a header, its name, its interface's name, which gives its own
+    // length, ends in a NUL and is padded to four bytes, and its version.
+    let (told, size) = globals.contents().with_list(|list| {
+        let size: usize = list
+            .iter()
+            .map(|global| 20 + (global.interface.len() + 1).next_multiple_of(4))
+            .sum();
+        (list.len(), size)
+    });
+    let registries = bytes.div_ceil(size);
+    for _ in 0..registries {
+        connection.display().get_registry(qh, ());
+    }
+    connection.flush().expect("could not ask");
+    registries * told
+}
+
 /// Dispatch until `done`, or fail after five seconds, then one more round
 /// trip to flush whatever was sent beside it.
 pub fn until<D>(queue: &mut EventQueue<D>, state: &mut D, done: impl Fn(&D) -> bool) {
@@ -640,6 +680,22 @@ pub struct WindowTold {
     pub workspace: Option<ObjectId>,
 }
 
+/// What the pointer told the client, in the order it told it: on our
+/// surfaces, `wl_pointer`'s events and the mouse's own motion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Pointing {
+    Enter,
+    Leave,
+    /// Where on the surface it moved to, in its own coordinates.
+    Motion((f64, f64)),
+    /// How far the mouse itself moved.
+    Relative((f64, f64)),
+    /// A button, by Linux code, pressed (`true`) or let go.
+    Button(u32, bool),
+    Scroll,
+    Frame,
+}
+
 /// What the compositor said to one of the client's surfaces, in the order
 /// it said it: which monitor it is on, when it may draw again, how to look,
 /// and, to a layer, that it is done.
@@ -863,6 +919,8 @@ pub struct Desk {
     /// The mouse's own motion, as `bind_relative` hears it: how far, and
     /// how far before acceleration, each in order.
     pub relative_motions: Vec<((f64, f64), (f64, f64))>,
+    /// Everything the pointer told us, in order, frames included.
+    pub pointing: Vec<Pointing>,
     relative: Option<(RelativePointerState, ZwpRelativePointerV1)>,
     constraints: Option<PointerConstraintsState>,
     /// The hold on the pointer asked for last, until `release`.
@@ -978,6 +1036,7 @@ impl Desk {
             scrolls: 0,
             motions: Vec::new(),
             relative_motions: Vec::new(),
+            pointing: Vec::new(),
             relative: None,
             constraints: None,
             held: None,
@@ -2669,11 +2728,13 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
                 surface_x,
                 surface_y,
             } => {
+                desk.pointing.push(Pointing::Enter);
                 desk.entered = Some(serial);
                 desk.pointed = Some(surface);
                 desk.arrived = Some((surface_x, surface_y));
             }
             wl_pointer::Event::Leave { .. } => {
+                desk.pointing.push(Pointing::Leave);
                 desk.entered = None;
                 desk.pointed = None;
             }
@@ -2684,17 +2745,25 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Desk {
                 ..
             } => {
                 let pressed = state == WEnum::Value(wl_pointer::ButtonState::Pressed);
+                desk.pointing.push(Pointing::Button(button, pressed));
                 if pressed {
                     desk.pressed = Some(serial);
                 }
                 desk.buttons.push((button, pressed));
             }
-            wl_pointer::Event::Axis { .. } => desk.scrolls += 1,
+            wl_pointer::Event::Axis { .. } => {
+                desk.pointing.push(Pointing::Scroll);
+                desk.scrolls += 1;
+            }
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
                 ..
-            } => desk.motions.push((surface_x, surface_y)),
+            } => {
+                desk.pointing.push(Pointing::Motion((surface_x, surface_y)));
+                desk.motions.push((surface_x, surface_y));
+            }
+            wl_pointer::Event::Frame => desk.pointing.push(Pointing::Frame),
             _ => {}
         }
     }
@@ -2709,8 +2778,23 @@ impl RelativePointerHandler for Desk {
         _: &wl_pointer::WlPointer,
         event: RelativeMotionEvent,
     ) {
+        self.pointing.push(Pointing::Relative(event.delta));
         self.relative_motions
             .push((event.delta, event.delta_unaccel));
+    }
+}
+
+/// The registries [`fall_behind`] asks for, told every global there is and
+/// heard by nobody.
+impl Dispatch<wl_registry::WlRegistry, ()> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &wl_registry::WlRegistry,
+        _: wl_registry::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
     }
 }
 
