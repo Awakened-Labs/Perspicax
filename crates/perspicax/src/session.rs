@@ -864,12 +864,12 @@ impl Drop for Registry {
 }
 
 /// The registry's program, which is never on `PATH`.
-const REGISTRY: &str = "at-spi2-registryd";
+pub const REGISTRY: &str = "at-spi2-registryd";
 
 /// Where distributions put [`REGISTRY`], in the order looked: Fedora's and
 /// Gentoo's, Arch's, and older Debian's and Ubuntu's, which some put under a
 /// multiarch triplet as well. A `*` is each folder there.
-const REGISTRY_FOLDERS: [&str; 4] = [
+pub const REGISTRY_FOLDERS: [&str; 4] = [
     "/usr/libexec",
     "/usr/lib",
     "/usr/lib/at-spi2-core",
@@ -879,7 +879,8 @@ const REGISTRY_FOLDERS: [&str; 4] = [
 /// The first [`REGISTRY`] that may be run in [`REGISTRY_FOLDERS`] under
 /// `root`, which is `/` but in a test. Triplets are taken in name order, so the
 /// choice does not depend on the order a folder happens to list them in.
-fn find_registry(root: &Path) -> Option<PathBuf> {
+#[must_use]
+pub fn find_registry(root: &Path) -> Option<PathBuf> {
     REGISTRY_FOLDERS
         .iter()
         .map(|folder| folder.trim_start_matches('/'))
@@ -912,7 +913,8 @@ fn find_registry(root: &Path) -> Option<PathBuf> {
 /// And `pgrep` without `-f` matches `/proc/<pid>/comm`, which the kernel
 /// truncates to fifteen characters: `at-spi2-registryd` is seventeen, so the
 /// obvious spelling silently matches nothing.
-fn registry_is_running() -> bool {
+#[must_use]
+pub fn registry_is_running() -> bool {
     let Ok(entries) = fs::read_dir("/proc") else {
         return false;
     };

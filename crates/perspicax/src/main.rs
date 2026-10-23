@@ -30,7 +30,11 @@
 //! ```
 //!
 //! and the agent, in that terminal, runs `perspicax attach` as its MCP server:
-//! `perspicax claude-code install` tells Claude Code to.
+//! `perspicax claude-code install` tells Claude Code to, and `perspicax ennius
+//! install` tells ennius, granting it the tools.
+//!
+//! `perspicax doctor` says what a machine lacks for any of this, before a
+//! session has to find out.
 //! A session the display manager starts, which no flag reaches, serves the
 //! same socket when its config says `[agent] socket = true`.
 //!
@@ -57,8 +61,8 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use perspicax::{
-    attach, bus, check, claude_code, desk::Desk, ennius, keep::keep_current, lock, observe, report,
-    session, wire::Wire,
+    attach, bus, check, claude_code, desk::Desk, doctor, ennius, keep::keep_current, lock, observe,
+    report, session, wire::Wire,
 };
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop, Virtual};
 use perspicax_config::{AgentSocket, Built};
@@ -320,6 +324,22 @@ enum Command {
         verb: WiringVerb,
     },
 
+    /// Say what this machine lacks for a session, and whether an agent inside
+    /// one could reach it, a row a thing, without starting anything.
+    ///
+    /// The runtime folder, a session bus and what starts one, the
+    /// accessibility registry, the shell, Xwayland where the config starts it,
+    /// the config in the words of both programs that read it, the programs
+    /// the menus' ways to leave run, the agent socket; then whether Claude Code
+    /// and ennius are told how to reach the desktop. A warning names what puts
+    /// it right. Exits 1 if anything a session needs fails, else 0.
+    Doctor {
+        /// The config to ask about, instead of the session's own
+        /// (`$PERSPICAX_CONFIG`, or else `$XDG_CONFIG_HOME/perspicax/config.toml`).
+        #[arg(value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+
     /// Not for people: the start of a session's own bus, which becomes
     /// `dbus-daemon` listening on ADDRESS once it has asked to be stopped
     /// when the session, PARENT, ends (`session::become_bus_daemon`).
@@ -403,6 +423,11 @@ fn main() -> Result<()> {
     }) = &cli.command
     {
         std::process::exit(check::run(path.as_deref(), BUILT));
+    }
+
+    // Likewise: what the machine lacks, and nothing started to find out.
+    if let Some(Command::Doctor { config }) = &cli.command {
+        std::process::exit(doctor::run(config.as_deref(), BUILT));
     }
 
     // Likewise: a word with Claude Code, through its own command line.
@@ -1299,6 +1324,24 @@ mod tests {
         ));
         assert_eq!(
             parse(&["--seat", "claude-code", "status"]).err(),
+            Some(ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn the_doctor_needs_no_session_and_may_be_given_a_config() {
+        assert!(matches!(
+            parse(&["doctor"]).expect("doctor alone").command,
+            Some(Command::Doctor { config: None })
+        ));
+        assert!(matches!(
+            parse(&["doctor", "/tmp/config.toml"])
+                .expect("doctor PATH")
+                .command,
+            Some(Command::Doctor { config: Some(_) })
+        ));
+        assert_eq!(
+            parse(&["--headless", "doctor"]).err(),
             Some(ErrorKind::ArgumentConflict)
         );
     }

@@ -11,7 +11,7 @@
 //! written for a shell built without one a refusal and not a surprise.
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -74,12 +74,7 @@ pub fn run(named: Option<&Path>, built: Built) -> i32 {
             return 1;
         }
     }
-    let beside = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_owned));
-    let on_path = std::env::var_os("PATH");
-    let shell = perspicax_config::find_program(SHELL, beside.as_deref(), on_path.as_deref());
-    match check(&path, built, shell.as_deref()) {
+    match check(&path, built, shell().as_deref()) {
         Ok(said) => {
             for said in &said {
                 match said {
@@ -98,6 +93,17 @@ pub fn run(named: Option<&Path>, built: Built) -> i32 {
             1
         }
     }
+}
+
+/// The perspicax-shell a session would start: beside this program, or else
+/// on `PATH`, as the session finds it.
+#[must_use]
+pub fn shell() -> Option<PathBuf> {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_owned));
+    let on_path = std::env::var_os("PATH");
+    perspicax_config::find_program(SHELL, beside.as_deref(), on_path.as_deref())
 }
 
 /// What perspicax, built with `built`, and the shell at `shell` say of the

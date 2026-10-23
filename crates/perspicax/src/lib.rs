@@ -15,6 +15,7 @@ pub mod bus;
 pub mod check;
 pub mod claude_code;
 pub mod desk;
+pub mod doctor;
 pub mod ennius;
 pub mod keep;
 pub mod lock;

@@ -812,6 +812,31 @@ packages: libwayland, libEGL and xkbcommon are opened as it starts. What it
 writes is checked by the `perspicax` beside it, or else the one on `PATH`, so
 install the two together.
 
+Before the first session, ask the machine what it lacks:
+
+```sh
+perspicax doctor
+```
+
+It prints a row for each thing a session needs, each found the way the
+session would find it:
+
+- the runtime folder;
+- a session bus, and the programs that start one;
+- the accessibility registry;
+- the shell;
+- Xwayland and `/tmp/.X11-unix`, where the config starts Xwayland;
+- the config, in the words of both programs that read it;
+- the programs the menus' ways to leave run;
+- the agent socket.
+
+Then it says whether Claude Code and ennius are told how to reach the desktop
+([An agent inside the session](#an-agent-inside-the-session)). A warning names
+what puts it right. The exit status is 1 only when something a session cannot
+do without fails, such as a missing Xwayland when the config starts it.
+Nothing is started to find any of this out. `perspicax doctor PATH` asks about
+another config.
+
 Run it from a text console (a TTY, not a terminal inside another desktop), with
 seatd or logind managing the seat. Log to a file: the console the session
 takes over shows nothing until it ends, and what the programs it starts
@@ -1406,6 +1431,11 @@ portal files only in `/usr/share/xdg-desktop-portal/portals`. The script says
 when either applies; `PREFIX=/usr scripts/install.sh` installs under `/usr`,
 and `PORTALDIR` moves the portal file alone. `DESTDIR` and the other variables
 `scripts/install.sh --help` lists are for a package.
+
+Then, as the account that will log in, `perspicax doctor` says what the
+session would lack. A session the display manager starts is given no flags,
+so it serves an agent inside it a socket only when the config says `[agent]
+socket = true`. Its `agent-socket` row says whether the config does.
 
 Choose Perspicax at the greeter. The entry runs `perspicax --session`, which is
 `--seat` with two differences, for a session nobody watches start:
