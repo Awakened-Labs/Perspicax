@@ -645,11 +645,54 @@ started inside it needs only a bridge from its stdio to the socket, and
 `perspicax attach` is one. For Claude Code in that terminal:
 
 ```sh
-claude mcp add perspicax -- perspicax attach
+perspicax claude-code install
 ```
 
-It passes the client closing its stdin on as the end of the conversation, and
-ends when the session closes the connection. Like `--mcp`, it keeps every
+This puts `perspicax attach` in Claude Code's user config, which every project
+reads, through Claude Code's own command line: `claude mcp add-json -s user
+perspicax '{"type":"stdio","command":"/usr/local/bin/perspicax","args":["attach"]}'`.
+Claude Code finds it the next time it starts, and `--dry-run` says what would
+be run. `perspicax claude-code status` says whether it is there and runs, and
+`uninstall` takes it out.
+
+A server that runs `perspicax attach` counts as perspicax's whatever it is
+called, so one added by hand -- `claude mcp add perspicax -- perspicax attach`
+-- counts too. An install leaves one that works as it is, and mends one whose
+program has gone, keeping its name and the rest of its entry. It adds no
+second one, since the desktop holds one conversation at a time. Two ways in,
+or a `perspicax` that is something else, are refused, naming them.
+
+ennius starts an MCP server only for a session granted one of its tools, and
+denies a session every tool it was not granted. For ennius:
+
+```sh
+perspicax ennius install
+```
+
+This adds `perspicax attach` to ennius's `[tools.mcp]`. It also grants every
+tool perspicax serves, as `mcp:perspicax:act` and so on, to the sessions that
+`ennius tui`, `chat` and the GUI start (`[interactive.grant] tools`). Both
+steps go through ennius's own `ennius tools mcp add` and `ennius config grant
+add`.
+
+- **No grant into ennius's defaults.** A config that does not list
+  `[interactive.grant] tools` is given no grant. ennius writes a grant as the
+  whole list, so a grant written there would replace ennius's own default
+  tools rather than add to them. List them there first.
+- **Another name is kept.** A server already wired under another name keeps
+  that name, and its grants go under it.
+- **Status and uninstall.** `perspicax ennius status` says what is missing,
+  and `uninstall` takes out the server and its grants.
+- **Inside the session only.** `attach` finds the session through
+  `PERSPICAX_MCP_SOCKET`, so ennius reaches the desktop when it is started
+  inside the session, from a terminal or the start menu, and not otherwise.
+- **Older ennius.** An ennius from before its #193 takes up an `mcp:` grant in
+  `agent run` only, and `status` says so.
+- **One at a time.** Claude Code and ennius wired together take turns at the
+  desktop's one conversation.
+
+`perspicax attach` passes the client closing its stdin on as the end of the
+conversation, and ends when the session closes the connection. Like `--mcp`, it keeps every
 other process out of itself, so no program can take the wire through it.
 `perspicax attach PATH` names a socket instead. Anything else that joins stdio to a Unix socket will do, with
 OpenBSD netcat's `-N` for the first of those: `nc -N -U "$PERSPICAX_MCP_SOCKET"`,
@@ -768,6 +811,31 @@ the app out and keeps the shell off libwayland. It needs no development
 packages: libwayland, libEGL and xkbcommon are opened as it starts. What it
 writes is checked by the `perspicax` beside it, or else the one on `PATH`, so
 install the two together.
+
+Before the first session, ask the machine what it lacks:
+
+```sh
+perspicax doctor
+```
+
+It prints a row for each thing a session needs, each found the way the
+session would find it:
+
+- the runtime folder;
+- a session bus, and the programs that start one;
+- the accessibility registry;
+- the shell;
+- Xwayland and `/tmp/.X11-unix`, where the config starts Xwayland;
+- the config, in the words of both programs that read it;
+- the programs the menus' ways to leave run;
+- the agent socket.
+
+Then it says whether Claude Code and ennius are told how to reach the desktop
+([An agent inside the session](#an-agent-inside-the-session)). A warning names
+what puts it right. The exit status is 1 only when something a session cannot
+do without fails, such as a missing Xwayland when the config starts it.
+Nothing is started to find any of this out. `perspicax doctor PATH` asks about
+another config.
 
 Run it from a text console (a TTY, not a terminal inside another desktop), with
 seatd or logind managing the seat. Log to a file: the console the session
@@ -1363,6 +1431,11 @@ portal files only in `/usr/share/xdg-desktop-portal/portals`. The script says
 when either applies; `PREFIX=/usr scripts/install.sh` installs under `/usr`,
 and `PORTALDIR` moves the portal file alone. `DESTDIR` and the other variables
 `scripts/install.sh --help` lists are for a package.
+
+Then, as the account that will log in, `perspicax doctor` says what the
+session would lack. A session the display manager starts is given no flags,
+so it serves an agent inside it a socket only when the config says `[agent]
+socket = true`. Its `agent-socket` row says whether the config does.
 
 Choose Perspicax at the greeter. The entry runs `perspicax --session`, which is
 `--seat` with two differences, for a session nobody watches start:

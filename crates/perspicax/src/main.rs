@@ -29,7 +29,12 @@
 //! perspicax --seat --mcp-socket "$XDG_RUNTIME_DIR/perspicax-mcp" --spawn foot
 //! ```
 //!
-//! and the agent, in that terminal, runs `perspicax attach` as its MCP server.
+//! and the agent, in that terminal, runs `perspicax attach` as its MCP server:
+//! `perspicax claude-code install` tells Claude Code to, and `perspicax ennius
+//! install` tells ennius, granting it the tools.
+//!
+//! `perspicax doctor` says what a machine lacks for any of this, before a
+//! session has to find out.
 //! A session the display manager starts, which no flag reaches, serves the
 //! same socket when its config says `[agent] socket = true`.
 //!
@@ -56,7 +61,8 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use perspicax::{
-    attach, bus, check, desk::Desk, keep::keep_current, lock, observe, session, wire::Wire,
+    attach, bus, check, claude_code, desk::Desk, doctor, ennius, keep::keep_current, lock, observe,
+    report, session, wire::Wire,
 };
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop, Virtual};
 use perspicax_config::{AgentSocket, Built};
@@ -288,6 +294,52 @@ enum Command {
         verb: ConfigVerb,
     },
 
+    /// Claude Code, told how to reach the desktop: `perspicax attach` as an
+    /// MCP server in its user config, which a Claude Code in a terminal inside
+    /// the session runs.
+    ///
+    /// Written through Claude Code's own `claude mcp`, and read from its
+    /// `.claude.json` (in `$CLAUDE_CONFIG_DIR`, or the home folder). A server
+    /// that runs `perspicax attach` is perspicax's whatever it is called, and
+    /// an install leaves one that works as it is. Each verb prints a row a
+    /// step and exits 1 if any failed.
+    ClaudeCode {
+        #[command(subcommand)]
+        verb: WiringVerb,
+    },
+
+    /// ennius, told how to reach the desktop: `perspicax attach` among its
+    /// `[tools.mcp]`, and each tool perspicax serves granted to the sessions
+    /// it starts, `[interactive.grant] tools`, as `mcp:NAME:TOOL`.
+    ///
+    /// Written through ennius's own `tools mcp` and `config grant`, asked
+    /// with `--json`, the keyring left alone. A grant is never written into
+    /// ennius's built-in default, which it would replace rather than add to:
+    /// that step waits until the config lists its tools. A server that runs
+    /// `perspicax attach` is perspicax's whatever it is called, and its grants
+    /// go under that name. Each verb prints a row a step and exits 1 if any
+    /// failed.
+    Ennius {
+        #[command(subcommand)]
+        verb: WiringVerb,
+    },
+
+    /// Say what this machine lacks for a session, and whether an agent inside
+    /// one could reach it, a row a thing, without starting anything.
+    ///
+    /// The runtime folder, a session bus and what starts one, the
+    /// accessibility registry, the shell, Xwayland where the config starts it,
+    /// the config in the words of both programs that read it, the programs
+    /// the menus' ways to leave run, the agent socket; then whether Claude Code
+    /// and ennius are told how to reach the desktop. A warning names what puts
+    /// it right. Exits 1 if anything a session needs fails, else 0.
+    Doctor {
+        /// The config to ask about, instead of the session's own
+        /// (`$PERSPICAX_CONFIG`, or else `$XDG_CONFIG_HOME/perspicax/config.toml`).
+        #[arg(value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+
     /// Not for people: the start of a session's own bus, which becomes
     /// `dbus-daemon` listening on ADDRESS once it has asked to be stopped
     /// when the session, PARENT, ends (`session::become_bus_daemon`).
@@ -309,6 +361,29 @@ enum ConfigVerb {
         /// else `$XDG_CONFIG_HOME/perspicax/config.toml`).
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum WiringVerb {
+    /// Add perspicax's server, or mend the one there, so that it runs this
+    /// perspicax with `attach` -- the one on PATH, when that is this one.
+    /// Leaves it as it is when it already reaches the desktop. Refuses to
+    /// choose between two ways in, since the desktop holds one conversation
+    /// at a time, or to take a name another server holds.
+    Install {
+        /// Say what it would run, and run nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Say whether it reaches the desktop, changing nothing.
+    Status,
+    /// Take out every server that runs `perspicax attach`. A way in made some
+    /// other way -- a netcat on the agent socket -- stays.
+    Uninstall {
+        /// Say what it would run, and run nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -348,6 +423,41 @@ fn main() -> Result<()> {
     }) = &cli.command
     {
         std::process::exit(check::run(path.as_deref(), BUILT));
+    }
+
+    // Likewise: what the machine lacks, and nothing started to find out.
+    if let Some(Command::Doctor { config }) = &cli.command {
+        std::process::exit(doctor::run(config.as_deref(), BUILT));
+    }
+
+    // Likewise: a word with Claude Code, through its own command line.
+    if let Some(Command::ClaudeCode { verb }) = &cli.command {
+        let var = |name: &str| std::env::var(name).ok();
+        let rows = match *verb {
+            WiringVerb::Install { dry_run } => {
+                let this = std::env::current_exe()
+                    .context("no path to this program, to tell Claude Code to run")?;
+                claude_code::install(&this, dry_run, var)
+            }
+            WiringVerb::Status => claude_code::status(var),
+            WiringVerb::Uninstall { dry_run } => claude_code::uninstall(dry_run, var),
+        };
+        std::process::exit(report::print(&rows));
+    }
+
+    // Likewise: a word with ennius, through its own command line.
+    if let Some(Command::Ennius { verb }) = &cli.command {
+        let var = |name: &str| std::env::var(name).ok();
+        let rows = match *verb {
+            WiringVerb::Install { dry_run } => {
+                let this = std::env::current_exe()
+                    .context("no path to this program, to tell ennius to run")?;
+                ennius::install(&this, dry_run, var)
+            }
+            WiringVerb::Status => ennius::status(var),
+            WiringVerb::Uninstall { dry_run } => ennius::uninstall(dry_run, var),
+        };
+        std::process::exit(report::print(&rows));
     }
 
     // Before the log is opened and before anything is started, because when it
@@ -1175,6 +1285,64 @@ mod tests {
         assert!(
             parse(&["config"]).is_err(),
             "config is not a verb on its own"
+        );
+    }
+
+    #[test]
+    fn wiring_claude_code_or_ennius_needs_no_session_and_a_verb() {
+        let verb = |cli: Cli| match cli.command {
+            Some(Command::ClaudeCode { verb }) => verb,
+            _ => panic!("not claude-code"),
+        };
+        assert!(matches!(
+            verb(parse(&["claude-code", "install"]).expect("install")),
+            WiringVerb::Install { dry_run: false }
+        ));
+        assert!(matches!(
+            verb(parse(&["claude-code", "install", "--dry-run"]).expect("a dry run")),
+            WiringVerb::Install { dry_run: true }
+        ));
+        assert!(matches!(
+            verb(parse(&["claude-code", "status"]).expect("status")),
+            WiringVerb::Status
+        ));
+        assert!(matches!(
+            verb(parse(&["claude-code", "uninstall", "--dry-run"]).expect("uninstall")),
+            WiringVerb::Uninstall { dry_run: true }
+        ));
+        assert!(
+            parse(&["claude-code"]).is_err(),
+            "claude-code is not a verb"
+        );
+        assert!(matches!(
+            parse(&["ennius", "install", "--dry-run"])
+                .expect("ennius install")
+                .command,
+            Some(Command::Ennius {
+                verb: WiringVerb::Install { dry_run: true }
+            })
+        ));
+        assert_eq!(
+            parse(&["--seat", "claude-code", "status"]).err(),
+            Some(ErrorKind::ArgumentConflict)
+        );
+    }
+
+    #[test]
+    fn the_doctor_needs_no_session_and_may_be_given_a_config() {
+        assert!(matches!(
+            parse(&["doctor"]).expect("doctor alone").command,
+            Some(Command::Doctor { config: None })
+        ));
+        assert!(matches!(
+            parse(&["doctor", "/tmp/config.toml"])
+                .expect("doctor PATH")
+                .command,
+            Some(Command::Doctor { config: Some(_) })
+        ));
+        assert_eq!(
+            parse(&["--headless", "doctor"]).err(),
+            Some(ErrorKind::ArgumentConflict)
         );
     }
 
