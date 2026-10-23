@@ -121,9 +121,13 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// off. wayland-backend's own is 4 KB, so a client was cut off once the
 /// kernel's buffer to it filled too: a few seconds of a pointer moving over
 /// it. That dropped #80's frozen Flutter applications, and the shell when
-/// something kept it from reading (#101). A megabyte is about half a minute
+/// something kept it from reading (#101). A megabyte was about half a minute
 /// of that, and costs only a client that falls behind: the buffer grows as
-/// it is needed.
+/// it is needed. A pointer moving over it fills none of it now, since it is
+/// owed one motion rather than sent each (#169, see `owed`). What still
+/// piles up is what is not motion -- keys, configures, a drag's motion,
+/// which smithay sends itself (#246) -- and everything Xwayland is sent,
+/// which is smithay's client and is owed nothing (#245).
 const MOST_UNREAD: usize = 1 << 20;
 
 /// What shows where no window is, once the splash is over and while the

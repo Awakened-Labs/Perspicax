@@ -1865,10 +1865,12 @@ impl ClientData for ClientState {
     ///
     /// A client that hung up and one wayland-backend cut off arrive alike, as
     /// `ConnectionClosed`. wayland-backend cuts off a client whose outgoing
-    /// buffer is full, which is what input does to a client that has stopped
+    /// buffer is full, which is what input did to a client that had stopped
     /// reading -- an application frozen for 25 s while an AT asked it where
     /// something is, as #80's Flutter applications were, or the shell when
-    /// something kept it from reading (#101). Nothing here can tell the two
+    /// something kept it from reading (#101). The pointer's motion no longer
+    /// does, being owed instead (#169), but keys and configures still can,
+    /// and so can whatever a client asked for. Nothing here can tell the two
     /// apart, but a client that went while it read nothing is said to have,
     /// and for how long: cut off for it, or ended frozen. The origin's pid is
     /// what ties this line to the application's own last words, and to the

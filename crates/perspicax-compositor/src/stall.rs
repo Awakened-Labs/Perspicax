@@ -5,7 +5,9 @@
 //! `ConnectionClosed`, the same as a hang-up's (#101). The one sign it does
 //! give is a flush that cannot write: the kernel's buffer to the client is
 //! full, so the client has read nothing for a while. What waits for it is
-//! then held, up to `MOST_UNREAD`, and past that it is cut off.
+//! then held, up to `MOST_UNREAD`, and past that it is cut off. The pointer's
+//! motion, which used to get it there, is owed to it from that first flush,
+//! told or not, and paid once a flush goes through (see [`crate::owed`]).
 //!
 //! A client reading through a burst can fill that buffer for a moment, so a
 //! stall is told only once it has lasted [`TOLD_AFTER`], and its end only if
