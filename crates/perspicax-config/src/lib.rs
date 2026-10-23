@@ -25,7 +25,8 @@
 //! vocabulary, which the menu file, the start menu and a pie are written in.
 //! And [`locate`]: where a path written in the file points. And
 //! [`find_program`]: where perspicax's own programs are, so that the session
-//! and `perspicax config check` find the same shell.
+//! and `perspicax config check` find the same shell; and [`which`], where
+//! anybody else's is.
 
 mod actions;
 pub mod autostart;
@@ -844,6 +845,31 @@ pub fn find_program(name: &str, beside: Option<&Path>, path: Option<&OsStr>) -> 
         .into_iter()
         .chain(on_path)
         .map(|folder| folder.join(name))
+        .find(|candidate| runnable(candidate))
+}
+
+/// Where the program a command names would be run from, as an exec finds it:
+/// a name with a `/` in it as written, and a bare name in the first folder of
+/// `path` that holds one. Only a file that may be run counts, and only a
+/// folder `path` names by a whole path: a relative one is somewhere else for
+/// every program that reads it.
+///
+/// For a program somebody else names -- a lock program, an MCP server
+/// another client starts -- where [`find_program`] is for one of perspicax's
+/// own.
+#[must_use]
+pub fn which(command: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    if command.contains('/') {
+        let named = PathBuf::from(command);
+        return runnable(&named).then_some(named);
+    }
+    if command.is_empty() {
+        return None;
+    }
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .filter(|folder| folder.is_absolute())
+        .map(|folder| folder.join(command))
         .find(|candidate| runnable(candidate))
 }
 
@@ -2865,6 +2891,32 @@ mod tests {
         let scratch = Scratch::new("mode");
         let beside = scratch.program("bin", "perspicax-shell", 0o644);
         assert_eq!(find_program("perspicax-shell", Some(&beside), None), None);
+    }
+
+    #[test]
+    fn a_command_with_a_slash_is_where_it_says_and_a_bare_one_is_on_path() {
+        let scratch = Scratch::new("which");
+        let first = scratch.program("first", "swaylock", 0o755);
+        let second = scratch.program("second", "swaylock", 0o755);
+        let path = std::env::join_paths([&first, &second]).unwrap();
+        assert_eq!(which("swaylock", Some(&path)), Some(first.join("swaylock")));
+        let named = second.join("swaylock");
+        assert_eq!(
+            which(named.to_str().unwrap(), None),
+            Some(named.clone()),
+            "a path needs no PATH"
+        );
+        let missing = scratch.0.join("nowhere/swaylock");
+        assert_eq!(which(missing.to_str().unwrap(), Some(&path)), None);
+        assert_eq!(which("", Some(&path)), None);
+    }
+
+    #[test]
+    fn which_skips_a_folder_path_names_relatively() {
+        let scratch = Scratch::new("relative");
+        scratch.program("here", "swaylock", 0o755);
+        let path = std::env::join_paths(["here"]).unwrap();
+        assert_eq!(which("swaylock", Some(&path)), None);
     }
 
     /// The key and the reason a `[keys]` table is refused for.

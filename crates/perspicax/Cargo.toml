@@ -52,6 +52,9 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 # accessibility bus its own bus started (H3). zbus's already. `stdio` for
 # `dup2` onto fds 0 and 1, once the agent's wire is off them (issue #43).
 rustix = { version = "1", default-features = false, features = ["process", "std", "stdio"] }
+# `perspicax claude-code status` reads Claude Code's config, which is JSON;
+# what it writes there, it writes through `claude mcp`.
+serde_json.workspace = true
 perspicax-atspi = { path = "../perspicax-atspi", version = "0.1.0" }
 perspicax-compositor = { path = "../perspicax-compositor", version = "0.1.0" }
 perspicax-config = { path = "../perspicax-config", version = "0.1.0" }
@@ -71,11 +74,7 @@ capture = ["perspicax-compositor/capture"]
 svg = ["seat", "perspicax-compositor/svg"]
 desktop = ["seat", "xwayland", "capture", "svg"]
 
-# The v1 demo asserts on the JSON two tools actually answered, rather than on a
-# projection of it made a second time in the test -- so it needs to hold a
-# `serde_json::Value`. Nothing in the library does.
 [dev-dependencies]
-serde_json.workspace = true
 # The settings portal's test waits on its signal, a stream.
 futures-util.workspace = true
 # `screenshot` takes its parameters in rmcp's wrapper, and the demo calls the

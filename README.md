@@ -645,8 +645,22 @@ started inside it needs only a bridge from its stdio to the socket, and
 `perspicax attach` is one. For Claude Code in that terminal:
 
 ```sh
-claude mcp add perspicax -- perspicax attach
+perspicax claude-code install
 ```
+
+This puts `perspicax attach` in Claude Code's user config, which every project
+reads, through Claude Code's own command line: `claude mcp add-json -s user
+perspicax '{"type":"stdio","command":"/usr/local/bin/perspicax","args":["attach"]}'`.
+Claude Code finds it the next time it starts, and `--dry-run` says what would
+be run. `perspicax claude-code status` says whether it is there and runs, and
+`uninstall` takes it out.
+
+A server that runs `perspicax attach` counts as perspicax's whatever it is
+called, so one added by hand -- `claude mcp add perspicax -- perspicax attach`
+-- counts too. An install leaves one that works as it is, and mends one whose
+program has gone, keeping its name and the rest of its entry. It adds no
+second one, since the desktop holds one conversation at a time. Two ways in,
+or a `perspicax` that is something else, are refused, naming them.
 
 It passes the client closing its stdin on as the end of the conversation, and
 ends when the session closes the connection. Like `--mcp`, it keeps every
