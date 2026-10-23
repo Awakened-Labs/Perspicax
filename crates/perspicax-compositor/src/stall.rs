@@ -68,6 +68,16 @@ impl Stall {
         }
     }
 
+    /// Whether the client has read nothing since a flush to it first could
+    /// not write: [`Self::behind`], for whoever needs no length.
+    pub(crate) fn stalled(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .since
+            .is_some()
+    }
+
     /// How long the client has read nothing at `now`, if it has stopped.
     pub(crate) fn behind(&self, now: Instant) -> Option<Duration> {
         let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -93,7 +103,9 @@ mod tests {
     fn a_client_is_stalled_from_its_first_full_flush_until_one_goes_through() {
         let stall = Stall::default();
         let start = Instant::now();
+        assert!(!stall.stalled());
         assert_eq!(stall.flushed(&full(), start), None);
+        assert!(stall.stalled(), "from the first, told or not");
         assert_eq!(stall.flushed(&full(), start + ms(500)), None);
         assert_eq!(
             stall.flushed(&full(), start + ms(1000)),
@@ -106,6 +118,7 @@ mod tests {
         );
         assert_eq!(stall.flushed(&Ok(()), start + ms(4000)), None, "and over");
         assert_eq!(stall.behind(start + ms(4000)), None);
+        assert!(!stall.stalled());
     }
 
     #[test]

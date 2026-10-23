@@ -58,6 +58,7 @@ mod mouse;
 mod origin;
 mod output_management;
 mod outputs;
+mod owed;
 mod pager;
 #[cfg(any(feature = "seat", feature = "capture"))]
 mod picture;

@@ -28,7 +28,9 @@ use crate::{
     facts::Facts,
     focus::FocusTarget,
     framed::Framed,
-    geometry, origin, popup,
+    geometry, origin,
+    owed::{Event, Owed, Paid, Plan},
+    popup,
     shell::{self, Fill},
     stall::{Change, Stall},
 };
@@ -53,7 +55,7 @@ use smithay::{
             },
         },
     },
-    utils::{SERIAL_COUNTER, Serial},
+    utils::{IsAlive as _, SERIAL_COUNTER, Serial},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -532,9 +534,15 @@ impl Compositor {
     /// A client that has gone is forgotten. It cannot be told by its flush,
     /// which for a client cleaned up is `Ok`, and for one cut off but not yet
     /// cleaned up still tries its socket.
+    ///
+    /// A client whose flush went through reads again, and is paid what it
+    /// was owed of the pointer meanwhile (see [`crate::owed`]): here, from
+    /// the loop, where nothing holds the pointer's lock. Whether or not its
+    /// stall was told, which only one of a second or more is.
     pub(crate) fn flush_each(&mut self) {
         let mut backend = self.display.backend_handle();
         let now = Instant::now();
+        let mut owed = Vec::new();
         self.clients.retain(|(id, client)| {
             if client.gone.load(Ordering::Relaxed) {
                 return false;
@@ -552,8 +560,31 @@ impl Compositor {
                 }
                 None => {}
             }
+            if flushed.is_ok()
+                && let Some(debt) = client.owed.take()
+            {
+                owed.push(debt);
+            }
             true
         });
+        for (target, paid) in owed {
+            self.pay_owed(&target, &paid);
+        }
+    }
+
+    /// Pay a client what it was owed for `target`, if the pointer is still
+    /// on it. A surface gone since stays the pointer's until it next moves,
+    /// and is owed nothing; one the pointer left was told so, which forgot
+    /// what it was owed.
+    fn pay_owed(&mut self, target: &FocusTarget, paid: &Paid) {
+        let Some(pointer) = self.pointer.clone() else {
+            return;
+        };
+        if !target.alive() || pointer.current_focus().as_ref() != Some(target) {
+            return;
+        }
+        let seat = self.seat.clone();
+        target.deliver(&seat, self, paid);
     }
 
     /// The next surface id. Monotonic, and never handed out twice.
@@ -1794,6 +1825,8 @@ pub(crate) struct ClientState {
     pidfd: OnceLock<OwnedFd>,
     /// Whether it has stopped reading what is sent to it.
     stall: Stall,
+    /// What of the pointer it is owed while it has.
+    owed: Owed<FocusTarget>,
     /// Whether it has gone, so that it is flushed no more.
     gone: AtomicBool,
 }
@@ -1816,6 +1849,12 @@ impl ClientState {
     /// A pidfd of its own on this client's process, if one was vouched for.
     pub(crate) fn pidfd(&self) -> Option<OwnedFd> {
         self.pidfd.get()?.try_clone().ok()
+    }
+
+    /// What to send this client of a pointer `event` for `target`, and what
+    /// owed to send before it (see [`crate::owed`]).
+    pub(crate) fn plan(&self, target: &FocusTarget, event: Event<'_>) -> Plan {
+        self.owed.plan(target, self.stall.stalled(), event)
     }
 }
 

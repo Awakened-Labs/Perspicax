@@ -10,7 +10,12 @@
 //! run, typing into an X11 alacritty.
 //!
 //! Everything here delegates to the target's own implementation; this type
-//! only chooses which.
+//! only chooses which -- and, for the pointer, what of it a client that has
+//! stopped reading is sent now and what it is owed instead (#169, see
+//! [`crate::owed`]). Every pointer event a client is sent passes through here,
+//! whoever moved the pointer: a hand, an agent, a grab. smithay calls these
+//! with the pointer's lock held, so nothing here may ask the pointer anything
+//! (its focus, its grab, a hold on it): only the target's client is asked.
 
 use std::borrow::Cow;
 
@@ -26,12 +31,17 @@ use smithay::{
             PointerTarget, RelativeMotionEvent,
         },
     },
-    reexports::wayland_server::{backend::ObjectId, protocol::wl_surface::WlSurface},
+    reexports::wayland_server::{
+        Resource as _, backend::ObjectId, protocol::wl_surface::WlSurface,
+    },
     utils::{IsAlive, Serial},
     wayland::seat::WaylandFocus,
 };
 
-use crate::state::Compositor;
+use crate::{
+    owed::{Event, Paid, Plan},
+    state::{ClientState, Compositor},
+};
 
 /// A keyboard or pointer focus target.
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +74,43 @@ impl From<WlSurface> for FocusTarget {
 impl From<PopupKind> for FocusTarget {
     fn from(popup: PopupKind) -> Self {
         Self::Wayland(popup.wl_surface().clone())
+    }
+}
+
+impl FocusTarget {
+    /// What to send of a pointer `event`, and what owed to send before it.
+    /// Everything as it is to a client this compositor did not accept
+    /// itself: Xwayland, which is smithay's, and keeps reading for the X11
+    /// applications behind it.
+    fn plan(&self, event: Event<'_>) -> Plan {
+        self.wl_surface()
+            .and_then(|surface| surface.client())
+            .and_then(|client| Some(client.get_data::<ClientState>()?.plan(self, event)))
+            .unwrap_or_else(Plan::as_is)
+    }
+
+    /// Pay what is owed before `event`. Whether `event` itself goes.
+    fn pay_before(&self, seat: &Seat<Compositor>, data: &mut Compositor, event: Event<'_>) -> bool {
+        let plan = self.plan(event);
+        if let Some(paid) = &plan.pay {
+            self.deliver(seat, data, paid);
+        }
+        plan.send
+    }
+
+    /// Send what was owed, as it would have been sent: the motion, the
+    /// mouse's own, and the frame closing them. Straight to the target,
+    /// never back through the pointer.
+    pub(crate) fn deliver(&self, seat: &Seat<Compositor>, data: &mut Compositor, paid: &Paid) {
+        if let Some(motion) = &paid.motion {
+            delegate!(self, target => PointerTarget::motion(target, seat, data, motion));
+        }
+        if let Some(relative) = &paid.relative {
+            delegate!(self, target => PointerTarget::relative_motion(target, seat, data, relative));
+        }
+        if paid.framed {
+            delegate!(self, target => PointerTarget::frame(target, seat, data));
+        }
     }
 }
 
@@ -127,10 +174,14 @@ impl KeyboardTarget<Compositor> for FocusTarget {
 
 impl PointerTarget<Compositor> for FocusTarget {
     fn enter(&self, seat: &Seat<Compositor>, data: &mut Compositor, event: &MotionEvent) {
-        delegate!(self, target => PointerTarget::enter(target, seat, data, event));
+        if self.pay_before(seat, data, Event::Other) {
+            delegate!(self, target => PointerTarget::enter(target, seat, data, event));
+        }
     }
     fn motion(&self, seat: &Seat<Compositor>, data: &mut Compositor, event: &MotionEvent) {
-        delegate!(self, target => PointerTarget::motion(target, seat, data, event));
+        if self.pay_before(seat, data, Event::Motion(event)) {
+            delegate!(self, target => PointerTarget::motion(target, seat, data, event));
+        }
     }
     fn relative_motion(
         &self,
@@ -138,16 +189,24 @@ impl PointerTarget<Compositor> for FocusTarget {
         data: &mut Compositor,
         event: &RelativeMotionEvent,
     ) {
-        delegate!(self, target => PointerTarget::relative_motion(target, seat, data, event));
+        if self.pay_before(seat, data, Event::Relative(event)) {
+            delegate!(self, target => PointerTarget::relative_motion(target, seat, data, event));
+        }
     }
     fn button(&self, seat: &Seat<Compositor>, data: &mut Compositor, event: &ButtonEvent) {
-        delegate!(self, target => PointerTarget::button(target, seat, data, event));
+        if self.pay_before(seat, data, Event::Other) {
+            delegate!(self, target => PointerTarget::button(target, seat, data, event));
+        }
     }
     fn axis(&self, seat: &Seat<Compositor>, data: &mut Compositor, frame: AxisFrame) {
-        delegate!(self, target => PointerTarget::axis(target, seat, data, frame));
+        if self.pay_before(seat, data, Event::Other) {
+            delegate!(self, target => PointerTarget::axis(target, seat, data, frame));
+        }
     }
     fn frame(&self, seat: &Seat<Compositor>, data: &mut Compositor) {
-        delegate!(self, target => PointerTarget::frame(target, seat, data));
+        if self.pay_before(seat, data, Event::Frame) {
+            delegate!(self, target => PointerTarget::frame(target, seat, data));
+        }
     }
     fn gesture_swipe_begin(
         &self,
@@ -155,7 +214,9 @@ impl PointerTarget<Compositor> for FocusTarget {
         data: &mut Compositor,
         event: &GestureSwipeBeginEvent,
     ) {
-        delegate!(self, target => PointerTarget::gesture_swipe_begin(target, seat, data, event));
+        if self.pay_before(seat, data, Event::Gesture) {
+            delegate!(self, target => PointerTarget::gesture_swipe_begin(target, seat, data, event));
+        }
     }
     fn gesture_swipe_update(
         &self,
@@ -163,7 +224,9 @@ impl PointerTarget<Compositor> for FocusTarget {
         data: &mut Compositor,
         event: &GestureSwipeUpdateEvent,
     ) {
-        delegate!(self, target => PointerTarget::gesture_swipe_update(target, seat, data, event));
+        if self.pay_before(seat, data, Event::Gesture) {
+            delegate!(self, target => PointerTarget::gesture_swipe_update(target, seat, data, event));
+        }
     }
     fn gesture_swipe_end(
         &self,
@@ -171,7 +234,9 @@ impl PointerTarget<Compositor> for FocusTarget {
         data: &mut Compositor,
         event: &GestureSwipeEndEvent,
     ) {
-        delegate!(self, target => PointerTarget::gesture_swipe_end(target, seat, data, event));
+        if self.pay_before(seat, data, Event::Gesture) {
+            delegate!(self, target => PointerTarget::gesture_swipe_end(target, seat, data, event));
+        }
     }
     fn gesture_pinch_begin(
         &self,
@@ -179,7 +244,9 @@ impl PointerTarget<Compositor> for FocusTarget {
         data: &mut Compositor,
         event: &GesturePinchBeginEvent,
     ) {
-        delegate!(self, target => PointerTarget::gesture_pinch_begin(target, seat, data, event));
+        if self.pay_before(seat, data, Event::Gesture) {
+            delegate!(self, target => PointerTarget::gesture_pinch_begin(target, seat, data, event));
+        }
     }
     fn gesture_pinch_update(
         &self,
@@ -187,7 +254,9 @@ impl PointerTarget<Compositor> for FocusTarget {
         data: &mut Compositor,
         event: &GesturePinchUpdateEvent,
     ) {
-        delegate!(self, target => PointerTarget::gesture_pinch_update(target, seat, data, event));
+        if self.pay_before(seat, data, Event::Gesture) {
+            delegate!(self, target => PointerTarget::gesture_pinch_update(target, seat, data, event));
+        }
     }
     fn gesture_pinch_end(
         &self,
@@ -195,7 +264,9 @@ impl PointerTarget<Compositor> for FocusTarget {
         data: &mut Compositor,
         event: &GesturePinchEndEvent,
     ) {
-        delegate!(self, target => PointerTarget::gesture_pinch_end(target, seat, data, event));
+        if self.pay_before(seat, data, Event::Gesture) {
+            delegate!(self, target => PointerTarget::gesture_pinch_end(target, seat, data, event));
+        }
     }
     fn gesture_hold_begin(
         &self,
@@ -203,7 +274,9 @@ impl PointerTarget<Compositor> for FocusTarget {
         data: &mut Compositor,
         event: &GestureHoldBeginEvent,
     ) {
-        delegate!(self, target => PointerTarget::gesture_hold_begin(target, seat, data, event));
+        if self.pay_before(seat, data, Event::Gesture) {
+            delegate!(self, target => PointerTarget::gesture_hold_begin(target, seat, data, event));
+        }
     }
     fn gesture_hold_end(
         &self,
@@ -211,9 +284,13 @@ impl PointerTarget<Compositor> for FocusTarget {
         data: &mut Compositor,
         event: &GestureHoldEndEvent,
     ) {
-        delegate!(self, target => PointerTarget::gesture_hold_end(target, seat, data, event));
+        if self.pay_before(seat, data, Event::Gesture) {
+            delegate!(self, target => PointerTarget::gesture_hold_end(target, seat, data, event));
+        }
     }
     fn leave(&self, seat: &Seat<Compositor>, data: &mut Compositor, serial: Serial, time: u32) {
-        delegate!(self, target => PointerTarget::leave(target, seat, data, serial, time));
+        if self.pay_before(seat, data, Event::Leave) {
+            delegate!(self, target => PointerTarget::leave(target, seat, data, serial, time));
+        }
     }
 }
