@@ -732,7 +732,8 @@ impl Compositor {
     /// goes, as one that opened behind the lock has them at unlock.
     ///
     /// [`Self::focus_plain`] and [`Self::focus_surface`] ask, which is every
-    /// way to the keyboard but a menu's grab, refused while locked (#82).
+    /// way to the keyboard but a menu's grab, refused while locked (#82) and
+    /// to a client without the keys (#187).
     fn may_take_keyboard(&self, surface: &WlSurface) -> bool {
         match &self.lock {
             Some(locked) => locked.covers(surface),
@@ -1443,12 +1444,27 @@ impl XdgShellHandler for Compositor {
     /// Never while the session is locked, when the lock screen holds both: a
     /// menu that took them would take the password typed next. Refused as
     /// xdg-shell says, by dismissing the menu.
+    ///
+    /// Nor for a client without the keys (#187): the serial it names is no
+    /// proof that anything was clicked or pressed in it (see
+    /// [`Compositor::keys_are_with`]), and its window would keep the keys as
+    /// the menu closed. A right-click still opens one, since the click gives
+    /// the window clicked the keys before it reaches it.
     fn grab(&mut self, surface: PopupSurface, seat: WlSeat, serial: Serial) {
         if self.lock.is_some() {
             surface.send_popup_done();
             return;
         }
         if !self.backend.has_person() {
+            return;
+        }
+        if !surface
+            .wl_surface()
+            .client()
+            .is_some_and(|client| self.keys_are_with(&client.id()))
+        {
+            tracing::debug!("menu grab refused: its client does not have the keys");
+            surface.send_popup_done();
             return;
         }
         if let Some(seat) = Seat::<Self>::from_resource(&seat) {

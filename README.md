@@ -958,7 +958,10 @@ and for ten seconds at most (#187). One any other program makes is
 forgotten as it is made, whatever input it says it answers, since that is
 anything a program cares to name. Otherwise a window could come forward
 while the person typed in another, a password at a terminal's `sudo` prompt
-say, and take the rest of it, Enter and all.
+say, and take the rest of it, Enter and all. For the same reason a menu that
+asks for the keys is dismissed when its program has none of them: one opened
+with a right-click still has them, since the click gives the window clicked
+the keys before it reaches it.
 
 A new window opens on the monitor under the pointer, in the room its panels
 leave, cascaded from the top-left corner: 32 pixels further in for each

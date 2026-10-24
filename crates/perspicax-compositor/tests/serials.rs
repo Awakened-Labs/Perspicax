@@ -27,7 +27,7 @@ use common::{Desk, Ear, Session, heard, menu_with_the_keyboard, until};
 use perspicax_compositor::Backend;
 use perspicax_index::{HostFacts, SurfaceFacts};
 use perspicax_node::SurfaceId;
-use smithay_client_toolkit::shell::WaylandSurface as _;
+use smithay_client_toolkit::shell::{WaylandSurface as _, xdg::XdgSurface as _};
 use wayland_client::{EventQueue, Proxy as _, QueueHandle};
 
 /// A serial no seat ever sent: what a client makes up.
@@ -300,4 +300,45 @@ fn a_token_naming_input_from_before_its_own_menu_closed_is_kept() {
     session.wait_for(|facts| on_top(facts).as_deref() == Some("browser"));
 
     session.stop(((browser, browser_queue), (terminal, terminal_queue)));
+}
+
+/// A menu opened with a made-up serial by a program whose window lost the
+/// keys to the terminal: nothing was clicked or pressed in it. It is
+/// dismissed, as xdg-shell has a refused grab answered, and takes nothing:
+/// had it taken the keys, its window would have kept them as it closed.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_opened_by_a_program_without_the_keys_is_dismissed_and_takes_none() {
+    let session = seated("serials-menu");
+    let (mut thief, mut thief_queue, thief_qh, thief_ear, _) = program(&session, "thief");
+    let (mut terminal, mut terminal_queue, _, terminal_ear, _) = program(&session, "terminal");
+    until(&mut thief_queue, &mut thief, |thief| {
+        !has_keys(thief, &thief_ear)
+    });
+
+    let menu = thief.open_menu(
+        &thief_qh,
+        thief.windows[0].xdg_surface(),
+        (40, 30),
+        (120, 80),
+        MADE_UP,
+    );
+    hear_all(
+        &mut thief,
+        &mut thief_queue,
+        &mut terminal,
+        &mut terminal_queue,
+    );
+    assert_eq!(thief.popups_done, 1, "the menu is dismissed");
+    assert!(
+        has_keys(&terminal, &terminal_ear),
+        "the terminal keeps the keys"
+    );
+    assert_ne!(
+        heard(&thief_ear).entered.as_ref(),
+        Some(&menu.wl_surface().id()),
+        "the menu has none of them"
+    );
+
+    session.stop(((thief, thief_queue), (terminal, terminal_queue)));
 }
