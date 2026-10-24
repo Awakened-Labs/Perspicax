@@ -732,7 +732,8 @@ impl Compositor {
     /// goes, as one that opened behind the lock has them at unlock.
     ///
     /// [`Self::focus_plain`] and [`Self::focus_surface`] ask, which is every
-    /// way to the keyboard but a menu's grab, refused while locked (#82).
+    /// way to the keyboard but a menu's grab, refused while locked (#82) and
+    /// to a client without the keys (#187).
     fn may_take_keyboard(&self, surface: &WlSurface) -> bool {
         match &self.lock {
             Some(locked) => locked.covers(surface),
@@ -743,6 +744,27 @@ impl Compositor {
                         .is_some_and(|held| self.is_launcher(&held))
             }
         }
+    }
+
+    /// Whether the keyboard is with one of `client`'s surfaces: a window, a
+    /// menu of one, a launcher, a lock surface.
+    ///
+    /// The serial a client names is believed only from it (#187). An
+    /// activation token carries one, and so does a menu's grab, to say what
+    /// input it answers, but nothing stops a client naming one it was never
+    /// sent, or one it was sent long ago. The client with the keys is the
+    /// one in use: what it asks for, the person is behind, a link opened in
+    /// it, an item picked from its launcher or its menu. Any other client is
+    /// asking for itself, which is the focus stealing both protocols leave
+    /// the compositor to refuse. How old the serial is proves nothing more,
+    /// since the client with the keys can always name the one it was sent as
+    /// it took them, and asking would refuse real input: a click that
+    /// focuses a window is pressed before the keys come to it, and a
+    /// window's own menu takes them and gives them back with new serials.
+    fn keys_are_with(&self, client: &ClientId) -> bool {
+        self.keyboard_focus()
+            .and_then(|surface| self.display.get_client(surface.id()).ok())
+            .is_some_and(|holder| holder.id() == *client)
     }
 
     /// A window closed. If it held the keyboard, the keyboard goes to the
@@ -1422,12 +1444,27 @@ impl XdgShellHandler for Compositor {
     /// Never while the session is locked, when the lock screen holds both: a
     /// menu that took them would take the password typed next. Refused as
     /// xdg-shell says, by dismissing the menu.
+    ///
+    /// Nor for a client without the keys (#187): the serial it names is no
+    /// proof that anything was clicked or pressed in it (see
+    /// [`Compositor::keys_are_with`]), and its window would keep the keys as
+    /// the menu closed. A right-click still opens one, since the click gives
+    /// the window clicked the keys before it reaches it.
     fn grab(&mut self, surface: PopupSurface, seat: WlSeat, serial: Serial) {
         if self.lock.is_some() {
             surface.send_popup_done();
             return;
         }
         if !self.backend.has_person() {
+            return;
+        }
+        if !surface
+            .wl_surface()
+            .client()
+            .is_some_and(|client| self.keys_are_with(&client.id()))
+        {
+            tracing::debug!("menu grab refused: its client does not have the keys");
+            surface.send_popup_done();
             return;
         }
         if let Some(seat) = Seat::<Self>::from_resource(&seat) {
@@ -1777,11 +1814,31 @@ impl XdgActivationHandler for Compositor {
         &mut self.activation
     }
 
+    /// A client making a token, to hand to what it starts or wakes. Kept
+    /// only if it names input and the client making it has the keys (see
+    /// [`Compositor::keys_are_with`]). Any other is forgotten as it is made,
+    /// so spending it brings nothing forward, as a token naming no input
+    /// never did. Its client is told the token all the same, as smithay
+    /// tells every one, and cannot tell the difference.
+    fn token_created(&mut self, _token: XdgActivationToken, data: XdgActivationTokenData) -> bool {
+        let vouched = data.serial.is_some()
+            && data
+                .client_id
+                .as_ref()
+                .is_some_and(|client| self.keys_are_with(client));
+        if !vouched {
+            tracing::debug!("activation token refused: its client does not have the keys");
+        }
+        vouched
+    }
+
     /// A client asking for one of its windows to be brought forward: an
     /// application opened from a launcher, a link opened in a browser that
-    /// was already running. Granted only for a fresh token minted from the
-    /// person's own input (see `perspicax_policy::grants_activation`), so a
-    /// window cannot pull focus to itself while someone is typing elsewhere.
+    /// was already running. Every token known was made by the client with
+    /// the keys, in answer to the person's own input (`token_created`), so
+    /// it is granted while it is fresh (see
+    /// `perspicax_policy::grants_activation`), and a window cannot pull
+    /// focus to itself while someone is typing elsewhere.
     fn request_activation(
         &mut self,
         token: XdgActivationToken,
@@ -1789,8 +1846,9 @@ impl XdgActivationHandler for Compositor {
         surface: WlSurface,
     ) {
         self.activation.remove_token(&token);
-        if !perspicax_policy::grants_activation(data.timestamp.elapsed(), data.serial.is_some()) {
-            tracing::debug!("activation refused: no recent input behind the token");
+        // The input behind it was vouched for when it was made.
+        if !perspicax_policy::grants_activation(data.timestamp.elapsed(), true) {
+            tracing::debug!("activation refused: the token is stale");
             return;
         }
         // A client may name any surface it owns, and the window a subsurface
