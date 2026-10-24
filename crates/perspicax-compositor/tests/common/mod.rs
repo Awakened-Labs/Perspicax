@@ -888,9 +888,13 @@ pub struct Desk {
     /// How many times one of them has been configured, and drawn.
     pub covers_drawn: usize,
     pub activation: Option<XdgActivationV1>,
-    /// How many activation tokens were spent on our windows, each the
-    /// moment it came.
+    /// How many activation tokens were spent on our windows: each that
+    /// [`Self::ask_activation`] asked for, the moment it came, and each
+    /// [`Self::spend_token`] spent.
     pub tokens_spent: usize,
+    /// The activation tokens [`Self::make_token`] asked for and kept, in the
+    /// order they came.
+    pub tokens: Vec<String>,
     pub taskbar: Option<ZwlrForeignToplevelManagerV1>,
     pub taskbar_finished: bool,
     pub tasked: Vec<Tasked>,
@@ -1024,6 +1028,7 @@ impl Desk {
             covers_drawn: 0,
             activation: None,
             tokens_spent: 0,
+            tokens: Vec::new(),
             taskbar: None,
             taskbar_finished: false,
             tasked: Vec::new(),
@@ -2184,14 +2189,49 @@ impl Desk {
     /// binding has not been called.
     pub fn ask_activation(&self, qh: &QueueHandle<Self>, nth: usize, serial: u32) {
         let surface = self.windows[nth].wl_surface().clone();
+        self.ask_token(qh, &surface, serial, Token::SpendOn(surface.clone()));
+    }
+
+    /// Make a token for the input `serial` names, on our seat, asked from the
+    /// `nth` window, as a launcher or a terminal opening a link makes one to
+    /// hand on, and keep it: in `tokens` once it comes, for
+    /// [`Self::spend_token`] here or on another client. Panics as
+    /// [`Self::ask_activation`] does.
+    pub fn make_token(&self, qh: &QueueHandle<Self>, nth: usize, serial: u32) {
+        let surface = self.windows[nth].wl_surface().clone();
+        self.ask_token(qh, &surface, serial, Token::Keep);
+    }
+
+    /// Ask for a token for the input `serial` names, from `surface`, to be
+    /// used as `token` says once it comes.
+    fn ask_token(
+        &self,
+        qh: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+        serial: u32,
+        token: Token,
+    ) {
         let token = self
             .activation
             .as_ref()
             .expect("bind_activation first")
-            .get_activation_token(qh, surface.clone());
+            .get_activation_token(qh, token);
         token.set_serial(serial, self.seat.as_ref().expect("bind a seat first"));
-        token.set_surface(&surface);
+        token.set_surface(surface);
         token.commit();
+    }
+
+    /// Spend `token` on the `nth` window, as a program handed it does: a
+    /// browser already running, given a link to open (`tokens_spent` counts
+    /// it). Nothing answers, so a round trip after it is what says the
+    /// compositor has heard it. Panics if `bind_activation` has not been
+    /// called.
+    pub fn spend_token(&mut self, token: &str, nth: usize) {
+        self.activation
+            .as_ref()
+            .expect("bind_activation first")
+            .activate(token.to_owned(), self.windows[nth].wl_surface());
+        self.tokens_spent += 1;
     }
 }
 
@@ -3025,23 +3065,34 @@ impl Dispatch<XdgActivationV1, ()> for Desk {
     }
 }
 
-/// An activation token, the window it is for its user data: spent on it the
-/// moment it comes.
-impl Dispatch<XdgActivationTokenV1, wl_surface::WlSurface> for Desk {
+/// What an activation token is for, once it comes: its user data.
+pub enum Token {
+    /// Spent on this window the moment it comes.
+    SpendOn(wl_surface::WlSurface),
+    /// Kept, in [`Desk::tokens`], for the test to spend.
+    Keep,
+}
+
+impl Dispatch<XdgActivationTokenV1, Token> for Desk {
     fn event(
         desk: &mut Self,
         token: &XdgActivationTokenV1,
         event: xdg_activation_token_v1::Event,
-        surface: &wl_surface::WlSurface,
+        then: &Token,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         let xdg_activation_token_v1::Event::Done { token: done } = event else {
             return;
         };
-        if let Some(activation) = &desk.activation {
-            activation.activate(done, surface);
-            desk.tokens_spent += 1;
+        match then {
+            Token::SpendOn(surface) => {
+                if let Some(activation) = &desk.activation {
+                    activation.activate(done, surface);
+                    desk.tokens_spent += 1;
+                }
+            }
+            Token::Keep => desk.tokens.push(done),
         }
         token.destroy();
     }

@@ -20,6 +20,7 @@ mod common;
 
 use common::{Desk, Ear, Session, heard, until};
 use perspicax_compositor::Backend;
+use perspicax_index::HostFacts;
 use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::{EventQueue, Proxy as _, QueueHandle, backend::ObjectId, globals::GlobalList};
 
@@ -88,6 +89,18 @@ fn hear_all(
     launcher_queue.roundtrip(launcher).expect("dispatch");
 }
 
+/// Whether the window `upper` is above the window `lower`, the facts giving
+/// them bottom to top.
+fn above(facts: &HostFacts, upper: &str, lower: &str) -> bool {
+    let at = |title: &str| {
+        facts
+            .surfaces()
+            .iter()
+            .position(|surface| surface.title.as_deref() == Some(title))
+    };
+    matches!((at(upper), at(lower)), (Some(upper), Some(lower)) if upper > lower)
+}
+
 /// The issue's own case: a program started a moment ago, a chat window, a
 /// dialog from a background job, opens while the person types at the
 /// launcher. Once the launcher goes, as one does when it has started what was
@@ -124,23 +137,37 @@ fn a_window_that_opens_under_a_launcher_takes_no_keys_from_it() {
     session.stop((desk, queue));
 }
 
-/// A window brought forward under the launcher, with the serial of the last
-/// key it had: what a program started a second time asks for its window, a
-/// link opened in a browser already running.
+/// A window brought forward under the launcher, with a token its program
+/// made while another of its windows had the keys, a moment before the
+/// launcher came up: a program started again just then, raising its first
+/// window. It is raised, as asked, which says the token was good (#187), but
+/// the launcher keeps the keys.
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_window_brought_forward_under_a_launcher_takes_no_keys_from_it() {
     let session = session("launcher-keys-activation");
     let (mut desk, mut queue, qh, globals, ear) = page(&session);
     desk.bind_activation(&globals, &qh);
+    desk.open_coloured(&qh, "top", "top", LATE);
+    until(&mut queue, &mut desk, |desk| desk.has_drawn(1));
+    let top = desk.windows[1].wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&top)
+    });
     let serial = heard(&ear).enter_serial.expect("entered");
+    desk.make_token(&qh, 1, serial);
+    until(&mut queue, &mut desk, |desk| !desk.tokens.is_empty());
+    let token = desk.tokens.remove(0);
     let (mut launcher, mut launcher_queue, _, launcher_ear) = launcher(&session);
     let held = launcher.layers[0].0.wl_surface().id();
     until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
 
-    desk.ask_activation(&qh, 0, serial);
-    until(&mut queue, &mut desk, |desk| desk.tokens_spent == 1);
+    desk.spend_token(&token, 0);
     hear_all(&mut desk, &mut queue, &mut launcher, &mut launcher_queue);
+    assert!(
+        above(&session.facts.read(), "page", "top"),
+        "the page is brought forward"
+    );
     assert_eq!(
         heard(&launcher_ear).entered.as_ref(),
         Some(&held),

@@ -21,6 +21,7 @@ mod common;
 
 use common::{Desk, Ear, Session, heard, until};
 use perspicax_compositor::Backend;
+use perspicax_index::HostFacts;
 use perspicax_policy::Action;
 use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::{EventQueue, Proxy as _, QueueHandle, backend::ObjectId, globals::GlobalList};
@@ -111,6 +112,18 @@ fn hear_all(
     locker_queue.roundtrip(locker).expect("dispatch");
 }
 
+/// Whether the window `upper` is above the window `lower`, the facts giving
+/// them bottom to top.
+fn above(facts: &HostFacts, upper: &str, lower: &str) -> bool {
+    let at = |title: &str| {
+        facts
+            .surfaces()
+            .iter()
+            .position(|surface| surface.title.as_deref() == Some(title))
+    };
+    matches!((at(upper), at(lower)), (Some(upper), Some(lower)) if upper > lower)
+}
+
 /// The issue's own case: a chat window, a terminal or a dialog that opens
 /// behind the lock screen while the person types their password.
 #[test]
@@ -146,23 +159,32 @@ fn a_window_that_opens_behind_the_lock_screen_takes_no_keys_from_it() {
     session.stop(((desk, queue), (locker, locker_queue)));
 }
 
-/// A window brought forward behind the lock screen, with the serial of the
-/// last key it had: what a program started a second time asks for its
-/// window, a link opened in a browser already running.
+/// A window brought forward behind the lock screen, with a token its program
+/// made while another of its windows had the keys, a moment before the
+/// screen locked: a program started again just then, raising its first
+/// window. It is raised, as asked, which says the token was good (#187), but
+/// the lock screen keeps the keys.
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_window_brought_forward_behind_the_lock_screen_takes_no_keys_from_it() {
     let session = session("lock-keys-activation");
     let (mut desk, mut queue, qh, globals, ear) = page(&session);
     desk.bind_activation(&globals, &qh);
+    open_second(&mut desk, &mut queue, &qh, &ear, "top");
     let serial = heard(&ear).enter_serial.expect("entered");
+    desk.make_token(&qh, 1, serial);
+    until(&mut queue, &mut desk, |desk| !desk.tokens.is_empty());
+    let token = desk.tokens.remove(0);
     let (mut locker, mut locker_queue, locker_qh, locker_ear) = locker(&session);
     let held = cover(&mut locker, &mut locker_queue, &locker_qh, &locker_ear);
     until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
 
-    desk.ask_activation(&qh, 0, serial);
-    until(&mut queue, &mut desk, |desk| desk.tokens_spent == 1);
+    desk.spend_token(&token, 0);
     hear_all(&mut desk, &mut queue, &mut locker, &mut locker_queue);
+    assert!(
+        above(&session.facts.read(), "page", "top"),
+        "the page is brought forward"
+    );
     assert_eq!(
         heard(&locker_ear).entered.as_ref(),
         Some(&held),

@@ -1,0 +1,303 @@
+//! The serial a client names, and the keys, by a compositor with no screen
+//! (#187).
+//!
+//! A client asking for the keys names a serial, the input it is answering:
+//! a click or a key given to it on the seat. An activation token carries
+//! one, for a window to be brought forward with, as a link opened in a
+//! browser already running is; so does a menu's grab, for the menu to take
+//! the keys, as a right-click opens one. Nothing in either protocol stops a
+//! client naming a serial it was never sent, or one it was sent long ago. So
+//! a serial is believed only from the client that has the keys: what it
+//! names is input the person gave it, or it is the client in use anyway. Any
+//! other client's token is forgotten as it is made, and its menu dismissed.
+//! Otherwise a window could come forward while the person typed elsewhere,
+//! and take what they typed: a password at a terminal's `sudo` prompt, sent
+//! on by the Enter that followed it.
+//!
+//! Each test has programs, each a client of its own with a window and a
+//! keyboard. What each keyboard was told is what is asserted, `enter` and
+//! `leave` alone, and which window the facts have on top, so none of this
+//! needs `capture`. Like the other live tests these bind a real Wayland
+//! socket, so they need `XDG_RUNTIME_DIR`, and are `#[ignore]`d for
+//! `ci/live-tests.sh` to run.
+
+mod common;
+
+use common::{Desk, Ear, Session, heard, menu_with_the_keyboard, until};
+use perspicax_compositor::Backend;
+use perspicax_index::{HostFacts, SurfaceFacts};
+use perspicax_node::SurfaceId;
+use smithay_client_toolkit::shell::WaylandSurface as _;
+use wayland_client::{EventQueue, Proxy as _, QueueHandle};
+
+/// A serial no seat ever sent: what a client makes up.
+const MADE_UP: u32 = 0x0bad_5eed;
+
+fn session(name: &str) -> Session {
+    Session::start(name, Backend::headless((1280, 800)))
+}
+
+/// A session with a person at the seat, where alone a menu takes the keys.
+fn seated(name: &str) -> Session {
+    Session::start(name, Backend::headless((1280, 800)).with_person())
+}
+
+fn titled<'a>(facts: &'a HostFacts, title: &str) -> Option<&'a SurfaceFacts> {
+    facts
+        .surfaces()
+        .iter()
+        .find(|surface| surface.title.as_deref() == Some(title))
+}
+
+/// The title of the window on top, the facts giving them bottom to top.
+fn on_top(facts: &HostFacts) -> Option<String> {
+    facts
+        .surfaces()
+        .iter()
+        .rfind(|surface| surface.mapped && surface.title.is_some())?
+        .title
+        .clone()
+}
+
+/// A program: a client of its own, with a keyboard and `xdg_activation_v1`,
+/// and a window called `title`, on screen and with the keys, as a window
+/// that has just opened has them. Returns what its keyboard hears, and its
+/// window to the facts.
+fn program(
+    session: &Session,
+    title: &str,
+) -> (Desk, EventQueue<Desk>, QueueHandle<Desk>, Ear, SurfaceId) {
+    let (mut desk, mut queue, qh, globals) = session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    desk.bind_activation(&globals, &qh);
+    desk.open_window(&qh, title, title);
+    until(&mut queue, &mut desk, |_| {
+        titled(&session.facts.read(), title).is_some_and(|window| window.mapped)
+    });
+    let id = titled(&session.facts.read(), title).expect("waited for").id;
+    until(&mut queue, &mut desk, |desk| has_keys(desk, &ear));
+    (desk, queue, qh, ear, id)
+}
+
+/// Whether this program's window has the keys, as its keyboard last heard.
+fn has_keys(desk: &Desk, ear: &Ear) -> bool {
+    heard(ear).entered.as_ref() == Some(&desk.windows[0].wl_surface().id())
+}
+
+/// Hear everything the compositor has sent so far: `asking` first, since
+/// what it just asked for is what might have moved the keys, then `typing`,
+/// so it hears any `leave` that came of it.
+fn hear_all(
+    asking: &mut Desk,
+    asking_queue: &mut EventQueue<Desk>,
+    typing: &mut Desk,
+    typing_queue: &mut EventQueue<Desk>,
+) {
+    asking_queue.roundtrip(asking).expect("dispatch");
+    typing_queue.roundtrip(typing).expect("dispatch");
+}
+
+/// The issue's own case. A program whose window opened first, and lost the
+/// keys to the terminal the person types in, asks for its window to be
+/// brought forward with a serial it was never sent. It comes forward with
+/// nothing: the terminal keeps the keys, and stays on top.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_made_up_serial_brings_no_window_forward() {
+    let session = session("serials-made-up");
+    let (mut thief, mut thief_queue, thief_qh, thief_ear, _) = program(&session, "thief");
+    let (mut terminal, mut terminal_queue, _, terminal_ear, _) = program(&session, "terminal");
+    until(&mut thief_queue, &mut thief, |thief| {
+        !has_keys(thief, &thief_ear)
+    });
+
+    thief.ask_activation(&thief_qh, 0, MADE_UP);
+    until(&mut thief_queue, &mut thief, |thief| {
+        thief.tokens_spent == 1
+    });
+    hear_all(
+        &mut thief,
+        &mut thief_queue,
+        &mut terminal,
+        &mut terminal_queue,
+    );
+    assert!(
+        has_keys(&terminal, &terminal_ear),
+        "the terminal keeps the keys"
+    );
+    assert!(!has_keys(&thief, &thief_ear), "the thief has none of them");
+    assert_eq!(
+        on_top(&session.facts.read()).as_deref(),
+        Some("terminal"),
+        "the thief is not brought forward"
+    );
+
+    session.stop(((thief, thief_queue), (terminal, terminal_queue)));
+}
+
+/// A serial it really was sent, but while it had the keys, before the
+/// person moved on to the terminal: the last one a program kept, to pull
+/// its window forward with later. As made up as any other, now.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_serial_from_when_it_had_the_keys_brings_no_window_forward() {
+    let session = session("serials-stale");
+    let (mut thief, mut thief_queue, thief_qh, thief_ear, _) = program(&session, "thief");
+    let kept = heard(&thief_ear).enter_serial.expect("entered");
+    let (mut terminal, mut terminal_queue, _, terminal_ear, _) = program(&session, "terminal");
+    until(&mut thief_queue, &mut thief, |thief| {
+        !has_keys(thief, &thief_ear)
+    });
+
+    thief.ask_activation(&thief_qh, 0, kept);
+    until(&mut thief_queue, &mut thief, |thief| {
+        thief.tokens_spent == 1
+    });
+    hear_all(
+        &mut thief,
+        &mut thief_queue,
+        &mut terminal,
+        &mut terminal_queue,
+    );
+    assert!(
+        has_keys(&terminal, &terminal_ear),
+        "the terminal keeps the keys"
+    );
+    assert!(!has_keys(&thief, &thief_ear), "the thief has none of them");
+    assert_eq!(
+        on_top(&session.facts.read()).as_deref(),
+        Some("terminal"),
+        "the thief is not brought forward"
+    );
+
+    session.stop(((thief, thief_queue), (terminal, terminal_queue)));
+}
+
+/// What the protocol is for: a link opened in the terminal the person types
+/// in, in a browser already running behind it. The terminal, with the keys,
+/// makes a token for the key that opened the link and hands it to the
+/// browser, which spends it on its window. That comes forward, with the
+/// keys. A launcher starting a program does the same.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_token_made_by_the_window_in_use_brings_another_programs_window_forward() {
+    let session = session("serials-handed-on");
+    let (mut browser, mut browser_queue, _, browser_ear, _) = program(&session, "browser");
+    let (mut terminal, mut terminal_queue, terminal_qh, terminal_ear, _) =
+        program(&session, "terminal");
+    until(&mut browser_queue, &mut browser, |browser| {
+        !has_keys(browser, &browser_ear)
+    });
+
+    let serial = heard(&terminal_ear).enter_serial.expect("entered");
+    terminal.make_token(&terminal_qh, 0, serial);
+    until(&mut terminal_queue, &mut terminal, |terminal| {
+        !terminal.tokens.is_empty()
+    });
+    let token = terminal.tokens.remove(0);
+    browser.spend_token(&token, 0);
+    until(&mut browser_queue, &mut browser, |browser| {
+        has_keys(browser, &browser_ear)
+    });
+    terminal_queue.roundtrip(&mut terminal).expect("dispatch");
+    assert!(
+        !has_keys(&terminal, &terminal_ear),
+        "the terminal let the keys go"
+    );
+    session.wait_for(|facts| on_top(facts).as_deref() == Some("browser"));
+
+    session.stop(((browser, browser_queue), (terminal, terminal_queue)));
+}
+
+/// A token made while the window's own menu has the keys, as one is when
+/// "Open link" is picked from it, naming the input from before the menu
+/// opened: the client in use is the one asking, whichever of its surfaces
+/// holds the keys. The menu closes, as a picked item closes it, and the
+/// browser the token is handed to comes forward with the keys.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_token_made_while_its_own_menu_has_the_keys_is_kept() {
+    let session = seated("serials-from-a-menu");
+    let (mut browser, mut browser_queue, _, browser_ear, _) = program(&session, "browser");
+    let (mut terminal, mut terminal_queue, terminal_qh, terminal_ear, page) =
+        program(&session, "terminal");
+    until(&mut browser_queue, &mut browser, |browser| {
+        !has_keys(browser, &browser_ear)
+    });
+    let serial = heard(&terminal_ear).enter_serial.expect("entered");
+    let menu = menu_with_the_keyboard(
+        &session,
+        &mut terminal,
+        &mut terminal_queue,
+        &terminal_qh,
+        &terminal_ear,
+        page,
+    );
+
+    terminal.make_token(&terminal_qh, 0, serial);
+    until(&mut terminal_queue, &mut terminal, |terminal| {
+        !terminal.tokens.is_empty()
+    });
+    drop(menu);
+    until(&mut terminal_queue, &mut terminal, |terminal| {
+        has_keys(terminal, &terminal_ear)
+    });
+    let token = terminal.tokens.remove(0);
+    browser.spend_token(&token, 0);
+    until(&mut browser_queue, &mut browser, |browser| {
+        has_keys(browser, &browser_ear)
+    });
+    session.wait_for(|facts| on_top(facts).as_deref() == Some("browser"));
+
+    session.stop(((browser, browser_queue), (terminal, terminal_queue)));
+}
+
+/// A token made once the window's own menu has closed, naming the input
+/// given while it was open: "Open link" picked from it, the menu closing as
+/// the toolkit acts on the item. Closing it gave the window the keys back,
+/// with a serial newer than anything the menu was sent, and the token still
+/// brings the browser it is handed to forward, with the keys.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_token_naming_input_from_before_its_own_menu_closed_is_kept() {
+    let session = seated("serials-after-a-menu");
+    let (mut browser, mut browser_queue, _, browser_ear, _) = program(&session, "browser");
+    let (mut terminal, mut terminal_queue, terminal_qh, terminal_ear, page) =
+        program(&session, "terminal");
+    until(&mut browser_queue, &mut browser, |browser| {
+        !has_keys(browser, &browser_ear)
+    });
+    let menu = menu_with_the_keyboard(
+        &session,
+        &mut terminal,
+        &mut terminal_queue,
+        &terminal_qh,
+        &terminal_ear,
+        page,
+    );
+    // What the menu was sent as it took the keys: the serial it was opened
+    // with, which a grab hands on.
+    let picked = heard(&terminal_ear).enter_serial.expect("entered");
+    drop(menu);
+    until(&mut terminal_queue, &mut terminal, |terminal| {
+        has_keys(terminal, &terminal_ear)
+    });
+    assert_ne!(
+        heard(&terminal_ear).enter_serial,
+        Some(picked),
+        "the keys came back with a serial of their own"
+    );
+
+    terminal.make_token(&terminal_qh, 0, picked);
+    until(&mut terminal_queue, &mut terminal, |terminal| {
+        !terminal.tokens.is_empty()
+    });
+    let token = terminal.tokens.remove(0);
+    browser.spend_token(&token, 0);
+    until(&mut browser_queue, &mut browser, |browser| {
+        has_keys(browser, &browser_ear)
+    });
+    session.wait_for(|facts| on_top(facts).as_deref() == Some("browser"));
+
+    session.stop(((browser, browser_queue), (terminal, terminal_queue)));
+}

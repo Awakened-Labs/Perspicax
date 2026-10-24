@@ -161,11 +161,13 @@ pub const ACTIVATION_WINDOW: Duration = Duration::from_secs(10);
 
 /// Whether an `xdg-activation` request may take focus.
 ///
-/// Only a token minted in answer to the person's own input (a click or key
-/// with a seat serial behind it), and only while it is fresh. Anything else
-/// is a window trying to take focus for itself, which is the focus stealing
-/// the protocol exists to prevent. A refused activation is not an error. The
-/// window simply stays where it is.
+/// Only a token minted in answer to the person's own input, and only while
+/// it is fresh. The compositor says whether input was behind it: for an xdg
+/// token, that the client with the keys made it, since a serial any client
+/// can name is no proof alone (#187); for an X11 request, the X time of the
+/// input it carries. Anything else is a window trying to take focus for
+/// itself, which is the focus stealing the protocol exists to prevent. A
+/// refused activation is not an error. The window simply stays where it is.
 #[must_use]
 pub fn grants_activation(age: Duration, from_input: bool) -> bool {
     from_input && age < ACTIVATION_WINDOW
