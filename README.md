@@ -264,7 +264,8 @@ everything it starts, and none of them is told your displays. That keeps the
 accessibility bus it starts from taking your desktop's: at-spi puts its
 socket in the runtime folder, and binding it removes any socket already
 there. The bus ends when perspicax ends, however it ends, `kill -9` included,
-and takes everything it started with it. A perspicax that ends of its own
+and takes everything it started with it. So does the accessibility registry
+perspicax starts for it. A perspicax that ends of its own
 accord removes the folder too, unless one of those programs left a file in
 it. A killed one leaves it behind.
 

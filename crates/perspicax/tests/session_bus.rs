@@ -629,19 +629,67 @@ fn a_bus_of_its_own_listens_in_its_folder_holds_nothing_and_goes_with_its_sessio
     std::fs::remove_dir(&runtime_dir).ok();
 }
 
-/// The start of a bus for a session that has already gone ends at once,
-/// rather than running on with nothing left to stop it.
+/// The start of a bus, or of anything else a session starts to end with it,
+/// for a session that has already gone ends at once, rather than running on
+/// with nothing left to stop it.
 #[test]
-fn a_bus_for_a_session_already_gone_is_never_started() {
-    // Process 1 started nothing here: the test's own parent did.
-    let ended = Command::new(env!("CARGO_BIN_EXE_perspicax"))
-        .args(["bus-daemon", "1", "unix:path=/nonexistent/perspicax-bus"])
+fn nothing_is_started_for_a_session_already_gone() {
+    for step in [
+        ["bus-daemon", "1", "unix:path=/nonexistent/perspicax-bus"],
+        ["ends-with", "1", "true"],
+    ] {
+        // Process 1 started nothing here: the test's own parent did.
+        let ended = Command::new(env!("CARGO_BIN_EXE_perspicax"))
+            .args(step)
+            .stdin(Stdio::null())
+            .output()
+            .expect("perspicax runs");
+        let said = String::from_utf8_lossy(&ended.stderr);
+        assert!(!ended.status.success(), "{}: {said}", step[0]);
+        assert!(said.contains("has gone"), "{}: {said}", step[0]);
+    }
+}
+
+/// Issue #249: what a session starts through `perspicax ends-with` ends when
+/// the session does, killed included -- a session that handles no signal, as
+/// perspicax handles none. A shell stands in for the session here, since what
+/// is asked of the kernel is the same whoever asks it.
+#[test]
+fn what_a_session_starts_to_end_with_it_ends_when_the_session_is_killed() {
+    let mut session = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "'{}' ends-with $$ sleep 60 & echo $!; wait",
+            env!("CARGO_BIN_EXE_perspicax")
+        ))
         .stdin(Stdio::null())
-        .output()
-        .expect("perspicax runs");
-    let said = String::from_utf8_lossy(&ended.stderr);
-    assert!(!ended.status.success(), "{said}");
-    assert!(said.contains("has gone"), "{said}");
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("sh runs");
+    let mut said = String::new();
+    std::io::BufReader::new(session.stdout.take().expect("its stdout"))
+        .read_line(&mut said)
+        .expect("the started program's pid");
+    let started: u32 = said.trim().parse().expect("a pid");
+
+    // Become `sleep`, which it is only once it has asked to end with the
+    // shell: killed before then, it would end for the step's own check.
+    let became = eventually(|| {
+        std::fs::read(format!("/proc/{started}/cmdline"))
+            .is_ok_and(|line| line.starts_with(b"sleep\0"))
+    });
+    if !became {
+        session.kill().ok();
+        session.wait().ok();
+        panic!("{started} never became sleep");
+    }
+
+    session.kill().expect("the session killed");
+    session.wait().expect("the session reaped");
+    assert!(
+        eventually(|| !running(started)),
+        "{started} runs on with its session gone"
+    );
 }
 
 /// Whether `pid` is a process that has not ended: a zombie has, and waits only

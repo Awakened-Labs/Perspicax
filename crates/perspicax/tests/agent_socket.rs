@@ -771,9 +771,9 @@ fn a_bus_of_its_own_holds_none_of_the_wire_and_goes_with_the_run() {
 /// ends, and the daemon removes its socket on its way out. Its folder stays,
 /// for nobody is left to remove it.
 ///
-/// Not what perspicax started itself, which is its own to stop and a killed
-/// perspicax stops nothing: the accessibility registry, above all, which runs
-/// on with both its buses gone. The test stops that one itself.
+/// And what perspicax started itself, which a killed perspicax cannot stop:
+/// the accessibility registry, above all, which would run on with both its
+/// buses gone. The kernel stops that one too (issue #249).
 #[test]
 #[ignore = "needs dbus-daemon and a live accessibility bus"]
 fn a_bus_of_its_own_goes_with_a_run_that_is_killed() {
@@ -800,26 +800,24 @@ fn a_bus_of_its_own_goes_with_a_run_that_is_killed() {
         );
     }
     let started = descendants(session.id());
+    let lines: Vec<_> = started.iter().map(|&pid| command_line(pid)).collect();
+    assert!(
+        lines.iter().any(|line| line.contains("at-spi2-registryd")),
+        "no registry among what it started: {lines:?}"
+    );
 
     session.kill().expect("perspicax killed");
     session.wait().expect("perspicax reaped");
     eventually("what the killed run's bus started is still running", || {
         !the_bus_started.iter().any(|&pid| running(pid))
     });
+    eventually("what the killed run started is still running", || {
+        !started.iter().any(|&pid| running(pid))
+    });
     assert!(
         !folder.join("bus").exists(),
         "the bus's socket is still there"
     );
-
-    for &pid in &started {
-        if running(pid)
-            && let Some(pid) = i32::try_from(pid)
-                .ok()
-                .and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
-        }
-    }
     tidy(&folder);
 }
 

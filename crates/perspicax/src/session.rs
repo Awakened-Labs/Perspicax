@@ -50,7 +50,7 @@
 
 use std::{
     env,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::{self, DirBuilder, File, OpenOptions},
     io::{self, BufRead as _},
     os::{
@@ -634,13 +634,7 @@ fn make_own_folder(folder: &Path) -> Result<()> {
 /// Returns only when it could not be done, saying why.
 pub fn become_bus_daemon(parent: u32, address: &str) -> anyhow::Error {
     let became = || -> Result<io::Error> {
-        rustix::process::set_parent_process_death_signal(Some(Signal::TERM))
-            .context("could not ask to be stopped with the session")?;
-        // Asked too late, if the session has already gone: nothing would
-        // stop this then.
-        if u32::try_from(Pid::as_raw(rustix::process::getppid())).ok() != Some(parent) {
-            bail!("the session that started this bus (pid {parent}) has gone");
-        }
+        end_with(parent)?;
         let saying = rustix::io::fcntl_dupfd_cloexec(io::stdout(), 3)
             .context("could not keep stdout for the bus's address")?;
         rustix::io::fcntl_setfd(&saying, rustix::io::FdFlags::empty())
@@ -656,6 +650,48 @@ pub fn become_bus_daemon(parent: u32, address: &str) -> anyhow::Error {
         Ok(error) => anyhow::Error::from(error).context("could not run dbus-daemon"),
         Err(error) => error,
     }
+}
+
+/// Become `program`, run with `args`, for `parent`, the session that started
+/// this process: what `perspicax ends-with` does. It is how a session starts
+/// what would otherwise outlive it, as the [`Registry`] would (issue #249).
+///
+/// The same step on the way as [`become_bus_daemon`], with no address to
+/// pass on: it asks the kernel to stop this process when `parent` ends, and
+/// then becomes `program`, which keeps what was asked. One started for a
+/// session that has already gone ends at once.
+///
+/// Returns only when it could not be done, saying why.
+pub fn become_ending_with(parent: u32, program: &OsStr, args: &[OsString]) -> anyhow::Error {
+    if let Err(error) = end_with(parent) {
+        return error;
+    }
+    let error = Command::new(program).args(args).exec();
+    anyhow::Error::from(error).context(format!("could not run {}", program.display()))
+}
+
+/// Ask the kernel to stop this process when `parent`, the session that
+/// started it, ends, however it ends: the step [`become_bus_daemon`] and
+/// [`become_ending_with`] take before they become what they start. Only a
+/// process can ask it for itself, and what it asks outlives the exec that
+/// follows.
+///
+/// What the kernel watches is the thread that started this process, not the
+/// whole of `parent`: so the session starts it on a thread that lasts as long
+/// as it is wanted.
+///
+/// # Errors
+///
+/// When it cannot be asked, or `parent` has already gone.
+fn end_with(parent: u32) -> Result<()> {
+    rustix::process::set_parent_process_death_signal(Some(Signal::TERM))
+        .context("could not ask to be stopped with the session")?;
+    // Asked too late, if the session has already gone: nothing would stop
+    // this then.
+    if u32::try_from(Pid::as_raw(rustix::process::getppid())).ok() != Some(parent) {
+        bail!("the session that started this (pid {parent}) has gone");
+    }
+    Ok(())
 }
 
 /// The accessibility bus's name on the session bus.
@@ -798,11 +834,13 @@ pub fn open_log(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-/// A registry this process started and is responsible for stopping.
+/// A registry this process started and is responsible for stopping: when
+/// this is dropped, or when this process ends, however it ends.
 pub struct Registry(Option<Child>);
 
 impl Registry {
-    /// Make sure an accessibility registry is running, starting one if not.
+    /// Make sure an accessibility registry is running, starting one if not,
+    /// as [`Registry::start`] does, with `perspicax`.
     ///
     /// Returns a handle that stops it again only if we were the ones to start
     /// it: on a real desktop the session's own registry is already up and
@@ -813,22 +851,30 @@ impl Registry {
     /// # Errors
     ///
     /// Only if no registry is running *and* none can be started.
-    pub fn ensure() -> Result<Self> {
+    pub fn ensure(perspicax: &Path) -> Result<Self> {
         if registry_is_running() {
             tracing::debug!("an accessibility registry is already running");
             return Ok(Self(None));
         }
-        Self::start().context("no accessibility registry is running")
+        Self::start(perspicax).context("no accessibility registry is running")
     }
 
     /// Start an accessibility registry, whether or not one is running: on a
     /// bus of the session's own ([`Bus`]), one already running is the
     /// person's, serving their accessibility bus rather than this one's.
     ///
+    /// It is started as `perspicax ends-with` ([`become_ending_with`]), where
+    /// `perspicax` is this program, or in a test the one built beside it, so
+    /// that the kernel stops it when this process ends. perspicax handles no
+    /// signal, and a registry nobody stops runs on for good, with both its
+    /// buses gone (issue #249). What the kernel watches is the thread that
+    /// started it, so this is called on one that lasts as long as the
+    /// registry is wanted: a session's main thread.
+    ///
     /// # Errors
     ///
     /// When none can be started.
-    pub fn start() -> Result<Self> {
+    pub fn start(perspicax: &Path) -> Result<Self> {
         let registry = find_registry(Path::new("/")).with_context(|| {
             format!(
                 "there is no {REGISTRY} to start in {}",
@@ -837,12 +883,21 @@ impl Registry {
         })?;
         // Nothing to read and nowhere to print, as for every program this
         // process starts: under `--mcp` its stdin is an agent's wire (#43).
-        let child = Command::new(&registry)
+        let mut child = Command::new(perspicax)
+            .arg("ends-with")
+            .arg(std::process::id().to_string())
+            .arg(&registry)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .with_context(|| format!("{} could not be started", registry.display()))?;
+            .with_context(|| {
+                format!(
+                    "could not start {} ends-with {}",
+                    perspicax.display(),
+                    registry.display()
+                )
+            })?;
         tracing::info!(pid = child.id(), "started an accessibility registry");
 
         // Give it a moment to claim its bus name. A client that asks before it
@@ -850,6 +905,13 @@ impl Registry {
         // for the name is not better: the name appears before the registry is
         // ready to answer about children.
         std::thread::sleep(Duration::from_millis(500));
+        // Said, since it prints nowhere. A registry that finds its name taken
+        // ends at once and well, for one is serving already.
+        if let Ok(Some(status)) = child.try_wait()
+            && !status.success()
+        {
+            tracing::warn!(%status, "the accessibility registry ended as it started");
+        }
         Ok(Self(Some(child)))
     }
 }
