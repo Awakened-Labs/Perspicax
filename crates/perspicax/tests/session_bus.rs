@@ -16,6 +16,7 @@
 
 use std::{
     io::BufRead as _,
+    os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex, mpsc},
@@ -479,6 +480,17 @@ fn the_portal_is_started_early_only_while_the_secret_service_is_still_starting()
     );
 }
 
+/// The program that serves the accessibility bus, as this machine installs
+/// it: what D-Bus runs when `org.a11y.Bus` is asked for.
+fn launcher() -> String {
+    std::fs::read_to_string("/usr/share/dbus-1/services/org.a11y.Bus.service")
+        .expect("the accessibility bus's service, which at-spi2-core installs")
+        .lines()
+        .find_map(|line| line.strip_prefix("Exec="))
+        .expect("the program it runs")
+        .to_owned()
+}
+
 /// H3: logging out of a session SDDM started left its accessibility bus
 /// running, one more `dbus-daemon` after every login. The launcher answering
 /// for `org.a11y.Bus` runs a bus daemon of its own and stops it on its way out,
@@ -488,13 +500,7 @@ fn the_portal_is_started_early_only_while_the_secret_service_is_still_starting()
 #[test]
 #[ignore = "starts a dbus-daemon of its own, and the accessibility bus as installed"]
 fn the_accessibility_bus_is_stopped_with_the_daemon_it_runs() {
-    let installed = std::fs::read_to_string("/usr/share/dbus-1/services/org.a11y.Bus.service")
-        .expect("the accessibility bus's service, which at-spi2-core installs");
-    let launcher = installed
-        .lines()
-        .find_map(|line| line.strip_prefix("Exec="))
-        .expect("the program it runs");
-    let bus = Bus::start(&[("org.a11y.Bus", launcher)]);
+    let bus = Bus::start(&[("org.a11y.Bus", &launcher())]);
     let runtime = runtime();
     let connection = bus.connect(&runtime);
 
@@ -551,6 +557,62 @@ fn the_accessibility_bus_is_stopped_with_the_daemon_it_runs() {
         eventually(|| !running(daemon)),
         "its daemon, {daemon}, is still running"
     );
+}
+
+/// Killed when dropped: a program the test started and nothing else stops.
+struct Started(Child);
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        self.0.kill().ok();
+        self.0.wait().ok();
+    }
+}
+
+/// Issue #249: whether a registry serves a session is asked of the session's
+/// accessibility bus, not of the programs running. A program named for one
+/// -- here a decoy, as the person's own registry, or one a killed run left,
+/// would be one -- serves some other bus, or none, and is not taken for this
+/// one's. A run on this bus starts a registry for it, and takes it with it.
+#[test]
+#[ignore = "starts a dbus-daemon of its own, and the accessibility bus as installed"]
+fn a_registry_serving_another_bus_is_not_taken_for_this_ones() {
+    let bus = Bus::start(&[("org.a11y.Bus", &launcher())]);
+    let _decoy = Started(
+        Command::new("sleep")
+            .arg0("/decoy/at-spi2-registryd")
+            .arg("60")
+            .spawn()
+            .expect("sleep runs"),
+    );
+    let runtime = runtime();
+    let connection = bus.connect(&runtime);
+    let serves = || {
+        runtime
+            .block_on(session::registry_serves(&connection))
+            .expect("the buses say")
+    };
+    assert!(!serves(), "a registry serves a bus nothing has used");
+
+    let mut run = Started(
+        Command::new(env!("CARGO_BIN_EXE_perspicax"))
+            .args(["--headless", "--run-for", "4"])
+            .env("DBUS_SESSION_BUS_ADDRESS", &bus.address)
+            // Where its Wayland socket goes.
+            .env("XDG_RUNTIME_DIR", &bus.dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("perspicax runs"),
+    );
+    assert!(eventually(&serves), "no registry serves the run's bus");
+    let ended = run.0.wait().expect("the run ends");
+    assert!(ended.success(), "{ended}");
+    assert!(eventually(|| !serves()), "its registry outlives the run");
+
+    runtime
+        .block_on(session::stop_accessibility_bus(&connection))
+        .expect("the accessibility bus stopped");
 }
 
 /// Issue #52: asked which process serves it, the bus names its daemon, the

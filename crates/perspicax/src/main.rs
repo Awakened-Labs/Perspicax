@@ -747,8 +747,9 @@ fn run(cli: &Cli, wire: Option<Wire>, own_bus: bool) -> Result<()> {
     }
 
     // Before anything is spawned, and in this order. A registry that arrives
-    // after its clients is a registry GTK has already given up on. On a bus of
-    // its own, one already running is the person's, for their bus, not this.
+    // after its clients is a registry GTK has already given up on. Asked of
+    // this session's accessibility bus, so that one serving another -- the
+    // person's, when the bus is one of its own -- is not taken for it.
     //
     // Without one, an agent run headless has nothing to read, and stops. A
     // person's session is still a session, and says so.
@@ -757,13 +758,7 @@ fn run(cli: &Cli, wire: Option<Wire>, own_bus: bool) -> Result<()> {
     // as it stops a bus of its own.
     let registry = std::env::current_exe()
         .context("no path to this program, to start the registry with")
-        .and_then(|this| {
-            if own_bus {
-                session::Registry::start(&this)
-            } else {
-                session::Registry::ensure(&this)
-            }
-        });
+        .and_then(|this| session::Registry::ensure(&this));
     let _registry = match registry {
         Ok(registry) => Some(registry),
         Err(error) if cli.on_seat() => {

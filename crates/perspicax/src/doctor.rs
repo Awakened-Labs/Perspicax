@@ -42,10 +42,11 @@ pub struct Machine<'a> {
     /// The perspicax-shell a session would start, found as it would find it.
     pub shell: Option<PathBuf>,
     /// The accessibility registry a session would start, found where
-    /// [`session::Registry::start`] looks.
+    /// [`session::find_registry`] looks.
     pub registry: Option<PathBuf>,
-    /// Whether one is running already.
-    pub registry_running: bool,
+    /// Whether one serves this session's accessibility bus already, as that
+    /// bus says ([`session::a_registry_serves_this_session`]).
+    pub registry_serving: bool,
     /// Whether `/tmp/.X11-unix`, where Xwayland's socket goes, is there.
     pub x11_sockets: bool,
 }
@@ -59,7 +60,7 @@ impl Machine<'_> {
             built,
             shell: check::shell(),
             registry: session::find_registry(Path::new("/")),
-            registry_running: session::registry_is_running(),
+            registry_serving: session::a_registry_serves_this_session(),
             x11_sockets: Path::new(X11_SOCKETS).is_dir(),
         }
     }
@@ -228,14 +229,15 @@ fn dbus(machine: &Machine<'_>) -> Row {
 fn accessibility(machine: &Machine<'_>) -> Row {
     const ROW: &str = "accessibility";
     let looked = session::REGISTRY_FOLDERS.join(", ");
-    match (&machine.registry, machine.registry_running) {
+    match (&machine.registry, machine.registry_serving) {
         (Some(registry), _) => Row::new(ROW, Status::Ok, registry.display().to_string()),
         (None, true) => Row::new(
             ROW,
             Status::Warn,
             format!(
-                "no {} in {looked}, but one is running, which a seat uses; `--headless` and \
-                 `--own-bus` start their own, and cannot: install at-spi2-core",
+                "no {} in {looked}, but one serves this session's accessibility bus, which a \
+                 session on this bus uses; one on a bus of its own (`--own-bus`, or `--mcp` \
+                 with no bus) starts its own, and cannot: install at-spi2-core",
                 session::REGISTRY
             ),
         ),
@@ -243,8 +245,8 @@ fn accessibility(machine: &Machine<'_>) -> Row {
             ROW,
             Status::Fail,
             format!(
-                "no {} in {looked}, and none running, so nothing on screen can be read: install \
-                 at-spi2-core",
+                "no {} in {looked}, and none serves this session's accessibility bus, so \
+                 nothing on screen can be read: install at-spi2-core",
                 session::REGISTRY
             ),
         ),
@@ -599,7 +601,7 @@ mod tests {
             built,
             shell: Some(PathBuf::from("/usr/bin/perspicax-shell")),
             registry: Some(PathBuf::from("/usr/libexec/at-spi2-registryd")),
-            registry_running: false,
+            registry_serving: false,
             x11_sockets: true,
         }
     }
@@ -701,15 +703,15 @@ mod tests {
     }
 
     #[test]
-    fn a_registry_running_but_not_installed_serves_a_seat_only() {
+    fn a_registry_serving_the_bus_but_not_installed_serves_a_session_on_it_only() {
         let env = HashMap::new();
         let var = var(&env);
         let mut machine = machine(&var, EVERYTHING);
         assert_eq!(accessibility(&machine).status, Status::Ok);
         machine.registry = None;
-        machine.registry_running = true;
+        machine.registry_serving = true;
         assert_eq!(accessibility(&machine).status, Status::Warn);
-        machine.registry_running = false;
+        machine.registry_serving = false;
         let row = accessibility(&machine);
         assert_eq!(row.status, Status::Fail);
         assert!(
