@@ -50,6 +50,7 @@
 //! deliberately draws nothing.
 
 use std::{
+    ffi::OsString,
     fs::File,
     io,
     os::{fd::AsFd as _, unix::net::UnixListener},
@@ -345,6 +346,17 @@ enum Command {
     /// when the session, PARENT, ends (`session::become_bus_daemon`).
     #[command(hide = true)]
     BusDaemon { parent: u32, address: String },
+
+    /// Not for people: PROGRAM, run with ARGS once it has asked to be stopped
+    /// when the session, PARENT, ends (`session::become_ending_with`): how a
+    /// session starts what would otherwise outlive it.
+    #[command(hide = true)]
+    EndsWith {
+        parent: u32,
+        program: OsString,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -402,6 +414,17 @@ fn main() -> Result<()> {
     // the daemon of a session's own bus, or says why it could not.
     if let Some(Command::BusDaemon { parent, address }) = &cli.command {
         return Err(session::become_bus_daemon(*parent, address));
+    }
+
+    // Likewise: this process becomes what the session started, once it is
+    // sure to end with the session.
+    if let Some(Command::EndsWith {
+        parent,
+        program,
+        args,
+    }) = &cli.command
+    {
+        return Err(session::become_ending_with(*parent, program, args));
     }
 
     // Likewise: no session, no log, nothing started, only a length of wire to
@@ -724,16 +747,18 @@ fn run(cli: &Cli, wire: Option<Wire>, own_bus: bool) -> Result<()> {
     }
 
     // Before anything is spawned, and in this order. A registry that arrives
-    // after its clients is a registry GTK has already given up on. On a bus of
-    // its own, one already running is the person's, for their bus, not this.
+    // after its clients is a registry GTK has already given up on. Asked of
+    // this session's accessibility bus, so that one serving another -- the
+    // person's, when the bus is one of its own -- is not taken for it.
     //
     // Without one, an agent run headless has nothing to read, and stops. A
     // person's session is still a session, and says so.
-    let registry = if own_bus {
-        session::Registry::start()
-    } else {
-        session::Registry::ensure()
-    };
+    //
+    // Started here, on the main thread, whose end the kernel stops it with,
+    // as it stops a bus of its own.
+    let registry = std::env::current_exe()
+        .context("no path to this program, to start the registry with")
+        .and_then(|this| session::Registry::ensure(&this));
     let _registry = match registry {
         Ok(registry) => Some(registry),
         Err(error) if cli.on_seat() => {

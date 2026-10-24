@@ -13,7 +13,9 @@
 //! 1. **The registry has to be running before the clients start.** GTK asks
 //!    once and gives up; Qt activates it on demand. Start both toolkits at once
 //!    against a cold bus and the Qt one arrives, the GTK one does not, and the
-//!    symptom looks exactly like an ingest that cannot read GTK.
+//!    symptom looks exactly like an ingest that cannot read GTK. Running for
+//!    this session's accessibility bus, too, as that bus says: one serving
+//!    another bus serves none of these clients ([`Registry::ensure`]).
 //! 2. **`org.a11y.Status.IsEnabled` has to be true.** Qt's bridge gates on it
 //!    and GTK's ignores it, so a false flag loses one toolkit and keeps the
 //!    other. A desktop sets it from dconf; a fresh `HOME` has no dconf state,
@@ -50,7 +52,7 @@
 
 use std::{
     env,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::{self, DirBuilder, File, OpenOptions},
     io::{self, BufRead as _},
     os::{
@@ -634,13 +636,7 @@ fn make_own_folder(folder: &Path) -> Result<()> {
 /// Returns only when it could not be done, saying why.
 pub fn become_bus_daemon(parent: u32, address: &str) -> anyhow::Error {
     let became = || -> Result<io::Error> {
-        rustix::process::set_parent_process_death_signal(Some(Signal::TERM))
-            .context("could not ask to be stopped with the session")?;
-        // Asked too late, if the session has already gone: nothing would
-        // stop this then.
-        if u32::try_from(Pid::as_raw(rustix::process::getppid())).ok() != Some(parent) {
-            bail!("the session that started this bus (pid {parent}) has gone");
-        }
+        end_with(parent)?;
         let saying = rustix::io::fcntl_dupfd_cloexec(io::stdout(), 3)
             .context("could not keep stdout for the bus's address")?;
         rustix::io::fcntl_setfd(&saying, rustix::io::FdFlags::empty())
@@ -656,6 +652,48 @@ pub fn become_bus_daemon(parent: u32, address: &str) -> anyhow::Error {
         Ok(error) => anyhow::Error::from(error).context("could not run dbus-daemon"),
         Err(error) => error,
     }
+}
+
+/// Become `program`, run with `args`, for `parent`, the session that started
+/// this process: what `perspicax ends-with` does. It is how a session starts
+/// what would otherwise outlive it, as the [`Registry`] would (issue #249).
+///
+/// The same step on the way as [`become_bus_daemon`], with no address to
+/// pass on: it asks the kernel to stop this process when `parent` ends, and
+/// then becomes `program`, which keeps what was asked. One started for a
+/// session that has already gone ends at once.
+///
+/// Returns only when it could not be done, saying why.
+pub fn become_ending_with(parent: u32, program: &OsStr, args: &[OsString]) -> anyhow::Error {
+    if let Err(error) = end_with(parent) {
+        return error;
+    }
+    let error = Command::new(program).args(args).exec();
+    anyhow::Error::from(error).context(format!("could not run {}", program.display()))
+}
+
+/// Ask the kernel to stop this process when `parent`, the session that
+/// started it, ends, however it ends: the step [`become_bus_daemon`] and
+/// [`become_ending_with`] take before they become what they start. Only a
+/// process can ask it for itself, and what it asks outlives the exec that
+/// follows.
+///
+/// What the kernel watches is the thread that started this process, not the
+/// whole of `parent`: so the session starts it on a thread that lasts as long
+/// as it is wanted.
+///
+/// # Errors
+///
+/// When it cannot be asked, or `parent` has already gone.
+fn end_with(parent: u32) -> Result<()> {
+    rustix::process::set_parent_process_death_signal(Some(Signal::TERM))
+        .context("could not ask to be stopped with the session")?;
+    // Asked too late, if the session has already gone: nothing would stop
+    // this then.
+    if u32::try_from(Pid::as_raw(rustix::process::getppid())).ok() != Some(parent) {
+        bail!("the session that started this (pid {parent}) has gone");
+    }
+    Ok(())
 }
 
 /// The accessibility bus's name on the session bus.
@@ -798,11 +836,19 @@ pub fn open_log(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-/// A registry this process started and is responsible for stopping.
+/// A registry this process started and is responsible for stopping: when
+/// this is dropped, or when this process ends, however it ends.
 pub struct Registry(Option<Child>);
 
 impl Registry {
-    /// Make sure an accessibility registry is running, starting one if not.
+    /// Make sure an accessibility registry serves this session's
+    /// accessibility bus, starting one if none does, as [`Registry::start`]
+    /// does, with `perspicax`.
+    ///
+    /// Asked of the bus ([`a_registry_serves_this_session`]), not of which
+    /// programs are running: one serving the person's desktop, when this
+    /// session's bus is one of its own, or one a killed session left, serves
+    /// some other bus, and GTK, asking this one once, would give up.
     ///
     /// Returns a handle that stops it again only if we were the ones to start
     /// it: on a real desktop the session's own registry is already up and
@@ -812,37 +858,55 @@ impl Registry {
     ///
     /// # Errors
     ///
-    /// Only if no registry is running *and* none can be started.
-    pub fn ensure() -> Result<Self> {
-        if registry_is_running() {
-            tracing::debug!("an accessibility registry is already running");
+    /// Only if none serves the bus *and* none can be started.
+    pub fn ensure(perspicax: &Path) -> Result<Self> {
+        if a_registry_serves_this_session() {
+            tracing::debug!("an accessibility registry serves this session already");
             return Ok(Self(None));
         }
-        Self::start().context("no accessibility registry is running")
+        Self::start(perspicax).context("no accessibility registry serves this session")
     }
 
-    /// Start an accessibility registry, whether or not one is running: on a
-    /// bus of the session's own ([`Bus`]), one already running is the
-    /// person's, serving their accessibility bus rather than this one's.
+    /// Start an accessibility registry for this session's accessibility bus,
+    /// told nothing that would lead it to another ([`registry_env`]).
+    ///
+    /// It is started as `perspicax ends-with` ([`become_ending_with`]), where
+    /// `perspicax` is this program, or in a test the one built beside it, so
+    /// that the kernel stops it when this process ends. perspicax handles no
+    /// signal, and a registry nobody stops runs on for good, with both its
+    /// buses gone (issue #249). What the kernel watches is the thread that
+    /// started it, so this is called on one that lasts as long as the
+    /// registry is wanted: a session's main thread.
     ///
     /// # Errors
     ///
     /// When none can be started.
-    pub fn start() -> Result<Self> {
+    fn start(perspicax: &Path) -> Result<Self> {
         let registry = find_registry(Path::new("/")).with_context(|| {
             format!(
                 "there is no {REGISTRY} to start in {}",
                 REGISTRY_FOLDERS.join(", ")
             )
         })?;
+        let mut command = Command::new(perspicax);
+        command
+            .arg("ends-with")
+            .arg(std::process::id().to_string())
+            .arg(&registry);
         // Nothing to read and nowhere to print, as for every program this
         // process starts: under `--mcp` its stdin is an agent's wire (#43).
-        let child = Command::new(&registry)
+        let mut child = changed(&mut command, registry_env())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .with_context(|| format!("{} could not be started", registry.display()))?;
+            .with_context(|| {
+                format!(
+                    "could not start {} ends-with {}",
+                    perspicax.display(),
+                    registry.display()
+                )
+            })?;
         tracing::info!(pid = child.id(), "started an accessibility registry");
 
         // Give it a moment to claim its bus name. A client that asks before it
@@ -850,6 +914,13 @@ impl Registry {
         // for the name is not better: the name appears before the registry is
         // ready to answer about children.
         std::thread::sleep(Duration::from_millis(500));
+        // Said, since it prints nowhere. A registry that finds its name taken
+        // ends at once and well, for one is serving already.
+        if let Ok(Some(status)) = child.try_wait()
+            && !status.success()
+        {
+            tracing::warn!(%status, "the accessibility registry ended as it started");
+        }
         Ok(Self(Some(child)))
     }
 }
@@ -904,31 +975,90 @@ pub fn find_registry(root: &Path) -> Option<PathBuf> {
         })
 }
 
-/// Whether something is already serving the accessibility registry.
+/// What the registry is started with in place of what it would inherit: no
+/// accessibility bus named, and no X display, so that it finds its bus as
+/// every read finds it, by asking the session bus ([`registry_serves`]).
 ///
-/// Read out of `/proc` rather than by shelling out to `pgrep`, for two
-/// reasons. A minimal container image need not have `procps` at all, and the
-/// absence would be indistinguishable from "no registry is running" -- so this
-/// compositor would start a second one on a desktop that already had one.
-/// And `pgrep` without `-f` matches `/proc/<pid>/comm`, which the kernel
-/// truncates to fifteen characters: `at-spi2-registryd` is seventeen, so the
-/// obvious spelling silently matches nothing.
+/// A registry looks for its bus in `AT_SPI_BUS_ADDRESS` first, and then, given
+/// an X display and no Wayland one, in the address that display's root window
+/// carries, before it asks the session bus (at-spi2-core 2.56,
+/// `atspi_get_a11y_bus`). Started from a terminal on an X desktop, it would
+/// join the desktop's accessibility bus, find a registry there already and
+/// end, leaving this session's with none.
+fn registry_env() -> Changes {
+    vec![("AT_SPI_BUS_ADDRESS", None), ("DISPLAY", None)]
+}
+
+/// The registry's name on the accessibility bus it serves.
+const REGISTRY_NAME: &str = "org.a11y.atspi.Registry";
+
+/// Whether a registry serves the accessibility bus `session` names: the one
+/// every read is made on ([`perspicax_atspi::bus_address`]).
+///
+/// Asked of the buses rather than of the programs running (issue #249). A
+/// registry serves one accessibility bus, and a program named for one may
+/// serve another: the person's desktop's, or a killed session's, whose
+/// registry runs on with its buses gone.
+///
+/// Asked by name, which starts nothing. An accessibility bus nobody has
+/// started has no registry on it, and a registry the bus could start on
+/// request has not been started: GTK asks for it once, and gives up.
+///
+/// # Errors
+///
+/// When the session bus, or the accessibility bus it names, will not say.
+pub async fn registry_serves(session: &Connection) -> Result<bool> {
+    let bus = DBusProxy::new(session)
+        .await
+        .context("no word from the session bus")?;
+    let accessibility = WellKnownName::from_static_str_unchecked(ACCESSIBILITY_BUS);
+    if !bus
+        .name_has_owner(accessibility.into())
+        .await
+        .context("the session bus would not say whether it serves the accessibility bus")?
+    {
+        return Ok(false);
+    }
+    let address = perspicax_atspi::bus_address(session)
+        .await
+        .context("the session bus would not say where its accessibility bus is")?;
+    let accessibility = zbus::connection::Builder::address(address.as_str())
+        .with_context(|| format!("the accessibility bus's address is no address: {address}"))?
+        .build()
+        .await
+        .with_context(|| format!("could not reach the accessibility bus at {address}"))?;
+    DBusProxy::new(&accessibility)
+        .await
+        .context("no word from the accessibility bus")?
+        .name_has_owner(WellKnownName::from_static_str_unchecked(REGISTRY_NAME).into())
+        .await
+        .context("the accessibility bus would not say whether a registry serves it")
+}
+
+/// Whether a registry serves this session's accessibility bus
+/// ([`registry_serves`]), asking the session bus the environment names, as
+/// every program the session starts finds it. Briefly borrows a runtime to
+/// ask.
+///
+/// No, when it cannot be asked: with no bus to ask, there is none for a
+/// registry to serve, and one started then ends at once of its own accord.
 #[must_use]
-pub fn registry_is_running() -> bool {
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return false;
-    };
-    entries.filter_map(Result::ok).any(|entry| {
-        fs::read(entry.path().join("cmdline")).is_ok_and(|cmdline| {
-            // Arguments are NUL-separated; only the executable is of interest,
-            // so that a command line merely *mentioning* the registry -- a
-            // shell running this very check, for instance -- is not mistaken
-            // for the registry itself.
-            cmdline
-                .split(|byte| *byte == 0)
-                .next()
-                .is_some_and(|argv0| argv0.ends_with(REGISTRY.as_bytes()))
-        })
+pub fn a_registry_serves_this_session() -> bool {
+    let asked = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("no runtime to ask the session bus with")
+        .and_then(|runtime| {
+            runtime.block_on(async {
+                let session = Connection::session()
+                    .await
+                    .context("no session bus to ask")?;
+                registry_serves(&session).await
+            })
+        });
+    asked.unwrap_or_else(|error| {
+        tracing::debug!("{error:#}: so no accessibility registry serves this session");
+        false
     })
 }
 
@@ -1155,6 +1285,14 @@ mod tests {
             Some(Some("")),
             "said, and empty, so an outer session's is not inherited"
         );
+    }
+
+    #[test]
+    fn the_registry_is_told_nothing_that_would_lead_it_to_another_bus() {
+        let started = registry_env();
+        for gone in ["AT_SPI_BUS_ADDRESS", "DISPLAY"] {
+            assert_eq!(changes(&started, gone), Some(None), "{gone}");
+        }
     }
 
     #[test]

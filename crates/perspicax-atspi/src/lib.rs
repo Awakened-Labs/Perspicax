@@ -443,18 +443,31 @@ async fn reading_bus() -> Result<Connection, Error> {
     // failing, and says so.
     let unreachable = |error: zbus::Error| Error::Bus(error.into());
     let session = Connection::session().await.map_err(unreachable)?;
-    let address: Address = BusProxy::new(&session)
-        .await
-        .map_err(unreachable)?
-        .get_address()
-        .await
-        .map_err(unreachable)?
-        .parse()
-        .map_err(unreachable)?;
+    let address: Address = bus_address(&session).await?.parse().map_err(unreachable)?;
     zbus::connection::Builder::address(address)
         .map_err(unreachable)?
         .method_timeout(read::ANSWER)
         .build()
+        .await
+        .map_err(unreachable)
+}
+
+/// The address of the accessibility bus `session` names: the bus every read
+/// is made on, and so the one a registry has to serve for a read to find
+/// anything (issue #249).
+///
+/// Asked as `AccessibilityConnection` asks it, of `org.a11y.Bus` on the
+/// session bus, which starts the accessibility bus if nothing has yet.
+///
+/// # Errors
+///
+/// [`Error::Bus`] if the session bus will not say.
+pub async fn bus_address(session: &Connection) -> Result<String, Error> {
+    let unreachable = |error: zbus::Error| Error::Bus(error.into());
+    BusProxy::new(session)
+        .await
+        .map_err(unreachable)?
+        .get_address()
         .await
         .map_err(unreachable)
 }

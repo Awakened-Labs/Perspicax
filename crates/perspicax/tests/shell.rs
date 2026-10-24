@@ -18,7 +18,7 @@
 
 use std::{
     os::unix::net::UnixStream,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command},
     sync::Arc,
     thread,
@@ -529,7 +529,8 @@ impl Drop for Shell {
 /// The compositor has the test's own thread, because Wayland state is not
 /// `Send`. A panic in `body` stops it and is the test's failure.
 fn host(name: &str, shell_config: &str, body: impl FnOnce(&Hosted) + Send + 'static) {
-    let _registry = session::Registry::ensure().expect("an accessibility registry");
+    let _registry = session::Registry::ensure(Path::new(env!("CARGO_BIN_EXE_perspicax")))
+        .expect("an accessibility registry");
     let socket = format!("perspicax-shell-{name}-{}", std::process::id());
     let runtime_dir = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR"));
     let config = std::env::temp_dir().join(format!("{socket}.toml"));

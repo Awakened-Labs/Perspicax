@@ -29,7 +29,14 @@
 //! `#[ignore]`d because it needs a live accessibility bus and two installed
 //! sample applications. `ci/live-tests.sh` runs it with `--include-ignored`.
 
-use std::{path::PathBuf, process::Command, sync::Arc, sync::mpsc, thread, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Arc,
+    sync::mpsc,
+    thread,
+    time::Duration,
+};
 
 use perspicax::{
     desk::Desk,
@@ -270,7 +277,8 @@ fn a_covered_control_is_refused_and_the_refusal_names_the_surface_in_the_way() {
 /// deadline is a backstop only -- reading a Qt tree takes seconds nobody can
 /// predict.
 fn run(spawn: Vec<Vec<String>>) -> Drive {
-    let _registry = session::Registry::ensure().expect("an accessibility registry");
+    let _registry = session::Registry::ensure(Path::new(env!("CARGO_BIN_EXE_perspicax")))
+        .expect("an accessibility registry");
 
     let facts = Facts::new();
     let stop = Stop::new();

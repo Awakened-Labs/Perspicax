@@ -9,7 +9,12 @@
 //! sample applications. `ci/live-tests.sh` runs it with `--include-ignored`.
 
 use std::{
-    collections::HashSet, path::PathBuf, process::Command, sync::mpsc, thread, time::Duration,
+    collections::HashSet,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 
 use perspicax::{
@@ -145,7 +150,8 @@ fn a_node_under_another_window_is_refused_and_names_the_surface() {
 /// Host both toolkits, read them, and give back what was found.
 fn run_demo() -> Reading {
     let gallery = qt_gallery().expect("qt6-base-examples must be installed");
-    let _registry = session::Registry::ensure().expect("an accessibility registry");
+    let _registry = session::Registry::ensure(Path::new(env!("CARGO_BIN_EXE_perspicax")))
+        .expect("an accessibility registry");
 
     let facts = Facts::new();
     let stop = Stop::new();

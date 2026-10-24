@@ -16,6 +16,7 @@
 
 use std::{
     io::BufRead as _,
+    os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex, mpsc},
@@ -479,6 +480,17 @@ fn the_portal_is_started_early_only_while_the_secret_service_is_still_starting()
     );
 }
 
+/// The program that serves the accessibility bus, as this machine installs
+/// it: what D-Bus runs when `org.a11y.Bus` is asked for.
+fn launcher() -> String {
+    std::fs::read_to_string("/usr/share/dbus-1/services/org.a11y.Bus.service")
+        .expect("the accessibility bus's service, which at-spi2-core installs")
+        .lines()
+        .find_map(|line| line.strip_prefix("Exec="))
+        .expect("the program it runs")
+        .to_owned()
+}
+
 /// H3: logging out of a session SDDM started left its accessibility bus
 /// running, one more `dbus-daemon` after every login. The launcher answering
 /// for `org.a11y.Bus` runs a bus daemon of its own and stops it on its way out,
@@ -488,13 +500,7 @@ fn the_portal_is_started_early_only_while_the_secret_service_is_still_starting()
 #[test]
 #[ignore = "starts a dbus-daemon of its own, and the accessibility bus as installed"]
 fn the_accessibility_bus_is_stopped_with_the_daemon_it_runs() {
-    let installed = std::fs::read_to_string("/usr/share/dbus-1/services/org.a11y.Bus.service")
-        .expect("the accessibility bus's service, which at-spi2-core installs");
-    let launcher = installed
-        .lines()
-        .find_map(|line| line.strip_prefix("Exec="))
-        .expect("the program it runs");
-    let bus = Bus::start(&[("org.a11y.Bus", launcher)]);
+    let bus = Bus::start(&[("org.a11y.Bus", &launcher())]);
     let runtime = runtime();
     let connection = bus.connect(&runtime);
 
@@ -551,6 +557,62 @@ fn the_accessibility_bus_is_stopped_with_the_daemon_it_runs() {
         eventually(|| !running(daemon)),
         "its daemon, {daemon}, is still running"
     );
+}
+
+/// Killed when dropped: a program the test started and nothing else stops.
+struct Started(Child);
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        self.0.kill().ok();
+        self.0.wait().ok();
+    }
+}
+
+/// Issue #249: whether a registry serves a session is asked of the session's
+/// accessibility bus, not of the programs running. A program named for one
+/// -- here a decoy, as the person's own registry, or one a killed run left,
+/// would be one -- serves some other bus, or none, and is not taken for this
+/// one's. A run on this bus starts a registry for it, and takes it with it.
+#[test]
+#[ignore = "starts a dbus-daemon of its own, and the accessibility bus as installed"]
+fn a_registry_serving_another_bus_is_not_taken_for_this_ones() {
+    let bus = Bus::start(&[("org.a11y.Bus", &launcher())]);
+    let _decoy = Started(
+        Command::new("sleep")
+            .arg0("/decoy/at-spi2-registryd")
+            .arg("60")
+            .spawn()
+            .expect("sleep runs"),
+    );
+    let runtime = runtime();
+    let connection = bus.connect(&runtime);
+    let serves = || {
+        runtime
+            .block_on(session::registry_serves(&connection))
+            .expect("the buses say")
+    };
+    assert!(!serves(), "a registry serves a bus nothing has used");
+
+    let mut run = Started(
+        Command::new(env!("CARGO_BIN_EXE_perspicax"))
+            .args(["--headless", "--run-for", "4"])
+            .env("DBUS_SESSION_BUS_ADDRESS", &bus.address)
+            // Where its Wayland socket goes.
+            .env("XDG_RUNTIME_DIR", &bus.dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("perspicax runs"),
+    );
+    assert!(eventually(&serves), "no registry serves the run's bus");
+    let ended = run.0.wait().expect("the run ends");
+    assert!(ended.success(), "{ended}");
+    assert!(eventually(|| !serves()), "its registry outlives the run");
+
+    runtime
+        .block_on(session::stop_accessibility_bus(&connection))
+        .expect("the accessibility bus stopped");
 }
 
 /// Issue #52: asked which process serves it, the bus names its daemon, the
@@ -629,19 +691,67 @@ fn a_bus_of_its_own_listens_in_its_folder_holds_nothing_and_goes_with_its_sessio
     std::fs::remove_dir(&runtime_dir).ok();
 }
 
-/// The start of a bus for a session that has already gone ends at once,
-/// rather than running on with nothing left to stop it.
+/// The start of a bus, or of anything else a session starts to end with it,
+/// for a session that has already gone ends at once, rather than running on
+/// with nothing left to stop it.
 #[test]
-fn a_bus_for_a_session_already_gone_is_never_started() {
-    // Process 1 started nothing here: the test's own parent did.
-    let ended = Command::new(env!("CARGO_BIN_EXE_perspicax"))
-        .args(["bus-daemon", "1", "unix:path=/nonexistent/perspicax-bus"])
+fn nothing_is_started_for_a_session_already_gone() {
+    for step in [
+        ["bus-daemon", "1", "unix:path=/nonexistent/perspicax-bus"],
+        ["ends-with", "1", "true"],
+    ] {
+        // Process 1 started nothing here: the test's own parent did.
+        let ended = Command::new(env!("CARGO_BIN_EXE_perspicax"))
+            .args(step)
+            .stdin(Stdio::null())
+            .output()
+            .expect("perspicax runs");
+        let said = String::from_utf8_lossy(&ended.stderr);
+        assert!(!ended.status.success(), "{}: {said}", step[0]);
+        assert!(said.contains("has gone"), "{}: {said}", step[0]);
+    }
+}
+
+/// Issue #249: what a session starts through `perspicax ends-with` ends when
+/// the session does, killed included -- a session that handles no signal, as
+/// perspicax handles none. A shell stands in for the session here, since what
+/// is asked of the kernel is the same whoever asks it.
+#[test]
+fn what_a_session_starts_to_end_with_it_ends_when_the_session_is_killed() {
+    let mut session = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "'{}' ends-with $$ sleep 60 & echo $!; wait",
+            env!("CARGO_BIN_EXE_perspicax")
+        ))
         .stdin(Stdio::null())
-        .output()
-        .expect("perspicax runs");
-    let said = String::from_utf8_lossy(&ended.stderr);
-    assert!(!ended.status.success(), "{said}");
-    assert!(said.contains("has gone"), "{said}");
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("sh runs");
+    let mut said = String::new();
+    std::io::BufReader::new(session.stdout.take().expect("its stdout"))
+        .read_line(&mut said)
+        .expect("the started program's pid");
+    let started: u32 = said.trim().parse().expect("a pid");
+
+    // Become `sleep`, which it is only once it has asked to end with the
+    // shell: killed before then, it would end for the step's own check.
+    let became = eventually(|| {
+        std::fs::read(format!("/proc/{started}/cmdline"))
+            .is_ok_and(|line| line.starts_with(b"sleep\0"))
+    });
+    if !became {
+        session.kill().ok();
+        session.wait().ok();
+        panic!("{started} never became sleep");
+    }
+
+    session.kill().expect("the session killed");
+    session.wait().expect("the session reaped");
+    assert!(
+        eventually(|| !running(started)),
+        "{started} runs on with its session gone"
+    );
 }
 
 /// Whether `pid` is a process that has not ended: a zombie has, and waits only
