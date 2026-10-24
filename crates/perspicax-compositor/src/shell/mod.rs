@@ -31,7 +31,7 @@ mod tabs;
 mod withdrawn;
 mod workspaces;
 
-use std::cell::RefCell;
+use std::{cell::RefCell, time::Instant};
 
 use perspicax_node::SurfaceId;
 use perspicax_policy::{
@@ -116,6 +116,9 @@ pub(crate) struct Placement {
     /// Kept in front of the other windows by the person, whichever has the
     /// keyboard. See `stacking`.
     pub(crate) on_top: bool,
+    /// When a Wayland window opened, until a seat names it for never having
+    /// drawn: taken then, so it is named once (#255).
+    pub(crate) opened: Option<Instant>,
 }
 
 /// How a window fills its monitor.

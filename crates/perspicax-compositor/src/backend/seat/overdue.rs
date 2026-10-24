@@ -15,6 +15,15 @@
 //! it is drawn. One that did is named in the log, at debug: something kept
 //! its monitor from telling it, as nothing did for #99. Not one rolled up,
 //! which is on screen by its titlebar alone, and waits as a parked one does.
+//!
+//! A Wayland window that has never drawn, five seconds after it opened, is
+//! named too, once and at info: on a seat it is a frame around nothing, and
+//! the log is where whoever saw it can find which (#255). The line says
+//! whether its client asked to be told it may draw and never committed the
+//! asking. No word from here can answer that: a callback that was never
+//! committed is not the compositor's to fire. GTK 4.20 leaves a window so
+//! when it cannot make the window an EGL surface, its frame clock frozen for
+//! good.
 
 use std::time::Duration;
 
@@ -24,7 +33,9 @@ use smithay::{
         LoopHandle,
         timer::{TimeoutAction, Timer},
     },
-    wayland::compositor::{SurfaceAttributes, TraversalAction, with_surface_tree_downward},
+    wayland::compositor::{
+        SurfaceAttributes, TraversalAction, with_states, with_surface_tree_downward,
+    },
 };
 
 use crate::{Error, backend::Running, framed::Framed, shell, state::Compositor};
@@ -37,6 +48,10 @@ const EVERY: Duration = Duration::from_secs(1);
 /// A render passes it too, with every window it tells, which is how the
 /// timer knows which windows a render has told lately.
 pub(super) const OVERDUE: Duration = Duration::from_millis(995);
+
+/// How long a Wayland window may go without its first picture before it is
+/// named in the log. A toolkit's first frame takes milliseconds.
+const UNDRAWN: Duration = Duration::from_secs(5);
 
 /// Look once a second, for as long as the session runs.
 pub(super) fn arm(handle: &LoopHandle<'static, Compositor>) -> Result<(), Error> {
@@ -75,6 +90,7 @@ fn release(state: &mut Compositor) {
     for window in &state.parked {
         window.send_frame(&output, now, Some(OVERDUE), |_, _| None);
     }
+    name_undrawn(state);
     // And one its client unmapped, which may wait for the word before it
     // asks for its window again.
     for withdrawn in &state.withdrawn {
@@ -95,6 +111,41 @@ fn release(state: &mut Compositor) {
             now,
             Some(OVERDUE),
             |_, _| None,
+        );
+    }
+}
+
+/// Name, once, each Wayland window open [`UNDRAWN`] that has never drawn, on
+/// screen or parked, and whether its client asked for a frame callback it
+/// has not committed.
+fn name_undrawn(state: &Compositor) {
+    for window in state.space.elements().chain(&state.parked) {
+        let (Some(id), Some(surface)) = (shell::id_of(window), shell::surface_of(window)) else {
+            continue;
+        };
+        if window.toplevel().is_none() || state.has_presented(id) {
+            continue;
+        }
+        let Some(opened) = shell::placement(window, |placement| {
+            placement
+                .opened
+                .take_if(|opened| opened.elapsed() >= UNDRAWN)
+        }) else {
+            continue;
+        };
+        let uncommitted = with_states(&surface, |states| {
+            !states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .pending()
+                .frame_callbacks
+                .is_empty()
+        });
+        tracing::info!(
+            surface = id.0,
+            open = ?opened.elapsed(),
+            frame_asked_uncommitted = uncommitted,
+            "a window has never drawn"
         );
     }
 }

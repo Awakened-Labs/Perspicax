@@ -1565,8 +1565,12 @@ impl Compositor {
         let id = self.mint_surface_id();
         window.user_data().insert_if_missing(|| id);
 
-        // Given back if it opens where its program's last window closed.
-        shell::placement(&window, |placement| placement.cascaded = Some(self.placed));
+        // Given back if it opens where its program's last window closed. And
+        // when it opened, for a seat to name it if it never draws.
+        shell::placement(&window, |placement| {
+            placement.cascaded = Some(self.placed);
+            placement.opened = Some(Instant::now());
+        });
         let at = self.place_new();
         // Not activated by the map: smithay would unset every other window's
         // state unsaid, and the window in use would never be told it no
