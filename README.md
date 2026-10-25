@@ -969,6 +969,18 @@ asks for the keys is dismissed when its program has none of them: one opened
 with a right-click still has them, since the click gives the window clicked
 the keys before it reaches it.
 
+And a token is good only until the person moves on (#257): until they press
+a key or a button, or the keys go to another program, whatever moves them --
+a window that opens, a click, Alt+Tab, the pointer under sloppy focus, a
+workspace switch, the lock screen. Otherwise the program they were using a
+moment ago could make one as they left it and spend it a few seconds later,
+on whatever they had moved on to. The keys coming back from a launcher as it
+goes are no move: that is when the program it started spends the token it
+was handed. A program keeps no more than eight at a time, so one making them
+in a loop has nowhere to grow. Left open: a program may open a launcher of
+its own, a layer asking for every key, and it has the keys as it opens
+(#259), so a token it makes there outlives it.
+
 A new window opens on the monitor under the pointer, in the room its panels
 leave, cascaded from the top-left corner: 32 pixels further in for each
 window opened before it, back to the corner before the middle. With a
