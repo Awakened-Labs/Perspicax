@@ -886,13 +886,19 @@ An X11 window may also ask to be the active one (`_NET_ACTIVE_WINDOW`), as a
 program does when a second copy of it is started, or as Wine does to bring a
 window back. It comes back from minimized and is raised, but takes the
 keyboard only with fresh input behind the request, as a Wayland window needs
-an activation token for: the X time of that input, under ten seconds old.
-Wine sends none, so its window comes back without the keyboard; without
-input a window on a workspace that is not showing waits there, since showing
-that workspace would move the keyboard. Asking with `_NET_WM_STATE_HIDDEN`
-minimizes or brings back, as Openbox takes it. And the root's
-`_NET_ACTIVE_WINDOW` names the X11 window with the keyboard, or none while a
-Wayland window has it, which Wine goes by for the window in front.
+an activation token for: the X time of that input, under ten seconds old,
+and only while an X11 window has the keys (#256). Any X program can learn
+the X server's time, so it is believed only from inside the X world in use,
+as a token is only from the program with the keys; otherwise an X11 window
+could take the keys from a Wayland window the person is typing in. So a
+program started again from a Wayland terminal or launcher comes up raised,
+to be clicked. Wine sends no time, so its window comes back without the
+keyboard. Without input, or with nothing to vouch for it, a window on a
+workspace that is not showing waits there, since showing that workspace
+would move the keyboard. Asking with `_NET_WM_STATE_HIDDEN` minimizes or
+brings back, as Openbox takes it. And the root's `_NET_ACTIVE_WINDOW` names
+the X11 window with the keyboard, or none while a Wayland window has it,
+which Wine goes by for the window in front.
 
 An X11 application's menus, tooltips and drag icons place themselves: they
 bypass the window manager (override-redirect, in X's terms), and are left to

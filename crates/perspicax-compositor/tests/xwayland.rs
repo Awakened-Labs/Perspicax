@@ -2097,6 +2097,8 @@ fn a_minimized_x11_window_asking_to_be_active_without_input_comes_back() {
 /// Issue #91: a window asking to be active with fresh input behind the
 /// request -- a program the person just started, raising its first
 /// instance -- takes the keyboard, as an xdg window does with a fresh token.
+/// From an X11 window that has the keys, as the time is believed only from
+/// one (#256).
 #[test]
 #[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
 fn an_x11_window_asking_to_be_active_with_fresh_input_takes_the_keyboard() {
@@ -2117,6 +2119,45 @@ fn an_x11_window_asking_to_be_active_with_fresh_input_takes_the_keyboard() {
     assert!(x11.names_active(first), "not named");
 
     x11.stop();
+}
+
+/// Issue #256: while a Wayland window has the keys, an X11 window asking to
+/// be active with an X time it learned from the server, as any X client
+/// can, is raised but takes none of them. Before, it took the rest of what
+/// was being typed in the Wayland window, a password at a `sudo` prompt say,
+/// Enter and all, as a made-up serial in a token did before #187.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_asking_to_be_active_while_a_wayland_window_has_the_keys_takes_none_of_them() {
+    let x11 = X11::start(
+        "x11-activate-past-wayland",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let behind = x11.open("behind");
+    let (mut desk, mut queue, qh, globals) = x11.session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    desk.open_window(&qh, "terminal", "terminal");
+    let terminal = desk.windows[0].wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&terminal)
+    });
+
+    x11.activate(behind, APPLICATION, x11.server_time());
+    assert!(
+        x11.answered(x11.root, x11.atoms._NET_ACTIVE_WINDOW),
+        "never answered"
+    );
+    assert!(x11.on_top("behind"), "never raised: {:?}", x11.facts());
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert_eq!(
+        heard(&ear).entered.as_ref(),
+        Some(&terminal),
+        "the terminal keeps the keys"
+    );
+    assert_ne!(x11.focus(), behind, "X gave the window the keys");
+    assert!(x11.names_active(x11rb::NONE), "names {:#x}", x11.active());
+
+    x11.session.stop((desk, queue));
 }
 
 /// Issue #91: a minimized window on a workspace that is not showing, asking
@@ -2151,7 +2192,9 @@ fn an_x11_window_on_a_workspace_not_showing_asking_to_be_active_without_input_wa
 
 /// Issue #91: a window on a workspace that is not showing, asking to be
 /// active with fresh input behind the request, is shown there with the
-/// keyboard, as an xdg window with a fresh token is.
+/// keyboard, as an xdg window with a fresh token is. Asked while an X11
+/// window on the workspace showing has the keys, as the time is believed
+/// only then (#256).
 #[test]
 #[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
 fn an_x11_window_on_a_workspace_not_showing_asking_to_be_active_with_fresh_input_is_shown() {
@@ -2160,6 +2203,11 @@ fn an_x11_window_on_a_workspace_not_showing_asking_to_be_active_with_fresh_input
     x11.perform(Action::Workspace(perspicax_policy::Direction::Right));
     x11.surface_where("game", |surface| surface.off_workspace.is_some())
         .expect("never left behind");
+    let terminal = x11.open("terminal");
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == terminal).then_some(())
+    })
+    .expect("the terminal never took the keyboard");
 
     x11.activate(window, APPLICATION, x11.server_time());
     x11.surface_where("game", |surface| surface.mapped)
@@ -2168,6 +2216,38 @@ fn an_x11_window_on_a_workspace_not_showing_asking_to_be_active_with_fresh_input
         (x11.focus() == window).then_some(())
     })
     .unwrap_or_else(|| panic!("never took the keyboard: {:?}", x11.facts()));
+
+    x11.stop();
+}
+
+/// Issue #256: with nothing holding the keys -- the workspace showing is
+/// empty -- an X11 window asking to be active with an X time waits on its
+/// own workspace, as one asking without input does. No X11 window has the
+/// keys to vouch for the time, which any X client can learn, as no client
+/// with the keys vouches for a token then (#187).
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_asking_to_be_active_while_nothing_has_the_keys_waits_on_its_workspace() {
+    let x11 = X11::start("x11-activate-unvouched", two_workspaces().with_person());
+    let window = x11.open("game");
+    x11.perform(Action::Workspace(perspicax_policy::Direction::Right));
+    x11.surface_where("game", |surface| surface.off_workspace.is_some())
+        .expect("never left behind");
+
+    x11.activate(window, APPLICATION, x11.server_time());
+    assert!(
+        x11.answered(x11.root, x11.atoms._NET_ACTIVE_WINDOW),
+        "never answered"
+    );
+    x11.surface_where("game", |surface| {
+        !surface.mapped && surface.off_workspace.is_some()
+    })
+    .unwrap_or_else(|| panic!("not left on its own workspace: {:?}", x11.facts()));
+    assert_ne!(
+        x11.focus(),
+        window,
+        "took the keyboard with nothing to vouch for its time"
+    );
 
     x11.stop();
 }

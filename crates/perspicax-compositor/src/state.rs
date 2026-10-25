@@ -761,7 +761,11 @@ impl Compositor {
     /// it took them, and asking would refuse real input: a click that
     /// focuses a window is pressed before the keys come to it, and a
     /// window's own menu takes them and gives them back with new serials.
-    fn keys_are_with(&self, client: &ClientId) -> bool {
+    ///
+    /// An X11 window's request to be active names an X time as its input,
+    /// which any X client can learn, and Xwayland is one client for them
+    /// all: the time is believed while it has the keys (#256).
+    pub(crate) fn keys_are_with(&self, client: &ClientId) -> bool {
         self.keyboard_focus()
             .and_then(|surface| self.display.get_client(surface.id()).ok())
             .is_some_and(|holder| holder.id() == *client)
