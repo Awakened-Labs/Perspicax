@@ -145,7 +145,7 @@ use smithay::{
     output::Output,
     reexports::{
         calloop::{LoopHandle, RegistrationToken, channel},
-        wayland_server::{Client, Resource as _, protocol::wl_output::WlOutput},
+        wayland_server::{Client, protocol::wl_output::WlOutput},
     },
     utils::{Clock, Logical, Monotonic, Point, Rectangle, SERIAL_COUNTER},
     wayland::{
@@ -849,13 +849,14 @@ impl Compositor {
             .filter(|window| !shell::places_itself(window))
     }
 
-    /// Whether the keyboard is with an X11 window, which is when X clients
-    /// may read the clipboard.
+    /// Whether the keyboard is with an X11 window: when X clients may read
+    /// the clipboard, and when one's X time is believed (#256). Xwayland is
+    /// one Wayland client for them all.
     fn x11_has_focus(&self) -> bool {
-        let focused_client = self
-            .keyboard_focus()
-            .and_then(|surface| self.display.get_client(surface.id()).ok());
-        focused_client.is_some() && focused_client == self.xwayland.client
+        self.xwayland
+            .client
+            .as_ref()
+            .is_some_and(|client| self.keys_are_with(&client.id()))
     }
 }
 
@@ -1276,13 +1277,23 @@ impl Compositor {
     /// token: here the X time of that input, which the request carries. Wine
     /// sends none, so a Wine window comes back without the keyboard.
     /// Answered either way, by the root naming the active window again.
+    ///
+    /// The time is believed only while an X11 window has the keys (#256).
+    /// Any X client can learn the server's time, by changing a property and
+    /// reading when the change was, so the time alone proves no more than a
+    /// serial alone does in a token (#187), and an X11 window could take the
+    /// keys from a Wayland window the person is typing in. While an X11
+    /// window has them, the request comes from inside the X world in use,
+    /// whose clients X does not keep from one another anyway. So a program
+    /// started again from a Wayland terminal or launcher comes up raised,
+    /// without the keys: nothing on the Wayland side can vouch for its time.
     fn activate_x11(&mut self, window: u32, stamp: u32) {
         let asked = self
             .managed_x11_by_id(window)
             .filter(|_| self.backend.has_person());
         if let Some((window, x11)) = asked {
             let now = Clock::<Monotonic>::new().now().as_millis();
-            let input = stamp != x11rb::CURRENT_TIME;
+            let input = stamp != x11rb::CURRENT_TIME && self.x11_has_focus();
             if perspicax_policy::grants_activation(activation_age(now, stamp), input) {
                 self.restore(&window);
                 self.raise_x11(&window, &x11);

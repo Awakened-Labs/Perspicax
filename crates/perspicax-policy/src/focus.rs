@@ -165,9 +165,11 @@ pub const ACTIVATION_WINDOW: Duration = Duration::from_secs(10);
 /// it is fresh. The compositor says whether input was behind it: for an xdg
 /// token, that the client with the keys made it, since a serial any client
 /// can name is no proof alone (#187); for an X11 request, the X time of the
-/// input it carries. Anything else is a window trying to take focus for
-/// itself, which is the focus stealing the protocol exists to prevent. A
-/// refused activation is not an error. The window simply stays where it is.
+/// input it carries, believed only while an X11 window has the keys, since
+/// any X client can learn the time (#256). Anything else is a window trying
+/// to take focus for itself, which is the focus stealing the protocol exists
+/// to prevent. A refused activation is not an error. The window simply stays
+/// where it is.
 #[must_use]
 pub fn grants_activation(age: Duration, from_input: bool) -> bool {
     from_input && age < ACTIVATION_WINDOW
