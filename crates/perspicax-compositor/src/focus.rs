@@ -20,6 +20,7 @@
 use std::borrow::Cow;
 
 use smithay::{
+    backend::input::ButtonState,
     desktop::PopupKind,
     input::{
         Seat,
@@ -195,6 +196,15 @@ impl PointerTarget<Compositor> for FocusTarget {
     }
     fn button(&self, seat: &Seat<Compositor>, data: &mut Compositor, event: &ButtonEvent) {
         if self.pay_before(seat, data, Event::Other) {
+            // Which client the person's latest press reached, if this is
+            // it: what vouches for a token from a notification or a dock,
+            // which never has the keys (#257). An agent's press has a
+            // serial of its own, and is not the person's.
+            if event.state == ButtonState::Pressed
+                && let Some(client) = self.wl_surface().and_then(|surface| surface.client())
+            {
+                data.attention.reached(&event.serial, client.id());
+            }
             delegate!(self, target => PointerTarget::button(target, seat, data, event));
         }
     }

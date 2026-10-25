@@ -621,3 +621,176 @@ fn a_token_made_before_the_person_left_for_an_empty_workspace_brings_nothing_bac
 
     session.stop((thief, thief_queue));
 }
+
+/// How tall the notifier's strip is, across the top of the screen.
+#[cfg(feature = "capture")]
+const NOTICE: u32 = 60;
+
+/// A point on the notifier's strip.
+#[cfg(feature = "capture")]
+const ON_NOTICE: (i32, i32) = (640, 30);
+
+/// A notification daemon, as mako is: a client of its own with a pointer
+/// and `xdg_activation_v1`, and a strip on `top` that never asks for a key,
+/// drawn. A notification's action is clicked on it, and it makes a token for
+/// that click, for the program whose notification it was.
+#[cfg(feature = "capture")]
+fn notifier(session: &Session) -> (Desk, EventQueue<Desk>, QueueHandle<Desk>) {
+    use smithay_client_toolkit::shell::wlr_layer::Layer;
+
+    let (mut notifier, mut queue, qh, globals) = session.client();
+    notifier.bind_pointer(&globals, &qh);
+    notifier.bind_activation(&globals, &qh);
+    notifier.open_strip(&qh, Layer::Top, "notifications", NOTICE, 0xff22_5588);
+    until(&mut queue, &mut notifier, |notifier| {
+        notifier.layers_drawn == 1
+    });
+    (notifier, queue, qh)
+}
+
+/// The person clicks the notifier's strip; returns the serial of the press
+/// it was sent.
+#[cfg(feature = "capture")]
+fn click_notice(session: &Session, notifier: &mut Desk, queue: &mut EventQueue<Desk>) -> u32 {
+    use perspicax_compositor::Command;
+    use perspicax_policy::{Button, Mods};
+
+    session.command(Command::Click {
+        at: ON_NOTICE,
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    until(queue, notifier, |notifier| notifier.buttons.len() == 2);
+    notifier.pressed.expect("pressed")
+}
+
+/// The notifier makes a token from its strip, naming `serial`, and waits for
+/// it.
+#[cfg(feature = "capture")]
+fn notice_token(
+    notifier: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    qh: &QueueHandle<Desk>,
+    serial: u32,
+) -> String {
+    let strip = notifier.layers[0].0.wl_surface().clone();
+    notifier.make_token_from(qh, &strip, serial);
+    until(queue, notifier, |notifier| !notifier.tokens.is_empty());
+    notifier.tokens.remove(0)
+}
+
+/// A notification's action clicked (#257). The notifier never has the keys,
+/// so the click it was just sent is what vouches for the token it makes, and
+/// the browser it is handed to comes forward with the keys, taking them
+/// from the terminal the person was typing in.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_layer_the_person_just_clicked_brings_a_window_forward() {
+    let session = session("serials-notified");
+    let (mut browser, mut browser_queue, _, browser_ear, _) = program(&session, "browser");
+    let (mut terminal, mut terminal_queue, _, terminal_ear, _) = program(&session, "terminal");
+    until(&mut browser_queue, &mut browser, |browser| {
+        !has_keys(browser, &browser_ear)
+    });
+    let (mut notifier, mut notifier_queue, notifier_qh) = notifier(&session);
+
+    let clicked = click_notice(&session, &mut notifier, &mut notifier_queue);
+    let token = notice_token(&mut notifier, &mut notifier_queue, &notifier_qh, clicked);
+    browser.spend_token(&token, 0);
+    until(&mut browser_queue, &mut browser, |browser| {
+        has_keys(browser, &browser_ear)
+    });
+    terminal_queue.roundtrip(&mut terminal).expect("dispatch");
+    assert!(
+        !has_keys(&terminal, &terminal_ear),
+        "the terminal let the keys go"
+    );
+    session.wait_for(|facts| on_top(facts).as_deref() == Some("browser"));
+
+    session.stop((
+        (browser, browser_queue),
+        (terminal, terminal_queue),
+        (notifier, notifier_queue),
+    ));
+}
+
+/// The person clicked the notifier, then moved on: a window opened and took
+/// the keys. A token the notifier makes now, naming that click, is
+/// forgotten as it is made, and brings nothing forward (#257).
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_layer_naming_a_click_the_person_has_moved_on_from_brings_nothing_forward() {
+    let session = session("serials-notified-moved-on");
+    let (mut browser, mut browser_queue, _, browser_ear, _) = program(&session, "browser");
+    let (mut notifier, mut notifier_queue, notifier_qh) = notifier(&session);
+    let clicked = click_notice(&session, &mut notifier, &mut notifier_queue);
+    let (mut terminal, mut terminal_queue, _, terminal_ear, _) = program(&session, "terminal");
+    until(&mut browser_queue, &mut browser, |browser| {
+        !has_keys(browser, &browser_ear)
+    });
+
+    let token = notice_token(&mut notifier, &mut notifier_queue, &notifier_qh, clicked);
+    browser.spend_token(&token, 0);
+    hear_all(
+        &mut browser,
+        &mut browser_queue,
+        &mut terminal,
+        &mut terminal_queue,
+    );
+    assert!(
+        has_keys(&terminal, &terminal_ear),
+        "the terminal keeps the keys"
+    );
+    assert!(
+        !has_keys(&browser, &browser_ear),
+        "the browser has none of them"
+    );
+
+    session.stop((
+        (browser, browser_queue),
+        (terminal, terminal_queue),
+        (notifier, notifier_queue),
+    ));
+}
+
+/// The person clicked the notifier, but the token it makes names a serial
+/// it was never sent. Only the press it was sent vouches, and the browser
+/// stays where it is (#257).
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_layer_naming_a_press_it_was_not_sent_brings_nothing_forward() {
+    let session = session("serials-notified-made-up");
+    let (mut browser, mut browser_queue, _, browser_ear, _) = program(&session, "browser");
+    let (mut terminal, mut terminal_queue, _, terminal_ear, _) = program(&session, "terminal");
+    until(&mut browser_queue, &mut browser, |browser| {
+        !has_keys(browser, &browser_ear)
+    });
+    let (mut notifier, mut notifier_queue, notifier_qh) = notifier(&session);
+
+    click_notice(&session, &mut notifier, &mut notifier_queue);
+    let token = notice_token(&mut notifier, &mut notifier_queue, &notifier_qh, MADE_UP);
+    browser.spend_token(&token, 0);
+    hear_all(
+        &mut browser,
+        &mut browser_queue,
+        &mut terminal,
+        &mut terminal_queue,
+    );
+    assert!(
+        has_keys(&terminal, &terminal_ear),
+        "the terminal keeps the keys"
+    );
+    assert!(
+        !has_keys(&browser, &browser_ear),
+        "the browser has none of them"
+    );
+
+    session.stop((
+        (browser, browser_queue),
+        (terminal, terminal_queue),
+        (notifier, notifier_queue),
+    ));
+}

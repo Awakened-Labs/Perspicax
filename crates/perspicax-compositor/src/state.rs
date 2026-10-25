@@ -755,11 +755,12 @@ impl Compositor {
     /// Whether the keyboard is with one of `client`'s surfaces: a window, a
     /// menu of one, a launcher, a lock surface.
     ///
-    /// The serial a client names is believed only from it (#187). An
-    /// activation token carries one, and so does a menu's grab, to say what
-    /// input it answers, but nothing stops a client naming one it was never
-    /// sent, or one it was sent long ago. The client with the keys is the
-    /// one in use: what it asks for, the person is behind, a link opened in
+    /// The serial a client names is believed only from it (#187), or, for
+    /// an activation token, from the client the person's latest press was
+    /// sent to, naming that press (#257). An activation token carries one,
+    /// and so does a menu's grab, to say what input it answers, but nothing
+    /// stops a client naming one it was never sent, or one it was sent long
+    /// ago. The client with the keys is the one in use: what it asks for, the person is behind, a link opened in
     /// it, an item picked from its launcher or its menu. Any other client is
     /// asking for itself, which is the focus stealing both protocols leave
     /// the compositor to refuse. How old the serial is proves nothing more,
@@ -1842,7 +1843,10 @@ impl XdgActivationHandler for Compositor {
 
     /// A client making a token, to hand to what it starts or wakes. Kept
     /// only if it names input and the client making it has the keys (see
-    /// [`Compositor::keys_are_with`]). Any other is forgotten as it is made,
+    /// [`Compositor::keys_are_with`]), or names the person's latest press,
+    /// under ten seconds old, which it was sent: a notification's action or
+    /// a dock's icon clicked, which never has the keys (#257). Any other is
+    /// forgotten as it is made,
     /// so spending it brings nothing forward, as a token naming no input
     /// never did. Its client is told the token all the same, as smithay
     /// tells every one, and cannot tell the difference.
@@ -1856,7 +1860,7 @@ impl XdgActivationHandler for Compositor {
         let turn = self.attention.turn();
         self.activation
             .retain_tokens(|_, made| still_good(made, turn));
-        let Some(client) = data.client_id.as_ref().filter(|_| data.serial.is_some()) else {
+        let Some(((serial, _), client)) = data.serial.as_ref().zip(data.client_id.as_ref()) else {
             tracing::debug!("activation token refused: it names no input");
             return false;
         };
@@ -1869,8 +1873,11 @@ impl XdgActivationHandler for Compositor {
             tracing::debug!("activation token refused: its client keeps enough already");
             return false;
         }
-        if !self.keys_are_with(client) {
-            tracing::debug!("activation token refused: its client does not have the keys");
+        if !(self.keys_are_with(client) || self.attention.vouches(serial, client, Instant::now())) {
+            tracing::debug!(
+                "activation token refused: its client neither has the keys nor names the \
+                 person's latest press, which it was sent"
+            );
             return false;
         }
         data.user_data.insert_if_missing(|| turn);
@@ -1879,9 +1886,10 @@ impl XdgActivationHandler for Compositor {
 
     /// A client asking for one of its windows to be brought forward: an
     /// application opened from a launcher, a link opened in a browser that
-    /// was already running. Every token known was made by the client with
-    /// the keys, in answer to the person's own input (`token_created`), so
-    /// it is granted while it is fresh and the person has not moved on (see
+    /// was already running. Every token known was made in answer to the
+    /// person's own input, by the client with the keys or the one their
+    /// latest press was sent to (`token_created`), so it is granted while it
+    /// is fresh and the person has not moved on (see
     /// `perspicax_policy::grants_activation`), and a window cannot pull
     /// focus to itself while someone is typing elsewhere.
     fn request_activation(
