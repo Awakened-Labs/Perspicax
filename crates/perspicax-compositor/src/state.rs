@@ -392,7 +392,7 @@ impl Compositor {
         // cannot fail, because there is no keymap to compile.
         let pointer = Some(seat.add_pointer());
 
-        let grants = crate::grants::Grants::new(backend.by_grant());
+        let grants = crate::grants::Grants::new(backend.by_grant(), backend.never().clone());
         let workspace_shape = backend.workspace_shape();
         let gate = crate::access::Gate::new(backend.access());
         let mouse = backend.mouse();

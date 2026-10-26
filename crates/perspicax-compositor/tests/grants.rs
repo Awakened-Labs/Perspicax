@@ -18,11 +18,11 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
-use common::{Session, until};
+use common::{Renamed, Session, until};
 use perspicax_compositor::{Backend, Host, LaunchError};
-use perspicax_index::{Consent, HostFacts, SurfaceFacts, judge};
+use perspicax_index::{Consent, HostFacts, Refusal, SurfaceFacts, judge};
 use perspicax_node::{Rect, Visibility};
-use perspicax_policy::{Action, Program, Rule};
+use perspicax_policy::{Action, Never, Program, Rule};
 
 /// Set, to the compositor's socket, for the copy of this binary that
 /// [`window_probe`] runs in.
@@ -43,7 +43,15 @@ fn titled<'a>(facts: &'a HostFacts, title: &str) -> Option<&'a SurfaceFacts> {
 /// A window titled "probe", put up by a process of its own: a copy of this
 /// binary running [`window_probe`]. It stays until it is killed.
 fn probe(session: &Session) -> Child {
-    let child = Command::new(std::env::current_exe().expect("this test's binary"))
+    probe_as(
+        session,
+        &std::env::current_exe().expect("this test's binary"),
+    )
+}
+
+/// The same, put up by `program`, this binary under another name.
+fn probe_as(session: &Session, program: &Path) -> Child {
+    let child = Command::new(program)
         .args(["--exact", "window_probe", "--ignored", "--test-threads=1"])
         .env(PROBE, session.socket())
         .stdout(Stdio::null())
@@ -306,14 +314,21 @@ fn a_program_that_will_not_start_says_why() {
 /// agent launched would start one: from a process of its own, under the
 /// shell. The `; :` keeps the shell from becoming the probe.
 fn probe_under_sh(session: &Session) -> Vec<String> {
-    let exe = std::env::current_exe().expect("this test's binary");
+    probe_under_sh_as(
+        session,
+        &std::env::current_exe().expect("this test's binary"),
+    )
+}
+
+/// The same, put up by `program`, this binary under another name.
+fn probe_under_sh_as(session: &Session, program: &Path) -> Vec<String> {
     words(&[
         "sh",
         "-c",
         &format!(
             "{PROBE}={} '{}' --exact window_probe --ignored --test-threads=1 >/dev/null; :",
             session.socket(),
-            exe.display()
+            program.display()
         ),
     ])
 }
@@ -413,6 +428,209 @@ fn a_window_a_spawned_program_starts_is_not_granted() {
     assert_eq!(granted_now.len(), 2, "sleep and the shell: {granted_now:?}");
     assert!(!granted_now.contains(&probe));
     kill(probe);
+    session.stop(());
+}
+
+/// What a seat's `[agent] never` names unless the person says otherwise.
+fn never_ennius() -> Never {
+    Never::new(vec![Program::parse("ennius")])
+}
+
+/// A desk that consents as a seat does, where an agent may start what
+/// `launch` admits and is never given ennius.
+fn withholding() -> Backend {
+    Backend::headless((1280, 1024))
+        .granting()
+        .withholding(never_ennius())
+}
+
+/// The refusal a window of ennius's is given, whatever was granted.
+fn never_granted() -> Result<(), Refusal> {
+    Err(Refusal::NeverGranted {
+        program: "ennius".to_owned(),
+    })
+}
+
+/// [`window_probe`] run as `program`, put up as a binding or `--spawn`
+/// starts it, told the socket by the session.
+fn probe_command(program: &Path) -> Vec<String> {
+    words(&[
+        &program.display().to_string(),
+        "--exact",
+        "window_probe",
+        "--ignored",
+        "--test-threads=1",
+    ])
+}
+
+/// The person's key on ennius's window grants nothing, and the window is
+/// refused to the agent and not marked.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_key_does_not_grant_a_program_never_given() {
+    let ennius = Renamed::called("ennius", "never-key");
+    let session = Session::start("never-key", withholding());
+    let mut probe = probe_as(&session, &ennius.0);
+    session.perform(Action::ToggleAgent);
+    // Heard in the order sent: once this is granted, the key has been too.
+    session.perform(Action::Spawn {
+        command: words(&["sleep", "30"]),
+        agent: true,
+    });
+    let facts = session.wait_for(|facts| granted(facts).is_some_and(|pids| !pids.is_empty()));
+    let pids = granted(&facts).expect("published");
+    assert_eq!(pids.len(), 1, "sleep's alone: {pids:?}");
+    assert!(!pids.contains(&probe.id()));
+    let window = titled(&facts, "probe").expect("the probe's window");
+    assert_eq!(facts.consent().check(&window.origin), never_granted());
+    assert!(!outlined(&facts, "probe"));
+
+    probe.kill().expect("the probe is ours to kill");
+    probe.wait().expect("and ours to reap");
+    session.stop(());
+}
+
+/// An agent asking to launch ennius is refused as never given, before any
+/// rule is asked, and nothing starts: by its name, by its path, through a
+/// link of another name to it, and through a link of its name to a file of
+/// another, as an install that keeps versions side by side makes one. What
+/// the rule admits still starts.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_launch_of_a_program_never_given_is_refused_whatever_the_rule_admits() {
+    let ennius = Renamed::called("ennius", "never-launch");
+    let link = ennius.link("e");
+    let versioned = Renamed::called("ennius-0.3", "never-launch-versioned");
+    let installed = versioned.link("ennius");
+    let session = Session::start("never-launch", withholding().launching(Rule::Any));
+    let host = Host::new(&session.facts, &session.requests);
+    for program in [
+        "ennius".to_owned(),
+        ennius.0.display().to_string(),
+        link.display().to_string(),
+        installed.display().to_string(),
+    ] {
+        assert_eq!(
+            host.launch(&words(&[&program, "gui"]), None),
+            Err(LaunchError::NeverGranted {
+                program: "ennius".to_owned()
+            }),
+            "{program}"
+        );
+    }
+    let sleep = host
+        .launch(&words(&["sleep", "30"]), None)
+        .expect("any other program starts");
+    session.wait_for(|facts| granted(facts) == Some(&[sleep][..]));
+    session.stop(());
+}
+
+/// A launch covers what it starts, but not ennius: the shell is the
+/// agent's, and the window ennius puts up under it is not.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_program_never_given_that_a_launch_starts_is_not_granted() {
+    let ennius = Renamed::called("ennius", "never-lineage");
+    let session = Session::start(
+        "never-lineage",
+        withholding().launching(Rule::Only(vec![Program::parse("sh")])),
+    );
+    let host = Host::new(&session.facts, &session.requests);
+    let sh = host
+        .launch(&probe_under_sh_as(&session, &ennius.0), None)
+        .expect("sh is admitted");
+    // Its grant is decided as it connects, before its window is drawn.
+    let facts = session.wait_for(|facts| drawn_by(facts, "probe").is_some());
+    let probe = drawn_by(&facts, "probe").expect("drawn");
+    assert_ne!(probe, sh, "drawn by the shell's child");
+    assert_eq!(granted(&facts), Some(&[sh][..]));
+    kill(probe);
+    session.stop(());
+}
+
+/// A binding the person marked for the agent starts ennius through a link
+/// of another name, which the config can't see through: it starts, since
+/// the person asked, and is not granted.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_binding_for_the_agent_starts_a_program_never_given_and_grants_nothing() {
+    let ennius = Renamed::called("ennius", "never-binding");
+    let link = ennius.link("e");
+    let session = Session::start_telling(
+        "never-binding",
+        withholding(),
+        Vec::new(),
+        vec![(PROBE.to_owned(), Session::socket_named("never-binding"))],
+    );
+    session.perform(Action::Spawn {
+        command: probe_command(&link),
+        agent: true,
+    });
+    // Started for the agent, it would be granted before its window maps.
+    let facts = session.wait_for(|facts| drawn_by(facts, "probe").is_some());
+    assert_eq!(
+        granted(&facts),
+        Some(&[][..]),
+        "started, and not the agent's"
+    );
+    let window = titled(&facts, "probe").expect("the probe's window");
+    assert_eq!(facts.consent().check(&window.origin), never_granted());
+    session.stop(());
+}
+
+/// `--spawn` starts ennius, and does not grant it.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_program_never_given_that_spawn_starts_is_not_granted() {
+    let ennius = Renamed::called("ennius", "never-spawn");
+    let session = Session::start_telling(
+        "never-spawn",
+        withholding(),
+        vec![probe_command(&ennius.0)],
+        vec![(PROBE.to_owned(), Session::socket_named("never-spawn"))],
+    );
+    let facts = session.wait_for(|facts| drawn_by(facts, "probe").is_some());
+    assert_eq!(
+        granted(&facts),
+        Some(&[][..]),
+        "started, and not the agent's"
+    );
+    session.stop(());
+}
+
+/// A granted process that becomes ennius keeps its pid, and the grant on
+/// it, but not the agent: the consent refuses its window by its program,
+/// whatever pid is granted. The person's key still takes the grant back.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_granted_process_that_becomes_a_program_never_given_is_refused_and_taken_back() {
+    let ennius = Renamed::called("ennius", "never-exec");
+    let session = Session::start_telling(
+        "never-exec",
+        withholding(),
+        vec![words(&[
+            "sh",
+            "-c",
+            &format!(
+                "exec '{}' --exact window_probe --ignored --test-threads=1 >/dev/null",
+                ennius.0.display()
+            ),
+        ])],
+        vec![(PROBE.to_owned(), Session::socket_named("never-exec"))],
+    );
+    let facts = session.wait_for(|facts| drawn_by(facts, "probe").is_some());
+    let probe = drawn_by(&facts, "probe").expect("drawn");
+    assert_eq!(
+        granted(&facts),
+        Some(&[probe][..]),
+        "sh's grant, kept by exec"
+    );
+    let window = titled(&facts, "probe").expect("the probe's window");
+    assert_eq!(facts.consent().check(&window.origin), never_granted());
+    assert!(!outlined(&facts, "probe"));
+
+    session.perform(Action::ToggleAgent);
+    session.wait_for(|facts| granted(facts).is_some_and(<[u32]>::is_empty));
     session.stop(());
 }
 

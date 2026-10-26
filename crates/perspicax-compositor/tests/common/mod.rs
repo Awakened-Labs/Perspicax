@@ -154,6 +154,24 @@ impl Session {
         Self::start_with(name, backend, spawn, false, None)
     }
 
+    /// The same, telling every program it starts `env` besides, as a
+    /// session's own variables are: a binding's and `--spawn`'s, with no
+    /// shell between them to say it.
+    pub fn start_telling(
+        name: &str,
+        backend: Backend,
+        spawn: Vec<Vec<String>>,
+        env: Vec<(String, String)>,
+    ) -> Self {
+        Self::start_in(name, backend, spawn, env, false, None)
+    }
+
+    /// The socket a session started as `name` is on, for a program it
+    /// starts to be told before it starts.
+    pub fn socket_named(name: &str) -> String {
+        format!("perspicax-{name}-{}", std::process::id())
+    }
+
     fn start_with(
         name: &str,
         backend: Backend,
@@ -161,7 +179,18 @@ impl Session {
         xwayland: bool,
         places: Option<PathBuf>,
     ) -> Self {
-        let socket = format!("perspicax-{name}-{}", std::process::id());
+        Self::start_in(name, backend, spawn, Vec::new(), xwayland, places)
+    }
+
+    fn start_in(
+        name: &str,
+        backend: Backend,
+        spawn: Vec<Vec<String>>,
+        env: Vec<(String, String)>,
+        xwayland: bool,
+        places: Option<PathBuf>,
+    ) -> Self {
+        let socket = Self::socket_named(name);
         let facts = Facts::new();
         let requests = Requests::new();
         let stop = Stop::new();
@@ -176,7 +205,7 @@ impl Session {
                 let config = Config {
                     backend,
                     spawn,
-                    env: Vec::new(),
+                    env,
                     run_for: Some(Duration::from_secs(30)),
                     config: None,
                     places,
@@ -243,6 +272,47 @@ impl Session {
             .expect("the compositor thread panicked")
             .expect("the compositor failed");
         drop(clients);
+    }
+}
+
+/// A copy of this test binary called `program`, removed when dropped. A
+/// hard link beside it: the same file, so nothing is written that a forking
+/// test could find still open, and `/proc` names the process by the link it
+/// was started through.
+pub struct Renamed(pub PathBuf);
+
+impl Renamed {
+    /// In a folder of its own, named for `tag` and this process, so the
+    /// tests of one binary running side by side each have their own.
+    pub fn called(program: &str, tag: &str) -> Self {
+        let exe = std::env::current_exe().expect("the test binary");
+        let dir = exe.with_file_name(format!("{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory beside the test binary");
+        let renamed = dir.join(program);
+        let _ = std::fs::remove_file(&renamed);
+        std::fs::hard_link(&exe, &renamed).expect("a link to the test binary");
+        Self(renamed)
+    }
+
+    /// A symbolic link to it, called `name`, beside it: a program of
+    /// another name that runs it.
+    pub fn link(&self, name: &str) -> PathBuf {
+        let link = self.0.with_file_name(name);
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&self.0, &link).expect("a link to the copy");
+        link
+    }
+}
+
+impl Drop for Renamed {
+    fn drop(&mut self) {
+        let Some(dir) = self.0.parent() else {
+            return;
+        };
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+        let _ = std::fs::remove_dir(dir);
     }
 }
 

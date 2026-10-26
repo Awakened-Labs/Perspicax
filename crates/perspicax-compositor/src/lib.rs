@@ -612,6 +612,19 @@ impl Launch {
             .or_else(|| std::env::var(name).ok())
     }
 
+    /// The file `program` names, as [`Self::spawn_in`] would run it in
+    /// `dir`: a path as it is, from `dir` if it is relative, and a bare name
+    /// where the session's `PATH` finds it. `None` for a bare name it does
+    /// not find, which will not start.
+    pub(crate) fn resolve(&self, program: &OsStr, dir: Option<&Path>) -> Option<PathBuf> {
+        if program.as_bytes().contains(&b'/') {
+            let path = Path::new(program);
+            Some(dir.map_or_else(|| path.to_owned(), |dir| dir.join(path)))
+        } else {
+            self.find(program)
+        }
+    }
+
     /// Where `program`, a bare name, is: the first file of that name that
     /// may be run, in a folder of the session's `PATH` that is a whole path.
     fn find(&self, program: &OsStr) -> Option<PathBuf> {
