@@ -4,7 +4,9 @@
 //! perspicax sends what kind of thing it refused, and only the words of it
 //! that came from the person or the config: the program as `[agent] never`
 //! writes it, the config's own reason in a line, the layout as written.
-//! The rest of each sentence is the shell's.
+//! A save the shell itself cannot use, though perspicax took it, is said
+//! the same way, with its own reason in a line. The rest of each sentence
+//! is the shell's.
 
 /// Something the person asked for, refused, with what its words need.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,10 +23,6 @@ pub(crate) enum Refused {
     /// A save of the config perspicax refused whole: why, in a line.
     Config(String),
     /// A save of the config the shell refused: why, in a line.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the shell's own refused save, next")
-    )]
     ShellConfig(String),
     /// A keyboard layout xkb could not compile, as the config writes it.
     Keymap(String),

@@ -12,7 +12,8 @@
 //! config changed, it repaints those surfaces rather than making new ones.
 //! Told perspicax refused a keymap, it says why on the `overlay` layer, in
 //! the middle above the foot of the screen, for a few seconds, and a second
-//! refusal takes the first's place.
+//! refusal takes the first's place; so it does of a save it cannot use
+//! itself.
 //! A workspace with a wallpaper of its own
 //! shows it while it is the one showing, on whichever monitor shows it.
 //! A right-click on the wallpaper, or the root
@@ -3309,6 +3310,27 @@ fn a_refusal_while_one_is_shown_takes_its_place_at_its_own_width() {
     let (again, rect) = osd(&facts).expect("waited for");
     assert_eq!(again, first, "in its place");
     assert!(in_the_middle(rect, PANEL_HEIGHT + 48.0), "still: {rect:?}");
+
+    shell.stop_with(session);
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_save_the_shell_cannot_use_is_said_on_the_screen_and_the_desktop_kept() {
+    let session = Session::start("shell-refused-save", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "refused-save", "profile = \"minimal\"\n");
+    let facts = session.wait_for(|facts| desktops(facts).len() == 1);
+    let desktop = desktops(&facts);
+
+    // A step the mixer refuses: the whole save is refused, and why is said
+    // in a line, wider than the volume's box.
+    shell.rewrite("profile = \"minimal\"\n[shell.mixer]\nstep = 99\n");
+    session.command(Command::ReconfigureShell);
+    let facts = session.wait_for(|facts| osd(facts).is_some());
+    let (_, rect) = osd(&facts).expect("waited for");
+    assert!(in_the_middle(rect, 48.0), "{rect:?}");
+    assert!(rect.x1 - rect.x0 > 280.0, "as wide as its words: {rect:?}");
+    assert_eq!(desktops(&facts), desktop, "and the desktop kept");
 
     shell.stop_with(session);
 }

@@ -370,8 +370,8 @@ impl App {
 
     /// The config file changed: read it again, and show what it says now on
     /// the surfaces already there. A file that can no longer be used is
-    /// reported, and the desktop stays as it is: a typo mid-session must not
-    /// take the wallpaper away.
+    /// reported, in the log and in a line on the screen, and the desktop
+    /// stays as it is: a typo mid-session must not take the wallpaper away.
     fn reconfigure(&mut self, qh: &QueueHandle<Self>) {
         let shell = match crate::read(self.config.as_deref()) {
             Ok(shell) => shell,
@@ -379,6 +379,10 @@ impl App {
                 tracing::warn!(
                     "the config changed and cannot be used: {error}; keeping what is shown"
                 );
+                #[cfg(any(feature = "menus", feature = "panel"))]
+                self.refused(&crate::model::notice::Refused::ShellConfig(
+                    error.in_a_line(),
+                ));
                 return;
             }
         };
