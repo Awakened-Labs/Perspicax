@@ -36,7 +36,8 @@
 //!
 //! From version 6 a shell is told what the person asked for that was
 //! refused, so it can say why in words: a window's grant to an agent, by
-//! the key, with which of the four reasons refused it. The compositor sends
+//! the key, with which of the four reasons refused it, or a keymap xkb could
+//! not compile, by its layout as written. The compositor sends
 //! the kind and what the words need of it, never prose of its own: the
 //! words are the shell's. What it sends is only ever the person's own words
 //! or the config's, never a window's title or a program's name for itself,
@@ -112,6 +113,9 @@ pub(crate) enum Refused {
     /// A window's grant to an agent: its program is one no agent is ever
     /// given, as `[agent] never` writes it.
     GrantNever(String),
+    /// A keymap xkb could not compile, by a save or, headless, a command:
+    /// its layout, as written. The keyboard keeps its old one.
+    Keymap(String),
 }
 
 /// Every shell bound to the channel.
@@ -208,6 +212,7 @@ impl Compositor {
             Refused::GrantUnattributed => (Refusal::GrantUnattributed, String::new()),
             Refused::GrantUnheld => (Refusal::GrantUnheld, String::new()),
             Refused::GrantNever(program) => (Refusal::GrantNever, program),
+            Refused::Keymap(layout) => (Refusal::Keymap, layout),
         };
         for shell in &self.shells.bound {
             if shell.version() >= perspicax_shell_v1::EVT_REFUSED_SINCE {

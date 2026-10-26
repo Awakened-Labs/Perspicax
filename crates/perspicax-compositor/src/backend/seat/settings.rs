@@ -54,6 +54,7 @@ use crate::{
     backdrop::{self, Look},
     backend::{Running, cursor::Cursor},
     grants::Why,
+    shell_protocol::Refused,
     state::Compositor,
 };
 
@@ -188,6 +189,7 @@ pub(super) fn apply_keyboard(state: &mut Compositor, numlock: Option<bool>) {
             layout = keymap.layout,
             "xkb could not compile that layout; the keyboard keeps its old one"
         );
+        state.tell_shell_refused(Refused::Keymap(keymap.layout));
         return;
     }
     if let Some(keyboard) = &state.keyboard {

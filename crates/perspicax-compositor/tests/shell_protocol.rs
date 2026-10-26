@@ -11,7 +11,9 @@
 //! From version 2 the shell is told the keyboard's layouts and the one in
 //! use, whatever switched it, and may switch it; a shell bound at version 1
 //! hears none of it. From version 4 it is told the volume keys, which a
-//! shell bound at version 3 is not.
+//! shell bound at version 3 is not. From version 6 it is told what was
+//! refused, a keymap xkb could not compile among it, which a shell bound at
+//! version 5 is not.
 //!
 //! The client is this test binary, so a rule naming `current_exe()` admits
 //! it. Like the other live tests it binds a real Wayland socket, so it needs
@@ -207,6 +209,42 @@ fn a_volume_key_reaches_a_shell_that_knows_them_and_not_one_that_does_not() {
     session.stop(((desk, queue), (old, old_queue)));
 }
 
+/// A keymap of a layout xkb has no file for, so cannot compile.
+fn nowhere() -> Keymap {
+    Keymap {
+        layout: "us,nowhere".to_owned(),
+        ..Keymap::default()
+    }
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_keymap_xkb_cannot_compile_is_told_to_a_shell_that_knows_refusals() {
+    let session = Session::start("shell-keymap", backend(Access::open()));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_shell(&globals, &qh);
+    queue.roundtrip(&mut desk).expect("bound");
+    // A shell from before refusals, which must not hear of one.
+    let (mut old, mut old_queue, old_qh, old_globals) = session.client();
+    old.bind_shell_v5(&old_globals, &old_qh);
+    old_queue.roundtrip(&mut old).expect("bound");
+
+    session.command(Command::Keymap(nowhere()));
+    until(&mut queue, &mut desk, |desk| !desk.told.is_empty());
+    assert_eq!(
+        desk.told,
+        [Told::Refused(
+            Ok(perspicax_shell_v1::Refusal::Keymap),
+            "us,nowhere".to_owned()
+        )],
+        "by its layout, as written"
+    );
+    settle(&mut old_queue, &mut old);
+    assert!(old.told.is_empty(), "{:?}", old.told);
+
+    session.stop(((desk, queue), (old, old_queue)));
+}
+
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn the_shell_is_told_nothing_and_ends_nothing_while_locked() {
@@ -220,6 +258,7 @@ fn the_shell_is_told_nothing_and_ends_nothing_while_locked() {
     session.perform(Action::RootMenu);
     session.perform(Action::Pie("launchers".to_owned()));
     session.perform(Action::Volume(VolumeKey::Up));
+    session.command(Command::Keymap(nowhere()));
     desk.shell.as_ref().expect("bound").exit_session();
     queue.roundtrip(&mut desk).expect("dispatch");
     thread::sleep(Duration::from_millis(200));

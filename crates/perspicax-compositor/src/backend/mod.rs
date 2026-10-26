@@ -38,7 +38,7 @@ use smithay::{
 
 use perspicax_policy::{Access, MouseBindings, Never, Opacity, Place, Rule, Shape};
 
-use crate::{Config, Error, FRAME_INTERVAL, state::Compositor};
+use crate::{Config, Error, FRAME_INTERVAL, shell_protocol::Refused, state::Compositor};
 
 /// Where the compositor puts its output and gets its input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -744,6 +744,7 @@ impl Compositor {
             crate::Command::Keymap(keymap) => {
                 if let Err(error) = self.set_keymap(keymap, None) {
                     tracing::warn!(%error, ?keymap, "xkb could not compile that keymap");
+                    self.tell_shell_refused(Refused::Keymap(keymap.layout.clone()));
                 }
             }
             crate::Command::LayoutSwitching(switching) => {
