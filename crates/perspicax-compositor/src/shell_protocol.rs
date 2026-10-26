@@ -34,6 +34,15 @@
 //! shell, taskbar or pager bound, or the rules changed. What a shell was told
 //! is kept with its binding, and goes with it.
 //!
+//! From version 6 a shell is told what the person asked for that was
+//! refused, so it can say why in words: a window's grant to an agent, by
+//! the key, with which of the four reasons refused it. The compositor sends
+//! the kind and what the words need of it, never prose of its own: the
+//! words are the shell's. What it sends is only ever the person's own words
+//! or the config's, never a window's title or a program's name for itself,
+//! which clients choose. A shell bound earlier is not told, as for a pie,
+//! and the log still says why.
+//!
 //! When a save changes the config's `[shell]` table, every shell is told to
 //! read it again, and applies it in place.
 //!
@@ -88,6 +97,23 @@ pub(crate) enum Menu {
     Pie(String),
 }
 
+/// Something the person asked for, refused: what a shell is told, so it can
+/// say why. Each carries only what its words need, and only words of the
+/// person's own or the config's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Refused {
+    /// A window's grant to an agent: consent for X11 is Xwayland's.
+    GrantX11,
+    /// A window's grant to an agent: nobody knows which process drew it.
+    GrantUnattributed,
+    /// A window's grant to an agent: its process could not be held, so its
+    /// grant could not end with it.
+    GrantUnheld,
+    /// A window's grant to an agent: its program is one no agent is ever
+    /// given, as `[agent] never` writes it.
+    GrantNever(String),
+}
+
 /// Every shell bound to the channel.
 #[derive(Default)]
 pub(crate) struct Shells {
@@ -120,7 +146,7 @@ impl Shells {
     /// Advertise the global, filtered by `gate`.
     pub(crate) fn new(display: &DisplayHandle, gate: &Gate) -> Self {
         display.create_global::<Compositor, PerspicaxShellV1, _>(
-            5,
+            6,
             Filtered {
                 gate: gate.clone(),
                 protocol: Protocol::Shell,
@@ -160,6 +186,37 @@ impl Compositor {
                 tracing::info!(
                     version = shell.version(),
                     "a volume key was pressed, and this shell is too old to hear of it"
+                );
+            }
+        }
+    }
+
+    /// Something the person asked for was refused: tell every shell that
+    /// knows refusals, so it can say why. Nothing at the lock screen; the
+    /// log, which the caller has written, still says why.
+    pub(crate) fn tell_shell_refused(&mut self, refused: Refused) {
+        use perspicax_shell_v1::Refusal;
+        if self.lock.is_some() {
+            return;
+        }
+        if self.shells.bound.is_empty() {
+            tracing::info!(?refused, "refused, and no shell is listening to say so");
+            return;
+        }
+        let (kind, subject) = match refused {
+            Refused::GrantX11 => (Refusal::GrantX11, String::new()),
+            Refused::GrantUnattributed => (Refusal::GrantUnattributed, String::new()),
+            Refused::GrantUnheld => (Refusal::GrantUnheld, String::new()),
+            Refused::GrantNever(program) => (Refusal::GrantNever, program),
+        };
+        for shell in &self.shells.bound {
+            if shell.version() >= perspicax_shell_v1::EVT_REFUSED_SINCE {
+                shell.refused(kind, subject.clone());
+            } else {
+                tracing::info!(
+                    version = shell.version(),
+                    ?kind,
+                    "refused, and this shell is too old to say so"
                 );
             }
         }

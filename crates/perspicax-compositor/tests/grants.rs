@@ -18,11 +18,12 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
-use common::{Renamed, Session, until};
+use common::{Renamed, Session, Told, until};
 use perspicax_compositor::{Backend, Host, LaunchError};
 use perspicax_index::{Consent, HostFacts, Refusal, SurfaceFacts, judge};
 use perspicax_node::{Rect, Visibility};
 use perspicax_policy::{Action, Never, Program, Rule};
+use perspicax_protocols::shell::v1::client::perspicax_shell_v1;
 
 /// Set, to the compositor's socket, for the copy of this binary that
 /// [`window_probe`] runs in.
@@ -496,6 +497,40 @@ fn a_key_does_not_grant_a_program_never_given() {
     probe.kill().expect("the probe is ours to kill");
     probe.wait().expect("and ours to reap");
     session.stop(());
+}
+
+/// The key refused on ennius's window is told to the shell, naming the
+/// program as `[agent] never` writes it, for the shell to say why in words.
+/// A shell from before refusals is told nothing.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_key_refused_is_told_to_a_shell_that_knows_refusals() {
+    let ennius = Renamed::called("ennius", "never-told");
+    let session = Session::start("never-told", withholding());
+    let (mut shell, mut queue, qh, globals) = session.client();
+    shell.bind_shell(&globals, &qh);
+    queue.roundtrip(&mut shell).expect("bound");
+    let (mut old, mut old_queue, old_qh, old_globals) = session.client();
+    old.bind_shell_v5(&old_globals, &old_qh);
+    old_queue.roundtrip(&mut old).expect("bound");
+    let mut probe = probe_as(&session, &ennius.0);
+
+    session.perform(Action::ToggleAgent);
+    until(&mut queue, &mut shell, |shell| !shell.told.is_empty());
+    assert_eq!(
+        shell.told,
+        [Told::Refused(
+            Ok(perspicax_shell_v1::Refusal::GrantNever),
+            "ennius".to_owned()
+        )]
+    );
+    // Told in the same turn as the other, so heard by now if at all.
+    old_queue.roundtrip(&mut old).expect("dispatched");
+    assert!(old.told.is_empty(), "{:?}", old.told);
+
+    probe.kill().expect("the probe is ours to kill");
+    probe.wait().expect("and ours to reap");
+    session.stop(((shell, queue), (old, old_queue)));
 }
 
 /// An agent asking to launch ennius is refused as never given, before any

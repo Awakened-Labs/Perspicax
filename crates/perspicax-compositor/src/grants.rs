@@ -58,6 +58,7 @@ use crate::{
     host::LaunchError,
     origin,
     shell::id_of,
+    shell_protocol::Refused,
     state::{ClientState, Compositor},
 };
 
@@ -440,8 +441,8 @@ impl Compositor {
     /// so granting one X11 window would grant all of them. So is a program
     /// no agent is ever given. A grant already held is taken back whatever
     /// the program, so the person can always take one back. Each refusal is
-    /// logged, saying why, and shown on the window (see
-    /// [`Self::show_refused`]).
+    /// logged, saying why, shown on the window, and told to the shell, which
+    /// says why in words (see [`Self::refuse`]).
     pub(crate) fn toggle_agent(&mut self, window: &Framed) {
         let Some(id) = id_of(window) else {
             return;
@@ -464,12 +465,12 @@ impl Compositor {
                     "not granted: consent for X11 is Xwayland's, and granting one X11 window \
                      would grant every one"
                 );
-                self.show_refused(id);
+                self.refuse(id, Refused::GrantX11);
                 return;
             }
             Origin::Unattributed => {
                 tracing::warn!(surface = ?id, "not granted: nobody knows which process drew it");
-                self.show_refused(id);
+                self.refuse(id, Refused::GrantUnattributed);
                 return;
             }
         };
@@ -484,7 +485,7 @@ impl Compositor {
                 program,
                 "not granted: no agent is ever given it, whatever grants it"
             );
-            self.show_refused(id);
+            self.refuse(id, Refused::GrantNever(program.to_owned()));
             return;
         }
         match self.pidfd_of(window) {
@@ -496,16 +497,19 @@ impl Compositor {
                     "not granted: its process could not be held, so its grant could not end \
                      with it"
                 );
-                self.show_refused(id);
+                self.refuse(id, Refused::GrantUnheld);
             }
         }
     }
 
     /// Show the person that the grant they asked for on the window `id` was
-    /// refused: the line round it drawn for [`REFUSED_FOR`] in
-    /// `[decorations.agent] refused-colour`. A key that granted nothing
-    /// would otherwise change nothing they can see. The log says why.
-    fn show_refused(&mut self, id: SurfaceId) {
+    /// refused, and why: the line round it drawn for [`REFUSED_FOR`] in
+    /// `[decorations.agent] refused-colour`, and `why` told to the shell,
+    /// which says it in words. A key that granted nothing would otherwise
+    /// change nothing they can see. The line shows whether or not a shell
+    /// is listening, and the log says why either way.
+    fn refuse(&mut self, id: SurfaceId, why: Refused) {
+        self.tell_shell_refused(why);
         if let Some((_, showing)) = self.grants.refused.take() {
             self.loop_handle.remove(showing);
         }
