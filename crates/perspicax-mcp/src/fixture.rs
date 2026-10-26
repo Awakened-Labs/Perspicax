@@ -214,7 +214,8 @@ impl Desktop for Fake {
         })
     }
 
-    /// `flutter` starts, as pid 4343. Anything else is not admitted, as a
+    /// `flutter` starts, as pid 4343. `ennius` is never an agent's, as the
+    /// default `[agent] never` says. Anything else is not admitted, as a
     /// person's list naming only `flutter` would say.
     fn launch(&self, command: &[String], cwd: Option<&Path>) -> Result<Launched, Unlaunched> {
         self.launched
@@ -223,6 +224,11 @@ impl Desktop for Fake {
             .push((command.to_vec(), cwd.map(Path::to_owned)));
         match command.first().map(String::as_str) {
             Some("flutter") => Ok(Launched { pid: 4343 }),
+            Some("ennius") => Err(Unlaunched::NeverGranted(
+                "`ennius` is never an agent's: perspicax starts nothing for an agent that the \
+                 person keeps to act on themselves"
+                    .to_owned(),
+            )),
             program => Err(Unlaunched::NotAdmitted(format!(
                 "`{}` is not admitted: an agent may start only flutter, each exactly as written",
                 program.unwrap_or_default()

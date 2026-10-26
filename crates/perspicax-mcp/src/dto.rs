@@ -217,8 +217,8 @@ pub struct Refused {
     /// One of `occluded`, `clipped`, `unmapped`, `off_screen`,
     /// `other_workspace`, `inactive_tab`, `rolled_up`, `not_showing`,
     /// `unjudged`, `menu_unplaced`, `unplaced`, `unattributed`, `stale`,
-    /// `no_capability`, `ambiguous_selector`, `not_found`, `not_a_window`,
-    /// `focus_elsewhere`, `pointer_captured`, `menu_open`.
+    /// `no_capability`, `never_granted`, `ambiguous_selector`, `not_found`,
+    /// `not_a_window`, `focus_elsewhere`, `pointer_captured`, `menu_open`.
     pub kind: &'static str,
     /// The refusal in words.
     pub message: String,
@@ -264,6 +264,12 @@ pub struct Refused {
     /// its own application, or wait for it to close.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub popup: Option<u64>,
+    /// `never_granted`: the program no agent is ever given, as the person's
+    /// `[agent] never` writes it, or `perspicax-settings`. It is for good:
+    /// no grant changes it, so don't ask the person for one. What it shows
+    /// is theirs to act on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
 }
 
 impl From<&Refusal> for Refused {
@@ -284,6 +290,7 @@ impl From<&Refusal> for Refused {
                 Refusal::Unattributed => "unattributed",
                 Refusal::Stale { .. } => "stale",
                 Refusal::NoCapability { .. } => "no_capability",
+                Refusal::NeverGranted { .. } => "never_granted",
                 Refusal::AmbiguousSelector { .. } => "ambiguous_selector",
                 Refusal::NotFound => "not_found",
                 Refusal::NotAWindow => "not_a_window",
@@ -300,6 +307,7 @@ impl From<&Refusal> for Refused {
             focused: None,
             captured_by: None,
             popup: None,
+            program: None,
         };
         match refusal {
             Refusal::Occluded { by } => refused.occluded_by = Some(by.0),
@@ -314,6 +322,7 @@ impl From<&Refusal> for Refused {
             Refusal::MenuUnplaced { popup } | Refusal::MenuOpen { popup } => {
                 refused.popup = Some(popup.0);
             }
+            Refusal::NeverGranted { program } => refused.program = Some(program.clone()),
             _ => {}
         }
         refused
@@ -529,6 +538,11 @@ pub struct Window {
     /// starting it for the agent. A node on a surface without it is refused
     /// as `no_capability`, however visible it is.
     pub agent: bool,
+    /// The program, when it is one no agent is ever given: `agent` is false
+    /// for good, and its nodes are refused as `never_granted`. A grant
+    /// would not change it, so don't ask the person for one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub never_granted: Option<String>,
     /// The title the client set, under a key that says who set it. A window
     /// title is a string an untrusted process chose; `rendered_by` above names
     /// the process that chose it.
@@ -642,6 +656,10 @@ impl Window {
             bounds: facts.geometry.into(),
             rendered_by: Provenance::of(&facts.origin),
             agent: consent.permits(&facts.origin),
+            never_granted: match consent.check(&facts.origin) {
+                Err(Refusal::NeverGranted { program }) => Some(program),
+                _ => None,
+            },
             untrusted_title: facts.title.clone(),
             damage_frames: facts.damage_generation,
             untrusted_app_id: facts.app_id.clone(),
@@ -962,6 +980,7 @@ impl From<&Delta> for Changed {
 mod tests {
     use super::*;
     use crate::fixture::{BURIED, CANCEL, FRAME, OVERLAY, WINDOW, facts, index};
+    use perspicax_index::{Never, Program};
 
     /// The read-path security posture, as one assertion: a string an
     /// application rendered is reachable only through a key that says so, and
@@ -1179,6 +1198,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn never_granted_names_the_program_kept_from_every_agent() {
+        let never = Refusal::NeverGranted {
+            program: "ennius".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_value(Refused::from(&never)).unwrap(),
+            serde_json::json!({"kind": "never_granted",
+            "message": "`ennius` is never an agent's, whatever is granted: \
+                        the person keeps it to act on themselves",
+            "program": "ennius"})
+        );
+    }
+
     /// A menu is listed, as a popup, naming the window it hangs from: the
     /// surface an `occluded` refusal may name, and where to look for it.
     #[test]
@@ -1261,12 +1294,35 @@ mod tests {
             "everyone, headless"
         );
 
-        let granted = facts().with_consent(Consent::Granted(vec![4242]));
+        let granted = facts().with_consent(Consent::granted(vec![4242]));
         let windows = Window::all(&index(), &granted);
         assert!(windows[0].agent, "4242 drew the window");
         assert!(!windows[1].agent, "nobody granted the panel's 5150");
         let wire = serde_json::to_value(&windows).unwrap();
         assert_eq!(wire[1]["agent"], false, "said, not left out: {}", wire[1]);
+        assert!(
+            wire[1].get("never_granted").is_none(),
+            "a grant would do: {}",
+            wire[1]
+        );
+    }
+
+    /// A window whose program is never an agent's says which, so an agent
+    /// knows not to ask the person for a grant that would change nothing.
+    #[test]
+    fn window_list_names_a_program_never_granted() {
+        let never = Consent::Granted {
+            pids: vec![4242],
+            never: Never::new(vec![Program::parse("gtk4-widget-factory")]),
+        };
+        let windows = Window::all(&index(), &facts().with_consent(never));
+        assert!(
+            !windows[0].agent,
+            "granted, and never an agent's all the same"
+        );
+        let wire = serde_json::to_value(&windows).unwrap();
+        assert_eq!(wire[0]["never_granted"], "gtk4-widget-factory");
+        assert!(wire[1].get("never_granted").is_none(), "{}", wire[1]);
     }
 
     /// A window the person made see-through says how opaque it is drawn, and

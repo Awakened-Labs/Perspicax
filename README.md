@@ -575,13 +575,45 @@ things grant one:
 
 Everything else is exactly the one process. An X11 window is never granted
 by a key: every X client shares one Xwayland, and may read and drive the
-others, so granting one would grant them all. And the settings app is never
-an agent's, whatever grants it: it writes the file that holds an agent back
-([see The settings app](#the-settings-app)). `window_list` says which windows
-an agent may act on (`agent`), and `deltas` says when that changes. On screen,
-each is marked out: a line round it, in front of its shadow, and its titlebar,
-where perspicax draws one, in the agent's colours (`[decorations.agent]`).
-Headless, where every window is an agent's, nothing is marked.
+others, so granting one would grant them all.
+
+**Some programs are never an agent's**, whatever grants them: those that
+exist so the person can oversee an agent, which an agent driving them would
+oversee itself. ennius is one: its review queue holds back the agent's own
+decisions, feedback rules and identity until the person approves them, and
+an agent granted its window could approve them itself. `[agent] never` names
+them, ennius in both profiles: a bare name matches the program wherever it
+is, and a path only itself; `never = []` names none. The settings app is
+never an agent's whatever the list says: it writes the file that holds an
+agent back ([see The settings app](#the-settings-app)). The list is the
+person's, so it is a seat's: headless, where every window is an agent's,
+only the settings app is never one.
+
+Every way to grant asks first, by the program a process runs. What is
+started for an agent is known by the file its command runs, links followed,
+so a link of another name to ennius is ennius. `launch` refuses one as
+`never_granted` before any list is asked, and nothing starts; `--spawn`, a
+binding or an autostart entry starts it, since the person asked, and grants
+nothing; Logo+A on its window grants nothing; and a launch's descendant that
+is one is not covered. The config refuses `agent = true` on a binding or an
+`autostart` entry whose program the list names, and an `[agent] launch`
+naming one. Every read and act asks again whatever was granted, so a granted
+process that becomes one, by `exec`, is refused too: its node, its window
+verbs and its picture are refused as `never_granted`, naming the program,
+which says no grant will change it. A program is known by the name its
+executable runs as, which anything can be called, so the list keeps an agent
+off the real one by mistake or in passing; an agent with a shell that copies
+ennius under another name, or a program run inside a granted terminal, is
+not known for it.
+
+`window_list` says which windows an agent may act on (`agent`), and which
+it never may (`never_granted`), and `deltas` says when that changes. On
+screen, each it may is marked out: a line round it, in front of its shadow,
+and its titlebar, where perspicax draws one, in the agent's colours
+(`[decorations.agent]`). Logo+A that grants nothing -- an X11 window, one
+nobody can say which process drew, or a program no agent is given -- draws
+the line round the window a moment in `refused-colour`, and the log says
+why. Headless, where every window is an agent's, nothing is marked.
 
 **`screenshot` is the fallback, and says so.** Occlusion needs geometry,
 z-order, regions and damage, none of which need pixels, so nothing is drawn
@@ -636,7 +668,8 @@ it runs, so listing a terminal, a shell or an interpreter -- `foot`, `sh`,
 `python3` -- admits everything it can start: list the programs themselves. A
 list a reload narrows applies to the next launch, and what was launched before
 stays granted until it exits or Logo+Shift+A takes it back. A launch refused
-says why: `not_admitted`, naming what the list admits, or `not_started`.
+says why: `not_admitted`, naming what the list admits, or `not_started`; and
+a program no agent is given is `never_granted` whatever the list says.
 Headless reads no config, and an agent there may launch any program, as every
 protocol there is open.
 
@@ -1052,8 +1085,9 @@ Plasma's and Windows' habits:
   corner to a quarter, the top to maximized, with Logo+arrows to do the same
   from the keyboard;
 - Logo+Shift+Left/Right moves a window between screens, Logo+Shift+R reloads;
-- Logo+A hands the focused window's program to an agent, or takes it back, and
-  Logo+Shift+A takes back everything an agent was granted;
+- Logo+A hands the focused window's program to an agent, or takes it back,
+  and a window it is refused for shows so a moment; Logo+Shift+A takes back
+  everything an agent was granted;
 - a tap of Logo on its own asks the desktop shell for its start menu;
 - a titlebar drawn by the compositor for a client that asks for one (Qt, foot,
   GTK 3 without a headerbar, and X11 applications): drag it to move,
@@ -1326,6 +1360,7 @@ focused = "#5a2d82"            # its titlebar, where perspicax draws one
 unfocused = "#3b2454"
 outline = 3                    # a line round it, 0 to 8 pixels; 0 is none
 outline-colour = "#b37feb"
+refused-colour = "#e5484d"     # the line a moment when Logo+A is refused
 
 [[output]]
 name = "DP-1"
@@ -1354,6 +1389,7 @@ socket = true                  # serve it at $XDG_RUNTIME_DIR/perspicax-mcp;
                                # or a path, or false for none
 launch = ["flutter", "zenity"] # what it may start for itself: a list, "any",
                                # or "off", the default
+never = ["ennius"]             # what no agent is given, whatever grants it
 ```
 
 `[protocols]` names the programs that may use the protocols reaching past
@@ -1397,9 +1433,11 @@ again -- is told then which workspace and windows are on it.
 
 `[agent]` says what an agent may do on the seat beyond what the person grants
 it: the programs it may start for itself (`launch`), and whether the session
-serves it a socket (`socket`). Both are under [An agent inside the
-session](#an-agent-inside-the-session). `[decorations.agent]` is how a window
-it may act on is marked out.
+serves it a socket (`socket`), both under [An agent inside the
+session](#an-agent-inside-the-session), and the programs no agent is given
+(`never`), under [What acting looks
+like](#what-acting-looks-like). `[decorations.agent]` is how a window it may
+act on is marked out, and how one it was refused for shows so.
 
 Monitors are placed relative to each other, so the layout survives one being
 unplugged: a monitor beside one that is missing goes to the right of the
@@ -2451,7 +2489,8 @@ that leaves it out, the page has the file's rules alone, each mode typed:
 `2560x1440@144`.
 
 **Protocols** shows each `[protocols]` rule and `[agent] launch` in force,
-beside the profile's, with `[agent] socket`, and changes none of them. Who
+beside the profile's, with `[agent] socket` and `[agent] never`, and changes
+none of them. Who
 may reach past their own windows, and what an agent may do, is the file's to
 say, in an editor: the app never writes it, so nothing that drives the app
 can widen it. "Open the file" opens it.

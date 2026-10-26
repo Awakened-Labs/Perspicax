@@ -210,26 +210,43 @@ impl Compositor {
     }
 
     /// How wide the line round `window` is: `[decorations.agent] outline`
-    /// for a window [`marked`](Self::marked), and none for any other, or for
-    /// one that is fullscreen, which nothing is drawn round.
+    /// for a window [`marked`](Self::marked) or [showing a grant
+    /// refused](Self::shows_refused), and none for any other, or for one that
+    /// is fullscreen, which nothing is drawn round. A grant refused is shown
+    /// even with `outline = 0`: the person asked for no mark, not for no
+    /// answer to a key they pressed.
     ///
     /// What the line is drawn from and what its facts say both ask here,
     /// so a window covers no more and no less than it is drawn with.
     pub(crate) fn outline_of(&self, window: &Framed) -> i32 {
-        if Self::look(window) == Look::Fullscreen || !self.marked(window) {
+        let outline = self.backend.decorations().agent.outline;
+        if Self::look(window) == Look::Fullscreen {
             0
+        } else if self.marked(window) {
+            outline
+        } else if self.shows_refused(window) {
+            match outline {
+                0 => perspicax_policy::AgentLook::default().outline,
+                width => width,
+            }
         } else {
-            self.backend.decorations().agent.outline
+            0
         }
     }
 
     /// Tell every window whether it is marked out as one an agent may act
-    /// on, for drawing it: on a monitor, by [`Self::dress_frames`], and in a
-    /// picture, which headless is the only drawing there is.
+    /// on, or is showing that a grant on it was refused, for drawing it: on
+    /// a monitor, by [`Self::dress_frames`], and in a picture, which
+    /// headless is the only drawing there is.
     #[cfg(any(feature = "seat", feature = "capture"))]
     pub(crate) fn dress_marks(&self) {
-        let colour = self.backend.decorations().agent.outline_colour;
+        let look = self.backend.decorations().agent;
         for window in self.space.elements() {
+            let colour = if self.shows_refused(window) {
+                look.refused_colour
+            } else {
+                look.outline_colour
+            };
             window.mark(self.insets(window), self.outline_of(window), colour);
         }
     }

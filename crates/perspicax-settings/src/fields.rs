@@ -1371,6 +1371,13 @@ fn decorations() -> Section {
         ),
         Field::new(
             AGENT,
+            "refused-colour",
+            "The line drawn a moment round a window it was refused for",
+            Kind::Colour,
+            |c| Some(Value::String(c.decorations.agent.refused_colour.hex())),
+        ),
+        Field::new(
+            AGENT,
             "focused",
             "Its titlebar, with the keyboard",
             Kind::Colour,

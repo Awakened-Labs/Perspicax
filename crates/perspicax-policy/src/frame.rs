@@ -275,6 +275,10 @@ pub struct AgentLook {
     /// has one, for most draw their own frame.
     pub outline: i32,
     pub outline_colour: Colour,
+    /// The line drawn round a window for a moment when the person asks to
+    /// grant it and it is refused: an X11 window, one nobody can say which
+    /// process drew, or a program no agent is ever given.
+    pub refused_colour: Colour,
 }
 
 impl Default for AgentLook {
@@ -284,6 +288,7 @@ impl Default for AgentLook {
             unfocused: Colour::rgb(0x3b, 0x24, 0x54),
             outline: 3,
             outline_colour: Colour::rgb(0xb3, 0x7f, 0xeb),
+            refused_colour: Colour::rgb(0xe5, 0x48, 0x4d),
         }
     }
 }

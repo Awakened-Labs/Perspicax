@@ -36,7 +36,7 @@ use smithay::{
     utils::Transform,
 };
 
-use perspicax_policy::{Access, MouseBindings, Opacity, Place, Rule, Shape};
+use perspicax_policy::{Access, MouseBindings, Never, Opacity, Place, Rule, Shape};
 
 use crate::{Config, Error, FRAME_INTERVAL, state::Compositor};
 
@@ -94,6 +94,11 @@ pub struct Agent {
     /// `[agent] launch` says. Any, by default: headless hosts only what an
     /// agent set up. See [`Backend::launching`].
     pub launch: Rule,
+    /// Which programs no agent is given, whatever grants them, as a seat's
+    /// `[agent] never` says. The settings app alone, by default: the
+    /// person's list is about what they grant, and nothing is granted where
+    /// consent is everyone's. See [`Backend::withholding`].
+    pub never: Never,
 }
 
 impl Default for Agent {
@@ -101,6 +106,7 @@ impl Default for Agent {
         Self {
             by_grant: false,
             launch: Rule::Any,
+            never: Never::FLOOR,
         }
     }
 }
@@ -177,6 +183,18 @@ impl Backend {
     pub fn launching(mut self, rule: Rule) -> Self {
         if let Self::Headless { agent, .. } = &mut self {
             agent.launch = rule;
+        }
+        self
+    }
+
+    /// The same, never giving an agent what `never` names, as a seat's
+    /// `[agent] never` does: refused when asked to grant it, and its windows
+    /// refused whatever was granted. Of a desk that consents as a seat does
+    /// ([`Backend::granting`]); one that consents to everyone grants nothing.
+    #[must_use]
+    pub fn withholding(mut self, never: Never) -> Self {
+        if let Self::Headless { agent, .. } = &mut self {
+            agent.never = never;
         }
         self
     }
@@ -578,6 +596,18 @@ impl Running {
             Self::Headless { agent, .. } => &agent.launch,
             #[cfg(feature = "seat")]
             Self::Seat(session) => &session.settings.agent.launch,
+        }
+    }
+
+    /// Which programs no agent is given, whatever grants them. Headless, the
+    /// settings app alone, unless a test asked for more. On a seat,
+    /// `[agent] never` as last saved: ennius, until the person says
+    /// otherwise.
+    pub(crate) fn never(&self) -> &Never {
+        match self {
+            Self::Headless { agent, .. } => &agent.never,
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => &session.settings.agent.never,
         }
     }
 

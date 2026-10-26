@@ -20,13 +20,12 @@
 mod common;
 
 use std::{
-    path::PathBuf,
     process::{Child, Command as Process, Stdio},
     thread,
     time::Duration,
 };
 
-use common::{Desk, Session, advertised, until};
+use common::{Desk, Renamed, Session, advertised, until};
 use perspicax_compositor::{Backend, Command, Virtual};
 use perspicax_index::{Consent, HostFacts, Refusal, SurfaceFacts, WindowVerb, check_window};
 use perspicax_policy::{Access, Program, Protocol, Rule, Shape};
@@ -242,40 +241,13 @@ fn a_reload_that_no_longer_admits_it_withdraws_the_capture() {
     session.stop((desk, queue));
 }
 
-/// A copy of this test binary under the settings app's name, removed when
-/// dropped. A hard link beside it: the same file, so nothing is written
-/// that a forking test could find still open, and `/proc` names the
-/// process by the link it was started through.
-struct Renamed(PathBuf);
-
-impl Renamed {
-    fn settings_app() -> Self {
-        let exe = std::env::current_exe().expect("the test binary");
-        let dir = exe.with_file_name(format!("settings-app-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a directory beside the test binary");
-        let renamed = dir.join("perspicax-settings");
-        let _ = std::fs::remove_file(&renamed);
-        std::fs::hard_link(&exe, &renamed).expect("a link to the test binary");
-        Self(renamed)
-    }
-}
-
-impl Drop for Renamed {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-        if let Some(dir) = self.0.parent() {
-            let _ = std::fs::remove_dir(dir);
-        }
-    }
-}
-
 /// Started as an agent's program is, by `--spawn`, on a desk that consents
 /// to everyone: the settings app's window is still refused, and this
 /// binary's, beside it, is not.
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_settings_app_started_with_spawn_is_still_refused_by_act() {
-    let renamed = Renamed::settings_app();
+    let renamed = Renamed::called("perspicax-settings", "settings-app");
     let socket = format!("perspicax-capture-act-{}", std::process::id());
     let session = Session::start_spawning(
         "capture-act",
@@ -297,11 +269,11 @@ fn a_settings_app_started_with_spawn_is_still_refused_by_act() {
     assert_eq!(facts.consent(), &Consent::Everyone);
 
     let probe = titled(&facts, "probe").expect("the settings app's window");
-    assert!(
-        matches!(
-            check_window(&facts, probe.id, &WindowVerb::Close),
-            Err(Refusal::NoCapability { .. })
-        ),
+    assert_eq!(
+        check_window(&facts, probe.id, &WindowVerb::Close).err(),
+        Some(Refusal::NeverGranted {
+            program: "perspicax-settings".to_owned()
+        }),
         "{:?}",
         probe.origin
     );

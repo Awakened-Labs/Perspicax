@@ -6,8 +6,8 @@
 //! app can widen them.
 
 use eframe::egui::{self, Ui};
-use perspicax_config::AgentSocket;
-use perspicax_settings::{Grant, rule_words, socket_words};
+use perspicax_config::Agent;
+use perspicax_settings::{Grant, never_words, rule_words, socket_words};
 
 /// How wide a rule's key and what it decides are drawn.
 const KEY_WIDTH: f32 = 230.0;
@@ -20,7 +20,7 @@ pub(crate) const WHY: &str = "This page only reads. What may reach past its own 
     drives the app can widen it. Change it in an editor.";
 
 /// Draw the page; whether the file is to be opened.
-pub(crate) fn ui(ui: &mut Ui, grants: &[Grant], socket: &AgentSocket) -> bool {
+pub(crate) fn ui(ui: &mut Ui, grants: &[Grant], agent: &Agent) -> bool {
     ui.heading("Protocols");
     ui.label("Who may reach past their own windows, and what an agent may do.");
     ui.add_space(6.0);
@@ -49,8 +49,17 @@ pub(crate) fn ui(ui: &mut Ui, grants: &[Grant], socket: &AgentSocket) -> bool {
                             "socket",
                             "where an agent inside the session reaches it",
                             |ui| {
-                                ui.label(socket_words(socket));
+                                ui.label(socket_words(&agent.socket));
                                 ui.weak("read once, at login: a change waits for the next");
+                            },
+                        );
+                        row(
+                            ui,
+                            "never",
+                            "the programs no agent is ever given, whatever grants them",
+                            |ui| {
+                                ui.label(never_words(&agent.never));
+                                ui.weak("the settings app always, whatever the list says");
                             },
                         );
                     }

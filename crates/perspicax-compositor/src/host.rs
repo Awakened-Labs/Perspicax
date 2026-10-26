@@ -185,6 +185,18 @@ pub enum LaunchError {
     /// not named a program in `[agent] launch`.
     #[error("launching is off: the person has named no program an agent may start")]
     Off,
+    /// The program is one no agent is ever given, whatever a rule admits:
+    /// `program`, as the person's `[agent] never` writes it, or the
+    /// settings app. Refused before any rule is asked, so the agent is not
+    /// told the person could admit it.
+    #[error(
+        "`{program}` is never an agent's: perspicax starts nothing for an agent that the \
+         person keeps to act on themselves"
+    )]
+    NeverGranted {
+        /// What withholds it, as written.
+        program: String,
+    },
     /// The rule names programs, and not this one. `admitted` is what it
     /// names, as written: a bare name admits only itself, for the session's
     /// `PATH` to find, and a path only itself.

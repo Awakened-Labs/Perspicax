@@ -29,8 +29,9 @@
 //! how see-through a window is drawn (`opacity`); the frame drawn
 //! around a window (`frame`); and tab groups
 //! (`tabs`); and which programs may use the protocols that reach past their
-//! own windows (`access`); and whether a display tool's request for the
-//! monitors can be carried out (`heads`); and whether a press of the Logo key
+//! own windows, and which no agent is ever given (`access`); and whether a
+//! display tool's request for the monitors can be carried out (`heads`); and
+//! whether a press of the Logo key
 //! was a tap (`tap`); and when to start the desktop shell again after it
 //! stops (`restart`). `perspicax-config`
 //! builds their settings from `config.toml` and the `classic`/`minimal`
@@ -60,7 +61,7 @@ mod transition;
 mod workspace;
 
 pub use crate::{
-    access::{Access, Program, Protocol, Rule},
+    access::{Access, Never, Program, Protocol, Rule, SETTINGS_APP, is_settings_app},
     binds::{Action, Bindings, Chord, Drag, Mods, Towards, VolumeKey, candidates},
     flip::{EdgeDwell, Flipping, NOTCH_PIXELS, Notches, Resting, arrival, edge_at},
     focus::{

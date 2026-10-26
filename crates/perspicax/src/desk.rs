@@ -178,11 +178,13 @@ impl Desktop for Desk {
     }
 }
 
-/// A program not started, as the MCP server reports it: one the rule does
-/// not admit, which only the person can change, or one that did not start.
+/// A program not started, as the MCP server reports it: one never an
+/// agent's, which nothing changes; one the rule does not admit, which only
+/// the person can change; or one that did not start.
 fn unlaunched(error: LaunchError) -> Unlaunched {
     let message = error.to_string();
     match error {
+        LaunchError::NeverGranted { .. } => Unlaunched::NeverGranted(message),
         LaunchError::Off | LaunchError::NotAdmitted { .. } => Unlaunched::NotAdmitted(message),
         LaunchError::Locked | LaunchError::NotStarted(_) | LaunchError::Unreachable => {
             Unlaunched::NotStarted(message)
@@ -370,8 +372,8 @@ mod tests {
     fn a_change_of_consent_is_drained_without_a_read_before_it() {
         // The tree was judged while nothing was granted; the host has since
         // granted the window's process.
-        let desk = desk(&clear().with_consent(Consent::Granted(vec![4242])));
-        desk.publish(tree(&clear().with_consent(Consent::Granted(Vec::new()))));
+        let desk = desk(&clear().with_consent(Consent::granted(vec![4242])));
+        desk.publish(tree(&clear().with_consent(Consent::granted(Vec::new()))));
         let deltas = desk.deltas();
         assert!(
             deltas.contains(&Delta::Granted { surface: WINDOW }),
@@ -399,11 +401,9 @@ mod tests {
         assert_eq!(refusal, Some(Refusal::Stale { frames: 0 }));
     }
 
-    /// A window's picture is gated like reading it, here, before the
-    /// compositor is asked: the host below has nobody listening, so a
-    /// picture that reached it would come back `Unreachable`, not refused.
     /// What the person's rule refuses is `not_admitted`, saying what it does
-    /// admit; the rest did not start, and says why.
+    /// admit; a program never an agent's is `never_granted`, whatever the
+    /// rule; the rest did not start, and says why.
     #[test]
     fn a_launch_the_rule_refuses_is_not_admitted_and_the_rest_not_started() {
         let refused = unlaunched(LaunchError::NotAdmitted {
@@ -418,6 +418,13 @@ mod tests {
             unlaunched(LaunchError::Off),
             Unlaunched::NotAdmitted(_)
         ));
+        assert!(
+            matches!(
+                unlaunched(LaunchError::NeverGranted { program: "ennius".to_owned() }),
+                Unlaunched::NeverGranted(message) if message.contains("`ennius` is never")
+            ),
+            "its own reason, not one the person could change"
+        );
         assert_eq!(
             unlaunched(LaunchError::Locked),
             Unlaunched::NotStarted("the session is locked".to_owned())
@@ -428,9 +435,12 @@ mod tests {
         ));
     }
 
+    /// A window's picture is gated like reading it, here, before the
+    /// compositor is asked: the host below has nobody listening, so a
+    /// picture that reached it would come back `Unreachable`, not refused.
     #[test]
     fn a_picture_of_a_window_the_agent_may_not_read_is_refused_before_it_is_taken() {
-        let desk = desk(&clear().with_consent(Consent::Granted(vec![1])));
+        let desk = desk(&clear().with_consent(Consent::granted(vec![1])));
         assert!(matches!(
             desk.capture(ShotTarget::Window(WINDOW)),
             Err(Denied::Refused(Refusal::NoCapability { .. }))

@@ -23,16 +23,30 @@
 //!   its parent can reap it, and the loop ends the grant when it does. A
 //!   process nothing could be vouched for is never granted: its grant could
 //!   not be made to end.
+//!
+//! Some programs are never granted at all, whatever asks: those that exist
+//! so the person can oversee an agent, which an agent driving them would
+//! oversee itself (see [`Never`]). The settings app is one everywhere, and
+//! on a seat `[agent] never` names the rest, ennius by default. Every way to
+//! grant asks before it does, by the executable: the file a command will
+//! run, found and with its links followed, for what is started for an
+//! agent, and the one its process runs for a window or a launch's
+//! descendant. What is started is still started, since the person asked for
+//! it, and is not the agent's. The consent the grants publish carries the
+//! list too, so a way to grant that forgot to ask, or a granted process that
+//! has since become one of them, still gives the agent nothing to act on.
 
-use std::{ffi::OsStr, os::fd::OwnedFd, path::Path};
+use std::{ffi::OsStr, os::fd::OwnedFd, path::Path, time::Duration};
 
 use perspicax_index::Consent;
-use perspicax_node::Origin;
-use perspicax_policy::Rule;
+use perspicax_node::{Origin, SurfaceId};
+use perspicax_policy::{Never, Rule};
 use smithay::{
     reexports::{
         calloop::{
-            self, Interest, LoopHandle, Mode, PostAction, RegistrationToken, generic::Generic,
+            self, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
+            generic::Generic,
+            timer::{TimeoutAction, Timer},
         },
         wayland_server::Resource as _,
     },
@@ -46,6 +60,10 @@ use crate::{
     shell::id_of,
     state::{ClientState, Compositor},
 };
+
+/// How long a window shows the person that the grant they asked for on it
+/// was refused.
+const REFUSED_FOR: Duration = Duration::from_millis(800);
 
 /// Why a process was granted: for the log, which is where a person who
 /// wonders why an agent could act on something will look.
@@ -89,18 +107,27 @@ pub(crate) struct Grants {
     /// asked for a desk that consents as a seat does.
     by_grant: bool,
     held: Vec<Held>,
+    /// What is never granted, whatever asks: the settings app, and on a
+    /// seat `[agent] never`.
+    never: Never,
     /// What `held` adds up to, kept beside it so the gates that ask on
     /// every snapshot and every picture ask without building it.
     consent: Consent,
+    /// The window showing the person that a grant they asked for was
+    /// refused, and the timer that ends it.
+    refused: Option<(SurfaceId, RegistrationToken)>,
 }
 
 impl Grants {
-    /// No grant yet. `by_grant` false is everyone, for good.
-    pub(crate) fn new(by_grant: bool) -> Self {
+    /// No grant yet. `by_grant` false is everyone, for good. `never` is
+    /// what is never granted.
+    pub(crate) fn new(by_grant: bool, never: Never) -> Self {
         let mut grants = Self {
             by_grant,
             held: Vec::new(),
+            never,
             consent: Consent::Everyone,
+            refused: None,
         };
         grants.recount();
         grants
@@ -129,9 +156,22 @@ impl Grants {
             .any(|held| held.pid == pid && held.why == Why::Launch)
     }
 
+    /// The program, as written, that keeps whoever drew `origin` from every
+    /// agent, if one does: known by the executable its process runs. An
+    /// X11 window is Xwayland's to consent for, so none is named here.
+    fn withholds(&self, origin: &Origin) -> Option<&str> {
+        match origin {
+            Origin::Process(process) => self.never.naming(process.exe.as_deref()?),
+            Origin::X11(_) | Origin::Unattributed => None,
+        }
+    }
+
     fn recount(&mut self) {
         self.consent = if self.by_grant {
-            Consent::Granted(self.held.iter().map(|held| held.pid).collect())
+            Consent::Granted {
+                pids: self.held.iter().map(|held| held.pid).collect(),
+                never: self.never.clone(),
+            }
         } else {
             Consent::Everyone
         };
@@ -163,6 +203,12 @@ impl Compositor {
     /// every program is started (see [`crate::Launch`]), kept in `spawned`
     /// to be reaped as it exits and killed with the session, and granted
     /// until it is reaped. Its pid, or why it would not start.
+    ///
+    /// A program no agent is given is started all the same, since someone
+    /// asked for it, and not granted: `--spawn`, a binding or an autostart
+    /// entry the person wrote names it some way the config could not see
+    /// through, a link of another name, say. An agent's own launch is
+    /// refused before it gets here (see [`Self::launch_for_agent`]).
     pub(crate) fn start_for_agent(
         &mut self,
         command: &[impl AsRef<OsStr>],
@@ -175,21 +221,53 @@ impl Compositor {
                 source: std::io::Error::other("no socket to start it against yet"),
             });
         };
+        let withheld = self.withholds(command, dir);
         let child = launch.spawn_in(command, dir)?;
         let pid = child.id();
-        self.grant(pid, why);
+        match withheld {
+            Some(program) => tracing::warn!(
+                pid,
+                ?why,
+                program,
+                "started, and not granted: no agent is ever given it"
+            ),
+            None => self.grant(pid, why),
+        }
         self.spawned.push(child);
         Ok(pid)
+    }
+
+    /// The program, as written, that keeps what `command` would run, in
+    /// `dir`, from every agent, if one does. Asked of the command's first
+    /// word as written, then of the file it names, found as it would be run
+    /// and with every link followed, so a link of another name to a program
+    /// the list names is known for it. Asked before the program starts,
+    /// because what `/proc` says of a process just started can still be the
+    /// compositor itself.
+    fn withholds(&self, command: &[impl AsRef<OsStr>], dir: Option<&Path>) -> Option<String> {
+        let program = command.first()?.as_ref();
+        let named = |file: &Path| {
+            self.grants
+                .never
+                .naming(&file.to_string_lossy())
+                .map(str::to_owned)
+        };
+        named(Path::new(program)).or_else(|| {
+            let file = self.launch.as_ref()?.resolve(program, dir)?;
+            named(&std::fs::canonicalize(&file).unwrap_or(file))
+        })
     }
 
     /// Start a program an agent asked for, in `cwd` if it named one, and
     /// grant it: what the `launch` tool does. Its pid, or why not.
     ///
     /// Refused while the session is locked, as every act is: the person has
-    /// walked away. Otherwise only what the rule admits is started (see
-    /// [`Rule::launches`]): headless, what the test asked, and any program
-    /// by default; on a seat, `[agent] launch` as last saved, which is off
-    /// until the person names programs.
+    /// walked away. A program no agent is ever given is refused next, and
+    /// before any rule is asked, so the agent is not told the person could
+    /// admit it (see [`Never`]). Otherwise only what the rule admits is
+    /// started (see [`Rule::launches`]): headless, what the test asked, and
+    /// any program by default; on a seat, `[agent] launch` as last saved,
+    /// which is off until the person names programs.
     pub(crate) fn launch_for_agent(
         &mut self,
         command: &[String],
@@ -197,6 +275,9 @@ impl Compositor {
     ) -> Result<u32, LaunchError> {
         if self.lock.is_some() {
             return Err(LaunchError::Locked);
+        }
+        if let Some(program) = self.withholds(command, cwd) {
+            return Err(LaunchError::NeverGranted { program });
         }
         let rule = self.backend.launching();
         if *rule == Rule::Off {
@@ -239,9 +320,29 @@ impl Compositor {
         let root = origin::ancestors(pid)
             .into_iter()
             .find(|&ancestor| self.grants.launched(ancestor));
-        if let Some((root, pidfd)) = root.zip(client.pidfd()) {
-            self.grant_watched(pid, pidfd, Why::Lineage, Some(root));
+        let Some((root, pidfd)) = root.zip(client.pidfd()) else {
+            return;
+        };
+        if let Some(program) = self.grants.withholds(&client.origin()) {
+            tracing::warn!(
+                pid,
+                under = root,
+                program,
+                "not granted: no agent is ever given it, whatever started it"
+            );
+            return;
         }
+        self.grant_watched(pid, pidfd, Why::Lineage, Some(root));
+    }
+
+    /// `[agent] never` changed: what is granted from now on is held to
+    /// `never`. A grant held already on a program it now names stays until
+    /// its process exits, but the consent published here refuses that
+    /// program's windows at once, and takes the mark off them.
+    #[cfg_attr(not(feature = "seat"), expect(dead_code, reason = "a seat's reload"))]
+    pub(crate) fn withhold(&mut self, never: Never) {
+        self.grants.never = never;
+        self.regranted();
     }
 
     /// Grant `pid`, anyone's process, to the agent: until `pidfd`, which
@@ -336,8 +437,11 @@ impl Compositor {
     /// Only a process its client was accepted for, with a pidfd to hold it
     /// by. An X11 window is refused, because consent for X11 is Xwayland's:
     /// every X client shares one server and may read and drive the others,
-    /// so granting one X11 window would grant all of them. Each refusal is
-    /// logged, saying why.
+    /// so granting one X11 window would grant all of them. So is a program
+    /// no agent is ever given. A grant already held is taken back whatever
+    /// the program, so the person can always take one back. Each refusal is
+    /// logged, saying why, and shown on the window (see
+    /// [`Self::show_refused`]).
     pub(crate) fn toggle_agent(&mut self, window: &Framed) {
         let Some(id) = id_of(window) else {
             return;
@@ -352,7 +456,7 @@ impl Compositor {
             .surface(id)
             .map(|facts| facts.origin.clone())
             .unwrap_or_default();
-        let pid = match origin {
+        let pid = match &origin {
             Origin::Process(process) => process.pid,
             Origin::X11(_) => {
                 tracing::warn!(
@@ -360,10 +464,12 @@ impl Compositor {
                     "not granted: consent for X11 is Xwayland's, and granting one X11 window \
                      would grant every one"
                 );
+                self.show_refused(id);
                 return;
             }
             Origin::Unattributed => {
                 tracing::warn!(surface = ?id, "not granted: nobody knows which process drew it");
+                self.show_refused(id);
                 return;
             }
         };
@@ -371,14 +477,64 @@ impl Compositor {
             self.revoke(pid);
             return;
         }
-        match self.pidfd_of(window) {
-            Some(pidfd) => self.grant_watched(pid, pidfd, Why::Key, None),
-            None => tracing::warn!(
+        if let Some(program) = self.grants.withholds(&origin) {
+            tracing::warn!(
                 surface = ?id,
                 pid,
-                "not granted: its process could not be held, so its grant could not end with it"
-            ),
+                program,
+                "not granted: no agent is ever given it, whatever grants it"
+            );
+            self.show_refused(id);
+            return;
         }
+        match self.pidfd_of(window) {
+            Some(pidfd) => self.grant_watched(pid, pidfd, Why::Key, None),
+            None => {
+                tracing::warn!(
+                    surface = ?id,
+                    pid,
+                    "not granted: its process could not be held, so its grant could not end \
+                     with it"
+                );
+                self.show_refused(id);
+            }
+        }
+    }
+
+    /// Show the person that the grant they asked for on the window `id` was
+    /// refused: the line round it drawn for [`REFUSED_FOR`] in
+    /// `[decorations.agent] refused-colour`. A key that granted nothing
+    /// would otherwise change nothing they can see. The log says why.
+    fn show_refused(&mut self, id: SurfaceId) {
+        if let Some((_, showing)) = self.grants.refused.take() {
+            self.loop_handle.remove(showing);
+        }
+        let armed =
+            self.loop_handle
+                .insert_source(Timer::from_duration(REFUSED_FOR), |_, (), state| {
+                    state.grants.refused = None;
+                    state.publish_facts();
+                    state.backend.redraw();
+                    TimeoutAction::Drop
+                });
+        match armed {
+            Ok(token) => self.grants.refused = Some((id, token)),
+            Err(error) => {
+                tracing::warn!(%error, "a refused grant is not shown");
+                return;
+            }
+        }
+        // The line is part of what the window covers, as every line is.
+        self.publish_facts();
+        self.backend.redraw();
+    }
+
+    /// Whether `window` is showing the person that a grant was refused.
+    pub(crate) fn shows_refused(&self, window: &Framed) -> bool {
+        self.grants
+            .refused
+            .as_ref()
+            .is_some_and(|(id, _)| id_of(window) == Some(*id))
     }
 
     /// A pidfd of its own on the process whose Wayland client drew `window`,
@@ -425,6 +581,8 @@ mod tests {
         rustix::process::{Pid, PidfdFlags, pidfd_open},
     };
 
+    use perspicax_policy::{Never, Program};
+
     use super::{Grants, Held, Why, watch};
 
     fn process(pid: u32) -> Origin {
@@ -438,15 +596,15 @@ mod tests {
 
     #[test]
     fn grants_that_are_not_by_grant_consent_to_everyone() {
-        let grants = Grants::new(false);
+        let grants = Grants::new(false, Never::FLOOR);
         assert_eq!(grants.consent(), &Consent::Everyone);
         assert!(grants.consent().permits(&process(4242)));
     }
 
     #[test]
     fn grants_by_grant_consent_to_what_they_hold_and_nothing_else() {
-        let mut grants = Grants::new(true);
-        assert_eq!(grants.consent(), &Consent::Granted(Vec::new()));
+        let mut grants = Grants::new(true, Never::FLOOR);
+        assert_eq!(grants.consent(), &Consent::granted(Vec::new()));
         grants.held.push(Held {
             pid: 7,
             why: Why::Spawn,
@@ -462,9 +620,9 @@ mod tests {
     /// would say nothing: only a grant marks one out.
     #[test]
     fn a_window_is_marked_out_only_where_consent_is_by_grant() {
-        assert!(!Grants::new(false).marks(&process(7)));
+        assert!(!Grants::new(false, Never::FLOOR).marks(&process(7)));
 
-        let mut grants = Grants::new(true);
+        let mut grants = Grants::new(true, Never::FLOOR);
         grants.held.push(Held {
             pid: 7,
             why: Why::Key,
@@ -475,6 +633,36 @@ mod tests {
         assert!(grants.marks(&process(7)));
         assert!(!grants.marks(&process(8)));
         assert!(!grants.marks(&Origin::Unattributed));
+    }
+
+    /// What is never granted goes out with the grants, so the consent they
+    /// publish refuses it whatever pid it runs as, a pid granted before the
+    /// list named it too, and its window is not marked.
+    #[test]
+    fn what_is_never_granted_is_refused_by_the_consent_the_grants_publish() {
+        let mut grants = Grants::new(true, Never::new(vec![Program::parse("ennius")]));
+        grants.held.push(Held {
+            pid: 7,
+            why: Why::Key,
+            watch: None,
+            under: None,
+        });
+        grants.recount();
+        let ennius = Origin::Process(Box::new(ProcessOrigin {
+            pid: 7,
+            exe: Some("/usr/local/bin/ennius".to_owned()),
+            cgroup: None,
+            sandbox: None,
+        }));
+        assert!(!grants.consent().permits(&ennius));
+        assert!(!grants.marks(&ennius));
+        assert_eq!(grants.withholds(&ennius), Some("ennius"));
+        assert_eq!(
+            grants.withholds(&process(7)),
+            None,
+            "nobody knows its program"
+        );
+        assert!(grants.marks(&process(7)));
     }
 
     /// The watch every grant to someone else's process is held by: told once

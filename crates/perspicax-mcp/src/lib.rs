@@ -160,12 +160,17 @@ pub struct Launched {
 
 /// Why a program was not started for the agent.
 ///
-/// Two answers an agent does different things with: one says to ask the
-/// person, or to start something the host admits, and the other says what
-/// went wrong. Each is a message, for the reason [`Denied::Undispatched`] is:
-/// the host's own type belongs to a crate this one cannot see.
+/// Three answers an agent does different things with: one says the program
+/// is never an agent's, which nothing changes; one says to ask the person,
+/// or to start something the host admits; and the other says what went
+/// wrong. Each is a message, for the reason [`Denied::Undispatched`] is: the
+/// host's own type belongs to a crate this one cannot see.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unlaunched {
+    /// The program is one no agent is ever given. No rule admits it, so
+    /// asking the person is no use. The message names it.
+    #[error("never granted: {0}")]
+    NeverGranted(String),
     /// The host does not let an agent start this program. The message says
     /// what it does let one start, if anything.
     #[error("not admitted: {0}")]
