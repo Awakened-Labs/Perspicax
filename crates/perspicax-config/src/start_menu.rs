@@ -221,7 +221,9 @@ mod tests {
             ("colour = 1", "colour"),
         ] {
             match start_menu(&format!("[shell.start-menu]\n{text}")) {
-                Err(Error::Parse(error)) => assert!(error.contains(word), "{error}"),
+                Err(error @ Error::Parse { .. }) => {
+                    assert!(error.to_string().contains(word), "{error}");
+                }
                 other => panic!("{text}: {other:?}"),
             }
         }

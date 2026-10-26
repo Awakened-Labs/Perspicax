@@ -429,7 +429,7 @@ mod tests {
         );
         assert!(matches!(
             pie("[shell.pie]\ncolour = 1"),
-            Err(Error::Parse(_))
+            Err(Error::Parse { .. })
         ));
     }
 
