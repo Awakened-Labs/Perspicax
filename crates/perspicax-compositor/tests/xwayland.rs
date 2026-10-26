@@ -2220,6 +2220,52 @@ fn an_x11_window_on_a_workspace_not_showing_asking_to_be_active_with_fresh_input
     x11.stop();
 }
 
+/// Issue #257: the Wayland program the person was using makes an activation
+/// token while it has the keys, and an X11 terminal then opens and takes
+/// them, as a binding opens one. The keys went to another client, so the
+/// person has moved on: the token, spent now, brings nothing forward, and
+/// the terminal keeps the keys.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_token_made_before_an_x11_window_opened_with_the_keys_brings_nothing_forward() {
+    let x11 = X11::start(
+        "x11-opened-since-token",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let (mut desk, mut queue, qh, globals) = x11.session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    desk.bind_activation(&globals, &qh);
+    desk.open_window(&qh, "thief", "thief");
+    let thief = desk.windows[0].wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&thief)
+    });
+    let serial = heard(&ear).enter_serial.expect("entered");
+    desk.make_token(&qh, 0, serial);
+    until(&mut queue, &mut desk, |desk| !desk.tokens.is_empty());
+    let token = desk.tokens.remove(0);
+
+    let terminal = x11.open("terminal");
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == terminal).then_some(())
+    })
+    .expect("the terminal never took the keyboard");
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() != Some(&thief)
+    });
+
+    desk.spend_token(&token, 0);
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert_ne!(
+        heard(&ear).entered.as_ref(),
+        Some(&thief),
+        "the thief has none of the keys"
+    );
+    assert_eq!(x11.focus(), terminal, "the terminal keeps the keys");
+
+    x11.session.stop((desk, queue));
+}
+
 /// Issue #256: with nothing holding the keys -- the workspace showing is
 /// empty -- an X11 window asking to be active with an X time waits on its
 /// own workspace, as one asking without input does. No X11 window has the

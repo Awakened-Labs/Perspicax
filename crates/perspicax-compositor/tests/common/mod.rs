@@ -2202,6 +2202,17 @@ impl Desk {
         self.ask_token(qh, &surface, serial, Token::Keep);
     }
 
+    /// The same, asked from any surface of ours: a layer, as a notification
+    /// or a launcher makes one, or a lock surface.
+    pub fn make_token_from(
+        &self,
+        qh: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+        serial: u32,
+    ) {
+        self.ask_token(qh, surface, serial, Token::Keep);
+    }
+
     /// Ask for a token for the input `serial` names, from `surface`, to be
     /// used as `token` says once it comes.
     fn ask_token(

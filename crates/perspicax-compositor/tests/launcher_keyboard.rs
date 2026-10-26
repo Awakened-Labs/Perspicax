@@ -48,11 +48,13 @@ fn page(session: &Session) -> (Desk, EventQueue<Desk>, QueueHandle<Desk>, Global
     (desk, queue, qh, globals, ear)
 }
 
-/// A launcher, as the shell is, on a connection of its own, with a keyboard:
-/// up, and holding the keys. Returns what its keyboard hears.
+/// A launcher, as the shell is, on a connection of its own, with a keyboard
+/// and `xdg_activation_v1`, for the token it hands what it starts: up, and
+/// holding the keys. Returns what its keyboard hears.
 fn launcher(session: &Session) -> (Desk, EventQueue<Desk>, QueueHandle<Desk>, Ear) {
     let (mut launcher, mut queue, qh, globals) = session.client();
     let ear = launcher.bind_keyboard(&globals, &qh);
+    launcher.bind_activation(&globals, &qh);
     open_launcher(&mut launcher, &mut queue, &qh, &ear);
     (launcher, queue, qh, ear)
 }
@@ -137,11 +139,12 @@ fn a_window_that_opens_under_a_launcher_takes_no_keys_from_it() {
     session.stop((desk, queue));
 }
 
-/// A window brought forward under the launcher, with a token its program
-/// made while another of its windows had the keys, a moment before the
-/// launcher came up: a program started again just then, raising its first
-/// window. It is raised, as asked, which says the token was good (#187), but
-/// the launcher keeps the keys.
+/// A window brought forward under the launcher, with the token the
+/// launcher made as it started the window's program again: the program was
+/// running already, and raises its first window before the launcher has
+/// gone. It is raised, as asked, which says the token was good (#187), but
+/// the launcher keeps the keys. A token made before the launcher came up
+/// would not do: the keys going to it moved the person on (#257).
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_window_brought_forward_under_a_launcher_takes_no_keys_from_it() {
@@ -154,13 +157,16 @@ fn a_window_brought_forward_under_a_launcher_takes_no_keys_from_it() {
     until(&mut queue, &mut desk, |_| {
         heard(&ear).entered.as_ref() == Some(&top)
     });
-    let serial = heard(&ear).enter_serial.expect("entered");
-    desk.make_token(&qh, 1, serial);
-    until(&mut queue, &mut desk, |desk| !desk.tokens.is_empty());
-    let token = desk.tokens.remove(0);
-    let (mut launcher, mut launcher_queue, _, launcher_ear) = launcher(&session);
-    let held = launcher.layers[0].0.wl_surface().id();
+    let (mut launcher, mut launcher_queue, launcher_qh, launcher_ear) = launcher(&session);
+    let held = launcher.layers[0].0.wl_surface().clone();
     until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
+    let serial = heard(&launcher_ear).enter_serial.expect("entered");
+    launcher.make_token_from(&launcher_qh, &held, serial);
+    until(&mut launcher_queue, &mut launcher, |launcher| {
+        !launcher.tokens.is_empty()
+    });
+    let token = launcher.tokens.remove(0);
+    let held = held.id();
 
     desk.spend_token(&token, 0);
     hear_all(&mut desk, &mut queue, &mut launcher, &mut launcher_queue);
@@ -179,6 +185,51 @@ fn a_window_brought_forward_under_a_launcher_takes_no_keys_from_it() {
     );
 
     session.stop(((desk, queue), (launcher, launcher_queue)));
+}
+
+/// What a launcher is for (#257): the person picks a program that is
+/// running already, the launcher makes a token for it and goes, and the
+/// keys go back to the window that was on top. Only then does the program
+/// spend the token, and its window comes forward with the keys. The keys
+/// leaving a launcher do not move the person on, as their going anywhere
+/// else would.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_token_the_launcher_made_brings_a_window_forward_once_it_has_gone() {
+    let session = session("launcher-keys-gone");
+    let (mut desk, mut queue, qh, globals, ear) = page(&session);
+    desk.bind_activation(&globals, &qh);
+    desk.open_coloured(&qh, "top", "top", LATE);
+    until(&mut queue, &mut desk, |desk| desk.has_drawn(1));
+    let top = desk.windows[1].wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&top)
+    });
+    let (mut launcher, mut launcher_queue, launcher_qh, launcher_ear) = launcher(&session);
+    let held = launcher.layers[0].0.wl_surface().clone();
+    until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
+    let serial = heard(&launcher_ear).enter_serial.expect("entered");
+    launcher.make_token_from(&launcher_qh, &held, serial);
+    until(&mut launcher_queue, &mut launcher, |launcher| {
+        !launcher.tokens.is_empty()
+    });
+    let token = launcher.tokens.remove(0);
+
+    drop((launcher, launcher_queue));
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&top)
+    });
+    desk.spend_token(&token, 0);
+    let page = desk.windows[0].wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&page)
+    });
+    assert!(
+        above(&session.facts.read(), "page", "top"),
+        "the page is brought forward"
+    );
+
+    session.stop((desk, queue));
 }
 
 /// The person picks a window in the taskbar while the launcher is up: the

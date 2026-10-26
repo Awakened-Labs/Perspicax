@@ -25,6 +25,8 @@
 //! empty spot of the desktop would be reaching past the window it was
 //! given.
 
+use std::time::Instant;
+
 use perspicax_policy::{Button, Context, Focus, Gesture, Mods, Part, Wheel};
 use smithay::{
     backend::input::{Axis, AxisSource, ButtonState},
@@ -35,7 +37,7 @@ use smithay::{
     },
     output::Output,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::{Logical, Point, SERIAL_COUNTER},
+    utils::{Logical, Point, SERIAL_COUNTER, Serial},
     wayland::seat::WaylandFocus,
 };
 
@@ -333,12 +335,15 @@ impl Compositor {
         // headless keeps no clock of the person, so a test's agent is never
         // refused for a hand that has stopped.
         self.person_button(code, true);
+        // And a turn of the person's attention (#257), as on a seat.
+        let serial = SERIAL_COUNTER.next_serial();
+        self.attention.pressed(serial, Instant::now());
         let time = self.now_ms();
         // Focus and raise before the press is delivered, and before a
         // binding, as a seat does.
         self.follow_press(hit.as_ref());
         if !self.bound_press(hit.as_ref(), at, code, mods, time) {
-            self.stand_in_button(&pointer, code, ButtonState::Pressed, time);
+            self.stand_in_button(&pointer, serial, code, ButtonState::Pressed, time);
         }
     }
 
@@ -355,7 +360,8 @@ impl Compositor {
         self.person_button(code, false);
         let time = self.now_ms();
         if !self.bound_release(code) {
-            self.stand_in_button(&pointer, code, ButtonState::Released, time);
+            let serial = SERIAL_COUNTER.next_serial();
+            self.stand_in_button(&pointer, serial, code, ButtonState::Released, time);
         }
     }
 
@@ -364,12 +370,13 @@ impl Compositor {
     fn stand_in_button(
         &mut self,
         pointer: &PointerHandle<Self>,
+        serial: Serial,
         code: u32,
         state: ButtonState,
         time: u32,
     ) {
         let event = ButtonEvent {
-            serial: SERIAL_COUNTER.next_serial(),
+            serial,
             time,
             button: code,
             state,

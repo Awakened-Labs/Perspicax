@@ -40,7 +40,7 @@
 //!    modifier, and the wheel flipping workspaces over the desktop;
 //! 3. the client under the pointer.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use perspicax_policy::{
     Action, Button, Drag, FrameButton, Hatch, KeyPress, Mods, Part, Resting, Taken, arrival,
@@ -174,6 +174,11 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
         return;
     };
     let serial = SERIAL_COUNTER.next_serial();
+    // Every press turns the person's attention (#257), the one a binding
+    // takes too: a token made before it is spent.
+    if pressed == KeyState::Pressed {
+        state.attention.pressed(serial, Instant::now());
+    }
     // Before the keyboard is asked: inside its callback nothing may ask
     // where its focus is (#131).
     let capturing = state.capturing();
@@ -311,6 +316,9 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
         state: pressed,
     };
     if pressed == ButtonState::Pressed {
+        // A press turns the person's attention (#257), before a binding or
+        // the focus policy acts on it.
+        state.attention.pressed(event.serial, Instant::now());
         // A click at the edge of the screen is a click, not a flip, and a
         // click with Logo held is not a tap of it.
         if let Running::Seat(session) = &mut state.backend {

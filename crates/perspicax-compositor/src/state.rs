@@ -217,6 +217,11 @@ pub struct Compositor {
     /// whose presses go straight to the pointer and come up in the same
     /// turn.
     pub(crate) person_buttons: Vec<u32>,
+    /// Where the person's attention has been: what an activation token is
+    /// good for only until it moves on (#257). Turned by the person's
+    /// presses, from the seat's libinput and a test's stand-ins, never an
+    /// agent's, and by the keys going to another client, whoever moved them.
+    pub(crate) attention: perspicax_policy::Attention<Serial, ClientId>,
     /// What the focused client asked the pointer to look like. Only the seat
     /// draws it; headless records it and nothing reads it.
     pub(crate) cursor: CursorImageStatus,
@@ -434,6 +439,7 @@ impl Compositor {
             grants,
             person_at: None,
             person_buttons: Vec::new(),
+            attention: perspicax_policy::Attention::default(),
             cursor: CursorImageStatus::default_named(),
             generation: 0,
             next_surface: 0,
@@ -749,11 +755,12 @@ impl Compositor {
     /// Whether the keyboard is with one of `client`'s surfaces: a window, a
     /// menu of one, a launcher, a lock surface.
     ///
-    /// The serial a client names is believed only from it (#187). An
-    /// activation token carries one, and so does a menu's grab, to say what
-    /// input it answers, but nothing stops a client naming one it was never
-    /// sent, or one it was sent long ago. The client with the keys is the
-    /// one in use: what it asks for, the person is behind, a link opened in
+    /// The serial a client names is believed only from it (#187), or, for
+    /// an activation token, from the client the person's latest press was
+    /// sent to, naming that press (#257). An activation token carries one,
+    /// and so does a menu's grab, to say what input it answers, but nothing
+    /// stops a client naming one it was never sent, or one it was sent long
+    /// ago. The client with the keys is the one in use: what it asks for, the person is behind, a link opened in
     /// it, an item picked from its launcher or its menu. Any other client is
     /// asking for itself, which is the focus stealing both protocols leave
     /// the compositor to refuse. How old the serial is proves nothing more,
@@ -800,6 +807,8 @@ impl Compositor {
         if let Some(keyboard) = self.keyboard.clone() {
             keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
         }
+        // Nor does anything have the person's attention (#257).
+        self.attention.keys_to(None, false);
         // No window is lit or undimmed now. See `focus_changed`.
         self.backend.redraw();
         self.show_active(None);
@@ -1697,6 +1706,16 @@ impl SeatHandler for Compositor {
         // keyboard: a client may only read a selection while focused. On both
         // backends, because an agent pasting is as real as a person pasting.
         let client = focused.and_then(|surface| self.display.get_client(surface.id()).ok());
+        // Gone to another client, the keys take the person's attention with
+        // them, and a token made before is spent (#257). Unless they leave a
+        // launcher, which is asked now, as it takes them: one that has gone
+        // is no launcher by the time it hands them on. A launcher's menu
+        // counts as the launcher. The layer maps' locks are free here, as
+        // `may_take_keyboard` found them just before.
+        let launcher =
+            focused.is_some_and(|surface| self.is_launcher(&self.menu_root(surface.clone())));
+        self.attention
+            .keys_to(client.as_ref().map(Client::id), launcher);
         set_data_device_focus(&self.display, seat, client.clone());
         set_primary_focus(&self.display, seat, client);
         // A chord is captured only for the process that has the keyboard.
@@ -1824,27 +1843,53 @@ impl XdgActivationHandler for Compositor {
 
     /// A client making a token, to hand to what it starts or wakes. Kept
     /// only if it names input and the client making it has the keys (see
-    /// [`Compositor::keys_are_with`]). Any other is forgotten as it is made,
+    /// [`Compositor::keys_are_with`]), or names the person's latest press,
+    /// under ten seconds old, which it was sent: a notification's action or
+    /// a dock's icon clicked, which never has the keys (#257). Any other is
+    /// forgotten as it is made,
     /// so spending it brings nothing forward, as a token naming no input
     /// never did. Its client is told the token all the same, as smithay
     /// tells every one, and cannot tell the difference.
+    ///
+    /// A kept token is stamped with the turn the person's attention is on,
+    /// and is good only on that turn (#257). Every token that can no longer
+    /// be granted is forgotten here, before smithay keeps the new one, and
+    /// no client keeps more than [`TOKENS_PER_CLIENT`]: one made in a loop
+    /// has nowhere to grow.
     fn token_created(&mut self, _token: XdgActivationToken, data: XdgActivationTokenData) -> bool {
-        let vouched = data.serial.is_some()
-            && data
-                .client_id
-                .as_ref()
-                .is_some_and(|client| self.keys_are_with(client));
-        if !vouched {
-            tracing::debug!("activation token refused: its client does not have the keys");
+        let turn = self.attention.turn();
+        self.activation
+            .retain_tokens(|_, made| still_good(made, turn));
+        let Some(((serial, _), client)) = data.serial.as_ref().zip(data.client_id.as_ref()) else {
+            tracing::debug!("activation token refused: it names no input");
+            return false;
+        };
+        let kept = self
+            .activation
+            .tokens()
+            .filter(|(_, made)| made.client_id.as_ref() == Some(client))
+            .count();
+        if kept >= TOKENS_PER_CLIENT {
+            tracing::debug!("activation token refused: its client keeps enough already");
+            return false;
         }
-        vouched
+        if !(self.keys_are_with(client) || self.attention.vouches(serial, client, Instant::now())) {
+            tracing::debug!(
+                "activation token refused: its client neither has the keys nor names the \
+                 person's latest press, which it was sent"
+            );
+            return false;
+        }
+        data.user_data.insert_if_missing(|| turn);
+        true
     }
 
     /// A client asking for one of its windows to be brought forward: an
     /// application opened from a launcher, a link opened in a browser that
-    /// was already running. Every token known was made by the client with
-    /// the keys, in answer to the person's own input (`token_created`), so
-    /// it is granted while it is fresh (see
+    /// was already running. Every token known was made in answer to the
+    /// person's own input, by the client with the keys or the one their
+    /// latest press was sent to (`token_created`), so it is granted while it
+    /// is fresh and the person has not moved on (see
     /// `perspicax_policy::grants_activation`), and a window cannot pull
     /// focus to itself while someone is typing elsewhere.
     fn request_activation(
@@ -1854,9 +1899,8 @@ impl XdgActivationHandler for Compositor {
         surface: WlSurface,
     ) {
         self.activation.remove_token(&token);
-        // The input behind it was vouched for when it was made.
-        if !perspicax_policy::grants_activation(data.timestamp.elapsed(), true) {
-            tracing::debug!("activation refused: the token is stale");
+        if !still_good(&data, self.attention.turn()) {
+            tracing::debug!("activation refused: the token is stale, or the person moved on");
             return;
         }
         // A client may name any surface it owns, and the window a subsurface
@@ -1874,6 +1918,22 @@ impl XdgActivationHandler for Compositor {
         self.backend.redraw();
         self.publish_facts();
     }
+}
+
+/// How many activation tokens one client may keep at once (#257). A token
+/// that brings a window forward with the keys turns the person's attention,
+/// and so spends every other there is: a program needs one or two at a
+/// time, a launcher one.
+const TOKENS_PER_CLIENT: usize = 8;
+
+/// Whether a token kept as `made` may still be granted, on `turn`: fresh, and
+/// stamped with that turn, so made since the person last pressed anything or
+/// the keys last moved on (#257).
+fn still_good(made: &XdgActivationTokenData, turn: perspicax_policy::Turn) -> bool {
+    perspicax_policy::grants_activation(
+        made.timestamp.elapsed(),
+        made.user_data.get::<perspicax_policy::Turn>() == Some(&turn),
+    )
 }
 
 /// Per-client state: the protocol's, and this client's provenance.

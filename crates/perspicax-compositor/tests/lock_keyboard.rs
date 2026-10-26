@@ -78,6 +78,7 @@ fn open_second(
 fn locker(session: &Session) -> (Desk, EventQueue<Desk>, QueueHandle<Desk>, Ear) {
     let (mut locker, mut queue, qh, globals) = session.client();
     let ear = locker.bind_keyboard(&globals, &qh);
+    locker.bind_activation(&globals, &qh);
     until(&mut queue, &mut locker, |locker| !locker.outputs_empty());
     locker.lock(&globals, &qh);
     until(&mut queue, &mut locker, |locker| locker.locked);
@@ -159,11 +160,11 @@ fn a_window_that_opens_behind_the_lock_screen_takes_no_keys_from_it() {
     session.stop(((desk, queue), (locker, locker_queue)));
 }
 
-/// A window brought forward behind the lock screen, with a token its program
-/// made while another of its windows had the keys, a moment before the
-/// screen locked: a program started again just then, raising its first
-/// window. It is raised, as asked, which says the token was good (#187), but
-/// the lock screen keeps the keys.
+/// A window brought forward behind the lock screen, with a token the one
+/// client that may make one then made: the lock screen, which has the keys.
+/// It is raised, as asked, which says the token was good (#187), but the
+/// lock screen keeps the keys. A token made before the screen locked would
+/// not do: the keys going to the lock screen moved the person on (#257).
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_window_brought_forward_behind_the_lock_screen_takes_no_keys_from_it() {
@@ -171,13 +172,16 @@ fn a_window_brought_forward_behind_the_lock_screen_takes_no_keys_from_it() {
     let (mut desk, mut queue, qh, globals, ear) = page(&session);
     desk.bind_activation(&globals, &qh);
     open_second(&mut desk, &mut queue, &qh, &ear, "top");
-    let serial = heard(&ear).enter_serial.expect("entered");
-    desk.make_token(&qh, 1, serial);
-    until(&mut queue, &mut desk, |desk| !desk.tokens.is_empty());
-    let token = desk.tokens.remove(0);
     let (mut locker, mut locker_queue, locker_qh, locker_ear) = locker(&session);
     let held = cover(&mut locker, &mut locker_queue, &locker_qh, &locker_ear);
     until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
+    let serial = heard(&locker_ear).enter_serial.expect("entered");
+    let surface = locker.covers[0].1.clone();
+    locker.make_token_from(&locker_qh, &surface, serial);
+    until(&mut locker_queue, &mut locker, |locker| {
+        !locker.tokens.is_empty()
+    });
+    let token = locker.tokens.remove(0);
 
     desk.spend_token(&token, 0);
     hear_all(&mut desk, &mut queue, &mut locker, &mut locker_queue);
