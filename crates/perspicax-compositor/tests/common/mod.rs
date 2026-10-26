@@ -737,6 +737,9 @@ pub enum Told {
     /// number.
     Volume(Result<perspicax_shell_v1::VolumeKey, u32>),
     Reconfigure,
+    /// Something refused, or a kind this client's protocol does not know,
+    /// by its number, and what the words need of it.
+    Refused(Result<perspicax_shell_v1::Refusal, u32>, String),
 }
 
 /// What the shell channel told of one window, from version 5.
@@ -2113,6 +2116,11 @@ impl Desk {
     /// Bind the shell channel, as perspicax-shell does. Panics if it is not
     /// advertised.
     pub fn bind_shell(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.bind_shell_up_to(globals, qh, 6);
+    }
+
+    /// Bind the channel as a shell from before refusals were in it would.
+    pub fn bind_shell_v5(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
         self.bind_shell_up_to(globals, qh, 5);
     }
 
@@ -2464,6 +2472,13 @@ impl Dispatch<PerspicaxShellV1, ()> for Desk {
                 desk.told.push(Told::Volume(key));
             }
             Event::Reconfigure => desk.told.push(Told::Reconfigure),
+            Event::Refused { kind, subject } => {
+                let kind = match kind {
+                    WEnum::Value(kind) => Ok(kind),
+                    WEnum::Unknown(number) => Err(number),
+                };
+                desk.told.push(Told::Refused(kind, subject));
+            }
             Event::ToplevelState {
                 toplevel,
                 state,

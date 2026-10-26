@@ -20,8 +20,9 @@
     What passes between perspicax and perspicax-shell that no standard
     protocol carries: the person asked for a menu or a pie, or pressed a
     volume key, the config changed, the session should end, the keyboard's
-    layouts and which is in use, what is made of each window, and what the
-    person chose in a window's menu.
+    layouts and which is in use, what is made of each window, what the
+    person chose in a window's menu, and what the person asked for that
+    perspicax refused, for the shell to say why in words.
 
     Everything else the shell does, it does as any other client would.
     Its wallpaper, panel and menus are layer-shell surfaces, its taskbar
@@ -37,7 +38,7 @@
     is locked the compositor sends nothing and ignores every request.
   </description>
 
-  <interface name="perspicax_shell_v1" version="5">
+  <interface name="perspicax_shell_v1" version="6">
     <description summary="a shell's binding to the compositor">
       Bound once by a shell. Several shells may bind it; each is told the
       same things.
@@ -287,5 +288,48 @@
       <arg name="workspace" type="object" interface="ext_workspace_handle_v1"
            summary="where it goes"/>
     </request>
+
+    <!-- Version 6: what was refused. -->
+
+    <enum name="refusal" since="6">
+      <description summary="what the person asked for that was refused, and why">
+        A kind a later version adds is sent only to a shell bound at that
+        version.
+      </description>
+      <entry name="grant_x11" value="0"
+             summary="a window's grant to an agent: consent for X11 is Xwayland's, and one X11 window granted would grant every one"/>
+      <entry name="grant_unattributed" value="1"
+             summary="a window's grant to an agent: nobody knows which process drew it"/>
+      <entry name="grant_unheld" value="2"
+             summary="a window's grant to an agent: its process could not be held, so its grant could not end with it"/>
+      <entry name="grant_never" value="3"
+             summary="a window's grant to an agent: its program is one no agent is ever given"/>
+      <entry name="config" value="4"
+             summary="a save of the config, refused whole: the one in use is kept"/>
+      <entry name="keymap" value="5"
+             summary="a keymap xkb could not compile: the keyboard keeps its old one"/>
+    </enum>
+
+    <event name="refused" since="6">
+      <description summary="something the person asked for was refused">
+        The person asked for something perspicax would not do: pressed the
+        toggle-agent key on a window it may not grant, say, or saved a
+        config it cannot use. Without this, only perspicax's log says so. A
+        shell says why in words of its own, and the words are the shell's:
+        the compositor sends the kind, and what the words need of it.
+
+        The subject is the program as [agent] never writes it, for
+        grant_never; the config's own reason, in a line, for config, such as
+        "`shell.mixer.step`: 99 is outside 1 to 25 percent", or the line and
+        column of a file that is not TOML; the layout as the config writes
+        it, for keymap; and empty for the others. It is only ever words of the person's own or perspicax's,
+        never a window's title or a program's name for itself, which their
+        clients choose.
+
+        Nothing is sent while the session is locked.
+      </description>
+      <arg name="kind" type="uint" enum="refusal" summary="what was refused, and why"/>
+      <arg name="subject" type="string" summary="what the words need, by kind"/>
+    </event>
   </interface>
 </protocol>

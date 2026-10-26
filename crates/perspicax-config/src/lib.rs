@@ -406,9 +406,19 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
-    /// Not TOML, or not this schema. The message names the key and the line.
-    #[error("{0}")]
-    Parse(String),
+    /// Not TOML, or not this schema, at a line and column of the file where
+    /// toml can say where. Shown as toml shows it: where, the line, a mark
+    /// under what is wrong, and what is.
+    #[error("{shown}")]
+    Parse {
+        /// What toml says, whole, as it shows it.
+        shown: String,
+        /// What is wrong, in a line.
+        message: String,
+        /// The line and the column, each counted from 1, where toml can
+        /// say.
+        at: Option<(usize, usize)>,
+    },
     /// A key for something this build left out.
     #[error(
         "`{key}` is not built into this perspicax; rebuild with the `{feature}` \
@@ -942,7 +952,7 @@ pub fn load_shell(path: &Path, built: ShellBuilt) -> Result<Shell, Error> {
 /// [`Error::ShellNotBuilt`] for a key the shell cannot honour,
 /// [`Error::Invalid`] for a value it cannot use.
 pub fn shell(text: &str, built: ShellBuilt) -> Result<Shell, Error> {
-    let raw: Raw = toml::from_str(text).map_err(|error| Error::Parse(error.to_string()))?;
+    let raw: Raw = toml::from_str(text).map_err(|error| unparsed(text, &error))?;
     let theme = theme(raw.theme, raw.decorations.as_ref())?;
     let profile = Shell::profile(raw.profile, built);
     // The grid's sides are the compositor's to judge; this only counts.
@@ -974,8 +984,55 @@ pub fn shell(text: &str, built: ShellBuilt) -> Result<Shell, Error> {
 /// a key this build cannot honour, [`Error::Invalid`] for a value it cannot
 /// use.
 pub fn parse(text: &str, built: Built) -> Result<Config, Error> {
-    let raw: Raw = toml::from_str(text).map_err(|error| Error::Parse(error.to_string()))?;
+    let raw: Raw = toml::from_str(text).map_err(|error| unparsed(text, &error))?;
     raw.apply(built)
+}
+
+impl Error {
+    /// Why, in a line, for a notice the person reads at a glance; the log
+    /// has room for the whole of it. Of a file that is not TOML or not this
+    /// schema, the line and the column, then what is wrong there; of the
+    /// rest, what they show, which is already a line.
+    #[must_use]
+    pub fn in_a_line(&self) -> String {
+        match self {
+            Self::Parse {
+                message,
+                at: Some((line, column)),
+                ..
+            } => format!("line {line}, column {column}: {message}"),
+            Self::Parse { message, .. } => message.clone(),
+            error => error.to_string(),
+        }
+    }
+}
+
+/// `error`, from reading `text` as this schema, as an [`Error::Parse`]: with
+/// the line and the column its span starts at, counted as toml counts them
+/// when it shows where.
+fn unparsed(text: &str, error: &toml::de::Error) -> Error {
+    let at = error.span().map(|span| {
+        let before = text.get(..span.start).unwrap_or(text);
+        let line = before.matches('\n').count() + 1;
+        let column = before
+            .rsplit('\n')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .count()
+            + 1;
+        (line, column)
+    });
+    let message = error
+        .message()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    Error::Parse {
+        shown: error.to_string(),
+        message,
+        at,
+    }
 }
 
 // The file, as serde reads it. Separate from `Config` so that every
@@ -3898,7 +3955,7 @@ mod tests {
     fn an_effect_not_known_is_refused() {
         assert!(matches!(
             parse("[workspaces.transition]\neffect = \"dissolve\"", SEAT),
-            Err(Error::Parse(_))
+            Err(Error::Parse { .. })
         ));
         assert!(
             parse("[workspaces.transition]\nspeed = 2", SEAT).is_err(),
@@ -4616,7 +4673,7 @@ mod tests {
         );
         assert!(matches!(
             parse("[splash]\ncolour = \"#000000\"", SEAT),
-            Err(Error::Parse(_))
+            Err(Error::Parse { .. })
         ));
     }
 
@@ -4701,7 +4758,7 @@ mod tests {
         );
         assert!(matches!(
             parse("[theme]\ncolor-scheme = \"grey\"", SEAT),
-            Err(Error::Parse(_))
+            Err(Error::Parse { .. })
         ));
     }
 
@@ -4790,7 +4847,7 @@ mod tests {
         }
         assert!(matches!(
             parse("[theme]\ncolour = \"#000000\"", SEAT),
-            Err(Error::Parse(_))
+            Err(Error::Parse { .. })
         ));
         assert_eq!(Palette::default(), Builtin::Perspicax.palette());
     }
@@ -5511,7 +5568,84 @@ mod tests {
         }
         assert!(matches!(
             socket("[agent]\nsocket = 1").unwrap_err(),
-            Error::Parse(_)
+            Error::Parse { .. }
         ));
+    }
+
+    /// A file that is not TOML, or not this schema, is refused at the line
+    /// and the column toml shows, counted in letters, not bytes, and said in
+    /// a line from there.
+    #[test]
+    fn a_file_that_is_not_toml_is_refused_where_toml_shows() {
+        for (text, line, column) in [
+            ("[shell]\nosd = \n", 2, 7),
+            (
+                "profile = \"classic\"\n[theme]\ncolour = \"#000000\"\n",
+                3,
+                1,
+            ),
+            ("# café\n[agent]\nsocket = 1\n", 3, 10),
+            ("[agent]\nlaunch = [\"é\" \"x\"]\n", 2, 15),
+        ] {
+            let error = parse(text, SEAT).unwrap_err();
+            let Error::Parse { shown, message, at } = &error else {
+                panic!("{text:?}: {error:?}");
+            };
+            assert_eq!(*at, Some((line, column)), "{text:?}: {shown}");
+            assert!(
+                shown.contains(&format!("line {line}, column {column}")),
+                "{shown}"
+            );
+            assert_eq!(
+                error.in_a_line(),
+                format!("line {line}, column {column}: {message}")
+            );
+            assert!(!error.in_a_line().contains('\n'), "{}", error.in_a_line());
+        }
+    }
+
+    /// Every refusal can be said in a line, for a notice; the log keeps
+    /// toml's whole picture of where.
+    #[test]
+    fn every_refusal_is_said_in_a_line() {
+        let invalid = Error::Invalid {
+            key: "shell.mixer.step".to_owned(),
+            reason: "99 is outside 1 to 25 percent".to_owned(),
+        };
+        assert_eq!(
+            invalid.in_a_line(),
+            "`shell.mixer.step`: 99 is outside 1 to 25 percent"
+        );
+        let refused = [
+            invalid,
+            Error::NotBuilt {
+                key: "xwayland",
+                feature: "xwayland",
+            },
+            Error::ShellNotBuilt {
+                key: "shell.tray",
+                feature: "tray",
+            },
+            Error::Read {
+                path: "/nowhere/config.toml".into(),
+                source: std::io::ErrorKind::PermissionDenied.into(),
+            },
+            parse("[agent]\nsocket = 1", SEAT).unwrap_err(),
+            // Where toml cannot say where: what is wrong, alone.
+            Error::Parse {
+                shown: "TOML parse error\nmissing field `x`".to_owned(),
+                message: "missing field `x`".to_owned(),
+                at: None,
+            },
+        ];
+        for error in &refused {
+            assert!(!error.in_a_line().contains('\n'), "{error:?}");
+            assert!(!error.in_a_line().is_empty(), "{error:?}");
+        }
+        assert!(
+            refused[4].to_string().contains('\n'),
+            "the log keeps the whole"
+        );
+        assert_eq!(refused[5].in_a_line(), "missing field `x`");
     }
 }

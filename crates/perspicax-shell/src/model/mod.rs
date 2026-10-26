@@ -11,6 +11,8 @@ pub(crate) mod kept;
 pub(crate) mod layouts;
 #[cfg(feature = "audio")]
 pub(crate) mod levels;
+#[cfg(any(feature = "menus", feature = "panel"))]
+pub(crate) mod notice;
 #[cfg(any(feature = "panel", feature = "wallpaper"))]
 pub(crate) mod pager;
 #[cfg(feature = "audio")]

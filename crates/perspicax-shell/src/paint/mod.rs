@@ -9,7 +9,7 @@ pub(crate) mod icons;
 pub(crate) mod menu;
 #[cfg(feature = "audio")]
 pub(crate) mod mixer;
-#[cfg(feature = "audio")]
+#[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) mod osd;
 #[cfg(feature = "panel")]
 pub(crate) mod panel;

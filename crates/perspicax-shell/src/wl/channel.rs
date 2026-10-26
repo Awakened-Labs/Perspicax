@@ -7,16 +7,22 @@
 //! indicator shows. A pie, from version 3, opens by name where perspicax
 //! says the pointer is. A volume key, from version 4, changes the sound as
 //! the mixer would. What is made of each window, from version 5, is what
-//! its menu shows, and what is chosen there is asked back.
+//! its menu shows, and what is chosen there is asked back. Something the
+//! person asked for that perspicax refused, from version 6, is said in
+//! words on the screen, with why.
 
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
+#[cfg(any(feature = "menus", feature = "panel"))]
+use perspicax_shell_v1::Refusal;
 #[cfg(all(feature = "panel", feature = "menus"))]
 use perspicax_shell_v1::{WindowCapabilities, WindowState};
-#[cfg(all(feature = "panel", feature = "menus"))]
+#[cfg(any(feature = "menus", feature = "panel"))]
 use wayland_client::WEnum;
 use wayland_client::{Connection, Dispatch, QueueHandle, globals::GlobalList, protocol::wl_output};
 
 use super::{App, watch};
+#[cfg(any(feature = "menus", feature = "panel"))]
+use crate::model::notice::Refused;
 #[cfg(all(feature = "panel", feature = "menus"))]
 use crate::model::tasks::Placing;
 
@@ -25,7 +31,7 @@ use crate::model::tasks::Placing;
 /// this program out; the shell still draws, and its menus open only by
 /// pointer.
 pub(super) fn bind(globals: &GlobalList, qh: &QueueHandle<App>) -> Option<PerspicaxShellV1> {
-    let bound = globals.bind::<PerspicaxShellV1, _, _>(qh, 1..=5, ()).ok();
+    let bound = globals.bind::<PerspicaxShellV1, _, _>(qh, 1..=6, ()).ok();
     if bound.is_none() {
         tracing::info!("the compositor offers no perspicax_shell_v1; no menu will open on a key");
     }
@@ -202,9 +208,38 @@ impl Dispatch<PerspicaxShellV1, ()> for App {
                 app.panels.layouts.activate(index);
                 app.panels_changed();
             }
+            #[cfg(any(feature = "menus", feature = "panel"))]
+            Event::Refused { kind, subject } => match refused(kind, subject) {
+                Some(refused) => app.refused(&refused),
+                None => tracing::info!(?kind, "refused, of a kind this shell does not know"),
+            },
+            #[cfg(not(any(feature = "menus", feature = "panel")))]
+            Event::Refused { kind, subject } => tracing::info!(
+                ?kind,
+                subject,
+                "refused, and this shell was built without the words to say why"
+            ),
             _ => {}
         }
     }
+}
+
+/// What perspicax refused, from the `kind` and `subject` it told: `None`
+/// for a kind a later version adds.
+#[cfg(any(feature = "menus", feature = "panel"))]
+fn refused(kind: WEnum<Refusal>, subject: String) -> Option<Refused> {
+    let WEnum::Value(kind) = kind else {
+        return None;
+    };
+    Some(match kind {
+        Refusal::GrantX11 => Refused::GrantX11,
+        Refusal::GrantUnattributed => Refused::GrantUnattributed,
+        Refusal::GrantUnheld => Refused::GrantUnheld,
+        Refusal::GrantNever => Refused::GrantNever(subject),
+        Refusal::Config => Refused::Config(subject),
+        Refusal::Keymap => Refused::Keymap(subject),
+        _ => return None,
+    })
 }
 
 /// Where a window stands, from what perspicax told: its `state` and its
@@ -234,10 +269,36 @@ fn placing(
     }
 }
 
-#[cfg(all(test, feature = "panel", feature = "menus"))]
+#[cfg(all(test, any(feature = "menus", feature = "panel")))]
 mod tests {
     use super::*;
 
+    #[test]
+    fn each_refusal_is_told_with_what_its_words_need_and_a_later_kind_is_not() {
+        let subject = || "us,nowhere".to_owned();
+        assert_eq!(
+            [
+                Refusal::GrantX11,
+                Refusal::GrantUnattributed,
+                Refusal::GrantUnheld,
+                Refusal::GrantNever,
+                Refusal::Config,
+                Refusal::Keymap,
+            ]
+            .map(|kind| refused(WEnum::Value(kind), subject())),
+            [
+                Some(Refused::GrantX11),
+                Some(Refused::GrantUnattributed),
+                Some(Refused::GrantUnheld),
+                Some(Refused::GrantNever(subject())),
+                Some(Refused::Config(subject())),
+                Some(Refused::Keymap(subject())),
+            ]
+        );
+        assert_eq!(refused(WEnum::Unknown(6), subject()), None, "a later kind");
+    }
+
+    #[cfg(all(feature = "panel", feature = "menus"))]
     #[test]
     fn a_windows_state_is_read_bit_by_bit_leaving_out_a_later_versions() {
         let later = 8;

@@ -54,6 +54,7 @@ use crate::{
     backdrop::{self, Look},
     backend::{Running, cursor::Cursor},
     grants::Why,
+    shell_protocol::Refused,
     state::Compositor,
 };
 
@@ -158,13 +159,21 @@ fn settle_then_reload(state: &mut Compositor) {
     }
 }
 
-/// Read the config, or the classic profile without a path.
+/// Read the config as the session starts, or the classic profile without a
+/// path: a refusal names the file, for the text console that shows it.
 pub(super) fn load(path: Option<&Path>) -> Result<Config, Error> {
+    read(path).map_err(|error| match path {
+        Some(path) => Error::Config(format!("{}: {error}", path.display())),
+        None => Error::Config(error.to_string()),
+    })
+}
+
+/// Read the config, or the classic profile without a path.
+fn read(path: Option<&Path>) -> Result<Config, perspicax_config::Error> {
     let Some(path) = path else {
         return Ok(Config::profile(perspicax_config::Profile::Classic, BUILT));
     };
     perspicax_config::load(path, BUILT)
-        .map_err(|error| Error::Config(format!("{}: {error}", path.display())))
 }
 
 /// Give the seat's keyboard the configured keymap and repeat. `numlock` sets
@@ -188,6 +197,7 @@ pub(super) fn apply_keyboard(state: &mut Compositor, numlock: Option<bool>) {
             layout = keymap.layout,
             "xkb could not compile that layout; the keyboard keeps its old one"
         );
+        state.tell_shell_refused(Refused::Keymap(keymap.layout));
         return;
     }
     if let Some(keyboard) = &state.keyboard {
@@ -233,15 +243,21 @@ pub(super) fn configure(device: &mut Device, pointer: &Pointer) {
 
 /// Re-read the config and apply whatever changed. A config that no longer
 /// parses is reported and the old one kept: a typo mid-session must not cost
-/// the person their bindings.
+/// the person their bindings. The log has the whole of why, and the shell is
+/// told it in a line, to show the person.
 pub(crate) fn reload(state: &mut Compositor) {
     let Running::Seat(session) = &mut state.backend else {
         return;
     };
-    let fresh = match load(session.config_path.as_deref()) {
+    let fresh = match read(session.config_path.as_deref()) {
         Ok(fresh) => fresh,
         Err(error) => {
-            tracing::error!(%error, "config not reloaded; keeping the one in use");
+            tracing::error!(
+                config = ?session.config_path,
+                %error,
+                "config not reloaded; keeping the one in use"
+            );
+            state.tell_shell_refused(Refused::Config(error.in_a_line()));
             return;
         }
     };

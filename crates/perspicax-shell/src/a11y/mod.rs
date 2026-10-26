@@ -2450,42 +2450,62 @@ mod mixers {
     }
 }
 
-#[cfg(feature = "audio")]
+#[cfg(any(feature = "menus", feature = "panel"))]
 pub(crate) use osds::osd;
 
-#[cfg(feature = "audio")]
+#[cfg(any(feature = "menus", feature = "panel"))]
 mod osds {
     use accesskit::{Live, Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate};
 
     use super::{ROOT, window};
-    use crate::layout::osd::Indicator;
+    use crate::layout::osd::Showing;
 
+    /// What it shows: the volume, and a notice, each a node of its own, so
+    /// that one coming in place of the other is read as new.
+    #[cfg(feature = "audio")]
     const STATUS: NodeId = NodeId(1);
+    const ALERT: NodeId = NodeId(2);
 
-    /// The volume shown on the screen: a window named `namespace`, holding
-    /// a `Status`, "Volume", whose value is how loud the output is and
-    /// which it is, "40%, Speakers" or "Muted, Speakers", read out politely
-    /// as it changes. With nothing shown, the window alone.
+    /// What is shown on the screen a moment: a window named `namespace`,
+    /// holding what it shows, if anything.
+    ///
+    /// The volume is a `Status`, "Volume", whose value is how loud the
+    /// output is and which it is, "40%, Speakers" or "Muted, Speakers",
+    /// read out politely as it changes. A notice is an `Alert` named with
+    /// the whole of it, its headline and why, read out at once: what is
+    /// read out of a live node is its name alone.
     pub(crate) fn osd(
         namespace: &str,
         size: Option<(u32, u32)>,
-        indicator: Option<&Indicator>,
+        showing: Option<&Showing>,
     ) -> TreeUpdate {
         let mut root = window(namespace, size);
         let mut nodes = Vec::new();
-        if let Some(indicator) = indicator {
-            let mut status = Node::new(Role::Status);
-            status.set_label("Volume");
-            let level = &indicator.level;
-            let loud = if level.muted {
-                "Muted".to_owned()
-            } else {
-                format!("{}%", level.percent)
+        if let Some(showing) = showing {
+            let (id, node) = match showing {
+                #[cfg(feature = "audio")]
+                Showing::Volume(indicator) => {
+                    let mut status = Node::new(Role::Status);
+                    status.set_label("Volume");
+                    let level = &indicator.level;
+                    let loud = if level.muted {
+                        "Muted".to_owned()
+                    } else {
+                        format!("{}%", level.percent)
+                    };
+                    status.set_value(format!("{loud}, {}", indicator.name));
+                    status.set_live(Live::Polite);
+                    (STATUS, status)
+                }
+                Showing::Notice(notice) => {
+                    let mut alert = Node::new(Role::Alert);
+                    alert.set_label(format!("{}. {}", notice.headline, notice.why));
+                    alert.set_live(Live::Assertive);
+                    (ALERT, alert)
+                }
             };
-            status.set_value(format!("{loud}, {}", indicator.name));
-            status.set_live(Live::Polite);
-            root.push_child(STATUS);
-            nodes.push((STATUS, status));
+            root.push_child(id);
+            nodes.push((id, node));
         }
         nodes.insert(0, (ROOT, root));
         TreeUpdate {
@@ -2499,27 +2519,35 @@ mod osds {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::model::sound::Level;
+        use crate::model::notice::Notice;
 
+        fn shown(showing: &Showing, id: NodeId) -> Node {
+            let tree = osd("perspicax-osd", Some((280, 64)), Some(showing));
+            assert_eq!(tree.nodes[0].1.children(), [id]);
+            let (_, node) = tree
+                .nodes
+                .iter()
+                .find(|(each, _)| *each == id)
+                .expect("what it shows")
+                .clone();
+            node
+        }
+
+        #[cfg(feature = "audio")]
         #[test]
         fn the_volume_shown_is_a_polite_status_of_how_loud_and_where() {
-            let shown = |percent, muted| {
+            use crate::{layout::osd::Indicator, model::sound::Level};
+
+            let status = |percent, muted| {
                 let indicator = Indicator {
                     name: "Speakers".to_owned(),
                     level: Level { percent, muted },
                 };
-                let tree = osd("perspicax-osd", Some((280, 64)), Some(&indicator));
-                let (_, status) = tree
-                    .nodes
-                    .iter()
-                    .find(|(id, _)| *id == STATUS)
-                    .expect("a status")
-                    .clone();
-                status
+                shown(&Showing::Volume(indicator), STATUS)
             };
-            let status = shown(40, false);
+            let loud = status(40, false);
             assert_eq!(
-                (status.role(), status.label(), status.value(), status.live()),
+                (loud.role(), loud.label(), loud.value(), loud.live()),
                 (
                     Role::Status,
                     Some("Volume"),
@@ -2527,8 +2555,27 @@ mod osds {
                     Some(Live::Polite)
                 )
             );
-            assert_eq!(shown(40, true).value(), Some("Muted, Speakers"));
-            assert_eq!(osd("perspicax-osd", None, None).nodes.len(), 1);
+            assert_eq!(status(40, true).value(), Some("Muted, Speakers"));
+        }
+
+        #[test]
+        fn a_notice_is_an_assertive_alert_named_with_the_whole_of_it() {
+            let alert = shown(
+                &Showing::Notice(Notice {
+                    headline: "Keyboard layout not applied".to_owned(),
+                    why: "xkb could not compile “nowhere”".to_owned(),
+                }),
+                ALERT,
+            );
+            assert_eq!(
+                (alert.role(), alert.label(), alert.live()),
+                (
+                    Role::Alert,
+                    Some("Keyboard layout not applied. xkb could not compile “nowhere”"),
+                    Some(Live::Assertive)
+                )
+            );
+            assert_eq!(osd("perspicax-osd", None, None).nodes.len(), 1, "nothing");
         }
     }
 }

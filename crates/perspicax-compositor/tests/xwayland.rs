@@ -36,7 +36,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::{Session, heard, menu_with_the_keyboard, until};
+use common::{Session, Told, heard, menu_with_the_keyboard, until};
 use perspicax_compositor::{
     ActError, Backend, Command, Config, Error, Facts, Host, Requests, Stop,
 };
@@ -45,6 +45,7 @@ use perspicax_index::{
 };
 use perspicax_node::{Origin, Rect, Visibility, X11Basis};
 use perspicax_policy::{Action, Button, Focus, FocusModel, Mods, Opacity};
+use perspicax_protocols::shell::v1::client::perspicax_shell_v1;
 use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::Proxy as _;
 use x11rb::{
@@ -1230,11 +1231,15 @@ fn an_x11_window_that_iconifies_itself_is_minimized_and_told_it_is_iconic() {
 /// #78: consent for X11 is Xwayland's, so the person's key does not grant an
 /// X11 window: every X client shares the one server and may read and drive
 /// the others, and granting one would grant them all. What the key asked is
-/// known to be done once the minimize after it is.
+/// known to be done once the minimize after it is. The shell is told why,
+/// to say so in words.
 #[test]
 #[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
 fn an_x11_window_is_not_granted_by_a_key() {
     let x11 = X11::start("x11-grant", Backend::headless((1280, 1024)).granting());
+    let (mut shell, mut queue, qh, globals) = x11.session.client();
+    shell.bind_shell(&globals, &qh);
+    queue.roundtrip(&mut shell).expect("bound");
     let window = x11.open("x11");
     eventually(Duration::from_secs(10), || {
         (x11.focus() == window).then_some(())
@@ -1250,6 +1255,15 @@ fn an_x11_window_is_not_granted_by_a_key() {
         &perspicax_index::Consent::granted(Vec::new()),
         "nothing granted"
     );
+    until(&mut queue, &mut shell, |shell| !shell.told.is_empty());
+    assert_eq!(
+        shell.told,
+        [Told::Refused(
+            Ok(perspicax_shell_v1::Refusal::GrantX11),
+            String::new()
+        )]
+    );
+    drop((shell, queue));
     x11.stop();
 }
 

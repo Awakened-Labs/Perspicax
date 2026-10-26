@@ -611,9 +611,11 @@ it never may (`never_granted`), and `deltas` says when that changes. On
 screen, each it may is marked out: a line round it, in front of its shadow,
 and its titlebar, where perspicax draws one, in the agent's colours
 (`[decorations.agent]`). Logo+A that grants nothing -- an X11 window, one
-nobody can say which process drew, or a program no agent is given -- draws
-the line round the window a moment in `refused-colour`, and the log says
-why. Headless, where every window is an agent's, nothing is marked.
+nobody can say which process drew, one whose process cannot be held, or a
+program no agent is given -- draws the line round the window a moment in
+`refused-colour`, and the shell says why in words
+([see Notices](#notices)), as the log does. Headless, where every window is
+an agent's, nothing is marked.
 
 **`screenshot` is the fallback, and says so.** Occlusion needs geometry,
 z-order, regions and damage, none of which need pixels, so nothing is drawn
@@ -1086,8 +1088,8 @@ Plasma's and Windows' habits:
   from the keyboard;
 - Logo+Shift+Left/Right moves a window between screens, Logo+Shift+R reloads;
 - Logo+A hands the focused window's program to an agent, or takes it back,
-  and a window it is refused for shows so a moment; Logo+Shift+A takes back
-  everything an agent was granted;
+  and a window it is refused for shows so a moment, the shell saying why;
+  Logo+Shift+A takes back everything an agent was granted;
 - a tap of Logo on its own asks the desktop shell for its start menu;
 - a titlebar drawn by the compositor for a client that asks for one (Qt, foot,
   GTK 3 without a headerbar, and X11 applications): drag it to move,
@@ -1232,7 +1234,8 @@ beside `"Logo+a"`, or `"Super"` beside `"Logo"` for the tap. And so is a
 chord no binding can take, Ctrl+Alt+Backspace or Ctrl+Alt+F1…F12.
 
 A file with a key refused is refused whole: the session carries on with the
-config it had, and says why only in its log. `perspicax config check` asks
+config it had, and says why in its log and, in a line, on the screen
+([see Notices](#notices)). `perspicax config check` asks
 first, in the words of both programs that read the file, each as it was
 built: perspicax itself, and the perspicax-shell the session would start,
 beside it or on `PATH`, asked with `perspicax-shell --check`.
@@ -1249,7 +1252,7 @@ session would look, it says a session there runs the classic profile, and
 exits 0. A shell it cannot find, or one too old to be asked, is said to be,
 and `[shell]` is checked as if the shell had every component. A keyboard
 layout xkb cannot make is not caught yet: the file is taken, and the
-keyboard keeps its old layout, with a line in the log (#215).
+keyboard keeps its old layout, which the log and the screen say (#215).
 
 ```toml
 profile = "minimal"            # or "classic"; minimal focuses under the pointer
@@ -1397,8 +1400,9 @@ their own windows: a taskbar's list of windows (`foreign-toplevel-list`, and
 `foreign-toplevel-management` to activate and close them), a pager
 (`workspace`), a screenshot tool (`screencopy`), a display tool
 (`output-management`), the desktop shell (`shell`), which is told when a
-key asks for a menu or a pie or changes the volume, and what is made of each
-window, and may end the session, or make a window sticky, keep it on top, roll
+key asks for a menu or a pie or changes the volume, what is made of each
+window, and why something the person asked for was refused, and may end
+the session, or make a window sticky, keep it on top, roll
 it up or send it to a workspace, and the settings app (`settings`), which hears the next chord pressed, to
 bind it. Listing windows and workspaces is open by default; reading pixels,
 moving monitors, speaking for the shell and hearing a chord are for the
@@ -1641,6 +1645,7 @@ them; none is on by default. The profiles turn on what the build has:
 | Keyboard layout | `panel` | before the tray, with two layouts or more | — | the panel's | a `Button` "Keyboard layout", the layout's name its value |
 | Tray | `tray` (with `panel`, `menus`) | before the mixer; resting on an icon, its program's name for it | — | the panel's; its menus as the root menu's; its tooltip as a task's | a `Group` "Tray" of a `Button` for each icon, named by its tooltip |
 | Mixer | `audio` (with `panel`, `menus`) | before the clock; the volume keys | the volume keys | the panel's; overlay, `perspicax-mixer-<output>`, while open; the volume shown, overlay, `perspicax-osd`, a moment | a `Group` "Sound" of a node for each piece; a `Dialog` "Sound"; a `Status` "Volume" |
+| Notices | `menus` or `panel` | why something asked for was refused | the same | overlay, `perspicax-osd`, five seconds | an `Alert`, its headline and why its name |
 | Clock | `panel` | the time, last | — | the panel's | a `Status` "Clock", the time its value |
 | Pies | `pie` (with `menus`, `panel`) | a key or button bound to `{ pie = "<name>" }` | the same | overlay, `perspicax-pie-<output>`, while open | a `Menu` named for the pie of a `MenuItem` for each slot, the one pointed at selected |
 
@@ -1868,7 +1873,8 @@ step = 5                       # percent a notch of the wheel or a volume key
                                # moves the volume, 1 to 25
 limit = 100                    # the loudest a notch or a key takes it, 1 to
                                # 150; one set louder elsewhere is left there
-osd = true                     # show the volume a moment when it changes
+osd = true                     # show the volume a moment when it changes;
+                               # false leaves notices shown
 ```
 
 The mixer has, for the output, a button that mutes it and a slider, and
@@ -1928,6 +1934,38 @@ the lock screen, where the shell is told nothing, they do nothing. With
 to one of the four is refused. A shell built without `audio` refuses
 `"mixer"` in `items` and the `[shell.mixer]` table, but for `osd = false`
 alone.
+
+### Notices
+
+When perspicax refuses something the person asked for, the shell says why,
+in words, in the box the volume shows in: a "no" sign in `alert`, a
+headline, and why under it, for five seconds, above the panel of the
+monitor the pointer is on, or above its foot with no panel. The box is as
+wide as its longer line needs, up to twice the volume's, and a line longer
+still is cut short; the log has the whole of it. The last to come is shown,
+a refusal or a change of volume, and a notice takes no clicks.
+
+| What was refused | Headline | Why |
+|---|---|---|
+| Logo+A on an X11 window | Not given to an agent | X11 windows share one server: granting one would grant them all |
+| Logo+A on a window nobody can say which program drew | Not given to an agent | Nobody knows which program drew this window |
+| Logo+A on a window whose program cannot be held | Not given to an agent | Its program can't be held, so its grant couldn't end with it |
+| Logo+A on a program `[agent] never` names | Not given to an agent | No agent is ever given ennius |
+| a save of the config perspicax refuses | Config not applied: the one in use is kept | why, in a line: `` `shell.mixer.step`: 99 is outside 1 to 25 percent ``, or a line and column then what is wrong there, for a file that is not TOML |
+| a save the shell cannot use, though perspicax took it | Shell settings not applied | why, in a line, the same way |
+| a keyboard layout xkb cannot make | Keyboard layout not applied | xkb could not compile “us,nowhere”; the keyboard keeps its old one |
+
+A notice holds only words of the person's own or the config's: the program
+as `[agent] never` writes it, the config's reason, the layout as written.
+Never a window's title or a program's name for itself, which their clients
+choose. perspicax tells the shell what kind of thing it refused, over
+`perspicax-shell-v1` from version 6, and the rest of the words are the
+shell's. Nothing is said while the screen is locked. An agent reads a
+notice as an `Alert`, read out at once, whose name is its headline and why.
+Any shell with `menus` or `panel` says them, `minimal` included, whatever
+`osd` says. With `[shell] enabled = false`, or a shell too old to be told,
+a refused Logo+A still draws its line round the window, and the rest is in
+the log alone.
 
 ### Pies
 
@@ -2063,7 +2101,7 @@ the first colour toward the second. The last column is the `perspicax` theme.
 | `lock-ink` | the lock screen's text | its ink | `#ffffff` |
 | `lock-ring` | the lock screen's ring, at rest: the brand's terracotta on any screen | — | `#c06a3c` |
 | `lock-accent` | the lock screen's ring as keys are typed, and while a password is checked | `accent` | `#3daee9` |
-| `alert` | a refusal: a wrong password, and a key taken back while typing one | — | `#da4453` |
+| `alert` | a refusal: a wrong password, a key taken back while typing one, and a notice's "no" sign | — | `#da4453` |
 | `title-close-hover` | a titlebar's close button under the pointer | `alert` | `#da4453` |
 | `splash` | the splash a session shows as it starts, behind the logo | `lock` | `#0c2440` |
 

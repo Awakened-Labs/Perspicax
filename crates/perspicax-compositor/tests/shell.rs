@@ -10,6 +10,10 @@
 //! for its monitor. Cut off from a compositor that runs on, it says it lost
 //! its connection, in the exit status perspicax starts it again on. Told its
 //! config changed, it repaints those surfaces rather than making new ones.
+//! Told perspicax refused a keymap, it says why on the `overlay` layer, in
+//! the middle above the foot of the screen, for a few seconds, and a second
+//! refusal takes the first's place; so it does of a save it cannot use
+//! itself.
 //! A workspace with a wallpaper of its own
 //! shows it while it is the one showing, on whichever monitor shows it.
 //! A right-click on the wallpaper, or the root
@@ -3218,8 +3222,8 @@ fn the_mixer_meters_what_plays_tests_an_output_and_stops_metering_once_closed() 
     shell.stop_with(session);
 }
 
-/// The volume shown on the screen, if it is: its surface and where it is.
-#[cfg(feature = "capture")]
+/// What is shown on the screen a moment, the volume or a notice, if
+/// anything is: its surface and where it is.
 fn osd(facts: &HostFacts) -> Option<(SurfaceId, Rect)> {
     facts
         .surfaces()
@@ -3233,6 +3237,102 @@ fn osd(facts: &HostFacts) -> Option<(SurfaceId, Rect)> {
             }
             _ => None,
         })
+}
+
+/// A keymap xkb cannot compile, as a save of the config asks for one.
+fn refused_keymap(layout: &str) -> Command {
+    Command::Keymap(Keymap {
+        layout: layout.to_owned(),
+        ..Keymap::default()
+    })
+}
+
+/// Whether `rect` stands in the middle of a monitor 1280 wide, its foot
+/// `above` the bottom of one 800 high.
+fn in_the_middle(rect: Rect, above: f64) -> bool {
+    ((rect.x0 + rect.x1) / 2.0 - 640.0).abs() <= 0.5 && rect.y1 == 800.0 - above
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn why_a_keymap_was_refused_is_shown_a_while_above_the_foot_of_the_screen() {
+    use std::time::{Duration, Instant};
+
+    let session = Session::start("shell-refused", Backend::headless((1280, 800)));
+    // A shell of menus alone, with no panel and no sound, says it too.
+    let shell = Shell::start(&session, "refused", "profile = \"minimal\"\n");
+    session.wait_for(|facts| desktops(facts).len() == 1);
+
+    session.command(refused_keymap("us,nowhere"));
+    let facts = session.wait_for(|facts| osd(facts).is_some());
+    let (_, rect) = osd(&facts).expect("waited for");
+    assert!(in_the_middle(rect, 48.0), "{rect:?}");
+    assert!(
+        rect.x1 - rect.x0 > 280.0,
+        "wider than the volume, for its words: {rect:?}"
+    );
+    assert_eq!(rect.y1 - rect.y0, 72.0, "two lines high: {rect:?}");
+
+    let shown = Instant::now();
+    let deadline = shown + Duration::from_secs(8);
+    while osd(&session.wait_for(|_| true)).is_some() {
+        assert!(Instant::now() < deadline, "never gone");
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        shown.elapsed() > Duration::from_secs(3),
+        "there long enough to read: {:?}",
+        shown.elapsed()
+    );
+
+    shell.stop_with(session);
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_refusal_while_one_is_shown_takes_its_place_at_its_own_width() {
+    let session = Session::start("shell-refused-again", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "refused-again", CLASSIC);
+    session.wait_for(|facts| panels(facts).len() == 1);
+
+    session.command(refused_keymap("us,nowhere"));
+    let facts = session.wait_for(|facts| osd(facts).is_some());
+    let (first, rect) = osd(&facts).expect("waited for");
+    assert!(
+        in_the_middle(rect, PANEL_HEIGHT + 48.0),
+        "above the panel: {rect:?}"
+    );
+    let wide = rect.x1 - rect.x0;
+
+    // A longer layout's words are wider: the same surface, sized again.
+    session.command(refused_keymap("us,nowhere,nor-anywhere-else-at-all"));
+    let facts = session.wait_for(|facts| osd(facts).is_some_and(|(_, now)| now.x1 - now.x0 > wide));
+    let (again, rect) = osd(&facts).expect("waited for");
+    assert_eq!(again, first, "in its place");
+    assert!(in_the_middle(rect, PANEL_HEIGHT + 48.0), "still: {rect:?}");
+
+    shell.stop_with(session);
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_save_the_shell_cannot_use_is_said_on_the_screen_and_the_desktop_kept() {
+    let session = Session::start("shell-refused-save", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "refused-save", "profile = \"minimal\"\n");
+    let facts = session.wait_for(|facts| desktops(facts).len() == 1);
+    let desktop = desktops(&facts);
+
+    // A step the mixer refuses: the whole save is refused, and why is said
+    // in a line, wider than the volume's box.
+    shell.rewrite("profile = \"minimal\"\n[shell.mixer]\nstep = 99\n");
+    session.command(Command::ReconfigureShell);
+    let facts = session.wait_for(|facts| osd(facts).is_some());
+    let (_, rect) = osd(&facts).expect("waited for");
+    assert!(in_the_middle(rect, 48.0), "{rect:?}");
+    assert!(rect.x1 - rect.x0 > 280.0, "as wide as its words: {rect:?}");
+    assert_eq!(desktops(&facts), desktop, "and the desktop kept");
+
+    shell.stop_with(session);
 }
 
 #[cfg(feature = "capture")]

@@ -22,7 +22,7 @@ mod kept;
 mod menu;
 #[cfg(feature = "audio")]
 mod mixer;
-#[cfg(feature = "audio")]
+#[cfg(any(feature = "menus", feature = "panel"))]
 mod osd;
 #[cfg(any(feature = "panel", feature = "wallpaper"))]
 mod pager;
@@ -181,7 +181,7 @@ pub(crate) fn run(
         audio: audio::Audio::new(sound, heard, kept::Keeper::load(state)),
         #[cfg(feature = "audio")]
         mixers: mixer::Mixers::new(actions.clone()),
-        #[cfg(feature = "audio")]
+        #[cfg(any(feature = "menus", feature = "panel"))]
         osd: osd::Osd::default(),
         #[cfg(any(feature = "menus", feature = "panel"))]
         seat: seat::Seat::new(&globals, &qh),
@@ -284,8 +284,9 @@ pub(crate) struct App {
     /// The mixer, opened from the panel.
     #[cfg(feature = "audio")]
     mixers: mixer::Mixers,
-    /// The volume shown on the screen when it changes.
-    #[cfg(feature = "audio")]
+    /// What is shown on the screen a moment: the volume when it changes,
+    /// and why something the person asked for was refused.
+    #[cfg(any(feature = "menus", feature = "panel"))]
     osd: osd::Osd,
     #[cfg(any(feature = "menus", feature = "panel"))]
     seat: seat::Seat,
@@ -369,8 +370,8 @@ impl App {
 
     /// The config file changed: read it again, and show what it says now on
     /// the surfaces already there. A file that can no longer be used is
-    /// reported, and the desktop stays as it is: a typo mid-session must not
-    /// take the wallpaper away.
+    /// reported, in the log and in a line on the screen, and the desktop
+    /// stays as it is: a typo mid-session must not take the wallpaper away.
     fn reconfigure(&mut self, qh: &QueueHandle<Self>) {
         let shell = match crate::read(self.config.as_deref()) {
             Ok(shell) => shell,
@@ -378,6 +379,10 @@ impl App {
                 tracing::warn!(
                     "the config changed and cannot be used: {error}; keeping what is shown"
                 );
+                #[cfg(any(feature = "menus", feature = "panel"))]
+                self.refused(&crate::model::notice::Refused::ShellConfig(
+                    error.in_a_line(),
+                ));
                 return;
             }
         };
