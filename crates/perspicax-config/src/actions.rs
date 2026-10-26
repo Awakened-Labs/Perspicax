@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use perspicax_policy::{Action, Direction, Towards, VolumeKey};
+use perspicax_policy::{Action, Direction, Never, Towards, VolumeKey};
 
 use crate::limits;
 
@@ -95,8 +95,13 @@ fn to_output(direction: Direction) -> Action {
 
 impl Spelled {
     /// The action these words name, `None` for `"none"`. `pies` are the pies
-    /// `[shell.pie.menus]` names, which a `{ pie = "..." }` must be one of.
-    pub(crate) fn read(self, pies: &BTreeSet<String>) -> Result<Option<Action>, String> {
+    /// `[shell.pie.menus]` names, which a `{ pie = "..." }` must be one of,
+    /// and `never` the programs an `agent = true` spawn may not start.
+    pub(crate) fn read(
+        self,
+        pies: &BTreeSet<String>,
+        never: &Never,
+    ) -> Result<Option<Action>, String> {
         Ok(Some(match self {
             Self::Spawn { command, .. } if command.is_empty() => {
                 return Err("`spawn` needs a program".to_owned());
@@ -104,7 +109,15 @@ impl Spelled {
             Self::Spawn { command, agent } if agent && crate::is_settings_app(&command[0]) => {
                 return Err(crate::no_agent_settings("drop `agent = true`"));
             }
-            Self::Spawn { command, agent } => Action::Spawn { command, agent },
+            Self::Spawn { command, agent } => {
+                if let Some(withheld) = never.naming(&command[0]).filter(|_| agent) {
+                    return Err(crate::never_an_agents(
+                        withheld,
+                        "drop `agent = true`, or take it out of the list",
+                    ));
+                }
+                Action::Spawn { command, agent }
+            }
             Self::Pie(pie) if pies.contains(&pie) => Action::Pie(pie),
             Self::Pie(pie) if pies.is_empty() => {
                 return Err(format!(
@@ -390,7 +403,7 @@ mod tests {
         for action in every_action() {
             let spelled =
                 spell_action(&action).unwrap_or_else(|| panic!("{action:?} has no spelling"));
-            let read = spelled.clone().read(&pies());
+            let read = spelled.clone().read(&pies(), &Never::FLOOR);
             assert_eq!(read, Ok(Some(action.clone())), "{action:?} as {spelled:?}");
         }
     }
@@ -454,7 +467,10 @@ mod tests {
 
     #[test]
     fn none_reads_as_no_action() {
-        assert_eq!(Spelled::Name("none".to_owned()).read(&pies()), Ok(None));
+        assert_eq!(
+            Spelled::Name("none".to_owned()).read(&pies(), &Never::FLOOR),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -462,7 +478,7 @@ mod tests {
         let names = action_names(6, 2);
         let mut read = Vec::new();
         for name in &names {
-            let action = Spelled::Name(name.clone()).read(&pies());
+            let action = Spelled::Name(name.clone()).read(&pies(), &Never::FLOOR);
             let Ok(Some(action)) = action else {
                 panic!("{name} reads as {action:?}");
             };
@@ -481,7 +497,7 @@ mod tests {
     #[test]
     fn the_unknown_action_message_names_every_action_in_the_table() {
         let error = Spelled::Name("explode".to_owned())
-            .read(&pies())
+            .read(&pies(), &Never::FLOOR)
             .unwrap_err();
         assert!(
             error.starts_with("`explode` is not an action; use close, "),

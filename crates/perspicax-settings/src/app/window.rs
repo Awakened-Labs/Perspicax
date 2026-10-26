@@ -14,7 +14,7 @@
 use std::{path::Path, time::Duration};
 
 use eframe::egui::{self, Ui};
-use perspicax_config::{AgentSocket, Built, Config};
+use perspicax_config::{Agent, Built, Config};
 use perspicax_settings::{
     Applied, Binding, Document, Edit, Grant, Reason, Refused, Registry, Rule, Section, Setting,
 };
@@ -72,7 +72,9 @@ pub(crate) struct App {
     /// Who may reach past their own windows, and what an agent may do, as
     /// the file stands: shown, never written.
     grants: Vec<Grant>,
-    socket: AgentSocket,
+    /// The `[agent]` table, for what is not a rule: its socket, and what
+    /// no agent is given.
+    agent: Agent,
     shown: Shown,
     /// What the last change did.
     notice: Option<Notice>,
@@ -138,7 +140,7 @@ impl App {
             outputs: outputs::Page::default(),
             countdown: None,
             grants: Vec::new(),
-            socket: AgentSocket::default(),
+            agent: Agent::default(),
             shown: Shown::Keys,
             notice: None,
             focused: true,
@@ -163,7 +165,7 @@ impl App {
         let config = parsed
             .unwrap_or_else(|| Config::profile(perspicax_config::Profile::Classic, EVERYTHING));
         self.grants = perspicax_settings::grants(text, &config);
-        self.socket = config.agent.socket.clone();
+        self.agent = config.agent.clone();
         let layouts = config.keyboard.layout.split(',').count();
         self.names = perspicax_config::action_names(
             config.workspaces.grid.len(),
@@ -394,7 +396,7 @@ impl App {
                 None
             }
             Shown::Protocols => {
-                if access::ui(ui, &self.grants, &self.socket) {
+                if access::ui(ui, &self.grants, &self.agent) {
                     open(self.document.path());
                 }
                 None

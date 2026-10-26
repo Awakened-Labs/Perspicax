@@ -5,7 +5,8 @@
 //! beside its profile's, and leaves changing them to an editor, so that
 //! nothing which drives the app can widen what the file allows.
 
-use perspicax_config::{AgentSocket, Config};
+use perspicax_config::{AgentSocket, Config, SETTINGS_APP};
+use perspicax_policy::Never;
 use perspicax_policy::{Protocol, Rule};
 
 use crate::edit::EVERYTHING;
@@ -81,6 +82,18 @@ pub fn rule_words(rule: &Rule) -> String {
     }
 }
 
+/// The programs no agent is ever given, in words: the person's list, then
+/// the settings app, which no list takes away.
+#[must_use]
+pub fn never_words(never: &Never) -> String {
+    never
+        .named()
+        .into_iter()
+        .chain([SETTINGS_APP])
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Where the session serves an agent inside it, in words.
 #[must_use]
 pub fn socket_words(socket: &AgentSocket) -> String {
@@ -100,6 +113,24 @@ mod tests {
     use perspicax_policy::Program;
 
     use super::*;
+
+    #[test]
+    fn what_no_agent_is_given_ends_with_the_settings_app() {
+        let never = |text: &str| {
+            never_words(
+                &perspicax_config::parse(text, EVERYTHING)
+                    .expect("a config")
+                    .agent
+                    .never,
+            )
+        };
+        assert_eq!(never(""), "ennius, perspicax-settings");
+        assert_eq!(never("[agent]\nnever = []"), "perspicax-settings");
+        assert_eq!(
+            never("[agent]\nnever = [\"ennius\", \"/opt/wallet/bin/wallet\"]"),
+            "ennius, /opt/wallet/bin/wallet, perspicax-settings"
+        );
+    }
 
     fn read(text: &str) -> Vec<Grant> {
         let config = perspicax_config::parse(text, EVERYTHING).expect("a config");

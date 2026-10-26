@@ -49,8 +49,8 @@ use std::{
 use perspicax_policy::{
     Access, Action, Animation, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction,
     Drag, Effect, Face, Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Hatch, Keysym,
-    Mods, MouseBindings, MouseChord, Opacity, Place, Program, Protocol, Remembering, Resistance,
-    Rule, Shadow, Shape, Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
+    Mods, MouseBindings, MouseChord, Never, Opacity, Place, Program, Protocol, Remembering,
+    Resistance, Rule, Shadow, Shape, Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
 };
 use serde::Deserialize;
 
@@ -134,6 +134,14 @@ pub struct Agent {
     /// Where the session serves the agent interface, for an agent inside it.
     /// Read once, before anything starts: a change waits for the next login.
     pub socket: AgentSocket,
+    /// The programs no agent is ever given, whatever grants them: those
+    /// that exist so the person can oversee an agent, which an agent driving
+    /// them would oversee itself. Each a bare name, matched wherever the
+    /// program is, or a whole path. ennius in both profiles, whose review
+    /// queue holds back the agent's own writes; `[]` gives none. The
+    /// settings app is never an agent's whatever this says (see
+    /// [`SETTINGS_APP`]), so it is not written here.
+    pub never: Never,
 }
 
 impl Default for Agent {
@@ -141,6 +149,7 @@ impl Default for Agent {
         Self {
             launch: Rule::Off,
             socket: AgentSocket::Unsaid,
+            never: Never::new(vec![Program::parse("ennius")]),
         }
     }
 }
@@ -733,6 +742,12 @@ fn no_agent_settings(remedy: &str) -> String {
     )
 }
 
+/// Why a program `[agent] never` names, as `program` there, may not be an
+/// agent's, and what to do instead.
+fn never_an_agents(program: &str, remedy: &str) -> String {
+    format!("`{program}` is in `[agent] never`, so no agent may be given it; {remedy}")
+}
+
 /// The `[protocols]` defaults, the same in both profiles: a profile is a
 /// window manager's habits, not a security posture. Listing windows and
 /// workspaces is open to any client, as every panel expects. Reading pixels,
@@ -1003,6 +1018,7 @@ struct Raw {
 struct RawAgent {
     launch: Option<RawRule>,
     socket: Option<RawSocket>,
+    never: Option<Vec<String>>,
 }
 
 /// `true`, `false`, or a path.
@@ -1015,6 +1031,32 @@ enum RawSocket {
 
 impl RawAgent {
     fn apply(self, mut agent: Agent) -> Result<Agent, Error> {
+        // Before `launch`, which may not name what this withholds.
+        if let Some(never) = self.never {
+            for (at, program) in never.iter().enumerate() {
+                if program.is_empty() {
+                    return Err(invalid(
+                        format!("agent.never[{at}]"),
+                        "an empty program name".to_owned(),
+                    ));
+                }
+                if program.contains('/') && !program.starts_with('/') {
+                    return Err(invalid(
+                        format!("agent.never[{at}]"),
+                        format!(
+                            "`{program}` is a path from nowhere in particular; write the whole \
+                             path, from /, or a bare name to match wherever it is"
+                        ),
+                    ));
+                }
+            }
+            agent.never = Never::new(
+                never
+                    .iter()
+                    .map(|program| Program::parse(program))
+                    .collect(),
+            );
+        }
         if let Some(launch) = self.launch {
             let rule = launch.rule("agent.launch")?;
             for (at, program) in rule.named().into_iter().enumerate() {
@@ -1031,6 +1073,12 @@ impl RawAgent {
                             "`{program}` is a path from nowhere in particular; write the whole \
                              path, from /, or a bare name for the session's PATH to find"
                         ),
+                    ));
+                }
+                if let Some(withheld) = agent.never.naming(program) {
+                    return Err(invalid(
+                        format!("agent.launch[{at}]"),
+                        never_an_agents(withheld, "take it out of one list or the other"),
                     ));
                 }
             }
@@ -1254,6 +1302,7 @@ struct RawAgentLook {
     unfocused: Option<String>,
     outline: Option<i32>,
     outline_colour: Option<String>,
+    refused_colour: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -1401,8 +1450,8 @@ impl RawMouse {
                         format!("is the same as `{first}`, already written; write it once"),
                     ));
                 }
-                let action =
-                    action_for(action, pies).map_err(|reason| invalid(key.clone(), reason))?;
+                let action = action_for(action, pies, &config.agent.never)
+                    .map_err(|reason| invalid(key.clone(), reason))?;
                 if action.is_some() && config.bindings.takes_drag(context, &chord) {
                     return Err(invalid(
                         key,
@@ -1626,6 +1675,12 @@ impl Raw {
             }
         }
 
+        // Before the bindings and `autostart`, which may not give an agent
+        // what `[agent] never` names.
+        if let Some(agent) = self.agent {
+            config.agent = agent.apply(config.agent)?;
+        }
+
         // The pies a binding may open, before the bindings are read and
         // `[shell]` after them.
         let pies = self
@@ -1649,8 +1704,8 @@ impl Raw {
                     format!("is the same as `{first}`, already written; write it once"),
                 ));
             }
-            let action =
-                action_for(action, &pies).map_err(|reason| invalid(key.clone(), reason))?;
+            let action = action_for(action, &pies, &config.agent.never)
+                .map_err(|reason| invalid(key.clone(), reason))?;
             if matches!(action, Some(Action::Volume(_))) && volume_written.is_none() {
                 volume_written = Some(key);
             }
@@ -1876,9 +1931,6 @@ impl Raw {
         if let Some(protocols) = self.protocols {
             config.protocols = protocols.apply(config.protocols, built)?;
         }
-        if let Some(agent) = self.agent {
-            config.agent = agent.apply(config.agent)?;
-        }
 
         // Whatever the shell was built with: see `shell`.
         if let Some(shell) = self.shell {
@@ -1921,6 +1973,14 @@ impl Raw {
                 format!("autostart[{settings}]"),
                 no_agent_settings("drop `agent = true`"),
             ));
+        }
+        for (at, start) in starts.iter().enumerate().filter(|(_, start)| start.agent) {
+            if let Some(withheld) = config.agent.never.naming(&start.command[0]) {
+                return Err(invalid(
+                    format!("autostart[{at}]"),
+                    never_an_agents(withheld, "drop `agent = true`, or take it out of the list"),
+                ));
+            }
         }
         config.autostart = starts;
         Ok(config)
@@ -2100,6 +2160,11 @@ impl RawDecorations {
                     "outline-colour",
                     agent.outline_colour,
                     &mut look.outline_colour,
+                ),
+                (
+                    "refused-colour",
+                    agent.refused_colour,
+                    &mut look.refused_colour,
                 ),
             ];
             for (key, text, colour) in written {
@@ -2601,8 +2666,12 @@ fn cycle(outputs: &[OutputRule]) -> Option<&str> {
 
 /// The action a binding's value names. `pies` are the pies
 /// `[shell.pie.menus]` names, which a `{ pie = "..." }` must be one of.
-fn action_for(action: RawAction, pies: &BTreeSet<String>) -> Result<Option<Action>, String> {
-    Spelled::from(action).read(pies)
+fn action_for(
+    action: RawAction,
+    pies: &BTreeSet<String>,
+    never: &Never,
+) -> Result<Option<Action>, String> {
+    Spelled::from(action).read(pies, never)
 }
 
 impl From<RawAction> for Spelled {
@@ -3591,6 +3660,66 @@ mod tests {
         assert!(persons.is_ok(), "the person's own: {persons:?}");
     }
 
+    /// `[agent] never` is read before the bindings, wherever the file
+    /// writes it, so a binding above it is held to it too.
+    #[test]
+    fn what_never_names_is_given_to_no_agent() {
+        let refused = |toml: &str| match parse(toml, SEAT) {
+            Err(Error::Invalid { key, reason }) => {
+                assert!(
+                    reason.contains("`ennius` is in `[agent] never`, so no agent may be given it"),
+                    "{reason}"
+                );
+                key
+            }
+            other => panic!("{toml}: {other:?}"),
+        };
+        assert_eq!(
+            refused("[keys]\n\"Logo+e\" = { spawn = [\"ennius\", \"gui\"], agent = true }"),
+            "keys.Logo+e"
+        );
+        assert_eq!(
+            refused(
+                "[mouse.desktop]\n\"Mouse8\" = { spawn = [\"/usr/local/bin/ennius\"], agent = true }"
+            ),
+            "mouse.desktop.Mouse8"
+        );
+        assert_eq!(
+            refused("autostart = [[\"foot\"], { spawn = [\"ennius\", \"gui\"], agent = true }]"),
+            "autostart[1]"
+        );
+        assert_eq!(
+            refused("[agent]\nlaunch = [\"foot\", \"ennius\"]"),
+            "agent.launch[1]"
+        );
+        match parse(
+            "[keys]\n\"Logo+w\" = { spawn = [\"wallet\"], agent = true }\n\
+             [agent]\nnever = [\"wallet\"]",
+            SEAT,
+        ) {
+            Err(Error::Invalid { key, reason }) => {
+                assert_eq!(key, "keys.Logo+w", "the list read before the keys above it");
+                assert!(
+                    reason.contains("`wallet` is in `[agent] never`"),
+                    "{reason}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let persons = parse(
+            "autostart = [[\"ennius\", \"gui\"]]\n[keys]\n\"Logo+e\" = { spawn = [\"ennius\", \"gui\"] }",
+            SEAT,
+        );
+        assert!(persons.is_ok(), "the person's own: {persons:?}");
+        let cleared = parse(
+            "[keys]\n\"Logo+e\" = { spawn = [\"ennius\", \"gui\"], agent = true }\n\
+             [agent]\nnever = []\nlaunch = [\"ennius\"]",
+            SEAT,
+        );
+        assert!(cleared.is_ok(), "the person took it off: {cleared:?}");
+    }
+
     #[test]
     fn xdg_autostart_is_on_in_both_profiles_and_can_be_turned_off() {
         for profile in [Profile::Classic, Profile::Minimal] {
@@ -4361,7 +4490,7 @@ mod tests {
         assert_eq!(look.outline, 3, "on by default, for the windows it marks");
         let config = parse(
             "[decorations.agent]\nfocused = \"#102030\"\noutline = 0\n\
-             outline-colour = \"#ff0000\"",
+             outline-colour = \"#ff0000\"\nrefused-colour = \"#ffaa00\"",
             SEAT,
         )
         .unwrap();
@@ -4370,6 +4499,7 @@ mod tests {
         assert_eq!(look.unfocused, AgentLook::default().unfocused);
         assert_eq!(look.outline, 0, "0 is none");
         assert_eq!(look.outline_colour, Colour::rgb(0xff, 0, 0));
+        assert_eq!(look.refused_colour, Colour::rgb(0xff, 0xaa, 0));
     }
 
     #[test]
@@ -4381,6 +4511,10 @@ mod tests {
             (
                 "outline-colour = \"#b37feb80\"",
                 "decorations.agent.outline-colour",
+            ),
+            (
+                "refused-colour = \"red\"",
+                "decorations.agent.refused-colour",
             ),
         ] {
             match parse(&format!("[decorations.agent]\n{text}"), SEAT).unwrap_err() {
@@ -5277,6 +5411,41 @@ mod tests {
     fn a_word_other_than_any_or_off_is_refused() {
         let error = parse("[protocols]\nworkspace = \"all\"", SEAT).unwrap_err();
         assert!(error.to_string().contains("`all` is not a rule"), "{error}");
+    }
+
+    #[test]
+    fn ennius_is_never_an_agents_in_both_profiles_until_the_person_says() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            assert_eq!(
+                Config::profile(profile, SEAT).agent.never.named(),
+                ["ennius"],
+                "{profile:?}"
+            );
+        }
+        let never = |toml: &str| parse(toml, SEAT).unwrap().agent.never;
+        assert!(never("[agent]\nnever = []").named().is_empty());
+        assert_eq!(
+            never("[agent]\nnever = [\"ennius\", \"/opt/wallet/bin/wallet\"]").named(),
+            ["ennius", "/opt/wallet/bin/wallet"]
+        );
+        assert_eq!(
+            never("[agent]\nnever = []").naming("/usr/bin/perspicax-settings"),
+            Some(SETTINGS_APP),
+            "the settings app, which no list takes away"
+        );
+        for (text, key) in [
+            ("never = [\"\"]", "agent.never[0]"),
+            ("never = [\"ennius\", \"bin/wallet\"]", "agent.never[1]"),
+        ] {
+            match parse(&format!("[agent]\n{text}"), SEAT).unwrap_err() {
+                Error::Invalid { key: at, .. } => assert_eq!(at, key, "{text}"),
+                other => panic!("{text}: {other}"),
+            }
+        }
+        assert!(
+            parse("[agent]\nnever = \"ennius\"", SEAT).is_err(),
+            "a list"
+        );
     }
 
     #[test]

@@ -49,7 +49,7 @@ use std::{
 
 use perspicax_config::{Spelled, Trigger};
 
-pub use crate::access::{Grant, grants, rule_words, socket_words};
+pub use crate::access::{Grant, grants, never_words, rule_words, socket_words};
 pub use crate::fields::{Field, Kind, Section, Setting, Source, sections, settings};
 pub use crate::judge::{Installed, Judge};
 pub use crate::keys::{Binding, Mark, bindings};

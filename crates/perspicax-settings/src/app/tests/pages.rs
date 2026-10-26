@@ -324,13 +324,15 @@ fn the_protocols_page_shows_each_rule_and_whose_it_is() {
     let scratch = Scratch::new("protocols");
     let (_, harness) = page(
         &scratch,
-        "[protocols]\nscreencopy = [\"/usr/bin/grim\"]\n\n[agent]\nsocket = false\n",
+        "[protocols]\nscreencopy = [\"/usr/bin/grim\"]\n\n[agent]\nsocket = false\n\
+         never = [\"ennius\", \"wallet\"]\n",
         "Protocols",
     );
     harness.get_by_label("/usr/bin/grim");
     harness.get_by_label("yours; the profile's is grim, wf-recorder, xdg-desktop-portal-wlr");
     harness.get_by_label("wlr-randr, kanshi, wdisplays, nwg-displays, perspicax-settings");
     harness.get_by_label("none, whatever `--mcp-socket` says");
+    harness.get_by_label("ennius, wallet, perspicax-settings");
     harness.get_by_label("none: not offered");
 }
 
