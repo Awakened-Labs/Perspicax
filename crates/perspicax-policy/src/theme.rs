@@ -188,7 +188,9 @@ roles! {
     /// The lock screen's ring as keys are typed, and while a password is
     /// checked.
     LockAccent = "lock-accent",
-    /// A refusal: a wrong password, and a key taken back while typing one.
+    /// A refusal: a wrong password, a key taken back while typing one, and
+    /// the "no" sign beside the words the shell shows when something the
+    /// person asked for was refused.
     Alert = "alert",
     /// A titlebar's close button under the pointer: what a press there
     /// does cannot be taken back.

@@ -36,7 +36,7 @@ use super::{App, kept::Keeper};
 use crate::{
     audio::{Ask, News, Running, Target},
     layout::{
-        osd::{self, Indicator},
+        osd::{self, Indicator, Showing},
         panel::{Part, Playing},
     },
     model::{
@@ -376,7 +376,7 @@ impl App {
         // The mixer, open, shows the change itself.
         let shown = self.audio.worth_showing(indicator);
         if let Some(indicator) = shown.filter(|_| self.mixers.open_on().is_none()) {
-            self.indicate(indicator);
+            self.indicate(Showing::Volume(indicator));
         }
     }
 

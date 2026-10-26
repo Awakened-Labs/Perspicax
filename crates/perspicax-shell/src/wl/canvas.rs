@@ -84,7 +84,7 @@ impl Canvas {
     }
 
     /// Have `layer` take no clicks at all: they go to what is under it.
-    #[cfg(feature = "panel")]
+    #[cfg(any(feature = "menus", feature = "panel"))]
     pub(super) fn take_no_clicks(&self, layer: &LayerSurface) {
         if let Ok(nowhere) = Region::new(&self.compositor) {
             layer
@@ -462,7 +462,7 @@ impl LayerShellHandler for App {
         self.pies.closed(layer);
         #[cfg(feature = "audio")]
         self.mixers.closed(layer);
-        #[cfg(feature = "audio")]
+        #[cfg(any(feature = "menus", feature = "panel"))]
         self.osd.closed(layer);
     }
 
@@ -494,7 +494,7 @@ impl LayerShellHandler for App {
         #[cfg(feature = "audio")]
         self.mixers
             .configure(&mut self.canvas, &mut self.kit, layer, &configure);
-        #[cfg(feature = "audio")]
+        #[cfg(any(feature = "menus", feature = "panel"))]
         self.osd
             .configure(&mut self.canvas, &mut self.kit, layer, &configure);
     }
@@ -548,16 +548,16 @@ impl CompositorHandler for App {
         surface: &wl_surface::WlSurface,
         output: &wl_output::WlOutput,
     ) {
-        // The volume shown is the one surface not put on a monitor of its
-        // choosing, so the one whose scale is learned here.
-        #[cfg(feature = "audio")]
+        // What is shown a moment is the one surface not put on a monitor of
+        // its choosing, so the one whose scale is learned here.
+        #[cfg(any(feature = "menus", feature = "panel"))]
         self.osd.entered(
             &mut self.canvas,
             &mut self.kit,
             &self.outputs,
             (surface, output),
         );
-        #[cfg(not(feature = "audio"))]
+        #[cfg(not(any(feature = "menus", feature = "panel")))]
         let _ = (surface, output);
     }
 
