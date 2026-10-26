@@ -464,7 +464,8 @@ fn probe_command(program: &Path) -> Vec<String> {
 }
 
 /// The person's key on ennius's window grants nothing, and the window is
-/// refused to the agent and not marked.
+/// refused to the agent. It is not marked: the line round it is the
+/// refusal shown a moment, and then there is none.
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_key_does_not_grant_a_program_never_given() {
@@ -483,7 +484,14 @@ fn a_key_does_not_grant_a_program_never_given() {
     assert!(!pids.contains(&probe.id()));
     let window = titled(&facts, "probe").expect("the probe's window");
     assert_eq!(facts.consent().check(&window.origin), never_granted());
-    assert!(!outlined(&facts, "probe"));
+    let facts = session.wait_for(|facts| {
+        titled(facts, "probe").is_some_and(|window| window.mapped) && !outlined(facts, "probe")
+    });
+    assert_eq!(
+        granted(&facts).map(<[u32]>::len),
+        Some(1),
+        "still sleep's alone"
+    );
 
     probe.kill().expect("the probe is ours to kill");
     probe.wait().expect("and ours to reap");

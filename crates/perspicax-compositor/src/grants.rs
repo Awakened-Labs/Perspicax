@@ -36,15 +36,17 @@
 //! list too, so a way to grant that forgot to ask, or a granted process that
 //! has since become one of them, still gives the agent nothing to act on.
 
-use std::{ffi::OsStr, os::fd::OwnedFd, path::Path};
+use std::{ffi::OsStr, os::fd::OwnedFd, path::Path, time::Duration};
 
 use perspicax_index::Consent;
-use perspicax_node::Origin;
+use perspicax_node::{Origin, SurfaceId};
 use perspicax_policy::{Never, Rule};
 use smithay::{
     reexports::{
         calloop::{
-            self, Interest, LoopHandle, Mode, PostAction, RegistrationToken, generic::Generic,
+            self, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
+            generic::Generic,
+            timer::{TimeoutAction, Timer},
         },
         wayland_server::Resource as _,
     },
@@ -58,6 +60,10 @@ use crate::{
     shell::id_of,
     state::{ClientState, Compositor},
 };
+
+/// How long a window shows the person that the grant they asked for on it
+/// was refused.
+const REFUSED_FOR: Duration = Duration::from_millis(800);
 
 /// Why a process was granted: for the log, which is where a person who
 /// wonders why an agent could act on something will look.
@@ -107,6 +113,9 @@ pub(crate) struct Grants {
     /// What `held` adds up to, kept beside it so the gates that ask on
     /// every snapshot and every picture ask without building it.
     consent: Consent,
+    /// The window showing the person that a grant they asked for was
+    /// refused, and the timer that ends it.
+    refused: Option<(SurfaceId, RegistrationToken)>,
 }
 
 impl Grants {
@@ -118,6 +127,7 @@ impl Grants {
             held: Vec::new(),
             never,
             consent: Consent::Everyone,
+            refused: None,
         };
         grants.recount();
         grants
@@ -430,7 +440,8 @@ impl Compositor {
     /// so granting one X11 window would grant all of them. So is a program
     /// no agent is ever given. A grant already held is taken back whatever
     /// the program, so the person can always take one back. Each refusal is
-    /// logged, saying why.
+    /// logged, saying why, and shown on the window (see
+    /// [`Self::show_refused`]).
     pub(crate) fn toggle_agent(&mut self, window: &Framed) {
         let Some(id) = id_of(window) else {
             return;
@@ -453,10 +464,12 @@ impl Compositor {
                     "not granted: consent for X11 is Xwayland's, and granting one X11 window \
                      would grant every one"
                 );
+                self.show_refused(id);
                 return;
             }
             Origin::Unattributed => {
                 tracing::warn!(surface = ?id, "not granted: nobody knows which process drew it");
+                self.show_refused(id);
                 return;
             }
         };
@@ -471,16 +484,57 @@ impl Compositor {
                 program,
                 "not granted: no agent is ever given it, whatever grants it"
             );
+            self.show_refused(id);
             return;
         }
         match self.pidfd_of(window) {
             Some(pidfd) => self.grant_watched(pid, pidfd, Why::Key, None),
-            None => tracing::warn!(
-                surface = ?id,
-                pid,
-                "not granted: its process could not be held, so its grant could not end with it"
-            ),
+            None => {
+                tracing::warn!(
+                    surface = ?id,
+                    pid,
+                    "not granted: its process could not be held, so its grant could not end \
+                     with it"
+                );
+                self.show_refused(id);
+            }
         }
+    }
+
+    /// Show the person that the grant they asked for on the window `id` was
+    /// refused: the line round it drawn for [`REFUSED_FOR`] in
+    /// `[decorations.agent] refused-colour`. A key that granted nothing
+    /// would otherwise change nothing they can see. The log says why.
+    fn show_refused(&mut self, id: SurfaceId) {
+        if let Some((_, showing)) = self.grants.refused.take() {
+            self.loop_handle.remove(showing);
+        }
+        let armed =
+            self.loop_handle
+                .insert_source(Timer::from_duration(REFUSED_FOR), |_, (), state| {
+                    state.grants.refused = None;
+                    state.publish_facts();
+                    state.backend.redraw();
+                    TimeoutAction::Drop
+                });
+        match armed {
+            Ok(token) => self.grants.refused = Some((id, token)),
+            Err(error) => {
+                tracing::warn!(%error, "a refused grant is not shown");
+                return;
+            }
+        }
+        // The line is part of what the window covers, as every line is.
+        self.publish_facts();
+        self.backend.redraw();
+    }
+
+    /// Whether `window` is showing the person that a grant was refused.
+    pub(crate) fn shows_refused(&self, window: &Framed) -> bool {
+        self.grants
+            .refused
+            .as_ref()
+            .is_some_and(|(id, _)| id_of(window) == Some(*id))
     }
 
     /// A pidfd of its own on the process whose Wayland client drew `window`,

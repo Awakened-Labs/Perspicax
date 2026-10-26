@@ -25,9 +25,9 @@ mod common;
 
 use common::{Desk, Session, WINDOW, advertised, around, copy_all, rgba, until};
 use perspicax_compositor::{Backend, Host, Virtual};
-use perspicax_index::{Action as Verb, HostFacts};
+use perspicax_index::{Action as Verb, Consent, HostFacts};
 use perspicax_node::Rect;
-use perspicax_policy::{Access, Protocol, Rule, Shape};
+use perspicax_policy::{Access, Action, Never, Program, Protocol, Rule, Shape};
 use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::{EventQueue, QueueHandle, globals::GlobalList};
 
@@ -443,5 +443,70 @@ fn a_frame_waiting_for_damage_with_the_pointer_is_copied_when_the_pointer_moves(
         "the pointer moving changes nothing in a picture without it"
     );
 
+    session.stop((desk, queue));
+}
+
+/// `[decorations.agent] refused-colour`, by default.
+const REFUSED: u32 = 0xffe5_484d;
+
+/// Logo+A that grants nothing shows the person so: the line round the window
+/// a moment in the refused colour, then none. Seen as a screenshot tool sees
+/// the monitor, which is the person's view: a picture the agent asks for
+/// greys the window, which isn't the agent's to see. The program here is
+/// one no agent is given -- this binary, by its own name.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_grant_refused_is_shown_round_the_window_a_moment() {
+    let exe = std::env::current_exe().expect("this test's binary");
+    let me = exe.file_name().expect("a name").to_string_lossy();
+    let session = Session::start(
+        "screencopy-refused",
+        Backend::headless((800, 600))
+            .granting()
+            .withholding(Never::new(vec![Program::parse(&me)])),
+    );
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.open_coloured(&qh, "blue", "blue", BLUE);
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    let facts = session.wait_for(|facts| facts.surfaces().iter().any(|s| s.mapped));
+    let window = area(&facts);
+    desk.bind_screencopy(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| !desk.outputs_empty());
+    let edge = (
+        window.x1 as usize + 1,
+        ((window.y0 + window.y1) / 2.0) as usize,
+    );
+
+    session.perform(Action::ToggleAgent);
+    let facts = session.wait_for(|facts| facts.surfaces().iter().any(|s| !s.frame.is_empty()));
+    assert_eq!(
+        facts.consent(),
+        &Consent::Granted {
+            pids: Vec::new(),
+            never: Never::new(vec![Program::parse(&me)]),
+        },
+        "nothing granted"
+    );
+    let shown = desk.grab(&qh, None, false);
+    copy_all(&mut desk, &mut queue, &[shown]);
+    assert_eq!(
+        around(&mut desk, shown, edge, 0),
+        [rgba(REFUSED)],
+        "the line, just past the window's edge"
+    );
+
+    session.wait_for(|facts| {
+        facts
+            .surfaces()
+            .iter()
+            .any(|s| s.mapped && s.frame.is_empty())
+    });
+    let gone = desk.grab(&qh, None, false);
+    copy_all(&mut desk, &mut queue, &[gone]);
+    assert_ne!(
+        around(&mut desk, gone, edge, 0),
+        [rgba(REFUSED)],
+        "gone a moment later"
+    );
     session.stop((desk, queue));
 }
