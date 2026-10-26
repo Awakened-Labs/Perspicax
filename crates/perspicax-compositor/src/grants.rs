@@ -131,7 +131,7 @@ impl Grants {
 
     fn recount(&mut self) {
         self.consent = if self.by_grant {
-            Consent::Granted(self.held.iter().map(|held| held.pid).collect())
+            Consent::granted(self.held.iter().map(|held| held.pid).collect())
         } else {
             Consent::Everyone
         };
@@ -446,7 +446,7 @@ mod tests {
     #[test]
     fn grants_by_grant_consent_to_what_they_hold_and_nothing_else() {
         let mut grants = Grants::new(true);
-        assert_eq!(grants.consent(), &Consent::Granted(Vec::new()));
+        assert_eq!(grants.consent(), &Consent::granted(Vec::new()));
         grants.held.push(Held {
             pid: 7,
             why: Why::Spawn,

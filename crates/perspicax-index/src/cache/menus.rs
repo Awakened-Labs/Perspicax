@@ -802,7 +802,7 @@ mod tests {
     fn a_menu_opening_is_not_announced_as_a_grant() {
         let opened = Instant::now();
         let (mut index, facts) = gtk4(opened);
-        let granted = |facts: HostFacts| facts.with_consent(Consent::Granted(vec![PID]));
+        let granted = |facts: HostFacts| facts.with_consent(Consent::granted(vec![PID]));
         index.judge(&granted(desk([window()])));
         index.take_deltas();
         index.judge(&granted(facts));
@@ -944,7 +944,7 @@ mod tests {
     fn a_popup_of_nothing_opening_is_not_announced_as_a_grant() {
         let opened = Instant::now();
         let (mut index, popover) = gtk4_of_nothing(opened);
-        let granted = |facts: HostFacts| facts.with_consent(Consent::Granted(vec![PID]));
+        let granted = |facts: HostFacts| facts.with_consent(Consent::granted(vec![PID]));
         index.judge(&granted(desk([window()])));
         index.take_deltas();
         index.judge(&granted(desk([window(), popover])));

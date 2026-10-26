@@ -561,7 +561,7 @@ impl Index {
     /// from, so a desk that consents to everyone does not announce a grant
     /// for every window that maps.
     fn note_consent(&mut self, facts: &HostFacts) {
-        let by_grant = matches!(self.consent, Consent::Granted(_));
+        let by_grant = matches!(self.consent, Consent::Granted { .. });
         let mut permitted = HashMap::with_capacity(facts.surfaces().len());
         // A menu is its window's to grant: announcing each one that opens
         // would tell an agent of a grant every time a person hovered a
@@ -685,6 +685,7 @@ impl Index {
     /// [`check_actable`] says about the node itself -- its origin, the
     /// compositor's visibility verdict, and [`Refusal::NotShowing`] when its
     /// application says it is not shown -- and last
+    /// [`Refusal::NeverGranted`] for a program no agent is ever given, or
     /// [`Refusal::NoCapability`] for an application the host's [`Consent`]
     /// does not cover. Consent comes last so a refusal names the nearer
     /// obstacle: a covered button is reported as covered, whoever drew it.
@@ -697,11 +698,7 @@ impl Index {
             return Err(Refusal::MenuUnplaced { popup: *popup });
         }
         check_actable(node)?;
-        if !self.consent.permits(&node.origin) {
-            return Err(Refusal::NoCapability {
-                origin: Box::new(node.origin.clone()),
-            });
-        }
+        self.consent.check(&node.origin)?;
         Ok(node)
     }
 }
@@ -1264,11 +1261,11 @@ mod tests {
     #[test]
     fn a_window_whose_consent_changes_is_announced_once_each_way() {
         let mut index = Index::new();
-        index.judge(&one_window(Consent::Granted(Vec::new())));
+        index.judge(&one_window(Consent::granted(Vec::new())));
         assert!(index.take_deltas().is_empty(), "not granted, and never was");
 
-        index.judge(&one_window(Consent::Granted(vec![9182])));
-        index.judge(&one_window(Consent::Granted(vec![9182])));
+        index.judge(&one_window(Consent::granted(vec![9182])));
+        index.judge(&one_window(Consent::granted(vec![9182])));
         assert_eq!(
             index.take_deltas(),
             vec![Delta::Granted {
@@ -1277,8 +1274,8 @@ mod tests {
             "once, however often it is judged"
         );
 
-        index.judge(&one_window(Consent::Granted(Vec::new())));
-        index.judge(&one_window(Consent::Granted(Vec::new())));
+        index.judge(&one_window(Consent::granted(Vec::new())));
+        index.judge(&one_window(Consent::granted(Vec::new())));
         assert_eq!(
             index.take_deltas(),
             vec![Delta::Revoked {
@@ -1297,8 +1294,8 @@ mod tests {
     #[test]
     fn a_new_window_under_a_grant_is_announced_granted() {
         let mut index = Index::new();
-        index.judge(&HostFacts::bottom_to_top([], 0).with_consent(Consent::Granted(vec![9182])));
-        index.judge(&one_window(Consent::Granted(vec![9182])));
+        index.judge(&HostFacts::bottom_to_top([], 0).with_consent(Consent::granted(vec![9182])));
+        index.judge(&one_window(Consent::granted(vec![9182])));
         assert_eq!(
             index.take_deltas(),
             vec![Delta::Granted {
@@ -1323,13 +1320,13 @@ mod tests {
     #[test]
     fn consent_to_spawned_processes_covers_those_pids_and_no_others() {
         let mut index = joined();
-        index.judge(&desktop(None).with_consent(Consent::Granted(vec![9182])));
+        index.judge(&desktop(None).with_consent(Consent::granted(vec![9182])));
         assert!(
             index.actable(NodeId(2)).is_ok(),
             "9182 is the one we spawned"
         );
 
-        index.judge(&desktop(None).with_consent(Consent::Granted(vec![1])));
+        index.judge(&desktop(None).with_consent(Consent::granted(vec![1])));
         assert!(matches!(
             index.actable(NodeId(2)),
             Err(Refusal::NoCapability { .. })

@@ -297,11 +297,11 @@ fn a_settings_app_started_with_spawn_is_still_refused_by_act() {
     assert_eq!(facts.consent(), &Consent::Everyone);
 
     let probe = titled(&facts, "probe").expect("the settings app's window");
-    assert!(
-        matches!(
-            check_window(&facts, probe.id, &WindowVerb::Close),
-            Err(Refusal::NoCapability { .. })
-        ),
+    assert_eq!(
+        check_window(&facts, probe.id, &WindowVerb::Close).err(),
+        Some(Refusal::NeverGranted {
+            program: "perspicax-settings".to_owned()
+        }),
         "{:?}",
         probe.origin
     );

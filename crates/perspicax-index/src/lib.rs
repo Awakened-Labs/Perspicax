@@ -3,7 +3,8 @@
 //! Everything above this crate (the MCP server) and everything below it (an
 //! accessibility bridge, a compositor) is replaceable. This is not, so it is
 //! the crate that must not acquire opinions about transport. It imports
-//! `perspicax-node` and nothing else.
+//! `perspicax-node`, and `perspicax-policy` for which programs no agent is
+//! ever given, and nothing else.
 //!
 //! Two traits describe the replaceable halves:
 //!
@@ -43,9 +44,10 @@ pub mod shot;
 
 use core::future::Future;
 
-use perspicax_node::{
-    Node, NodeId, ObservedNode, Origin, ProcessOrigin, Rect, SurfaceId, Visibility,
-};
+use perspicax_node::{Node, NodeId, ObservedNode, Origin, Rect, SurfaceId, Visibility};
+/// What [`Consent::Granted`]'s list of programs no agent is given is
+/// written in.
+pub use perspicax_policy::{Never, Program};
 
 pub use crate::{
     cache::{Delta, Index},
@@ -142,6 +144,13 @@ pub enum Refusal {
     Stale { frames: u32 },
     /// The agent holds no capability for this node's origin.
     NoCapability { origin: Box<Origin> },
+    /// The node's program is one no agent is ever given, whatever was
+    /// granted: `program`, as the person's `[agent] never` writes it, or
+    /// perspicax's settings app, which edits the file that holds an agent
+    /// back. It exists so the person can oversee an agent, and an agent
+    /// acting on it would oversee itself. It is permanent: no grant changes
+    /// it, so asking the person for one is no use. It is theirs to act on.
+    NeverGranted { program: String },
     /// The selector matched more than one node. Carries the count so the agent
     /// can decide whether to narrow it or enumerate.
     AmbiguousSelector { matches: usize },
@@ -234,6 +243,11 @@ impl core::fmt::Display for Refusal {
             }
             Self::Stale { frames } => write!(f, "node is stale by {frames} frame(s) of damage"),
             Self::NoCapability { origin } => write!(f, "no capability for origin {origin:?}"),
+            Self::NeverGranted { program } => write!(
+                f,
+                "`{program}` is never an agent's, whatever is granted: \
+                 the person keeps it to act on themselves"
+            ),
             Self::AmbiguousSelector { matches } => write!(f, "selector matched {matches} nodes"),
             Self::NotFound => write!(f, "selector matched no nodes"),
             Self::NotAWindow => write!(
@@ -282,6 +296,15 @@ impl core::error::Error for Refusal {}
 /// what an agent launches as their list admits, with what that launch
 /// starts while it runs.
 ///
+/// Some programs are never an agent's, whatever grants them ([`Never`]):
+/// those that exist so the person can oversee an agent, which an agent
+/// driving them would oversee itself. perspicax's settings app is one under
+/// every policy, and on a seat the person's `[agent] never` names the rest,
+/// ennius by default. The host refuses to grant them, and this refuses them
+/// again whatever it was given, so a way to grant that forgets to ask, or a
+/// granted process that becomes one of them, still yields nothing an agent
+/// may act on.
+///
 /// The default is [`Consent::Nobody`], so a host that forgets to publish
 /// consent produces no actable node. This is the same fail-closed rule the
 /// visibility gate follows.
@@ -296,54 +319,95 @@ pub enum Consent {
     /// process has not exited, since the kernel reissues the number after.
     /// A process a granted one starts is *not* included by this rule, and
     /// the host lists it only where it has decided to.
-    Granted(Vec<u32>),
+    ///
+    /// None of them that runs a program `never` names, whatever the pid.
+    Granted { pids: Vec<u32>, never: Never },
     /// Every attributed application.
     Everyone,
 }
 
+/// What is never an agent's where consent is not by grant: the settings app
+/// alone.
+static FLOOR: Never = Never::FLOOR;
+
 impl Consent {
-    /// Whether an agent may act on something drawn by `origin`. Never for an
-    /// unattributed origin, whatever the policy: a policy about processes
-    /// cannot say yes to a process nobody has identified.
+    /// Consent to the processes `pids`, withholding nothing but the settings
+    /// app.
+    #[must_use]
+    pub fn granted(pids: Vec<u32>) -> Self {
+        Self::Granted {
+            pids,
+            never: Never::FLOOR,
+        }
+    }
+
+    /// Whether an agent may act on something drawn by `origin`: whether
+    /// [`Consent::check`] lets it.
+    #[must_use]
+    pub fn permits(&self, origin: &Origin) -> bool {
+        self.check(origin).is_ok()
+    }
+
+    /// Why an agent may not act on something drawn by `origin`, if it may
+    /// not.
     ///
-    /// Never for perspicax's settings app either, whatever was granted or
-    /// started for an agent. It edits the session's config, which is what
-    /// says what an agent may do: an agent driving it could grant itself
-    /// anything. Known by its executable's name, which anything can take, so
-    /// this keeps an agent off the real one rather than proving a program
-    /// is not it.
+    /// Never for an unattributed origin, whatever the policy: a policy about
+    /// processes cannot say yes to a process nobody has identified.
+    ///
+    /// Never for a program no agent is given, whatever was granted or
+    /// started for an agent, and it is named: the settings app under every
+    /// policy, and what `never` names where consent is by grant. Known by its
+    /// executable, which anything can be called, so this keeps an agent off
+    /// the real one rather than proving a program is not it.
     ///
     /// An X11 origin is judged by its server, never by its client: every X
     /// client shares one Xwayland, and X11 lets any of them read and inject
     /// into the others, so consenting to one X client is consenting to all of
     /// them. The Xwayland perspicax starts for a person is never granted,
     /// so on a seat X11 applications are refused unless consent is everyone.
-    #[must_use]
-    pub fn permits(&self, origin: &Origin) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NeverGranted`] naming the program, or
+    /// [`Refusal::NoCapability`] for anything else not consented to.
+    pub fn check(&self, origin: &Origin) -> Result<(), Refusal> {
         let pid = match origin {
-            Origin::Unattributed => return false,
-            Origin::Process(process) if is_settings_app(process) => return false,
-            Origin::Process(process) => process.pid,
-            Origin::X11(x11) => x11.server,
+            Origin::Unattributed => None,
+            Origin::Process(process) => {
+                let withheld = process
+                    .exe
+                    .as_deref()
+                    .and_then(|exe| self.never().naming(exe));
+                if let Some(program) = withheld {
+                    return Err(Refusal::NeverGranted {
+                        program: program.to_owned(),
+                    });
+                }
+                Some(process.pid)
+            }
+            Origin::X11(x11) => Some(x11.server),
         };
-        match self {
+        let consented = pid.is_some_and(|pid| match self {
             Self::Nobody => false,
-            Self::Granted(pids) => pids.contains(&pid),
+            Self::Granted { pids, .. } => pids.contains(&pid),
             Self::Everyone => true,
+        });
+        if consented {
+            Ok(())
+        } else {
+            Err(Refusal::NoCapability {
+                origin: Box::new(origin.clone()),
+            })
         }
     }
-}
 
-/// The settings app's executable, as `perspicax-config` names it.
-const SETTINGS_APP: &str = "perspicax-settings";
-
-/// Whether `process` runs the settings app, from wherever, and even once its
-/// file was replaced by an upgrade (`/proc` then says ` (deleted)`).
-fn is_settings_app(process: &ProcessOrigin) -> bool {
-    process.exe.as_deref().is_some_and(|exe| {
-        let exe = exe.strip_suffix(" (deleted)").unwrap_or(exe);
-        exe.rsplit('/').next() == Some(SETTINGS_APP)
-    })
+    /// The programs no agent is given under this policy.
+    fn never(&self) -> &Never {
+        match self {
+            Self::Granted { never, .. } => never,
+            Self::Nobody | Self::Everyone => &FLOOR,
+        }
+    }
 }
 
 /// The gate. Every act path goes through here.
@@ -442,10 +506,7 @@ pub fn check_readable(facts: &HostFacts, surface: SurfaceId) -> Result<&SurfaceF
     }
     match &window.origin {
         Origin::Unattributed => Err(Refusal::Unattributed),
-        origin if facts.consent().permits(origin) => Ok(window),
-        origin => Err(Refusal::NoCapability {
-            origin: Box::new(origin.clone()),
-        }),
+        origin => facts.consent().check(origin).map(|()| window),
     }
 }
 
@@ -669,7 +730,7 @@ mod tests {
     };
 
     use super::*;
-    use perspicax_node::{Rect, Role};
+    use perspicax_node::{ProcessOrigin, Rect, Role};
 
     fn attributed() -> Origin {
         Origin::Process(Box::new(ProcessOrigin {
@@ -900,7 +961,7 @@ mod tests {
     fn no_consent_policy_permits_an_unattributed_origin() {
         for consent in [
             Consent::Nobody,
-            Consent::Granted(vec![0]),
+            Consent::granted(vec![0]),
             Consent::Everyone,
         ] {
             assert!(!consent.permits(&Origin::Unattributed), "{consent:?}");
@@ -920,37 +981,92 @@ mod tests {
             basis: perspicax_node::X11Basis::XRes,
         }));
         assert!(
-            !Consent::Granted(vec![900]).permits(&x11),
+            !Consent::granted(vec![900]).permits(&x11),
             "the client is not the unit"
         );
-        assert!(Consent::Granted(vec![700]).permits(&x11));
+        assert!(Consent::granted(vec![700]).permits(&x11));
         assert!(Consent::Everyone.permits(&x11));
+    }
+
+    fn running(pid: u32, exe: &str) -> Origin {
+        Origin::Process(Box::new(ProcessOrigin {
+            pid,
+            exe: Some(exe.to_owned()),
+            cgroup: None,
+            sandbox: None,
+        }))
     }
 
     #[test]
     fn the_settings_app_is_never_consented_even_when_granted() {
-        let running = |exe: &str| {
-            Origin::Process(Box::new(ProcessOrigin {
-                pid: 42,
-                exe: Some(exe.to_owned()),
-                cgroup: None,
-                sandbox: None,
-            }))
-        };
         for exe in [
             "/usr/bin/perspicax-settings",
             "/home/me/.cargo/bin/perspicax-settings (deleted)",
             "perspicax-settings",
         ] {
-            for consent in [Consent::Granted(vec![42]), Consent::Everyone] {
-                assert!(!consent.permits(&running(exe)), "{exe} under {consent:?}");
+            for consent in [Consent::granted(vec![42]), Consent::Everyone] {
+                assert_eq!(
+                    consent.check(&running(42, exe)),
+                    Err(Refusal::NeverGranted {
+                        program: "perspicax-settings".to_owned()
+                    }),
+                    "{exe} under {consent:?}"
+                );
             }
         }
         assert!(
-            Consent::Granted(vec![42]).permits(&running("/usr/bin/perspicax-settings-viewer")),
+            Consent::granted(vec![42]).permits(&running(42, "/usr/bin/perspicax-settings-viewer")),
             "another program"
         );
-        assert!(Consent::Everyone.permits(&running("/usr/bin/foot")));
+        assert!(Consent::Everyone.permits(&running(42, "/usr/bin/foot")));
+    }
+
+    /// The person's list is about what they grant, so it is asked only
+    /// where consent is by grant: headless, everyone's, it names nothing.
+    #[test]
+    fn what_never_names_is_refused_by_name_however_it_was_granted() {
+        let consent = Consent::Granted {
+            pids: vec![42, 43],
+            never: Never::new(vec![Program::parse("ennius")]),
+        };
+        assert_eq!(
+            consent.check(&running(42, "/usr/local/bin/ennius")),
+            Err(Refusal::NeverGranted {
+                program: "ennius".to_owned()
+            })
+        );
+        assert_eq!(
+            consent.check(&running(7, "/usr/local/bin/ennius")),
+            Err(Refusal::NeverGranted {
+                program: "ennius".to_owned()
+            }),
+            "named before the pid is asked about"
+        );
+        assert!(consent.permits(&running(43, "/usr/bin/foot")));
+        assert!(matches!(
+            consent.check(&running(8, "/usr/bin/foot")),
+            Err(Refusal::NoCapability { .. })
+        ));
+        assert!(
+            Consent::Everyone.permits(&running(42, "/usr/local/bin/ennius")),
+            "a list of what the person grants, where nothing is granted"
+        );
+        assert!(
+            Consent::granted(vec![42]).permits(&running(42, "/usr/local/bin/ennius")),
+            "a seat whose person cleared the list"
+        );
+    }
+
+    #[test]
+    fn a_program_never_given_says_so_and_who_keeps_it() {
+        assert_eq!(
+            Refusal::NeverGranted {
+                program: "ennius".to_owned()
+            }
+            .to_string(),
+            "`ennius` is never an agent's, whatever is granted: \
+             the person keeps it to act on themselves"
+        );
     }
 
     fn owned_by(pid: u32) -> Origin {
@@ -990,7 +1106,7 @@ mod tests {
         );
         assert!(check_window(&facts, SurfaceId(2), &WindowVerb::Close).is_ok());
 
-        let facts = tabs(front(), Consent::Granted(vec![11]));
+        let facts = tabs(front(), Consent::granted(vec![11]));
         assert!(matches!(
             check_window(&facts, SurfaceId(2), &WindowVerb::Close),
             Err(Refusal::NoCapability { .. })
@@ -1210,7 +1326,7 @@ mod tests {
     /// for is refused as that, wherever it is.
     #[test]
     fn consent_is_asked_before_whether_a_window_is_in_sight() {
-        let facts = desk(lone().rolled_up(), []).with_consent(Consent::Granted(vec![11]));
+        let facts = desk(lone().rolled_up(), []).with_consent(Consent::granted(vec![11]));
         for verb in keys() {
             assert!(matches!(
                 check_window(&facts, SurfaceId(1), &verb),
@@ -1231,7 +1347,7 @@ mod tests {
             ],
             1,
         )
-        .with_consent(Consent::Granted(vec![10]));
+        .with_consent(Consent::granted(vec![10]));
         assert!(matches!(
             check_window(&facts, SurfaceId(1), &WindowVerb::Forward),
             Err(Refusal::NoCapability { .. })

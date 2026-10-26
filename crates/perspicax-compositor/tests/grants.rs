@@ -57,7 +57,7 @@ fn probe(session: &Session) -> Child {
 /// its first snapshot a reader sees the default, nobody.
 fn granted(facts: &HostFacts) -> Option<&[u32]> {
     match facts.consent() {
-        Consent::Granted(pids) => Some(pids),
+        Consent::Granted { pids, .. } => Some(pids),
         Consent::Nobody => None,
         Consent::Everyone => panic!("consent is not by grant"),
     }

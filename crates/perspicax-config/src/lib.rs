@@ -722,14 +722,8 @@ fn count(grid: Grid) -> u32 {
 /// holds every agent back, so no agent is ever handed it: the config
 /// refuses to mark it for one, and `perspicax-index` refuses to act on its
 /// windows whatever was granted.
-pub const SETTINGS_APP: &str = "perspicax-settings";
-
-/// Whether `program`, a bare name or a path, is [`SETTINGS_APP`].
-fn is_settings_app(program: &str) -> bool {
-    Path::new(program)
-        .file_name()
-        .is_some_and(|name| name == SETTINGS_APP)
-}
+pub use perspicax_policy::SETTINGS_APP;
+pub(crate) use perspicax_policy::is_settings_app;
 
 /// Why `perspicax-settings` may not be an agent's, and what to do instead.
 fn no_agent_settings(remedy: &str) -> String {

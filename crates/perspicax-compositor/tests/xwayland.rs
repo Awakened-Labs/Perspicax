@@ -1247,7 +1247,7 @@ fn an_x11_window_is_not_granted_by_a_key() {
         .expect("the minimize after the key was done");
     assert_eq!(
         x11.facts().consent(),
-        &perspicax_index::Consent::Granted(Vec::new()),
+        &perspicax_index::Consent::granted(Vec::new()),
         "nothing granted"
     );
     x11.stop();

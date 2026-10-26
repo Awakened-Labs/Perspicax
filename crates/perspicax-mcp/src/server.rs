@@ -164,7 +164,11 @@ impl Perspicax {
                        `agent` says whether you may act on it at all. On a seat, the person \
                        consents process by process: only what was granted to you, or what you \
                        `launch`, is `true`, and a node on anything else is refused as \
-                       `no_capability` however visible it is. Headless, everything is.\n\n\
+                       `no_capability` however visible it is. Headless, everything is. A \
+                       window whose program is never yours, whatever is granted, names it in \
+                       `never_granted`, and its nodes are refused as `never_granted`: it \
+                       exists so the person can oversee you -- ennius, or perspicax's own \
+                       settings app -- and no grant changes that, so don't ask for one.\n\n\
                        The desk is listed too: a panel, a wallpaper or a menu is `kind: layer`, \
                        with the `layer` it stacks in and the `untrusted_namespace` its program \
                        gave it, and a screen locker's cover is `kind: lock_cover`. They can be \
@@ -375,7 +379,10 @@ impl Perspicax {
                        the person opened, say -- so `click` and `scroll` on any other \
                        application would close it under them or reach nothing, and `focus` on \
                        anything but that window and its menus would be kept from it: choose \
-                       from the menu, act on its own application, or wait for it to close.",
+                       from the menu, act on its own application, or wait for it to close. \
+                       `never_granted` means the control's program, named as `program`, is one \
+                       no agent is ever given, because it exists so the person can oversee you: \
+                       it is for good, no grant changes it, and it is theirs to act on.",
         annotations(
             title = "Act on a control",
             read_only_hint = false,
@@ -425,7 +432,8 @@ impl Perspicax {
                        any new window of the same process -- the dialog that is asking. \
                        `observe` it and answer it, or leave it for the person.\n\n\
                        Refused like `act` is: `no_capability` for a window the agent holds no \
-                       consent for, `not_found` for a surface that is not a window here.",
+                       consent for, `never_granted` for one whose program no agent is ever \
+                       given, `not_found` for a surface that is not a window here.",
         annotations(
             title = "Close a window",
             read_only_hint = false,
@@ -497,8 +505,9 @@ impl Perspicax {
                        `quiet`, `elsewhere` or `on_target`, with `frames` -- weighed as `act`'s \
                        `damage` is.\n\n\
                        Refused like the other window verbs: `no_capability` for a window the \
-                       agent holds no consent for, `not_a_window` for a panel, wallpaper, menu \
-                       or lock screen, `not_found` for a surface that is not here.",
+                       agent holds no consent for, `never_granted` for one whose program no \
+                       agent is ever given, `not_a_window` for a panel, wallpaper, menu or \
+                       lock screen, `not_found` for a surface that is not here.",
         annotations(
             title = "Focus a window",
             read_only_hint = false,
@@ -688,7 +697,12 @@ impl Perspicax {
                        write the program as the list does. A refusal is `not_admitted`, and \
                        its `message` says what is admitted. Headless, any program starts. One \
                        that will not start, or a session that is locked, is `not_started`, \
-                       with the reason. The answer is the `pid` it started as.",
+                       with the reason. The answer is the `pid` it started as.\n\n\
+                       Some programs are never yours, whatever any list says: those that exist \
+                       so the person can oversee you, ennius and perspicax's own settings app \
+                       among them. One is refused as `never_granted`, before any list is \
+                       asked, and nothing starts: no list can admit it, so don't ask the \
+                       person to.",
         annotations(
             title = "Launch a program",
             read_only_hint = false,
@@ -738,6 +752,7 @@ impl Perspicax {
                 "pid": launched.pid,
                 "command": request.command,
             })),
+            Err(Unlaunched::NeverGranted(message)) => unlaunched("never_granted", message),
             Err(Unlaunched::NotAdmitted(message)) => unlaunched("not_admitted", message),
             Err(Unlaunched::NotStarted(message)) => unlaunched("not_started", message),
         })
@@ -1058,6 +1073,11 @@ mod tests {
         assert!(describing("window_list").contains("still covered"));
         assert!(describing("screenshot").contains("still covered"));
         assert!(describing("launch").contains("not_admitted"));
+        assert!(describing("launch").contains("never_granted"));
+        assert!(describing("act").contains("never_granted"));
+        assert!(describing("window_list").contains("never_granted"));
+        assert!(describing("window_close").contains("never_granted"));
+        assert!(describing("window_focus").contains("never_granted"));
         assert!(describing("launch").contains("No shell runs it"));
     }
 
@@ -1619,6 +1639,27 @@ mod tests {
             body["message"]
                 .as_str()
                 .is_some_and(|message| message.contains("may start only flutter")),
+            "{body}"
+        );
+    }
+
+    /// A program never an agent's is its own reason, so an agent does not
+    /// ask the person to admit what no list can.
+    #[tokio::test]
+    async fn a_launch_of_a_program_never_granted_says_so() {
+        let (server, _) = server(Ok(receipt()));
+        let result = server
+            .launch(launching(&["ennius"], None))
+            .await
+            .expect("it answers");
+        assert_eq!(result.is_error, Some(true));
+        let body = body(&result);
+        assert_eq!(body["launched"], false);
+        assert_eq!(body["reason"], "never_granted");
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("`ennius` is never an agent's")),
             "{body}"
         );
     }

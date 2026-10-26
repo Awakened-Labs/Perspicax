@@ -3005,6 +3005,7 @@ name = "perspicax-index"
 version = "0.1.0"
 dependencies = [
  "perspicax-node",
+ "perspicax-policy",
 ]
 
 [[package]]

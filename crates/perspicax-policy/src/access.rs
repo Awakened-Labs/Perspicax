@@ -1,4 +1,5 @@
-//! Which programs may use the protocols that reach past their own windows.
+//! Which programs may use the protocols that reach past their own windows,
+//! and which are never given to an agent at all.
 //!
 //! Most of Wayland confines a client to what it drew. A handful of protocols
 //! do not: a taskbar lists and closes other programs' windows, a screenshot
@@ -17,6 +18,12 @@
 //!
 //! None of this is about the lock. Whatever a rule says, the compositor keeps
 //! every one of these protocols inert while the session is locked.
+//!
+//! Some programs exist so the person can oversee an agent, and one handed
+//! to the agent oversees nothing: ennius's review queue, approved by the
+//! agent whose writes it holds back. [`Never`] names them. It is known by
+//! the executable too, with the same caveat, which here errs the safe way: a
+//! name that matches more than was meant only refuses more.
 
 use std::path::Path;
 
@@ -168,6 +175,71 @@ impl Rule {
     }
 }
 
+/// The settings app's program. It edits the session's config, and the config
+/// is what holds every agent back, so an agent that could drive it could
+/// grant itself anything: it is never an agent's, whatever any list says.
+pub const SETTINGS_APP: &str = "perspicax-settings";
+
+/// Whether `program` is [`SETTINGS_APP`]: a bare name or a path, as a config
+/// writes one, or the executable a process runs, wherever it is installed
+/// and even once an upgrade has replaced its file.
+#[must_use]
+pub fn is_settings_app(program: &str) -> bool {
+    Path::new(unreplaced(program))
+        .file_name()
+        .is_some_and(|name| name == SETTINGS_APP)
+}
+
+/// `exe` as it ran before an upgrade replaced its file, which `/proc` marks
+/// with ` (deleted)` after the path.
+fn unreplaced(exe: &str) -> &str {
+    exe.strip_suffix(" (deleted)").unwrap_or(exe)
+}
+
+/// The programs no agent is ever given, whatever grants them: the person's
+/// `[agent] never`, above [`SETTINGS_APP`], which no list can take away.
+///
+/// A program is known by its executable, as for [`Rule::admits`], so a copy
+/// under another name is not known. Every doubt otherwise falls on the side
+/// of refusing: a name matches that file wherever it is, and a file an
+/// upgrade replaced still matches.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Never(Vec<Program>);
+
+impl Never {
+    /// The settings app alone, beneath no list of the person's.
+    pub const FLOOR: Self = Self(Vec::new());
+
+    /// These programs, above the settings app.
+    #[must_use]
+    pub fn new(programs: Vec<Program>) -> Self {
+        Self(programs)
+    }
+
+    /// The programs it names, as written: the person's list, without the
+    /// settings app beneath it.
+    #[must_use]
+    pub fn named(&self) -> Vec<&str> {
+        self.0.iter().map(Program::spelled).collect()
+    }
+
+    /// The program, as written, that keeps `exe` from every agent: the
+    /// settings app, or the first entry of the list that matches it. `exe`
+    /// is the executable a process runs, or the file a command would run;
+    /// `None` when it is neither.
+    #[must_use]
+    pub fn naming(&self, exe: &str) -> Option<&str> {
+        let exe = unreplaced(exe);
+        if is_settings_app(exe) {
+            return Some(SETTINGS_APP);
+        }
+        self.0
+            .iter()
+            .find(|program| program.matches(exe))
+            .map(Program::spelled)
+    }
+}
+
 /// A rule for every protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Access {
@@ -296,6 +368,51 @@ mod tests {
         assert!(!rule.admits(Some("/usr/bin/grim (deleted)")));
         assert!(Rule::Any.admits(None));
         assert!(!Rule::Off.admits(Some("/usr/bin/grim")));
+    }
+
+    #[test]
+    fn the_settings_app_is_never_whatever_the_list_says() {
+        for exe in [
+            "/usr/bin/perspicax-settings",
+            "/home/me/.cargo/bin/perspicax-settings (deleted)",
+            "perspicax-settings",
+        ] {
+            assert_eq!(Never::FLOOR.naming(exe), Some(SETTINGS_APP), "{exe}");
+            assert_eq!(
+                Never::new(vec![Program::parse("ennius")]).naming(exe),
+                Some(SETTINGS_APP),
+                "{exe}"
+            );
+        }
+        assert_eq!(
+            Never::FLOOR.naming("/usr/bin/perspicax-settings-viewer"),
+            None
+        );
+        assert_eq!(Never::FLOOR.naming("/usr/local/bin/ennius"), None);
+    }
+
+    #[test]
+    fn a_name_is_never_given_wherever_it_is_and_a_path_only_itself() {
+        let never = Never::new(vec![
+            Program::parse("ennius"),
+            Program::parse("/opt/wallet/bin/wallet"),
+        ]);
+        assert_eq!(never.naming("/usr/local/bin/ennius"), Some("ennius"));
+        assert_eq!(never.naming("/tmp/x/ennius"), Some("ennius"));
+        assert_eq!(never.naming("ennius"), Some("ennius"), "a bare word");
+        assert_eq!(
+            never.naming("/usr/local/bin/ennius (deleted)"),
+            Some("ennius"),
+            "replaced by an upgrade"
+        );
+        assert_eq!(never.naming("/usr/local/bin/ennius2"), None);
+        assert_eq!(
+            never.naming("/opt/wallet/bin/wallet"),
+            Some("/opt/wallet/bin/wallet")
+        );
+        assert_eq!(never.naming("/usr/bin/wallet"), None, "another wallet");
+        assert_eq!(never.named(), ["ennius", "/opt/wallet/bin/wallet"]);
+        assert!(Never::FLOOR.named().is_empty());
     }
 
     #[test]

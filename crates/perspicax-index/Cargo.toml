@@ -14,8 +14,14 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
-# `perspicax-node` and nothing else, on purpose. This crate is the portable
-# core: the moment Smithay or zbus appears here, a GNOME or KWin host stops
-# being a port and becomes a rewrite. If a dependency is ever added below, it
-# needs a reason written down next to it that survives that question.
+# `perspicax-node`, and nothing else without a reason, on purpose. This crate
+# is the portable core: the moment Smithay or zbus appears here, a GNOME or
+# KWin host stops being a port and becomes a rewrite. Every dependency below
+# has a reason written down next to it that survives that question.
 perspicax-node = { path = "../perspicax-node", version = "0.1.0" }
+# The rules about programs: which no agent is ever given (`Never`), matched
+# by executable as the config writes them, so the gate and the config cannot
+# disagree on what a name matches. It is decisions as plain data -- no
+# Smithay, no D-Bus, no I/O; std and xkeysym's keysym names -- so a GNOME or
+# KWin host takes it as it takes this crate.
+perspicax-policy = { path = "../perspicax-policy", version = "0.1.0" }
