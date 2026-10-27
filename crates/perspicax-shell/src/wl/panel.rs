@@ -730,6 +730,7 @@ impl Panels {
                 icon: self.icons.get(&window.app_id).cloned().flatten(),
                 active: window.active,
                 minimized: window.minimized,
+                wants_attention: window.wants_attention,
             })
             .collect();
         let cells = workspaces

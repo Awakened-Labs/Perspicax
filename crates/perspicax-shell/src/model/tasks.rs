@@ -13,7 +13,10 @@
 //! perspicax tells its own shell more of each window, from version 5 of its
 //! channel: where it stands among the workspaces and the other windows, and
 //! what can be made of it. That is what a window's menu shows, and it is kept
-//! apart from what is listed, so that it never draws a panel again.
+//! apart from what is listed, so that it never draws a panel again. From
+//! version 7 it tells whether a window wants the person's attention, which
+//! its task is marked with: that is listed, and takes effect as it is told,
+//! since perspicax sends no `done` of its own.
 //!
 //! Generic over the handle the compositor gave each window and the monitors
 //! it names, so that the shell keeps its Wayland objects here and a test
@@ -59,6 +62,10 @@ pub(crate) struct Window<O> {
     pub(crate) maximized: bool,
     /// It belongs to another window.
     pub(crate) child: bool,
+    /// perspicax says it wants the person's attention: it opened without
+    /// the keyboard, or asked for it and was refused, and has not had it
+    /// since.
+    pub(crate) wants_attention: bool,
 }
 
 /// Where a window stands, and what can be made of it, as perspicax tells
@@ -140,6 +147,7 @@ impl<O> Default for Window<O> {
             minimized: false,
             maximized: false,
             child: false,
+            wants_attention: false,
         }
     }
 }
@@ -258,6 +266,35 @@ impl<H: PartialEq, O: Clone + PartialEq> Tasks<H, O> {
             .iter()
             .find(|known| known.serial == serial && known.now.is_some())
             .map(|known| &known.handle)
+    }
+
+    /// Take in whether perspicax told the window `handle` wants the person's
+    /// attention. Whether that changed what is listed.
+    pub(crate) fn want(&mut self, handle: &H, wanting: bool) -> bool {
+        let Some(toplevel) = self.each.iter_mut().find(|known| known.handle == *handle) else {
+            return false;
+        };
+        toplevel.pending.wants_attention = wanting;
+        let Some(now) = &mut toplevel.now else {
+            return false;
+        };
+        let changed = now.wants_attention != wanting;
+        now.wants_attention = wanting;
+        changed
+    }
+
+    /// Forget which windows want attention, as when perspicax stops telling.
+    /// Whether that changed what is listed.
+    pub(crate) fn unwant_all(&mut self) -> bool {
+        let mut changed = false;
+        for toplevel in &mut self.each {
+            changed |= toplevel.now.as_ref().is_some_and(|now| now.wants_attention);
+            toplevel.pending.wants_attention = false;
+            if let Some(now) = &mut toplevel.now {
+                now.wants_attention = false;
+            }
+        }
+        changed
     }
 
     /// Take in what perspicax told of the window `handle` is: where it
@@ -470,6 +507,35 @@ mod tests {
             "minimized: brought back"
         );
         assert_eq!(tasks.pressed(99, Button::Left), None, "no such task");
+    }
+
+    #[test]
+    fn a_window_wanting_attention_is_listed_so_as_soon_as_it_is_told() {
+        let mut tasks = Windows::default();
+        let wants = |tasks: &Windows| {
+            tasks
+                .listed(&"DP-1", TaskbarScope::All)
+                .map(|(_, window)| window.wants_attention)
+                .collect::<Vec<_>>()
+        };
+        assert!(!tasks.want(&1, true), "no such window");
+        tasks.add(1);
+        assert!(!tasks.want(&1, true), "not listed yet");
+        tasks.tell(&1, Told::OutputEnter("DP-1"));
+        assert!(tasks.tell(&1, Told::Done));
+        assert_eq!(wants(&tasks), [true], "kept until its first done");
+        opened(&mut tasks, 2, "Mail", "DP-1");
+
+        assert!(tasks.want(&2, true), "no done of perspicax's own");
+        assert!(!tasks.want(&2, true), "told again, nothing changes");
+        assert!(!tasks.tell(&2, Told::Done), "nor at its next done");
+        assert_eq!(wants(&tasks), [true, true]);
+        assert!(tasks.want(&1, false));
+        assert_eq!(wants(&tasks), [false, true]);
+
+        assert!(tasks.unwant_all(), "perspicax stopped telling");
+        assert_eq!(wants(&tasks), [false, false]);
+        assert!(!tasks.unwant_all());
     }
 
     #[test]

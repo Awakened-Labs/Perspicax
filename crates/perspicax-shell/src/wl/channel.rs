@@ -9,13 +9,16 @@
 //! the mixer would. What is made of each window, from version 5, is what
 //! its menu shows, and what is chosen there is asked back. Something the
 //! person asked for that perspicax refused, from version 6, is said in
-//! words on the screen, with why.
+//! words on the screen, with why. Which windows want the person's
+//! attention, from version 7, the taskbar marks.
 
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 #[cfg(any(feature = "menus", feature = "panel"))]
 use perspicax_shell_v1::Refusal;
 #[cfg(all(feature = "panel", feature = "menus"))]
-use perspicax_shell_v1::{WindowCapabilities, WindowState};
+use perspicax_shell_v1::WindowCapabilities;
+#[cfg(feature = "panel")]
+use perspicax_shell_v1::WindowState;
 #[cfg(any(feature = "menus", feature = "panel"))]
 use wayland_client::WEnum;
 use wayland_client::{Connection, Dispatch, QueueHandle, globals::GlobalList, protocol::wl_output};
@@ -31,7 +34,7 @@ use crate::model::tasks::Placing;
 /// this program out; the shell still draws, and its menus open only by
 /// pointer.
 pub(super) fn bind(globals: &GlobalList, qh: &QueueHandle<App>) -> Option<PerspicaxShellV1> {
-    let bound = globals.bind::<PerspicaxShellV1, _, _>(qh, 1..=6, ()).ok();
+    let bound = globals.bind::<PerspicaxShellV1, _, _>(qh, 1..=7, ()).ok();
     if bound.is_none() {
         tracing::info!("the compositor offers no perspicax_shell_v1; no menu will open on a key");
     }
@@ -184,17 +187,29 @@ impl Dispatch<PerspicaxShellV1, ()> for App {
                 app.menus.set_log_out(false);
                 #[cfg(all(feature = "panel", feature = "menus"))]
                 app.panels.tasks.unplace_all();
+                #[cfg(feature = "panel")]
+                if app.panels.tasks.unwant_all() {
+                    app.panels_changed();
+                }
             }
-            #[cfg(all(feature = "panel", feature = "menus"))]
+            #[cfg(feature = "panel")]
             Event::ToplevelState {
                 toplevel,
                 state,
                 capabilities,
                 workspace,
             } => {
-                let workspace = workspace.and_then(|ws| app.workspaces.model.serial_of(&ws));
-                let placing = placing(state, capabilities, workspace);
-                app.panels.tasks.place(&toplevel, placing);
+                if app.panels.tasks.want(&toplevel, wants_attention(state)) {
+                    app.panels_changed();
+                }
+                #[cfg(feature = "menus")]
+                {
+                    let workspace = workspace.and_then(|ws| app.workspaces.model.serial_of(&ws));
+                    let placing = placing(state, capabilities, workspace);
+                    app.panels.tasks.place(&toplevel, placing);
+                }
+                #[cfg(not(feature = "menus"))]
+                let _ = (capabilities, workspace);
             }
             #[cfg(feature = "panel")]
             Event::Layout { name, short, .. } => app.panels.layouts.layout(name, short),
@@ -240,6 +255,18 @@ fn refused(kind: WEnum<Refusal>, subject: String) -> Option<Refused> {
         Refusal::Keymap => Refused::Keymap(subject),
         _ => return None,
     })
+}
+
+/// Whether perspicax told, in a window's `state`, that it wants the
+/// person's attention.
+#[cfg(feature = "panel")]
+fn wants_attention(state: WEnum<WindowState>) -> bool {
+    match state {
+        WEnum::Value(state) => state.contains(WindowState::WantsAttention),
+        WEnum::Unknown(bits) => {
+            WindowState::from_bits_truncate(bits).contains(WindowState::WantsAttention)
+        }
+    }
 }
 
 /// Where a window stands, from what perspicax told: its `state` and its
@@ -301,7 +328,7 @@ mod tests {
     #[cfg(all(feature = "panel", feature = "menus"))]
     #[test]
     fn a_windows_state_is_read_bit_by_bit_leaving_out_a_later_versions() {
-        let later = 8;
+        let later = 16;
         let told = placing(
             WEnum::Unknown(WindowState::OnTop.bits() | later),
             WEnum::Unknown(WindowCapabilities::Shade.bits() | later),
@@ -323,5 +350,21 @@ mod tests {
         );
         assert!(told.sticky && told.shaded && !told.on_top);
         assert!(told.homed && !told.shadeable);
+    }
+
+    #[cfg(feature = "panel")]
+    #[test]
+    fn a_window_wanting_attention_is_read_beside_a_later_versions_bits() {
+        let later = 16;
+        assert!(wants_attention(WEnum::Value(
+            WindowState::OnTop | WindowState::WantsAttention
+        )));
+        assert!(wants_attention(WEnum::Unknown(
+            WindowState::WantsAttention.bits() | later
+        )));
+        assert!(!wants_attention(WEnum::Unknown(
+            WindowState::Sticky.bits() | later
+        )));
+        assert!(!wants_attention(WEnum::Value(WindowState::empty())));
     }
 }
