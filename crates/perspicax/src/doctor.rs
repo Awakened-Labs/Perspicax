@@ -530,7 +530,7 @@ fn summed(name: &'static str, rows: &[Row], status: &str) -> Row {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs, os::unix::fs::PermissionsExt as _};
+    use std::{collections::HashMap, fs};
 
     use perspicax_config::Profile;
 
@@ -562,11 +562,10 @@ mod tests {
             Self(dir)
         }
 
-        /// A program on its `PATH`.
+        /// A program on its `PATH`: written as [`crate::forked`] says.
         fn program(&self, name: &str) -> PathBuf {
             let path = self.0.join("bin").join(name);
-            fs::write(&path, "#!/bin/sh\n").expect("a program");
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("its mode");
+            crate::forked::program(&path, "#!/bin/sh\n");
             path
         }
 
@@ -830,9 +829,15 @@ mod tests {
         let row = agent_socket(&machine(&inside, EVERYTHING), Some(&config));
         assert!(row.detail.ends_with("answers"), "{row:?}");
         drop(listening);
-        let row = agent_socket(&machine(&inside, EVERYTHING), Some(&config));
-        assert_eq!(row.status, Status::Warn, "{row:?}");
-        assert!(row.detail.ends_with("does not answer"), "{row:?}");
+        // Soon, not at once: another test's fork may hold it a moment (see
+        // `crate::forked`).
+        let row = || agent_socket(&machine(&inside, EVERYTHING), Some(&config));
+        assert!(
+            crate::forked::soon(|| row().detail.ends_with("does not answer")),
+            "{:?}",
+            row()
+        );
+        assert_eq!(row().status, Status::Warn, "{:?}", row());
     }
 
     #[test]

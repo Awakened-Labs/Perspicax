@@ -100,6 +100,22 @@ fn exited(child: &mut Child, patience: Duration) -> ExitStatus {
     }
 }
 
+/// Write `text` to `path`, a program that may be run, from a shell of its
+/// own (#272). The tests here run in parallel and start programs, and a fork
+/// takes every file this process has open with it until the child runs its
+/// program: a stand-in this process held open for writing as another test
+/// forked would be busy (`ETXTBSY`) if run in that moment. Written by a
+/// child, it is never open here. `crates/perspicax/src/forked.rs` says more.
+fn program(path: &Path, text: &str) {
+    let written = Command::new("/bin/sh")
+        .args(["-c", r#"printf '%s' "$1" > "$0" && chmod 755 "$0""#])
+        .arg(path)
+        .arg(text)
+        .status()
+        .expect("a shell to write it");
+    assert!(written.success(), "{} not written", path.display());
+}
+
 #[test]
 fn a_socket_another_session_serves_is_refused_before_anything_starts() {
     let scratch = Scratch::new();
@@ -326,12 +342,10 @@ fn a_headless_session_serves_conversation_after_conversation_and_tidies_up() {
     let scratch = Scratch::new();
     let path = scratch.join("mcp");
     let report = scratch.join("report");
-    fs::write(
+    program(
         &report,
         "#!/bin/sh\nprintf '%s' \"$PERSPICAX_MCP_SOCKET\" > \"$(dirname \"$0\")/seen\"\n",
-    )
-    .expect("a script");
-    fs::set_permissions(&report, fs::Permissions::from_mode(0o755)).expect("executable");
+    );
 
     let mut session = perspicax()
         .args([

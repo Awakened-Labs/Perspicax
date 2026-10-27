@@ -1141,7 +1141,9 @@ mod tests {
 
         drop(listening);
         assert!(scratch.0.join("bus").exists(), "the socket stays behind");
-        assert!(!has_bus(scratch.env(&runtime)));
+        // Soon, not at once: another test's fork may hold it a moment (see
+        // `crate::forked`).
+        assert!(crate::forked::soon(|| !has_bus(scratch.env(&runtime))));
     }
 
     /// This process's pid, as [`own_bus`] is given it, in the tests below.

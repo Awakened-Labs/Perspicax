@@ -440,8 +440,6 @@ fn claude_mcp(claude: &Path, args: &[&str]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
-
     use super::*;
 
     /// A home folder for one test, with a `bin` on its `PATH`, emptied when it
@@ -461,12 +459,11 @@ mod tests {
             fs::write(self.0.join(".claude.json"), text).expect("a config");
         }
 
-        /// A program at `name` under the folder, running `body`.
+        /// A program at `name` under the folder, running `body`: written
+        /// as [`crate::forked`] says.
         fn program(&self, name: &str, body: &str) -> PathBuf {
             let path = self.0.join(name);
-            fs::create_dir_all(path.parent().unwrap()).expect("its folder");
-            fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("a program");
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("its mode");
+            crate::forked::program(&path, &format!("#!/bin/sh\n{body}\n"));
             path
         }
 

@@ -280,7 +280,7 @@ fn heard(told: &mpsc::Receiver<String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt as _};
+    use std::fs;
 
     use super::*;
 
@@ -295,12 +295,11 @@ mod tests {
             Self(dir)
         }
 
-        /// A program in it at `name`, which may be run.
+        /// A program in it at `name`, which may be run: written as
+        /// [`crate::forked`] says.
         fn program(&self, name: &str) -> PathBuf {
             let path = self.0.join(name);
-            fs::create_dir_all(path.parent().unwrap()).expect("its folder");
-            fs::write(&path, "#!/bin/sh\n").expect("a program");
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("its mode");
+            crate::forked::program(&path, "#!/bin/sh\n");
             path
         }
     }
@@ -449,12 +448,10 @@ mod tests {
     fn a_program_is_heard_out_and_its_complaint_is_its_first_line() {
         let scratch = Scratch::new("ask");
         let program = scratch.0.join("complains");
-        fs::write(
+        crate::forked::program(
             &program,
             "#!/bin/sh\necho \"out $1\"\necho \"\n  no such server\nmore\" >&2\nexit 3\n",
-        )
-        .unwrap();
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let answer = ask(&program, &["here"], &[]).expect("an answer");
         assert_eq!(answer.status.code(), Some(3));
         assert_eq!(answer.stdout, "out here\n");
@@ -465,8 +462,7 @@ mod tests {
     fn a_program_given_an_environment_has_it() {
         let scratch = Scratch::new("env");
         let program = scratch.0.join("env");
-        fs::write(&program, "#!/bin/sh\necho \"$ENNIUS_DISABLE_KEYRING\"\n").unwrap();
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::forked::program(&program, "#!/bin/sh\necho \"$ENNIUS_DISABLE_KEYRING\"\n");
         let answer = ask(&program, &[], &[("ENNIUS_DISABLE_KEYRING", "1")]).expect("an answer");
         assert_eq!(answer.stdout, "1\n");
     }
