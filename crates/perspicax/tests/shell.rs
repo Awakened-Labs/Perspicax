@@ -6,8 +6,10 @@
 //! button found by name, and the start menu it opens; a window found on the
 //! taskbar by its title, and brought forward by a click on its tab; a
 //! window that opened without the keys, with a person at the seat, said on
-//! its tab to want attention until it is brought forward (#259); the
-//! desktop folder's icons read as a list, and one selected by a click.
+//! its tab to want attention until it is brought forward (#259); an
+//! application chosen from a menu brought forward with the token the shell
+//! handed it (#258); the desktop folder's icons read as a list, and one
+//! selected by a click.
 //!
 //! Each test runs a compositor that keeps its desk current the way `--mcp`
 //! does, and starts shells against its socket as a person's session would,
@@ -44,6 +46,9 @@ const MENUS: &str = "perspicax-menu-HEADLESS-1";
 /// The profiles' shells: a wallpaper and a root menu, and a panel too.
 const MINIMAL: &str = "profile = \"minimal\"\n";
 const CLASSIC: &str = "profile = \"classic\"\n";
+
+/// Set for the copy of this binary that [`token_probe`] runs in.
+const TOKEN_PROBE: &str = "PERSPICAX_SHELL_TOKEN_PROBE";
 
 /// How long a newcomer draws before it is read. Short: the shell's tree is
 /// whole before its first frame.
@@ -360,6 +365,79 @@ fn a_window_refused_the_keys_it_asked_for_says_so_on_its_tab() {
     });
 }
 
+/// Issue #258: with a person at the seat, an application chosen from the
+/// start menu while a window has the keys opens without them, as any
+/// program's window does that the person's press did not start: an agent's
+/// clicks are not the person's. But the shell handed it a token, asked for
+/// while the menu still had the keys, and spending it, as GTK does, brings
+/// its window forward with them.
+#[test]
+#[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
+fn an_application_chosen_from_a_menu_comes_forward_with_the_token_the_shell_handed_it() {
+    let seated = Backend::headless((1280, 800)).with_person();
+    host_on("token", seated, CLASSIC, |hosted| {
+        // One application installed: a copy of this binary, as
+        // `token_probe`.
+        let base =
+            std::env::temp_dir().join(format!("perspicax-shell-token-{}", std::process::id()));
+        let (data, none) = (base.join("data"), base.join("none"));
+        std::fs::create_dir_all(data.join("applications")).expect("a data folder");
+        std::fs::create_dir_all(&none).expect("an empty one");
+        let exe = std::env::current_exe().expect("this test's binary");
+        std::fs::write(
+            data.join("applications/probe.desktop"),
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Probe\nExec={} --exact token_probe --ignored --nocapture\nCategories=Utility;\n",
+                exe.display()
+            ),
+        )
+        .expect("a desktop entry");
+        let _shell = hosted.shell_with(&[
+            ("XDG_DATA_HOME", data.as_os_str()),
+            ("XDG_DATA_DIRS", none.as_os_str()),
+            (TOKEN_PROBE, std::ffi::OsStr::new("1")),
+        ]);
+        hosted.wait_until("the start button read and joined", |index, facts| {
+            on_layer(index, facts, (Role::Button, "Start"), (Layer::Top, PANEL))
+        });
+        let _first = hosted.window("First");
+        hosted.wait_until("the first window with the keys", |_, facts| {
+            focused_last(facts, "First")
+        });
+
+        hosted.click("button:Start", PointerButton::Left);
+        hosted.wait_until("the start menu read and joined", |index, facts| {
+            menu_item(index, facts, "Accessories")
+        });
+        hosted.click("menuitem:Accessories", PointerButton::Left);
+        hosted.wait_until("its submenu read", |index, facts| {
+            menu_item(index, facts, "Probe")
+        });
+        hosted.click("menuitem:Probe", PointerButton::Left);
+        hosted.wait_until(
+            "the application's window forward, with the keys",
+            |_, facts| focused_last(facts, "Probe"),
+        );
+        std::fs::remove_dir_all(&base).ok();
+    });
+}
+
+/// Not a test: the application [`an_application_chosen_from_a_menu_comes_forward_with_the_token_the_shell_handed_it`]
+/// installs, in a process of its own: a window titled "Probe", which spends
+/// the token it was started with, until the compositor goes.
+#[test]
+#[ignore = "an application in a process of its own, for the test that starts one"]
+fn token_probe() {
+    if std::env::var_os(TOKEN_PROBE).is_none() {
+        return;
+    }
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR"));
+    let socket = std::env::var_os("WAYLAND_DISPLAY").expect("WAYLAND_DISPLAY");
+    let stream = UnixStream::connect(runtime.join(socket)).expect("the compositor's socket");
+    let token = std::env::var("XDG_ACTIVATION_TOKEN").expect("handed a token");
+    window::open_spending(stream, "Probe", token).wait();
+}
+
 #[test]
 #[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
 fn the_desktop_icons_are_a_list_an_agent_can_read() {
@@ -445,6 +523,17 @@ fn forward(index: &Index, facts: &HostFacts, title: &str) -> Option<NodeId> {
             .get(tab)
             .is_some_and(|node| node.node.is_selected() == Some(true))
     })
+}
+
+/// `Some` if the window titled `title` is the one that took the keys last,
+/// as the facts say.
+fn focused_last(facts: &HostFacts, title: &str) -> Option<()> {
+    let last = facts
+        .surfaces()
+        .iter()
+        .filter(|surface| surface.focused_at.is_some())
+        .max_by_key(|surface| surface.focused_at)?;
+    (last.title.as_deref() == Some(title)).then_some(())
 }
 
 /// The taskbar's tab for the window titled `title`, if it is read, joined
@@ -778,6 +867,13 @@ mod window {
     }
 
     impl Opened {
+        /// Wait until the compositor goes, the window open meanwhile.
+        pub(super) fn wait(mut self) {
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+
         /// Whether it has made its token, if it asks.
         pub(super) fn made(&self) -> bool {
             self.asking.made.load(Ordering::Relaxed)
@@ -800,21 +896,29 @@ mod window {
 
     /// Open a window titled `title` on the compositor at the end of `stream`.
     pub(super) fn open(stream: UnixStream, title: &str) -> Opened {
-        open_as(stream, title, false)
+        open_as(stream, title, false, None)
     }
 
     /// The same, a window that asks to be brought forward: see [`Asking`].
     pub(super) fn open_asking(stream: UnixStream, title: &str) -> Opened {
-        open_as(stream, title, true)
+        open_as(stream, title, true, None)
     }
 
-    fn open_as(stream: UnixStream, title: &str, asks: bool) -> Opened {
+    /// The same, a window that spends `token` as soon as it is open, as a
+    /// GTK application spends the one it was started with.
+    pub(super) fn open_spending(stream: UnixStream, title: &str, token: String) -> Opened {
+        let opened = open_as(stream, title, true, Some(token));
+        opened.spend();
+        opened
+    }
+
+    fn open_as(stream: UnixStream, title: &str, asks: bool, token: Option<String>) -> Opened {
         let open = Arc::new(AtomicBool::new(true));
         let asking = Arc::new(Asking::default());
         let title = title.to_owned();
         let thread = {
             let (open, asking) = (Arc::clone(&open), Arc::clone(&asking));
-            thread::spawn(move || run(stream, &title, &open, asks.then_some(&*asking)))
+            thread::spawn(move || run(stream, &title, &open, asks.then_some((&*asking, token))))
         };
         Opened {
             open,
@@ -823,7 +927,13 @@ mod window {
         }
     }
 
-    fn run(stream: UnixStream, title: &str, open: &AtomicBool, asking: Option<&Asking>) {
+    fn run(
+        stream: UnixStream,
+        title: &str,
+        open: &AtomicBool,
+        asking: Option<(&Asking, Option<String>)>,
+    ) {
+        let (asking, token) = asking.map_or((None, None), |(asking, token)| (Some(asking), token));
         let connection = Connection::from_socket(stream).expect("a connection");
         let (globals, mut queue) = registry_queue_init::<Client>(&connection).expect("the globals");
         let qh = queue.handle();
@@ -857,8 +967,9 @@ mod window {
             surface: window.wl_surface().clone(),
             seat,
             activation,
-            token: None,
-            asked: false,
+            // One handed a token makes none of its own.
+            asked: token.is_some(),
+            token,
         };
         // Until dropped, or until the compositor goes.
         let mut spent = false;

@@ -14,6 +14,10 @@
 //! The shell is each program's parent, so it collects each one's exit
 //! status when it ends, or the ended programs would linger as zombies for
 //! as long as the shell runs.
+//!
+//! A program is handed the activation token asked for it, if one was, as
+//! `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID` (#258): its window opens
+//! with the keys. One the shell was itself handed is never passed on.
 
 use std::{
     io,
@@ -64,6 +68,18 @@ pub(crate) fn command_line(run: &Run, terminal: Option<&[String]>) -> Option<Vec
     Some(terminal?.iter().chain(&run.argv).cloned().collect())
 }
 
+/// Hand what `command` starts `token`, as `XDG_ACTIVATION_TOKEN` and, for
+/// an X11 program, `DESKTOP_STARTUP_ID`; or, with none, neither, whatever
+/// the shell was given itself.
+fn hand(command: &mut Command, token: Option<&str>) {
+    for name in ["XDG_ACTIVATION_TOKEN", "DESKTOP_STARTUP_ID"] {
+        match token {
+            Some(token) => command.env(name, token),
+            None => command.env_remove(name),
+        };
+    }
+}
+
 /// What the shell has started, until each has ended.
 pub(crate) struct Launcher {
     /// The terminal's words, configured or found.
@@ -86,8 +102,8 @@ impl Launcher {
         self.terminal = terminal;
     }
 
-    /// Start `run`.
-    pub(crate) fn run(&mut self, run: &Run) -> io::Result<u32> {
+    /// Start `run`, handed `token` if there is one.
+    pub(crate) fn run(&mut self, run: &Run, token: Option<&str>) -> io::Result<u32> {
         let words = command_line(run, self.terminal.as_deref()).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -102,6 +118,7 @@ impl Launcher {
             .args(arguments)
             .stdin(Stdio::null())
             .process_group(0);
+        hand(&mut command, token);
         let folder = run
             .dir
             .as_deref()
@@ -195,12 +212,12 @@ mod tests {
         let mut launcher = Launcher::new(None, Some(PathBuf::from("/")));
         let mut sleeping = run(&["sleep", "30"], false);
         sleeping.dir = Some(std::env::temp_dir());
-        let pid = launcher.run(&sleeping).expect("started");
+        let pid = launcher.run(&sleeping, None).expect("started");
         assert_eq!(group_of(pid), Some(pid), "the leader of its own group");
         assert_eq!(folder_of(pid), std::env::temp_dir().canonicalize().ok());
         assert!(launcher.reap(), "still running");
 
-        let quick = launcher.run(&run(&["true"], false)).expect("started");
+        let quick = launcher.run(&run(&["true"], false), None).expect("started");
         let deadline = Instant::now() + Duration::from_secs(5);
         while launcher.children.iter().any(|child| child.id() == quick) {
             assert!(Instant::now() < deadline, "collected once it ended");
@@ -218,9 +235,69 @@ mod tests {
         }
         assert!(
             launcher
-                .run(&run(&["perspicax-no-such-program"], false))
+                .run(&run(&["perspicax-no-such-program"], false), None)
                 .is_err(),
             "a program that is not installed says so"
         );
+    }
+
+    #[test]
+    fn a_program_is_handed_the_token_asked_for_it_and_never_the_shells_own() {
+        use std::collections::BTreeSet;
+
+        let mut launcher = Launcher::new(None, None);
+        let given = |launcher: &mut Launcher, token: Option<&str>| {
+            let pid = launcher
+                .run(&run(&["sleep", "30"], false), token)
+                .expect("started");
+            // Read once sleep is running: until its exec is done, its
+            // environment is still the shell's.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let environ = loop {
+                let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+                if cmdline.starts_with(b"sleep\0") || Instant::now() >= deadline {
+                    break std::fs::read(format!("/proc/{pid}/environ")).expect("its environment");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            environ
+                .split(|&byte| byte == 0)
+                .filter_map(|entry| std::str::from_utf8(entry).ok())
+                .filter(|entry| {
+                    entry.starts_with("XDG_ACTIVATION_TOKEN=")
+                        || entry.starts_with("DESKTOP_STARTUP_ID=")
+                })
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>()
+        };
+
+        assert_eq!(
+            given(&mut launcher, Some("handed")),
+            BTreeSet::from(
+                ["DESKTOP_STARTUP_ID=handed", "XDG_ACTIVATION_TOKEN=handed"].map(str::to_owned)
+            ),
+            "under both names, for X11 too"
+        );
+        assert!(
+            given(&mut launcher, None).is_empty(),
+            "none asked, none handed"
+        );
+
+        // Nor one the shell was itself given: taken out of what it passes on.
+        let mut command = Command::new("true");
+        hand(&mut command, None);
+        let set: Vec<_> = command.get_envs().collect();
+        assert_eq!(
+            set,
+            [
+                (std::ffi::OsStr::new("DESKTOP_STARTUP_ID"), None),
+                (std::ffi::OsStr::new("XDG_ACTIVATION_TOKEN"), None),
+            ]
+        );
+
+        for child in &mut launcher.children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
