@@ -66,7 +66,13 @@
 //! window manager drops it, so [`Side`] hears it too, on a thread of its own,
 //! and passes it on (issue #91). The window comes back and is raised; it
 //! takes the keyboard only with fresh input behind the request, as an xdg
-//! window does.
+//! window does, and is marked as wanting attention when refused (#259).
+//!
+//! A window takes the keyboard as it maps only as a Wayland window does
+//! (#259), Xwayland being the program of every X client: see
+//! `map_window_request`. One the person's press started, under a Wayland
+//! terminal say, is known for one only once the X-Resource thread names its
+//! process, and takes the keyboard then (`started_x11`).
 //!
 //! EWMH has a window manager name the window with the keyboard in the
 //! root's `_NET_ACTIVE_WINDOW`, and clients go by it: Wine takes it for the
@@ -1355,6 +1361,8 @@ impl Compositor {
     /// whose clients X does not keep from one another anyway. So a program
     /// started again from a Wayland terminal or launcher comes up raised,
     /// without the keys: nothing on the Wayland side can vouch for its time.
+    /// Refused, it wants the person's attention, and the taskbar says so
+    /// (#259).
     fn activate_x11(&mut self, window: u32, stamp: u32) {
         let asked = self
             .managed_x11_by_id(window)

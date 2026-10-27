@@ -753,7 +753,8 @@ impl Compositor {
     /// them, and a window that opened under it, was brought forward, clicked
     /// or pointed at, would have what was being typed at the launcher. The
     /// window is raised all the same, and has the keys once the launcher
-    /// goes, as one that opened behind the lock has them at unlock.
+    /// goes, being on top then; one that opened without the person asking
+    /// for it waits, marked, beneath the window they were using (#259).
     ///
     /// [`Self::focus_plain`] and [`Self::focus_surface`] ask, which is every
     /// way to the keyboard but a menu's grab, refused while locked (#82) and
@@ -937,8 +938,10 @@ impl Compositor {
     /// focus moves with it. See [`crate::focus`].
     ///
     /// Never while the session is locked: a window is no lock surface. It
-    /// is not focused, and has the keyboard once the session unlocks if it
-    /// is the window on top then, as one that opened behind the lock is.
+    /// is not focused, and has the keyboard once the session unlocks if the
+    /// keys go back to it then, the topmost window that wants no attention
+    /// ([`Self::window_for_keys`]): not one that opened behind the lock,
+    /// which nobody at it asked for (#259).
     pub(crate) fn focus_surface(&mut self, surface: WlSurface, id: SurfaceId) {
         if !self.may_take_keyboard(&surface) {
             return;

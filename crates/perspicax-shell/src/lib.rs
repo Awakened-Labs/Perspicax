@@ -11,12 +11,14 @@
 //! are layer-shell surfaces, its taskbar speaks
 //! wlr-foreign-toplevel-management, and what it needs from perspicax alone
 //! comes over `perspicax-shell-v1`: being told that the person asked for a
-//! menu, what is made of each window, and what perspicax refused them, to
-//! say why on the screen; and asking for a window to be made sticky, kept
-//! on top, rolled up or sent to a workspace. A compositor without that
-//! channel still gets a desktop, with no menu on a key, and a window's menu
-//! of only what the taskbar's protocol can ask, and a refusal is only in
-//! perspicax's log.
+//! menu, what is made of each window and which want the person's attention,
+//! and what perspicax refused them, to say why on the screen; and asking for
+//! a window to be made sticky, kept on top, rolled up or sent to a
+//! workspace. A compositor without that channel still gets a desktop, with
+//! no menu on a key, and a window's menu of only what the taskbar's protocol
+//! can ask, and a refusal is only in perspicax's log. What the person starts
+//! from it is handed an activation token, over `xdg_activation_v1`, so its
+//! window opens with the keys.
 //!
 //! The shell is drawn in software: tiny-skia paints into memory, and the
 //! picture is copied into a `wl_shm` buffer. A desktop changes rarely, and
