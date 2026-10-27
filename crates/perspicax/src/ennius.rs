@@ -586,7 +586,7 @@ fn asked(ennius: &Path, args: &[&str]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt as _};
+    use std::fs;
 
     use super::*;
 
@@ -601,12 +601,11 @@ mod tests {
             Self(dir)
         }
 
-        /// A program at `name` under the folder, running `body`.
+        /// A program at `name` under the folder, running `body`: written
+        /// as [`crate::forked`] says.
         fn program(&self, name: &str, body: &str) -> PathBuf {
             let path = self.0.join(name);
-            fs::create_dir_all(path.parent().unwrap()).expect("its folder");
-            fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("a program");
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("its mode");
+            crate::forked::program(&path, &format!("#!/bin/sh\n{body}\n"));
             path
         }
 
@@ -710,6 +709,7 @@ mod tests {
         scratch.program("bin/perspicax", "");
         scratch.ennius(DAVES, Some(r#"["read_file","echo"]"#), "");
         let rows = status(scratch.var());
+        assert_eq!(rows.len(), 2, "{rows:?}");
         assert_eq!(rows[0].status, Status::Warn, "{rows:?}");
         assert!(
             rows[0].detail.contains("upgrade ennius past its #193"),
@@ -735,6 +735,7 @@ mod tests {
         let scratch = Scratch::new("default");
         scratch.ennius("[]", None, "");
         let rows = install(&scratch.this(), false, scratch.var());
+        assert_eq!(rows.len(), 2, "{rows:?}");
         assert_eq!(rows[1].status, Status::Skipped, "{rows:?}");
         assert!(
             rows[1]
@@ -800,6 +801,7 @@ mod tests {
             "",
         );
         let rows = install(&scratch.this(), false, scratch.var());
+        assert_eq!(rows.len(), 2, "{rows:?}");
         assert_eq!(rows[0].status, Status::Fail, "{rows:?}");
         assert!(rows[0].detail.contains("as `a` and `b`"), "{rows:?}");
         assert_eq!(rows[1].status, Status::Skipped);
@@ -843,6 +845,7 @@ mod tests {
         let scratch = Scratch::new("dry");
         scratch.ennius("[]", Some("[]"), "");
         let rows = install(&scratch.this(), true, scratch.var());
+        assert_eq!(rows.len(), 2, "{rows:?}");
         assert!(
             rows[0].detail.starts_with("would add `perspicax`"),
             "{rows:?}"

@@ -8,7 +8,6 @@
 
 use std::{
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
@@ -16,6 +15,22 @@ use std::{
 
 /// A home folder of this test's own, with a `bin` for its `PATH`, removed
 /// when dropped.
+/// Write `text` to `path`, a program that may be run, from a shell of its
+/// own (#272). The tests here run in parallel and start programs, and a fork
+/// takes every file this process has open with it until the child runs its
+/// program: a stand-in this process held open for writing as another test
+/// forked would be busy (`ETXTBSY`) if run in that moment. Written by a
+/// child, it is never open here. `crates/perspicax/src/forked.rs` says more.
+fn program(path: &Path, text: &str) {
+    let written = Command::new("/bin/sh")
+        .args(["-c", r#"printf '%s' "$1" > "$0" && chmod 755 "$0""#])
+        .arg(path)
+        .arg(text)
+        .status()
+        .expect("a shell to write it");
+    assert!(written.success(), "{} not written", path.display());
+}
+
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -35,15 +50,13 @@ impl Scratch {
     /// there for it to use: its `PATH` holds nothing else.
     fn claude(&self, body: &str) {
         let path = self.0.join("bin/claude");
-        fs::write(
+        program(
             &path,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n{body}\n",
                 self.0.join("claude.log").display()
             ),
-        )
-        .expect("a claude");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("its mode");
+        );
     }
 
     /// A stand-in `ennius`, which answers `tools list` with `servers`, and
@@ -55,9 +68,9 @@ impl Scratch {
         let show = format!(
             r#"{{"config":{{"interactive":{{"grant":{{"tools":{tools}}}}}}},"provenance":{{"interactive.grant.tools":"user"}}}}"#
         );
-        fs::write(
+        program(
             &path,
-            format!(
+            &format!(
                 "#!/bin/sh
 \
                  case \"$*\" in\n\
@@ -67,9 +80,7 @@ impl Scratch {
                  esac\n",
                 self.0.join("ennius.log").display()
             ),
-        )
-        .expect("an ennius");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("its mode");
+        );
     }
 
     /// What the stand-in `claude` was asked, a line a command.

@@ -165,7 +165,7 @@ fn ask(shell: &Path, path: &Path) -> Result<Said> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
+    use std::{fs, path::PathBuf};
 
     use super::*;
 
@@ -195,15 +195,13 @@ mod tests {
         }
 
         /// A stand-in shell that says `said` on stderr and exits with
-        /// `status`, whatever it is asked.
+        /// `status`, whatever it is asked: written as [`crate::forked`] says.
         fn shell(&self, said: &str, status: i32) -> PathBuf {
             let path = self.0.join(SHELL);
-            fs::write(
+            crate::forked::program(
                 &path,
-                format!("#!/bin/sh\necho '{said}' >&2\nexit {status}\n"),
-            )
-            .expect("a shell");
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("its mode");
+                &format!("#!/bin/sh\necho '{said}' >&2\nexit {status}\n"),
+            );
             path
         }
     }

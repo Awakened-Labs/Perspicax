@@ -25,3 +25,6 @@ pub mod report;
 pub mod session;
 pub mod wire;
 pub mod wiring;
+
+#[cfg(test)]
+mod forked;

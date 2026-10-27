@@ -646,7 +646,6 @@ pub(crate) fn runnable(path: &Path) -> bool {
 mod tests {
     use std::{
         env, fs, io,
-        os::unix::fs::PermissionsExt as _,
         path::{Path, PathBuf},
         process::{Command, Stdio},
         thread,
@@ -725,12 +724,25 @@ mod tests {
         }
 
         /// A file at `path` in it, with `mode`: a program, if that says it
-        /// may be run.
+        /// may be run. Written by a shell of its own, never this process
+        /// (#272): the tests here run in parallel and start programs, and a
+        /// fork takes every file this process has open with it until the
+        /// child runs its program, so a program this process held open for
+        /// writing as another test forked would be busy (`ETXTBSY`) if run
+        /// in that moment.
         fn file(&self, path: &str, mode: u32) -> PathBuf {
             let file = self.0.join(path);
             fs::create_dir_all(file.parent().expect("a folder")).expect("its folder");
-            fs::write(&file, "#!/bin/sh\nexec sleep 30\n").expect("a file");
-            fs::set_permissions(&file, fs::Permissions::from_mode(mode)).expect("its mode");
+            let written = Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    r#"printf '#!/bin/sh\nexec sleep 30\n' > "$0" && chmod "$1" "$0""#,
+                ])
+                .arg(&file)
+                .arg(format!("{mode:o}"))
+                .status()
+                .expect("a shell to write it");
+            assert!(written.success(), "{} not written", file.display());
             file
         }
     }
