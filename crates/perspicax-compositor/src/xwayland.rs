@@ -1370,6 +1370,7 @@ impl Compositor {
                 }
             } else {
                 self.bring_back_x11(&window, &x11);
+                self.refused_keys(&window);
             }
             self.backend.redraw();
             self.publish_facts();

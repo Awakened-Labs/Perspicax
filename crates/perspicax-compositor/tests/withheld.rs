@@ -11,7 +11,9 @@
 //! the window in use, not told it is active, and has the keys only once the
 //! person gives them to it. A token is the other way of asking, spent once
 //! it is open. With nobody at the seat, every window takes the keys, as
-//! before.
+//! before. A shell is told, from version 7 of its channel, that such a
+//! window wants attention, and so is one whose program asked for the keys
+//! and was refused, until the person gives it them.
 //!
 //! Each test has programs, each a client of its own with a window and a
 //! keyboard, and some a program in a process of its own: a copy of this
@@ -36,6 +38,7 @@ use std::{
 use common::{Desk, Ear, Session, heard, until};
 use perspicax_compositor::{Backend, Command as Do};
 use perspicax_index::{HostFacts, SurfaceFacts};
+use perspicax_protocols::shell::v1::client::perspicax_shell_v1::WindowState;
 use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::{EventQueue, Proxy as _, QueueHandle, globals::GlobalList};
 
@@ -379,6 +382,146 @@ fn a_window_that_opened_without_the_keys_stays_beneath_as_it_goes_where_its_prog
 /// Whether a window has drawn, so has a size.
 fn drawn(window: &SurfaceFacts) -> bool {
     window.geometry.x1 > window.geometry.x0
+}
+
+/// The person's panel: a client of its own with the shell's channel and a
+/// taskbar, bound as perspicax-shell binds them, at `version`, and no
+/// window.
+fn panel(session: &Session, version: u32) -> (Desk, EventQueue<Desk>) {
+    let (mut panel, mut queue, qh, globals) = session.client();
+    match version {
+        7 => panel.bind_shell(&globals, &qh),
+        _ => panel.bind_shell_v6(&globals, &qh),
+    }
+    panel.bind_taskbar(&globals, &qh);
+    queue.roundtrip(&mut panel).expect("bound");
+    (panel, queue)
+}
+
+/// The person picks the window `title` in the panel's taskbar.
+fn pick(panel: &mut Desk, queue: &mut EventQueue<Desk>, title: &str) {
+    until(queue, panel, |panel| panel.task(title).is_some());
+    panel.activate(title);
+    queue.roundtrip(panel).expect("the pick sent");
+}
+
+/// Whether the panel was last told the window `title` wants attention, once
+/// it has been told of it at all.
+fn told_wanting(panel: &mut Desk, queue: &mut EventQueue<Desk>, title: &str) -> bool {
+    until(queue, panel, |panel| panel.told_of(title).0.is_some());
+    // Told at the end of a turn of the loop, after the answer to a round
+    // trip in it: one more, for what this turn changed.
+    queue.roundtrip(panel).expect("dispatch");
+    queue.roundtrip(panel).expect("dispatch");
+    panel
+        .told_of(title)
+        .0
+        .is_some_and(|told| told.state.contains(WindowState::WantsAttention))
+}
+
+/// Wait for the panel to be told the window `title` wants attention, or no
+/// longer does.
+fn told_so(panel: &mut Desk, queue: &mut EventQueue<Desk>, title: &str, wanting: bool) {
+    until(queue, panel, |panel| {
+        panel
+            .told_of(title)
+            .0
+            .is_some_and(|told| told.state.contains(WindowState::WantsAttention) == wanting)
+    });
+}
+
+/// The panel is told that a window that opened without the keys wants
+/// attention, and that the window in use does not. The person picks it
+/// there, and it wants it no longer.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_that_opened_without_the_keys_wants_attention_until_the_person_picks_it() {
+    let session = seated("withheld-wants");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let (mut panel, mut panel_queue) = panel(&session, 7);
+    let (mut thief, mut thief_queue, _, _, thief_ear) = program(&session, "thief");
+
+    told_so(&mut panel, &mut panel_queue, "thief", true);
+    assert!(!told_wanting(&mut panel, &mut panel_queue, "terminal"));
+    pick(&mut panel, &mut panel_queue, "thief");
+    until(&mut thief_queue, &mut thief, |thief| {
+        has_keys(thief, &thief_ear, 0)
+    });
+    told_so(&mut panel, &mut panel_queue, "thief", false);
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert!(!has_keys(&desk, &ear, 0));
+
+    session.stop(((desk, queue), (thief, thief_queue), (panel, panel_queue)));
+}
+
+/// A shell bound at version 6 knows no such bit, and is never sent it.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_shell_bound_at_version_6_is_never_told_a_window_wants_attention() {
+    let session = seated("withheld-v6");
+    let (desk, queue, _, _, _) = terminal(&session);
+    let (mut panel, mut panel_queue) = panel(&session, 6);
+    let (thief, thief_queue, _, _, _) = program(&session, "thief");
+    session.wait_for(|facts| titled(facts, "thief").is_some_and(drawn));
+
+    assert!(!told_wanting(&mut panel, &mut panel_queue, "thief"));
+
+    session.stop(((desk, queue), (thief, thief_queue), (panel, panel_queue)));
+}
+
+/// A program the person has moved on from asks to bring its window forward
+/// with a token made before: refused, and the window wants attention.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_refused_the_keys_by_a_stale_token_wants_attention() {
+    let session = seated("withheld-stale");
+    let (mut other, mut other_queue, other_qh, other_globals, other_ear) =
+        program(&session, "other");
+    other.bind_activation(&other_globals, &other_qh);
+    until(&mut other_queue, &mut other, |other| {
+        has_keys(other, &other_ear, 0)
+    });
+    let serial = heard(&other_ear).enter_serial.expect("entered");
+    other.make_token(&other_qh, 0, serial);
+    until(&mut other_queue, &mut other, |other| {
+        !other.tokens.is_empty()
+    });
+    let token = other.tokens.remove(0);
+    let (mut panel, mut panel_queue) = panel(&session, 7);
+    let (mut desk, mut queue, _, _, ear) = program(&session, "terminal");
+    pick(&mut panel, &mut panel_queue, "terminal");
+    until(&mut queue, &mut desk, |desk| has_keys(desk, &ear, 0));
+    assert!(!told_wanting(&mut panel, &mut panel_queue, "other"));
+
+    other.spend_token(&token, 0);
+    other_queue.roundtrip(&mut other).expect("dispatch");
+    told_so(&mut panel, &mut panel_queue, "other", true);
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert!(has_keys(&desk, &ear, 0), "the terminal keeps the keys");
+
+    session.stop(((desk, queue), (other, other_queue), (panel, panel_queue)));
+}
+
+/// Unless it is the window in use: refused what it has already, it wants
+/// nothing.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_window_in_use_refused_the_keys_by_a_stale_token_wants_no_attention() {
+    let session = seated("withheld-in-use");
+    let (mut desk, mut queue, qh, globals, ear) = terminal(&session);
+    desk.bind_activation(&globals, &qh);
+    let serial = heard(&ear).enter_serial.expect("entered");
+    desk.make_token(&qh, 0, serial);
+    until(&mut queue, &mut desk, |desk| !desk.tokens.is_empty());
+    let token = desk.tokens.remove(0);
+    let (mut panel, mut panel_queue) = panel(&session, 7);
+    types(&session, &mut desk, &mut queue, "x");
+
+    desk.spend_token(&token, 0);
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert!(!told_wanting(&mut panel, &mut panel_queue, "terminal"));
+
+    session.stop(((desk, queue), (panel, panel_queue)));
 }
 
 /// What [`window_probe`] does, by [`STEPS`].

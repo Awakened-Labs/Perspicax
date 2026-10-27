@@ -103,6 +103,17 @@ impl Compositor {
         );
     }
 
+    /// `window`'s program asked to bring it forward with the keys, and was
+    /// refused: a token stale, an X time nothing vouched for. It wants
+    /// attention, as one that opened without them does, unless it is the
+    /// window in use, which has them already.
+    pub(crate) fn refused_keys(&self, window: &Framed) {
+        if id_of(window).is_some_and(|id| self.window_in_use() == Some(id)) {
+            return;
+        }
+        placement(window, |placement| placement.wanting = true);
+    }
+
     /// The window `id` has the keys: it wants attention no longer. Asked
     /// while the keyboard is moving, so it only marks.
     pub(crate) fn heeded(&self, id: SurfaceId) {

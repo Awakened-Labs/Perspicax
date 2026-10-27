@@ -4021,6 +4021,43 @@ fn an_x11_menu_of_a_fullscreen_window_left_for_another_goes_back_under_it_with_i
     x11.stop();
 }
 
+/// Issue #259: an X11 window asking to be active with an X time nothing
+/// vouches for is refused the keys, and wants the person's attention: the
+/// shell is told, for its taskbar to say so.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_refused_the_keys_it_asked_for_wants_attention() {
+    use perspicax_shell_v1::WindowState;
+    let x11 = X11::start("x11-refused", Backend::headless((1280, 1024)).with_person());
+    let behind = x11.open("behind");
+    let (mut desk, mut queue, qh, globals) = x11.session.client();
+    desk.bind_shell(&globals, &qh);
+    let ear = desk.bind_keyboard(&globals, &qh);
+    desk.open_window(&qh, "terminal", "terminal");
+    let terminal = desk.windows[0].wl_surface().id();
+    pick(&mut desk, &mut queue, &globals, &qh, "terminal");
+    until(&mut queue, &mut desk, |desk| {
+        heard(&ear).entered.as_ref() == Some(&terminal) && desk.told_of("behind").0.is_some()
+    });
+    queue.roundtrip(&mut desk).expect("dispatch");
+    let wants = |desk: &Desk| {
+        desk.told_of("behind")
+            .0
+            .is_some_and(|told| told.state.contains(WindowState::WantsAttention))
+    };
+    assert!(!wants(&desk), "wants attention before it asked");
+
+    x11.activate(behind, APPLICATION, x11.server_time());
+    assert!(
+        x11.answered(x11.root, x11.atoms._NET_ACTIVE_WINDOW),
+        "never answered"
+    );
+    until(&mut queue, &mut desk, wants);
+    assert_eq!(heard(&ear).entered.as_ref(), Some(&terminal));
+
+    x11.session.stop((desk, queue));
+}
+
 /// A Wayland terminal the person types at: a client of its own, with a
 /// keyboard and `xdg_activation_v1`, whose window opened with the keys,
 /// nothing having had them.
@@ -4232,13 +4269,14 @@ fn an_x11_program_started_by_an_enter_at_a_wayland_terminal_takes_the_keys() {
     let mut terminal = Terminal::open(&x11);
     terminal.types(&x11, "xeyes\n");
 
-    let _probe = Probe::x11(&x11);
+    let probe = Probe::x11(&x11);
     assert!(
         x11.given_keys("probe"),
         "never took the keys: {:?}",
         x11.facts()
     );
     assert!(!terminal.has_keys(), "the terminal kept them");
+    drop(probe);
 
     terminal.stop(x11);
 }
@@ -4279,12 +4317,13 @@ fn a_wayland_program_started_by_an_enter_at_an_x11_terminal_opens_with_the_keys(
     })
     .expect("the Enter never reached the terminal");
 
-    let _probe = Probe::wayland(&x11);
+    let probe = Probe::wayland(&x11);
     assert!(
         x11.given_keys("probe"),
         "never took the keys: {:?}",
         x11.facts()
     );
+    drop(probe);
 
     x11.stop();
 }

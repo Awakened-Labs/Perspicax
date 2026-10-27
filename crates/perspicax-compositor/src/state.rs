@@ -1952,7 +1952,8 @@ impl XdgActivationHandler for Compositor {
     /// latest press was sent to (`token_created`), so it is granted while it
     /// is fresh and the person has not moved on (see
     /// `perspicax_policy::grants_activation`), and a window cannot pull
-    /// focus to itself while someone is typing elsewhere.
+    /// focus to itself while someone is typing elsewhere. One refused wants
+    /// the person's attention, and its taskbar says so (#259).
     fn request_activation(
         &mut self,
         token: XdgActivationToken,
@@ -1960,16 +1961,18 @@ impl XdgActivationHandler for Compositor {
         surface: WlSurface,
     ) {
         self.activation.remove_token(&token);
-        if !still_good(&data, self.attention.turn()) {
-            tracing::debug!("activation refused: the token is stale, or the person moved on");
-            return;
-        }
         // A client may name any surface it owns, and the window a subsurface
         // belongs to is its tree's root: that is what is raised and focused.
         let (surface, _) = damage::root_of(&surface);
         let Some(window) = self.window_for(&surface) else {
             return;
         };
+        if !still_good(&data, self.attention.turn()) {
+            tracing::debug!("activation refused: the token is stale, or the person moved on");
+            self.refused_keys(&window);
+            self.publish_facts();
+            return;
+        }
         let Some(id) = shell::id_of(&window) else {
             return;
         };
