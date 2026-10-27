@@ -148,7 +148,7 @@ impl Compositor {
     /// never takes one, unless another window has been placed since.
     pub(crate) fn place_remembered(&mut self, window: &Framed) -> Option<Output> {
         let (at, output) = self.remembered_place(window)?;
-        self.space.map_element(window.clone(), at, false);
+        self.move_window(window, at);
         self.window_moved(window);
         if let Some(step) = placement(window, |placement| placement.cascaded.take())
             && self.placed == step.wrapping_add(1)

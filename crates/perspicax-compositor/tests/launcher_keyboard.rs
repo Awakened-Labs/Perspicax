@@ -34,6 +34,12 @@ fn session(name: &str) -> Session {
     Session::start(name, Backend::headless((1280, 800)))
 }
 
+/// A session with a person at the seat, where a window opens with the keys
+/// only if the person asked for it (#259).
+fn seated(name: &str) -> Session {
+    Session::start(name, Backend::headless((1280, 800)).with_person())
+}
+
 /// A client with a window called "page", drawn, and a keyboard, which the
 /// page has. Returns what the keyboard hears.
 fn page(session: &Session) -> (Desk, EventQueue<Desk>, QueueHandle<Desk>, GlobalList, Ear) {
@@ -137,6 +143,38 @@ fn a_window_that_opens_under_a_launcher_takes_no_keys_from_it() {
     });
 
     session.stop((desk, queue));
+}
+
+/// With a person at the seat, a window another program opens under the
+/// launcher, which they did not start from it, opens without the keys
+/// (#259). Once the launcher goes, the window they were using has them
+/// back, over it; the new one waits beneath until they give it them.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_another_program_opens_under_a_launcher_waits_for_the_person_once_it_goes() {
+    let session = seated("launcher-keys-another-seated");
+    let (mut desk, mut queue, _, _, ear) = page(&session);
+    let (launcher, launcher_queue, _, _) = launcher(&session);
+    until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
+
+    let (mut other, mut other_queue, other_qh, other_globals) = session.client();
+    let other_ear = other.bind_keyboard(&other_globals, &other_qh);
+    other.open_coloured(&other_qh, "late", "late", LATE);
+    until(&mut other_queue, &mut other, |other| other.has_drawn(0));
+
+    drop((launcher, launcher_queue));
+    let page = desk.windows[0].wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&page)
+    });
+    other_queue.roundtrip(&mut other).expect("dispatch");
+    assert!(
+        heard(&other_ear).entered.is_none(),
+        "the window that opened under the launcher has none"
+    );
+    session.wait_for(|facts| above(facts, "page", "late"));
+
+    session.stop(((desk, queue), (other, other_queue)));
 }
 
 /// A window brought forward under the launcher, with the token the

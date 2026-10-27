@@ -840,7 +840,7 @@ impl Compositor {
     /// another workspace while it had the keyboard would otherwise go on
     /// saying it has it. A window whose own menu has the keyboard is still
     /// in use, as on sway and Plasma.
-    fn show_active(&self, in_use: Option<SurfaceId>) {
+    pub(crate) fn show_active(&self, in_use: Option<SurfaceId>) {
         if !self.backend.has_person() {
             return;
         }
@@ -864,7 +864,10 @@ impl Compositor {
     /// Topmost in the stack, which is the order the windows were raised in:
     /// the window raised last, whether or not one kept on top is drawn in
     /// front of it (`shell::stacking`). The keyboard goes where it went
-    /// before any window was kept on top.
+    /// before any window was kept on top. Passing over a window that opened
+    /// without the keys (#259), which the person never gave them to, and
+    /// raising the window they go to over it, so they go where the person
+    /// can see.
     ///
     /// While the session is locked, or a launcher holds the keyboard,
     /// [`Self::focus_surface`] refuses the window the keyboard. Giving it to
@@ -872,16 +875,39 @@ impl Compositor {
     /// surface or a launcher holds the keyboard, only once what held it has
     /// gone, or while a window or a menu holds it.
     pub(crate) fn focus_top_window(&mut self) {
-        let top = self
+        let Some(window) = self.window_for_keys() else {
+            self.clear_focus();
+            return;
+        };
+        let (Some(surface), Some(id)) = (shell::surface_of(&window), shell::id_of(&window)) else {
+            self.clear_focus();
+            return;
+        };
+        let topmost = self
             .space
             .elements()
             .rev()
-            .find(|window| !shell::places_itself(window))
-            .and_then(|window| Some((shell::surface_of(window)?, shell::id_of(window)?)));
-        match top {
-            Some((surface, id)) => self.focus_surface(surface, id),
-            None => self.clear_focus(),
+            .find(|other| !shell::places_itself(other));
+        if topmost != Some(&window) {
+            self.space.raise_element(&window, false);
         }
+        self.focus_surface(surface, id);
+    }
+
+    /// The window the keys go back to: the topmost but for a window that
+    /// places itself, or one that opened without them (#259), unless every
+    /// window did.
+    pub(crate) fn window_for_keys(&self) -> Option<Framed> {
+        let windows = || {
+            self.space
+                .elements()
+                .rev()
+                .filter(|window| !shell::places_itself(window))
+        };
+        windows()
+            .find(|window| !shell::wants_attention(window))
+            .or_else(|| windows().next())
+            .cloned()
     }
 
     /// Whether an agent acting now would race the person at the seat: they
@@ -1342,9 +1368,13 @@ impl XdgShellHandler for Compositor {
         &mut self.xdg_shell
     }
 
+    /// A window asked for, which opens with the keys, or one the person did
+    /// not ask for, which opens without them (#259), decided now: what it is
+    /// first told says whether it is active.
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        self.configure_new(&surface);
-        self.open_toplevel(surface);
+        let asked = self.asked_for(surface.wl_surface());
+        self.configure_new(&surface, asked);
+        self.open_toplevel(surface, asked);
         self.publish_facts();
     }
 
@@ -1571,14 +1601,18 @@ impl Compositor {
     /// window is told at `get_toplevel`, and one its client unmapped when it
     /// is asked for again (see `shell::withdrawn`).
     ///
-    /// Activated from the start: a toolkit that believes it is unfocused
-    /// renders differently, and M2 is about reading what is on screen. With
-    /// a person at the seat, told the room it has ([`Self::bounds_for`]),
-    /// so a toolkit that reads it opens at a size that fits.
-    pub(crate) fn configure_new(&self, toplevel: &ToplevelSurface) {
+    /// Activated from the start if it is `active`, as every window is with
+    /// nobody at the seat: a toolkit that believes it is unfocused renders
+    /// differently, and M2 is about reading what is on screen. Not one that
+    /// opens without the keys (#259). With a person at the seat, told the
+    /// room it has ([`Self::bounds_for`]), so a toolkit that reads it opens
+    /// at a size that fits.
+    pub(crate) fn configure_new(&self, toplevel: &ToplevelSurface, active: bool) {
         let bounds = self.bounds_for(toplevel);
         toplevel.with_pending_state(|state| {
-            state.states.set(xdg_toplevel::State::Activated);
+            if active {
+                state.states.set(xdg_toplevel::State::Activated);
+            }
             state.bounds = bounds;
         });
         toplevel.send_configure();
@@ -1586,9 +1620,10 @@ impl Compositor {
 
     /// Put a toplevel on screen as a new window: with an id nothing has
     /// seen, placed, on the workspace its monitor shows, and with the
-    /// keyboard. What a new window gets, and one its client unmapped when it
-    /// maps it again.
-    pub(crate) fn open_toplevel(&mut self, toplevel: ToplevelSurface) -> Framed {
+    /// keyboard if the person `asked` for it, beneath the window in use
+    /// without it if not (#259). What a new window gets, and one its client
+    /// unmapped when it maps it again.
+    pub(crate) fn open_toplevel(&mut self, toplevel: ToplevelSurface, asked: bool) -> Framed {
         // Taken before the toplevel is moved into the window.
         let wl_surface = toplevel.wl_surface().clone();
         let window = Framed::from(Window::new_wayland_window(toplevel));
@@ -1615,12 +1650,17 @@ impl Compositor {
         self.adopt(&window);
         tracing::info!(surface = id.0, at = ?at, "toplevel mapped");
 
-        // Focus what just appeared. A newly mapped window taking focus is what
-        // every desktop does, and here it does double duty: it is the host half
-        // of the focus correlation, and it makes the toolkit's own idea of
-        // which window is active agree with ours -- which is the pair of
-        // observations the join weighs.
-        self.focus_surface(wl_surface, id);
+        // Focus what just appeared, if the person asked for it. It does double
+        // duty: it is the host half of the focus correlation, and it makes
+        // the toolkit's own idea of which window is active agree with ours --
+        // which is the pair of observations the join weighs. One that opens
+        // without the keys is joined once it has them, if its title alone
+        // cannot tell it from its program's other windows.
+        if asked {
+            self.focus_surface(wl_surface, id);
+        } else {
+            self.open_without_keys(&window);
+        }
         window
     }
 
@@ -1743,6 +1783,10 @@ impl SeatHandler for Compositor {
         let window = focused
             .and_then(|surface| self.window_for(&self.menu_root(surface.clone())))
             .and_then(|window| shell::id_of(&window));
+        // A window that opened without the keys has them now (#259).
+        if let Some(id) = window {
+            self.heeded(id);
+        }
         // A fullscreen window covers the panels only while it is in use.
         self.restack(window);
         // The window in use is typed in its own layout, when each has one.
@@ -2004,6 +2048,11 @@ impl ClientState {
     /// This client's process, with when it started, if it could be read.
     pub(crate) fn process(&self) -> Option<perspicax_policy::Process> {
         self.process.get().copied()
+    }
+
+    /// The person's press that started this client's program, if one did.
+    pub(crate) fn started_on(&self) -> Option<perspicax_policy::Turn> {
+        self.started_on.get().copied()
     }
 
     /// What to send this client of a pointer `event` for `target`, and what

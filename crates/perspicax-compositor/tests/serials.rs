@@ -67,10 +67,12 @@ fn on_top(facts: &HostFacts) -> Option<String> {
         .clone()
 }
 
-/// A program: a client of its own, with a keyboard, a pointer and
-/// `xdg_activation_v1`, and a window called `title`, on screen and with the
-/// keys, as a window that has just opened has them. Returns what its
-/// keyboard hears, and its window to the facts.
+/// A program: a client of its own, with a keyboard, a pointer, a taskbar
+/// and `xdg_activation_v1`, and a window called `title`, on screen and with
+/// the keys, as a window that has just opened has them. With a person at
+/// the seat, one that opens while another program's window has them opens
+/// without them (#259), and the person picks it in the taskbar. Returns
+/// what its keyboard hears, and its window to the facts.
 fn program(
     session: &Session,
     title: &str,
@@ -78,12 +80,17 @@ fn program(
     let (mut desk, mut queue, qh, globals) = session.client();
     let ear = desk.bind_keyboard(&globals, &qh);
     desk.bind_pointer(&globals, &qh);
+    desk.bind_taskbar(&globals, &qh);
     desk.bind_activation(&globals, &qh);
     desk.open_window(&qh, title, title);
-    until(&mut queue, &mut desk, |_| {
-        titled(&session.facts.read(), title).is_some_and(|window| window.mapped)
+    until(&mut queue, &mut desk, |desk| {
+        desk.task(title).is_some()
+            && titled(&session.facts.read(), title).is_some_and(|window| window.mapped)
     });
     let id = titled(&session.facts.read(), title).expect("waited for").id;
+    if !has_keys(&desk, &ear) {
+        desk.activate(title);
+    }
     until(&mut queue, &mut desk, |desk| has_keys(desk, &ear));
     (desk, queue, qh, ear, id)
 }

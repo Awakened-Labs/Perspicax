@@ -36,7 +36,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::{Session, Told, heard, menu_with_the_keyboard, until};
+use common::{Desk, Session, Told, heard, menu_with_the_keyboard, until};
 use perspicax_compositor::{
     ActError, Backend, Command, Config, Error, Facts, Host, Requests, Stop,
 };
@@ -47,7 +47,7 @@ use perspicax_node::{Origin, Rect, Visibility, X11Basis};
 use perspicax_policy::{Action, Button, Focus, FocusModel, Mods, Opacity};
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1;
 use smithay_client_toolkit::shell::WaylandSurface as _;
-use wayland_client::Proxy as _;
+use wayland_client::{EventQueue, Proxy as _, QueueHandle, globals::GlobalList};
 use x11rb::{
     connection::Connection as _,
     properties::{WmHints, WmHintsState, WmSizeHints, WmSizeHintsSpecification},
@@ -277,6 +277,22 @@ fn focused_last(facts: &Facts) -> Option<String> {
         .max_by_key(|surface| surface.focused_at)?
         .title
         .clone()
+}
+
+/// The person picks the Wayland window `title` in the taskbar. One that
+/// opens while an X11 window has the keys opens without them, as a window
+/// of any other program does (#259).
+fn pick(
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    globals: &GlobalList,
+    qh: &QueueHandle<Desk>,
+    title: &str,
+) {
+    desk.bind_taskbar(globals, qh);
+    until(queue, desk, |desk| desk.task(title).is_some());
+    desk.activate(title);
+    queue.roundtrip(desk).expect("the pick sent");
 }
 
 /// Issue #8: an X11 window has no xdg maximized state, so maximizing one
@@ -1972,9 +1988,10 @@ fn the_root_names_the_x11_window_with_the_keyboard_and_none_once_a_wayland_one_h
     let second = x11.open("second");
     assert!(x11.names_active(second), "the second is not named");
 
-    let (mut desk, mut queue, qh, _) = x11.session.client();
+    let (mut desk, mut queue, qh, globals) = x11.session.client();
     desk.open_window(&qh, "wayland", "perspicax.test.wayland");
     until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    pick(&mut desk, &mut queue, &globals, &qh, "wayland");
     assert!(
         x11.names_active(x11rb::NONE),
         "still names {:#x} with a Wayland window at the keyboard",
@@ -2152,6 +2169,7 @@ fn an_x11_window_asking_to_be_active_while_a_wayland_window_has_the_keys_takes_n
     let ear = desk.bind_keyboard(&globals, &qh);
     desk.open_window(&qh, "terminal", "terminal");
     let terminal = desk.windows[0].wl_surface().id();
+    pick(&mut desk, &mut queue, &globals, &qh, "terminal");
     until(&mut queue, &mut desk, |_| {
         heard(&ear).entered.as_ref() == Some(&terminal)
     });
@@ -3272,6 +3290,7 @@ fn an_agent_cannot_click_or_focus_an_x11_window_past_a_wayland_menu() {
     let ear = desk.bind_keyboard(&globals, &qh);
     desk.open_window(&qh, "page", "page");
     until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    pick(&mut desk, &mut queue, &globals, &qh, "page");
     let page = id_of(&x11, "page");
     let _menu = menu_with_the_keyboard(&x11.session, &mut desk, &mut queue, &qh, &ear, page);
     let menu = x11
