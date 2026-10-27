@@ -177,7 +177,9 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
     // Every press turns the person's attention (#257), the one a binding
     // takes too: a token made before it is spent.
     if pressed == KeyState::Pressed {
-        state.attention.pressed(serial, Instant::now());
+        state
+            .attention
+            .pressed(serial, Instant::now(), crate::origin::boot_ticks());
     }
     // Before the keyboard is asked: inside its callback nothing may ask
     // where its focus is (#131).
@@ -318,7 +320,9 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
     if pressed == ButtonState::Pressed {
         // A press turns the person's attention (#257), before a binding or
         // the focus policy acts on it.
-        state.attention.pressed(event.serial, Instant::now());
+        state
+            .attention
+            .pressed(event.serial, Instant::now(), crate::origin::boot_ticks());
         // A click at the edge of the screen is a click, not a flip, and a
         // click with Logo held is not a tap of it.
         if let Running::Seat(session) = &mut state.backend {

@@ -65,8 +65,8 @@ pub use crate::{
     binds::{Action, Bindings, Chord, Drag, Mods, Towards, VolumeKey, candidates},
     flip::{EdgeDwell, Flipping, NOTCH_PIXELS, Notches, Resting, arrival, edge_at},
     focus::{
-        ACTIVATION_WINDOW, Attention, Change, Decision, Focus, FocusModel, Turn, cycle,
-        grants_activation,
+        ACTIVATION_WINDOW, Attention, Change, Decision, Focus, FocusModel, Process, Turn, cycle,
+        grants_activation, is_enter,
     },
     frame::{
         AgentLook, Animation, Buttons, Colour, DOUBLE_CLICK_MS, Decorations, Face, FrameButton,

@@ -341,6 +341,13 @@ impl Keys {
     }
 }
 
+/// Whose keys are typed: an agent's, or a test's stand-in for a person's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hand {
+    Agent,
+    Person,
+}
+
 /// The character a keysym types, if it types one. Control characters have
 /// keysyms and are not text, with one exception: an agent asking to type a
 /// newline means Return. xkb reads Return as `\r` and gives `\n` to the
@@ -679,11 +686,23 @@ impl Compositor {
     /// reading published facts would leave that moment open: a window mapping
     /// takes focus, and the keys would follow it.
     fn act_type(&mut self, surface: SurfaceId, text: &str) -> Result<(), ActError> {
-        let keyboard = self.keyboard.clone().ok_or(ActError::NoKeyboard)?;
         let focused = self.keyboard_holder();
         if focused != Some(surface) {
             return Err(ActError::FocusElsewhere { focused });
         }
+        self.type_text(text, Hand::Agent)
+    }
+
+    /// A person's typing, for a test: see [`crate::Command::Type`].
+    pub(crate) fn stand_in_type(&mut self, text: &str) {
+        if let Err(error) = self.type_text(text, Hand::Person) {
+            tracing::warn!(%error, text, "a stand-in could not type that");
+        }
+    }
+
+    /// Type `text` at whatever has the keys, by `hand`.
+    fn type_text(&mut self, text: &str, hand: Hand) -> Result<(), ActError> {
+        let keyboard = self.keyboard.clone().ok_or(ActError::NoKeyboard)?;
         let (active, _) = self.layouts().ok_or(ActError::NoKeyboard)?;
         let caps = keyboard.modifier_state().caps_lock;
 
@@ -720,17 +739,17 @@ impl Compositor {
                 } else {
                     KeyState::Released
                 };
-                self.press(&keyboard, shift_key, state);
+                self.press(&keyboard, shift_key, state, hand);
                 held = wants_shift;
             }
-            self.press(&keyboard, key, KeyState::Pressed);
-            self.press(&keyboard, key, KeyState::Released);
+            self.press(&keyboard, key, KeyState::Pressed, hand);
+            self.press(&keyboard, key, KeyState::Released, hand);
         }
 
         // Never leave a modifier down. A stuck shift turns every later act into
         // a different one, and the client has no way to notice.
         if held && let Some(shift_key) = shift {
-            self.press(&keyboard, shift_key, KeyState::Released);
+            self.press(&keyboard, shift_key, KeyState::Released, hand);
         }
         // Nor the person in a layout they did not choose.
         if layout != active {
@@ -746,16 +765,25 @@ impl Compositor {
     /// text must never end the session, switch VT or close a window by
     /// spelling a chord. Forwarding everything is also what makes the events
     /// indistinguishable from a device's to the client.
-    fn press(&mut self, keyboard: &KeyboardHandle<Self>, key: Keycode, state: KeyState) {
+    ///
+    /// A stand-in person's press turns their attention, as one at a seat
+    /// does (#257): an agent's never does.
+    fn press(
+        &mut self,
+        keyboard: &KeyboardHandle<Self>,
+        key: Keycode,
+        state: KeyState,
+        hand: Hand,
+    ) {
+        let serial = SERIAL_COUNTER.next_serial();
+        if hand == Hand::Person && state == KeyState::Pressed {
+            self.attention
+                .pressed(serial, Instant::now(), crate::origin::boot_ticks());
+        }
         let time = self.now_ms();
-        keyboard.input::<(), _>(
-            self,
-            key,
-            state,
-            SERIAL_COUNTER.next_serial(),
-            time,
-            |_, _, _| FilterResult::Forward,
-        );
+        keyboard.input::<(), _>(self, key, state, serial, time, |_, _, _| {
+            FilterResult::Forward
+        });
     }
 
     /// Where to put the pointer for a window-relative rect: the rect's centre

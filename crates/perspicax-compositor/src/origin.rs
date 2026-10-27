@@ -30,6 +30,7 @@ use std::{
 };
 
 use perspicax_node::{Origin, ProcessOrigin};
+use perspicax_policy::Process;
 use smithay::reexports::rustix::process::{Pid, PidfdFlags, pidfd_open};
 
 /// The origin of a process, by pid: an X client's, which nothing will hold a
@@ -73,17 +74,34 @@ const FARTHEST: usize = 64;
 
 /// The processes `pid` descends from, its parent first, up to but not
 /// including the init process. Empty for a process that has gone.
+pub(crate) fn ancestors(pid: u32) -> Vec<u32> {
+    lineage(pid)
+        .into_iter()
+        .skip(1)
+        .map(|process| process.pid)
+        .collect()
+}
+
+/// `pid` and the processes it descends from, each with when it started: the
+/// process itself first, then its parent, up to but not including the init
+/// process. Empty for a process that has gone. What tells a program started
+/// by the person's press, under what it reached, from one that was already
+/// running (#259).
 ///
 /// Each parent is pinned, then the child is asked again who its parent is.
 /// A parent that exits hands its children to another before its own pid can
 /// be given to anyone else, so a child still naming it after the pin means
 /// the pin holds that parent, not a process given its pid since.
-pub(crate) fn ancestors(pid: u32) -> Vec<u32> {
+pub(crate) fn lineage(pid: u32) -> Vec<Process> {
     let mut chain = Vec::new();
     let Some(mut child) = Pinned::open(pid) else {
         return chain;
     };
-    while chain.len() < FARTHEST {
+    let Some(started) = child.started() else {
+        return chain;
+    };
+    chain.push(Process { pid, started });
+    while chain.len() <= FARTHEST {
         let Some(parent) = child.parent().filter(|&parent| parent > 1) else {
             break;
         };
@@ -93,18 +111,45 @@ pub(crate) fn ancestors(pid: u32) -> Vec<u32> {
         if child.parent() != Some(parent) {
             break;
         }
-        chain.push(parent);
+        let Some(started) = pinned.started() else {
+            break;
+        };
+        chain.push(Process {
+            pid: parent,
+            started,
+        });
         child = pinned;
     }
     chain
+}
+
+/// Now, in the clock a process's start is told in: the kernel's ticks since
+/// boot, suspend included, as `stat` has counted a start since Linux 5.3.
+/// Floored to the tick, as a start is.
+pub(crate) fn boot_ticks() -> u64 {
+    let now = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
+    let per_second = rustix::param::clock_ticks_per_second();
+    let seconds = u64::try_from(now.tv_sec).unwrap_or(0);
+    let nanos = u64::try_from(now.tv_nsec).unwrap_or(0);
+    seconds * per_second + nanos * per_second / 1_000_000_000
 }
 
 /// The parent's pid in a `stat` line. Read past the last `)`, since what
 /// comes before it is the program's name in brackets, and a name may hold a
 /// bracket or a space of its own.
 fn parent_in(stat: &str) -> Option<u32> {
-    let after_name = &stat[stat.rfind(')')? + 1..];
-    after_name.split_whitespace().nth(1)?.parse().ok()
+    after_name(stat)?.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// When the process started, in ticks since boot, from a `stat` line: its
+/// 22nd field, read past the name as [`parent_in`] reads.
+fn started_in(stat: &str) -> Option<u64> {
+    after_name(stat)?.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// A `stat` line from its third field on: past the last `)`.
+fn after_name(stat: &str) -> Option<&str> {
+    Some(&stat[stat.rfind(')')? + 1..])
 }
 
 /// Everything a pin can say about its process.
@@ -162,7 +207,16 @@ impl Pinned {
 
     /// The pid of its parent, while it has one.
     fn parent(&self) -> Option<u32> {
-        parent_in(&fs::read_to_string(self.path().join("stat")).ok()?)
+        parent_in(&self.stat()?)
+    }
+
+    /// When it started, in ticks since boot.
+    fn started(&self) -> Option<u64> {
+        started_in(&self.stat()?)
+    }
+
+    fn stat(&self) -> Option<String> {
+        fs::read_to_string(self.path().join("stat")).ok()
     }
 
     /// The executable behind the pid.
@@ -282,6 +336,38 @@ mod tests {
         assert_eq!(parent_in("4242 (a) b (c) S 17 4242 4242 0 -1"), Some(17));
         assert_eq!(parent_in("1 (init) S 0 1 1 0 -1"), Some(0));
         assert_eq!(parent_in("4242 (truncated"), None);
+    }
+
+    #[test]
+    fn a_start_is_read_past_a_name_with_a_parenthesis() {
+        let stat = "4242 (a) b (c) S 17 4242 4242 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 \
+                    98765 1 2";
+        assert_eq!(started_in(stat), Some(98_765));
+        assert_eq!(started_in("4242 (truncated) S 17"), None);
+    }
+
+    /// A child started now started no sooner than now, and its lineage names
+    /// it with its start, then this process with this one's.
+    #[test]
+    fn a_child_started_now_is_told_from_its_parent_by_its_start() {
+        let before = boot_ticks();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep is in coreutils");
+        let chain = lineage(child.id());
+        child.kill().expect("the child is ours to kill");
+        child.wait().expect("and ours to reap");
+
+        let (own, parent) = (chain[0], chain[1]);
+        assert_eq!(own.pid, child.id(), "{chain:?}");
+        assert!(own.started >= before, "{chain:?} started before {before}");
+        assert_eq!(parent.pid, std::process::id(), "{chain:?}");
+        assert!(parent.started <= own.started, "{chain:?}");
+        assert!(
+            lineage(0x7FFF_FFFE).is_empty(),
+            "a pid with nothing behind it"
+        );
     }
 
     /// A child of this process descends from it, and the chain ends before

@@ -530,8 +530,25 @@ impl Compositor {
         tracing::info!(id = ?client.id(), ?origin, "client connected");
         if let Origin::Process(process) = &origin {
             self.grant_lineage(process.pid, &state);
+            self.stamp_started(process.pid, &state);
         }
         self.clients.push((client.id(), state));
+    }
+
+    /// Record a client's process, with when it started, and the person's
+    /// press that started it, if one did (#259): a binding's, or a click or
+    /// an Enter at what it descends from. Asked once, as it connects, while
+    /// whatever started it most likely runs yet; its windows ask the stamp.
+    fn stamp_started(&self, pid: u32, client: &ClientState) {
+        let lineage = origin::lineage(pid);
+        let Some(&process) = lineage.first() else {
+            return;
+        };
+        let _ = client.process.set(process);
+        if let Some(turn) = self.attention.started(&lineage, Instant::now()) {
+            tracing::debug!(pid, "started by the person's latest press");
+            let _ = client.started_on.set(turn);
+        }
     }
 
     /// Flush what waits for each client this compositor accepted, and say
@@ -1949,6 +1966,13 @@ pub(crate) struct ClientState {
     /// A pidfd on the origin's process, when one could be vouched for: what
     /// a grant to it is held by. See [`crate::origin::attest`].
     pidfd: OnceLock<OwnedFd>,
+    /// The origin's process, with when it started: what a press that reached
+    /// this client starts programs under (#259).
+    process: OnceLock<perspicax_policy::Process>,
+    /// The person's press that started this client's program, if one did:
+    /// its windows open with the keys while that press is their latest
+    /// (#259). See [`Compositor::stamp_started`].
+    started_on: OnceLock<perspicax_policy::Turn>,
     /// Whether it has stopped reading what is sent to it.
     stall: Stall,
     /// What of the pointer it is owed while it has.
@@ -1975,6 +1999,11 @@ impl ClientState {
     /// A pidfd of its own on this client's process, if one was vouched for.
     pub(crate) fn pidfd(&self) -> Option<OwnedFd> {
         self.pidfd.get()?.try_clone().ok()
+    }
+
+    /// This client's process, with when it started, if it could be read.
+    pub(crate) fn process(&self) -> Option<perspicax_policy::Process> {
+        self.process.get().copied()
     }
 
     /// What to send this client of a pointer `event` for `target`, and what

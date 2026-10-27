@@ -337,7 +337,8 @@ impl Compositor {
         self.person_button(code, true);
         // And a turn of the person's attention (#257), as on a seat.
         let serial = SERIAL_COUNTER.next_serial();
-        self.attention.pressed(serial, Instant::now());
+        self.attention
+            .pressed(serial, Instant::now(), crate::origin::boot_ticks());
         let time = self.now_ms();
         // Focus and raise before the press is delivered, and before a
         // binding, as a seat does.
