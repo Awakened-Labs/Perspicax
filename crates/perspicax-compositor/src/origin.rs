@@ -125,7 +125,6 @@ pub(crate) fn lineage(pid: u32) -> Vec<Process> {
 
 /// `pid`, with when it started: the first of its [`lineage`], alone. `None`
 /// for a process that has gone.
-#[cfg_attr(not(feature = "xwayland"), expect(dead_code, reason = "X11's"))]
 pub(crate) fn process(pid: u32) -> Option<Process> {
     let started = Pinned::open(pid)?.started()?;
     Some(Process { pid, started })

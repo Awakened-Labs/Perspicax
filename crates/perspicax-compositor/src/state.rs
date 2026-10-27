@@ -346,7 +346,8 @@ pub struct Compositor {
     /// socket exists, so `None` only before any client could connect.
     pub(crate) launch: Option<crate::Launch>,
     /// The agent's programs, started by `--spawn`: reaped as they exit and
-    /// killed when `run` ends. The person's are the seat session's.
+    /// killed when `run` ends. The person's are the seat session's, but for
+    /// a binding's, headless with a person at it, for a test.
     pub(crate) spawned: Vec<std::process::Child>,
     /// A `--spawn` command that would not start, waiting for `run` to return
     /// it. It may have been tried only once Xwayland was ready, inside the
@@ -1984,11 +1985,23 @@ impl XdgActivationHandler for Compositor {
     }
 }
 
-#[cfg(feature = "xwayland")]
 impl Compositor {
+    /// A token of the compositor's own, for a program a binding of the
+    /// person's starts (#259): stamped with the turn their press made, so
+    /// good while it is their latest, as one a program makes with it is.
+    pub(crate) fn token_for_person(&mut self) -> String {
+        let turn = self.attention.turn();
+        self.activation
+            .retain_tokens(|_, made| still_good(made, turn));
+        let (token, made) = self.activation.create_external_token(None);
+        made.user_data.insert_if_missing(|| turn);
+        token.as_str().to_owned()
+    }
+
     /// Spend the token `named` outside the protocol, as an X11 window's
     /// `_NET_STARTUP_ID` names the one its program was handed (#259):
     /// whether it was one still good, as `request_activation` asks.
+    #[cfg(feature = "xwayland")]
     pub(crate) fn spend_token(&mut self, named: String) -> bool {
         let token = XdgActivationToken::from(named);
         let good = self

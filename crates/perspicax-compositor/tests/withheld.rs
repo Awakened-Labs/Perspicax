@@ -13,7 +13,9 @@
 //! it is open. With nobody at the seat, every window takes the keys, as
 //! before. A shell is told, from version 7 of its channel, that such a
 //! window wants attention, and so is one whose program asked for the keys
-//! and was refused, until the person gives it them.
+//! and was refused, until the person gives it them. What a binding of the
+//! person's starts is the root of their press, and is handed a token of
+//! the compositor's own, good while that press is their latest.
 //!
 //! Each test has programs, each a client of its own with a window and a
 //! keyboard, and some a program in a process of its own: a copy of this
@@ -522,6 +524,151 @@ fn the_window_in_use_refused_the_keys_by_a_stale_token_wants_no_attention() {
     assert!(!told_wanting(&mut panel, &mut panel_queue, "terminal"));
 
     session.stop(((desk, queue), (panel, panel_queue)));
+}
+
+/// A binding of the person's: a press of the side button on the desktop
+/// starts `command`, for them.
+#[cfg(feature = "capture")]
+fn bind_spawn(session: &Session, command: Vec<String>) {
+    use perspicax_policy::{Action, Button, Context, Gesture, Mods, MouseBindings, MouseChord};
+    session.command(Do::MouseBindings(MouseBindings::default().bind(
+        Context::Desktop,
+        MouseChord {
+            mods: Mods::default(),
+            gesture: Gesture::Press(Button::Side),
+        },
+        Action::Spawn {
+            command,
+            agent: false,
+        },
+    )));
+}
+
+/// The person presses the binding, on the desktop's far corner, where no
+/// window is.
+#[cfg(feature = "capture")]
+fn press_binding(session: &Session) {
+    use perspicax_policy::{Button, Mods};
+    session.command(Do::Click {
+        at: (1270, 790),
+        button: Button::Side,
+        mods: Mods::default(),
+    });
+}
+
+/// What the binding started was handed, as `XDG_ACTIVATION_TOKEN` and
+/// `DESKTOP_STARTUP_ID`: bound, pressed, and written down by a shell it
+/// starts.
+#[cfg(feature = "capture")]
+fn handed(session: &Session) -> (String, String) {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR");
+    let said = Path::new(&dir).join(format!("{}.handed", session.socket()));
+    let _ = std::fs::remove_file(&said);
+    let script = r#"printf '%s\n%s' "$XDG_ACTIVATION_TOKEN" "$DESKTOP_STARTUP_ID" > "$0.part" && mv "$0.part" "$0""#;
+    bind_spawn(
+        session,
+        vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            script.to_owned(),
+            said.to_string_lossy().into_owned(),
+        ],
+    );
+    press_binding(session);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !said.exists() {
+        assert!(Instant::now() < deadline, "the binding started nothing");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let text = std::fs::read_to_string(&said).expect("written down");
+    let _ = std::fs::remove_file(&said);
+    let (token, startup) = text.split_once('\n').expect("two lines");
+    (token.to_owned(), startup.to_owned())
+}
+
+/// The person's binding starts a program: the root of their press, its
+/// window opens with the keys, though the terminal had them.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_program_a_binding_of_the_persons_starts_opens_with_the_keys() {
+    let session = seated("withheld-binding");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    // The probe, in the binding's own process, its harness's report nowhere.
+    let script = format!(
+        "{PROBE}=\"$0\" {STEPS}={} exec \"$1\" --exact window_probe --ignored --nocapture > /dev/null",
+        Steps::Window.name()
+    );
+    let exe = std::env::current_exe().expect("this test's binary");
+    bind_spawn(
+        &session,
+        vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            script,
+            session.socket().to_owned(),
+            exe.to_string_lossy().into_owned(),
+        ],
+    );
+    press_binding(&session);
+
+    let facts = session.wait_for(|facts| titled(facts, "probe").is_some());
+    assert!(
+        given_keys(&facts, "probe"),
+        "the program started has the keys"
+    );
+    until(&mut queue, &mut desk, |desk| !has_keys(desk, &ear, 0));
+    session.stop((desk, queue));
+}
+
+/// What the binding starts is handed a token of the compositor's own, under
+/// both names: a program it hands on to, already running, brings its window
+/// forward with it, as a browser started again opens its window in the one
+/// running.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_program_a_binding_starts_is_handed_a_token_that_brings_a_window_forward() {
+    let session = seated("withheld-handed");
+    let (desk, queue, _, _, _) = terminal(&session);
+    let (mut other, mut other_queue, other_qh, other_globals, other_ear) =
+        program(&session, "other");
+    other.bind_activation(&other_globals, &other_qh);
+    until(&mut other_queue, &mut other, |other| other.has_drawn(0));
+
+    let (token, startup) = handed(&session);
+    assert!(!token.is_empty(), "handed a token");
+    assert_eq!(startup, token, "and the same as its startup id, for X11");
+    other.spend_token(&token, 0);
+    until(&mut other_queue, &mut other, |other| {
+        has_keys(other, &other_ear, 0)
+    });
+
+    session.stop(((desk, queue), (other, other_queue)));
+}
+
+/// But only while the binding's press is the person's latest: a key pressed
+/// since, and it brings nothing forward.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_token_a_binding_hands_on_is_good_until_the_person_presses_something_else() {
+    let session = seated("withheld-handed-since");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let (mut other, mut other_queue, other_qh, other_globals, other_ear) =
+        program(&session, "other");
+    other.bind_activation(&other_globals, &other_qh);
+    until(&mut other_queue, &mut other, |other| other.has_drawn(0));
+
+    let (token, _) = handed(&session);
+    types(&session, &mut desk, &mut queue, "x");
+    other.spend_token(&token, 0);
+    other_queue.roundtrip(&mut other).expect("dispatch");
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert!(has_keys(&desk, &ear, 0), "the terminal keeps the keys");
+    assert!(!has_keys(&other, &other_ear, 0));
+
+    session.stop(((desk, queue), (other, other_queue)));
 }
 
 /// What [`window_probe`] does, by [`STEPS`].

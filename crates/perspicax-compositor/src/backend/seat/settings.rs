@@ -563,10 +563,25 @@ impl Session {
         }
     }
 
-    /// Start a program for the person, and keep it to stop with the session.
-    pub(crate) fn spawn(&mut self, launch: Option<&Launch>, command: &[String]) {
-        if let Some(launch) = launch {
-            self.spawn_in(launch, command, None);
+    /// Start a program for the person, handed `token` (see
+    /// [`Launch::spawn_handing`]), and keep it to stop with the session. Its
+    /// pid, if it started.
+    pub(crate) fn spawn(
+        &mut self,
+        launch: Option<&Launch>,
+        command: &[String],
+        token: &str,
+    ) -> Option<u32> {
+        match launch?.spawn_handing(command, None, Some(token)) {
+            Ok(child) => {
+                let pid = child.id();
+                self.children.push(child);
+                Some(pid)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not start");
+                None
+            }
         }
     }
 

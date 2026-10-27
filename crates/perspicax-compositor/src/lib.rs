@@ -548,6 +548,21 @@ impl Launch {
         command: &[impl AsRef<OsStr>],
         dir: Option<&Path>,
     ) -> Result<Child, Error> {
+        self.spawn_handing(command, dir, None)
+    }
+
+    /// [`Self::spawn_in`], handing the program `token`, an activation token
+    /// of the compositor's own, as `XDG_ACTIVATION_TOKEN` and, for an X11
+    /// program, `DESKTOP_STARTUP_ID`: the program asks with it for its
+    /// window to come forward, the person having asked for it (#259).
+    /// Without one, neither is set, whatever this process was given or the
+    /// session sets: a token is good for the one start it was made for.
+    pub(crate) fn spawn_handing(
+        &self,
+        command: &[impl AsRef<OsStr>],
+        dir: Option<&Path>,
+        token: Option<&str>,
+    ) -> Result<Child, Error> {
         let shown = command
             .iter()
             .map(|word| word.as_ref().to_string_lossy())
@@ -586,6 +601,12 @@ impl Launch {
             // Xwayland or removed.
             .env("GDK_BACKEND", "wayland,x11")
             .env("QT_QPA_PLATFORM", "wayland;xcb");
+        for name in ["XDG_ACTIVATION_TOKEN", "DESKTOP_STARTUP_ID"] {
+            match token {
+                Some(token) => command_line.env(name, token),
+                None => command_line.env_remove(name),
+            };
+        }
         if let Some(dir) = dir {
             command_line.current_dir(dir);
         }
@@ -828,5 +849,32 @@ mod tests {
 
         assert_eq!(said, asked, "as a shell would name it");
         assert_eq!(folder, scratch.0);
+    }
+
+    #[test]
+    fn a_program_is_handed_an_activation_token_only_with_the_start_it_was_made_for() {
+        let scratch = Scratch::new("token");
+        let said = scratch.0.join("said");
+        // Given one by whatever started this process, or by the session.
+        let launch = Launch {
+            env: vec![
+                ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+                ("XDG_ACTIVATION_TOKEN".to_owned(), "inherited".to_owned()),
+                ("DESKTOP_STARTUP_ID".to_owned(), "inherited".to_owned()),
+            ],
+            ..on_path("")
+        };
+        let told = |token: Option<&str>| {
+            let script = r#"printf '%s|%s' "$XDG_ACTIVATION_TOKEN" "$DESKTOP_STARTUP_ID" > "$0""#;
+            let command = [Path::new("sh"), Path::new("-c"), Path::new(script), &said];
+            let mut child = launch
+                .spawn_handing(&command, None, token)
+                .expect("sh starts");
+            child.wait().expect("sh ends");
+            fs::read_to_string(&said).expect("what it was given")
+        };
+
+        assert_eq!(told(None), "|", "none, whatever it was given");
+        assert_eq!(told(Some("handed")), "handed|handed", "both, for X11 too");
     }
 }
