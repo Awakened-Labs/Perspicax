@@ -23,6 +23,12 @@
 //! `Command::FocusPolicy`. To an agent each is a popup (issue #159), hung
 //! from the window its `WM_TRANSIENT_FOR` names, or from nothing.
 //!
+//! The keys (issue #259): with a person at the seat an X11 window takes them
+//! as it opens only if they asked for it, as a Wayland window does, and the
+//! person picks a window that opened without them in the taskbar. What a
+//! press started is a program in a process of its own, as a terminal starts
+//! one: a copy of this binary running `window_probe`.
+//!
 //! The X client is this test process, speaking X11 through x11rb, so nothing
 //! beyond `Xwayland` itself has to be installed. Needs `XDG_RUNTIME_DIR` and
 //! `Xwayland` on the `PATH`, and is `#[ignore]`d for `ci/live-tests.sh`.
@@ -32,11 +38,12 @@
 mod common;
 
 use std::{
+    process::{self, Child, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
-use common::{Desk, Session, Told, heard, menu_with_the_keyboard, until};
+use common::{Desk, Ear, Session, Told, heard, menu_with_the_keyboard, until};
 use perspicax_compositor::{
     ActError, Backend, Command, Config, Error, Facts, Host, Requests, Stop,
 };
@@ -47,7 +54,7 @@ use perspicax_node::{Origin, Rect, Visibility, X11Basis};
 use perspicax_policy::{Action, Button, Focus, FocusModel, Mods, Opacity};
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1;
 use smithay_client_toolkit::shell::WaylandSurface as _;
-use wayland_client::{EventQueue, Proxy as _, QueueHandle, globals::GlobalList};
+use wayland_client::{EventQueue, Proxy as _, QueueHandle, backend::ObjectId, globals::GlobalList};
 use x11rb::{
     connection::Connection as _,
     properties::{WmHints, WmHintsState, WmSizeHints, WmSizeHintsSpecification},
@@ -279,9 +286,9 @@ fn focused_last(facts: &Facts) -> Option<String> {
         .clone()
 }
 
-/// The person picks the Wayland window `title` in the taskbar. One that
-/// opens while an X11 window has the keys opens without them, as a window
-/// of any other program does (#259).
+/// The person picks the window `title` in the taskbar. One that opens while
+/// another program has the keys opens without them (#259): a Wayland window
+/// while an X11 one has them, or the other way about.
 fn pick(
     desk: &mut Desk,
     queue: &mut EventQueue<Desk>,
@@ -578,6 +585,8 @@ x11rb::atom_manager! {
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_POPUP_MENU,
         _NET_WM_WINDOW_TYPE_DIALOG,
+        _NET_STARTUP_ID,
+        UTF8_STRING,
     }
 }
 
@@ -2253,8 +2262,8 @@ fn an_x11_window_on_a_workspace_not_showing_asking_to_be_active_with_fresh_input
 }
 
 /// Issue #257: the Wayland program the person was using makes an activation
-/// token while it has the keys, and an X11 terminal then opens and takes
-/// them, as a binding opens one. The keys went to another client, so the
+/// token while it has the keys, and an X11 terminal then opens, which the
+/// person picks in the taskbar. The keys went to another client, so the
 /// person has moved on: the token, spent now, brings nothing forward, and
 /// the terminal keeps the keys.
 #[test]
@@ -2278,6 +2287,7 @@ fn a_token_made_before_an_x11_window_opened_with_the_keys_brings_nothing_forward
     let token = desk.tokens.remove(0);
 
     let terminal = x11.open("terminal");
+    pick(&mut desk, &mut queue, &globals, &qh, "terminal");
     eventually(Duration::from_secs(10), || {
         (x11.focus() == terminal).then_some(())
     })
@@ -2649,7 +2659,7 @@ fn two_workspaces() -> Backend {
 fn an_x11_pointer_grab_confined_to_its_window_keeps_the_mouse_in_it() {
     let x11 = X11::start("x11-confine", Backend::headless((1280, 800)).with_person());
     // A Wayland window at the top left, and the X game cascaded over it,
-    // with the keyboard.
+    // with the keyboard, the person having picked it.
     let (mut desk, mut queue, qh, globals) = x11.session.client();
     desk.bind_pointer(&globals, &qh);
     desk.open_window(&qh, "beside", "beside");
@@ -2657,6 +2667,7 @@ fn an_x11_pointer_grab_confined_to_its_window_keeps_the_mouse_in_it() {
     x11.surface_where("beside", |surface| surface.mapped)
         .expect("the Wayland window on screen");
     let window = x11.open("game");
+    pick(&mut desk, &mut queue, &globals, &qh, "game");
     assert!(
         eventually(Duration::from_secs(5), || {
             (focused_last(&x11.session.facts).as_deref() == Some("game")).then_some(())
@@ -4008,4 +4019,362 @@ fn an_x11_menu_of_a_fullscreen_window_left_for_another_goes_back_under_it_with_i
 
     assert!(x11.on_top("other"), "under the menu: {:?}", x11.facts());
     x11.stop();
+}
+
+/// A Wayland terminal the person types at: a client of its own, with a
+/// keyboard and `xdg_activation_v1`, whose window opened with the keys,
+/// nothing having had them.
+struct Terminal {
+    desk: Desk,
+    queue: EventQueue<Desk>,
+    qh: QueueHandle<Desk>,
+    ear: Ear,
+    window: ObjectId,
+}
+
+impl Terminal {
+    fn open(x11: &X11) -> Self {
+        let (mut desk, mut queue, qh, globals) = x11.session.client();
+        let ear = desk.bind_keyboard(&globals, &qh);
+        desk.bind_activation(&globals, &qh);
+        desk.open_window(&qh, "terminal", "terminal");
+        let window = desk.windows[0].wl_surface().id();
+        until(&mut queue, &mut desk, |_| {
+            heard(&ear).entered.as_ref() == Some(&window)
+        });
+        Self {
+            desk,
+            queue,
+            qh,
+            ear,
+            window,
+        }
+    }
+
+    /// The person types `text` at it, taken in before this returns: a
+    /// round trip, whose answer comes after the keys.
+    fn types(&mut self, x11: &X11, text: &str) {
+        x11.session.command(Command::Type(text.to_owned()));
+        self.queue.roundtrip(&mut self.desk).expect("dispatch");
+        self.queue.roundtrip(&mut self.desk).expect("dispatch");
+    }
+
+    /// Whether it still has the keys, as its keyboard last heard.
+    fn has_keys(&mut self) -> bool {
+        self.queue.roundtrip(&mut self.desk).expect("dispatch");
+        heard(&self.ear).entered.as_ref() == Some(&self.window)
+    }
+
+    /// A token it makes with the keys, as a launcher makes one for what it
+    /// starts.
+    fn token(&mut self) -> String {
+        let serial = heard(&self.ear).enter_serial.expect("entered");
+        self.desk.make_token(&self.qh, 0, serial);
+        until(&mut self.queue, &mut self.desk, |desk| {
+            !desk.tokens.is_empty()
+        });
+        self.desk.tokens.remove(0)
+    }
+
+    fn stop(self, x11: X11) {
+        x11.session.stop((self.desk, self.queue));
+    }
+}
+
+impl X11 {
+    /// A window titled `title` whose program was started with `token`, as
+    /// `DESKTOP_STARTUP_ID`, and names it in `_NET_STARTUP_ID`: mapped, once
+    /// the compositor has it on screen.
+    fn open_started_with(&self, title: &str, token: &str) -> u32 {
+        let window = self.create(title, &[]);
+        self.x
+            .change_property8(
+                PropMode::REPLACE,
+                window,
+                self.atoms._NET_STARTUP_ID,
+                self.atoms.UTF8_STRING,
+                token.as_bytes(),
+            )
+            .expect("_NET_STARTUP_ID");
+        self.x.map_window(window).expect("map_window");
+        self.x.flush().expect("flush");
+        self.surface_where(title, |surface| surface.mapped)
+            .unwrap_or_else(|| panic!("{title} never mapped: {:?}", self.facts()));
+        window
+    }
+
+    /// Wait for XRes to have named the process of the window titled
+    /// `title`: by then whatever its process decides is decided.
+    fn attributed(&self, title: &str) {
+        self.surface_where(title, |surface| {
+            matches!(&surface.origin, Origin::X11(origin) if origin.basis == X11Basis::XRes)
+        })
+        .unwrap_or_else(|| panic!("{title} never named by XRes: {:?}", self.facts()));
+    }
+
+    /// Whether the window titled `title` comes to have the keys, as the
+    /// facts say: the window focused last.
+    fn given_keys(&self, title: &str) -> bool {
+        eventually(Duration::from_secs(10), || {
+            (focused_last(&self.session.facts).as_deref() == Some(title)).then_some(())
+        })
+        .is_some()
+    }
+}
+
+/// Issue #259: the person types at a Wayland terminal, and an X11 program
+/// already running opens a window. It opens without the keys, as a Wayland
+/// program's does: the terminal keeps them, X is not told the window has
+/// them, and it is beneath the terminal. So it stays once XRes has named its
+/// process, which was running before the person's Enter.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_another_program_opens_while_the_person_types_opens_without_the_keys() {
+    let x11 = X11::start(
+        "x11-withheld",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let mut terminal = Terminal::open(&x11);
+    terminal.types(&x11, "sudo true\n");
+
+    let thief = x11.open("thief");
+    x11.attributed("thief");
+    assert!(terminal.has_keys(), "the terminal keeps the keys");
+    assert_ne!(x11.focus(), thief, "X gave the window the keys");
+    assert!(x11.on_top("terminal"), "not beneath: {:?}", x11.facts());
+
+    terminal.stop(x11);
+}
+
+/// A window that opened without the keys asks to go fullscreen, as a game
+/// does once it has set its mode: it fills its monitor, still beneath the
+/// window in use, which keeps the keys.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_that_opened_without_the_keys_stays_beneath_as_it_goes_fullscreen() {
+    let x11 = X11::start(
+        "x11-withheld-fills",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let mut terminal = Terminal::open(&x11);
+    let game = x11.open("game");
+
+    x11.ask_state(game, ADD, x11.atoms._NET_WM_STATE_FULLSCREEN, 0);
+    assert!(
+        x11.answered(game, x11.atoms._NET_WM_STATE),
+        "never answered"
+    );
+    x11.surface_where("game", |surface| {
+        rect_of(surface) == (0.0, 0.0, 1280.0, 1024.0)
+    })
+    .unwrap_or_else(|| panic!("never filled its monitor: {:?}", x11.facts()));
+    assert!(x11.on_top("terminal"), "not beneath: {:?}", x11.facts());
+    assert!(terminal.has_keys(), "the terminal keeps the keys");
+
+    terminal.stop(x11);
+}
+
+/// Issue #259: an X program a launcher started with a token, handed on as
+/// `DESKTOP_STARTUP_ID`, names it in its window's `_NET_STARTUP_ID`. While
+/// the token is still good its window opens with the keys, the person having
+/// asked for it, as a Wayland window spending one is.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_naming_a_token_still_good_opens_with_the_keys() {
+    let x11 = X11::start(
+        "x11-started-with",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let mut terminal = Terminal::open(&x11);
+    let token = terminal.token();
+
+    let launched = x11.open_started_with("launched", &token);
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == launched).then_some(())
+    })
+    .unwrap_or_else(|| panic!("never took the keys: {:?}", x11.facts()));
+
+    terminal.stop(x11);
+}
+
+/// But not one the person has moved on from: a key pressed after the token
+/// was made. That window opens without the keys.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_naming_a_stale_token_opens_without_the_keys() {
+    let x11 = X11::start(
+        "x11-started-stale",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let mut terminal = Terminal::open(&x11);
+    let token = terminal.token();
+    terminal.types(&x11, "x");
+
+    let launched = x11.open_started_with("launched", &token);
+    x11.attributed("launched");
+    assert!(terminal.has_keys(), "the terminal keeps the keys");
+    assert_ne!(x11.focus(), launched, "X gave the window the keys");
+
+    terminal.stop(x11);
+}
+
+/// Issue #259: the person runs an X program at a Wayland terminal, with an
+/// Enter. Its window opens without the keys, Xwayland not being the
+/// terminal, but takes them as soon as XRes names its process: one started
+/// since, under the terminal.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_program_started_by_an_enter_at_a_wayland_terminal_takes_the_keys() {
+    let x11 = X11::start(
+        "x11-started-by",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let mut terminal = Terminal::open(&x11);
+    terminal.types(&x11, "xeyes\n");
+
+    let _probe = Probe::x11(&x11);
+    assert!(
+        x11.given_keys("probe"),
+        "never took the keys: {:?}",
+        x11.facts()
+    );
+    assert!(!terminal.has_keys(), "the terminal kept them");
+
+    terminal.stop(x11);
+}
+
+/// And the other way about: the person runs a Wayland program at an X
+/// terminal. What it starts descends from the X client XRes named for the
+/// window, Xwayland being one client for every X client, and its window
+/// opens with the keys.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_wayland_program_started_by_an_enter_at_an_x11_terminal_opens_with_the_keys() {
+    let x11 = X11::start("x11-starts", Backend::headless((1280, 1024)).with_person());
+    let terminal = x11.create("xterm", &[]);
+    x11.x
+        .change_window_attributes(
+            terminal,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::KEY_PRESS),
+        )
+        .expect("change_window_attributes");
+    x11.x.map_window(terminal).expect("map_window");
+    x11.x.flush().expect("flush");
+    eventually(Duration::from_secs(10), || {
+        (x11.focus() == terminal).then_some(())
+    })
+    .expect("the terminal never took the keys");
+    x11.attributed("xterm");
+    x11.drain();
+    x11.session.command(Command::Type("foot\n".to_owned()));
+    // Return, as X numbers it: the Enter has reached the terminal.
+    eventually(Duration::from_secs(5), || {
+        loop {
+            match x11.x.poll_for_event().ok()? {
+                Some(Event::KeyPress(press)) if press.detail == 36 => return Some(()),
+                Some(_) => {}
+                None => return None,
+            }
+        }
+    })
+    .expect("the Enter never reached the terminal");
+
+    let _probe = Probe::wayland(&x11);
+    assert!(
+        x11.given_keys("probe"),
+        "never took the keys: {:?}",
+        x11.facts()
+    );
+
+    x11.stop();
+}
+
+/// Set, to what [`window_probe`] opens its window on -- `x11:` and a
+/// display, or `wayland:` and a socket -- for the copy of this binary it
+/// runs in.
+const PROBE: &str = "PERSPICAX_XWAYLAND_PROBE";
+
+/// A program in a process of its own, as a terminal starts one: a copy of
+/// this binary running [`window_probe`], its window titled "probe". Killed
+/// and reaped as it is dropped, whether its test passes or not.
+struct Probe(Child);
+
+impl Probe {
+    /// One with an X11 window.
+    fn x11(x11: &X11) -> Self {
+        let display = x11.session.facts.x11_display().expect("Xwayland is ready");
+        Self::start(format!("x11:{display}"))
+    }
+
+    /// One with a Wayland window.
+    fn wayland(x11: &X11) -> Self {
+        Self::start(format!("wayland:{}", x11.session.socket()))
+    }
+
+    fn start(on: String) -> Self {
+        // Its panics on stderr, beside this test's; its harness's report
+        // nowhere.
+        let child = process::Command::new(std::env::current_exe().expect("this test's binary"))
+            .args(["--exact", "window_probe", "--ignored", "--nocapture"])
+            .env(PROBE, on)
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("the probe starts");
+        Self(child)
+    }
+}
+
+impl Drop for Probe {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Not a test: the program a [`Probe`] is, in a process of its own.
+#[test]
+#[ignore = "a program in a process of its own, for the tests that start one"]
+fn window_probe() {
+    let Ok(on) = std::env::var(PROBE) else {
+        return;
+    };
+    if let Some(display) = on.strip_prefix("x11:") {
+        let (x, screen) = x11rb::connect(Some(&format!(":{display}"))).expect("an X connection");
+        let window = x.generate_id().expect("an X id");
+        x.create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            window,
+            x.setup().roots[screen].root,
+            0,
+            0,
+            320,
+            200,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new().background_pixel(x.setup().roots[screen].white_pixel),
+        )
+        .expect("create_window");
+        x.change_property8(
+            PropMode::REPLACE,
+            window,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            b"probe",
+        )
+        .expect("WM_NAME");
+        x.map_window(window).expect("map_window");
+        x.flush().expect("flush");
+        loop {
+            x.wait_for_event().expect("the X server is there");
+        }
+    }
+    let socket = on.strip_prefix("wayland:").expect("x11: or wayland:");
+    let (mut desk, mut queue, qh, _) = common::client_on(socket);
+    desk.open_window(&qh, "probe", "probe");
+    loop {
+        queue
+            .blocking_dispatch(&mut desk)
+            .expect("the compositor is there");
+    }
 }

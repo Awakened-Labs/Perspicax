@@ -139,13 +139,16 @@ use std::{
 };
 
 use perspicax_node::{Origin, SurfaceId, X11Basis, X11Origin};
-use perspicax_policy::Zone;
+use perspicax_policy::{Process, Zone};
 use smithay::{
     desktop::Window,
     output::Output,
     reexports::{
         calloop::{LoopHandle, RegistrationToken, channel},
-        wayland_server::{Client, protocol::wl_output::WlOutput},
+        wayland_server::{
+            Client,
+            protocol::{wl_output::WlOutput, wl_surface::WlSurface},
+        },
     },
     utils::{Clock, Logical, Monotonic, Point, Rectangle, SERIAL_COUNTER},
     wayland::{
@@ -201,6 +204,10 @@ pub(crate) struct Xwayland {
     /// The window that mapped last, while it waits for the surface it takes
     /// the keyboard with. See `map_window_request`.
     awaiting_focus: Option<SurfaceId>,
+    /// Windows that opened without the keys, by X window id, until XRes
+    /// names their process: one the person's latest press started takes
+    /// them then (#259). See `started_x11`.
+    deciding: HashSet<u32>,
     /// The connection that tells windows what Smithay's window manager does
     /// not. See [`Side`].
     side: Option<Side>,
@@ -719,6 +726,11 @@ type Attribution = RefCell<Option<X11Origin>>;
 /// map makes anew, so it lives and dies with that map.
 struct MappedAt(Instant);
 
+/// The process XRes named for a window, with when it started: what a press
+/// on the window starts programs under (#259). Never the pid the window
+/// claims for itself, which any X client may write.
+struct Attested(Process);
+
 impl Compositor {
     /// The origin of an X11 window, as far as it is known.
     pub(crate) fn x11_origin(window: &Framed) -> Origin {
@@ -730,8 +742,11 @@ impl Compositor {
     }
 
     /// XRes answered for `window_id`: upgrade the origin to the server's own
-    /// word, or leave the claim standing if it had nothing to say.
+    /// word, or leave the claim standing if it had nothing to say. A window
+    /// that opened without the keys takes them now if its process turns out
+    /// to be one the person started.
     fn attribute_x11(&mut self, window_id: u32, pid: Option<u32>) {
+        let deciding = self.xwayland.deciding.remove(&window_id);
         let Some(pid) = pid else {
             return;
         };
@@ -753,7 +768,47 @@ impl Compositor {
                 basis: X11Basis::XRes,
             });
         }
+        if let Some(process) = crate::origin::process(pid) {
+            window.user_data().insert_if_missing(|| Attested(process));
+        }
+        if deciding {
+            self.started_x11(&window, pid);
+        }
         self.publish_facts();
+    }
+
+    /// The process XRes named for the X11 window `surface` is, if it has:
+    /// see [`Attested`].
+    pub(crate) fn x11_process(&self, surface: &WlSurface) -> Option<Process> {
+        let window = self.window_for(surface)?;
+        window
+            .user_data()
+            .get::<Attested>()
+            .map(|attested| attested.0)
+    }
+
+    /// XRes named `pid` the process of a window that opened without the
+    /// keys. If the person's latest press started it --
+    /// `xeyes` typed at a Wayland terminal -- they asked for it after all,
+    /// and it takes the keys, as a Wayland program started so does as its
+    /// window opens; a moment later, XRes answering on a thread of its own.
+    /// Not if the person has given the keys elsewhere since, or it is gone
+    /// from sight.
+    fn started_x11(&mut self, window: &Framed, pid: u32) {
+        if !shell::wants_attention(window) || self.space.element_location(window).is_none() {
+            return;
+        }
+        let lineage = crate::origin::lineage(pid);
+        if self.attention.started(&lineage, Instant::now()).is_none() {
+            return;
+        }
+        let (Some(x11), Some(id)) = (window.x11_surface().cloned(), shell::id_of(window)) else {
+            return;
+        };
+        tracing::debug!(surface = id.0, "started by the person's latest press");
+        self.raise_x11(window, &x11);
+        self.focus_x11(window, id);
+        self.backend.redraw();
     }
 
     /// Record what is known about an X11 window's origin at map time -- its
@@ -932,7 +987,9 @@ impl XwmHandler for Compositor {
 
     /// A managed X11 window wants to be seen: place it as any new window is
     /// placed, or where it asked to be, tell it where it is, and give it the
-    /// keyboard, as a new Wayland window takes it. One that asks to start
+    /// keyboard if the person asked for it, as a new Wayland window takes it
+    /// (#259). One they did not opens without it, beneath the window in use,
+    /// until XRes names its process (`started_x11`). One that asks to start
     /// minimized is placed all the same, then minimized instead, and the
     /// keyboard stays where it was.
     fn map_window_request(&mut self, _xwm: XwmId, x11: X11Surface) {
@@ -995,20 +1052,31 @@ impl XwmHandler for Compositor {
         if wants.fullscreen {
             self.fill(&window, Fill::Fullscreen, None);
         }
+        // Asked for as a Wayland window is, Xwayland being the program of
+        // every X client (#256), or by the token its program was handed,
+        // which is spent whatever else asked for it: nothing else would.
+        let token = x11
+            .startup_id()
+            .is_some_and(|named| self.spend_token(named));
+        let asked_for = token || self.client_asked_for(self.xwayland.client.as_ref());
         // Its frame stays mapped, minimized or not, so Xwayland gives it its
         // surface: minimized is a state here.
         if wants.minimized {
             self.minimize(&window);
-        } else {
+        } else if asked_for {
             if let Some(wm) = self.xwayland.wm.as_mut() {
                 let _ = wm.raise_window(&x11);
             }
             self.focus_x11(&window, id);
+        } else {
+            self.open_without_keys(&window);
+            self.xwayland.deciding.insert(x11.window_id());
         }
         tracing::info!(
             surface = id.0,
             title = x11.title(),
             minimized = wants.minimized,
+            asked_for,
             asked,
             remembered = remembered.is_some(),
             "X11 window mapped"
@@ -1504,7 +1572,7 @@ impl Compositor {
             placement.restore.get_or_insert(current);
         });
         let _ = x11.configure(area);
-        self.space.map_element(window.clone(), area.loc, false);
+        self.move_window(window, area.loc);
         self.window_moved(window);
         self.backend.redraw();
         self.publish_facts();
@@ -1532,7 +1600,7 @@ impl Compositor {
             let to = at.unwrap_or(restore.loc);
             let _ = x11.configure(Rectangle::new(to, restore.size));
             if shown {
-                self.space.map_element(window.clone(), to, false);
+                self.move_window(window, to);
                 self.window_moved(window);
             } else {
                 placement(window, |placement| placement.parked = Some(to));
@@ -1546,6 +1614,7 @@ impl Compositor {
     /// nobody at the seat it does not -- the root names none as active,
     /// rather than a window that is not there.
     fn forget_x11(&mut self, x11: &X11Surface) {
+        self.xwayland.deciding.remove(&x11.window_id());
         if let Some(window) = self.x11_window(x11) {
             self.forget_window(&window);
             self.refocus_after_close(x11.wl_surface().as_ref());

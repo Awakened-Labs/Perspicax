@@ -93,15 +93,16 @@ impl FocusTarget {
     /// The person's press sent as `serial` reached this target's client:
     /// what vouches for a token a notification or a dock makes with it
     /// (#257). And if it `starts` what it reaches, as a click or an Enter
-    /// does, what the programs that client starts now descend from (#259).
+    /// does, what the programs started under it now descend from (#259).
     /// An agent's press has a serial of its own, and is not the person's.
     fn reached(&self, data: &mut Compositor, serial: &Serial, starts: bool) {
-        let Some(client) = self.wl_surface().and_then(|surface| surface.client()) else {
+        let Some(surface) = self.wl_surface() else {
             return;
         };
-        let root = starts
-            .then(|| client.get_data::<ClientState>()?.process())
-            .flatten();
+        let Some(client) = surface.client() else {
+            return;
+        };
+        let root = starts.then(|| data.root_under(&surface, &client)).flatten();
         data.attention.reached(serial, client.id(), root);
     }
 

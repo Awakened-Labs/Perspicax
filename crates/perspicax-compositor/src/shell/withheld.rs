@@ -27,7 +27,8 @@
 use std::{cell::RefCell, time::Instant};
 
 use perspicax_node::SurfaceId;
-use smithay::reexports::wayland_server::{Resource as _, protocol::wl_surface::WlSurface};
+use perspicax_policy::Process;
+use smithay::reexports::wayland_server::{Client, Resource as _, protocol::wl_surface::WlSurface};
 
 use super::{Placement, id_of, placement};
 use crate::{
@@ -48,10 +49,17 @@ impl Compositor {
     /// Whether the person asked for a window `surface`'s client maps now:
     /// see the module's doc. Always, with nobody at the seat.
     pub(crate) fn asked_for(&self, surface: &WlSurface) -> bool {
+        self.client_asked_for(surface.client().as_ref())
+    }
+
+    /// The same, of a window `client` maps: Xwayland, for an X11 window,
+    /// which may have no surface yet. Nobody asked for a window of a client
+    /// gone.
+    pub(crate) fn client_asked_for(&self, client: Option<&Client>) -> bool {
         if !self.backend.has_person() {
             return true;
         }
-        let Some(client) = surface.client() else {
+        let Some(client) = client else {
             return false;
         };
         let holder = self
@@ -63,6 +71,24 @@ impl Compositor {
             .and_then(ClientState::started_on);
         self.attention
             .asked_for(&client.id(), holder.as_ref(), started_on, Instant::now())
+    }
+
+    /// What a program started under `surface` descends from, the person's
+    /// press having reached it: its client's process. For an X11 window,
+    /// Xwayland being one client for every X client, the process XRes named
+    /// for it, once it has.
+    pub(crate) fn root_under(&self, surface: &WlSurface, client: &Client) -> Option<Process> {
+        if let Some(ours) = client.get_data::<ClientState>() {
+            return ours.process();
+        }
+        // Xwayland: the one client with smithay's data rather than ours.
+        #[cfg(feature = "xwayland")]
+        return self.x11_process(surface);
+        #[cfg(not(feature = "xwayland"))]
+        {
+            let _ = surface;
+            None
+        }
     }
 
     /// Open `window` without the keys: beneath the window in use, told it

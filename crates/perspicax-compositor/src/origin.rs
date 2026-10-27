@@ -123,6 +123,14 @@ pub(crate) fn lineage(pid: u32) -> Vec<Process> {
     chain
 }
 
+/// `pid`, with when it started: the first of its [`lineage`], alone. `None`
+/// for a process that has gone.
+#[cfg_attr(not(feature = "xwayland"), expect(dead_code, reason = "X11's"))]
+pub(crate) fn process(pid: u32) -> Option<Process> {
+    let started = Pinned::open(pid)?.started()?;
+    Some(Process { pid, started })
+}
+
 /// Now, in the clock a process's start is told in: the kernel's ticks since
 /// boot, suspend included, as `stat` has counted a start since Linux 5.3.
 /// Floored to the tick, as a start is.

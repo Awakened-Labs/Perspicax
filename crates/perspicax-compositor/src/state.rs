@@ -1981,6 +1981,22 @@ impl XdgActivationHandler for Compositor {
     }
 }
 
+#[cfg(feature = "xwayland")]
+impl Compositor {
+    /// Spend the token `named` outside the protocol, as an X11 window's
+    /// `_NET_STARTUP_ID` names the one its program was handed (#259):
+    /// whether it was one still good, as `request_activation` asks.
+    pub(crate) fn spend_token(&mut self, named: String) -> bool {
+        let token = XdgActivationToken::from(named);
+        let good = self
+            .activation
+            .data_for_token(&token)
+            .is_some_and(|made| still_good(made, self.attention.turn()));
+        self.activation.remove_token(&token);
+        good
+    }
+}
+
 /// How many activation tokens one client may keep at once (#257). A token
 /// that brings a window forward with the keys turns the person's attention,
 /// and so spends every other there is: a program needs one or two at a
