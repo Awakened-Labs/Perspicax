@@ -131,7 +131,14 @@ pub(crate) enum Refused {
     /// A keymap xkb could not compile, by a save or, headless, a command:
     /// its layout, as written. The keyboard keeps its old one.
     Keymap(String),
+    /// A program called as a lock program is, refused the lock: not the
+    /// one `[protocols] session-lock` admits, as it writes that program.
+    Lock(String),
 }
+
+/// The version that tells a shell of a lock refused: a kind a later version
+/// adds is sent only to a shell bound at that version.
+const LOCK_REFUSED_SINCE: u32 = 8;
 
 /// Every shell bound to the channel.
 #[derive(Default)]
@@ -165,7 +172,7 @@ impl Shells {
     /// Advertise the global, filtered by `gate`.
     pub(crate) fn new(display: &DisplayHandle, gate: &Gate) -> Self {
         display.create_global::<Compositor, PerspicaxShellV1, _>(
-            7,
+            8,
             Filtered {
                 gate: gate.clone(),
                 protocol: Protocol::Shell,
@@ -229,9 +236,14 @@ impl Compositor {
             Refused::GrantNever(program) => (Refusal::GrantNever, program),
             Refused::Config(said) => (Refusal::Config, said),
             Refused::Keymap(layout) => (Refusal::Keymap, layout),
+            Refused::Lock(program) => (Refusal::Lock, program),
+        };
+        let since = match kind {
+            Refusal::Lock => LOCK_REFUSED_SINCE,
+            _ => perspicax_shell_v1::EVT_REFUSED_SINCE,
         };
         for shell in &self.shells.bound {
-            if shell.version() >= perspicax_shell_v1::EVT_REFUSED_SINCE {
+            if shell.version() >= since {
                 shell.refused(kind, subject.clone());
             } else {
                 tracing::info!(

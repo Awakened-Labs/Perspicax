@@ -473,10 +473,7 @@ impl Compositor {
             // other client can put a lock screen of its own up to be typed
             // the password (#178). Only the lock that holds the session may
             // unlock it: see `crate::lock`.
-            lock_manager: SessionLockManagerState::new::<Self, _>(
-                display,
-                gate.filter(perspicax_policy::Protocol::SessionLock),
-            ),
+            lock_manager: SessionLockManagerState::new::<Self, _>(display, gate.lock_filter()),
             lock: None,
             #[cfg(any(feature = "seat", feature = "capture"))]
             backdrop: crate::backdrop::Backdrop::default(),
@@ -572,6 +569,17 @@ impl Compositor {
     /// the loop, where nothing holds the pointer's lock. Whether or not its
     /// stall was told, which only one of a second or more is.
     pub(crate) fn flush_each(&mut self) {
+        // A lock program refused, noted where only the client was known, is
+        // told now: even of one gone already, as a refused lock program
+        // goes at once.
+        let refused: Vec<String> = self
+            .clients
+            .iter()
+            .filter_map(|(_, client)| client.take_lock_refused())
+            .collect();
+        for program in refused {
+            self.tell_shell_refused(crate::shell_protocol::Refused::Lock(program));
+        }
         let mut backend = self.display.backend_handle();
         let now = Instant::now();
         let mut owed = Vec::new();
@@ -2070,6 +2078,11 @@ pub(crate) struct ClientState {
     owed: Owed<FocusTarget>,
     /// Whether it has gone, so that it is flushed no more.
     gone: AtomicBool,
+    /// The lock program it is called, as `[protocols] session-lock` writes
+    /// it, refused the lock: for the shell to be told once (#178).
+    lock_refused: std::sync::Mutex<Option<String>>,
+    /// Whether it has been, so that it is told only once.
+    lock_noted: AtomicBool,
 }
 
 impl ClientState {
@@ -2107,6 +2120,25 @@ impl ClientState {
     /// The person's press that started this client's program, if one did.
     pub(crate) fn started_on(&self) -> Option<perspicax_policy::Turn> {
         self.started_on.get().copied()
+    }
+
+    /// Note that it was refused the lock, called `program`: once, however
+    /// often it asks. See [`crate::access::Gate::note_if_a_lock`].
+    pub(crate) fn note_lock_refused(&self, program: String) {
+        if !self.lock_noted.swap(true, Ordering::Relaxed) {
+            *self
+                .lock_refused
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(program);
+        }
+    }
+
+    /// The lock refusal noted and not yet told, if there is one.
+    fn take_lock_refused(&self) -> Option<String> {
+        self.lock_refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// What to send this client of a pointer `event` for `target`, and what

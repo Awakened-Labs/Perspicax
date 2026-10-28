@@ -39,7 +39,7 @@
     is locked the compositor sends nothing and ignores every request.
   </description>
 
-  <interface name="perspicax_shell_v1" version="7">
+  <interface name="perspicax_shell_v1" version="8">
     <description summary="a shell's binding to the compositor">
       Bound once by a shell. Several shells may bind it; each is told the
       same things.
@@ -319,6 +319,9 @@
              summary="a save of the config, refused whole: the one in use is kept"/>
       <entry name="keymap" value="5"
              summary="a keymap xkb could not compile: the keyboard keeps its old one"/>
+      <!-- Version 8: a lock refused. -->
+      <entry name="lock" value="6" since="8"
+             summary="a program called as a lock program is, not the one [protocols] session-lock admits: it may not lock the screen"/>
     </enum>
 
     <event name="refused" since="6">
@@ -333,9 +336,11 @@
         grant_never; the config's own reason, in a line, for config, such as
         "`shell.mixer.step`: 99 is outside 1 to 25 percent", or the line and
         column of a file that is not TOML; the layout as the config writes
-        it, for keymap; and empty for the others. It is only ever words of the person's own or perspicax's,
-        never a window's title or a program's name for itself, which their
-        clients choose.
+        it, for keymap; the lock program as [protocols] session-lock writes
+        it, for lock, never the path the refused program runs from, whose
+        folders it chose; and empty for the others. It is only ever words of
+        the person's own or perspicax's, never a window's title or a
+        program's name for itself, which their clients choose.
 
         Nothing is sent while the session is locked.
       </description>

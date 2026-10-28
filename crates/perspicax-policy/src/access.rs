@@ -173,6 +173,16 @@ impl Program {
         }
     }
 
+    /// The name of the file it is: a bare name itself, or a path's last
+    /// part.
+    #[must_use]
+    pub fn file_name(&self) -> Option<&str> {
+        match self {
+            Self::Path(path) => Path::new(path).file_name()?.to_str(),
+            Self::Name(name) | Self::Installed(name) => Some(name),
+        }
+    }
+
     /// The entry as it was written: a path, or a bare name.
     #[must_use]
     pub fn spelled(&self) -> &str {

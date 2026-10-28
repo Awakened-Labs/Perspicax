@@ -184,6 +184,9 @@ impl SessionLockHandler for Compositor {
                 origin = ?origin(&lock),
                 "refused a lock: [protocols] session-lock does not admit it"
             );
+            if let Some(client) = lock.client() {
+                self.gate.note_if_a_lock(&client);
+            }
             // Which tells it `finished`.
             drop(confirmation);
             return;

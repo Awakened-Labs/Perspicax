@@ -9,6 +9,10 @@
 //! reload never takes the session from the lock holding it, which still
 //! unlocks: nobody else could.
 //!
+//! A program called what a lock program the rule names is called, refused,
+//! is told to a shell bound at version 8, to say on the screen: a lock screen
+//! came up that was not the one perspicax lets lock it.
+//!
 //! The clients are this test binary, so a rule naming `current_exe()` admits
 //! them. By a bare name read as the system's copy it does not: the binary
 //! is somewhere the person running the tests could have written. Like the
@@ -19,20 +23,25 @@ mod common;
 
 use std::{
     net::Shutdown,
+    process::{Command as Process, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
-use common::{Desk, Ear, Session, advertised, client_over, heard, until};
+use common::{Desk, Ear, Renamed, Session, Told, advertised, client_over, heard, until};
 use perspicax_compositor::{Backend, Command, Virtual};
 use perspicax_index::{HostFacts, SurfaceKind};
 use perspicax_node::SurfaceId;
 use perspicax_policy::{Access, Program, Protocol, Rule, Shape};
+use perspicax_protocols::shell::v1::client::perspicax_shell_v1::Refusal;
 use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::{Connection, EventQueue, Proxy as _, QueueHandle, globals::GlobalList};
 use wayland_protocols::ext::session_lock::v1::client::ext_session_lock_manager_v1::ExtSessionLockManagerV1;
 
 const LOCK: &str = "ext_session_lock_manager_v1";
+/// Set, to the compositor's socket, for the copy of this binary that
+/// [`lock_probe`] runs in.
+const PROBE: &str = "PERSPICAX_LOCK_PROBE";
 const PAGE: u32 = 0xff33_6699;
 const COVER: u32 = 0xff20_2020;
 
@@ -354,4 +363,75 @@ fn a_lock_gone_is_taken_over_only_by_what_the_rule_admits() {
         (taker, taker_queue),
         (rescuer, rescuer_queue),
     ));
+}
+
+/// Long enough for anything the compositor was going to say to arrive.
+fn settle(queue: &mut EventQueue<Desk>, desk: &mut Desk) {
+    queue.roundtrip(desk).expect("dispatch");
+    thread::sleep(Duration::from_millis(200));
+    queue.roundtrip(desk).expect("dispatch");
+}
+
+/// A copy of this binary called swaylock, where the person running the
+/// tests could have written it: a lock program not the system's, or a
+/// program passing itself off as one. It is refused the global, and a shell
+/// is told, by the rule's word for it; one from before version 8 is not.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_lock_program_refused_is_told_to_a_shell_that_knows_of_it() {
+    let swaylock = Renamed::called("swaylock", "lock-refused");
+    let session = Session::start(
+        "lock-rule-told",
+        backend(only(Program::parse("swaylock").installed())),
+    );
+    let (mut shell, mut shell_queue, shell_qh, shell_globals) = session.client();
+    shell.bind_shell(&shell_globals, &shell_qh);
+    shell_queue.roundtrip(&mut shell).expect("bound");
+    let (mut old, mut old_queue, old_qh, old_globals) = session.client();
+    old.bind_shell_v7(&old_globals, &old_qh);
+    old_queue.roundtrip(&mut old).expect("bound");
+
+    let status = Process::new(&swaylock.0)
+        .args(["--exact", "lock_probe", "--ignored", "--test-threads=1"])
+        .env(PROBE, session.socket())
+        .stdout(Stdio::null())
+        .status()
+        .expect("the probe runs");
+    assert_eq!(status.code(), Some(1), "not shown the lock's global");
+    until(&mut shell_queue, &mut shell, |shell| !shell.told.is_empty());
+    assert_eq!(
+        shell.told,
+        [Told::Refused(Ok(Refusal::Lock), "swaylock".to_owned())],
+        "by the rule's word for it, never the path it ran from"
+    );
+    settle(&mut old_queue, &mut old);
+    assert!(old.told.is_empty(), "{:?}", old.told);
+
+    // A program not called what the rule names is nobody's business.
+    let other = Renamed::called("firefox", "lock-unnamed");
+    let status = Process::new(&other.0)
+        .args(["--exact", "lock_probe", "--ignored", "--test-threads=1"])
+        .env(PROBE, session.socket())
+        .stdout(Stdio::null())
+        .status()
+        .expect("the probe runs");
+    assert_eq!(status.code(), Some(1));
+    settle(&mut shell_queue, &mut shell);
+    assert_eq!(shell.told.len(), 1, "{:?}", shell.told);
+
+    session.stop(((shell, shell_queue), (old, old_queue)));
+    drop((swaylock, other));
+}
+
+/// Not a test: a client in a process of its own, for
+/// [`a_lock_program_refused_is_told_to_a_shell_that_knows_of_it`]. Exits 0
+/// if the compositor showed it the lock's global, and 1 if not.
+#[test]
+#[ignore = "a client in a process of its own, for the tests that need one"]
+fn lock_probe() {
+    let Ok(socket) = std::env::var(PROBE) else {
+        return;
+    };
+    let (_desk, _queue, _qh, globals) = common::client_on(&socket);
+    std::process::exit(if advertised(&globals, LOCK) { 0 } else { 1 });
 }
