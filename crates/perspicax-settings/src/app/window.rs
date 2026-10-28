@@ -72,6 +72,9 @@ pub(crate) struct App {
     /// Who may reach past their own windows, and what an agent may do, as
     /// the file stands: shown, never written.
     grants: Vec<Grant>,
+    /// What weakens who may lock the session, or keeps it from locking, in
+    /// words: read as the file is, since it asks the disk.
+    lock_doubts: Vec<String>,
     /// The `[agent]` table, for what is not a rule: its socket, and what
     /// no agent is given.
     agent: Agent,
@@ -140,6 +143,7 @@ impl App {
             outputs: outputs::Page::default(),
             countdown: None,
             grants: Vec::new(),
+            lock_doubts: Vec::new(),
             agent: Agent::default(),
             shown: Shown::Keys,
             notice: None,
@@ -165,6 +169,13 @@ impl App {
         let config = parsed
             .unwrap_or_else(|| Config::profile(perspicax_config::Profile::Classic, EVERYTHING));
         self.grants = perspicax_settings::grants(text, &config);
+        let path = std::env::var_os("PATH");
+        let person = perspicax_config::person();
+        self.lock_doubts = perspicax_config::lock_doubts(&config, path.as_deref(), person.as_ref())
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        self.fields.lock_doubts.clone_from(&self.lock_doubts);
         self.agent = config.agent.clone();
         let layouts = config.keyboard.layout.split(',').count();
         self.names = perspicax_config::action_names(
@@ -396,7 +407,7 @@ impl App {
                 None
             }
             Shown::Protocols => {
-                if access::ui(ui, &self.grants, &self.agent) {
+                if access::ui(ui, &self.grants, &self.agent, &self.lock_doubts) {
                     open(self.document.path());
                 }
                 None

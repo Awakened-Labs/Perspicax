@@ -336,6 +336,36 @@ fn the_protocols_page_shows_each_rule_and_whose_it_is() {
     harness.get_by_label("none: not offered");
 }
 
+/// Unwritten, the lock's rule follows `[shell] lock`; written "any", the
+/// page warns of it beside the rule.
+#[test]
+fn the_protocols_page_warns_of_what_weakens_who_may_lock() {
+    let scratch = Scratch::new("protocols-lock");
+    let (_, harness) = page(&scratch, "[shell]\nlock = [\"gtklock\"]\n", "Protocols");
+    harness.get_by_label("the system's gtklock");
+    harness.get_by_label("follows [shell] lock");
+
+    let scratch = Scratch::new("protocols-any-lock");
+    let (_, harness) = page(
+        &scratch,
+        "[protocols]\nsession-lock = \"any\"\n",
+        "Protocols",
+    );
+    harness.get_by_label(&perspicax_config::Doubt::AnyLock.to_string());
+}
+
+/// The lock program's field says when no copy the system installed is
+/// there to lock with.
+#[test]
+fn the_lock_field_says_when_nothing_could_lock() {
+    let scratch = Scratch::new("shell-lock");
+    let (_, harness) = page(&scratch, "[shell]\nlock = [\"no-such-lock\"]\n", "Shell");
+    let doubt = perspicax_config::Doubt::NotInstalled {
+        name: "no-such-lock".to_owned(),
+    };
+    harness.get_by_label(&doubt.to_string());
+}
+
 #[test]
 fn the_protocols_page_has_nothing_to_change() {
     let scratch = Scratch::new("protocols-read");

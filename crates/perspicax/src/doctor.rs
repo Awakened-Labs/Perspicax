@@ -134,6 +134,7 @@ pub fn rows(machine: &Machine<'_>, named: Option<&Path>) -> Vec<Row> {
         // every machine.
         seat(config_row(machine, path.as_deref(), named.is_some())),
         seat(leave(machine, shell.as_ref())),
+        seat(lock_row(machine, config.as_ref())),
         seat(agent_socket(machine, config.as_ref())),
         claude_code_row(machine),
         ennius_row(machine),
@@ -449,6 +450,40 @@ fn leave(machine: &Machine<'_>, shell: Option<&Shell>) -> Row {
     Row::new(ROW, Status::Ok, detail)
 }
 
+/// Who may lock the session, and whether Lock locks: what weakens either,
+/// as [`perspicax_config::lock_doubts`] says it (#178).
+fn lock_row(machine: &Machine<'_>, config: Option<&Config>) -> Row {
+    const ROW: &str = "lock";
+    let Some(config) = config else {
+        return Row::new(
+            ROW,
+            Status::Skipped,
+            "the config is refused, so who may lock is unknown",
+        );
+    };
+    let doubts =
+        perspicax_config::lock_doubts(config, machine.path().as_deref(), machine.person.as_ref());
+    if !doubts.is_empty() {
+        let said: Vec<String> = doubts.iter().map(ToString::to_string).collect();
+        return Row::new(ROW, Status::Warn, said.join("; "));
+    }
+    let runs = config
+        .shell
+        .lock
+        .first()
+        .and_then(|program| machine.installed(program));
+    let detail = runs.map_or_else(
+        || "nothing may lock the screen".to_owned(),
+        |file| {
+            format!(
+                "Lock runs {}, and no program of yours may lock",
+                file.display()
+            )
+        },
+    );
+    Row::new(ROW, Status::Ok, detail)
+}
+
 /// Whether a session serves an agent inside it a socket, and inside one,
 /// whether it answers.
 fn agent_socket(machine: &Machine<'_>, config: Option<&Config>) -> Row {
@@ -657,6 +692,7 @@ mod tests {
                 "xwayland",
                 "config",
                 "leave",
+                "lock",
                 "agent-socket",
                 "claude-code",
                 "ennius"
@@ -667,6 +703,7 @@ mod tests {
             "xwayland",
             "config",
             "leave",
+            "lock",
             "agent-socket",
             "claude-code",
             "ennius",
@@ -801,6 +838,37 @@ mod tests {
             row.detail.starts_with("perspicax takes it; "),
             "the shell was not asked: {row:?}"
         );
+    }
+
+    /// `true`, the system's, stands in for a lock program it installed.
+    #[test]
+    fn the_lock_row_warns_of_what_weakens_who_may_lock() {
+        let scratch = Scratch::new("lock");
+        let env = scratch.env(&[("PATH", "/bin")]);
+        let var = var(&env);
+        let machine = machine(&var, EVERYTHING);
+        let row = |text: &str| {
+            let config = perspicax_config::parse(text, EVERYTHING).unwrap();
+            lock_row(&machine, Some(&config))
+        };
+
+        let ok = row("[shell]\nlock = [\"true\"]");
+        assert_eq!(ok.status, Status::Ok, "{ok:?}");
+        assert!(ok.detail.starts_with("Lock runs /"), "{ok:?}");
+
+        let any = row("[shell]\nlock = [\"true\"]\n[protocols]\nsession-lock = \"any\"");
+        assert_eq!(any.status, Status::Warn);
+        assert_eq!(any.detail, perspicax_config::Doubt::AnyLock.to_string());
+
+        let missing = row("[shell]\nlock = [\"no-such-lock\"]");
+        assert_eq!(missing.status, Status::Warn);
+        assert!(
+            missing
+                .detail
+                .starts_with("no no-such-lock the system installed is on PATH"),
+            "{missing:?}"
+        );
+        assert_eq!(lock_row(&machine, None).status, Status::Skipped);
     }
 
     #[test]

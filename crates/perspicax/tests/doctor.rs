@@ -80,6 +80,7 @@ fn every_row_is_said_in_order_and_no_runtime_folder_is_a_failure() {
             "xwayland",
             "config",
             "leave",
+            "lock",
             "agent-socket",
             "claude-code",
             "ennius"

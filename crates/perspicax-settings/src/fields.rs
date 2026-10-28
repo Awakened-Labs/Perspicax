@@ -44,6 +44,9 @@ pub struct Field {
     /// What nothing in force means, where nothing can be: "xkb's default".
     /// Clearing such a field resets it.
     pub unset: Option<&'static str>,
+    /// Whether what keeps the session from locking, or lets a program not
+    /// the system's lock it, is said under it: `perspicax_config::Doubt`.
+    pub lock_doubts: bool,
     read: Box<Reader>,
 }
 
@@ -147,12 +150,18 @@ impl Field {
             says,
             kind,
             unset: None,
+            lock_doubts: false,
             read: Box::new(read),
         }
     }
 
     fn unset(mut self, words: &'static str) -> Self {
         self.unset = Some(words);
+        self
+    }
+
+    fn with_lock_doubts(mut self) -> Self {
+        self.lock_doubts = true;
         self
     }
 
@@ -1014,7 +1023,7 @@ fn shell() -> Section {
                 |c| c.shell.terminal.clone().map(Value::Strings),
             )
             .unset("the first terminal installed"),
-            command("lock", "What the menus' Lock runs", |c| &c.shell.lock),
+            command("lock", "What the menus' Lock runs", |c| &c.shell.lock).with_lock_doubts(),
             command("suspend", "What Suspend runs", |c| &c.shell.suspend),
             command("reboot", "What Restart runs", |c| &c.shell.reboot),
             command("power-off", "What Shut Down runs", |c| &c.shell.power_off),

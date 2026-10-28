@@ -7,7 +7,7 @@
 
 use perspicax_config::{AgentSocket, Config, SETTINGS_APP};
 use perspicax_policy::Never;
-use perspicax_policy::{Protocol, Rule};
+use perspicax_policy::{Program, Protocol, Rule};
 
 use crate::edit::EVERYTHING;
 
@@ -79,7 +79,14 @@ pub fn rule_words(rule: &Rule) -> String {
     match rule {
         Rule::Off => "none: not offered".to_owned(),
         Rule::Any => "any program".to_owned(),
-        Rule::Only(_) => rule.named().join(", "),
+        Rule::Only(programs) => programs
+            .iter()
+            .map(|program| match program {
+                Program::Installed(name) => format!("the system's {name}"),
+                other => other.spelled().to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }
 
@@ -176,6 +183,14 @@ mod tests {
             Program::parse("/usr/bin/wlr-randr"),
         ]);
         assert_eq!(rule_words(&only), "kanshi, /usr/bin/wlr-randr");
+        let lock = Rule::Only(vec![
+            Program::parse("swaylock").installed(),
+            Program::parse("/opt/lock/bin/lock"),
+        ]);
+        assert_eq!(
+            rule_words(&lock),
+            "the system's swaylock, /opt/lock/bin/lock"
+        );
     }
 
     #[test]

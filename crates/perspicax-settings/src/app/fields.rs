@@ -31,6 +31,9 @@ pub(crate) struct Page {
     /// The draft last handed on to be written, until the write is settled.
     sent: Option<Draft>,
     layouts: layouts::Editor,
+    /// What weakens who may lock the session, in words, said under a field
+    /// that asks for it ([`Field::lock_doubts`]).
+    pub(crate) lock_doubts: Vec<String>,
 }
 
 /// A field's text as typed, and why it can't be written, if it can't.
@@ -230,6 +233,11 @@ impl Page {
                 "{} is in force: another setting overrides it",
                 words(field, setting.in_force.as_ref())
             ));
+        }
+        if field.lock_doubts {
+            for doubt in &self.lock_doubts {
+                ui.colored_label(ui.visuals().warn_fg_color, doubt);
+            }
         }
         edits
     }

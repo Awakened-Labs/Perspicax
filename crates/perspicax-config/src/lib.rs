@@ -50,9 +50,9 @@ use std::{
 
 use perspicax_policy::{
     Access, Action, Animation, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction,
-    Drag, Effect, Face, Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Hatch, Keysym,
-    Mods, MouseBindings, MouseChord, Never, Opacity, Owner, Person, Place, Program, Protocol,
-    Remembering, Resistance, Rule, Shadow, Shape, Side, Snapping, Switching, Towards,
+    Drag, Effect, Exe, Face, Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Hatch,
+    Keysym, Mods, MouseBindings, MouseChord, Never, Opacity, Owner, Person, Place, Program,
+    Protocol, Remembering, Resistance, Rule, Shadow, Shape, Side, Snapping, Switching, Towards,
     Transitioning, VolumeKey,
 };
 use serde::Deserialize;
@@ -923,26 +923,130 @@ pub fn which_installed(
     path: Option<&OsStr>,
     person: Option<&Person>,
 ) -> Option<PathBuf> {
-    use std::os::unix::fs::MetadataExt as _;
     if command.contains('/') {
         return which(command, path);
     }
     let person = person?;
-    let stat = |entry: &Path| {
-        let entry = fs::symlink_metadata(entry).ok()?;
-        Some(Owner {
-            uid: entry.uid(),
-            gid: entry.gid(),
-            mode: entry.mode(),
-        })
-    };
     path.into_iter()
         .flat_map(std::env::split_paths)
         .filter(|folder| folder.is_absolute())
         .map(|folder| folder.join(command))
         .filter(|candidate| runnable(candidate))
         .filter_map(|candidate| fs::canonicalize(candidate).ok())
-        .find(|file| perspicax_policy::installed(file, person, stat))
+        .find(|file| perspicax_policy::installed(file, person, owner))
+}
+
+/// Who an entry in a path belongs to, the entry itself and not where a link
+/// leads: what [`perspicax_policy::installed`] asks.
+fn owner(entry: &Path) -> Option<Owner> {
+    use std::os::unix::fs::MetadataExt as _;
+    let entry = fs::symlink_metadata(entry).ok()?;
+    Some(Owner {
+        uid: entry.uid(),
+        gid: entry.gid(),
+        mode: entry.mode(),
+    })
+}
+
+/// What leaves the session open to a lock screen not the system's, or keeps
+/// the screen from locking at all: what `perspicax doctor` and the settings
+/// app warn of. See [`lock_doubts`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Doubt {
+    /// `[shell] lock` names `name`, and no copy of it the system installed
+    /// is on `PATH`: the menus hide Lock, and `perspicax lock` refuses.
+    NotInstalled { name: String },
+    /// Lock runs `file`, and `[protocols] session-lock` does not admit it:
+    /// it would be refused, and the screen would not lock. A link whose file
+    /// has another name is the likely cause, as a program is known by the
+    /// name of the file it runs.
+    NotAdmitted { file: PathBuf },
+    /// `path`, in `[shell] lock` or `session-lock`, is somewhere a program
+    /// of the person's could write: any of them could put a lock screen of
+    /// its own there.
+    Writable { path: String },
+    /// `session-lock` is `"any"`: any program may lock.
+    AnyLock,
+}
+
+impl std::fmt::Display for Doubt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotInstalled { name } => write!(
+                f,
+                "no {name} the system installed is on PATH, so there is no Lock: install it, \
+                 or name the one to run by its full path in [shell] lock"
+            ),
+            Self::NotAdmitted { file } => write!(
+                f,
+                "Lock runs {}, which [protocols] session-lock does not admit, so the screen \
+                 would not lock: name it there by its full path",
+                file.display()
+            ),
+            Self::Writable { path } => write!(
+                f,
+                "{path} is somewhere a program of yours could write, so any of them could \
+                 put a lock screen of its own there and be typed your password: install the \
+                 lock program, and name it by its name"
+            ),
+            Self::AnyLock => f.write_str(
+                "[protocols] session-lock is \"any\": any program may put up a lock screen \
+                 of its own and be typed your password",
+            ),
+        }
+    }
+}
+
+/// What weakens who may lock the session that `config` describes, or keeps
+/// it from locking at all, with `path` and `person` as [`which_installed`]
+/// takes them: those that keep it from locking first.
+#[must_use]
+pub fn lock_doubts(config: &Config, path: Option<&OsStr>, person: Option<&Person>) -> Vec<Doubt> {
+    let rule = config.protocols.rule(Protocol::SessionLock);
+    let installed =
+        |file: &Path| person.is_some_and(|person| perspicax_policy::installed(file, person, owner));
+    let mut doubts = Vec::new();
+    let mut writable = Vec::new();
+    if let Some(program) = config.shell.lock.first() {
+        match which_installed(program, path, person) {
+            None if !program.contains('/') => doubts.push(Doubt::NotInstalled {
+                name: program.clone(),
+            }),
+            None => {}
+            Some(found) => {
+                // Run, it is known by the file it runs, every link followed.
+                let file = fs::canonicalize(&found).unwrap_or(found);
+                let text = file.to_string_lossy();
+                let exe = Exe {
+                    path: &text,
+                    here: true,
+                    installed: installed(&file),
+                };
+                if !rule.admits(Some(exe)) {
+                    doubts.push(Doubt::NotAdmitted { file: file.clone() });
+                }
+                if program.contains('/') && !installed(Path::new(program)) {
+                    writable.push(program.clone());
+                }
+            }
+        }
+    }
+    match rule {
+        Rule::Any => doubts.push(Doubt::AnyLock),
+        Rule::Only(programs) => {
+            for program in programs {
+                if let Program::Path(written) = program
+                    && !installed(Path::new(written))
+                    && !writable.contains(written)
+                {
+                    writable.push(written.clone());
+                }
+            }
+        }
+        Rule::Off => {}
+    }
+    doubts.extend(writable.into_iter().map(|path| Doubt::Writable { path }));
+    doubts
 }
 
 /// Whom this process runs as, from `/proc/self/status`: whose writes a
@@ -2846,7 +2950,7 @@ fn invalid(key: String, reason: String) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use perspicax_policy::{AgentLook, Exe, Palette};
+    use perspicax_policy::{AgentLook, Palette};
 
     use super::*;
 
@@ -3150,6 +3254,65 @@ mod tests {
             which_installed(named.to_str().unwrap(), None, Some(&person)),
             Some(named.clone()),
             "a path is the person's choice, as written"
+        );
+    }
+
+    /// `true`, the system's, stands in for a lock program it installed: a
+    /// file of that name, where `sh` is often a link to one of another.
+    #[test]
+    fn what_weakens_who_may_lock_is_doubted() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let scratch = Scratch::new("doubts");
+        let mine = scratch.program("bin", "mylock", 0o755);
+        std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let mine = mine.join("mylock").display().to_string();
+        let path = std::env::join_paths(["/bin"]).unwrap();
+        let person = Person {
+            uid: 4242,
+            groups: vec![4242],
+        };
+        let doubts = |text: &str| {
+            let config = parse(text, SEAT).unwrap_or_else(|e| panic!("{text}: {e}"));
+            lock_doubts(&config, Some(&path), Some(&person))
+        };
+        let system_true = std::fs::canonicalize("/bin/true").unwrap();
+
+        assert_eq!(doubts("[shell]\nlock = [\"true\"]"), [], "the system's");
+        assert_eq!(
+            doubts("[shell]\nlock = [\"no-such-lock\"]"),
+            [Doubt::NotInstalled {
+                name: "no-such-lock".to_owned()
+            }]
+        );
+        assert_eq!(
+            doubts(&format!("[shell]\nlock = [\"{mine}\"]")),
+            [Doubt::Writable { path: mine.clone() }],
+            "a path of the person's own, said once"
+        );
+        assert_eq!(
+            doubts("[shell]\nlock = [\"true\"]\n[protocols]\nsession-lock = \"any\""),
+            [Doubt::AnyLock]
+        );
+        assert_eq!(
+            doubts(&format!(
+                "[shell]\nlock = [\"true\"]\n[protocols]\nsession-lock = [\"swaylock\", \"{mine}\"]"
+            )),
+            [
+                Doubt::NotAdmitted { file: system_true },
+                Doubt::Writable { path: mine },
+            ],
+            "what keeps it from locking first"
+        );
+        assert_eq!(
+            lock_doubts(
+                &parse("[shell]\nlock = [\"true\"]", SEAT).unwrap(),
+                Some(&path),
+                None
+            ),
+            [Doubt::NotInstalled {
+                name: "true".to_owned()
+            }],
+            "with nobody to judge for, nothing is the system's"
         );
     }
 
