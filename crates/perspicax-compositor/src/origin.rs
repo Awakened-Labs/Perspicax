@@ -25,12 +25,15 @@
 
 use std::{
     fs::{self, File},
-    os::fd::{AsRawFd, OwnedFd},
-    path::PathBuf,
+    os::{
+        fd::{AsRawFd, OwnedFd},
+        unix::fs::MetadataExt as _,
+    },
+    path::{Path, PathBuf},
 };
 
 use perspicax_node::{Origin, ProcessOrigin};
-use perspicax_policy::Process;
+use perspicax_policy::{Owner, Person, Process};
 use smithay::reexports::rustix::process::{Pid, PidfdFlags, pidfd_open};
 
 /// The origin of a process, by pid: an X client's, which nothing will hold a
@@ -55,9 +58,12 @@ pub(crate) fn of_pid(pid: i32) -> Origin {
 /// number is the pinned process's and nobody else's. Reading through the pin
 /// after the pidfd is open is what shows that, since a pin reads nothing
 /// once its process is reaped; a pidfd the pin cannot vouch for is dropped.
-pub(crate) fn attest(pid: i32) -> (Origin, Option<OwnedFd>) {
+///
+/// And what the path its executable is named by proves, judged for `person`:
+/// see [`ExeFile`].
+pub(crate) fn attest(pid: i32, person: Option<&Person>) -> Attested {
     let Ok(number) = u32::try_from(pid) else {
-        return (Origin::Unattributed, None);
+        return Attested::default();
     };
     let pinned = Pinned::open(number);
     let origin = describe(number, pinned.as_ref());
@@ -65,7 +71,49 @@ pub(crate) fn attest(pid: i32) -> (Origin, Option<OwnedFd>) {
         let pidfd = pidfd_open(Pid::from_raw(pid)?, PidfdFlags::empty()).ok()?;
         pinned.unreaped().then_some(pidfd)
     });
-    (origin, pidfd)
+    let file = match (&origin, &pinned) {
+        (Origin::Process(process), Some(pinned)) => process
+            .exe
+            .as_deref()
+            .map(|exe| pinned.file(exe, person))
+            .unwrap_or_default(),
+        _ => ExeFile::default(),
+    };
+    Attested {
+        origin,
+        pidfd,
+        file,
+    }
+}
+
+/// What [`attest`] vouches for.
+#[derive(Debug, Default)]
+pub(crate) struct Attested {
+    pub(crate) origin: Origin,
+    /// A pidfd on that same process, when one can be had.
+    pub(crate) pidfd: Option<OwnedFd>,
+    pub(crate) file: ExeFile,
+}
+
+/// What the path the kernel names a process's executable by proves, as
+/// [`perspicax_policy::Exe`] carries it: whether the file at that path here
+/// is the one it runs, and whether only the system could have put it there.
+///
+/// The kernel names the file by the path the process's own mounts give it,
+/// and mounts of its own need no root, so the path is checked against the
+/// file: the inode `exe` leads to, wherever it is mounted, against the inode
+/// at that path as this compositor finds it. Nothing but the path's own
+/// entries is followed, so a link where the path should be is not the file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ExeFile {
+    pub(crate) here: bool,
+    pub(crate) installed: bool,
+}
+
+/// Whom this compositor runs as, for [`attest`]: `None` if its own status
+/// cannot be read, and then nothing is installed by the system.
+pub(crate) fn this_person() -> Option<Person> {
+    Person::from_status(&fs::read_to_string("/proc/self/status").ok()?)
 }
 
 /// The longest chain of parents [`ancestors`] follows. Far past any real
@@ -241,6 +289,30 @@ impl Pinned {
             .map(|path| path.to_string_lossy().into_owned())
     }
 
+    /// What `exe`, the path [`Self::exe`] read, proves of the file the
+    /// process runs. See [`ExeFile`].
+    fn file(&self, exe: &str, person: Option<&Person>) -> ExeFile {
+        let Ok(runs) = fs::metadata(self.path().join("exe")) else {
+            return ExeFile::default();
+        };
+        let Ok(named) = fs::symlink_metadata(exe) else {
+            return ExeFile::default();
+        };
+        let here = (runs.dev(), runs.ino()) == (named.dev(), named.ino());
+        let installed = here
+            && person.is_some_and(|person| {
+                perspicax_policy::installed(Path::new(exe), person, |entry| {
+                    let entry = fs::symlink_metadata(entry).ok()?;
+                    Some(Owner {
+                        uid: entry.uid(),
+                        gid: entry.gid(),
+                        mode: entry.mode(),
+                    })
+                })
+            });
+        ExeFile { here, installed }
+    }
+
     /// The process's cgroup path.
     ///
     /// The v2 line is `0::/path`, so the path is whatever follows the second
@@ -321,10 +393,10 @@ mod tests {
     /// A live process is attested with a pidfd to hold a grant by.
     #[test]
     fn a_live_process_is_attested_with_a_pidfd() {
-        let (origin, pidfd) = attest(i32::try_from(std::process::id()).unwrap());
-        assert!(matches!(origin, Origin::Process(_)));
+        let attested = attest(i32::try_from(std::process::id()).unwrap(), None);
+        assert!(matches!(attested.origin, Origin::Process(_)));
         assert!(
-            pidfd.is_some(),
+            attested.pidfd.is_some(),
             "this process is alive, and pidfds are Linux 5.3+"
         );
     }
@@ -333,9 +405,53 @@ mod tests {
     /// yields nothing to hold a grant by: nothing could ever say it ended.
     #[test]
     fn a_pid_with_no_process_cannot_be_held() {
-        let (origin, pidfd) = attest(0x7FFF_FFFE);
-        assert!(matches!(origin, Origin::Process(_)));
-        assert!(pidfd.is_none());
+        let attested = attest(0x7FFF_FFFE, this_person().as_ref());
+        assert!(matches!(attested.origin, Origin::Process(_)));
+        assert!(attested.pidfd.is_none());
+        assert_eq!(attested.file, ExeFile::default(), "nor any file proven");
+    }
+
+    /// This test binary is the file at the path the kernel names it by, and
+    /// the person running the tests could have written it: it is not the
+    /// system's. As root, nothing is.
+    #[test]
+    fn a_process_is_the_file_at_its_path_here() {
+        let attested = attest(
+            i32::try_from(std::process::id()).unwrap(),
+            this_person().as_ref(),
+        );
+        assert_eq!(
+            attested.file,
+            ExeFile {
+                here: true,
+                installed: false
+            }
+        );
+    }
+
+    /// `sleep` from coreutils, as the system installed it: named so only
+    /// where the person is not root and the system's folders are root's.
+    #[test]
+    fn a_program_the_system_installed_is_said_to_be() {
+        let Some(person) = this_person().filter(|person| person.uid != 0) else {
+            return;
+        };
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep is in coreutils");
+        let attested = attest(i32::try_from(child.id()).unwrap(), Some(&person));
+        child.kill().expect("the child is ours to kill");
+        child.wait().expect("and ours to reap");
+        assert_eq!(
+            attested.file,
+            ExeFile {
+                here: true,
+                installed: true
+            },
+            "{:?}",
+            attested.origin
+        );
     }
 
     #[test]

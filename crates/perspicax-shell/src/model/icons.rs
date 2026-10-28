@@ -443,6 +443,9 @@ mod tests {
         fn is_executable(&self, path: &Path) -> bool {
             self.files.is_executable(path)
         }
+        fn installed(&self, name: &str, path: &[PathBuf]) -> Option<PathBuf> {
+            self.files.installed(name, path)
+        }
     }
 
     #[test]

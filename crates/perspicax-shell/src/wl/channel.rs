@@ -10,7 +10,9 @@
 //! its menu shows, and what is chosen there is asked back. Something the
 //! person asked for that perspicax refused, from version 6, is said in
 //! words on the screen, with why. Which windows want the person's
-//! attention, from version 7, the taskbar marks.
+//! attention, from version 7, the taskbar marks. A lock program refused,
+//! from version 8, is said the same way: a lock screen that came up and was
+//! not the one perspicax lets lock it (#178).
 
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 #[cfg(any(feature = "menus", feature = "panel"))]
@@ -34,7 +36,7 @@ use crate::model::tasks::Placing;
 /// this program out; the shell still draws, and its menus open only by
 /// pointer.
 pub(super) fn bind(globals: &GlobalList, qh: &QueueHandle<App>) -> Option<PerspicaxShellV1> {
-    let bound = globals.bind::<PerspicaxShellV1, _, _>(qh, 1..=7, ()).ok();
+    let bound = globals.bind::<PerspicaxShellV1, _, _>(qh, 1..=8, ()).ok();
     if bound.is_none() {
         tracing::info!("the compositor offers no perspicax_shell_v1; no menu will open on a key");
     }
@@ -253,6 +255,7 @@ fn refused(kind: WEnum<Refusal>, subject: String) -> Option<Refused> {
         Refusal::GrantNever => Refused::GrantNever(subject),
         Refusal::Config => Refused::Config(subject),
         Refusal::Keymap => Refused::Keymap(subject),
+        Refusal::Lock => Refused::Lock(subject),
         _ => return None,
     })
 }
@@ -311,6 +314,7 @@ mod tests {
                 Refusal::GrantNever,
                 Refusal::Config,
                 Refusal::Keymap,
+                Refusal::Lock,
             ]
             .map(|kind| refused(WEnum::Value(kind), subject())),
             [
@@ -320,9 +324,10 @@ mod tests {
                 Some(Refused::GrantNever(subject())),
                 Some(Refused::Config(subject())),
                 Some(Refused::Keymap(subject())),
+                Some(Refused::Lock(subject())),
             ]
         );
-        assert_eq!(refused(WEnum::Unknown(6), subject()), None, "a later kind");
+        assert_eq!(refused(WEnum::Unknown(7), subject()), None, "a later kind");
     }
 
     #[cfg(all(feature = "panel", feature = "menus"))]

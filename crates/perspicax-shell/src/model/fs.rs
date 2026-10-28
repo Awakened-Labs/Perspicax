@@ -21,6 +21,10 @@ pub(crate) trait Fs {
     fn is_file(&self, path: &Path) -> bool;
     /// Whether a file is there and may be run.
     fn is_executable(&self, path: &Path) -> bool;
+    /// Where the lock program `name` is run from: itself if it is a path,
+    /// otherwise the copy the system installed, in the first folder of
+    /// `path` that holds one. See `perspicax_config::which_installed`.
+    fn installed(&self, name: &str, path: &[PathBuf]) -> Option<PathBuf>;
 }
 
 /// The real one.
@@ -54,6 +58,11 @@ impl Fs for Disk {
         std::fs::metadata(path)
             .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
     }
+
+    fn installed(&self, name: &str, path: &[PathBuf]) -> Option<PathBuf> {
+        let path = std::env::join_paths(path).ok()?;
+        perspicax_config::which_installed(name, Some(&path), perspicax_config::person().as_ref())
+    }
 }
 
 /// Where a program named `name` would be found and run from: itself if it
@@ -79,6 +88,8 @@ pub(crate) mod fake {
     pub(crate) struct Files {
         text: BTreeMap<PathBuf, String>,
         executable: BTreeSet<PathBuf>,
+        /// The programs the system installed, by name, each where it is.
+        installed: BTreeMap<String, PathBuf>,
     }
 
     impl Files {
@@ -92,6 +103,12 @@ pub(crate) mod fake {
         pub(crate) fn program(mut self, path: &str) -> Self {
             self.executable.insert(path.into());
             self.with(path, "")
+        }
+
+        /// A program at `path` the system installed, as `name`.
+        pub(crate) fn system(mut self, name: &str, path: &str) -> Self {
+            self.installed.insert(name.to_owned(), path.into());
+            self.program(path)
         }
     }
 
@@ -121,6 +138,13 @@ pub(crate) mod fake {
 
         fn is_executable(&self, path: &Path) -> bool {
             self.executable.contains(path)
+        }
+
+        fn installed(&self, name: &str, path: &[PathBuf]) -> Option<PathBuf> {
+            if name.contains('/') {
+                return which(self, name, path);
+            }
+            self.installed.get(name).cloned()
         }
     }
 }

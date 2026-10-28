@@ -23,7 +23,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use perspicax_config::{AgentSocket, Built, Config, Shell, ShellBuilt};
+use perspicax_config::{AgentSocket, Built, Config, Leave, Shell, ShellBuilt};
+use perspicax_policy::Person;
 
 use crate::{
     check::{self, Said},
@@ -49,6 +50,9 @@ pub struct Machine<'a> {
     pub registry_serving: bool,
     /// Whether `/tmp/.X11-unix`, where Xwayland's socket goes, is there.
     pub x11_sockets: bool,
+    /// Whom this runs as: whose writes the system's copy of a lock program
+    /// cannot be ([`perspicax_config::which_installed`]).
+    pub person: Option<Person>,
 }
 
 impl Machine<'_> {
@@ -62,6 +66,7 @@ impl Machine<'_> {
             registry: session::find_registry(Path::new("/")),
             registry_serving: session::a_registry_serves_this_session(),
             x11_sockets: Path::new(X11_SOCKETS).is_dir(),
+            person: perspicax_config::person(),
         }
     }
 
@@ -71,6 +76,11 @@ impl Machine<'_> {
 
     fn which(&self, program: &str) -> Option<PathBuf> {
         perspicax_config::which(program, self.path().as_deref())
+    }
+
+    /// Where Lock would run `program` from: the copy the system installed.
+    fn installed(&self, program: &str) -> Option<PathBuf> {
+        perspicax_config::which_installed(program, self.path().as_deref(), self.person.as_ref())
     }
 }
 
@@ -124,6 +134,7 @@ pub fn rows(machine: &Machine<'_>, named: Option<&Path>) -> Vec<Row> {
         // every machine.
         seat(config_row(machine, path.as_deref(), named.is_some())),
         seat(leave(machine, shell.as_ref())),
+        seat(lock_row(machine, config.as_ref())),
         seat(agent_socket(machine, config.as_ref())),
         claude_code_row(machine),
         ennius_row(machine),
@@ -392,7 +403,8 @@ fn config_row(machine: &Machine<'_>, path: Option<&Path>, named: bool) -> Row {
 }
 
 /// The ways to leave at the menus' foot, each of which shows only with its
-/// program installed.
+/// program installed: Lock's, the copy the system installed, as only it may
+/// lock (#178).
 fn leave(machine: &Machine<'_>, shell: Option<&Shell>) -> Row {
     const ROW: &str = "leave";
     let Some(shell) = shell else {
@@ -408,7 +420,16 @@ fn leave(machine: &Machine<'_>, shell: Option<&Shell>) -> Row {
         let Some(program) = shell.runs(way).and_then(|argv| argv.into_iter().next()) else {
             continue;
         };
-        if machine.which(&program).is_some() {
+        if way == Leave::Lock {
+            if machine.installed(&program).is_some() {
+                found.push(way.key());
+            } else {
+                hidden.push(format!(
+                    "{} (no {program} the system installed on PATH)",
+                    way.key()
+                ));
+            }
+        } else if machine.which(&program).is_some() {
             found.push(way.key());
         } else {
             hidden.push(format!("{} (no {program} on PATH)", way.key()));
@@ -426,6 +447,40 @@ fn leave(machine: &Machine<'_>, shell: Option<&Shell>) -> Row {
     } else {
         format!("each has its program: {}", found.join(", "))
     };
+    Row::new(ROW, Status::Ok, detail)
+}
+
+/// Who may lock the session, and whether Lock locks: what weakens either,
+/// as [`perspicax_config::lock_doubts`] says it (#178).
+fn lock_row(machine: &Machine<'_>, config: Option<&Config>) -> Row {
+    const ROW: &str = "lock";
+    let Some(config) = config else {
+        return Row::new(
+            ROW,
+            Status::Skipped,
+            "the config is refused, so who may lock is unknown",
+        );
+    };
+    let doubts =
+        perspicax_config::lock_doubts(config, machine.path().as_deref(), machine.person.as_ref());
+    if !doubts.is_empty() {
+        let said: Vec<String> = doubts.iter().map(ToString::to_string).collect();
+        return Row::new(ROW, Status::Warn, said.join("; "));
+    }
+    let runs = config
+        .shell
+        .lock
+        .first()
+        .and_then(|program| machine.installed(program));
+    let detail = runs.map_or_else(
+        || "nothing may lock the screen".to_owned(),
+        |file| {
+            format!(
+                "Lock runs {}, and no program of yours may lock",
+                file.display()
+            )
+        },
+    );
     Row::new(ROW, Status::Ok, detail)
 }
 
@@ -530,7 +585,7 @@ fn summed(name: &'static str, rows: &[Row], status: &str) -> Row {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs};
+    use std::{collections::HashMap, fs, os::unix::fs::PermissionsExt as _};
 
     use perspicax_config::Profile;
 
@@ -602,6 +657,11 @@ mod tests {
             registry: Some(PathBuf::from("/usr/libexec/at-spi2-registryd")),
             registry_serving: false,
             x11_sockets: true,
+            // Somebody who is not root, and owns none of the system's files.
+            person: Some(Person {
+                uid: 4242,
+                groups: vec![4242],
+            }),
         }
     }
 
@@ -632,6 +692,7 @@ mod tests {
                 "xwayland",
                 "config",
                 "leave",
+                "lock",
                 "agent-socket",
                 "claude-code",
                 "ennius"
@@ -642,6 +703,7 @@ mod tests {
             "xwayland",
             "config",
             "leave",
+            "lock",
             "agent-socket",
             "claude-code",
             "ennius",
@@ -778,6 +840,37 @@ mod tests {
         );
     }
 
+    /// `true`, the system's, stands in for a lock program it installed.
+    #[test]
+    fn the_lock_row_warns_of_what_weakens_who_may_lock() {
+        let scratch = Scratch::new("lock");
+        let env = scratch.env(&[("PATH", "/bin")]);
+        let var = var(&env);
+        let machine = machine(&var, EVERYTHING);
+        let row = |text: &str| {
+            let config = perspicax_config::parse(text, EVERYTHING).unwrap();
+            lock_row(&machine, Some(&config))
+        };
+
+        let ok = row("[shell]\nlock = [\"true\"]");
+        assert_eq!(ok.status, Status::Ok, "{ok:?}");
+        assert!(ok.detail.starts_with("Lock runs /"), "{ok:?}");
+
+        let any = row("[shell]\nlock = [\"true\"]\n[protocols]\nsession-lock = \"any\"");
+        assert_eq!(any.status, Status::Warn);
+        assert_eq!(any.detail, perspicax_config::Doubt::AnyLock.to_string());
+
+        let missing = row("[shell]\nlock = [\"no-such-lock\"]");
+        assert_eq!(missing.status, Status::Warn);
+        assert!(
+            missing
+                .detail
+                .starts_with("no no-such-lock the system installed is on PATH"),
+            "{missing:?}"
+        );
+        assert_eq!(lock_row(&machine, None).status, Status::Skipped);
+    }
+
     #[test]
     fn a_way_to_leave_without_its_program_is_one_the_menus_hide() {
         let scratch = Scratch::new("leave");
@@ -785,15 +878,32 @@ mod tests {
         let var = var(&env);
         let machine = machine(&var, EVERYTHING);
         let shell = Shell::profile(Profile::Classic, ShellBuilt::FULL);
+        let hidden = "the menus hide lock (no swaylock the system installed on PATH)";
+        let row = leave(&machine, Some(&shell));
+        assert_eq!(row.status, Status::Warn);
+        assert!(row.detail.starts_with(hidden), "{row:?}");
+
+        // A copy where anybody may write is nobody's to vouch for, whoever
+        // runs the tests.
+        let bin = scratch.0.join("bin");
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o777)).unwrap();
+        scratch.program("swaylock");
+        scratch.program("loginctl");
         let row = leave(&machine, Some(&shell));
         assert_eq!(row.status, Status::Warn);
         assert!(
-            row.detail
-                .starts_with("the menus hide lock (no swaylock on PATH)"),
-            "{row:?}"
+            row.detail.starts_with(hidden),
+            "a copy that is not the system's: {row:?}"
         );
-        scratch.program("swaylock");
-        scratch.program("loginctl");
+
+        // `sh`, the system's, stands in for a lock program it installed.
+        let env = scratch.env(&[("PATH", &format!("{}:/bin", bin.display()))]);
+        let var = self::var(&env);
+        let machine = self::machine(&var, EVERYTHING);
+        let shell = Shell {
+            lock: vec!["sh".to_owned()],
+            ..shell
+        };
         let row = leave(&machine, Some(&shell));
         assert_eq!(row.status, Status::Ok, "{row:?}");
         assert_eq!(leave(&machine, None).status, Status::Skipped);

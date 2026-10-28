@@ -26,7 +26,8 @@
 //! And [`locate`]: where a path written in the file points. And
 //! [`find_program`]: where perspicax's own programs are, so that the session
 //! and `perspicax config check` find the same shell; and [`which`], where
-//! anybody else's is.
+//! anybody else's is; and [`which_installed`], where the system's copy of a
+//! lock program is, judged for the [`person`] running it.
 
 mod actions;
 pub mod autostart;
@@ -43,14 +44,16 @@ mod swaylock;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
 };
 
 use perspicax_policy::{
     Access, Action, Animation, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction,
-    Drag, Effect, Face, Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Hatch, Keysym,
-    Mods, MouseBindings, MouseChord, Never, Opacity, Place, Program, Protocol, Remembering,
-    Resistance, Rule, Shadow, Shape, Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
+    Drag, Effect, Exe, Face, Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Hatch,
+    Keysym, Mods, MouseBindings, MouseChord, Never, Opacity, Owner, Person, Place, Program,
+    Protocol, Remembering, Resistance, Rule, Shadow, Shape, Side, Snapping, Switching, Towards,
+    Transitioning, VolumeKey,
 };
 use serde::Deserialize;
 
@@ -590,6 +593,7 @@ impl Config {
             }
         }
         let workspaces = workspaces(profile);
+        let shell = Shell::profile(profile, ShellBuilt::FULL);
         Self {
             profile,
             focus,
@@ -639,9 +643,9 @@ impl Config {
             theme: Theme::default(),
             splash: built.seat,
             xwayland: built.xwayland,
-            protocols: protocols(built),
+            protocols: protocols(built).with(Protocol::SessionLock, lock_rule(&shell.lock)),
             agent: Agent::default(),
-            shell: Shell::profile(profile, ShellBuilt::FULL),
+            shell,
         }
     }
 }
@@ -791,6 +795,17 @@ fn protocols(built: Built) -> Access {
         .with(Protocol::Settings, only(&[SETTINGS_APP]))
 }
 
+/// Who may lock the session when `[protocols] session-lock` does not say:
+/// the program `[shell] lock` runs, and only it. Named by a bare name, that is
+/// the copy the system installed, so no program the person runs can put a
+/// lock screen of its own up to be typed the password; named by a path, the
+/// file there, which the person chose.
+fn lock_rule(lock: &[String]) -> Rule {
+    lock.first().map_or(Rule::Off, |program| {
+        Rule::Only(vec![Program::parse(program).installed()])
+    })
+}
+
 /// Set in the environment of every program a session on a seat starts: the
 /// config file the session read. Empty for a session that read none.
 pub const SESSION_CONFIG: &str = "PERSPICAX_CONFIG";
@@ -890,6 +905,155 @@ pub fn which(command: &str, path: Option<&OsStr>) -> Option<PathBuf> {
         .filter(|folder| folder.is_absolute())
         .map(|folder| folder.join(command))
         .find(|candidate| runnable(candidate))
+}
+
+/// Where the lock program a command names is run from, as only it may lock
+/// the session (#178): a name with a `/` in it as written, the file the
+/// person chose, and a bare name the copy the system installed, in the
+/// first folder of `path` holding one, every link followed to the file
+/// itself. A copy the person could have written, one a program of theirs
+/// could have, is passed over, as a copy of swaylock planted in
+/// `~/.local/bin` ahead of the system's would be. `None` with nobody to
+/// judge for: see [`person`].
+///
+/// What runs it runs the file found, so that it runs what was judged.
+#[must_use]
+pub fn which_installed(
+    command: &str,
+    path: Option<&OsStr>,
+    person: Option<&Person>,
+) -> Option<PathBuf> {
+    if command.contains('/') {
+        return which(command, path);
+    }
+    let person = person?;
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .filter(|folder| folder.is_absolute())
+        .map(|folder| folder.join(command))
+        .filter(|candidate| runnable(candidate))
+        .filter_map(|candidate| fs::canonicalize(candidate).ok())
+        .find(|file| perspicax_policy::installed(file, person, owner))
+}
+
+/// Who an entry in a path belongs to, the entry itself and not where a link
+/// leads: what [`perspicax_policy::installed`] asks.
+fn owner(entry: &Path) -> Option<Owner> {
+    use std::os::unix::fs::MetadataExt as _;
+    let entry = fs::symlink_metadata(entry).ok()?;
+    Some(Owner {
+        uid: entry.uid(),
+        gid: entry.gid(),
+        mode: entry.mode(),
+    })
+}
+
+/// What leaves the session open to a lock screen not the system's, or keeps
+/// the screen from locking at all: what `perspicax doctor` and the settings
+/// app warn of. See [`lock_doubts`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Doubt {
+    /// `[shell] lock` names `name`, and no copy of it the system installed
+    /// is on `PATH`: the menus hide Lock, and `perspicax lock` refuses.
+    NotInstalled { name: String },
+    /// Lock runs `file`, and `[protocols] session-lock` does not admit it:
+    /// it would be refused, and the screen would not lock. A link whose file
+    /// has another name is the likely cause, as a program is known by the
+    /// name of the file it runs.
+    NotAdmitted { file: PathBuf },
+    /// `path`, in `[shell] lock` or `session-lock`, is somewhere a program
+    /// of the person's could write: any of them could put a lock screen of
+    /// its own there.
+    Writable { path: String },
+    /// `session-lock` is `"any"`: any program may lock.
+    AnyLock,
+}
+
+impl std::fmt::Display for Doubt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotInstalled { name } => write!(
+                f,
+                "no {name} the system installed is on PATH, so there is no Lock: install it, \
+                 or name the one to run by its full path in [shell] lock"
+            ),
+            Self::NotAdmitted { file } => write!(
+                f,
+                "Lock runs {}, which [protocols] session-lock does not admit, so the screen \
+                 would not lock: name it there by its full path",
+                file.display()
+            ),
+            Self::Writable { path } => write!(
+                f,
+                "{path} is somewhere a program of yours could write, so any of them could \
+                 put a lock screen of its own there and be typed your password: install the \
+                 lock program, and name it by its name"
+            ),
+            Self::AnyLock => f.write_str(
+                "[protocols] session-lock is \"any\": any program may put up a lock screen \
+                 of its own and be typed your password",
+            ),
+        }
+    }
+}
+
+/// What weakens who may lock the session that `config` describes, or keeps
+/// it from locking at all, with `path` and `person` as [`which_installed`]
+/// takes them: those that keep it from locking first.
+#[must_use]
+pub fn lock_doubts(config: &Config, path: Option<&OsStr>, person: Option<&Person>) -> Vec<Doubt> {
+    let rule = config.protocols.rule(Protocol::SessionLock);
+    let installed =
+        |file: &Path| person.is_some_and(|person| perspicax_policy::installed(file, person, owner));
+    let mut doubts = Vec::new();
+    let mut writable = Vec::new();
+    if let Some(program) = config.shell.lock.first() {
+        match which_installed(program, path, person) {
+            None if !program.contains('/') => doubts.push(Doubt::NotInstalled {
+                name: program.clone(),
+            }),
+            None => {}
+            Some(found) => {
+                // Run, it is known by the file it runs, every link followed.
+                let file = fs::canonicalize(&found).unwrap_or(found);
+                let text = file.to_string_lossy();
+                let exe = Exe {
+                    path: &text,
+                    here: true,
+                    installed: installed(&file),
+                };
+                if !rule.admits(Some(exe)) {
+                    doubts.push(Doubt::NotAdmitted { file: file.clone() });
+                }
+                if program.contains('/') && !installed(Path::new(program)) {
+                    writable.push(program.clone());
+                }
+            }
+        }
+    }
+    match rule {
+        Rule::Any => doubts.push(Doubt::AnyLock),
+        Rule::Only(programs) => {
+            for program in programs {
+                if let Program::Path(written) = program
+                    && !installed(Path::new(written))
+                    && !writable.contains(written)
+                {
+                    writable.push(written.clone());
+                }
+            }
+        }
+        Rule::Off => {}
+    }
+    doubts.extend(writable.into_iter().map(|path| Doubt::Writable { path }));
+    doubts
+}
+
+/// Whom this process runs as, from `/proc/self/status`: whose writes a
+/// program the system installed cannot be. `None` if it cannot be read.
+#[must_use]
+pub fn person() -> Option<Person> {
+    Person::from_status(&fs::read_to_string("/proc/self/status").ok()?)
 }
 
 /// Whether `path` is a file that may be run.
@@ -1223,6 +1387,7 @@ struct RawProtocols {
     output_management: Option<RawRule>,
     shell: Option<RawRule>,
     settings: Option<RawRule>,
+    session_lock: Option<RawRule>,
 }
 
 /// `"any"`, `"off"`, or a list of programs.
@@ -1985,6 +2150,10 @@ impl Raw {
             config.decorations.animation = Animation::default();
         }
 
+        let lock_written = self
+            .protocols
+            .as_ref()
+            .is_some_and(|protocols| protocols.session_lock.is_some());
         if let Some(protocols) = self.protocols {
             config.protocols = protocols.apply(config.protocols, built)?;
         }
@@ -1996,6 +2165,11 @@ impl Raw {
                 ShellBuilt::FULL,
                 count(config.workspaces.grid),
             )?;
+        }
+        if !lock_written {
+            config.protocols = config
+                .protocols
+                .with(Protocol::SessionLock, lock_rule(&config.shell.lock));
         }
         // The volume is the shell's to change: with it off, a key written to
         // change it is a mistake, and the profile's are given back to the
@@ -2507,10 +2681,14 @@ impl RawProtocols {
             (Protocol::OutputManagement, self.output_management),
             (Protocol::Shell, self.shell),
             (Protocol::Settings, self.settings),
+            (Protocol::SessionLock, self.session_lock),
         ];
         for (protocol, raw) in written {
             let Some(raw) = raw else { continue };
-            let rule = raw.rule(&format!("protocols.{}", protocol.key()))?;
+            let mut rule = raw.rule(&format!("protocols.{}", protocol.key()))?;
+            if protocol == Protocol::SessionLock {
+                rule = rule.installed();
+            }
             if protocol == Protocol::Screencopy && rule != Rule::Off && !built.capture {
                 return Err(Error::NotBuilt {
                     key: "protocols.screencopy",
@@ -3029,6 +3207,113 @@ mod tests {
         let missing = scratch.0.join("nowhere/swaylock");
         assert_eq!(which(missing.to_str().unwrap(), Some(&path)), None);
         assert_eq!(which("", Some(&path)), None);
+    }
+
+    /// The system's `sh`, behind a copy planted ahead of it on PATH, as a
+    /// program of the person's could plant swaylock in `~/.local/bin`.
+    #[test]
+    fn a_bare_lock_program_is_the_copy_the_system_installed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let scratch = Scratch::new("installed");
+        let planted = scratch.program("bin", "sh", 0o755);
+        // Anybody may write here, so nothing in it is the system's alone,
+        // whoever runs the tests.
+        std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let path = std::env::join_paths([planted.as_path(), Path::new("/bin")]).unwrap();
+        // Somebody who is not root, and owns none of the system's files.
+        let person = Person {
+            uid: 4242,
+            groups: vec![4242],
+        };
+        assert_eq!(
+            which_installed("sh", Some(&path), Some(&person)),
+            Some(std::fs::canonicalize("/bin/sh").unwrap()),
+            "the system's, every link followed"
+        );
+        assert_eq!(
+            which("sh", Some(&path)),
+            Some(planted.join("sh")),
+            "where which finds the planted one"
+        );
+        assert_eq!(
+            which_installed("sh", Some(&path), None),
+            None,
+            "nobody to judge for"
+        );
+        let root = Person {
+            uid: 0,
+            groups: vec![0],
+        };
+        assert_eq!(
+            which_installed("sh", Some(&path), Some(&root)),
+            None,
+            "for root, nothing is the system's alone"
+        );
+        let named = planted.join("sh");
+        assert_eq!(
+            which_installed(named.to_str().unwrap(), None, Some(&person)),
+            Some(named.clone()),
+            "a path is the person's choice, as written"
+        );
+    }
+
+    /// `true`, the system's, stands in for a lock program it installed: a
+    /// file of that name, where `sh` is often a link to one of another.
+    #[test]
+    fn what_weakens_who_may_lock_is_doubted() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let scratch = Scratch::new("doubts");
+        let mine = scratch.program("bin", "mylock", 0o755);
+        std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let mine = mine.join("mylock").display().to_string();
+        let path = std::env::join_paths(["/bin"]).unwrap();
+        let person = Person {
+            uid: 4242,
+            groups: vec![4242],
+        };
+        let doubts = |text: &str| {
+            let config = parse(text, SEAT).unwrap_or_else(|e| panic!("{text}: {e}"));
+            lock_doubts(&config, Some(&path), Some(&person))
+        };
+        let system_true = std::fs::canonicalize("/bin/true").unwrap();
+
+        assert_eq!(doubts("[shell]\nlock = [\"true\"]"), [], "the system's");
+        assert_eq!(
+            doubts("[shell]\nlock = [\"no-such-lock\"]"),
+            [Doubt::NotInstalled {
+                name: "no-such-lock".to_owned()
+            }]
+        );
+        assert_eq!(
+            doubts(&format!("[shell]\nlock = [\"{mine}\"]")),
+            [Doubt::Writable { path: mine.clone() }],
+            "a path of the person's own, said once"
+        );
+        assert_eq!(
+            doubts("[shell]\nlock = [\"true\"]\n[protocols]\nsession-lock = \"any\""),
+            [Doubt::AnyLock]
+        );
+        assert_eq!(
+            doubts(&format!(
+                "[shell]\nlock = [\"true\"]\n[protocols]\nsession-lock = [\"swaylock\", \"{mine}\"]"
+            )),
+            [
+                Doubt::NotAdmitted { file: system_true },
+                Doubt::Writable { path: mine },
+            ],
+            "what keeps it from locking first"
+        );
+        assert_eq!(
+            lock_doubts(
+                &parse("[shell]\nlock = [\"true\"]", SEAT).unwrap(),
+                Some(&path),
+                None
+            ),
+            [Doubt::NotInstalled {
+                name: "true".to_owned()
+            }],
+            "with nobody to judge for, nothing is the system's"
+        );
     }
 
     #[test]
@@ -5340,8 +5625,11 @@ mod tests {
     fn the_shell_protocol_defaults_to_perspicax_shell_in_both_profiles() {
         for profile in [Profile::Classic, Profile::Minimal] {
             let access = Config::profile(profile, SEAT).protocols;
-            assert!(access.admits(Protocol::Shell, Some("/usr/bin/perspicax-shell")));
-            assert!(!access.admits(Protocol::Shell, Some("/usr/bin/waybar")));
+            assert!(access.admits(
+                Protocol::Shell,
+                Some(Exe::persons("/usr/bin/perspicax-shell"))
+            ));
+            assert!(!access.admits(Protocol::Shell, Some(Exe::persons("/usr/bin/waybar"))));
             assert!(!access.admits(Protocol::Shell, None));
         }
         let config = parse("[protocols]\nshell = \"off\"", SEAT).unwrap();
@@ -5352,12 +5640,65 @@ mod tests {
     fn the_settings_protocol_defaults_to_perspicax_settings_in_both_profiles() {
         for profile in [Profile::Classic, Profile::Minimal] {
             let access = Config::profile(profile, SEAT).protocols;
-            assert!(access.admits(Protocol::Settings, Some("/usr/bin/perspicax-settings")));
-            assert!(!access.admits(Protocol::Settings, Some("/usr/bin/perspicax-shell")));
+            assert!(access.admits(
+                Protocol::Settings,
+                Some(Exe::persons("/usr/bin/perspicax-settings"))
+            ));
+            assert!(!access.admits(
+                Protocol::Settings,
+                Some(Exe::persons("/usr/bin/perspicax-shell"))
+            ));
             assert!(!access.admits(Protocol::Settings, None));
         }
         let config = parse("[protocols]\nsettings = \"off\"", SEAT).unwrap();
         assert_eq!(config.protocols.rule(Protocol::Settings), &Rule::Off);
+    }
+
+    #[test]
+    fn only_the_systems_copy_of_the_lock_program_may_lock_by_default() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let access = Config::profile(profile, SEAT).protocols;
+            assert_eq!(
+                access.rule(Protocol::SessionLock),
+                &Rule::Only(vec![Program::Installed("swaylock".to_owned())])
+            );
+            let lock = |exe| access.admits(Protocol::SessionLock, Some(exe));
+            assert!(lock(Exe::systems("/usr/bin/swaylock")));
+            assert!(!lock(Exe::persons("/home/me/.local/bin/swaylock")));
+            assert!(!lock(Exe::systems("/usr/bin/gtklock")));
+            assert!(!access.admits(Protocol::SessionLock, None));
+        }
+    }
+
+    #[test]
+    fn the_lock_rule_follows_what_shell_lock_runs_unless_written() {
+        let rule = |text: &str| {
+            let config = parse(text, SEAT).unwrap_or_else(|e| panic!("{text}: {e}"));
+            config.protocols.rule(Protocol::SessionLock).clone()
+        };
+        assert_eq!(
+            rule("[shell]\nlock = [\"gtklock\", \"-d\"]"),
+            Rule::Only(vec![Program::Installed("gtklock".to_owned())]),
+            "a bare name: the system's copy"
+        );
+        assert_eq!(
+            rule("[shell]\nlock = [\"/home/me/bin/mylock\"]"),
+            Rule::Only(vec![Program::Path("/home/me/bin/mylock".to_owned())]),
+            "a path: the file the person chose"
+        );
+        assert_eq!(
+            rule(
+                "[shell]\nlock = [\"gtklock\"]\n\
+                 [protocols]\nsession-lock = [\"waylock\", \"/opt/lock/bin/lock\"]"
+            ),
+            Rule::Only(vec![
+                Program::Installed("waylock".to_owned()),
+                Program::Path("/opt/lock/bin/lock".to_owned()),
+            ]),
+            "written, the rule is the person's, and a name in it the system's copy"
+        );
+        assert_eq!(rule("[protocols]\nsession-lock = \"any\""), Rule::Any);
+        assert_eq!(rule("[protocols]\nsession-lock = \"off\""), Rule::Off);
     }
 
     #[test]
@@ -5371,17 +5712,23 @@ mod tests {
         let classic = Config::profile(Profile::Classic, SEAT).protocols;
         assert_eq!(classic, Config::profile(Profile::Minimal, SEAT).protocols);
         assert!(classic.admits(Protocol::ForeignToplevelManagement, None));
-        assert!(classic.admits(Protocol::Screencopy, Some("/usr/bin/grim")));
-        assert!(!classic.admits(Protocol::Screencopy, Some("/usr/bin/firefox")));
-        assert!(classic.admits(Protocol::OutputManagement, Some("/usr/bin/kanshi")));
+        assert!(classic.admits(Protocol::Screencopy, Some(Exe::persons("/usr/bin/grim"))));
+        assert!(!classic.admits(Protocol::Screencopy, Some(Exe::persons("/usr/bin/firefox"))));
+        assert!(classic.admits(
+            Protocol::OutputManagement,
+            Some(Exe::persons("/usr/bin/kanshi"))
+        ));
     }
 
     #[test]
     fn the_settings_app_may_read_the_monitors_by_default() {
         let protocols = Config::profile(Profile::Classic, SEAT).protocols;
         let app = format!("/usr/local/bin/{SETTINGS_APP}");
-        assert!(protocols.admits(Protocol::OutputManagement, Some(&app)));
-        assert!(!protocols.admits(Protocol::OutputManagement, Some("/usr/bin/firefox")));
+        assert!(protocols.admits(Protocol::OutputManagement, Some(Exe::persons(&app))));
+        assert!(!protocols.admits(
+            Protocol::OutputManagement,
+            Some(Exe::persons("/usr/bin/firefox"))
+        ));
     }
 
     #[test]
@@ -5412,10 +5759,10 @@ mod tests {
         )
         .unwrap();
         let access = config.protocols;
-        assert!(!access.admits(Protocol::Workspace, Some("/usr/bin/waybar")));
-        assert!(access.admits(Protocol::Screencopy, Some("/usr/bin/grim")));
-        assert!(!access.admits(Protocol::Screencopy, Some("/tmp/grim")));
-        assert!(access.admits(Protocol::Screencopy, Some("/opt/x/flameshot")));
+        assert!(!access.admits(Protocol::Workspace, Some(Exe::persons("/usr/bin/waybar"))));
+        assert!(access.admits(Protocol::Screencopy, Some(Exe::persons("/usr/bin/grim"))));
+        assert!(!access.admits(Protocol::Screencopy, Some(Exe::persons("/tmp/grim"))));
+        assert!(access.admits(Protocol::Screencopy, Some(Exe::persons("/opt/x/flameshot"))));
         assert!(
             access.admits(Protocol::ForeignToplevelList, None),
             "from the profile"

@@ -7,6 +7,7 @@
 
 use eframe::egui::{self, Ui};
 use perspicax_config::Agent;
+use perspicax_policy::Protocol;
 use perspicax_settings::{Grant, never_words, rule_words, socket_words};
 
 /// How wide a rule's key and what it decides are drawn.
@@ -19,8 +20,9 @@ pub(crate) const WHY: &str = "This page only reads. What may reach past its own 
     what an agent may do, is the file's to say: the app never writes it, so nothing that \
     drives the app can widen it. Change it in an editor.";
 
-/// Draw the page; whether the file is to be opened.
-pub(crate) fn ui(ui: &mut Ui, grants: &[Grant], agent: &Agent) -> bool {
+/// Draw the page; whether the file is to be opened. `lock_doubts` are said
+/// under the lock's rule, in the colour of a warning.
+pub(crate) fn ui(ui: &mut Ui, grants: &[Grant], agent: &Agent, lock_doubts: &[String]) -> bool {
     ui.heading("Protocols");
     ui.label("Who may reach past their own windows, and what an agent may do.");
     ui.add_space(6.0);
@@ -41,6 +43,11 @@ pub(crate) fn ui(ui: &mut Ui, grants: &[Grant], agent: &Agent) -> bool {
                         row(ui, grant.key, grant.about, |ui| {
                             ui.label(rule_words(&grant.in_force));
                             ui.weak(whose(grant));
+                            if grant.key == Protocol::SessionLock.key() {
+                                for doubt in lock_doubts {
+                                    ui.colored_label(ui.visuals().warn_fg_color, doubt);
+                                }
+                            }
                         });
                     }
                     if table == "agent" {
@@ -67,8 +74,9 @@ pub(crate) fn ui(ui: &mut Ui, grants: &[Grant], agent: &Agent) -> bool {
         }
         ui.add_space(8.0);
         ui.weak(
-            "A name admits any program of that name, wherever it is; a path admits only \
-             itself. While the screen is locked, none of them is.",
+            "A name admits any program of that name, wherever it is, but in session-lock only \
+             the copy the system installed; a path admits only the file there. While the \
+             screen is locked, none of them is but the lock's own.",
         );
     });
     open
@@ -93,6 +101,8 @@ fn row(ui: &mut Ui, key: &str, about: &str, value: impl FnOnce(&mut Ui)) {
 /// Whose a rule is, in words.
 fn whose(grant: &Grant) -> String {
     match (grant.written, grant.in_force == grant.profile) {
+        // Unwritten, the lock's rule is the program `[shell] lock` runs.
+        (false, _) if grant.key == Protocol::SessionLock.key() => "follows [shell] lock".to_owned(),
         (false, _) => "the profile's".to_owned(),
         (true, true) => "yours, the same as the profile's".to_owned(),
         (true, false) => format!("yours; the profile's is {}", rule_words(&grant.profile)),

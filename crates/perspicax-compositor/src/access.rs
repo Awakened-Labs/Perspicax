@@ -9,14 +9,16 @@
 //! the protocol itself, which withdraws what the new rule no longer allows.
 //!
 //! A client is named by the executable recorded when its connection was
-//! accepted (`crate::origin`), never asked for again. Xwayland's own
+//! accepted (`crate::origin`), never asked for again, with what the path it
+//! is named by proved then: whether it is the very file the client runs, and
+//! whether only the system could have put it there. Xwayland's own
 //! connection carries no such record and is never admitted: an X11 program
 //! reaching other windows through it would be a program nobody named.
 
 use std::sync::{Arc, PoisonError, RwLock};
 
 use perspicax_node::Origin;
-use perspicax_policy::{Access, Protocol};
+use perspicax_policy::{Access, Exe, Protocol, Rule};
 use smithay::reexports::wayland_server::Client;
 
 use crate::state::ClientState;
@@ -39,6 +41,49 @@ impl Gate {
         narrowed
     }
 
+    /// The lock's global's filter, for smithay's: whether a client may see
+    /// it, asked as [`Filtered`] asks. A client refused it that is called
+    /// what a program the rule names is called is noted, for the shell to
+    /// say so ([`Self::note_if_a_lock`]).
+    pub(crate) fn lock_filter(&self) -> impl Fn(&Client) -> bool + Send + Sync + use<> {
+        let gate = self.clone();
+        move |client| {
+            let admitted = gate.admits(Protocol::SessionLock, client);
+            if !admitted {
+                gate.note_if_a_lock(client);
+            }
+            admitted
+        }
+    }
+
+    /// Note `client`, refused the lock, if it is called what a program the
+    /// lock's rule names is called: a lock program, and not the copy the
+    /// rule admits, or a program passing itself off as one. Its note is the
+    /// program as the rule writes it, never the path the client runs from,
+    /// whose folders are its own to name (#178).
+    pub(crate) fn note_if_a_lock(&self, client: &Client) {
+        let Some(state) = client.get_data::<ClientState>() else {
+            return;
+        };
+        let Origin::Process(process) = state.origin() else {
+            return;
+        };
+        let Some(exe) = process.exe.as_deref() else {
+            return;
+        };
+        let called = std::path::Path::new(exe).file_name();
+        let rules = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        let Rule::Only(programs) = rules.rule(Protocol::SessionLock) else {
+            return;
+        };
+        let named = programs
+            .iter()
+            .find(|program| program.file_name().map(std::ffi::OsStr::new) == called);
+        if let Some(program) = named {
+            state.note_lock_refused(program.spelled().to_owned());
+        }
+    }
+
     /// Whether `client` may use `protocol` under the current rules.
     pub(crate) fn admits(&self, protocol: Protocol, client: &Client) -> bool {
         let Some(state) = client.get_data::<ClientState>() else {
@@ -48,10 +93,16 @@ impl Gate {
             Origin::Process(process) => process.exe,
             _ => None,
         };
+        let file = state.file();
+        let exe = exe.as_deref().map(|path| Exe {
+            path,
+            here: file.here,
+            installed: file.installed,
+        });
         self.0
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .admits(protocol, exe.as_deref())
+            .admits(protocol, exe)
     }
 }
 
@@ -68,6 +119,10 @@ impl crate::state::Compositor {
                 Protocol::OutputManagement => self.revoke_displays(),
                 Protocol::Shell => self.revoke_shell(),
                 Protocol::Settings => self.revoke_settings(),
+                // The lock holding the session keeps it: taken back, the
+                // session would stay locked with nobody to unlock it. Only a
+                // lock asked for from now on is asked the rule again.
+                Protocol::SessionLock => {}
                 #[cfg(feature = "capture")]
                 Protocol::Screencopy => self.revoke_screencopy(),
                 _ => self.revoke_toplevels(protocol),

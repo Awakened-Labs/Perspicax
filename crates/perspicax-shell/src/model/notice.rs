@@ -3,7 +3,8 @@
 //!
 //! perspicax sends what kind of thing it refused, and only the words of it
 //! that came from the person or the config: the program as `[agent] never`
-//! writes it, the config's own reason in a line, the layout as written.
+//! writes it, the config's own reason in a line, the layout as written, the
+//! lock program as `[protocols] session-lock` writes it.
 //! A save the shell itself cannot use, though perspicax took it, is said
 //! the same way, with its own reason in a line. The rest of each sentence
 //! is the shell's.
@@ -26,6 +27,9 @@ pub(crate) enum Refused {
     ShellConfig(String),
     /// A keyboard layout xkb could not compile, as the config writes it.
     Keymap(String),
+    /// A program called as a lock program is, refused the lock: not the
+    /// one `[protocols] session-lock` admits, as it writes that program.
+    Lock(String),
 }
 
 /// What is said of a refusal: a headline, and why under it.
@@ -64,6 +68,13 @@ pub(crate) fn notice(refused: &Refused) -> Notice {
         ),
         Refused::Config(why) => ("Config not applied: the one in use is kept", why.clone()),
         Refused::ShellConfig(why) => ("Shell settings not applied", why.clone()),
+        Refused::Lock(program) => (
+            "A lock screen was refused",
+            format!(
+                "A program called {program} asked to lock the screen, and is not the one \
+                 [protocols] session-lock lets lock it"
+            ),
+        ),
         Refused::Keymap(layout) => (
             "Keyboard layout not applied",
             if layout.is_empty() {
@@ -132,6 +143,22 @@ mod tests {
         assert_eq!(
             said(&Refused::ShellConfig(reason.to_owned())),
             ("Shell settings not applied".to_owned(), reason.to_owned())
+        );
+    }
+
+    /// Whether it was Lock, run from a copy the person's programs could
+    /// have written, or a program passing itself off as one, the person
+    /// learns a lock screen came up that was not the system's.
+    #[test]
+    fn a_refused_lock_names_the_program_as_the_rule_does() {
+        assert_eq!(
+            said(&Refused::Lock("swaylock".to_owned())),
+            (
+                "A lock screen was refused".to_owned(),
+                "A program called swaylock asked to lock the screen, and is not the one \
+                 [protocols] session-lock lets lock it"
+                    .to_owned()
+            )
         );
     }
 

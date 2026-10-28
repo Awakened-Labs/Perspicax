@@ -319,6 +319,9 @@ pub struct Compositor {
     /// Who may use the protocols that reach past their own windows. See
     /// [`crate::access`].
     pub(crate) gate: crate::access::Gate,
+    /// Whom this compositor runs as: whose writes a program the system
+    /// installed cannot be. See [`crate::origin::attest`].
+    person: Option<perspicax_policy::Person>,
     /// Every window, as the taskbar protocols have been told it. See
     /// [`crate::toplevels`].
     pub(crate) toplevels: crate::toplevels::Toplevels,
@@ -466,10 +469,11 @@ impl Compositor {
             primary_selection: PrimarySelectionState::new::<Self>(display),
             activation: XdgActivationState::new::<Self>(display),
             layer_shell: WlrLayerShellState::new::<Self>(display),
-            // Any client may lock. A lock client is the one kind that must
-            // work when everything else has gone wrong. Only the lock that
-            // holds the session may unlock it: see `crate::lock`.
-            lock_manager: SessionLockManagerState::new::<Self, _>(display, |_| true),
+            // Only what `[protocols] session-lock` admits may lock, so no
+            // other client can put a lock screen of its own up to be typed
+            // the password (#178). Only the lock that holds the session may
+            // unlock it: see `crate::lock`.
+            lock_manager: SessionLockManagerState::new::<Self, _>(display, gate.lock_filter()),
             lock: None,
             #[cfg(any(feature = "seat", feature = "capture"))]
             backdrop: crate::backdrop::Backdrop::default(),
@@ -479,6 +483,7 @@ impl Compositor {
             #[cfg(feature = "xwayland")]
             xwayland_shell: None,
             gate,
+            person: crate::origin::this_person(),
             toplevels,
             pager,
             displays,
@@ -522,13 +527,13 @@ impl Compositor {
             }
         };
 
-        let (origin, pidfd) = client
-            .get_credentials(&self.display)
-            .map_or((Origin::Unattributed, None), |credentials| {
-                origin::attest(credentials.pid)
-            });
-        state.attribute(origin.clone(), pidfd);
-        tracing::info!(id = ?client.id(), ?origin, "client connected");
+        let attested = client.get_credentials(&self.display).map_or_else(
+            |_| origin::Attested::default(),
+            |credentials| origin::attest(credentials.pid, self.person.as_ref()),
+        );
+        let (origin, file) = (attested.origin.clone(), attested.file);
+        state.attribute(attested);
+        tracing::info!(id = ?client.id(), ?origin, ?file, "client connected");
         if let Origin::Process(process) = &origin {
             self.grant_lineage(process.pid, &state);
             self.stamp_started(process.pid, &state);
@@ -564,6 +569,17 @@ impl Compositor {
     /// the loop, where nothing holds the pointer's lock. Whether or not its
     /// stall was told, which only one of a second or more is.
     pub(crate) fn flush_each(&mut self) {
+        // A lock program refused, noted where only the client was known, is
+        // told now: even of one gone already, as a refused lock program
+        // goes at once.
+        let refused: Vec<String> = self
+            .clients
+            .iter()
+            .filter_map(|(_, client)| client.take_lock_refused())
+            .collect();
+        for program in refused {
+            self.tell_shell_refused(crate::shell_protocol::Refused::Lock(program));
+        }
         let mut backend = self.display.backend_handle();
         let now = Instant::now();
         let mut owed = Vec::new();
@@ -2045,6 +2061,10 @@ pub(crate) struct ClientState {
     /// A pidfd on the origin's process, when one could be vouched for: what
     /// a grant to it is held by. See [`crate::origin::attest`].
     pidfd: OnceLock<OwnedFd>,
+    /// What the path its executable is named by proves: what a rule in
+    /// `[protocols]` that names a path, or a program the system installed,
+    /// asks. See [`crate::origin::ExeFile`].
+    file: OnceLock<crate::origin::ExeFile>,
     /// The origin's process, with when it started: what a press that reached
     /// this client starts programs under (#259).
     process: OnceLock<perspicax_policy::Process>,
@@ -2058,21 +2078,33 @@ pub(crate) struct ClientState {
     owed: Owed<FocusTarget>,
     /// Whether it has gone, so that it is flushed no more.
     gone: AtomicBool,
+    /// The lock program it is called, as `[protocols] session-lock` writes
+    /// it, refused the lock: for the shell to be told once (#178).
+    lock_refused: std::sync::Mutex<Option<String>>,
+    /// Whether it has been, so that it is told only once.
+    lock_noted: AtomicBool,
 }
 
 impl ClientState {
     /// Record who this client is. Once, and only the first time: an identity
     /// that could be overwritten is not an attestation.
-    fn attribute(&self, origin: Origin, pidfd: Option<OwnedFd>) {
-        let _ = self.origin.set(origin);
-        if let Some(pidfd) = pidfd {
+    fn attribute(&self, attested: crate::origin::Attested) {
+        let _ = self.origin.set(attested.origin);
+        if let Some(pidfd) = attested.pidfd {
             let _ = self.pidfd.set(pidfd);
         }
+        let _ = self.file.set(attested.file);
     }
 
     /// Who this client is, or `Unattributed` if it was never established.
     pub(crate) fn origin(&self) -> Origin {
         self.origin.get().cloned().unwrap_or_default()
+    }
+
+    /// What the path this client's executable is named by proves: nothing,
+    /// if it was never established.
+    pub(crate) fn file(&self) -> crate::origin::ExeFile {
+        self.file.get().copied().unwrap_or_default()
     }
 
     /// A pidfd of its own on this client's process, if one was vouched for.
@@ -2088,6 +2120,25 @@ impl ClientState {
     /// The person's press that started this client's program, if one did.
     pub(crate) fn started_on(&self) -> Option<perspicax_policy::Turn> {
         self.started_on.get().copied()
+    }
+
+    /// Note that it was refused the lock, called `program`: once, however
+    /// often it asks. See [`crate::access::Gate::note_if_a_lock`].
+    pub(crate) fn note_lock_refused(&self, program: String) {
+        if !self.lock_noted.swap(true, Ordering::Relaxed) {
+            *self
+                .lock_refused
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(program);
+        }
+    }
+
+    /// The lock refusal noted and not yet told, if there is one.
+    fn take_lock_refused(&self) -> Option<String> {
+        self.lock_refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// What to send this client of a pointer `event` for `target`, and what

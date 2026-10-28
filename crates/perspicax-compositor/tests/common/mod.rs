@@ -2116,6 +2116,12 @@ impl Desk {
     /// Bind the shell channel, as perspicax-shell does. Panics if it is not
     /// advertised.
     pub fn bind_shell(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.bind_shell_up_to(globals, qh, 8);
+    }
+
+    /// Bind the channel as a shell from before it was told of a lock
+    /// refused would.
+    pub fn bind_shell_v7(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
         self.bind_shell_up_to(globals, qh, 7);
     }
 
