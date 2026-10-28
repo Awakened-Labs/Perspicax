@@ -34,6 +34,8 @@ mod pie;
 mod seat;
 #[cfg(feature = "panel")]
 mod taskbar;
+#[cfg(feature = "menus")]
+mod token;
 #[cfg(feature = "panel")]
 mod tooltip;
 #[cfg(feature = "tray")]
@@ -199,6 +201,8 @@ pub(crate) fn run(
         installed,
         #[cfg(feature = "menus")]
         reaping: false,
+        #[cfg(feature = "menus")]
+        activation: smithay_client_toolkit::activation::ActivationState::bind(&globals, &qh).ok(),
         channel,
         config,
         handle: event_loop.handle(),
@@ -297,6 +301,10 @@ pub(crate) struct App {
     /// Whether a timer is collecting the programs the menus started.
     #[cfg(feature = "menus")]
     reaping: bool,
+    /// What the tokens for those programs are asked of, if this compositor
+    /// makes them: see [`token`].
+    #[cfg(feature = "menus")]
+    activation: Option<smithay_client_toolkit::activation::ActivationState>,
     /// The config file, read again when perspicax says it changed.
     config: Option<PathBuf>,
     #[cfg_attr(
@@ -630,6 +638,7 @@ impl App {
                 Effect::Redraw => {}
             }
         }
+        self.menus.let_go();
     }
 
     /// Pass `event` to the pie, and carry out what it calls for.
@@ -647,6 +656,7 @@ impl App {
                 crate::pie::Effect::Redraw => {}
             }
         }
+        self.pies.let_go();
     }
 
     /// The menus' area on `output`: the monitor, less the shell's panel on
@@ -675,13 +685,31 @@ impl App {
         crate::layout::Rect::new(0, 0, width, height)
     }
 
-    /// Start a program a menu named, and collect it when it ends.
+    /// Start a program a menu named, handed a token asked for now, with
+    /// the person's latest press on the shell: see [`token`].
     fn start(&mut self, run: &crate::model::apps::Run) {
+        if let (Some(activation), Some((seat_and_serial, surface))) =
+            (&self.activation, self.seat.latest())
+        {
+            let starting = token::Starting {
+                run: run.clone(),
+                seat_and_serial,
+                surface,
+            };
+            activation.request_token_with_data(&self.qh, starting);
+            return;
+        }
+        self.launch(run, None);
+    }
+
+    /// Start `run`, handed `token` if there is one, and collect it when it
+    /// ends.
+    fn launch(&mut self, run: &crate::model::apps::Run, token: Option<&str>) {
         use std::time::Duration;
 
         use calloop::timer::{TimeoutAction, Timer};
 
-        if let Err(error) = self.menus.launcher.run(run) {
+        if let Err(error) = self.menus.launcher.run(run, token) {
             tracing::warn!("{} could not be started: {error}", run.argv.join(" "));
             return;
         }

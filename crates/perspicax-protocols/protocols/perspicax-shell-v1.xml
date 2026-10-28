@@ -20,9 +20,10 @@
     What passes between perspicax and perspicax-shell that no standard
     protocol carries: the person asked for a menu or a pie, or pressed a
     volume key, the config changed, the session should end, the keyboard's
-    layouts and which is in use, what is made of each window, what the
-    person chose in a window's menu, and what the person asked for that
-    perspicax refused, for the shell to say why in words.
+    layouts and which is in use, what is made of each window and which
+    want the person's attention, what the person chose in a window's menu,
+    and what the person asked for that perspicax refused, for the shell to
+    say why in words.
 
     Everything else the shell does, it does as any other client would.
     Its wallpaper, panel and menus are layer-shell surfaces, its taskbar
@@ -38,7 +39,7 @@
     is locked the compositor sends nothing and ignores every request.
   </description>
 
-  <interface name="perspicax_shell_v1" version="6">
+  <interface name="perspicax_shell_v1" version="7">
     <description summary="a shell's binding to the compositor">
       Bound once by a shell. Several shells may bind it; each is told the
       same things.
@@ -184,12 +185,22 @@
     <enum name="window_state" bitfield="true" since="5">
       <description summary="what a window is made">
         What the person made of a window, by a key, a titlebar button or
-        its menu, beyond what the taskbar's own protocol tells. A bit a
-        later version adds is sent only to a shell bound at that version.
+        its menu, beyond what the taskbar's own protocol tells; and from
+        version 7 whether it wants their attention. A bit a later version
+        adds is sent only to a shell bound at that version.
+
+        A window wants the person's attention when it opened without the
+        keys, its program not being one the person asked for, or when its
+        program asked to bring it forward with the keys and was refused: a
+        token stale, say. It wants it until the person gives it the keys,
+        by a click, the taskbar, Alt+Tab or a token of their own. The
+        window with the keys never wants it.
       </description>
       <entry name="sticky" value="1" summary="on every workspace"/>
       <entry name="on_top" value="2" summary="kept in front of the other windows"/>
       <entry name="shaded" value="4" summary="rolled up to its titlebar"/>
+      <entry name="wants_attention" value="8" since="7"
+             summary="it wants the keys, which the person has not given it"/>
     </enum>
 
     <enum name="window_capabilities" bitfield="true" since="5">

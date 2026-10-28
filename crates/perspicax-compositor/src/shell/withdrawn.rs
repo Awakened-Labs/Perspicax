@@ -14,8 +14,8 @@
 //! The asking is a new window's: a commit with nothing in it, the configure
 //! a new window is sent in answer, then a picture. The window is on screen
 //! again from that first picture, and not before, as a new window: placed,
-//! given the keyboard, announced to the taskbars, and with an id nothing has
-//! seen, so nothing an agent learned of it before is taken for what it is
+//! given the keyboard if the person asked for it (`withheld`), announced to
+//! the taskbars, and with an id nothing has seen, so nothing an agent learned of it before is taken for what it is
 //! now. A hidden client may commit for reasons of its own, and on screen
 //! before it drew, the window would again be a frame around nothing. An X11
 //! window its client withdraws and maps again goes and comes back the same
@@ -108,13 +108,13 @@ impl Compositor {
         };
         let toplevel = &self.withdrawn[at].toplevel;
         if !toplevel.is_initial_configure_sent() {
-            self.configure_new(toplevel);
+            self.configure_new(toplevel, self.asked_for(surface));
         }
         if !matches!(own, Buffer::New(_)) {
             return;
         }
         let Withdrawn { toplevel, wants } = self.withdrawn.remove(at);
-        let window = self.open_toplevel(toplevel);
+        let window = self.open_toplevel(toplevel, self.asked_for(surface));
         if let Some(fill) = wants
             && self.backend.has_person()
         {

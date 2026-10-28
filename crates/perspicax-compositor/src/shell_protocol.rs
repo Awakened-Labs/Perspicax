@@ -45,6 +45,12 @@
 //! shell bound earlier is not told, as for a pie, and the log still says
 //! why.
 //!
+//! From version 7 a shell is told, with the rest of where a window stands,
+//! whether it wants the person's attention: it opened without the keys, or
+//! its program asked to bring it forward and was refused (#259), and the
+//! person has not given it the keys since. A taskbar marks it. A shell
+//! bound earlier is never told the bit, as for a pie.
+//!
 //! When a save changes the config's `[shell]` table, every shell is told to
 //! read it again, and applies it in place.
 //!
@@ -86,9 +92,13 @@ use crate::{
     Keymap,
     access::{Filtered, Gate},
     framed::Framed,
-    shell::{Fill, id_of, is_on_top, is_shaded},
+    shell::{Fill, id_of, is_on_top, is_shaded, wants_attention},
     state::Compositor,
 };
+
+/// The version a shell is told from whether a window wants attention: a
+/// bit of `window_state`, for which wayland-scanner makes no constant.
+const WANTS_ATTENTION_SINCE: u32 = 7;
 
 /// Which menu a binding asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,7 +165,7 @@ impl Shells {
     /// Advertise the global, filtered by `gate`.
     pub(crate) fn new(display: &DisplayHandle, gate: &Gate) -> Self {
         display.create_global::<Compositor, PerspicaxShellV1, _>(
-            6,
+            7,
             Filtered {
                 gate: gate.clone(),
                 protocol: Protocol::Shell,
@@ -353,7 +363,10 @@ impl Compositor {
                 .into_iter()
                 .filter_map(|(id, toplevel)| {
                     let window = self.any_window(id)?;
-                    Some((id, self.standing(&client, toplevel, &window)))
+                    Some((
+                        id,
+                        self.standing(&client, shell.version(), toplevel, &window),
+                    ))
                 })
                 .collect();
             let mut told = told.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -371,11 +384,13 @@ impl Compositor {
         }
     }
 
-    /// What `client`, holding the handle `toplevel` on `window`, is told of
-    /// it: its group's, as the tab in front holds it.
+    /// What `client`, bound at `version` and holding the handle `toplevel`
+    /// on `window`, is told of it: its group's, as the tab in front holds
+    /// it.
     fn standing(
         &self,
         client: &Client,
+        version: u32,
         toplevel: ZwlrForeignToplevelHandleV1,
         window: &Framed,
     ) -> Standing {
@@ -386,6 +401,10 @@ impl Compositor {
         state.set(WindowState::Sticky, home == Some(Home::Sticky));
         state.set(WindowState::OnTop, is_on_top(&front));
         state.set(WindowState::Shaded, is_shaded(&front));
+        state.set(
+            WindowState::WantsAttention,
+            version >= WANTS_ATTENTION_SINCE && wants_attention(&front),
+        );
         let mut capabilities = WindowCapabilities::empty();
         capabilities.set(WindowCapabilities::Workspace, home.is_some());
         capabilities.set(

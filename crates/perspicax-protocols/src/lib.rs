@@ -9,9 +9,9 @@
 //!   layouts and which is in use, from version 3 that the person asked for
 //!   a pie, from version 4 a volume key, from version 5 what is made of
 //!   each window and what the person chose in its menu: sticky, on top,
-//!   rolled up, sent to a workspace, and from version 6 what the person
-//!   asked for that was refused, by kind, for the shell to say why in its
-//!   own words. The shell's surfaces, taskbar and pager all speak standard
+//!   rolled up, sent to a workspace, from version 6 what the person asked
+//!   for that was refused, by kind, for the shell to say why in its own
+//!   words, and from version 7 which windows want the person's attention. The shell's surfaces, taskbar and pager all speak standard
 //!   protocols, so any piece of it can be replaced by a program that knows
 //!   nothing of this one; a window's menu names the window and the
 //!   workspace by the handles those protocols gave it.
@@ -104,10 +104,10 @@ macro_rules! generated {
 
 /// `perspicax-shell-v1`: menus and pies asked for, a config changed, a
 /// session ended, the keyboard's layouts, the volume keys, a window made
-/// sticky, kept on top, rolled up or sent to a workspace, and what was
-/// refused.
+/// sticky, kept on top, rolled up or sent to a workspace, what was refused,
+/// and which windows want the person's attention.
 pub mod shell {
-    /// `perspicax_shell_v1`, whose interface is at version 6.
+    /// `perspicax_shell_v1`, whose interface is at version 7.
     pub mod v1 {
         generated!(
             "protocols/perspicax-shell-v1.xml",

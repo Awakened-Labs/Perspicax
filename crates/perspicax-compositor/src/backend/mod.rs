@@ -763,6 +763,7 @@ impl Compositor {
                 self.stand_in_scroll(*at, *v120, *mods);
             }
             crate::Command::Motion { by } => self.stand_in_motion(*by),
+            crate::Command::Type(text) => self.stand_in_type(text),
             #[cfg(any(feature = "seat", feature = "capture"))]
             crate::Command::Splash { lasts, palette } => self.splash_for_test(*lasts, palette),
             #[cfg(not(any(feature = "seat", feature = "capture")))]

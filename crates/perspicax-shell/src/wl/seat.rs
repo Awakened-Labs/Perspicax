@@ -37,6 +37,8 @@ use smithay_client_toolkit::{
     },
 };
 #[cfg(feature = "menus")]
+use wayland_client::Proxy as _;
+#[cfg(feature = "menus")]
 use wayland_client::protocol::wl_keyboard;
 use wayland_client::{
     Connection, QueueHandle,
@@ -66,6 +68,11 @@ pub(super) struct Seat {
     /// the mixer's from the menus'.
     #[cfg(any(feature = "pie", feature = "audio"))]
     keyboard_on: Option<wl_surface::WlSurface>,
+    /// The serial of the person's latest press on a surface of ours, or of
+    /// the keyboard coming to one, and that surface: what a token for a
+    /// program the shell starts is asked with (see [`super::token`]).
+    #[cfg(feature = "menus")]
+    latest: Option<(u32, wl_surface::WlSurface)>,
 }
 
 impl Seat {
@@ -77,7 +84,18 @@ impl Seat {
             keyboard: None,
             #[cfg(any(feature = "pie", feature = "audio"))]
             keyboard_on: None,
+            #[cfg(feature = "menus")]
+            latest: None,
         }
+    }
+
+    /// What to ask a token with, if the person has pressed anything on the
+    /// shell: the seat and the serial, and the surface, while it is there.
+    #[cfg(feature = "menus")]
+    pub(super) fn latest(&self) -> Option<((wl_seat::WlSeat, u32), Option<wl_surface::WlSurface>)> {
+        let (serial, surface) = self.latest.as_ref()?;
+        let seat = self.state.seats().next()?;
+        Some(((seat, *serial), surface.is_alive().then(|| surface.clone())))
     }
 }
 
@@ -316,6 +334,10 @@ impl PointerHandler for App {
         events: &[PointerEvent],
     ) {
         for event in events {
+            #[cfg(feature = "menus")]
+            if let PointerEventKind::Press { serial, .. } = event.kind {
+                self.seat.latest = Some((serial, event.surface.clone()));
+            }
             if let PointerEventKind::Enter { .. } = event.kind
                 && let Some(pointer) = &self.seat.pointer
                 && let Err(error) = pointer.set_cursor(connection, CursorIcon::Default)
@@ -428,10 +450,11 @@ impl KeyboardHandler for App {
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
         surface: &wl_surface::WlSurface,
-        _: u32,
+        serial: u32,
         _: &[u32],
         _: &[Keysym],
     ) {
+        self.seat.latest = Some((serial, surface.clone()));
         #[cfg(any(feature = "pie", feature = "audio"))]
         {
             self.seat.keyboard_on = Some(surface.clone());
@@ -476,9 +499,13 @@ impl KeyboardHandler for App {
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
-        _: u32,
+        serial: u32,
         event: KeyEvent,
     ) {
+        // On the surface the keyboard came to.
+        if let Some((latest, _)) = &mut self.seat.latest {
+            *latest = serial;
+        }
         self.key(&event);
     }
 

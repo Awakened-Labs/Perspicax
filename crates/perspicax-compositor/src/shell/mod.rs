@@ -29,6 +29,7 @@ mod snap;
 mod stacking;
 mod tabs;
 mod withdrawn;
+mod withheld;
 mod workspaces;
 
 use std::{cell::RefCell, time::Instant};
@@ -68,6 +69,7 @@ pub(crate) use snap::SnapPreview;
 pub(crate) use stacking::{Stack, stack};
 pub(crate) use stacking::{as_drawn, covers_panels, is_kept_on_top, window_under};
 pub(crate) use withdrawn::Withdrawn;
+pub(crate) use withheld::wants_attention;
 #[cfg(feature = "seat")]
 pub(crate) use workspaces::Pictured;
 
@@ -119,6 +121,9 @@ pub(crate) struct Placement {
     /// When a Wayland window opened, until a seat names it for never having
     /// drawn: taken then, so it is named once (#255).
     pub(crate) opened: Option<Instant>,
+    /// It opened without the keys, the person not having asked for it, and
+    /// has not had them since (#259). See `withheld`.
+    pub(crate) wanting: bool,
 }
 
 /// How a window fills its monitor.
@@ -329,7 +334,7 @@ impl Compositor {
             let _ = x11.configure(to);
         }
         if to.loc != client.loc {
-            self.space.map_element(window.clone(), to.loc, false);
+            self.move_window(window, to.loc);
         }
         tracing::info!(
             surface = ?id_of(window).map(|id| id.0),
@@ -456,7 +461,7 @@ impl Compositor {
             pending.size = Some(area.size);
         });
         surface.send_configure();
-        self.space.map_element(window.clone(), area.loc, false);
+        self.move_window(window, area.loc);
         self.publish_facts();
     }
 
@@ -489,7 +494,7 @@ impl Compositor {
         };
         let to = at.unwrap_or(restore.loc);
         if self.space.element_location(window).is_some() {
-            self.space.map_element(window.clone(), to, false);
+            self.move_window(window, to);
         } else {
             placement(window, |placement| placement.parked = Some(to));
         }

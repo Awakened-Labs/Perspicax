@@ -901,6 +901,15 @@ X11 window's origin says so: the X client's pid comes from the X server's
 X-Resource answer rather than the kernel, and every X client shares one consent
 decision, because X11 lets them read and drive each other.
 
+An X11 window takes the keys as it opens only as a Wayland one does (#259,
+below), Xwayland being the program of every X client: while an X11 window
+has them, while nothing has them, when its `_NET_STARTUP_ID` names a token
+still good, as a launcher's `DESKTOP_STARTUP_ID` hands one on, or when the
+person's latest press started its program, which is known once the X server
+names its process; it opens beneath the window in use, and takes them then.
+A press on an X11 window starts programs under the X client the X server
+names for it, never the pid the window claims.
+
 An X11 window gets what a Wayland one gets, and is told so in X11's terms. One
 that asks to go fullscreen -- a game, as Wine asks -- covers its monitor and
 the panels, with no frame, and keeps it if it then asks for another size; one
@@ -927,7 +936,7 @@ the X server's time, so it is believed only from inside the X world in use,
 as a token is only from the program with the keys; otherwise an X11 window
 could take the keys from a Wayland window the person is typing in. So a
 program started again from a Wayland terminal or launcher comes up raised,
-to be clicked. Wine sends no time, so its window comes back without the
+to be clicked, and marked on the taskbar as wanting attention (#259). Wine sends no time, so its window comes back without the
 keyboard. Without input, or with nothing to vouch for it, a window on a
 workspace that is not showing waits there, since showing that workspace
 would move the keyboard. Asking with `_NET_WM_STATE_HIDDEN` minimizes or
@@ -964,10 +973,11 @@ attaching no buffer to it, as xdg-shell allows, and ask for it again later.
 To everyone else the window has closed. It leaves the screen, the taskbar
 and `window_list`, its menus are dismissed, and a move or resize of it ends
 with nothing in hand. With a person at the seat, the keyboard goes to the
-window now on top. Asked for again, it is configured as a new window is,
-with what it was told before (maximized, fullscreen) forgotten, as
-xdg-shell says. It is back from the first picture it draws, and not before.
-It returns as a new window: placed, given the keyboard, announced to the
+window now on top, passing over one that wants attention (#259). Asked for
+again, it is configured as a new window is, with what it was told before
+(maximized, fullscreen) forgotten, as xdg-shell says. It is back from the
+first picture it draws, and not before. It returns as a new window: placed,
+given the keyboard if the person asked for it (#259), announced to the
 taskbar, and with a new id. An X11 window its client withdraws and maps
 again goes and comes back the same way.
 
@@ -987,8 +997,9 @@ asks for every key does: fuzzel, say, or the shell's own menus and pies. A
 window that opens under it, asks to be brought forward, or is clicked,
 pointed at or picked in the taskbar is raised as it would be, but takes
 none of the keys typed at the launcher. It has them once the launcher goes,
-being on top then. Only another launcher takes them, the newest being the
-top-most (#131).
+being on top then, if the person asked for it; one another program opened
+meanwhile waits beneath the window they were using, marked (#259). Only
+another launcher takes them, the newest being the top-most (#131).
 
 Nor does a token any program made bring a window forward with the keys. An
 application asks for that with an activation token from the program the
@@ -1017,11 +1028,44 @@ press, under ten seconds old and named exactly. So clicking a notification's
 action brings its program forward. A program keeps no more than eight tokens
 at a time, so one making them in a loop has nowhere to grow. Left open: a
 program may open a launcher of its own, a layer asking for every key, and it
-has the keys as it opens (#259), so a token it makes there outlives it. And,
+has the keys as it opens (#267), so a token it makes there outlives it. And,
 as on wlroots, a program that laid an invisible layer over the screen would
 be sent the clicks meant for what is beneath it, and could make tokens with
 them, though nothing beneath would answer the person's clicks while it was
 there.
+
+Nor does a window take the keys by opening (#259). With a person at the
+seat, a window takes them as it opens only if the person asked for it: a
+window of the program they are using, a dialog say; any window while nothing
+has the keys; or one their latest press, under ten seconds old, reached or
+started -- a dock or a notification clicked opening a window of its own, a
+binding, an Enter at a terminal. What a press started is what began under
+the program it reached, after it, or what a binding started: and only a
+click or an Enter starts anything, never a letter, so a background job of a
+terminal that starts a program while the person types a password there takes
+none of it. A token is the other way to be asked for: perspicax hands one to
+what its bindings start, and its shell to what the person picks from a menu,
+as `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`, so a program that hands
+on to a copy of itself already running brings that copy's window forward,
+and no other start is handed one, whatever perspicax was started with. Any
+other window opens without the keys, as Mutter and KWin open one: just
+beneath the window in use, in sight but behind what the person is typing
+into, not told it is active, and marked on the taskbar as wanting attention
+until they give it the keys, with a click, the taskbar, Alt+Tab or a token.
+So is a window whose program asked to bring it forward and was refused. When
+the window in use closes, the keys pass over a marked window for the one
+beneath it, unless it is all there is. A splash screen closing before its
+program's window opens costs that window nothing: the person pressed nothing
+meanwhile. Headless, with nobody at the seat, every window takes the keys as
+it opens, as before. Left open: a program whose first window takes more than
+ten seconds opens without them, as does one whose descent from the press is
+lost -- started through `systemd-run`, `gtk-launch` or D-Bus activation, or
+by a launcher that exited first and handed it no token; prompts of daemons
+started at login, pinentry and polkit agents, open without them (#268); a
+token that names no input is forgotten as it is made, so spending one marks
+nothing (#269); and any program admitted to `foreign-toplevel-management`,
+which is any by default, can still give a window the keys with its
+`activate` request (#270).
 
 A new window opens on the monitor under the pointer, in the room its panels
 leave, cascaded from the top-left corner: 32 pixels further in for each
@@ -1401,7 +1445,8 @@ their own windows: a taskbar's list of windows (`foreign-toplevel-list`, and
 (`workspace`), a screenshot tool (`screencopy`), a display tool
 (`output-management`), the desktop shell (`shell`), which is told when a
 key asks for a menu or a pie or changes the volume, what is made of each
-window, and why something the person asked for was refused, and may end
+window and which want attention, and why something the person asked for was
+refused, and may end
 the session, or make a window sticky, keep it on top, roll
 it up or send it to a workspace, and the settings app (`settings`), which hears the next chord pressed, to
 bind it. Listing windows and workspaces is open by default; reading pixels,
@@ -1640,7 +1685,7 @@ them; none is on by default. The profiles turn on what the build has:
 | Root menu | `menus` | right-click on the wallpaper, or a key or button bound to `root-menu` | the same | overlay, `perspicax-menu-<output>`, while open | a `Menu` "Root menu" of `MenuItem`s |
 | Panel | `panel` | along the bottom of every monitor | none | top, `perspicax-panel-<output>` | a `Toolbar` "Panel" holding what follows |
 | Start button and menu | `menus` | the panel's first item; a tap of Logo | — | the panel's; its menu as the root menu's | a `Button` "Start"; a `Menu` "Start menu", with a search line unless `search = "none"` |
-| Taskbar | `panel` | each monitor's own windows; a right-click, a window's menu (with `menus`); resting on one, its whole title | — | the panel's; a window's menu as the root menu's; the tooltip, overlay, `perspicax-tooltip-<output>`, while the pointer rests | a `TabList` "Taskbar", the window in use selected, each `Tab`'s context menu its window's; a `Menu` named for the window, its ticks and dots `MenuItemCheckBox`es and `MenuItemRadio`s; nothing more for the tooltip |
+| Taskbar | `panel` | each monitor's own windows; a right-click, a window's menu (with `menus`); resting on one, its whole title | — | the panel's; a window's menu as the root menu's; the tooltip, overlay, `perspicax-tooltip-<output>`, while the pointer rests | a `TabList` "Taskbar", the window in use selected, one wanting attention described so, each `Tab`'s context menu its window's; a `Menu` named for the window, its ticks and dots `MenuItemCheckBox`es and `MenuItemRadio`s; nothing more for the tooltip |
 | Pager | `panel` | the workspaces | — | the panel's | a `TabList` "Workspaces", the one showing selected |
 | Keyboard layout | `panel` | before the tray, with two layouts or more | — | the panel's | a `Button` "Keyboard layout", the layout's name its value |
 | Tray | `tray` (with `panel`, `menus`) | before the mixer; resting on an icon, its program's name for it | — | the panel's; its menus as the root menu's; its tooltip as a task's | a `Group` "Tray" of a `Button` for each icon, named by its tooltip |
@@ -1664,6 +1709,17 @@ from a titlebar ([#240](https://github.com/Awakened-Labs/Perspicax/issues/240)),
 from an application's own titlebar
 ([#241](https://github.com/Awakened-Labs/Perspicax/issues/241)) or from a key
 ([#239](https://github.com/Awakened-Labs/Perspicax/issues/239)).
+
+A task whose window wants the person's attention -- it opened without the
+keys, or its program asked to bring it forward and was refused (#259) -- is
+ringed in the accent, and its `Tab` is described as wanting attention, until
+the person gives it the keys; perspicax tells the shell so over
+`perspicax-shell-v1`, from version 7. A program the person picks in a menu,
+a pie or the desktop folder is handed an activation token, as
+`XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`, asked for while the menu
+still has the keys (#258): its window opens with them, and one that hands on
+to a copy of itself already running brings that copy's window forward. A
+token the shell was itself started with is never passed on.
 
 The pointer resting 0.7 s on a task or a status icon shows what it is in a
 tooltip: the window's whole title, which a task showing its icon alone, or
@@ -2375,8 +2431,9 @@ window that opens behind it, asks to be brought forward, or comes forward as
 the tab in front of it closes gets none of what you type, so a chat window, a
 terminal or a dialog that pops up while you type your password never sees it.
 Unlocked, the window under the pointer has the pointer back, and its own cursor
-with it, and the window on top has the keyboard, often the one that opened
-meanwhile.
+with it, and the window you were using has the keyboard again: one another
+program opened meanwhile waits beneath it, marked as wanting attention
+(#259).
 
 The program that locked the screen holds the lock, and only it can unlock it.
 Another program that asks to lock while it runs is refused, and cannot unlock

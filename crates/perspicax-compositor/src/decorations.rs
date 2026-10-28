@@ -392,7 +392,7 @@ impl Compositor {
         if let Some(x11) = window.x11_surface() {
             let _ = x11.configure(Rectangle::new(to.into(), x11.geometry().size));
         }
-        self.space.map_element(window.clone(), to, false);
+        self.move_window(window, to.into());
     }
 
     /// The client changed who draws its frame: refit its window to the new

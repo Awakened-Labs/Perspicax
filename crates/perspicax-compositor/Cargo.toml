@@ -46,6 +46,11 @@ perspicax-protocols = { path = "../perspicax-protocols", version = "0.1.0", feat
 # Apache-2.0.
 serde.workspace = true
 serde_json.workspace = true
+# The clock a process's start is told in, ticks since boot, and how many to a
+# second: what tells a program started by the person's press from one already
+# running (#259). smithay re-exports rustix without `param`. The version
+# already in the tree; Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT.
+rustix = { version = "1", default-features = false, features = ["param", "std", "time"] }
 # Xwayland-only: a second X connection, for the X-Resource extension's
 # QueryClientIds -- the X server's own word on which process drew a window.
 # Already in the tree under Smithay's own Xwayland support; MIT OR Apache-2.0.

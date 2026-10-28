@@ -90,6 +90,22 @@ impl FocusTarget {
             .unwrap_or_else(Plan::as_is)
     }
 
+    /// The person's press sent as `serial` reached this target's client:
+    /// what vouches for a token a notification or a dock makes with it
+    /// (#257). And if it `starts` what it reaches, as a click or an Enter
+    /// does, what the programs started under it now descend from (#259).
+    /// An agent's press has a serial of its own, and is not the person's.
+    fn reached(&self, data: &mut Compositor, serial: &Serial, starts: bool) {
+        let Some(surface) = self.wl_surface() else {
+            return;
+        };
+        let Some(client) = surface.client() else {
+            return;
+        };
+        let root = starts.then(|| data.root_under(&surface, &client)).flatten();
+        data.attention.reached(serial, client.id(), root);
+    }
+
     /// Pay what is owed before `event`. Whether `event` itself goes.
     fn pay_before(&self, seat: &Seat<Compositor>, data: &mut Compositor, event: Event<'_>) -> bool {
         let plan = self.plan(event);
@@ -159,6 +175,19 @@ impl KeyboardTarget<Compositor> for FocusTarget {
         serial: Serial,
         time: u32,
     ) {
+        // An Enter starts what was typed, at a terminal or a launcher, and
+        // what starts now under the client it reached is the person's
+        // (#259). No other key starts anything: a password typed at a
+        // terminal is pressed letter by letter.
+        if state == smithay::backend::input::KeyState::Pressed
+            && key
+                .raw_syms()
+                .iter()
+                .copied()
+                .any(perspicax_policy::is_enter)
+        {
+            self.reached(data, &serial, true);
+        }
         delegate!(self, target => KeyboardTarget::key(target, seat, data, key, state, serial, time));
     }
 
@@ -198,12 +227,10 @@ impl PointerTarget<Compositor> for FocusTarget {
         if self.pay_before(seat, data, Event::Other) {
             // Which client the person's latest press reached, if this is
             // it: what vouches for a token from a notification or a dock,
-            // which never has the keys (#257). An agent's press has a
-            // serial of its own, and is not the person's.
-            if event.state == ButtonState::Pressed
-                && let Some(client) = self.wl_surface().and_then(|surface| surface.client())
-            {
-                data.attention.reached(&event.serial, client.id());
+            // which never has the keys (#257), and what a program it starts
+            // now descends from (#259).
+            if event.state == ButtonState::Pressed {
+                self.reached(data, &event.serial, true);
             }
             delegate!(self, target => PointerTarget::button(target, seat, data, event));
         }

@@ -2116,6 +2116,12 @@ impl Desk {
     /// Bind the shell channel, as perspicax-shell does. Panics if it is not
     /// advertised.
     pub fn bind_shell(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.bind_shell_up_to(globals, qh, 7);
+    }
+
+    /// Bind the channel as a shell from before it was told which windows
+    /// want attention would.
+    pub fn bind_shell_v6(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
         self.bind_shell_up_to(globals, qh, 6);
     }
 

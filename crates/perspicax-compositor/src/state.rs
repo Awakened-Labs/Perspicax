@@ -346,7 +346,8 @@ pub struct Compositor {
     /// socket exists, so `None` only before any client could connect.
     pub(crate) launch: Option<crate::Launch>,
     /// The agent's programs, started by `--spawn`: reaped as they exit and
-    /// killed when `run` ends. The person's are the seat session's.
+    /// killed when `run` ends. The person's are the seat session's, but for
+    /// a binding's, headless with a person at it, for a test.
     pub(crate) spawned: Vec<std::process::Child>,
     /// A `--spawn` command that would not start, waiting for `run` to return
     /// it. It may have been tried only once Xwayland was ready, inside the
@@ -530,8 +531,25 @@ impl Compositor {
         tracing::info!(id = ?client.id(), ?origin, "client connected");
         if let Origin::Process(process) = &origin {
             self.grant_lineage(process.pid, &state);
+            self.stamp_started(process.pid, &state);
         }
         self.clients.push((client.id(), state));
+    }
+
+    /// Record a client's process, with when it started, and the person's
+    /// press that started it, if one did (#259): a binding's, or a click or
+    /// an Enter at what it descends from. Asked once, as it connects, while
+    /// whatever started it most likely runs yet; its windows ask the stamp.
+    fn stamp_started(&self, pid: u32, client: &ClientState) {
+        let lineage = origin::lineage(pid);
+        let Some(&process) = lineage.first() else {
+            return;
+        };
+        let _ = client.process.set(process);
+        if let Some(turn) = self.attention.started(&lineage, Instant::now()) {
+            tracing::debug!(pid, "started by the person's latest press");
+            let _ = client.started_on.set(turn);
+        }
     }
 
     /// Flush what waits for each client this compositor accepted, and say
@@ -735,7 +753,8 @@ impl Compositor {
     /// them, and a window that opened under it, was brought forward, clicked
     /// or pointed at, would have what was being typed at the launcher. The
     /// window is raised all the same, and has the keys once the launcher
-    /// goes, as one that opened behind the lock has them at unlock.
+    /// goes, being on top then; one that opened without the person asking
+    /// for it waits, marked, beneath the window they were using (#259).
     ///
     /// [`Self::focus_plain`] and [`Self::focus_surface`] ask, which is every
     /// way to the keyboard but a menu's grab, refused while locked (#82) and
@@ -823,7 +842,7 @@ impl Compositor {
     /// another workspace while it had the keyboard would otherwise go on
     /// saying it has it. A window whose own menu has the keyboard is still
     /// in use, as on sway and Plasma.
-    fn show_active(&self, in_use: Option<SurfaceId>) {
+    pub(crate) fn show_active(&self, in_use: Option<SurfaceId>) {
         if !self.backend.has_person() {
             return;
         }
@@ -847,7 +866,10 @@ impl Compositor {
     /// Topmost in the stack, which is the order the windows were raised in:
     /// the window raised last, whether or not one kept on top is drawn in
     /// front of it (`shell::stacking`). The keyboard goes where it went
-    /// before any window was kept on top.
+    /// before any window was kept on top. Passing over a window that opened
+    /// without the keys (#259), which the person never gave them to, and
+    /// raising the window they go to over it, so they go where the person
+    /// can see.
     ///
     /// While the session is locked, or a launcher holds the keyboard,
     /// [`Self::focus_surface`] refuses the window the keyboard. Giving it to
@@ -855,16 +877,39 @@ impl Compositor {
     /// surface or a launcher holds the keyboard, only once what held it has
     /// gone, or while a window or a menu holds it.
     pub(crate) fn focus_top_window(&mut self) {
-        let top = self
+        let Some(window) = self.window_for_keys() else {
+            self.clear_focus();
+            return;
+        };
+        let (Some(surface), Some(id)) = (shell::surface_of(&window), shell::id_of(&window)) else {
+            self.clear_focus();
+            return;
+        };
+        let topmost = self
             .space
             .elements()
             .rev()
-            .find(|window| !shell::places_itself(window))
-            .and_then(|window| Some((shell::surface_of(window)?, shell::id_of(window)?)));
-        match top {
-            Some((surface, id)) => self.focus_surface(surface, id),
-            None => self.clear_focus(),
+            .find(|other| !shell::places_itself(other));
+        if topmost != Some(&window) {
+            self.space.raise_element(&window, false);
         }
+        self.focus_surface(surface, id);
+    }
+
+    /// The window the keys go back to: the topmost but for a window that
+    /// places itself, or one that opened without them (#259), unless every
+    /// window did.
+    pub(crate) fn window_for_keys(&self) -> Option<Framed> {
+        let windows = || {
+            self.space
+                .elements()
+                .rev()
+                .filter(|window| !shell::places_itself(window))
+        };
+        windows()
+            .find(|window| !shell::wants_attention(window))
+            .or_else(|| windows().next())
+            .cloned()
     }
 
     /// Whether an agent acting now would race the person at the seat: they
@@ -893,8 +938,10 @@ impl Compositor {
     /// focus moves with it. See [`crate::focus`].
     ///
     /// Never while the session is locked: a window is no lock surface. It
-    /// is not focused, and has the keyboard once the session unlocks if it
-    /// is the window on top then, as one that opened behind the lock is.
+    /// is not focused, and has the keyboard once the session unlocks if the
+    /// keys go back to it then, the topmost window that wants no attention
+    /// ([`Self::window_for_keys`]): not one that opened behind the lock,
+    /// which nobody at it asked for (#259).
     pub(crate) fn focus_surface(&mut self, surface: WlSurface, id: SurfaceId) {
         if !self.may_take_keyboard(&surface) {
             return;
@@ -1325,9 +1372,13 @@ impl XdgShellHandler for Compositor {
         &mut self.xdg_shell
     }
 
+    /// A window asked for, which opens with the keys, or one the person did
+    /// not ask for, which opens without them (#259), decided now: what it is
+    /// first told says whether it is active.
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        self.configure_new(&surface);
-        self.open_toplevel(surface);
+        let asked = self.asked_for(surface.wl_surface());
+        self.configure_new(&surface, asked);
+        self.open_toplevel(surface, asked);
         self.publish_facts();
     }
 
@@ -1554,14 +1605,18 @@ impl Compositor {
     /// window is told at `get_toplevel`, and one its client unmapped when it
     /// is asked for again (see `shell::withdrawn`).
     ///
-    /// Activated from the start: a toolkit that believes it is unfocused
-    /// renders differently, and M2 is about reading what is on screen. With
-    /// a person at the seat, told the room it has ([`Self::bounds_for`]),
-    /// so a toolkit that reads it opens at a size that fits.
-    pub(crate) fn configure_new(&self, toplevel: &ToplevelSurface) {
+    /// Activated from the start if it is `active`, as every window is with
+    /// nobody at the seat: a toolkit that believes it is unfocused renders
+    /// differently, and M2 is about reading what is on screen. Not one that
+    /// opens without the keys (#259). With a person at the seat, told the
+    /// room it has ([`Self::bounds_for`]), so a toolkit that reads it opens
+    /// at a size that fits.
+    pub(crate) fn configure_new(&self, toplevel: &ToplevelSurface, active: bool) {
         let bounds = self.bounds_for(toplevel);
         toplevel.with_pending_state(|state| {
-            state.states.set(xdg_toplevel::State::Activated);
+            if active {
+                state.states.set(xdg_toplevel::State::Activated);
+            }
             state.bounds = bounds;
         });
         toplevel.send_configure();
@@ -1569,9 +1624,10 @@ impl Compositor {
 
     /// Put a toplevel on screen as a new window: with an id nothing has
     /// seen, placed, on the workspace its monitor shows, and with the
-    /// keyboard. What a new window gets, and one its client unmapped when it
-    /// maps it again.
-    pub(crate) fn open_toplevel(&mut self, toplevel: ToplevelSurface) -> Framed {
+    /// keyboard if the person `asked` for it, beneath the window in use
+    /// without it if not (#259). What a new window gets, and one its client
+    /// unmapped when it maps it again.
+    pub(crate) fn open_toplevel(&mut self, toplevel: ToplevelSurface, asked: bool) -> Framed {
         // Taken before the toplevel is moved into the window.
         let wl_surface = toplevel.wl_surface().clone();
         let window = Framed::from(Window::new_wayland_window(toplevel));
@@ -1598,12 +1654,17 @@ impl Compositor {
         self.adopt(&window);
         tracing::info!(surface = id.0, at = ?at, "toplevel mapped");
 
-        // Focus what just appeared. A newly mapped window taking focus is what
-        // every desktop does, and here it does double duty: it is the host half
-        // of the focus correlation, and it makes the toolkit's own idea of
-        // which window is active agree with ours -- which is the pair of
-        // observations the join weighs.
-        self.focus_surface(wl_surface, id);
+        // Focus what just appeared, if the person asked for it. It does double
+        // duty: it is the host half of the focus correlation, and it makes
+        // the toolkit's own idea of which window is active agree with ours --
+        // which is the pair of observations the join weighs. One that opens
+        // without the keys is joined once it has them, if its title alone
+        // cannot tell it from its program's other windows.
+        if asked {
+            self.focus_surface(wl_surface, id);
+        } else {
+            self.open_without_keys(&window);
+        }
         window
     }
 
@@ -1726,6 +1787,10 @@ impl SeatHandler for Compositor {
         let window = focused
             .and_then(|surface| self.window_for(&self.menu_root(surface.clone())))
             .and_then(|window| shell::id_of(&window));
+        // A window that opened without the keys has them now (#259).
+        if let Some(id) = window {
+            self.heeded(id);
+        }
         // A fullscreen window covers the panels only while it is in use.
         self.restack(window);
         // The window in use is typed in its own layout, when each has one.
@@ -1891,7 +1956,8 @@ impl XdgActivationHandler for Compositor {
     /// latest press was sent to (`token_created`), so it is granted while it
     /// is fresh and the person has not moved on (see
     /// `perspicax_policy::grants_activation`), and a window cannot pull
-    /// focus to itself while someone is typing elsewhere.
+    /// focus to itself while someone is typing elsewhere. One refused wants
+    /// the person's attention, and its taskbar says so (#259).
     fn request_activation(
         &mut self,
         token: XdgActivationToken,
@@ -1899,16 +1965,18 @@ impl XdgActivationHandler for Compositor {
         surface: WlSurface,
     ) {
         self.activation.remove_token(&token);
-        if !still_good(&data, self.attention.turn()) {
-            tracing::debug!("activation refused: the token is stale, or the person moved on");
-            return;
-        }
         // A client may name any surface it owns, and the window a subsurface
         // belongs to is its tree's root: that is what is raised and focused.
         let (surface, _) = damage::root_of(&surface);
         let Some(window) = self.window_for(&surface) else {
             return;
         };
+        if !still_good(&data, self.attention.turn()) {
+            tracing::debug!("activation refused: the token is stale, or the person moved on");
+            self.refused_keys(&window);
+            self.publish_facts();
+            return;
+        }
         let Some(id) = shell::id_of(&window) else {
             return;
         };
@@ -1917,6 +1985,34 @@ impl XdgActivationHandler for Compositor {
         self.focus_surface(surface, id);
         self.backend.redraw();
         self.publish_facts();
+    }
+}
+
+impl Compositor {
+    /// A token of the compositor's own, for a program a binding of the
+    /// person's starts (#259): stamped with the turn their press made, so
+    /// good while it is their latest, as one a program makes with it is.
+    pub(crate) fn token_for_person(&mut self) -> String {
+        let turn = self.attention.turn();
+        self.activation
+            .retain_tokens(|_, made| still_good(made, turn));
+        let (token, made) = self.activation.create_external_token(None);
+        made.user_data.insert_if_missing(|| turn);
+        token.as_str().to_owned()
+    }
+
+    /// Spend the token `named` outside the protocol, as an X11 window's
+    /// `_NET_STARTUP_ID` names the one its program was handed (#259):
+    /// whether it was one still good, as `request_activation` asks.
+    #[cfg(feature = "xwayland")]
+    pub(crate) fn spend_token(&mut self, named: String) -> bool {
+        let token = XdgActivationToken::from(named);
+        let good = self
+            .activation
+            .data_for_token(&token)
+            .is_some_and(|made| still_good(made, self.attention.turn()));
+        self.activation.remove_token(&token);
+        good
     }
 }
 
@@ -1949,6 +2045,13 @@ pub(crate) struct ClientState {
     /// A pidfd on the origin's process, when one could be vouched for: what
     /// a grant to it is held by. See [`crate::origin::attest`].
     pidfd: OnceLock<OwnedFd>,
+    /// The origin's process, with when it started: what a press that reached
+    /// this client starts programs under (#259).
+    process: OnceLock<perspicax_policy::Process>,
+    /// The person's press that started this client's program, if one did:
+    /// its windows open with the keys while that press is their latest
+    /// (#259). See [`Compositor::stamp_started`].
+    started_on: OnceLock<perspicax_policy::Turn>,
     /// Whether it has stopped reading what is sent to it.
     stall: Stall,
     /// What of the pointer it is owed while it has.
@@ -1975,6 +2078,16 @@ impl ClientState {
     /// A pidfd of its own on this client's process, if one was vouched for.
     pub(crate) fn pidfd(&self) -> Option<OwnedFd> {
         self.pidfd.get()?.try_clone().ok()
+    }
+
+    /// This client's process, with when it started, if it could be read.
+    pub(crate) fn process(&self) -> Option<perspicax_policy::Process> {
+        self.process.get().copied()
+    }
+
+    /// The person's press that started this client's program, if one did.
+    pub(crate) fn started_on(&self) -> Option<perspicax_policy::Turn> {
+        self.started_on.get().copied()
     }
 
     /// What to send this client of a pointer `event` for `target`, and what

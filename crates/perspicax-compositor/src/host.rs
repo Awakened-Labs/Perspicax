@@ -148,6 +148,12 @@ pub enum Command {
         v120: (i32, i32),
         mods: perspicax_policy::Mods,
     },
+    /// Type text as a person's keys would, at whatever has the keys: every
+    /// key a press of theirs, and `\n` an Enter. No binding is looked for,
+    /// as none is for an agent's typing. So a test can be someone at a
+    /// terminal, starting a program with an Enter (#259). Unlike the hand's,
+    /// it needs no `capture`.
+    Type(String),
     /// Move the mouse by `by`, in whole pixels, as [`Command::Click`]
     /// presses a button: the pointer goes as far as the desk lets it, and
     /// the client under it is told the motion as the mouse made it, which a

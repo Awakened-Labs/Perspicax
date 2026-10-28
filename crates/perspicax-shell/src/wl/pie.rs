@@ -62,6 +62,10 @@ pub(super) struct Pies {
     state: State,
     /// The surface, while a pie is open.
     shown: Option<Shown>,
+    /// The surface of a pie just closed, until what was picked from it
+    /// has been carried out: a program it starts asks for its token while
+    /// the shell still has the keys (see [`super::token`]).
+    closing: Option<Shown>,
     /// What the config says of the pies, if it has any.
     pie: Option<Pie>,
     /// The pie's own folder of icons, read when a pie opens.
@@ -99,6 +103,7 @@ impl Pies {
         let mut pies = Self {
             state: State::default(),
             shown: None,
+            closing: None,
             pie: None,
             folder: None,
             config: config.map(Path::to_owned),
@@ -201,6 +206,12 @@ impl Pies {
             .collect()
     }
 
+    /// Let go of the surface of a pie just closed, now that what was
+    /// picked from it has been carried out.
+    pub(super) fn let_go(&mut self) {
+        self.closing = None;
+    }
+
     /// Make the surface match what is open: take it away, put it up on the
     /// monitor the pie opened on, or draw it again.
     fn sync(
@@ -211,7 +222,7 @@ impl Pies {
         kit: &mut Kit,
     ) {
         let Some(view) = self.state.view() else {
-            self.shown = None;
+            self.closing = self.shown.take();
             return;
         };
         if self

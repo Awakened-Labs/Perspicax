@@ -71,6 +71,10 @@ pub(super) struct Menus {
     state: State,
     /// The surface, while a menu is open.
     shown: Option<Shown>,
+    /// The surface of a menu just closed, until what was picked from it
+    /// has been carried out: a program it starts asks for its token while
+    /// the shell still has the keys (see [`super::token`]).
+    closing: Option<Shown>,
     /// The strip each of the shell's panels takes of its monitor, by the
     /// monitor's connector name: where no menu is drawn, and where the
     /// menus' surface takes no clicks.
@@ -131,6 +135,7 @@ impl Menus {
         Self {
             state: State::new(menu::Menu::default(), menu::Menu::default()),
             shown: None,
+            closing: None,
             reserved: Vec::new(),
             settings: Settings::of(shell, config),
             path: places.path.clone(),
@@ -260,6 +265,12 @@ impl Menus {
         self.built_from = Some(now);
     }
 
+    /// Let go of the surface of a menu just closed, now that what was
+    /// picked from it has been carried out.
+    pub(super) fn let_go(&mut self) {
+        self.closing = None;
+    }
+
     /// Make the surface match what is open: take it away, put it up on the
     /// monitor a menu opened on, or draw it again.
     fn sync(
@@ -270,7 +281,7 @@ impl Menus {
         kit: &mut Kit,
     ) {
         let Some(view) = self.state.view() else {
-            self.shown = None;
+            self.closing = self.shown.take();
             return;
         };
         if self

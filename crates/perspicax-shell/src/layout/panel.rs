@@ -90,6 +90,9 @@ pub(crate) struct Task {
     /// It has the keyboard.
     pub(crate) active: bool,
     pub(crate) minimized: bool,
+    /// perspicax says it wants the person's attention: it opened without
+    /// the keyboard, or asked for it and was refused (#259).
+    pub(crate) wants_attention: bool,
 }
 
 /// A workspace the pager shows, as a cell of its grid.
@@ -605,6 +608,7 @@ mod tests {
                     icon: None,
                     active: false,
                     minimized: false,
+                    wants_attention: false,
                 })
                 .collect(),
             task_titles: true,

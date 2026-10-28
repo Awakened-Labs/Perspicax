@@ -160,6 +160,40 @@ fn a_window_that_opens_behind_the_lock_screen_takes_no_keys_from_it() {
     session.stop(((desk, queue), (locker, locker_queue)));
 }
 
+/// With a person at the seat, a window another program opens behind the
+/// lock screen opens without the keys, the lock screen having them (#259).
+/// Unlocked, the window the person was using has them back, over it; the
+/// new one waits beneath until they give it them.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_another_program_opens_behind_the_lock_screen_waits_for_the_person_once_unlocked() {
+    let session = seated("lock-keys-another-seated");
+    let (mut desk, mut queue, _, _, ear) = page(&session);
+    let (mut locker, mut locker_queue, locker_qh, locker_ear) = locker(&session);
+    cover(&mut locker, &mut locker_queue, &locker_qh, &locker_ear);
+    until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
+
+    let (mut other, mut other_queue, other_qh, other_globals) = session.client();
+    let other_ear = other.bind_keyboard(&other_globals, &other_qh);
+    other.open_coloured(&other_qh, "late", "late", LATE);
+    until(&mut other_queue, &mut other, |other| other.has_drawn(0));
+
+    locker.unlock();
+    locker_queue.roundtrip(&mut locker).expect("dispatch");
+    let page = desk.windows[0].wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&page)
+    });
+    other_queue.roundtrip(&mut other).expect("dispatch");
+    assert!(
+        heard(&other_ear).entered.is_none(),
+        "the window that opened behind the lock screen has none"
+    );
+    session.wait_for(|facts| above(facts, "page", "late"));
+
+    session.stop(((desk, queue), (locker, locker_queue), (other, other_queue)));
+}
+
 /// A window brought forward behind the lock screen, with a token the one
 /// client that may make one then made: the lock screen, which has the keys.
 /// It is raised, as asked, which says the token was good (#187), but the

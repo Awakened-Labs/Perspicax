@@ -248,17 +248,53 @@ impl Compositor {
         self.publish_facts();
     }
 
+    /// A binding's program, for the person (#259): handed a token of the
+    /// compositor's own, good while the binding's press is their latest, so
+    /// that a program already running it hands on to -- a second copy of a
+    /// browser -- brings its window forward with it; and the root of that
+    /// press, so that what starts under it now opens with the keys. Never
+    /// an agent's. Headless only with a person at it, for a test.
     fn spawn_for_person(&mut self, command: &[String]) {
-        #[cfg(feature = "seat")]
-        if let crate::backend::Running::Seat(session) = &mut self.backend {
-            let launch = self.launch.clone();
-            session.spawn(launch.as_ref(), command);
+        if !self.backend.has_person() {
+            tracing::warn!(
+                ?command,
+                "a binding's spawn is for a person's session; headless has none"
+            );
             return;
         }
-        tracing::warn!(
-            ?command,
-            "a binding's spawn is for a person's session; headless has none"
-        );
+        let token = self.token_for_person();
+        let launch = self.launch.clone();
+        let pid = match &mut self.backend {
+            #[cfg(feature = "seat")]
+            crate::backend::Running::Seat(session) => {
+                session.spawn(launch.as_ref(), command, &token)
+            }
+            _ => self.spawn_headless(launch.as_ref(), command, &token),
+        };
+        if let Some(process) = pid.and_then(crate::origin::process) {
+            self.attention.spawned(process);
+        }
+    }
+
+    /// [`Self::spawn_for_person`], headless: kept with the agent's programs,
+    /// to be reaped as they are, and granted nothing. Its pid, if it started.
+    fn spawn_headless(
+        &mut self,
+        launch: Option<&crate::Launch>,
+        command: &[String],
+        token: &str,
+    ) -> Option<u32> {
+        match launch?.spawn_handing(command, None, Some(token)) {
+            Ok(child) => {
+                let pid = child.id();
+                self.spawned.push(child);
+                Some(pid)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not start");
+                None
+            }
+        }
     }
 
     fn reload(&mut self) {

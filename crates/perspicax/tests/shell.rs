@@ -4,8 +4,12 @@
 //! uses it: a right-click on the wallpaper by selector, and the menu that
 //! opens read and clicked through to an application; the panel's start
 //! button found by name, and the start menu it opens; a window found on the
-//! taskbar by its title, and brought forward by a click on its tab; the
-//! desktop folder's icons read as a list, and one selected by a click.
+//! taskbar by its title, and brought forward by a click on its tab; a
+//! window that opened without the keys, with a person at the seat, said on
+//! its tab to want attention until it is brought forward (#259); an
+//! application chosen from a menu brought forward with the token the shell
+//! handed it (#258); the desktop folder's icons read as a list, and one
+//! selected by a click.
 //!
 //! Each test runs a compositor that keeps its desk current the way `--mcp`
 //! does, and starts shells against its socket as a person's session would,
@@ -42,6 +46,9 @@ const MENUS: &str = "perspicax-menu-HEADLESS-1";
 /// The profiles' shells: a wallpaper and a root menu, and a panel too.
 const MINIMAL: &str = "profile = \"minimal\"\n";
 const CLASSIC: &str = "profile = \"classic\"\n";
+
+/// Set for the copy of this binary that [`token_probe`] runs in.
+const TOKEN_PROBE: &str = "PERSPICAX_SHELL_TOKEN_PROBE";
 
 /// How long a newcomer draws before it is read. Short: the shell's tree is
 /// whole before its first frame.
@@ -288,6 +295,149 @@ fn an_agent_brings_a_window_forward_by_its_tab() {
     });
 }
 
+/// Issue #259: with a person at the seat, a window of another program that
+/// opens while they are at one opens without the keys, and its tab says it
+/// wants attention, to an agent as to a screen reader. Brought forward by a
+/// click on its tab, it wants it no longer.
+#[test]
+#[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
+fn a_window_that_opened_without_the_keys_says_so_on_its_tab_until_brought_forward() {
+    let seated = Backend::headless((1280, 800)).with_person();
+    host_on("wanting", seated, CLASSIC, |hosted| {
+        let _shell = hosted.shell();
+        let _first = hosted.window("First");
+        hosted.wait_until("the first window forward", |index, facts| {
+            forward(index, facts, "First")
+        });
+        let _second = hosted.window("Second");
+        hosted.wait_until(
+            "the second window's tab wanting attention",
+            |index, facts| described(index, facts, "Second", Some("Wants attention")),
+        );
+
+        hosted.click("tablist:Taskbar>tab:Second", PointerButton::Left);
+        hosted.wait_until(
+            "the second window forward, wanting nothing",
+            |index, facts| {
+                forward(index, facts, "Second")
+                    .and_then(|_| described(index, facts, "Second", None))
+            },
+        );
+    });
+}
+
+/// And a window whose program asks to bring it forward with a token made
+/// before the person moved on is refused, and says so on its tab: nothing
+/// but that changes, for the panel to be drawn again by.
+#[test]
+#[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
+fn a_window_refused_the_keys_it_asked_for_says_so_on_its_tab() {
+    let seated = Backend::headless((1280, 800)).with_person();
+    host_on("refused", seated, CLASSIC, |hosted| {
+        let _shell = hosted.shell();
+        let first = hosted.window_asking("First");
+        hosted.wait_until(
+            "the first window forward, its token made",
+            |index, facts| forward(index, facts, "First").filter(|_| first.made()),
+        );
+        let _second = hosted.window("Second");
+        hosted.click("tablist:Taskbar>tab:Second", PointerButton::Left);
+        hosted.wait_until("the second window forward", |index, facts| {
+            forward(index, facts, "Second")
+        });
+        hosted.wait_until("the first window's tab wanting nothing", |index, facts| {
+            described(index, facts, "First", None)
+        });
+        // Whatever the keys moving drew is drawn, and the panel is drawn
+        // again as each minute turns: spent with time to spare in this one,
+        // the mark is all there is to draw it again for while it is waited.
+        thread::sleep(SETTLE);
+        while seconds_into_the_minute() > 45 {
+            thread::sleep(Duration::from_millis(200));
+        }
+
+        first.spend();
+        hosted.wait_within(
+            Duration::from_secs(10),
+            "the first window's tab wanting attention",
+            |index, facts| described(index, facts, "First", Some("Wants attention")),
+        );
+    });
+}
+
+/// Issue #258: with a person at the seat, an application chosen from the
+/// start menu while a window has the keys opens without them, as any
+/// program's window does that the person's press did not start: an agent's
+/// clicks are not the person's. But the shell handed it a token, asked for
+/// while the menu still had the keys, and spending it, as GTK does, brings
+/// its window forward with them.
+#[test]
+#[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
+fn an_application_chosen_from_a_menu_comes_forward_with_the_token_the_shell_handed_it() {
+    let seated = Backend::headless((1280, 800)).with_person();
+    host_on("token", seated, CLASSIC, |hosted| {
+        // One application installed: a copy of this binary, as
+        // `token_probe`.
+        let base =
+            std::env::temp_dir().join(format!("perspicax-shell-token-{}", std::process::id()));
+        let (data, none) = (base.join("data"), base.join("none"));
+        std::fs::create_dir_all(data.join("applications")).expect("a data folder");
+        std::fs::create_dir_all(&none).expect("an empty one");
+        let exe = std::env::current_exe().expect("this test's binary");
+        std::fs::write(
+            data.join("applications/probe.desktop"),
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Probe\nExec={} --exact token_probe --ignored --nocapture\nCategories=Utility;\n",
+                exe.display()
+            ),
+        )
+        .expect("a desktop entry");
+        let _shell = hosted.shell_with(&[
+            ("XDG_DATA_HOME", data.as_os_str()),
+            ("XDG_DATA_DIRS", none.as_os_str()),
+            (TOKEN_PROBE, std::ffi::OsStr::new("1")),
+        ]);
+        hosted.wait_until("the start button read and joined", |index, facts| {
+            on_layer(index, facts, (Role::Button, "Start"), (Layer::Top, PANEL))
+        });
+        let _first = hosted.window("First");
+        hosted.wait_until("the first window with the keys", |_, facts| {
+            focused_last(facts, "First")
+        });
+
+        hosted.click("button:Start", PointerButton::Left);
+        hosted.wait_until("the start menu read and joined", |index, facts| {
+            menu_item(index, facts, "Accessories")
+        });
+        hosted.click("menuitem:Accessories", PointerButton::Left);
+        hosted.wait_until("its submenu read", |index, facts| {
+            menu_item(index, facts, "Probe")
+        });
+        hosted.click("menuitem:Probe", PointerButton::Left);
+        hosted.wait_until(
+            "the application's window forward, with the keys",
+            |_, facts| focused_last(facts, "Probe"),
+        );
+        std::fs::remove_dir_all(&base).ok();
+    });
+}
+
+/// Not a test: the application [`an_application_chosen_from_a_menu_comes_forward_with_the_token_the_shell_handed_it`]
+/// installs, in a process of its own: a window titled "Probe", which spends
+/// the token it was started with, until the compositor goes.
+#[test]
+#[ignore = "an application in a process of its own, for the test that starts one"]
+fn token_probe() {
+    if std::env::var_os(TOKEN_PROBE).is_none() {
+        return;
+    }
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR"));
+    let socket = std::env::var_os("WAYLAND_DISPLAY").expect("WAYLAND_DISPLAY");
+    let stream = UnixStream::connect(runtime.join(socket)).expect("the compositor's socket");
+    let token = std::env::var("XDG_ACTIVATION_TOKEN").expect("handed a token");
+    window::open_spending(stream, "Probe", token).wait();
+}
+
 #[test]
 #[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
 fn the_desktop_icons_are_a_list_an_agent_can_read() {
@@ -373,6 +523,41 @@ fn forward(index: &Index, facts: &HostFacts, title: &str) -> Option<NodeId> {
             .get(tab)
             .is_some_and(|node| node.node.is_selected() == Some(true))
     })
+}
+
+/// `Some` if the window titled `title` is the one that took the keys last,
+/// as the facts say.
+fn focused_last(facts: &HostFacts, title: &str) -> Option<()> {
+    let last = facts
+        .surfaces()
+        .iter()
+        .filter(|surface| surface.focused_at.is_some())
+        .max_by_key(|surface| surface.focused_at)?;
+    (last.title.as_deref() == Some(title)).then_some(())
+}
+
+/// The taskbar's tab for the window titled `title`, if it is read, joined
+/// to the panel, and described as `description` says.
+fn described(
+    index: &Index,
+    facts: &HostFacts,
+    title: &str,
+    description: Option<&str>,
+) -> Option<NodeId> {
+    on_layer(index, facts, (Role::Tab, title), (Layer::Top, PANEL)).filter(|&tab| {
+        index
+            .get(tab)
+            .is_some_and(|node| node.node.description() == description)
+    })
+}
+
+/// How far into the minute the clock is: a panel's clock turns over with it.
+fn seconds_into_the_minute() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after 1970")
+        .as_secs()
+        % 60
 }
 
 /// The menu item labelled `label`, if it is read and joined to the menus'
@@ -467,6 +652,15 @@ impl Hosted {
         window::open(stream, title)
     }
 
+    /// A window titled `title` that asks to be brought forward: see
+    /// `window::open_asking`.
+    fn window_asking(&self, title: &str) -> window::Opened {
+        let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR"));
+        let stream =
+            UnixStream::connect(runtime.join(&self.socket)).expect("the compositor's socket");
+        window::open_asking(stream, title)
+    }
+
     /// Click what `selector` names with `button`, as an agent does.
     fn click(&self, selector: &str, button: PointerButton) {
         let selector = Selector::parse(selector).expect("a selector");
@@ -489,7 +683,17 @@ impl Hosted {
 
     /// Wait for `find` to find something on the desk.
     fn wait_until<T>(&self, what: &str, find: impl Fn(&Index, &HostFacts) -> Option<T>) -> T {
-        let deadline = Instant::now() + PATIENCE;
+        self.wait_within(PATIENCE, what, find)
+    }
+
+    /// The same, for no longer than `patience`.
+    fn wait_within<T>(
+        &self,
+        patience: Duration,
+        what: &str,
+        find: impl Fn(&Index, &HostFacts) -> Option<T>,
+    ) -> T {
+        let deadline = Instant::now() + patience;
         loop {
             let mut found = None;
             self.desk
@@ -497,7 +701,7 @@ impl Hosted {
             if let Some(found) = found {
                 return found;
             }
-            assert!(Instant::now() < deadline, "{what}, within {PATIENCE:?}");
+            assert!(Instant::now() < deadline, "{what}, within {patience:?}");
             thread::sleep(Duration::from_millis(100));
         }
     }
@@ -529,6 +733,16 @@ impl Drop for Shell {
 /// The compositor has the test's own thread, because Wayland state is not
 /// `Send`. A panic in `body` stops it and is the test's failure.
 fn host(name: &str, shell_config: &str, body: impl FnOnce(&Hosted) + Send + 'static) {
+    host_on(name, Backend::headless((1280, 800)), shell_config, body);
+}
+
+/// As [`host`], on `backend`: one with a person at it, say.
+fn host_on(
+    name: &str,
+    backend: Backend,
+    shell_config: &str,
+    body: impl FnOnce(&Hosted) + Send + 'static,
+) {
     let _registry = session::Registry::ensure(Path::new(env!("CARGO_BIN_EXE_perspicax")))
         .expect("an accessibility registry");
     let socket = format!("perspicax-shell-{name}-{}", std::process::id());
@@ -566,7 +780,7 @@ fn host(name: &str, shell_config: &str, body: impl FnOnce(&Hosted) + Send + 'sta
     };
 
     let config_run = Config {
-        backend: Backend::headless((1280, 800)),
+        backend,
         spawn: Vec::new(),
         env: session::accessibility_env(),
         run_for: Some(Duration::from_secs(120)),
@@ -610,6 +824,10 @@ mod window {
         delegate_compositor, delegate_output, delegate_registry, delegate_shm, delegate_xdg_shell,
         delegate_xdg_window,
         output::{OutputHandler, OutputState},
+        reexports::protocols::xdg::activation::v1::client::{
+            xdg_activation_token_v1::{self, XdgActivationTokenV1},
+            xdg_activation_v1::XdgActivationV1,
+        },
         registry::{ProvidesRegistryState, RegistryState},
         registry_handlers,
         shell::{
@@ -622,9 +840,9 @@ mod window {
         shm::{Shm, ShmHandler, slot::SlotPool},
     };
     use wayland_client::{
-        Connection, QueueHandle,
+        Connection, Dispatch, QueueHandle,
         globals::registry_queue_init,
-        protocol::{wl_output, wl_shm, wl_surface},
+        protocol::{wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
     };
 
     /// The size it draws itself, whatever it is offered.
@@ -633,7 +851,38 @@ mod window {
     /// The window, open until this is dropped.
     pub(super) struct Opened {
         open: Arc<AtomicBool>,
+        asking: Arc<Asking>,
         thread: Option<thread::JoinHandle<()>>,
+    }
+
+    /// What a window that asks to be brought forward has done, and is told
+    /// to do: as an application does when a second copy of it is started, it
+    /// makes a token as it takes the keys, and spends it later.
+    #[derive(Default)]
+    struct Asking {
+        /// Its token is made, while it had the keys.
+        made: AtomicBool,
+        /// Spend it now.
+        spend: AtomicBool,
+    }
+
+    impl Opened {
+        /// Wait until the compositor goes, the window open meanwhile.
+        pub(super) fn wait(mut self) {
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+
+        /// Whether it has made its token, if it asks.
+        pub(super) fn made(&self) -> bool {
+            self.asking.made.load(Ordering::Relaxed)
+        }
+
+        /// Spend its token, asking to be brought forward.
+        pub(super) fn spend(&self) {
+            self.asking.spend.store(true, Ordering::Relaxed);
+        }
     }
 
     impl Drop for Opened {
@@ -647,19 +896,44 @@ mod window {
 
     /// Open a window titled `title` on the compositor at the end of `stream`.
     pub(super) fn open(stream: UnixStream, title: &str) -> Opened {
+        open_as(stream, title, false, None)
+    }
+
+    /// The same, a window that asks to be brought forward: see [`Asking`].
+    pub(super) fn open_asking(stream: UnixStream, title: &str) -> Opened {
+        open_as(stream, title, true, None)
+    }
+
+    /// The same, a window that spends `token` as soon as it is open, as a
+    /// GTK application spends the one it was started with.
+    pub(super) fn open_spending(stream: UnixStream, title: &str, token: String) -> Opened {
+        let opened = open_as(stream, title, true, Some(token));
+        opened.spend();
+        opened
+    }
+
+    fn open_as(stream: UnixStream, title: &str, asks: bool, token: Option<String>) -> Opened {
         let open = Arc::new(AtomicBool::new(true));
+        let asking = Arc::new(Asking::default());
         let title = title.to_owned();
         let thread = {
-            let open = Arc::clone(&open);
-            thread::spawn(move || run(stream, &title, &open))
+            let (open, asking) = (Arc::clone(&open), Arc::clone(&asking));
+            thread::spawn(move || run(stream, &title, &open, asks.then_some((&*asking, token))))
         };
         Opened {
             open,
+            asking,
             thread: Some(thread),
         }
     }
 
-    fn run(stream: UnixStream, title: &str, open: &AtomicBool) {
+    fn run(
+        stream: UnixStream,
+        title: &str,
+        open: &AtomicBool,
+        asking: Option<(&Asking, Option<String>)>,
+    ) {
+        let (asking, token) = asking.map_or((None, None), |(asking, token)| (Some(asking), token));
         let connection = Connection::from_socket(stream).expect("a connection");
         let (globals, mut queue) = registry_queue_init::<Client>(&connection).expect("the globals");
         let qh = queue.handle();
@@ -671,14 +945,47 @@ mod window {
         window.set_title(title);
         window.set_app_id("perspicax-test");
         window.commit();
+        // One that asks has a keyboard, for the serial it makes its token
+        // with, and the activation global to make it with.
+        let seat = asking.map(|_| {
+            let seat = globals
+                .bind::<wl_seat::WlSeat, _, _>(&qh, 1..=7, ())
+                .expect("wl_seat");
+            seat.get_keyboard(&qh, ());
+            seat
+        });
+        let activation = asking.map(|_| {
+            globals
+                .bind::<XdgActivationV1, _, _>(&qh, 1..=1, ())
+                .expect("xdg_activation_v1")
+        });
         let mut client = Client {
             registry: RegistryState::new(&globals),
             outputs: OutputState::new(&globals, &qh),
             pool: SlotPool::new((SIZE.0 * SIZE.1 * 4) as usize, &shm).expect("memory"),
             shm,
+            surface: window.wl_surface().clone(),
+            seat,
+            activation,
+            // One handed a token makes none of its own.
+            asked: token.is_some(),
+            token,
         };
         // Until dropped, or until the compositor goes.
+        let mut spent = false;
         while open.load(Ordering::Relaxed) && queue.roundtrip(&mut client).is_ok() {
+            if let Some(asking) = asking {
+                asking.made.store(client.token.is_some(), Ordering::Relaxed);
+                if let (false, true, Some(token), Some(activation)) = (
+                    spent,
+                    asking.spend.load(Ordering::Relaxed),
+                    &client.token,
+                    &client.activation,
+                ) {
+                    activation.activate(token.clone(), &client.surface);
+                    spent = true;
+                }
+            }
             thread::sleep(Duration::from_millis(20));
         }
         drop(window);
@@ -690,6 +997,82 @@ mod window {
         outputs: OutputState,
         shm: Shm,
         pool: SlotPool,
+        surface: wl_surface::WlSurface,
+        /// For one that asks: see [`Asking`].
+        seat: Option<wl_seat::WlSeat>,
+        activation: Option<XdgActivationV1>,
+        token: Option<String>,
+        /// Whether it has asked for its token.
+        asked: bool,
+    }
+
+    impl Dispatch<wl_seat::WlSeat, ()> for Client {
+        fn event(
+            _: &mut Self,
+            _: &wl_seat::WlSeat,
+            _: wl_seat::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
+
+    impl Dispatch<wl_keyboard::WlKeyboard, ()> for Client {
+        /// The keys came to its window: it makes its token, with that serial.
+        fn event(
+            client: &mut Self,
+            _: &wl_keyboard::WlKeyboard,
+            event: wl_keyboard::Event,
+            _: &(),
+            _: &Connection,
+            qh: &QueueHandle<Self>,
+        ) {
+            let wl_keyboard::Event::Enter {
+                serial, surface, ..
+            } = event
+            else {
+                return;
+            };
+            let (Some(seat), Some(activation)) = (&client.seat, &client.activation) else {
+                return;
+            };
+            if client.asked || surface != client.surface {
+                return;
+            }
+            let token = activation.get_activation_token(qh, ());
+            token.set_serial(serial, seat);
+            token.set_surface(&surface);
+            token.commit();
+            client.asked = true;
+        }
+    }
+
+    impl Dispatch<XdgActivationV1, ()> for Client {
+        fn event(
+            _: &mut Self,
+            _: &XdgActivationV1,
+            _: <XdgActivationV1 as wayland_client::Proxy>::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
+
+    impl Dispatch<XdgActivationTokenV1, ()> for Client {
+        fn event(
+            client: &mut Self,
+            _: &XdgActivationTokenV1,
+            event: xdg_activation_token_v1::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+            if let xdg_activation_token_v1::Event::Done { token } = event {
+                client.token = Some(token);
+            }
+        }
     }
 
     impl WindowHandler for Client {

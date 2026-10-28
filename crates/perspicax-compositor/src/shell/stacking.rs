@@ -60,7 +60,7 @@ use smithay::{
 
 use perspicax_node::SurfaceId;
 
-use super::{id_of, is_on_top, placement};
+use super::{id_of, is_on_top, placement, wants_attention};
 use crate::{framed::Framed, state::Compositor};
 
 /// A window's z-index among the windows: smithay's default.
@@ -316,6 +316,53 @@ impl Compositor {
         }
         if moved || !menus.is_empty() || redraw {
             self.backend.redraw();
+        }
+    }
+
+    /// Put `window` just beneath the window in use, or beneath the one the
+    /// keys would go back to, if they are with no window: where a window
+    /// the person did not ask for opens (#259), in sight, and behind what
+    /// they are typing into. Every window over that one stays over it.
+    pub(crate) fn put_beneath(&mut self, window: &Framed) {
+        let anchor = self
+            .window_in_use()
+            .and_then(|id| self.window_for_id(id))
+            .or_else(|| self.window_for_keys())
+            .filter(|anchor| anchor != window);
+        let Some(anchor) = anchor else {
+            return;
+        };
+        let over: Vec<Framed> = self
+            .space
+            .elements()
+            .skip_while(|other| **other != anchor)
+            .filter(|other| *other != window)
+            .cloned()
+            .collect();
+        for other in &over {
+            self.space.raise_element(other, false);
+        }
+    }
+
+    /// Move `window` to `at`, as a window is placed while it opens, fitted
+    /// to its frame or filling its monitor. One that wants attention keeps
+    /// its place in the stack, beneath the window in use (#259): smithay's
+    /// map brings it to the top, and what was over it goes back over it.
+    /// Any other comes to the top, as it always has.
+    pub(crate) fn move_window(&mut self, window: &Framed, at: Point<i32, Logical>) {
+        let over: Vec<Framed> = if wants_attention(window) {
+            self.space
+                .elements()
+                .skip_while(|other| *other != window)
+                .skip(1)
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.space.map_element(window.clone(), at, false);
+        for other in &over {
+            self.space.raise_element(other, false);
         }
     }
 

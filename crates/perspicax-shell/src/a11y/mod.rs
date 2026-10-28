@@ -868,8 +868,12 @@ mod panels {
                 Item::Taskbar => {
                     let tabs = placed.tasks.iter().map(|(task, place)| {
                         let mut tab = tab(&task.title, *place, task.active);
-                        if task.minimized {
-                            tab.set_description("Minimized");
+                        let wanting = task.wants_attention && !task.active;
+                        match (task.minimized, wanting) {
+                            (true, true) => tab.set_description("Minimized, wants attention"),
+                            (true, false) => tab.set_description("Minimized"),
+                            (false, true) => tab.set_description("Wants attention"),
+                            (false, false) => {}
                         }
                         #[cfg(feature = "menus")]
                         tab.add_action(Action::ShowContextMenu);
@@ -1526,6 +1530,11 @@ mod panels {
                 icon: None,
                 active,
                 minimized,
+                wants_attention: false,
+            };
+            let wanting = |serial: u64, title: &str, active: bool, minimized: bool| Task {
+                wants_attention: true,
+                ..task(serial, title, active, minimized)
             };
             let cell = |serial: u64, name: &str, column: u32, active: bool| Cell {
                 serial,
@@ -1539,6 +1548,9 @@ mod panels {
                     task(3, "Editor", false, false),
                     task(7, "Mail", true, false),
                     task(9, "Notes", false, true),
+                    wanting(11, "Save as", false, false),
+                    wanting(13, "Updates", false, true),
+                    wanting(15, "Terminal", true, false),
                 ],
                 vec![cell(0, "1", 0, false), cell(1, "2", 1, true)],
             );
@@ -1576,6 +1588,17 @@ mod panels {
                         Some(false),
                         Some("Minimized".to_owned())
                     ),
+                    (
+                        "Save as".to_owned(),
+                        Some(false),
+                        Some("Wants attention".to_owned())
+                    ),
+                    (
+                        "Updates".to_owned(),
+                        Some(false),
+                        Some("Minimized, wants attention".to_owned())
+                    ),
+                    ("Terminal".to_owned(), Some(true), None),
                 ]
             );
             let mail = taskbar.children()[1];
@@ -1616,6 +1639,7 @@ mod panels {
                 icon: Some("firefox".to_owned()),
                 active: false,
                 minimized: false,
+                wants_attention: false,
             };
             let placed = laid_titled(vec![task(3, "Editor"), task(7, "Mail")], Vec::new(), false);
             let tree = panel("perspicax-panel-DP-1", None, &placed, "14:05", false, None);

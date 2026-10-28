@@ -97,7 +97,8 @@ const SKY: [u8; 4] = [0x7b, 0xae, 0xcd, 0xff];
 /// A task's face is this far inside its place, above and below, and this
 /// far either side, which leaves a gap between one task and the next.
 const MARGIN: (i32, i32) = (1, 3);
-/// The line along the edge of the active task.
+/// The line along the edge of the active task, and around one that wants
+/// the person's attention.
 const LINE: i32 = 2;
 /// A task's icon, square, and the room around it and the title.
 const ICON: i32 = 22;
@@ -232,6 +233,19 @@ impl Pen<'_, '_, '_> {
         scaled(rect, self.scale)
     }
 
+    /// A line `LINE` wide just inside `place`, all round, in `colour`.
+    fn ring(&mut self, place: Rect, colour: [u8; 4]) {
+        let sides = [
+            Rect::new(place.x, place.y, place.w, LINE),
+            Rect::new(place.x, place.bottom() - LINE, place.w, LINE),
+            Rect::new(place.x, place.y, LINE, place.h),
+            Rect::new(place.right() - LINE, place.y, LINE, place.h),
+        ];
+        for side in sides {
+            fill(self.canvas, self.px(side), colour);
+        }
+    }
+
     /// A task, at `place`, on a panel along `edge`: its icon, then its
     /// window's title in what room is left, or in a face too narrow for
     /// both, its icon alone in the middle.
@@ -256,6 +270,11 @@ impl Pen<'_, '_, '_> {
             fill(self.canvas, self.px(line), colours.highlight);
         } else if !task.minimized {
             fill(self.canvas, self.px(face), colours.face);
+        }
+        // Its window wants the person's attention (#259): ringed in the
+        // accent, as the workspace showing is, until they give it the keys.
+        if task.wants_attention && !task.active {
+            self.ring(face, colours.highlight);
         }
         let ink = if task.minimized {
             colours.faint
@@ -618,6 +637,7 @@ mod tests {
             icon: None,
             active: second && !minimized,
             minimized: second && minimized,
+            wants_attention: false,
         };
         let cell = |serial: u64, column: u32| Cell {
             serial,
@@ -1005,18 +1025,25 @@ mod tests {
     /// `place`'s task, holding no icon, painted alone on a panel 600 by
     /// `tall`.
     fn one_task(place: Rect, tall: i32) -> Pixmap {
+        one_task_as(
+            Task {
+                serial: 0,
+                title: "Editor".to_owned(),
+                icon: None,
+                active: false,
+                minimized: false,
+                wants_attention: false,
+            },
+            place,
+            tall,
+        )
+    }
+
+    /// As [`one_task`], the task being `task`.
+    fn one_task_as(task: Task, place: Rect, tall: i32) -> Pixmap {
         let placed = Placed {
             bar: Rect::new(0, 0, 600, tall),
-            tasks: vec![(
-                Task {
-                    serial: 0,
-                    title: "Editor".to_owned(),
-                    icon: None,
-                    active: false,
-                    minimized: false,
-                },
-                place,
-            )],
+            tasks: vec![(task, place)],
             ..Placed::default()
         };
         let mut picture = Pixmap::new(600, tall as u32).expect("a picture");
@@ -1086,6 +1113,56 @@ mod tests {
     fn a_window_too_small_to_make_out_is_not_drawn() {
         let place = Rect::new(40, 0, 8, 40);
         assert_eq!(inked(&one_task(place, 40), place), None);
+    }
+
+    #[test]
+    fn a_task_whose_window_wants_attention_is_ringed_unless_it_is_in_use() {
+        let place = Rect::new(40, 0, 200, 40);
+        let task = |active: bool, minimized: bool| Task {
+            serial: 0,
+            title: "Editor".to_owned(),
+            icon: None,
+            active,
+            minimized,
+            wants_attention: true,
+        };
+        // Its face, MARGIN inside its place.
+        let face = Rect::new(41, 3, 198, 34);
+        let wanting = one_task_as(task(false, false), place, 40);
+        for (x, y) in [
+            (face.x, face.y),
+            (face.x + LINE - 1, face.y + LINE - 1),
+            (face.right() - 1, face.bottom() - 1),
+            (face.x + 100, face.bottom() - LINE),
+            (face.right() - LINE, face.y + 20),
+        ] {
+            assert_eq!(pixel(&wanting, x, y), HIGHLIGHT, "its ring at ({x}, {y})");
+        }
+        assert_eq!(
+            pixel(&wanting, face.x + LINE, face.y + LINE),
+            FACE,
+            "inside it"
+        );
+        assert_eq!(
+            pixel(&wanting, face.x - 1, face.y),
+            BAR,
+            "and nothing outside"
+        );
+
+        let minimized = one_task_as(task(false, true), place, 40);
+        assert_eq!(
+            pixel(&minimized, face.x, face.y),
+            HIGHLIGHT,
+            "minimized too"
+        );
+        assert_eq!(pixel(&minimized, face.x + LINE, face.y + LINE), BAR);
+
+        let in_use = one_task_as(task(true, false), place, 40);
+        assert_eq!(
+            pixel(&in_use, face.x, face.y),
+            OPEN,
+            "the window in use wants none"
+        );
     }
 
     #[test]

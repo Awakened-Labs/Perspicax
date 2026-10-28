@@ -25,7 +25,10 @@ use perspicax_compositor::{ActError, Backend, Host};
 use perspicax_index::{Action as Verb, HostFacts, PointerButton, SurfaceKind, judge};
 use perspicax_node::{Rect, SurfaceId, Visibility};
 use perspicax_policy::Action;
-use smithay_client_toolkit::shell::xdg::{XdgSurface as _, popup::Popup};
+use smithay_client_toolkit::shell::{
+    WaylandSurface as _,
+    xdg::{XdgSurface as _, popup::Popup},
+};
 use wayland_client::{EventQueue, Proxy as _, QueueHandle, protocol::wl_surface::WlSurface};
 
 /// Linux's code for the left button.
@@ -154,8 +157,17 @@ impl Apps {
 
         let (mut a, mut a_queue, a_qh, a_globals) = session.client();
         a.bind_pointer(&a_globals, &a_qh);
+        a.bind_taskbar(&a_globals, &a_qh);
         let ear = a.bind_keyboard(&a_globals, &a_qh);
         let own = opened(session, &mut a, &mut a_queue, &a_qh, "own");
+        // Picked in the taskbar: it opened without the keys, "elsewhere"
+        // having them (#259), and has them once the person gives them.
+        until(&mut a_queue, &mut a, |a| a.task("own").is_some());
+        a.activate("own");
+        let own_surface = a.windows[0].wl_surface().id();
+        until(&mut a_queue, &mut a, |_| {
+            heard(&ear).entered.as_ref() == Some(&own_surface)
+        });
         // Over "own", with the keyboard as it opened, so that its menu is
         // over "own" too, where an agent's click on the menu lands.
         let page = opened(session, &mut a, &mut a_queue, &a_qh, "page");
