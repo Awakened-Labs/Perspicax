@@ -26,7 +26,8 @@
 //! And [`locate`]: where a path written in the file points. And
 //! [`find_program`]: where perspicax's own programs are, so that the session
 //! and `perspicax config check` find the same shell; and [`which`], where
-//! anybody else's is.
+//! anybody else's is; and [`which_installed`], where the system's copy of a
+//! lock program is, judged for the [`person`] running it.
 
 mod actions;
 pub mod autostart;
@@ -43,14 +44,16 @@ mod swaylock;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
 };
 
 use perspicax_policy::{
     Access, Action, Animation, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction,
     Drag, Effect, Face, Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Hatch, Keysym,
-    Mods, MouseBindings, MouseChord, Never, Opacity, Place, Program, Protocol, Remembering,
-    Resistance, Rule, Shadow, Shape, Side, Snapping, Switching, Towards, Transitioning, VolumeKey,
+    Mods, MouseBindings, MouseChord, Never, Opacity, Owner, Person, Place, Program, Protocol,
+    Remembering, Resistance, Rule, Shadow, Shape, Side, Snapping, Switching, Towards,
+    Transitioning, VolumeKey,
 };
 use serde::Deserialize;
 
@@ -902,6 +905,51 @@ pub fn which(command: &str, path: Option<&OsStr>) -> Option<PathBuf> {
         .filter(|folder| folder.is_absolute())
         .map(|folder| folder.join(command))
         .find(|candidate| runnable(candidate))
+}
+
+/// Where the lock program a command names is run from, as only it may lock
+/// the session (#178): a name with a `/` in it as written, the file the
+/// person chose, and a bare name the copy the system installed, in the
+/// first folder of `path` holding one, every link followed to the file
+/// itself. A copy the person could have written, one a program of theirs
+/// could have, is passed over, as a copy of swaylock planted in
+/// `~/.local/bin` ahead of the system's would be. `None` with nobody to
+/// judge for: see [`person`].
+///
+/// What runs it runs the file found, so that it runs what was judged.
+#[must_use]
+pub fn which_installed(
+    command: &str,
+    path: Option<&OsStr>,
+    person: Option<&Person>,
+) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt as _;
+    if command.contains('/') {
+        return which(command, path);
+    }
+    let person = person?;
+    let stat = |entry: &Path| {
+        let entry = fs::symlink_metadata(entry).ok()?;
+        Some(Owner {
+            uid: entry.uid(),
+            gid: entry.gid(),
+            mode: entry.mode(),
+        })
+    };
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .filter(|folder| folder.is_absolute())
+        .map(|folder| folder.join(command))
+        .filter(|candidate| runnable(candidate))
+        .filter_map(|candidate| fs::canonicalize(candidate).ok())
+        .find(|file| perspicax_policy::installed(file, person, stat))
+}
+
+/// Whom this process runs as, from `/proc/self/status`: whose writes a
+/// program the system installed cannot be. `None` if it cannot be read.
+#[must_use]
+pub fn person() -> Option<Person> {
+    Person::from_status(&fs::read_to_string("/proc/self/status").ok()?)
 }
 
 /// Whether `path` is a file that may be run.
@@ -3055,6 +3103,54 @@ mod tests {
         let missing = scratch.0.join("nowhere/swaylock");
         assert_eq!(which(missing.to_str().unwrap(), Some(&path)), None);
         assert_eq!(which("", Some(&path)), None);
+    }
+
+    /// The system's `sh`, behind a copy planted ahead of it on PATH, as a
+    /// program of the person's could plant swaylock in `~/.local/bin`.
+    #[test]
+    fn a_bare_lock_program_is_the_copy_the_system_installed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let scratch = Scratch::new("installed");
+        let planted = scratch.program("bin", "sh", 0o755);
+        // Anybody may write here, so nothing in it is the system's alone,
+        // whoever runs the tests.
+        std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let path = std::env::join_paths([planted.as_path(), Path::new("/bin")]).unwrap();
+        // Somebody who is not root, and owns none of the system's files.
+        let person = Person {
+            uid: 4242,
+            groups: vec![4242],
+        };
+        assert_eq!(
+            which_installed("sh", Some(&path), Some(&person)),
+            Some(std::fs::canonicalize("/bin/sh").unwrap()),
+            "the system's, every link followed"
+        );
+        assert_eq!(
+            which("sh", Some(&path)),
+            Some(planted.join("sh")),
+            "where which finds the planted one"
+        );
+        assert_eq!(
+            which_installed("sh", Some(&path), None),
+            None,
+            "nobody to judge for"
+        );
+        let root = Person {
+            uid: 0,
+            groups: vec![0],
+        };
+        assert_eq!(
+            which_installed("sh", Some(&path), Some(&root)),
+            None,
+            "for root, nothing is the system's alone"
+        );
+        let named = planted.join("sh");
+        assert_eq!(
+            which_installed(named.to_str().unwrap(), None, Some(&person)),
+            Some(named.clone()),
+            "a path is the person's choice, as written"
+        );
     }
 
     #[test]

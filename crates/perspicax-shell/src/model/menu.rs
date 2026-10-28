@@ -111,6 +111,11 @@ impl Session {
     /// compositor to ask (`log_out`), and each of the others with its
     /// program installed, found on `path` in `fs`. An item that would do
     /// nothing is worse than none.
+    ///
+    /// Lock runs the copy of its program the system installed, by the path
+    /// it is found at: only that copy may lock (#178), and a copy the person
+    /// could have written ahead of it on `path` would be refused. With none,
+    /// there is no Lock.
     pub(crate) fn of(shell: &Shell, log_out: bool, fs: &impl Fs, path: &[PathBuf]) -> Self {
         let leave = shell
             .leave
@@ -118,8 +123,14 @@ impl Session {
             .filter_map(|&leave| {
                 let does = match shell.runs(leave) {
                     None => log_out.then_some(Does::LogOut)?,
-                    Some(argv) => {
-                        which(fs, argv.first()?, path)?;
+                    Some(mut argv) => {
+                        let program = argv.first_mut()?;
+                        if leave == Leave::Lock {
+                            let file = fs.installed(program, path)?;
+                            *program = file.to_string_lossy().into_owned();
+                        } else {
+                            which(fs, program, path)?;
+                        }
                         Does::Run(Run {
                             argv,
                             terminal: false,
@@ -800,15 +811,32 @@ mod tests {
     }
 
     #[test]
-    fn lock_runs_swaylock_in_the_theme() {
-        let files = Files::default().program("/usr/bin/swaylock");
+    fn lock_runs_the_systems_swaylock_in_the_theme() {
+        let files = Files::default()
+            .program("/home/me/.local/bin/swaylock")
+            .system("swaylock", "/usr/bin/swaylock");
+        let path = [
+            PathBuf::from("/home/me/.local/bin"),
+            PathBuf::from("/usr/bin"),
+        ];
         let shell = Shell::profile(Profile::Classic, ShellBuilt::FULL);
-        let session = Session::of(&shell, true, &files, &[PathBuf::from("/usr/bin")]);
+        let session = Session::of(&shell, true, &files, &path);
         let Some((Leave::Lock, Does::Run(lock))) = session.leave.first() else {
             panic!("no Lock: {session:?}");
         };
-        assert_eq!(lock.argv, shell.lock_command(&[], true));
-        assert_eq!(lock.argv[..3], ["swaylock", "-C", "/dev/null"]);
+        assert_eq!(lock.argv[1..], shell.lock_command(&[], true)[1..]);
+        assert_eq!(
+            lock.argv[..3],
+            ["/usr/bin/swaylock", "-C", "/dev/null"],
+            "the system's, by its path, never the copy ahead of it"
+        );
+
+        let planted = Files::default().program("/home/me/.local/bin/swaylock");
+        let session = Session::of(&shell, true, &planted, &path);
+        assert!(
+            session.leave.iter().all(|(leave, _)| *leave != Leave::Lock),
+            "only a copy the person could have written, so no Lock: {session:?}"
+        );
     }
 
     #[test]

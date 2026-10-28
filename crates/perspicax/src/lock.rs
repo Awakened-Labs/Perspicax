@@ -12,6 +12,12 @@
 //! same, in the default theme, rather than leave the screen open while its
 //! owner walks away.
 //!
+//! A bare name is the copy of that program the system installed, wherever on
+//! `PATH` it is: only that copy may lock the session (#178), so a copy the
+//! person could have written, ahead of it on `PATH`, is passed over rather
+//! than run to be refused. A path is run as written: the file the person
+//! chose.
+//!
 //! Inside a perspicax session, the compositor draws the lock screen beneath
 //! swaylock, which is dressed clear but for its ring. Outside one, nothing of
 //! perspicax's would be beneath it, and another compositor's desktop would
@@ -20,6 +26,7 @@
 //! even empty, as it is for a session that read no config.
 
 use std::{
+    ffi::OsStr,
     os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
     process::Command,
@@ -27,6 +34,7 @@ use std::{
 
 use anyhow::{Error, anyhow};
 use perspicax_config::{Profile, Shell, ShellBuilt};
+use perspicax_policy::Person;
 
 /// Set in the environment of every program a session on a seat starts: the
 /// config file the session read, which `perspicax lock` reads too.
@@ -79,8 +87,39 @@ pub fn lock(more: &[String]) -> Error {
     let Some((program, arguments)) = command.split_first() else {
         return anyhow!("[shell] lock is empty");
     };
-    let error = Command::new(program).args(arguments).exec();
-    anyhow!(error).context(format!("could not run {program}"))
+    let path = std::env::var_os("PATH");
+    let file = match found(
+        program,
+        path.as_deref(),
+        perspicax_config::person().as_ref(),
+    ) {
+        Ok(file) => file,
+        Err(error) => return error,
+    };
+    // Still called what `lock` calls it, for what it says of itself.
+    let error = Command::new(&file).arg0(program).args(arguments).exec();
+    anyhow!(error).context(format!("could not run {}", file.display()))
+}
+
+/// The file `program` runs from, as [`perspicax_config::which_installed`]
+/// finds it on `path` for `person`, or why there is none.
+fn found(program: &str, path: Option<&OsStr>, person: Option<&Person>) -> Result<PathBuf, Error> {
+    if let Some(file) = perspicax_config::which_installed(program, path, person) {
+        return Ok(file);
+    }
+    if program.contains('/') {
+        return Err(anyhow!("{program} is not a program that may be run"));
+    }
+    let passed_over = perspicax_config::which(program, path).map_or_else(String::new, |copy| {
+        format!(
+            ", only {}, which a program of yours could have written",
+            copy.display()
+        )
+    });
+    Err(anyhow!(
+        "no {program} the system installed is on PATH{passed_over}; only that copy may lock \
+         the screen. Install it, or name the one to run by its full path in [shell] lock"
+    ))
 }
 
 #[cfg(test)]
@@ -152,6 +191,52 @@ mod tests {
             "outside one, the theme's lock colour"
         );
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// The system's `sh` stands in for a lock program, behind a copy planted
+    /// ahead of it on PATH in a folder anybody may write.
+    #[test]
+    fn a_bare_name_runs_the_copy_the_system_installed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let folder =
+            std::env::temp_dir().join(format!("perspicax-lock-{}-planted", std::process::id()));
+        fs::create_dir_all(&folder).unwrap();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o777)).unwrap();
+        let planted = folder.join("sh");
+        fs::write(&planted, "").unwrap();
+        fs::set_permissions(&planted, fs::Permissions::from_mode(0o755)).unwrap();
+        let person = Person {
+            uid: 4242,
+            groups: vec![4242],
+        };
+        let path = std::env::join_paths([folder.as_path(), Path::new("/bin")]).unwrap();
+        assert_eq!(
+            found("sh", Some(&path), Some(&person)).unwrap(),
+            fs::canonicalize("/bin/sh").unwrap()
+        );
+
+        let alone = std::env::join_paths([folder.as_path()]).unwrap();
+        let refused = found("sh", Some(&alone), Some(&person))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.starts_with("no sh the system installed is on PATH"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains(&planted.display().to_string()),
+            "{refused}"
+        );
+        assert!(refused.contains("[shell] lock"), "{refused}");
+
+        assert_eq!(
+            found(planted.to_str().unwrap(), None, Some(&person)).unwrap(),
+            planted,
+            "a path is run as written"
+        );
+        let missing = folder.join("missing");
+        assert!(found(missing.to_str().unwrap(), None, Some(&person)).is_err());
+        fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]
