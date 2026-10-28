@@ -9,14 +9,16 @@
 //! the protocol itself, which withdraws what the new rule no longer allows.
 //!
 //! A client is named by the executable recorded when its connection was
-//! accepted (`crate::origin`), never asked for again. Xwayland's own
+//! accepted (`crate::origin`), never asked for again, with what the path it
+//! is named by proved then: whether it is the very file the client runs, and
+//! whether only the system could have put it there. Xwayland's own
 //! connection carries no such record and is never admitted: an X11 program
 //! reaching other windows through it would be a program nobody named.
 
 use std::sync::{Arc, PoisonError, RwLock};
 
 use perspicax_node::Origin;
-use perspicax_policy::{Access, Protocol};
+use perspicax_policy::{Access, Exe, Protocol};
 use smithay::reexports::wayland_server::Client;
 
 use crate::state::ClientState;
@@ -48,10 +50,16 @@ impl Gate {
             Origin::Process(process) => process.exe,
             _ => None,
         };
+        let file = state.file();
+        let exe = exe.as_deref().map(|path| Exe {
+            path,
+            here: file.here,
+            installed: file.installed,
+        });
         self.0
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .admits(protocol, exe.as_deref())
+            .admits(protocol, exe)
     }
 }
 

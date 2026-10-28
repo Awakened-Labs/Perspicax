@@ -61,7 +61,10 @@ mod transition;
 mod workspace;
 
 pub use crate::{
-    access::{Access, Never, Program, Protocol, Rule, SETTINGS_APP, is_settings_app},
+    access::{
+        Access, Exe, Never, Owner, Person, Program, Protocol, Rule, SETTINGS_APP, installed,
+        is_settings_app,
+    },
     binds::{Action, Bindings, Chord, Drag, Mods, Towards, VolumeKey, candidates},
     flip::{EdgeDwell, Flipping, NOTCH_PIXELS, Notches, Resting, arrival, edge_at},
     focus::{

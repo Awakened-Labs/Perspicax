@@ -319,6 +319,9 @@ pub struct Compositor {
     /// Who may use the protocols that reach past their own windows. See
     /// [`crate::access`].
     pub(crate) gate: crate::access::Gate,
+    /// Whom this compositor runs as: whose writes a program the system
+    /// installed cannot be. See [`crate::origin::attest`].
+    person: Option<perspicax_policy::Person>,
     /// Every window, as the taskbar protocols have been told it. See
     /// [`crate::toplevels`].
     pub(crate) toplevels: crate::toplevels::Toplevels,
@@ -479,6 +482,7 @@ impl Compositor {
             #[cfg(feature = "xwayland")]
             xwayland_shell: None,
             gate,
+            person: crate::origin::this_person(),
             toplevels,
             pager,
             displays,
@@ -522,13 +526,13 @@ impl Compositor {
             }
         };
 
-        let (origin, pidfd) = client
-            .get_credentials(&self.display)
-            .map_or((Origin::Unattributed, None), |credentials| {
-                origin::attest(credentials.pid)
-            });
-        state.attribute(origin.clone(), pidfd);
-        tracing::info!(id = ?client.id(), ?origin, "client connected");
+        let attested = client.get_credentials(&self.display).map_or_else(
+            |_| origin::Attested::default(),
+            |credentials| origin::attest(credentials.pid, self.person.as_ref()),
+        );
+        let (origin, file) = (attested.origin.clone(), attested.file);
+        state.attribute(attested);
+        tracing::info!(id = ?client.id(), ?origin, ?file, "client connected");
         if let Origin::Process(process) = &origin {
             self.grant_lineage(process.pid, &state);
             self.stamp_started(process.pid, &state);
@@ -2045,6 +2049,10 @@ pub(crate) struct ClientState {
     /// A pidfd on the origin's process, when one could be vouched for: what
     /// a grant to it is held by. See [`crate::origin::attest`].
     pidfd: OnceLock<OwnedFd>,
+    /// What the path its executable is named by proves: what a rule in
+    /// `[protocols]` that names a path, or a program the system installed,
+    /// asks. See [`crate::origin::ExeFile`].
+    file: OnceLock<crate::origin::ExeFile>,
     /// The origin's process, with when it started: what a press that reached
     /// this client starts programs under (#259).
     process: OnceLock<perspicax_policy::Process>,
@@ -2063,16 +2071,23 @@ pub(crate) struct ClientState {
 impl ClientState {
     /// Record who this client is. Once, and only the first time: an identity
     /// that could be overwritten is not an attestation.
-    fn attribute(&self, origin: Origin, pidfd: Option<OwnedFd>) {
-        let _ = self.origin.set(origin);
-        if let Some(pidfd) = pidfd {
+    fn attribute(&self, attested: crate::origin::Attested) {
+        let _ = self.origin.set(attested.origin);
+        if let Some(pidfd) = attested.pidfd {
             let _ = self.pidfd.set(pidfd);
         }
+        let _ = self.file.set(attested.file);
     }
 
     /// Who this client is, or `Unattributed` if it was never established.
     pub(crate) fn origin(&self) -> Origin {
         self.origin.get().cloned().unwrap_or_default()
+    }
+
+    /// What the path this client's executable is named by proves: nothing,
+    /// if it was never established.
+    pub(crate) fn file(&self) -> crate::origin::ExeFile {
+        self.file.get().copied().unwrap_or_default()
     }
 
     /// A pidfd of its own on this client's process, if one was vouched for.

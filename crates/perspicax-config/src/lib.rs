@@ -2772,7 +2772,7 @@ fn invalid(key: String, reason: String) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use perspicax_policy::{AgentLook, Palette};
+    use perspicax_policy::{AgentLook, Exe, Palette};
 
     use super::*;
 
@@ -5340,8 +5340,11 @@ mod tests {
     fn the_shell_protocol_defaults_to_perspicax_shell_in_both_profiles() {
         for profile in [Profile::Classic, Profile::Minimal] {
             let access = Config::profile(profile, SEAT).protocols;
-            assert!(access.admits(Protocol::Shell, Some("/usr/bin/perspicax-shell")));
-            assert!(!access.admits(Protocol::Shell, Some("/usr/bin/waybar")));
+            assert!(access.admits(
+                Protocol::Shell,
+                Some(Exe::persons("/usr/bin/perspicax-shell"))
+            ));
+            assert!(!access.admits(Protocol::Shell, Some(Exe::persons("/usr/bin/waybar"))));
             assert!(!access.admits(Protocol::Shell, None));
         }
         let config = parse("[protocols]\nshell = \"off\"", SEAT).unwrap();
@@ -5352,8 +5355,14 @@ mod tests {
     fn the_settings_protocol_defaults_to_perspicax_settings_in_both_profiles() {
         for profile in [Profile::Classic, Profile::Minimal] {
             let access = Config::profile(profile, SEAT).protocols;
-            assert!(access.admits(Protocol::Settings, Some("/usr/bin/perspicax-settings")));
-            assert!(!access.admits(Protocol::Settings, Some("/usr/bin/perspicax-shell")));
+            assert!(access.admits(
+                Protocol::Settings,
+                Some(Exe::persons("/usr/bin/perspicax-settings"))
+            ));
+            assert!(!access.admits(
+                Protocol::Settings,
+                Some(Exe::persons("/usr/bin/perspicax-shell"))
+            ));
             assert!(!access.admits(Protocol::Settings, None));
         }
         let config = parse("[protocols]\nsettings = \"off\"", SEAT).unwrap();
@@ -5371,17 +5380,23 @@ mod tests {
         let classic = Config::profile(Profile::Classic, SEAT).protocols;
         assert_eq!(classic, Config::profile(Profile::Minimal, SEAT).protocols);
         assert!(classic.admits(Protocol::ForeignToplevelManagement, None));
-        assert!(classic.admits(Protocol::Screencopy, Some("/usr/bin/grim")));
-        assert!(!classic.admits(Protocol::Screencopy, Some("/usr/bin/firefox")));
-        assert!(classic.admits(Protocol::OutputManagement, Some("/usr/bin/kanshi")));
+        assert!(classic.admits(Protocol::Screencopy, Some(Exe::persons("/usr/bin/grim"))));
+        assert!(!classic.admits(Protocol::Screencopy, Some(Exe::persons("/usr/bin/firefox"))));
+        assert!(classic.admits(
+            Protocol::OutputManagement,
+            Some(Exe::persons("/usr/bin/kanshi"))
+        ));
     }
 
     #[test]
     fn the_settings_app_may_read_the_monitors_by_default() {
         let protocols = Config::profile(Profile::Classic, SEAT).protocols;
         let app = format!("/usr/local/bin/{SETTINGS_APP}");
-        assert!(protocols.admits(Protocol::OutputManagement, Some(&app)));
-        assert!(!protocols.admits(Protocol::OutputManagement, Some("/usr/bin/firefox")));
+        assert!(protocols.admits(Protocol::OutputManagement, Some(Exe::persons(&app))));
+        assert!(!protocols.admits(
+            Protocol::OutputManagement,
+            Some(Exe::persons("/usr/bin/firefox"))
+        ));
     }
 
     #[test]
@@ -5412,10 +5427,10 @@ mod tests {
         )
         .unwrap();
         let access = config.protocols;
-        assert!(!access.admits(Protocol::Workspace, Some("/usr/bin/waybar")));
-        assert!(access.admits(Protocol::Screencopy, Some("/usr/bin/grim")));
-        assert!(!access.admits(Protocol::Screencopy, Some("/tmp/grim")));
-        assert!(access.admits(Protocol::Screencopy, Some("/opt/x/flameshot")));
+        assert!(!access.admits(Protocol::Workspace, Some(Exe::persons("/usr/bin/waybar"))));
+        assert!(access.admits(Protocol::Screencopy, Some(Exe::persons("/usr/bin/grim"))));
+        assert!(!access.admits(Protocol::Screencopy, Some(Exe::persons("/tmp/grim"))));
+        assert!(access.admits(Protocol::Screencopy, Some(Exe::persons("/opt/x/flameshot"))));
         assert!(
             access.admits(Protocol::ForeignToplevelList, None),
             "from the profile"

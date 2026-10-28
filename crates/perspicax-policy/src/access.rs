@@ -16,6 +16,15 @@
 //! been deleted since it started, is admitted only by a rule that admits
 //! any client.
 //!
+//! A path is not proof on its own either. The kernel names the file a
+//! process runs by the path its own mounts give it, and a program needs no
+//! root to have mounts of its own (`unshare`, a rootless container, a
+//! sandbox): inside them, any file can be at `/usr/bin/grim`. So a path
+//! admits a client only when the file at that path, as the compositor sees
+//! it, is the very file the client runs ([`Exe::here`]). And a program
+//! [`Program::Installed`] admits must be where only the system could have put
+//! it ([`installed`]).
+//!
 //! None of this is about the lock. Whatever a rule says, the compositor keeps
 //! every one of these protocols inert while the session is locked.
 //!
@@ -82,6 +91,47 @@ impl Protocol {
     }
 }
 
+/// What the compositor knows of the file a client runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Exe<'a> {
+    /// The path the kernel names it by, as the client's own mounts see it.
+    pub path: &'a str,
+    /// Whether the file at `path`, as the compositor sees it, is the very
+    /// file the client runs, and not another put there by mounts of its own.
+    pub here: bool,
+    /// Whether it is, and only the system could have put it there: see
+    /// [`installed`]. Never without [`Self::here`].
+    pub installed: bool,
+}
+
+impl<'a> Exe<'a> {
+    /// A client running the file at `path`, somewhere the person could have
+    /// written: a program of their own, or a test's.
+    #[must_use]
+    pub const fn persons(path: &'a str) -> Self {
+        Self {
+            path,
+            here: true,
+            installed: false,
+        }
+    }
+
+    /// A client running the file at `path`, which the system installed.
+    #[must_use]
+    pub const fn systems(path: &'a str) -> Self {
+        Self {
+            path,
+            here: true,
+            installed: true,
+        }
+    }
+
+    /// Its file's name: `grim` for `/usr/bin/grim`.
+    fn file_name(&self) -> Option<&'a str> {
+        Path::new(self.path).file_name()?.to_str()
+    }
+}
+
 /// A program named in an allowlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Program {
@@ -89,6 +139,9 @@ pub enum Program {
     Path(String),
     /// `grim`: any executable of this name, wherever it is.
     Name(String),
+    /// `swaylock`, as `[protocols] session-lock` reads a name: an executable
+    /// of this name that only the system could have put where it is.
+    Installed(String),
 }
 
 impl Program {
@@ -102,22 +155,125 @@ impl Program {
         }
     }
 
+    /// This, with a bare name read as the system's copy of that program.
+    #[must_use]
+    pub fn installed(self) -> Self {
+        match self {
+            Self::Name(name) => Self::Installed(name),
+            other => other,
+        }
+    }
+
     /// The entry as it was written: a path, or a bare name.
     #[must_use]
     pub fn spelled(&self) -> &str {
         match self {
-            Self::Path(written) | Self::Name(written) => written,
+            Self::Path(written) | Self::Name(written) | Self::Installed(written) => written,
         }
     }
 
+    /// Whether a client running `exe` is this program.
+    fn admits(&self, exe: Exe<'_>) -> bool {
+        match self {
+            Self::Path(path) => exe.here && exe.path == path,
+            Self::Name(name) => exe.file_name() == Some(name.as_str()),
+            Self::Installed(name) => {
+                exe.here && exe.installed && exe.file_name() == Some(name.as_str())
+            }
+        }
+    }
+
+    /// Whether `exe`, a path alone, names this program: what [`Never`]
+    /// asks, for which matching more than was meant only refuses more.
     fn matches(&self, exe: &str) -> bool {
         match self {
             Self::Path(path) => exe == path,
-            Self::Name(name) => Path::new(exe)
+            Self::Name(name) | Self::Installed(name) => Path::new(exe)
                 .file_name()
                 .is_some_and(|file| file == name.as_str()),
         }
     }
+}
+
+/// The owner and mode of one entry in a path: what [`installed`] asks of
+/// each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Owner {
+    /// The user it belongs to.
+    pub uid: u32,
+    /// The group it belongs to.
+    pub gid: u32,
+    /// Its permission bits, as `stat` gives them.
+    pub mode: u32,
+}
+
+/// Root's uid.
+const ROOT: u32 = 0;
+
+impl Owner {
+    /// Whether `person` cannot write it: it is root's, nobody else may write
+    /// it, and its group may only if the person is not in that group.
+    fn kept_from(self, person: &Person) -> bool {
+        const GROUP_WRITES: u32 = 0o020;
+        const OTHERS_WRITE: u32 = 0o002;
+        self.uid == ROOT
+            && self.mode & OTHERS_WRITE == 0
+            && (self.mode & GROUP_WRITES == 0 || !person.groups.contains(&self.gid))
+    }
+}
+
+/// Whom a session runs as: the uid and the groups whose writes a file might
+/// be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Person {
+    /// Its effective uid.
+    pub uid: u32,
+    /// Its own group, then the others it is in.
+    pub groups: Vec<u32>,
+}
+
+impl Person {
+    /// The person a process runs as, from its `/proc/<pid>/status`: the
+    /// effective uid and gid, and the supplementary groups.
+    #[must_use]
+    pub fn from_status(status: &str) -> Option<Self> {
+        let field = |name: &str| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix(name)?.strip_prefix(':'))
+        };
+        let effective = |name| field(name)?.split_whitespace().nth(1)?.parse().ok();
+        let uid = effective("Uid")?;
+        let gid = effective("Gid")?;
+        let mut groups = vec![gid];
+        for group in field("Groups")?.split_whitespace() {
+            let group = group.parse().ok()?;
+            if !groups.contains(&group) {
+                groups.push(group);
+            }
+        }
+        Some(Self { uid, groups })
+    }
+}
+
+/// Whether only the system could have put the file at `path` there: it, and
+/// every folder above it to `/`, is one [`Owner::kept_from`] `person`. `stat`
+/// says who an entry belongs to, without following a link, or `None` for one
+/// that is not there.
+///
+/// `path` is the file's own, every link already followed, as the kernel names
+/// a process's executable: a link in it is judged as itself, and its mode
+/// lets everyone write it. Nothing is installed by the system for a person
+/// who is root, whose every write would pass.
+#[must_use]
+pub fn installed(path: &Path, person: &Person, stat: impl Fn(&Path) -> Option<Owner>) -> bool {
+    use std::path::Component;
+    let relative = |component| matches!(component, Component::CurDir | Component::ParentDir);
+    if person.uid == ROOT || !path.is_absolute() || path.components().any(relative) {
+        return false;
+    }
+    path.ancestors()
+        .all(|entry| stat(entry).is_some_and(|owner| owner.kept_from(person)))
 }
 
 /// Who may use one protocol.
@@ -135,13 +291,13 @@ impl Rule {
     /// Whether a client running `exe` may use the protocol. `None` is a
     /// client whose executable is unknown.
     #[must_use]
-    pub fn admits(&self, exe: Option<&str>) -> bool {
+    pub fn admits(&self, exe: Option<Exe<'_>>) -> bool {
         match self {
             Self::Off => false,
             Self::Any => true,
             Self::Only(programs) => exe
-                .filter(|exe| !exe.ends_with(" (deleted)"))
-                .is_some_and(|exe| programs.iter().any(|program| program.matches(exe))),
+                .filter(|exe| !exe.path.ends_with(" (deleted)"))
+                .is_some_and(|exe| programs.iter().any(|program| program.admits(exe))),
         }
     }
 
@@ -271,7 +427,7 @@ impl Access {
 
     /// Whether a client running `exe` may use `protocol`.
     #[must_use]
-    pub fn admits(&self, protocol: Protocol, exe: Option<&str>) -> bool {
+    pub fn admits(&self, protocol: Protocol, exe: Option<Exe<'_>>) -> bool {
         self.rule(protocol).admits(exe)
     }
 
@@ -348,26 +504,184 @@ mod tests {
     #[test]
     fn a_name_matches_that_executable_anywhere() {
         let rule = only(&["grim"]);
-        assert!(rule.admits(Some("/usr/bin/grim")));
-        assert!(rule.admits(Some("/home/me/.local/bin/grim")));
-        assert!(!rule.admits(Some("/usr/bin/grimace")));
-        assert!(!rule.admits(Some("/usr/bin/grim/not-grim")));
+        assert!(rule.admits(Some(Exe::persons("/usr/bin/grim"))));
+        assert!(rule.admits(Some(Exe::persons("/home/me/.local/bin/grim"))));
+        assert!(!rule.admits(Some(Exe::persons("/usr/bin/grimace"))));
+        assert!(!rule.admits(Some(Exe::persons("/usr/bin/grim/not-grim"))));
     }
 
     #[test]
     fn a_path_matches_only_that_executable() {
         let rule = only(&["/usr/bin/grim"]);
-        assert!(rule.admits(Some("/usr/bin/grim")));
-        assert!(!rule.admits(Some("/tmp/grim")));
+        assert!(rule.admits(Some(Exe::persons("/usr/bin/grim"))));
+        assert!(!rule.admits(Some(Exe::persons("/tmp/grim"))));
+    }
+
+    /// A program in mounts of its own reads as whatever path it put its file
+    /// at: the path is only the path.
+    #[test]
+    fn a_path_admits_only_the_file_that_is_there() {
+        let rule = only(&["/usr/bin/grim"]);
+        let elsewhere = Exe {
+            path: "/usr/bin/grim",
+            here: false,
+            installed: false,
+        };
+        assert!(!rule.admits(Some(elsewhere)));
+        assert!(rule.admits(Some(Exe::systems("/usr/bin/grim"))));
+        assert!(
+            only(&["grim"]).admits(Some(elsewhere)),
+            "a name was never more than a name"
+        );
+    }
+
+    #[test]
+    fn an_installed_name_admits_only_the_systems_copy() {
+        let rule = Rule::Only(vec![Program::parse("swaylock").installed()]);
+        assert!(rule.admits(Some(Exe::systems("/usr/bin/swaylock"))));
+        assert!(rule.admits(Some(Exe::systems(
+            "/nix/store/0abc-swaylock-1.8/bin/swaylock"
+        ))));
+        assert!(!rule.admits(Some(Exe::persons("/home/me/.local/bin/swaylock"))));
+        assert!(!rule.admits(Some(Exe::systems("/usr/bin/swaylock-effects"))));
+        assert!(!rule.admits(Some(Exe::systems("/usr/bin/swaylock (deleted)"))));
+        let elsewhere = Exe {
+            path: "/usr/bin/swaylock",
+            here: false,
+            installed: true,
+        };
+        assert!(!rule.admits(Some(elsewhere)), "installed means here too");
+    }
+
+    #[test]
+    fn only_a_bare_name_is_read_as_installed() {
+        assert_eq!(
+            Program::parse("swaylock").installed(),
+            Program::Installed("swaylock".to_owned())
+        );
+        assert_eq!(
+            Program::parse("/opt/lock/bin/lock").installed(),
+            Program::Path("/opt/lock/bin/lock".to_owned())
+        );
+        assert_eq!(Program::parse("swaylock").installed().spelled(), "swaylock");
+        assert_eq!(
+            Never::new(vec![Program::parse("swaylock").installed()])
+                .naming("/home/me/.local/bin/swaylock"),
+            Some("swaylock"),
+            "never errs on refusing: a name is enough"
+        );
+    }
+
+    const ME: u32 = 1000;
+    const NIXBLD: u32 = 30_000;
+
+    fn me() -> Person {
+        Person {
+            uid: ME,
+            groups: vec![ME, 10],
+        }
+    }
+
+    /// A tree of entries, each `(path, uid, gid, mode)`, as `stat` would say.
+    fn tree(entries: &'static [(&'static str, u32, u32, u32)]) -> impl Fn(&Path) -> Option<Owner> {
+        move |path| {
+            entries
+                .iter()
+                .find(|(entry, ..)| Path::new(entry) == path)
+                .map(|&(_, uid, gid, mode)| Owner { uid, gid, mode })
+        }
+    }
+
+    const SYSTEM: &[(&str, u32, u32, u32)] = &[
+        ("/", 0, 0, 0o755),
+        ("/usr", 0, 0, 0o755),
+        ("/usr/bin", 0, 0, 0o755),
+        ("/usr/bin/swaylock", 0, 0, 0o755),
+        ("/home", 0, 0, 0o755),
+        ("/home/me", ME, ME, 0o700),
+        ("/home/me/swaylock", ME, ME, 0o755),
+        ("/opt", 0, 0, 0o755),
+        ("/opt/x", ME, ME, 0o755),
+        ("/opt/x/swaylock", 0, 0, 0o755),
+        ("/tmp", 0, 0, 0o1777),
+        ("/tmp/swaylock", 0, 0, 0o755),
+        ("/srv", 0, 10, 0o775),
+        ("/srv/swaylock", 0, 0, 0o755),
+        ("/nix", 0, 0, 0o755),
+        ("/nix/store", 0, NIXBLD, 0o1775),
+        ("/nix/store/swaylock", 0, 0, 0o555),
+        ("/usr/bin/lock", 0, 0, 0o777),
+    ];
+
+    #[test]
+    fn installed_is_roots_all_the_way_up_and_the_persons_nowhere() {
+        let stat = tree(SYSTEM);
+        let judge = |path: &str| installed(Path::new(path), &me(), &stat);
+        assert!(judge("/usr/bin/swaylock"));
+        assert!(!judge("/home/me/swaylock"), "the person's own");
+        assert!(
+            !judge("/opt/x/swaylock"),
+            "root's file in the person's folder"
+        );
+        assert!(!judge("/tmp/swaylock"), "a folder anyone may write");
+        assert!(
+            !judge("/srv/swaylock"),
+            "a folder a group of theirs may write"
+        );
+        assert!(
+            judge("/nix/store/swaylock"),
+            "a folder a group they are not in may write"
+        );
+        assert!(
+            !judge("/usr/bin/lock"),
+            "a file anyone may write, or a link"
+        );
+        assert!(!judge("/usr/bin/missing"), "nothing there");
+        assert!(!judge("usr/bin/swaylock"), "not a path from the root");
+        assert!(
+            !judge("/usr/bin/../bin/swaylock"),
+            "judged by name, not by where it leads"
+        );
+        let root = Person {
+            uid: 0,
+            groups: vec![0],
+        };
+        assert!(
+            !installed(Path::new("/usr/bin/swaylock"), &root, &stat),
+            "every write of root's would pass"
+        );
+    }
+
+    #[test]
+    fn a_person_is_read_from_their_status() {
+        let status = "Name:\tperspicax\nUmask:\t0022\nState:\tS (sleeping)\n\
+                      Uid:\t1000\t1001\t1001\t1001\nGid:\t100\t1002\t1002\t1002\n\
+                      FDSize:\t64\nGroups:\t10 18 1002 \n";
+        assert_eq!(
+            Person::from_status(status),
+            Some(Person {
+                uid: 1001,
+                groups: vec![1002, 10, 18]
+            })
+        );
+        let alone = "Uid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nGroups:\t\n";
+        assert_eq!(
+            Person::from_status(alone),
+            Some(Person {
+                uid: 1000,
+                groups: vec![1000]
+            })
+        );
+        assert_eq!(Person::from_status("Uid:\t1000\n"), None);
     }
 
     #[test]
     fn an_unknown_or_deleted_executable_is_admitted_only_by_any() {
         let rule = only(&["grim"]);
         assert!(!rule.admits(None));
-        assert!(!rule.admits(Some("/usr/bin/grim (deleted)")));
+        assert!(!rule.admits(Some(Exe::persons("/usr/bin/grim (deleted)"))));
         assert!(Rule::Any.admits(None));
-        assert!(!Rule::Off.admits(Some("/usr/bin/grim")));
+        assert!(!Rule::Off.admits(Some(Exe::persons("/usr/bin/grim"))));
     }
 
     #[test]
@@ -418,8 +732,8 @@ mod tests {
     #[test]
     fn each_protocol_has_its_own_rule() {
         let access = Access::open().with(Protocol::Screencopy, Rule::Off);
-        assert!(!access.admits(Protocol::Screencopy, Some("/usr/bin/grim")));
-        assert!(access.admits(Protocol::Workspace, Some("/usr/bin/waybar")));
+        assert!(!access.admits(Protocol::Screencopy, Some(Exe::persons("/usr/bin/grim"))));
+        assert!(access.admits(Protocol::Workspace, Some(Exe::persons("/usr/bin/waybar"))));
     }
 
     #[test]
