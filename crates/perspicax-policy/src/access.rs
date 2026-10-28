@@ -25,8 +25,12 @@
 //! [`Program::Installed`] admits must be where only the system could have put
 //! it ([`installed`]).
 //!
-//! None of this is about the lock. Whatever a rule says, the compositor keeps
-//! every one of these protocols inert while the session is locked.
+//! The lock is one of them: a lock program covers every monitor and is typed
+//! the password, so a client that could lock could put up a lock screen of
+//! its own and be typed the password instead. Whatever a rule says, the
+//! compositor keeps every other one of these protocols inert while the
+//! session is locked. And a reload that narrows the lock's rule never takes
+//! the session from the lock holding it: nobody would be left to unlock it.
 //!
 //! Some programs exist so the person can oversee an agent, and one handed
 //! to the agent oversees nothing: ennius's review queue, approved by the
@@ -58,11 +62,14 @@ pub enum Protocol {
     /// `perspicax-settings-v1`: the next chord the person presses, before
     /// any binding takes it. perspicax's own, for its settings app.
     Settings,
+    /// `ext-session-lock-v1`: locking the session, and being typed the
+    /// password that unlocks it.
+    SessionLock,
 }
 
 impl Protocol {
     /// Every protocol, in the order a config file lists them.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::ForeignToplevelList,
         Self::ForeignToplevelManagement,
         Self::Workspace,
@@ -70,6 +77,7 @@ impl Protocol {
         Self::OutputManagement,
         Self::Shell,
         Self::Settings,
+        Self::SessionLock,
     ];
 
     /// Its key in the `[protocols]` table.
@@ -83,6 +91,7 @@ impl Protocol {
             Self::OutputManagement => "output-management",
             Self::Shell => "shell",
             Self::Settings => "settings",
+            Self::SessionLock => "session-lock",
         }
     }
 
@@ -317,6 +326,18 @@ impl Rule {
             Self::Off => false,
             Self::Any => true,
             Self::Only(programs) => programs.iter().any(|entry| entry.spelled() == program),
+        }
+    }
+
+    /// This, with each bare name read as the system's copy of that program:
+    /// how `[protocols] session-lock` reads a list.
+    #[must_use]
+    pub fn installed(self) -> Self {
+        match self {
+            Self::Only(programs) => {
+                Self::Only(programs.into_iter().map(Program::installed).collect())
+            }
+            other => other,
         }
     }
 

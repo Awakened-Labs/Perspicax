@@ -590,6 +590,7 @@ impl Config {
             }
         }
         let workspaces = workspaces(profile);
+        let shell = Shell::profile(profile, ShellBuilt::FULL);
         Self {
             profile,
             focus,
@@ -639,9 +640,9 @@ impl Config {
             theme: Theme::default(),
             splash: built.seat,
             xwayland: built.xwayland,
-            protocols: protocols(built),
+            protocols: protocols(built).with(Protocol::SessionLock, lock_rule(&shell.lock)),
             agent: Agent::default(),
-            shell: Shell::profile(profile, ShellBuilt::FULL),
+            shell,
         }
     }
 }
@@ -789,6 +790,17 @@ fn protocols(built: Built) -> Access {
         )
         .with(Protocol::Shell, only(&["perspicax-shell"]))
         .with(Protocol::Settings, only(&[SETTINGS_APP]))
+}
+
+/// Who may lock the session when `[protocols] session-lock` does not say:
+/// the program `[shell] lock` runs, and only it. Named by a bare name, that is
+/// the copy the system installed, so no program the person runs can put a
+/// lock screen of its own up to be typed the password; named by a path, the
+/// file there, which the person chose.
+fn lock_rule(lock: &[String]) -> Rule {
+    lock.first().map_or(Rule::Off, |program| {
+        Rule::Only(vec![Program::parse(program).installed()])
+    })
 }
 
 /// Set in the environment of every program a session on a seat starts: the
@@ -1223,6 +1235,7 @@ struct RawProtocols {
     output_management: Option<RawRule>,
     shell: Option<RawRule>,
     settings: Option<RawRule>,
+    session_lock: Option<RawRule>,
 }
 
 /// `"any"`, `"off"`, or a list of programs.
@@ -1985,6 +1998,10 @@ impl Raw {
             config.decorations.animation = Animation::default();
         }
 
+        let lock_written = self
+            .protocols
+            .as_ref()
+            .is_some_and(|protocols| protocols.session_lock.is_some());
         if let Some(protocols) = self.protocols {
             config.protocols = protocols.apply(config.protocols, built)?;
         }
@@ -1996,6 +2013,11 @@ impl Raw {
                 ShellBuilt::FULL,
                 count(config.workspaces.grid),
             )?;
+        }
+        if !lock_written {
+            config.protocols = config
+                .protocols
+                .with(Protocol::SessionLock, lock_rule(&config.shell.lock));
         }
         // The volume is the shell's to change: with it off, a key written to
         // change it is a mistake, and the profile's are given back to the
@@ -2507,10 +2529,14 @@ impl RawProtocols {
             (Protocol::OutputManagement, self.output_management),
             (Protocol::Shell, self.shell),
             (Protocol::Settings, self.settings),
+            (Protocol::SessionLock, self.session_lock),
         ];
         for (protocol, raw) in written {
             let Some(raw) = raw else { continue };
-            let rule = raw.rule(&format!("protocols.{}", protocol.key()))?;
+            let mut rule = raw.rule(&format!("protocols.{}", protocol.key()))?;
+            if protocol == Protocol::SessionLock {
+                rule = rule.installed();
+            }
             if protocol == Protocol::Screencopy && rule != Rule::Off && !built.capture {
                 return Err(Error::NotBuilt {
                     key: "protocols.screencopy",
@@ -5367,6 +5393,53 @@ mod tests {
         }
         let config = parse("[protocols]\nsettings = \"off\"", SEAT).unwrap();
         assert_eq!(config.protocols.rule(Protocol::Settings), &Rule::Off);
+    }
+
+    #[test]
+    fn only_the_systems_copy_of_the_lock_program_may_lock_by_default() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            let access = Config::profile(profile, SEAT).protocols;
+            assert_eq!(
+                access.rule(Protocol::SessionLock),
+                &Rule::Only(vec![Program::Installed("swaylock".to_owned())])
+            );
+            let lock = |exe| access.admits(Protocol::SessionLock, Some(exe));
+            assert!(lock(Exe::systems("/usr/bin/swaylock")));
+            assert!(!lock(Exe::persons("/home/me/.local/bin/swaylock")));
+            assert!(!lock(Exe::systems("/usr/bin/gtklock")));
+            assert!(!access.admits(Protocol::SessionLock, None));
+        }
+    }
+
+    #[test]
+    fn the_lock_rule_follows_what_shell_lock_runs_unless_written() {
+        let rule = |text: &str| {
+            let config = parse(text, SEAT).unwrap_or_else(|e| panic!("{text}: {e}"));
+            config.protocols.rule(Protocol::SessionLock).clone()
+        };
+        assert_eq!(
+            rule("[shell]\nlock = [\"gtklock\", \"-d\"]"),
+            Rule::Only(vec![Program::Installed("gtklock".to_owned())]),
+            "a bare name: the system's copy"
+        );
+        assert_eq!(
+            rule("[shell]\nlock = [\"/home/me/bin/mylock\"]"),
+            Rule::Only(vec![Program::Path("/home/me/bin/mylock".to_owned())]),
+            "a path: the file the person chose"
+        );
+        assert_eq!(
+            rule(
+                "[shell]\nlock = [\"gtklock\"]\n\
+                 [protocols]\nsession-lock = [\"waylock\", \"/opt/lock/bin/lock\"]"
+            ),
+            Rule::Only(vec![
+                Program::Installed("waylock".to_owned()),
+                Program::Path("/opt/lock/bin/lock".to_owned()),
+            ]),
+            "written, the rule is the person's, and a name in it the system's copy"
+        );
+        assert_eq!(rule("[protocols]\nsession-lock = \"any\""), Rule::Any);
+        assert_eq!(rule("[protocols]\nsession-lock = \"off\""), Rule::Off);
     }
 
     #[test]

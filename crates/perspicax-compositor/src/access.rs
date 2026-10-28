@@ -41,6 +41,16 @@ impl Gate {
         narrowed
     }
 
+    /// A global's filter, for one smithay makes: whether a client may see
+    /// `protocol`'s global, asked as [`Filtered`] asks.
+    pub(crate) fn filter(
+        &self,
+        protocol: Protocol,
+    ) -> impl Fn(&Client) -> bool + Send + Sync + use<> {
+        let gate = self.clone();
+        move |client| gate.admits(protocol, client)
+    }
+
     /// Whether `client` may use `protocol` under the current rules.
     pub(crate) fn admits(&self, protocol: Protocol, client: &Client) -> bool {
         let Some(state) = client.get_data::<ClientState>() else {
@@ -76,6 +86,10 @@ impl crate::state::Compositor {
                 Protocol::OutputManagement => self.revoke_displays(),
                 Protocol::Shell => self.revoke_shell(),
                 Protocol::Settings => self.revoke_settings(),
+                // The lock holding the session keeps it: taken back, the
+                // session would stay locked with nobody to unlock it. Only a
+                // lock asked for from now on is asked the rule again.
+                Protocol::SessionLock => {}
                 #[cfg(feature = "capture")]
                 Protocol::Screencopy => self.revoke_screencopy(),
                 _ => self.revoke_toplevels(protocol),

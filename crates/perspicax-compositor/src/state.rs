@@ -469,10 +469,14 @@ impl Compositor {
             primary_selection: PrimarySelectionState::new::<Self>(display),
             activation: XdgActivationState::new::<Self>(display),
             layer_shell: WlrLayerShellState::new::<Self>(display),
-            // Any client may lock. A lock client is the one kind that must
-            // work when everything else has gone wrong. Only the lock that
-            // holds the session may unlock it: see `crate::lock`.
-            lock_manager: SessionLockManagerState::new::<Self, _>(display, |_| true),
+            // Only what `[protocols] session-lock` admits may lock, so no
+            // other client can put a lock screen of its own up to be typed
+            // the password (#178). Only the lock that holds the session may
+            // unlock it: see `crate::lock`.
+            lock_manager: SessionLockManagerState::new::<Self, _>(
+                display,
+                gate.filter(perspicax_policy::Protocol::SessionLock),
+            ),
             lock: None,
             #[cfg(any(feature = "seat", feature = "capture"))]
             backdrop: crate::backdrop::Backdrop::default(),

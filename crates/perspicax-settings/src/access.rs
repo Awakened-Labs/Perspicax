@@ -69,6 +69,7 @@ fn about(protocol: Protocol) -> &'static str {
         Protocol::OutputManagement => "list the monitors, and change their modes and places",
         Protocol::Shell => "speak for the desktop shell: its menus, and ending the session",
         Protocol::Settings => "hear the next chord pressed, before any binding: this app",
+        Protocol::SessionLock => "lock the screen, and be typed the password that unlocks it",
     }
 }
 

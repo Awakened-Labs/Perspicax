@@ -32,12 +32,22 @@
 //! refused outright ([`crate::ActError::Locked`]). A person who locked their
 //! screen has walked away, and nobody should be driving their applications.
 //!
+//! # Who locks
+//!
+//! Only a program `[protocols] session-lock` admits may lock (#178): by
+//! default, the copy of `[shell] lock`'s program the system installed. A lock
+//! program is typed the password, so any client that could lock could put up
+//! a lock screen of its own, over perspicax's own backdrop, and be typed the
+//! password instead. A client the rule does not admit is not shown the
+//! global, and one that bound it before a reload narrowed the rule is
+//! refused its lock as a second lock is, told `finished`. A reload never
+//! takes the session from the lock already holding it.
+//!
 //! # Who unlocks
 //!
-//! Any client may lock, but one lock holds the session, and only it may
-//! unlock it (#126). Otherwise any program with a Wayland socket could lock
-//! and unlock straight away, and open a session its owner locked and walked
-//! away from. A second lock while the holder's client lives is refused, and
+//! One lock holds the session, and only it may unlock it (#126). Otherwise
+//! any program with a Wayland socket could lock and unlock straight away,
+//! and open a session its owner locked and walked away from. A second lock while the holder's client lives is refused, and
 //! its lock surfaces cover nothing: it is told `finished`, as swaylock is
 //! when swayidle starts a second one. Its `unlock_and_destroy` is the
 //! protocol error the protocol says it is, and unlocks nothing.
@@ -63,6 +73,7 @@
 use std::sync::{Mutex, PoisonError};
 
 use perspicax_node::{Origin, SurfaceId};
+use perspicax_policy::Protocol;
 use smithay::{
     input::pointer::CursorImageStatus,
     output::Output,
@@ -159,8 +170,24 @@ impl SessionLockHandler for Compositor {
     /// Already locked, the lock is refused while the holder's client lives,
     /// and takes the session over once it has gone. See the module's "Who
     /// unlocks".
+    ///
+    /// A lock from a client `[protocols] session-lock` does not admit is
+    /// refused first, whether to lock or to take a session over: it bound the
+    /// global before a reload narrowed the rule. See "Who locks".
     fn lock(&mut self, confirmation: SessionLocker) {
         let lock = confirmation.ext_session_lock().clone();
+        let admitted = lock
+            .client()
+            .is_some_and(|client| self.gate.admits(Protocol::SessionLock, &client));
+        if !admitted {
+            tracing::warn!(
+                origin = ?origin(&lock),
+                "refused a lock: [protocols] session-lock does not admit it"
+            );
+            // Which tells it `finished`.
+            drop(confirmation);
+            return;
+        }
         if let Some(locked) = self.lock.as_mut() {
             if locked.holder.is_alive() {
                 tracing::warn!(
