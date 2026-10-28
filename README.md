@@ -864,6 +864,7 @@ session would find it:
 - Xwayland and `/tmp/.X11-unix`, where the config starts Xwayland;
 - the config, in the words of both programs that read it;
 - the programs the menus' ways to leave run;
+- who may lock the screen, and whether Lock locks;
 - the agent socket.
 
 Then it says whether Claude Code and ennius are told how to reach the desktop
@@ -1430,6 +1431,7 @@ screencopy = ["grim", "/usr/bin/wf-recorder"]   # a name, or a full path
 output-management = ["kanshi", "wlr-randr", "perspicax-settings"]
 shell = ["/usr/local/bin/perspicax-shell"]
 settings = ["/usr/local/bin/perspicax-settings"]
+session-lock = ["swaylock"]    # here a name is the copy the system installed
 
 [agent]                        # what an agent may do on the seat; see below
 socket = true                  # serve it at $XDG_RUNTIME_DIR/perspicax-mcp;
@@ -1448,14 +1450,34 @@ key asks for a menu or a pie or changes the volume, what is made of each
 window and which want attention, and why something the person asked for was
 refused, and may end
 the session, or make a window sticky, keep it on top, roll
-it up or send it to a workspace, and the settings app (`settings`), which hears the next chord pressed, to
-bind it. Listing windows and workspaces is open by default; reading pixels,
+it up or send it to a workspace, the settings app (`settings`), which hears the next chord pressed, to
+bind it, and the lock program (`session-lock`), which covers every monitor
+and is typed the password. Listing windows and workspaces is open by default; reading pixels,
 moving monitors, speaking for the shell and hearing a chord are for the
 usual programs, by name. The settings app is among the display tools, to
 list the monitors on its Outputs page; it changes them only through the
 file. A name is whatever the kernel says the client is running, which any
-program can be called, so a full path is the stricter form. Whatever this
-says, all of them are inert while the screen is locked.
+program can be called, so a full path is the stricter form. A path admits
+only the very file at it, as perspicax finds it: a program needs no root
+for mounts of its own (`unshare`, a rootless container, a sandbox), and in
+them it can put any file at `/usr/bin/grim` and be named by that path. That
+one is refused. Whatever this says, all of them but the lock program's are
+inert while the screen is locked.
+
+`session-lock` says who may lock the screen, so that no other program can
+put up a lock screen of its own for you to type your password into. Left
+out, it is the program `[shell] lock` runs. By a bare name that is only the
+copy the system installed, wherever on `PATH` it is: a file root owns, in
+folders root owns, none of them one you or a group of yours could write. By
+a path, it is the file at it, which you chose. A name written in
+`session-lock` is read the same way, so `["swaylock", "gtklock"]` admits
+those two as your system installed them, and no copy of either in
+`~/.local/bin`. `"any"` lets any program lock, as every program could before
+this rule; `"off"` lets none. A reload that no longer admits the program
+holding the lock leaves it holding the lock, since nobody else could unlock;
+only a lock asked for afterwards is refused. When a program called what the
+rule names is refused, the screen says so ([Notices](#notices)), and
+`perspicax doctor` and the settings app say what weakens the rule.
 
 | Protocol | `[protocols]` key | Spoken by | While locked | When the rule narrows |
 |---|---|---|---|---|
@@ -1466,6 +1488,7 @@ says, all of them are inert while the screen is locked.
 | `wlr-output-management-unstable-v1` v4 | `output-management` | wlr-randr, kanshi, wdisplays; perspicax-settings, to list | every configuration fails | manager finished |
 | `perspicax-shell-v1` (perspicax's own) | `shell` | perspicax-shell | told nothing; requests ignored | finished |
 | `perspicax-settings-v1` (perspicax's own) | `settings` | perspicax-settings | nothing captured; a capture waiting is cancelled | a capture waiting is cancelled |
+| `ext-session-lock-v1` | `session-lock` | swaylock, gtklock, hyprlock, waylock | the lock holding the session unlocks it; another is refused | nothing withdrawn: the lock holding it still unlocks; a new lock is refused |
 
 A rule a reload changes applies to the next client that looks, with no
 global torn down, and what a client already holds is withdrawn as above.
@@ -1849,8 +1872,9 @@ wears.
 The start menu ends with those ways to leave, unless `[shell.start-menu]`
 puts its items in their place without `session = true`: Lock, Log Out, Suspend, Restart
 and Shut Down, as `leave` chooses and orders them (`leave = []` shows none).
-Each runs its program, and shows only when that program is on `PATH`; Log Out
-asks the compositor instead. Typing "sleep", "reboot" or "power off" in the
+Each runs its program, and shows only when that program is on `PATH`, Lock
+only when the system installed its program; Log Out asks the compositor
+instead. Typing "sleep", "reboot" or "power off" in the
 search line finds the last three. Suspend does not lock the screen first;
 `["swayidle", "-w", "before-sleep", "perspicax lock -f"]` in `autostart` does.
 
@@ -1871,7 +1895,11 @@ swaylock read a file of its own, name it, whole, since `~` is not expanded:
 written, and so does any other program, each drawing its own screen.
 
 `perspicax lock` locks as Lock does, from a key or from swayidle: it runs
-`lock` with its own arguments after `lock`'s, and becomes it. It reads the
+`lock` with its own arguments after `lock`'s, and becomes it. Both run a bare
+name's copy the system installed, the first on `PATH`, and never a copy you
+could have written ahead of it, which `[protocols] session-lock` would refuse;
+with none, Lock is not shown, and `perspicax lock` says so and locks nothing.
+A path in `lock` is run as written. It reads the
 config of the session it was started in, which the session tells every program
 it starts in `PERSPICAX_CONFIG`; a config it cannot read still locks, in the
 default theme. Run outside a perspicax session, where nothing of perspicax's is
@@ -2010,13 +2038,15 @@ a refusal or a change of volume, and a notice takes no clicks.
 | a save of the config perspicax refuses | Config not applied: the one in use is kept | why, in a line: `` `shell.mixer.step`: 99 is outside 1 to 25 percent ``, or a line and column then what is wrong there, for a file that is not TOML |
 | a save the shell cannot use, though perspicax took it | Shell settings not applied | why, in a line, the same way |
 | a keyboard layout xkb cannot make | Keyboard layout not applied | xkb could not compile “us,nowhere”; the keyboard keeps its old one |
+| a program called as the lock program is, not the one `[protocols] session-lock` admits | A lock screen was refused | A program called swaylock asked to lock the screen, and is not the one [protocols] session-lock lets lock it |
 
 A notice holds only words of the person's own or the config's: the program
-as `[agent] never` writes it, the config's reason, the layout as written.
-Never a window's title or a program's name for itself, which their clients
-choose. perspicax tells the shell what kind of thing it refused, over
-`perspicax-shell-v1` from version 6, and the rest of the words are the
-shell's. Nothing is said while the screen is locked. An agent reads a
+as `[agent] never` writes it, the config's reason, the layout as written, the
+lock program as `session-lock` writes it. Never a window's title or a
+program's name for itself, which their clients choose, nor the folders a
+refused lock program ran from. perspicax tells the shell what kind of thing
+it refused, over `perspicax-shell-v1` from version 6, a lock program from
+version 8, and the rest of the words are the shell's. Nothing is said while the screen is locked. An agent reads a
 notice as an `Alert`, read out at once, whose name is its headline and why.
 Any shell with `menus` or `panel` says them, `minimal` included, whatever
 `osd` says. With `[shell] enabled = false`, or a shell too old to be told,
@@ -2445,6 +2475,20 @@ screen stays locked, and none of your windows show. Start a lock program again
 session's `WAYLAND_DISPLAY` set -- and it takes the lock over, and unlocks as
 usual.
 
+Only the program `[protocols] session-lock` admits may lock at all: by
+default the copy of `[shell] lock`'s program the system installed. Any other
+is not offered the lock, so a program of yours gone bad, or one in a
+container or a sandbox, cannot cover the screen with a lock screen of its own
+and be typed your password, then unlock. A program called what the lock
+program is called, refused, is said on the screen: "A lock screen was
+refused". It is either Lock run from a copy the system did not install, which
+leaves the screen open, or a program passing itself off as a lock program.
+What this cannot stop is a program running as you outside any sandbox: it can
+start the real lock program with code of its own loaded into it
+(`LD_PRELOAD`), or read the password out of it as its debugger would
+(ptrace), and no rule about which program is running sees that. The kernel's
+Yama `ptrace_scope` limits the second.
+
 ### A game holding the pointer
 
 A game turns its camera by how far the mouse moves, and keeps the pointer from
@@ -2585,7 +2629,8 @@ that leaves it out, the page has the file's rules alone, each mode typed:
 
 **Protocols** shows each `[protocols]` rule and `[agent] launch` in force,
 beside the profile's, with `[agent] socket` and `[agent] never`, and changes
-none of them. Who
+none of them. Under `session-lock` it says what weakens who may lock, as
+`perspicax doctor` does, and so does the Shell page under `lock`. Who
 may reach past their own windows, and what an agent may do, is the file's to
 say, in an editor: the app never writes it, so nothing that drives the app
 can widen it. "Open the file" opens it.
