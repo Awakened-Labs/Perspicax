@@ -26,7 +26,7 @@
 
 mod common;
 
-use common::{Desk, Said, Session, heard, until};
+use common::{Desk, Said, Session, Told, heard, until};
 use perspicax_compositor::{Backend, Command, Virtual};
 use perspicax_policy::{Access, Action, Direction, Grid, Mode, Place, Shape, Side, Towards};
 use smithay_client_toolkit::shell::WaylandSurface as _;
@@ -168,6 +168,7 @@ fn windows_a_dead_shell_left_are_fitted_to_its_room_and_told_where_they_are_afte
     let session = Session::start("frames-shell-gone", two_workspaces(true));
     // The shell, on a client of its own: a panel holding room at the top.
     let (mut shell, mut shell_queue, shell_qh, shell_globals) = session.client();
+    shell.bind_shell(&shell_globals, &shell_qh);
     shell.open_panel(&shell_qh, "panel", PANEL, PANEL_COLOUR);
     until(&mut shell_queue, &mut shell, |shell| {
         shell.layers_drawn == 1
@@ -193,7 +194,16 @@ fn windows_a_dead_shell_left_are_fitted_to_its_room_and_told_where_they_are_afte
         heard(&ear).entered.as_ref() == Some(&right_window.id())
     });
 
-    // A launcher over everything takes the keyboard, as the pie did.
+    // The person presses their binding for a pie, and the shell shows it: a
+    // launcher over everything, which takes the keyboard, the binding having
+    // handed the shell their press (#267).
+    session.press_bound(Action::Pie("launchers".to_owned()));
+    until(&mut shell_queue, &mut shell, |shell| {
+        shell
+            .told
+            .iter()
+            .any(|told| matches!(told, Told::PieMenu(..)))
+    });
     shell.open_launcher(&shell_qh, LAUNCHER, LAUNCHER_COLOUR);
     until(&mut shell_queue, &mut shell, |shell| {
         shell.layers_drawn == 2

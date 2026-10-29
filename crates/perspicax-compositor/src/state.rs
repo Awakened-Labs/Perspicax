@@ -774,7 +774,10 @@ impl Compositor {
     /// or pointed at, would have what was being typed at the launcher. The
     /// window is raised all the same, and has the keys once the launcher
     /// goes, being on top then; one that opened without the person asking
-    /// for it waits, marked, beneath the window they were using (#259).
+    /// for it waits, marked, beneath the window they were using (#259). A
+    /// launcher shown without the keys, nobody having asked for it (#267),
+    /// is a launcher still, and has them when it is clicked: whether one
+    /// takes them as it shows is asked before it gets here (`layers`).
     ///
     /// [`Self::focus_plain`] and [`Self::focus_surface`] ask, which is every
     /// way to the keyboard but a menu's grab, refused while locked (#82) and

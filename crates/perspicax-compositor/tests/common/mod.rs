@@ -245,6 +245,17 @@ impl Session {
         self.command(Command::Perform(action));
     }
 
+    /// The person presses a key that a binding of theirs takes to do
+    /// `action`: the key, then what the binding does with it.
+    /// [`Command::Perform`] stands in for a binding, and presses nothing
+    /// itself; the key, typed at whatever has the keys, is the press. A
+    /// binding's mouse press is the same without the key, but needs
+    /// `capture` to find what is under the hand.
+    pub fn press_bound(&self, action: Action) {
+        self.command(Command::Type("x".to_owned()));
+        self.perform(action);
+    }
+
     pub fn wait_for(&self, ready: impl Fn(&HostFacts) -> bool) -> HostFacts {
         wait_for(&self.facts, ready)
     }

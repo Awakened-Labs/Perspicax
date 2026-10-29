@@ -12,6 +12,18 @@
 //! Handled the same headless and on a seat. The slice's live test is exactly
 //! this: a panel occluding a window, judged by a compositor with no screen.
 //!
+//! # Launchers
+//!
+//! A layer over the windows that wants every key, fuzzel or the shell's
+//! menus and pies, is a launcher: layer-shell has the top-most keep the keys
+//! while it is up (#131). With a person at the seat, it takes them as it
+//! shows only if they asked for it (#267): its program has them, or their
+//! latest press reached or started it
+//! ([`Compositor::launcher_asked_for`]). Any other is shown without them,
+//! over everything all the same, and has them only once it is clicked.
+//! Before, any program could show one and have the rest of a password typed
+//! at a terminal's `sudo` prompt, Enter and all.
+//!
 //! # Unmapped by its client
 //!
 //! A client may take its layer surface off the screen without destroying it,
@@ -32,9 +44,9 @@
 //! panel is from its first commit. So, like a new panel, it keeps its room
 //! from then. It comes back as a new layer, with a new id, and, like a new
 //! one, it takes the keyboard, if it wants every key, only once it shows
-//! something.
+//! something, and only if the person asked for it, asked again.
 
-use std::sync::PoisonError;
+use std::{cell::Cell, sync::PoisonError};
 
 use smithay::{
     desktop::{LayerSurface, WindowSurfaceType, layer_map_for_output},
@@ -131,6 +143,12 @@ impl WlrLayerShellHandler for Compositor {
     }
 }
 
+/// Whether the person asked for a launcher (#267): `None` while it does not
+/// want every key, and decided as it comes to. Kept on the layer as its map
+/// knows it, so one mapped again, a new layer, is asked again.
+#[derive(Default)]
+struct Asked(Cell<Option<bool>>);
+
 /// A layer surface its client unmapped, waiting to be asked for again. See
 /// [`Compositor::withdraw_layer`].
 pub(crate) struct Withdrawn {
@@ -147,9 +165,9 @@ pub(crate) struct Withdrawn {
 impl Compositor {
     /// A commit on a layer surface: rearrange its output (its size or
     /// exclusive zone may have changed), send its first configure if this is
-    /// its first commit, and give it the keyboard if it asks for all of it
-    /// and has something to show. Returns its id, for the damage bookkeeping
-    /// every surface gets.
+    /// its first commit, and give it the keyboard if it asks for all of it,
+    /// has something to show, and the person asked for it. Returns its id,
+    /// for the damage bookkeeping every surface gets.
     pub(crate) fn layer_committed(&mut self, surface: &WlSurface) -> Option<SurfaceId> {
         let output = self.space.outputs().find(|output| {
             layer_map_for_output(output)
@@ -190,15 +208,16 @@ impl Compositor {
         if !configured {
             layer.layer_surface().send_configure();
         }
-        // A launcher or lock-ish overlay that wants every key gets them the
-        // moment it is up, unless the session is locked (`focus_plain`
+        // A launcher gets the keys the moment it is up, if the person asked
+        // for it (#267), unless the session is locked (`focus_plain`
         // refuses), and keeps them while it is up (#131). Up is its first
         // picture, not the commit that asked for its configure: until it
         // shows something it is not mapped, and the keys typed at it would go
-        // to a surface nobody can see. `OnDemand` waits for a click (see the
-        // seat's input path).
-        let shown = crate::geometry::shown(surface).is_some();
-        if wants_every_key(&layer) && shown && self.keyboard_focus().as_ref() != Some(surface) {
+        // to a surface nobody can see. One nobody asked for waits for a
+        // click, as `OnDemand` does (see the seat's input path).
+        let wants = wants_every_key(&layer) && crate::geometry::shown(surface).is_some();
+        if self.asked_as_it_wants(&layer, wants) && self.keyboard_focus().as_ref() != Some(surface)
+        {
             self.focus_plain(surface.clone());
         }
         // The usable area changed under the windows: a panel appearing
@@ -212,6 +231,39 @@ impl Compositor {
         self.repoint();
         self.backend.redraw();
         layer.user_data().get::<SurfaceId>().copied()
+    }
+
+    /// Whether the person asked for `layer`, a launcher that shows, if it
+    /// `wants` every key now (#267).
+    ///
+    /// Asked as it comes to want them, as a window is asked as it opens, and
+    /// the answer kept while it does. Asked again at every picture, a
+    /// launcher refused would take the keys at its next one the moment its
+    /// program had them, or the person's press reached it, whatever the
+    /// person was doing by then: one that animates draws many. Forgotten as
+    /// soon as it does not want them, so the next time is asked afresh.
+    fn asked_as_it_wants(&self, layer: &LayerSurface, wants: bool) -> bool {
+        layer.user_data().insert_if_missing(Asked::default);
+        let Some(Asked(asked)) = layer.user_data().get::<Asked>() else {
+            return false;
+        };
+        if !wants {
+            asked.set(None);
+            return false;
+        }
+        if let Some(asked) = asked.get() {
+            return asked;
+        }
+        let verdict = self.launcher_asked_for(layer.wl_surface());
+        if !verdict {
+            tracing::info!(
+                surface = ?layer.user_data().get::<SurfaceId>().map(|id| id.0),
+                namespace = layer.namespace(),
+                "a launcher shown without the keys: the person did not ask for it"
+            );
+        }
+        asked.set(Some(verdict));
+        verdict
     }
 
     /// Take a layer surface its client unmapped off its output, as though it

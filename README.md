@@ -991,16 +991,18 @@ without a person at the seat, and an agent can no longer reach it. Asked for
 again, it is configured as a new one is, keeps its room again from the
 commit that asks, and returns with a new id. One whose monitor is unplugged
 while it is away is told it is closed. A launcher that asks for every key,
-new or back, has them from the first picture it draws, and not before.
+new or back, has them from the first picture it draws, and not before, if
+the person asked for it (#267).
 
-And it keeps them while it is up, as layer-shell says the top-most one that
-asks for every key does: fuzzel, say, or the shell's own menus and pies. A
-window that opens under it, asks to be brought forward, or is clicked,
-pointed at or picked in the taskbar is raised as it would be, but takes
-none of the keys typed at the launcher. It has them once the launcher goes,
-being on top then, if the person asked for it; one another program opened
-meanwhile waits beneath the window they were using, marked (#259). Only
-another launcher takes them, the newest being the top-most (#131).
+And once it has them it keeps them while it is up, as layer-shell says the
+top-most one that asks for every key does: fuzzel, say, or the shell's own
+menus and pies. A window that opens under it, asks to be brought forward, or
+is clicked, pointed at or picked in the taskbar is raised as it would be,
+but takes none of the keys typed at the launcher. It has them once the
+launcher goes, being on top then, if the person asked for it; one another
+program opened meanwhile waits beneath the window they were using, marked
+(#259). Only another launcher takes them, the newest being the top-most
+(#131).
 
 Nor does a token any program made bring a window forward with the keys. An
 application asks for that with an activation token from the program the
@@ -1027,11 +1029,9 @@ was handed. A notification or a dock never has the keys, so its token is
 vouched for instead by the click it was just sent: the person's latest
 press, under ten seconds old and named exactly. So clicking a notification's
 action brings its program forward. A program keeps no more than eight tokens
-at a time, so one making them in a loop has nowhere to grow. Left open: a
-program may open a launcher of its own, a layer asking for every key, and it
-has the keys as it opens (#267), so a token it makes there outlives it. And,
-as on wlroots, a program that laid an invisible layer over the screen would
-be sent the clicks meant for what is beneath it, and could make tokens with
+at a time, so one making them in a loop has nowhere to grow. Left open, as
+on wlroots: a program that laid an invisible layer over the screen would be
+sent the clicks meant for what is beneath it, and could make tokens with
 them, though nothing beneath would answer the person's clicks while it was
 there.
 
@@ -1067,6 +1067,31 @@ token that names no input is forgotten as it is made, so spending one marks
 nothing (#269); and any program admitted to `foreign-toplevel-management`,
 which is any by default, can still give a window the keys with its
 `activate` request (#270).
+
+Nor does a launcher take the keys by showing (#267). A launcher is a layer
+over the windows that asks for every key: fuzzel, a screenshot tool's
+selection, the shell's own menus and pies. With a person at the seat it
+takes them as it shows only if the person asked for it, as for a window: its
+program has the keys already, a run box a terminal opened say; or their
+latest press, under ten seconds old, reached its program or started it -- a
+binding that starts fuzzel, an Enter at a terminal, a click on the panel's
+start button. Never just because nothing has the keys, as a window may: a
+launcher keeps them from every window while it is up, so one shown on an
+empty desk by a program nobody started would keep them from the terminal
+opened next. It is asked as it comes to want every key, not again at each
+picture it draws, and asked afresh the next time it comes to want them. Any
+other launcher is shown without the keys, over everything all the same, and
+has them once the person clicks it. A binding that asks the shell for a menu
+or a pie hands the shell its press, so the menu opens with the keys, as one
+opened from the panel does. One an agent opens while a window has the keys
+opens without them, and so does a program the agent picks from it, since the
+token the shell hands that program is good only while the menu has the keys.
+Headless, with nobody at the seat, every launcher takes the keys as it shows,
+as before. Left open: a key pressed between a binding and its launcher's
+first picture is the person's latest press, so the launcher shows without
+the keys, as a window opens without them; and a launcher whose descent from
+the press is lost, a service started at login that a binding asks over D-Bus
+to show itself say, shows without them until it is clicked.
 
 A new window opens on the monitor under the pointer, in the room its panels
 leave, cascaded from the top-left corner: 32 pixels further in for each

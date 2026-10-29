@@ -148,21 +148,23 @@ fn a_window_that_opens_under_a_launcher_takes_no_keys_from_it() {
 /// With a person at the seat, a window another program opens under the
 /// launcher, which they did not start from it, opens without the keys
 /// (#259). Once the launcher goes, the window they were using has them
-/// back, over it; the new one waits beneath until they give it them.
+/// back, over it; the new one waits beneath until they give it them. The
+/// launcher is the page's own, a run box it opened say: one another
+/// program showed would have taken nothing from the page (#267).
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_window_another_program_opens_under_a_launcher_waits_for_the_person_once_it_goes() {
     let session = seated("launcher-keys-another-seated");
-    let (mut desk, mut queue, _, _, ear) = page(&session);
-    let (launcher, launcher_queue, _, _) = launcher(&session);
-    until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
+    let (mut desk, mut queue, qh, _, ear) = page(&session);
+    open_launcher(&mut desk, &mut queue, &qh, &ear);
 
     let (mut other, mut other_queue, other_qh, other_globals) = session.client();
     let other_ear = other.bind_keyboard(&other_globals, &other_qh);
     other.open_coloured(&other_qh, "late", "late", LATE);
     until(&mut other_queue, &mut other, |other| other.has_drawn(0));
 
-    drop((launcher, launcher_queue));
+    // The launcher goes, and the page stays.
+    desk.layers.clear();
     let page = desk.windows[0].wl_surface().id();
     until(&mut queue, &mut desk, |_| {
         heard(&ear).entered.as_ref() == Some(&page)
