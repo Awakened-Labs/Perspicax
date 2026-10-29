@@ -21,6 +21,20 @@
 //! Enter would send it. Unlocked, the window on top has the keyboard, often
 //! the one that opened meanwhile.
 //!
+//! A gate at every way to the keyboard is a list, and a way it misses sends
+//! the password to whatever took the keys. So the rule is kept where keys go
+//! out too (#197). [`Compositor::send_key`] puts the keyboard back on the
+//! lock screen before each key goes, and `crate::focus` drops a key or a
+//! change of the modifiers bound anywhere else. A focus the gate missed is
+//! said in the log as it happens, and put right at once
+//! ([`Compositor::keep_keys_on_lock`]). The lock screen that has the keys is
+//! the one on the pointer's monitor, else the first still up, else nothing:
+//! a key typed before any is up reaches nobody.
+//!
+//! A lock surface goes with its surface: swaylock takes down a monitor's as
+//! the monitor is unplugged. It covers nothing from then on, and its keys go
+//! at once to another still up, or to the next to come.
+//!
 //! The pointer is taken from the windows the moment the session locks, not
 //! at the next motion: a hand at rest, or a tap of the touchpad to wake the
 //! screen, would otherwise click in the window under it, unseen (#82). The
@@ -69,6 +83,14 @@
 //! unlock check and [`AskedOn`] go, and so does `delegate_session_lock!`'s
 //! stand-in, if what [`Compositor::lock_gone`] does has found another home:
 //! upstream tells the handler nothing when the holder goes.
+//!
+//! Nor does 0.7.0 say which lock surface a destroyed
+//! `ext_session_lock_surface_v1` was: `LockSurface` keeps it to itself. So a
+//! lock surface stops covering when its `wl_surface` goes
+//! ([`Compositor::uncover`]), which swaylock destroys with it. A client that
+//! destroys only the lock surface keeps covering with what it drew last,
+//! where the protocol asks for a plain colour; its keys still go to it. Once
+//! smithay says which lock surface went, it goes then.
 
 use std::sync::{Mutex, PoisonError};
 
