@@ -89,6 +89,12 @@ fn program(
     });
     let id = titled(&session.facts.read(), title).expect("waited for").id;
     if !has_keys(&desk, &ear) {
+        // The person's press reaches the taskbar they pick it in (#270):
+        // this program's own, bound as the shell for the stand-in to hand
+        // the press to, and the only one bound so.
+        desk.bind_shell(&globals, &qh);
+        queue.roundtrip(&mut desk).expect("bound");
+        common::press_reaching(session, &mut desk, &mut queue);
         desk.activate(title);
     }
     until(&mut queue, &mut desk, |desk| has_keys(desk, &ear));

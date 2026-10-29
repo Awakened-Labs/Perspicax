@@ -27,6 +27,9 @@
 //! A launcher, a layer over the windows that wants every key, is asked the
 //! same as it comes to want them (`layers`, #267), but never for nothing
 //! having the keys: it keeps them from every window while it is up (#131).
+//! And so is a taskbar, as it asks to bring a window forward, minimize it or
+//! close it (`toplevels::wlr`, #270): what it does to the window in use moves
+//! the keys.
 
 use std::{cell::RefCell, time::Instant};
 
@@ -46,8 +49,8 @@ use crate::{
 };
 
 /// One of the policy's answers to whether the person asked for something a
-/// client shows: [`Attention::asked_for`] for a window, or
-/// [`Attention::asked_of`] for a launcher.
+/// client shows or does: [`Attention::asked_for`] for a window, or
+/// [`Attention::asked_of`] for a launcher or a taskbar.
 type Rule =
     fn(&Attention<Serial, ClientId>, &ClientId, Option<&ClientId>, Option<Turn>, Instant) -> bool;
 
@@ -78,7 +81,15 @@ impl Compositor {
     /// it comes to want every key (#267): as for a window, but never for
     /// nothing having the keys. Always, with nobody at the seat.
     pub(crate) fn launcher_asked_for(&self, surface: &WlSurface) -> bool {
-        self.asked_by(surface.client().as_ref(), Attention::asked_of)
+        self.asked_of(surface.client().as_ref())
+    }
+
+    /// Whether the person asked something of `client`: that a launcher it
+    /// shows take the keys, or that a window be done what its taskbar asks
+    /// (#270). As a window is asked for, but never for nothing having the
+    /// keys. Always, with nobody at the seat; never, of a client gone.
+    pub(crate) fn asked_of(&self, client: Option<&Client>) -> bool {
+        self.asked_by(client, Attention::asked_of)
     }
 
     /// Whether the person asked for what `client` shows, by `rule`: one of

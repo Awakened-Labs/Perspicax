@@ -9,6 +9,18 @@
 //! another brings it forward in its group's place. Closing asks the client,
 //! which may decline.
 //!
+//! And done only for the person (#270). Activating a window gives it the
+//! keys, and minimizing or closing the window in use hands them on to the
+//! one beneath, so a program nobody asked could take the rest of a password
+//! typed at a terminal's `sudo` prompt with one request. With a person at
+//! the seat a taskbar acts only if they asked it to
+//! ([`perspicax_policy::Attention::asked_of`]): it has the keys, a switcher
+//! say, or their latest press reached it, a task clicked, or started it, a
+//! binding that runs `wlrctl`. Anything else is ignored. A program asking to
+//! bring its own window forward has it marked as wanting attention, as one
+//! whose token was refused does; another program's window is left as it is.
+//! Headless, with nobody at the seat, a taskbar acts as asked.
+//!
 //! A request is ignored while the session is locked, and from a client the
 //! rules no longer admit.
 
@@ -177,6 +189,30 @@ pub(super) fn revoke(state: &mut Compositor) {
     }
 }
 
+/// What `request` asks done to a window, by name, if it asks anything: every
+/// request but where the taskbar's button is, which only tells, and Destroy.
+fn asks(request: &zwlr_foreign_toplevel_handle_v1::Request) -> Option<&'static str> {
+    use zwlr_foreign_toplevel_handle_v1::Request;
+    Some(match request {
+        Request::Activate { .. } => "activate",
+        Request::Close => "close",
+        Request::SetMinimized => "set_minimized",
+        Request::UnsetMinimized => "unset_minimized",
+        Request::SetMaximized => "set_maximized",
+        Request::UnsetMaximized => "unset_maximized",
+        Request::SetFullscreen { .. } => "set_fullscreen",
+        Request::UnsetFullscreen => "unset_fullscreen",
+        _ => return None,
+    })
+}
+
+/// Whether `window` is one of `client`'s own.
+fn owns(client: &Client, window: &crate::framed::Framed) -> bool {
+    surface_of(window)
+        .and_then(|surface| surface.client())
+        .is_some_and(|owner| owner == *client)
+}
+
 /// The state array: each state a little-endian `u32`.
 fn states(snapshot: &Snapshot) -> Vec<u8> {
     use zwlr_foreign_toplevel_handle_v1::State;
@@ -292,6 +328,20 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, SurfaceId> for Compositor {
         let Some(window) = state.any_window(*id) else {
             return;
         };
+        if let Some(asked) = asks(&request)
+            && !state.asked_of(Some(client))
+        {
+            tracing::info!(
+                surface = id.0,
+                asked,
+                "a taskbar's request ignored: the person did not ask its program for it"
+            );
+            if matches!(request, Request::Activate { .. }) && owns(client, &window) {
+                state.refused_keys(&window);
+                state.publish_facts();
+            }
+            return;
+        }
         let toplevel = window.toplevel().cloned();
         match request {
             Request::Activate { .. } => state.activate_window(&window),
@@ -337,7 +387,8 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, SurfaceId> for Compositor {
 impl Compositor {
     /// Bring a window to the person, as clicking it in a taskbar does: a tab
     /// behind another comes forward in its group's place; anything else is
-    /// restored, onto its workspace, raised and given the keyboard.
+    /// restored, onto its workspace, raised and given the keyboard. Only
+    /// when the person asked the taskbar for it (#270).
     pub(crate) fn activate_window(&mut self, window: &crate::framed::Framed) {
         if self.behind_tab(window).is_some() {
             self.activate_tab(window);
