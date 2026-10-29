@@ -389,6 +389,12 @@ impl Compositor {
     /// behind another comes forward in its group's place; anything else is
     /// restored, onto its workspace, raised and given the keyboard. Only
     /// when the person asked the taskbar for it (#270).
+    ///
+    /// Asked for, it wants their attention no longer, keyboard or not. A
+    /// launcher of the taskbar's own may have the keys -- the shell's pie,
+    /// or a task's menu -- and keep them till it goes. They go then to the
+    /// topmost window that wants none, which would pass over this one, were
+    /// it still marked, for the window it was raised over.
     pub(crate) fn activate_window(&mut self, window: &crate::framed::Framed) {
         if self.behind_tab(window).is_some() {
             self.activate_tab(window);
@@ -399,6 +405,7 @@ impl Compositor {
         };
         self.restore(window);
         self.space.raise_element(window, false);
+        self.heeded(id);
         self.focus_surface(surface, id);
         self.publish_facts();
     }

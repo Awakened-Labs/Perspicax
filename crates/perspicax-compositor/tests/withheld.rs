@@ -1357,6 +1357,40 @@ fn a_taskbar_of_the_program_in_use_brings_a_window_forward() {
     session.stop(((desk, queue), (other, other_queue)));
 }
 
+/// A window that opened without the keys, picked while a launcher of the
+/// taskbar's own has them -- the shell's pie, a task's menu -- comes
+/// forward, and has them once the launcher goes: the person asked for it.
+/// Not the window it came forward over, which the keys would go back to
+/// were it still marked as wanting attention.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_picked_while_the_taskbars_own_launcher_has_the_keys_has_them_once_it_goes() {
+    let session = seated("withheld-taskbar-launcher");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let (mut other, mut other_queue, _, _, other_ear) = program(&session, "other");
+    let (mut panel, mut panel_queue) = panel(&session, 7);
+    told_so(&mut panel, &mut panel_queue, "other", true);
+
+    common::press_reaching(&session, &mut panel, &mut panel_queue);
+    let panel_qh = panel_queue.handle();
+    show_launcher(&mut panel, &mut panel_queue, &panel_qh);
+    until(&mut queue, &mut desk, |desk| !has_keys(desk, &ear, 0));
+    panel.activate("other");
+    panel_queue.roundtrip(&mut panel).expect("the pick sent");
+    session.wait_for(|facts| on_top(facts).as_deref() == Some("other"));
+
+    panel.layers.clear();
+    panel_queue
+        .roundtrip(&mut panel)
+        .expect("the launcher gone");
+    until(&mut other_queue, &mut other, |other| {
+        has_keys(other, &other_ear, 0)
+    });
+    told_so(&mut panel, &mut panel_queue, "other", false);
+
+    session.stop(((desk, queue), (other, other_queue), (panel, panel_queue)));
+}
+
 /// The person clicks a panel, which never has the keys, and what its
 /// taskbar asks next is theirs: the click reached it.
 #[cfg(feature = "capture")]
