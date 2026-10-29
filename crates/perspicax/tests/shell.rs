@@ -8,7 +8,8 @@
 //! window that opened without the keys, with a person at the seat, said on
 //! its tab to want attention until it is brought forward (#259); an
 //! application chosen from a menu the person opened brought forward with the
-//! token the shell handed it (#258); the desktop folder's icons read as a
+//! token the shell handed it (#258), and one chosen from a menu an agent
+//! opened left without the keys (#267); the desktop folder's icons read as a
 //! list, and one selected by a click.
 //!
 //! Each test runs a compositor that keeps its desk current the way `--mcp`
@@ -385,6 +386,36 @@ fn an_application_chosen_from_a_menu_comes_forward_with_the_token_the_shell_hand
                 "the application's window forward, with the keys",
                 |_, facts| focused_last(facts, "Probe"),
             );
+        });
+    });
+}
+
+/// Issue #267: a start menu an agent opens while a window has the keys
+/// opens without them, as a launcher any program shows does that the
+/// person did not ask for. So the token the shell hands what the agent
+/// picks from it is no good, and the application opens without the keys
+/// too, its tab saying so, while the window the person was using keeps
+/// them.
+#[test]
+#[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
+fn an_application_chosen_from_a_menu_an_agent_opened_opens_without_the_keys() {
+    let seated = Backend::headless((1280, 800)).with_person();
+    host_on("token-agent", seated, CLASSIC, |hosted| {
+        with_probe_installed(hosted, || {
+            hosted.click("button:Start", PointerButton::Left);
+            pick_probe(hosted);
+            hosted.wait_until("the application's tab wanting attention", |index, facts| {
+                described(index, facts, "Probe", Some("Wants attention"))
+            });
+            // Time enough for the application to spend its token, as it does
+            // as soon as its window is open.
+            thread::sleep(SETTLE);
+            hosted.desk.read(&mut |_, facts| {
+                assert!(
+                    focused_last(facts, "First").is_some(),
+                    "the first window keeps the keys"
+                );
+            });
         });
     });
 }
