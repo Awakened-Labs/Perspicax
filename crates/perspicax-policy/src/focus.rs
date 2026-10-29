@@ -202,7 +202,8 @@ pub struct Turn(u64);
 /// pressed before its token is made, and a release that moves the keys is
 /// counted as they move.
 ///
-/// It also keeps the person's latest press, and which client it reached. A
+/// It also keeps the person's latest press, and which client it reached, or
+/// was handed on to by a binding asking the shell for a menu (#267). A
 /// notification or a dock never has the keys, and the click it was sent is
 /// what vouches for a token it makes, until the next turn.
 ///
@@ -314,6 +315,17 @@ impl<S: PartialEq, C: PartialEq> Attention<S, C> {
         }
     }
 
+    /// A binding of perspicax's handed the person's latest press on to
+    /// `client`, asking its shell for a menu or a pie (#267): as though the
+    /// press had reached it, starting nothing there. A binding takes the
+    /// press for itself, and no client is sent it, so the menu the shell
+    /// shows in answer would otherwise be one nobody asked for.
+    pub fn handed(&mut self, client: C) {
+        if let Some(press) = &mut self.press {
+            press.reached = Some(client);
+        }
+    }
+
     /// Whether `client` was sent the person's latest press as `serial`, less
     /// than [`ACTIVATION_WINDOW`] before `now`, and nothing has turned since.
     #[must_use]
@@ -364,7 +376,28 @@ impl<S: PartialEq, C: PartialEq> Attention<S, C> {
         started_on: Option<Turn>,
         now: Instant,
     ) -> bool {
-        holder.is_none_or(|holder| holder == client)
+        holder.is_none() || self.asked_for_launcher(client, holder, started_on, now)
+    }
+
+    /// Whether a launcher `client` shows -- a layer over the windows that
+    /// wants every key -- may take the keys from `holder` (#267): as a
+    /// window may, but never for nothing having them.
+    ///
+    /// A window that takes the keys gives them up to the next one the person
+    /// clicks. A launcher keeps them from every window while it is up
+    /// (#131), so one given them on an empty desk by a program nobody
+    /// started would keep them from the terminal the person opened next.
+    /// What the person starts from an empty desk, with a binding or a click,
+    /// is asked for all the same.
+    #[must_use]
+    pub fn asked_for_launcher(
+        &self,
+        client: &C,
+        holder: Option<&C>,
+        started_on: Option<Turn>,
+        now: Instant,
+    ) -> bool {
+        holder == Some(client)
             || self.press.as_ref().is_some_and(|press| {
                 fresh(press.at, now)
                     && (press.reached.as_ref() == Some(client) || started_on == Some(press.turn))
@@ -780,6 +813,91 @@ mod tests {
         assert_eq!(attention.started(&lineage, at), stamp);
         assert!(attention.asked_for(&'p', Some(&'t'), stamp, at));
         assert!(!attention.vouches(&7, &'t', at), "no token rides on it");
+    }
+
+    /// A run box the terminal in use opened, say (#267).
+    #[test]
+    fn a_launcher_of_the_program_with_the_keys_may_take_them() {
+        assert!(attention().asked_for_launcher(&'a', Some(&'a'), None, Instant::now()));
+    }
+
+    /// Where a window may: a launcher keeps the keys from every window
+    /// while it is up (#131).
+    #[test]
+    fn a_launcher_shown_where_nothing_has_the_keys_may_not_take_them() {
+        let attention = attention();
+        let now = Instant::now();
+        assert!(!attention.asked_for_launcher(&'l', None, None, now));
+        assert!(attention.asked_for(&'l', None, None, now), "a window may");
+    }
+
+    /// The issue's own case: a program in the background shows a launcher
+    /// while the person types at a terminal.
+    #[test]
+    fn a_launcher_of_another_program_may_not_take_the_keys() {
+        let at = Instant::now();
+        let mut attention = pressed_at(at);
+        attention.reached(&7, 't', Some(TERMINAL));
+        assert!(!attention.asked_for_launcher(&'l', Some(&'t'), None, at));
+    }
+
+    /// The shell's panel clicked, opening its menu.
+    #[test]
+    fn a_launcher_of_the_program_the_latest_press_reached_may_take_the_keys() {
+        let at = Instant::now();
+        let mut attention = pressed_at(at);
+        attention.reached(&7, 's', None);
+        assert!(attention.asked_for_launcher(&'s', Some(&'t'), None, at));
+        attention.pressed(8, at, 101);
+        assert!(
+            !attention.asked_for_launcher(&'s', Some(&'t'), None, at),
+            "pressed since"
+        );
+    }
+
+    /// fuzzel, from a binding or an Enter at a terminal.
+    #[test]
+    fn a_launcher_of_a_program_the_latest_press_started_may_take_the_keys() {
+        let at = Instant::now();
+        let mut attention = pressed_at(at);
+        attention.reached(&7, 't', Some(TERMINAL));
+        let stamp = attention.started(&[process(70, 103), TERMINAL], at);
+        assert!(attention.asked_for_launcher(&'f', Some(&'t'), stamp, at));
+        let just = ACTIVATION_WINDOW - Duration::from_millis(1);
+        assert!(attention.asked_for_launcher(&'f', Some(&'t'), stamp, at + just));
+        assert!(
+            !attention.asked_for_launcher(&'f', Some(&'t'), stamp, at + ACTIVATION_WINDOW),
+            "too long ago"
+        );
+    }
+
+    /// Logo tapped, and the shell asked for its start menu.
+    #[test]
+    fn a_press_a_binding_handed_on_reaches_the_client_it_was_handed_to() {
+        let at = Instant::now();
+        let mut attention = pressed_at(at);
+        assert!(!attention.asked_for_launcher(&'s', Some(&'t'), None, at));
+        attention.handed('s');
+        assert!(attention.asked_for_launcher(&'s', Some(&'t'), None, at));
+        assert!(
+            attention
+                .started(&[process(70, 103), TERMINAL], at)
+                .is_none(),
+            "and starts nothing"
+        );
+        attention.pressed(8, at, 101);
+        assert!(
+            !attention.asked_for_launcher(&'s', Some(&'t'), None, at),
+            "pressed since"
+        );
+    }
+
+    /// The shell asked for a menu by a test, with nothing pressed.
+    #[test]
+    fn handing_on_with_no_press_reaches_nothing() {
+        let mut attention = attention();
+        attention.handed('s');
+        assert!(!attention.asked_for_launcher(&'s', Some(&'t'), None, Instant::now()));
     }
 
     #[test]
