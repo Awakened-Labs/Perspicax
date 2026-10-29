@@ -7,9 +7,9 @@
 //! taskbar by its title, and brought forward by a click on its tab; a
 //! window that opened without the keys, with a person at the seat, said on
 //! its tab to want attention until it is brought forward (#259); an
-//! application chosen from a menu brought forward with the token the shell
-//! handed it (#258); the desktop folder's icons read as a list, and one
-//! selected by a click.
+//! application chosen from a menu the person opened brought forward with the
+//! token the shell handed it (#258); the desktop folder's icons read as a
+//! list, and one selected by a click.
 //!
 //! Each test runs a compositor that keeps its desk current the way `--mcp`
 //! does, and starts shells against its socket as a person's session would,
@@ -30,12 +30,13 @@ use std::{
 };
 
 use perspicax::{desk::Desk, keep::keep_current, session};
-use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop};
+use perspicax_compositor::{Backend, Command as Do, Config, Facts, Host, Requests, Stop};
 use perspicax_index::{
     HostFacts, Index, Layer, PointerButton, Refusal, Selector, SurfaceKind, Verb,
 };
 use perspicax_mcp::{Denied, Desktop};
 use perspicax_node::{NodeId, Origin, Role, SurfaceId};
+use perspicax_policy::Action;
 
 /// The one monitor's desktop: the surface's namespace and its window's name.
 const DESKTOP: &str = "perspicax-desktop-HEADLESS-1";
@@ -368,63 +369,76 @@ fn a_window_refused_the_keys_it_asked_for_says_so_on_its_tab() {
 /// Issue #258: with a person at the seat, an application chosen from the
 /// start menu while a window has the keys opens without them, as any
 /// program's window does that the person's press did not start: an agent's
-/// clicks are not the person's. But the shell handed it a token, asked for
-/// while the menu still had the keys, and spending it, as GTK does, brings
-/// its window forward with them.
+/// clicks are not the person's. But the person opened the menu, with a
+/// binding, so it had the keys (#267); the shell handed the application a
+/// token, asked for while the menu still had them, and spending it, as GTK
+/// does, brings its window forward with them.
 #[test]
 #[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
 fn an_application_chosen_from_a_menu_comes_forward_with_the_token_the_shell_handed_it() {
     let seated = Backend::headless((1280, 800)).with_person();
     host_on("token", seated, CLASSIC, |hosted| {
-        // One application installed: a copy of this binary, as
-        // `token_probe`.
-        let base =
-            std::env::temp_dir().join(format!("perspicax-shell-token-{}", std::process::id()));
-        let (data, none) = (base.join("data"), base.join("none"));
-        std::fs::create_dir_all(data.join("applications")).expect("a data folder");
-        std::fs::create_dir_all(&none).expect("an empty one");
-        let exe = std::env::current_exe().expect("this test's binary");
-        std::fs::write(
-            data.join("applications/probe.desktop"),
-            format!(
-                "[Desktop Entry]\nType=Application\nName=Probe\nExec={} --exact token_probe --ignored --nocapture\nCategories=Utility;\n",
-                exe.display()
-            ),
-        )
-        .expect("a desktop entry");
-        let _shell = hosted.shell_with(&[
-            ("XDG_DATA_HOME", data.as_os_str()),
-            ("XDG_DATA_DIRS", none.as_os_str()),
-            (TOKEN_PROBE, std::ffi::OsStr::new("1")),
-        ]);
-        hosted.wait_until("the start button read and joined", |index, facts| {
-            on_layer(index, facts, (Role::Button, "Start"), (Layer::Top, PANEL))
+        with_probe_installed(hosted, || {
+            hosted.press_binding(Action::StartMenu);
+            pick_probe(hosted);
+            hosted.wait_until(
+                "the application's window forward, with the keys",
+                |_, facts| focused_last(facts, "Probe"),
+            );
         });
-        let _first = hosted.window("First");
-        hosted.wait_until("the first window with the keys", |_, facts| {
-            focused_last(facts, "First")
-        });
-
-        hosted.click("button:Start", PointerButton::Left);
-        hosted.wait_until("the start menu read and joined", |index, facts| {
-            menu_item(index, facts, "Accessories")
-        });
-        hosted.click("menuitem:Accessories", PointerButton::Left);
-        hosted.wait_until("its submenu read", |index, facts| {
-            menu_item(index, facts, "Probe")
-        });
-        hosted.click("menuitem:Probe", PointerButton::Left);
-        hosted.wait_until(
-            "the application's window forward, with the keys",
-            |_, facts| focused_last(facts, "Probe"),
-        );
-        std::fs::remove_dir_all(&base).ok();
     });
 }
 
-/// Not a test: the application [`an_application_chosen_from_a_menu_comes_forward_with_the_token_the_shell_handed_it`]
-/// installs, in a process of its own: a window titled "Probe", which spends
-/// the token it was started with, until the compositor goes.
+/// Install one application, a copy of this binary as [`token_probe`], start
+/// a shell that lists it alone, and open a window titled "First", which
+/// has the keys; then `body`, and the application is removed.
+fn with_probe_installed(hosted: &Hosted, body: impl FnOnce()) {
+    // Named for the compositor's socket, which is named for the test.
+    let base = std::env::temp_dir().join(format!("{}-applications", hosted.socket));
+    let (data, none) = (base.join("data"), base.join("none"));
+    std::fs::create_dir_all(data.join("applications")).expect("a data folder");
+    std::fs::create_dir_all(&none).expect("an empty one");
+    let exe = std::env::current_exe().expect("this test's binary");
+    std::fs::write(
+        data.join("applications/probe.desktop"),
+        format!(
+            "[Desktop Entry]\nType=Application\nName=Probe\nExec={} --exact token_probe --ignored --nocapture\nCategories=Utility;\n",
+            exe.display()
+        ),
+    )
+    .expect("a desktop entry");
+    let _shell = hosted.shell_with(&[
+        ("XDG_DATA_HOME", data.as_os_str()),
+        ("XDG_DATA_DIRS", none.as_os_str()),
+        (TOKEN_PROBE, std::ffi::OsStr::new("1")),
+    ]);
+    hosted.wait_until("the start button read and joined", |index, facts| {
+        on_layer(index, facts, (Role::Button, "Start"), (Layer::Top, PANEL))
+    });
+    let _first = hosted.window("First");
+    hosted.wait_until("the first window with the keys", |_, facts| {
+        focused_last(facts, "First")
+    });
+    body();
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// The agent picks the application [`with_probe_installed`] installed from
+/// the start menu, once it is open: Accessories, then Probe.
+fn pick_probe(hosted: &Hosted) {
+    hosted.wait_until("the start menu read and joined", |index, facts| {
+        menu_item(index, facts, "Accessories")
+    });
+    hosted.click("menuitem:Accessories", PointerButton::Left);
+    hosted.wait_until("its submenu read", |index, facts| {
+        menu_item(index, facts, "Probe")
+    });
+    hosted.click("menuitem:Probe", PointerButton::Left);
+}
+
+/// Not a test: the application [`with_probe_installed`] installs, in a
+/// process of its own: a window titled "Probe", which spends the token it
+/// was started with, until the compositor goes.
 #[test]
 #[ignore = "an application in a process of its own, for the test that starts one"]
 fn token_probe() {
@@ -619,6 +633,8 @@ fn joined_desktop(index: &Index, facts: &HostFacts, pid: u32) -> Option<(NodeId,
 /// A headless perspicax keeping its desk current, as `--mcp` does.
 struct Hosted {
     desk: Arc<Desk>,
+    /// What the compositor is sent, as a person's hand.
+    requests: Requests,
     socket: String,
     config: PathBuf,
 }
@@ -659,6 +675,18 @@ impl Hosted {
         let stream =
             UnixStream::connect(runtime.join(&self.socket)).expect("the compositor's socket");
         window::open_asking(stream, title)
+    }
+
+    /// The person presses a binding of theirs that does `action`: a key
+    /// pressed, then what the binding does with it. [`Do::Perform`] stands
+    /// in for a binding, and presses nothing itself; the key, typed at
+    /// whatever has the keys, is the press.
+    fn press_binding(&self, action: Action) {
+        for command in [Do::Type("x".to_owned()), Do::Perform(action)] {
+            self.requests
+                .command(command)
+                .expect("the compositor is there");
+        }
     }
 
     /// Click what `selector` names with `button`, as an agent does.
@@ -755,6 +783,7 @@ fn host_on(
     keep_current(Arc::clone(&desk), facts.clone(), stop.clone(), SETTLE);
     let hosted = Hosted {
         desk,
+        requests: requests.clone(),
         socket: socket.clone(),
         config: config.clone(),
     };

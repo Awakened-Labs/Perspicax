@@ -23,18 +23,33 @@
 //!
 //! Headless, with nobody at the seat, every window takes the keys as it
 //! opens, as M2's contract has it: nobody is typing anything to take.
+//!
+//! A launcher, a layer over the windows that wants every key, is asked the
+//! same as it comes to want them (`layers`, #267), but never for nothing
+//! having the keys: it keeps them from every window while it is up (#131).
 
 use std::{cell::RefCell, time::Instant};
 
 use perspicax_node::SurfaceId;
-use perspicax_policy::Process;
-use smithay::reexports::wayland_server::{Client, Resource as _, protocol::wl_surface::WlSurface};
+use perspicax_policy::{Attention, Process, Turn};
+use smithay::{
+    reexports::wayland_server::{
+        Client, Resource as _, backend::ClientId, protocol::wl_surface::WlSurface,
+    },
+    utils::Serial,
+};
 
 use super::{Placement, id_of, placement};
 use crate::{
     framed::Framed,
     state::{ClientState, Compositor},
 };
+
+/// One of the policy's answers to whether the person asked for something a
+/// client shows: [`Attention::asked_for`] for a window, or
+/// [`Attention::asked_for_launcher`].
+type Rule =
+    fn(&Attention<Serial, ClientId>, &ClientId, Option<&ClientId>, Option<Turn>, Instant) -> bool;
 
 /// Whether `window` opened without the keys, and has not had them since.
 /// Only looks, as `is_on_top` does: a window with no record never did.
@@ -56,6 +71,20 @@ impl Compositor {
     /// which may have no surface yet. Nobody asked for a window of a client
     /// gone.
     pub(crate) fn client_asked_for(&self, client: Option<&Client>) -> bool {
+        self.asked_by(client, Attention::asked_for)
+    }
+
+    /// Whether the person asked for a launcher `surface`'s client shows, as
+    /// it comes to want every key (#267): as for a window, but never for
+    /// nothing having the keys. Always, with nobody at the seat.
+    pub(crate) fn launcher_asked_for(&self, surface: &WlSurface) -> bool {
+        self.asked_by(surface.client().as_ref(), Attention::asked_for_launcher)
+    }
+
+    /// Whether the person asked for what `client` shows, by `rule`: one of
+    /// the policy's two, for a window or for a launcher. Always, with nobody
+    /// at the seat; never, of a client gone.
+    fn asked_by(&self, client: Option<&Client>, rule: Rule) -> bool {
         if !self.backend.has_person() {
             return true;
         }
@@ -69,8 +98,13 @@ impl Compositor {
         let started_on = client
             .get_data::<ClientState>()
             .and_then(ClientState::started_on);
-        self.attention
-            .asked_for(&client.id(), holder.as_ref(), started_on, Instant::now())
+        rule(
+            &self.attention,
+            &client.id(),
+            holder.as_ref(),
+            started_on,
+            Instant::now(),
+        )
     }
 
     /// What a program started under `surface` descends from, the person's

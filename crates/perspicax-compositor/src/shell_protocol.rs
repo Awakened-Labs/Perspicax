@@ -257,6 +257,12 @@ impl Compositor {
 
     /// A binding asked for a menu: tell every shell, on the monitor under
     /// the pointer. Nothing while the session is locked.
+    ///
+    /// The binding took the person's press for itself, and no client was
+    /// sent it, so it is handed on to the shell told: the menu the shell
+    /// shows in answer, a launcher, is one they asked for, and takes the
+    /// keys as it shows (#267). To the first told, should several shells be
+    /// bound; to none, if none can show it.
     pub(crate) fn ask_shell(&mut self, menu: Menu) {
         if self.lock.is_some() {
             return;
@@ -276,6 +282,7 @@ impl Compositor {
             .map_or_else(Point::default, |geometry| {
                 (at - geometry.loc.to_f64()).to_i32_round()
             });
+        let mut told = None;
         for shell in &self.shells.bound {
             let Ok(client) = self.display.get_client(shell.id()) else {
                 continue;
@@ -289,12 +296,19 @@ impl Compositor {
                 Menu::Pie(name) if shell.version() >= perspicax_shell_v1::EVT_PIE_MENU_SINCE => {
                     shell.pie_menu(wl_output.as_ref(), local.x, local.y, name.clone());
                 }
-                Menu::Pie(name) => tracing::info!(
-                    name,
-                    version = shell.version(),
-                    "a pie was asked for, and this shell is too old to show one"
-                ),
+                Menu::Pie(name) => {
+                    tracing::info!(
+                        name,
+                        version = shell.version(),
+                        "a pie was asked for, and this shell is too old to show one"
+                    );
+                    continue;
+                }
             }
+            told.get_or_insert(client.id());
+        }
+        if let Some(shell) = told {
+            self.attention.handed(shell);
         }
     }
 

@@ -17,6 +17,10 @@
 //! person's starts is the root of their press, and is handed a token of
 //! the compositor's own, good while that press is their latest.
 //!
+//! A launcher, a layer over the windows that asks for every key as fuzzel
+//! does, is asked the same as it comes to want them (#267), but never for
+//! nothing having the keys: one nobody asked for is shown without them.
+//!
 //! Each test has programs, each a client of its own with a window and a
 //! keyboard, and some a program in a process of its own: a copy of this
 //! binary running [`window_probe`], started by this one, as a terminal
@@ -39,10 +43,10 @@ use std::{
 
 use common::{Desk, Ear, Session, heard, until};
 use perspicax_compositor::{Backend, Command as Do};
-use perspicax_index::{HostFacts, SurfaceFacts};
+use perspicax_index::{HostFacts, SurfaceFacts, SurfaceKind};
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::WindowState;
-use smithay_client_toolkit::shell::WaylandSurface as _;
-use wayland_client::{EventQueue, Proxy as _, QueueHandle, globals::GlobalList};
+use smithay_client_toolkit::shell::{WaylandSurface as _, wlr_layer::KeyboardInteractivity};
+use wayland_client::{EventQueue, Proxy as _, QueueHandle, backend::ObjectId, globals::GlobalList};
 
 /// Set, to the compositor's socket, for the copy of this binary that
 /// [`window_probe`] runs in.
@@ -51,6 +55,9 @@ const PROBE: &str = "PERSPICAX_WITHHELD_PROBE";
 const STEPS: &str = "PERSPICAX_WITHHELD_STEPS";
 /// A file the probe waits for before its next step, where it has one.
 const GATE: &str = "PERSPICAX_WITHHELD_GATE";
+/// How tall a launcher is, across the top of the screen.
+const STRIP: u32 = 120;
+const LAUNCHER: u32 = 0xff44_4444;
 
 /// A session with a person at the seat.
 fn seated(name: &str) -> Session {
@@ -530,17 +537,27 @@ fn the_window_in_use_refused_the_keys_by_a_stale_token_wants_no_attention() {
 /// starts `command`, for them.
 #[cfg(feature = "capture")]
 fn bind_spawn(session: &Session, command: Vec<String>) {
-    use perspicax_policy::{Action, Button, Context, Gesture, Mods, MouseBindings, MouseChord};
+    bind_side(
+        session,
+        perspicax_policy::Action::Spawn {
+            command,
+            agent: false,
+        },
+    );
+}
+
+/// A binding of the person's: a press of the side button on the desktop
+/// does `action`.
+#[cfg(feature = "capture")]
+fn bind_side(session: &Session, action: perspicax_policy::Action) {
+    use perspicax_policy::{Button, Context, Gesture, Mods, MouseBindings, MouseChord};
     session.command(Do::MouseBindings(MouseBindings::default().bind(
         Context::Desktop,
         MouseChord {
             mods: Mods::default(),
             gesture: Gesture::Press(Button::Side),
         },
-        Action::Spawn {
-            command,
-            agent: false,
-        },
+        action,
     )));
 }
 
@@ -683,6 +700,8 @@ enum Steps {
     ConnectWaitWindow,
     /// Open a splash, close it once it has drawn, then open its window.
     Splash,
+    /// Show a launcher, as fuzzel does, and no window.
+    Launcher,
 }
 
 impl Steps {
@@ -692,6 +711,7 @@ impl Steps {
             Self::WaitThenWindow => "wait-then-window",
             Self::ConnectWaitWindow => "connect-wait-window",
             Self::Splash => "splash",
+            Self::Launcher => "launcher",
         }
     }
 }
@@ -859,6 +879,205 @@ fn a_programs_window_opens_with_the_keys_after_its_splash_has_closed() {
     session.stop((desk, queue));
 }
 
+/// A program with a keyboard and nothing on screen yet: a client of its
+/// own.
+fn client(session: &Session) -> (Desk, EventQueue<Desk>, QueueHandle<Desk>, Ear) {
+    let (mut desk, queue, qh, globals) = session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    (desk, queue, qh, ear)
+}
+
+/// Show a launcher on `desk`'s client, as fuzzel shows one: a strip over
+/// everything, asking for every key, drawn. Its commits are taken in, and
+/// whatever came of them sent, before this returns. Its surface.
+fn show_launcher(
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    qh: &QueueHandle<Desk>,
+) -> ObjectId {
+    let before = desk.layers_drawn;
+    desk.open_launcher(qh, STRIP, LAUNCHER);
+    let surface = desk.layers.last().expect("just opened").0.wl_surface().id();
+    until(queue, desk, |desk| desk.layers_drawn > before);
+    surface
+}
+
+/// Whether a launcher is on screen, as the facts have it.
+fn launcher_shown(facts: &HostFacts) -> bool {
+    facts.surfaces().iter().any(|surface| {
+        surface.mapped
+            && matches!(&surface.kind, SurfaceKind::Layer { namespace, .. } if namespace == "launcher")
+    })
+}
+
+/// The issue's own case (#267): the person types at a terminal, and another
+/// program shows a launcher. It is on screen, over everything, but takes
+/// none of the keys: the rest of what the person types goes to the
+/// terminal still.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_launcher_another_program_shows_while_the_person_types_takes_no_keys() {
+    let session = seated("withheld-launcher");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    types(&session, &mut desk, &mut queue, "sudo");
+
+    let (mut thief, mut thief_queue, thief_qh, thief_ear) = client(&session);
+    show_launcher(&mut thief, &mut thief_queue, &thief_qh);
+    session.wait_for(launcher_shown);
+    let before = heard(&ear).keys.len();
+    types(&session, &mut desk, &mut queue, "x");
+    thief_queue.roundtrip(&mut thief).expect("dispatch");
+    assert!(has_keys(&desk, &ear, 0), "the terminal keeps the keys");
+    assert!(heard(&ear).keys.len() > before, "and hears the rest");
+    assert!(heard(&thief_ear).entered.is_none(), "the launcher has none");
+    assert!(heard(&thief_ear).keys.is_empty(), "nor hears any");
+
+    session.stop(((desk, queue), (thief, thief_queue)));
+}
+
+/// A launcher of the program in use, a run box the terminal opened say,
+/// takes the keys: the person is behind what the program they use asks for.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_launcher_of_the_program_in_use_takes_the_keys() {
+    let session = seated("withheld-launcher-own");
+    let (mut desk, mut queue, qh, _, ear) = terminal(&session);
+    let launcher = show_launcher(&mut desk, &mut queue, &qh);
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&launcher)
+    });
+    session.stop((desk, queue));
+}
+
+/// Nothing has the keys -- the person is at an empty desk -- and a program
+/// shows a launcher: it takes none of them, though a window would. A
+/// launcher keeps them from every window while it is up (#131), so the
+/// terminal the person opened next would have none.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_launcher_shown_where_nothing_has_the_keys_takes_none() {
+    let session = seated("withheld-launcher-nothing");
+    let (mut thief, mut thief_queue, thief_qh, thief_ear) = client(&session);
+    show_launcher(&mut thief, &mut thief_queue, &thief_qh);
+    session.wait_for(launcher_shown);
+    assert!(heard(&thief_ear).entered.is_none(), "the launcher has none");
+
+    // Waits until the terminal has the keys, and fails if it never does.
+    let (desk, queue, _, _, _) = terminal(&session);
+    session.stop(((desk, queue), (thief, thief_queue)));
+}
+
+/// A launcher shown without the keys is not asked again as it draws. Its
+/// program comes to have them, its window picked in the taskbar, and the
+/// launcher draws again: it has none still, for the person picked the
+/// window. It is asked again only as it next comes to want every key, and
+/// then, its program being in use, it takes them.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_launcher_refused_the_keys_is_asked_again_only_as_it_next_wants_them() {
+    let session = seated("withheld-launcher-again");
+    let (desk, queue, _, _, _) = terminal(&session);
+    let (mut other, mut other_queue, other_qh, _, other_ear) = program(&session, "other");
+    until(&mut other_queue, &mut other, |other| other.has_drawn(0));
+    let launcher = show_launcher(&mut other, &mut other_queue, &other_qh);
+    assert!(heard(&other_ear).entered.is_none(), "neither has the keys");
+
+    until(&mut other_queue, &mut other, |other| {
+        other.task("other").is_some()
+    });
+    other.activate("other");
+    until(&mut other_queue, &mut other, |other| {
+        has_keys(other, &other_ear, 0)
+    });
+    other.draw_layer(0);
+    other_queue.roundtrip(&mut other).expect("dispatch");
+    assert!(
+        has_keys(&other, &other_ear, 0),
+        "the window picked keeps them as the launcher draws"
+    );
+
+    let layer = other.layers[0].0.clone();
+    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+    layer.commit();
+    other_queue.roundtrip(&mut other).expect("dispatch");
+    assert!(
+        has_keys(&other, &other_ear, 0),
+        "wanting none, it takes none"
+    );
+    layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+    layer.commit();
+    until(&mut other_queue, &mut other, |_| {
+        heard(&other_ear).entered.as_ref() == Some(&launcher)
+    });
+
+    session.stop(((desk, queue), (other, other_queue)));
+}
+
+/// fuzzel, from a binding of the person's: what the binding started is the
+/// root of their press, and its launcher takes the keys though the terminal
+/// had them.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_launcher_a_binding_of_the_persons_starts_takes_the_keys() {
+    let session = seated("withheld-launcher-binding");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    // The probe, in the binding's own process, its harness's report nowhere.
+    let script = format!(
+        "{PROBE}=\"$0\" {STEPS}={} exec \"$1\" --exact window_probe --ignored --nocapture > /dev/null",
+        Steps::Launcher.name()
+    );
+    let exe = std::env::current_exe().expect("this test's binary");
+    bind_spawn(
+        &session,
+        vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            script,
+            session.socket().to_owned(),
+            exe.to_string_lossy().into_owned(),
+        ],
+    );
+    press_binding(&session);
+
+    session.wait_for(launcher_shown);
+    until(&mut queue, &mut desk, |desk| !has_keys(desk, &ear, 0));
+    session.stop((desk, queue));
+}
+
+/// The person's binding asks the shell for its start menu. The binding
+/// took their press, and hands it on to the shell, so the menu the shell
+/// shows in answer, a launcher, takes the keys though the terminal had them.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_a_binding_asks_the_shell_for_takes_the_keys() {
+    use common::Told;
+
+    let session = seated("withheld-launcher-shell");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    // The shell, on a connection of its own, as perspicax-shell is.
+    let (mut shell, mut shell_queue, shell_qh, shell_globals) = session.client();
+    shell.bind_shell(&shell_globals, &shell_qh);
+    let shell_ear = shell.bind_keyboard(&shell_globals, &shell_qh);
+    shell_queue.roundtrip(&mut shell).expect("bound");
+    bind_side(&session, perspicax_policy::Action::StartMenu);
+    press_binding(&session);
+    until(&mut shell_queue, &mut shell, |shell| {
+        shell
+            .told
+            .iter()
+            .any(|told| matches!(told, Told::StartMenu(_)))
+    });
+
+    let menu = show_launcher(&mut shell, &mut shell_queue, &shell_qh);
+    until(&mut shell_queue, &mut shell, |_| {
+        heard(&shell_ear).entered.as_ref() == Some(&menu)
+    });
+    until(&mut queue, &mut desk, |desk| !has_keys(desk, &ear, 0));
+    session.stop(((desk, queue), (shell, shell_queue)));
+}
+
 /// Not a test: the program a [`Probe`] is, in a process of its own.
 #[test]
 #[ignore = "a program in a process of its own, for the tests that start one"]
@@ -888,7 +1107,11 @@ fn window_probe() {
         desk.windows.remove(0);
         queue.roundtrip(&mut desk).expect("the splash closed");
     }
-    desk.open_window(&qh, "probe", "probe");
+    if steps == Steps::Launcher.name() {
+        desk.open_launcher(&qh, STRIP, LAUNCHER);
+    } else {
+        desk.open_window(&qh, "probe", "probe");
+    }
     loop {
         queue
             .blocking_dispatch(&mut desk)
