@@ -256,9 +256,10 @@ impl SessionLockHandler for Compositor {
     }
 
     /// A lock surface for one output: sized to cover it, given the keyboard
-    /// if it is the first, and the pointer if the pointer is on its output,
-    /// whichever came first. swaylock hides the cursor as the pointer
-    /// arrives, so until it does the cursor is drawn over the lock.
+    /// if no lock surface still up has it, as the first does, and the
+    /// pointer if the pointer is on its output, whichever came first.
+    /// swaylock hides the cursor as the pointer arrives, so until it does
+    /// the cursor is drawn over the lock.
     ///
     /// A lock surface of a lock that does not hold the session is sized like
     /// any other, but covers nothing: the protocol has a refused lock's
@@ -280,23 +281,19 @@ impl SessionLockHandler for Compositor {
             );
         });
         surface.send_configure();
-        let wl_surface = surface.wl_surface().clone();
-        if !asked_on(&wl_surface).is_some_and(|lock| self.holds(&lock)) {
+        if !asked_on(surface.wl_surface()).is_some_and(|lock| self.holds(&lock)) {
             return;
         }
         let id = self.mint_surface_id();
         let Some(locked) = self.lock.as_mut() else {
             return;
         };
-        let first = locked.surfaces.is_empty();
         locked.surfaces.push(Cover {
             output,
             surface,
             id,
         });
-        if first {
-            self.focus_plain(wl_surface);
-        }
+        self.keep_keys_on_lock();
         self.repoint();
         self.backend.redraw();
         self.publish_facts();
@@ -378,8 +375,9 @@ impl Compositor {
 
     /// The holder's client went without unlocking. The session stays locked,
     /// as ext-session-lock requires. What it drew went with it, so nothing
-    /// covers any output but the backdrop, and whichever lock takes the
-    /// session over starts afresh: its first lock surface has the keyboard.
+    /// covers any output but the backdrop, the keys go to nothing, and
+    /// whichever lock takes the session over starts afresh: its first lock
+    /// surface has the keyboard.
     fn lock_gone(&mut self) {
         tracing::warn!(
             "the lock client went without unlocking: the session stays locked until another lock takes it over"
@@ -387,6 +385,34 @@ impl Compositor {
         if let Some(locked) = self.lock.as_mut() {
             locked.surfaces.clear();
         }
+        self.keep_keys_on_lock();
+        self.repoint();
+        self.backend.redraw();
+        self.publish_facts();
+    }
+
+    /// A surface went. One of the holder's lock surfaces covers nothing
+    /// from now on, as swaylock's does once its monitor is unplugged, and
+    /// the backdrop shows where it was (#197). If it had the keys, the lock
+    /// screen on the pointer's monitor has them now, else another still up,
+    /// else nothing until one comes: not at the next key.
+    ///
+    /// Asked of the surface, not its lock surface: smithay 0.7 does not say
+    /// which lock surface a destroyed `ext_session_lock_surface_v1` was.
+    /// swaylock destroys both together. See the module's "When to delete".
+    pub(crate) fn uncover(&mut self, surface: &WlSurface) {
+        let Some(locked) = self.lock.as_mut() else {
+            return;
+        };
+        let covering = locked.surfaces.len();
+        locked
+            .surfaces
+            .retain(|cover| cover.surface.wl_surface() != surface);
+        if locked.surfaces.len() == covering {
+            return;
+        }
+        tracing::info!("a lock surface went, and covers nothing");
+        self.keep_keys_on_lock();
         self.repoint();
         self.backend.redraw();
         self.publish_facts();

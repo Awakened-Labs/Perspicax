@@ -7,7 +7,8 @@
 //! the pointer is on has it the moment it comes up, whichever monitor's came
 //! first, so swaylock hides the cursor without a nudge. Unlocked, the window
 //! under the pointer has it back at once, and the cursor swaylock hid is the
-//! compositor's arrow until that window sets its own.
+//! compositor's arrow until that window sets its own. A lock surface that
+//! goes with the keys hands them to the one under the pointer (#197).
 //!
 //! Whatever held the keyboard or the pointer lets go as the session locks.
 //! A window's open menu closes, as a click outside it would, and the lock
@@ -77,6 +78,17 @@ fn two_monitors(name: &str) -> Session {
             agent: Default::default(),
         },
     )
+}
+
+/// Three monitors side by side, HEADLESS-1 leftmost.
+fn three_monitors(name: &str) -> Session {
+    let mut backend = Backend::headless((1280, 800));
+    if let Backend::Headless { outputs, .. } = &mut backend {
+        *outputs = (1..=3)
+            .map(|nth| Virtual::numbered(nth, (1280, 800)))
+            .collect();
+    }
+    Session::start(name, backend)
 }
 
 /// A client with our pointer and a window called "page", drawn. Returns the
@@ -204,6 +216,35 @@ fn the_lock_screen_on_the_monitor_under_the_pointer_has_it_though_it_came_second
     });
 
     session.stop(((desk, queue), (locker, locker_queue)));
+}
+
+/// A lock screen that goes hands the keys to the one on the monitor the
+/// pointer is on, where the person is, not merely to the next one (#197).
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_lock_screen_that_goes_hands_its_keys_to_the_one_under_the_pointer() {
+    let session = three_monitors("lock-keys-under-the-pointer");
+    // From the origin onto the third monitor, where nothing is.
+    session.command(Command::Motion {
+        by: (2 * 1280 + 640, 400),
+    });
+    let (mut locker, mut locker_queue, locker_qh, ear) = locked(&session);
+    let first = cover(&mut locker, &mut locker_queue, &locker_qh, "HEADLESS-1");
+    until(&mut locker_queue, &mut locker, |_| {
+        heard(&ear).entered == Some(first.id())
+    });
+    cover(&mut locker, &mut locker_queue, &locker_qh, "HEADLESS-2");
+    let third = cover(&mut locker, &mut locker_queue, &locker_qh, "HEADLESS-3");
+    until(&mut locker_queue, &mut locker, |locker| {
+        locker.pointed.as_ref() == Some(&third)
+    });
+
+    locker.uncover(&first);
+    until(&mut locker_queue, &mut locker, |_| {
+        heard(&ear).entered == Some(third.id())
+    });
+
+    session.stop((locker, locker_queue));
 }
 
 #[test]

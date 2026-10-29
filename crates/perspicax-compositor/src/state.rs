@@ -1197,6 +1197,11 @@ impl CompositorHandler for Compositor {
         &mut self.compositor
     }
 
+    /// A surface went: if it was a lock screen, it covers nothing now.
+    fn destroyed(&mut self, surface: &WlSurface) {
+        self.uncover(surface);
+    }
+
     /// Every client carries one of two kinds of data: ours, inserted in
     /// `insert_client`, or -- for the one client this compositor did not
     /// accept from its socket -- the data Smithay gives the Xwayland it

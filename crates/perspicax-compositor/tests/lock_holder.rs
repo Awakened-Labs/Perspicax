@@ -24,7 +24,7 @@ mod common;
 use std::net::Shutdown;
 
 use common::{Desk, Ear, Session, client_over, heard, refused, until};
-use perspicax_compositor::Backend;
+use perspicax_compositor::{Backend, Command};
 use perspicax_index::{HostFacts, SurfaceKind};
 use perspicax_node::SurfaceId;
 use smithay_client_toolkit::shell::WaylandSurface as _;
@@ -219,6 +219,15 @@ fn a_lock_client_that_dies_leaves_the_session_locked_for_another_to_take() {
     assert!(
         !page_has_keyboard(&mut desk, &mut queue, &ear),
         "the session is still locked"
+    );
+    // A password typed now, at the compositor's own lock screen, reaches no
+    // window (#197): the command is carried out between two round trips.
+    session.command(Command::Type("hunter2\n".to_owned()));
+    queue.roundtrip(&mut desk).expect("dispatch");
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert!(
+        heard(&ear).keys.is_empty(),
+        "the window heard what was typed while no lock screen was up"
     );
 
     // Another lock client takes the session over, and has the keyboard as

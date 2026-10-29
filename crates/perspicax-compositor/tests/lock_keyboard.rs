@@ -10,6 +10,10 @@
 //! the keys from, and a window closing then gives them to no other.
 //! Unlocked, the window on top has them, often the one that opened meanwhile.
 //!
+//! A lock screen that goes while the session is locked, as swaylock's does
+//! when its monitor is unplugged, hands the keys to one still up, or to
+//! nobody until one comes (#197).
+//!
 //! Each test has a page, a client with a window and a keyboard, and a
 //! locker, a client of its own with a keyboard, as swaylock is. The person
 //! types a password at the lock screen ([`Command::Type`]), and what each
@@ -25,11 +29,14 @@
 mod common;
 
 use common::{Desk, Ear, Session, advertised, heard, until};
-use perspicax_compositor::{Backend, Command};
-use perspicax_index::HostFacts;
+use perspicax_compositor::{Backend, Command, Virtual};
+use perspicax_index::{HostFacts, SurfaceKind};
 use perspicax_policy::Action;
 use smithay_client_toolkit::shell::WaylandSurface as _;
-use wayland_client::{EventQueue, Proxy as _, QueueHandle, backend::ObjectId, globals::GlobalList};
+use wayland_client::{
+    EventQueue, Proxy as _, QueueHandle, backend::ObjectId, globals::GlobalList,
+    protocol::wl_surface,
+};
 
 const PAGE: u32 = 0xff33_6699;
 const LATE: u32 = 0xff66_9933;
@@ -47,6 +54,17 @@ fn session(name: &str) -> Session {
 /// the keyboard on.
 fn seated(name: &str) -> Session {
     Session::start(name, Backend::headless((1280, 800)).with_person())
+}
+
+/// `count` monitors side by side, HEADLESS-1 leftmost.
+fn monitors(name: &str, count: usize) -> Session {
+    let mut backend = Backend::headless((1280, 800));
+    if let Backend::Headless { outputs, .. } = &mut backend {
+        *outputs = (1..=count)
+            .map(|nth| Virtual::numbered(nth, (1280, 800)))
+            .collect();
+    }
+    Session::start(name, backend)
 }
 
 /// A client with a window called "page", drawn, and a keyboard, which the
@@ -107,6 +125,29 @@ fn cover(
         heard(ear).entered.as_ref() == Some(&cover)
     });
     cover
+}
+
+/// Cover `monitor` too, and wait until the cover has drawn. Returns its
+/// surface.
+fn cover_also(
+    locker: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    qh: &QueueHandle<Desk>,
+    monitor: &str,
+) -> wl_surface::WlSurface {
+    let drawn = locker.covers_drawn;
+    let cover = locker.cover(qh, monitor, COVER);
+    until(queue, locker, |locker| locker.covers_drawn > drawn);
+    cover
+}
+
+/// The lock surfaces the facts say cover a monitor.
+fn covers(facts: &HostFacts) -> usize {
+    facts
+        .surfaces()
+        .iter()
+        .filter(|surface| matches!(surface.kind, SurfaceKind::LockCover))
+        .count()
 }
 
 /// Hear everything the compositor has sent so far: the page first, since
@@ -426,6 +467,105 @@ fn a_launcher_that_opens_behind_the_lock_screen_takes_no_keys_from_it() {
         Some(&held),
         "the lock screen keeps the keys"
     );
+
+    session.stop(((desk, queue), (locker, locker_queue)));
+}
+
+/// The issue's other case: a locked laptop undocked. Its monitor goes, and
+/// swaylock takes down the lock screen that covered it, the one with the
+/// keys. The lock screen on the monitor left has them at once, and hears
+/// the password. Before, they stayed on the surface that went, and no
+/// other lock screen was ever given them. A monitor plugged back in is
+/// covered again, and takes nothing from the lock screen that has them.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_lock_screen_whose_monitor_goes_hands_its_keys_to_the_one_left() {
+    let session = monitors("lock-keys-monitor-goes", 2);
+    let (mut desk, mut queue, _, _, ear) = page(&session);
+    let (mut locker, mut locker_queue, locker_qh, locker_ear) = locker(&session);
+    cover(&mut locker, &mut locker_queue, &locker_qh, &locker_ear);
+    let first = locker.covers[0].1.clone();
+    let second = cover_also(&mut locker, &mut locker_queue, &locker_qh, "HEADLESS-2");
+    session.wait_for(|facts| covers(facts) == 2);
+    until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
+    let before = heard(&ear).enter_serial;
+    assert_eq!(
+        heard(&locker_ear).entered,
+        Some(first.id()),
+        "the first lock screen has the keys"
+    );
+
+    session.command(Command::Unplug("HEADLESS-1".to_owned()));
+    until(&mut locker_queue, &mut locker, |locker| {
+        !locker.has_monitor("HEADLESS-1")
+    });
+    locker.uncover(&first);
+    until(&mut locker_queue, &mut locker, |_| {
+        heard(&locker_ear).entered == Some(second.id())
+    });
+    session.wait_for(|facts| covers(facts) == 1);
+    type_password(
+        &session,
+        &mut [(&mut desk, &mut queue), (&mut locker, &mut locker_queue)],
+    );
+    the_lock_screen_heard_it(&ear, &locker_ear, before);
+
+    // Plugged back in, and covered again.
+    session.command(Command::Plug(Virtual::numbered(1, (1280, 800))));
+    until(&mut locker_queue, &mut locker, |locker| {
+        locker.has_monitor("HEADLESS-1")
+    });
+    cover_also(&mut locker, &mut locker_queue, &locker_qh, "HEADLESS-1");
+    session.wait_for(|facts| covers(facts) == 2);
+    locker_queue.roundtrip(&mut locker).expect("dispatch");
+    assert_eq!(
+        heard(&locker_ear).entered,
+        Some(second.id()),
+        "the lock screen with the keys keeps them"
+    );
+
+    session.stop(((desk, queue), (locker, locker_queue)));
+}
+
+/// The lock client takes down its only lock screen and the session stays
+/// locked, over the compositor's own: what is typed then reaches nobody,
+/// neither a window nor the surface that went. The next lock screen up has
+/// the keys, though it is not the lock's first. Before, the keys stayed on
+/// the surface that went, and no later one was given them.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_lock_screen_left_with_no_cover_gives_the_keys_to_nobody_until_one_comes() {
+    let session = monitors("lock-keys-no-cover", 2);
+    let (mut desk, mut queue, _, _, ear) = page(&session);
+    let (mut locker, mut locker_queue, locker_qh, locker_ear) = locker(&session);
+    cover(&mut locker, &mut locker_queue, &locker_qh, &locker_ear);
+    let first = locker.covers[0].1.clone();
+    until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
+    let before = heard(&ear).enter_serial;
+
+    locker.uncover(&first);
+    // Taking it down is only queued until the locker's next round trip.
+    locker_queue.roundtrip(&mut locker).expect("dispatch");
+    session.wait_for(|facts| covers(facts) == 0);
+    type_password(
+        &session,
+        &mut [(&mut desk, &mut queue), (&mut locker, &mut locker_queue)],
+    );
+    assert!(heard(&ear).keys.is_empty(), "the window heard the password");
+    assert!(
+        heard(&locker_ear).keys.is_empty(),
+        "the lock screen that went heard the password"
+    );
+
+    let next = cover_also(&mut locker, &mut locker_queue, &locker_qh, "HEADLESS-2");
+    until(&mut locker_queue, &mut locker, |_| {
+        heard(&locker_ear).entered == Some(next.id())
+    });
+    type_password(
+        &session,
+        &mut [(&mut desk, &mut queue), (&mut locker, &mut locker_queue)],
+    );
+    the_lock_screen_heard_it(&ear, &locker_ear, before);
 
     session.stop(((desk, queue), (locker, locker_queue)));
 }
