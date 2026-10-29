@@ -47,7 +47,7 @@ use crate::{
 
 /// One of the policy's answers to whether the person asked for something a
 /// client shows: [`Attention::asked_for`] for a window, or
-/// [`Attention::asked_for_launcher`].
+/// [`Attention::asked_of`] for a launcher.
 type Rule =
     fn(&Attention<Serial, ClientId>, &ClientId, Option<&ClientId>, Option<Turn>, Instant) -> bool;
 
@@ -78,7 +78,7 @@ impl Compositor {
     /// it comes to want every key (#267): as for a window, but never for
     /// nothing having the keys. Always, with nobody at the seat.
     pub(crate) fn launcher_asked_for(&self, surface: &WlSurface) -> bool {
-        self.asked_by(surface.client().as_ref(), Attention::asked_for_launcher)
+        self.asked_by(surface.client().as_ref(), Attention::asked_of)
     }
 
     /// Whether the person asked for what `client` shows, by `rule`: one of
