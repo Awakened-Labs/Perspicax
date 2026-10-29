@@ -90,10 +90,12 @@ use smithay::{
             protocol::{wl_output::WlOutput, wl_surface::WlSurface},
         },
     },
+    utils::IsAlive as _,
     wayland::{
         compositor::with_states,
         idle_inhibit::IdleInhibitHandler,
         idle_notify::{IdleNotifierHandler, IdleNotifierState},
+        seat::WaylandFocus as _,
         session_lock::{
             ExtLockSurfaceUserData, LockSurface, SessionLockHandler, SessionLockManagerGlobalData,
             SessionLockManagerState, SessionLockState, SessionLocker,
@@ -103,6 +105,7 @@ use smithay::{
 
 use crate::{
     chord_capture::{Heard, Reason},
+    focus::FocusTarget,
     state::{ClientState, Compositor},
 };
 
@@ -138,11 +141,24 @@ impl Locked {
         self.surfaces.iter().find(|cover| &cover.output == output)
     }
 
-    /// Whether `surface` is one of the holder's lock surfaces.
+    /// Whether `surface` is one of the holder's lock surfaces, and still
+    /// there.
     pub(crate) fn covers(&self, surface: &WlSurface) -> bool {
-        self.surfaces
-            .iter()
-            .any(|cover| cover.surface.wl_surface() == surface)
+        surface.alive()
+            && self
+                .surfaces
+                .iter()
+                .any(|cover| cover.surface.wl_surface() == surface)
+    }
+
+    /// Whether a key sent to `target` reaches the lock screen: one of the
+    /// holder's lock surfaces, still there. An X11 window never does.
+    pub(crate) fn hears(&self, target: &FocusTarget) -> bool {
+        match target {
+            FocusTarget::Wayland(surface) => self.covers(surface),
+            #[cfg(feature = "xwayland")]
+            FocusTarget::X11(_) => false,
+        }
     }
 }
 
@@ -303,6 +319,56 @@ impl Compositor {
         Some((cover.surface.wl_surface().clone(), origin))
     }
 
+    /// Whether the keys are where they belong: anywhere while the session is
+    /// unlocked. Locked, on one of the holder's lock surfaces, with no
+    /// menu's grab to move them on the way out, or on nothing while none is
+    /// up (#197). See the module's "While locked".
+    pub(crate) fn keys_with_the_lock(&self) -> bool {
+        let (Some(locked), Some(keyboard)) = (&self.lock, &self.keyboard) else {
+            return true;
+        };
+        if keyboard.is_grabbed() {
+            return false;
+        }
+        match keyboard.current_focus() {
+            Some(target) => locked.hears(&target),
+            None => !locked.surfaces.iter().any(|cover| cover.surface.alive()),
+        }
+    }
+
+    /// Put the keys where they belong while locked, if they are not there
+    /// (#197): on the lock screen on the pointer's monitor, else on the
+    /// first still up, else on nothing. A menu's grab goes first, since
+    /// smithay keeps the keys on the menu whatever is given them while it
+    /// holds them.
+    pub(crate) fn keep_keys_on_lock(&mut self) {
+        if self.keys_with_the_lock() {
+            return;
+        }
+        self.let_go();
+        match self.cover_for_keys() {
+            Some(cover) => self.focus_plain(cover),
+            None => self.clear_focus(),
+        }
+        if !self.keys_with_the_lock() {
+            tracing::warn!("the keys could not be given back to the lock screen");
+        }
+    }
+
+    /// The lock surface the keys go to: the one on the monitor the pointer
+    /// is on, where the person is, else the first still up.
+    fn cover_for_keys(&self) -> Option<WlSurface> {
+        let locked = self.lock.as_ref()?;
+        let up = |cover: &&Cover| cover.surface.alive();
+        self.pointer
+            .as_ref()
+            .and_then(|pointer| self.space.output_under(pointer.current_location()).next())
+            .and_then(|output| locked.on(output))
+            .filter(up)
+            .or_else(|| locked.surfaces.iter().find(up))
+            .map(|cover| cover.surface.wl_surface().clone())
+    }
+
     /// Whether `lock` holds the session.
     fn holds(&self, lock: &ExtSessionLockV1) -> bool {
         self.lock
@@ -327,10 +393,19 @@ impl Compositor {
     }
 }
 
-/// The process that asked for `lock`, for the log.
-fn origin(lock: &ExtSessionLockV1) -> Origin {
-    lock.client()
+/// The process that asked for `object`, for the log: a lock, or a surface.
+fn origin(object: &impl Resource) -> Origin {
+    object
+        .client()
         .and_then(|client| client.get_data::<ClientState>().map(ClientState::origin))
+        .unwrap_or_default()
+}
+
+/// The process whose window or surface `target` is, for the log.
+pub(crate) fn origin_of(target: &FocusTarget) -> Origin {
+    target
+        .wl_surface()
+        .map(|surface| origin(&*surface))
         .unwrap_or_default()
 }
 

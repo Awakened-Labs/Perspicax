@@ -1,5 +1,5 @@
 //! The lock screen and the keyboard, by a compositor with no screen:
-//! `ext-session-lock-v1`, as swaylock speaks it (#127).
+//! `ext-session-lock-v1`, as swaylock speaks it (#127, #197).
 //!
 //! While the session is locked, only the lock screen has the keys. A window
 //! that opens behind it, asks to be brought forward, or comes forward as the
@@ -11,16 +11,21 @@
 //! Unlocked, the window on top has them, often the one that opened meanwhile.
 //!
 //! Each test has a page, a client with a window and a keyboard, and a
-//! locker, a client of its own with a keyboard, as swaylock is. What each
-//! keyboard was told is what is asserted: `enter` and `leave` alone, so none
-//! of this needs `capture`. Like the other live tests these bind a real
-//! Wayland socket, so they need `XDG_RUNTIME_DIR`, and are `#[ignore]`d for
-//! `ci/live-tests.sh` to run.
+//! locker, a client of its own with a keyboard, as swaylock is. The person
+//! types a password at the lock screen ([`Command::Type`]), and what each
+//! keyboard was told is what is asserted, so none of this needs `capture`.
+//! Each way the keys could leave the lock screen is asserted in the order
+//! that says what held them: the window heard no key of the password, the
+//! lock screen heard every one, and the window never had the keyboard since
+//! the lock, not even for a moment. The first two are kept where keys go
+//! out, even with every gate of #127 taken out; the third is the gate's.
+//! Like the other live tests these bind a real Wayland socket, so they need
+//! `XDG_RUNTIME_DIR`, and are `#[ignore]`d for `ci/live-tests.sh` to run.
 
 mod common;
 
-use common::{Desk, Ear, Session, heard, until};
-use perspicax_compositor::Backend;
+use common::{Desk, Ear, Session, advertised, heard, until};
+use perspicax_compositor::{Backend, Command};
 use perspicax_index::HostFacts;
 use perspicax_policy::Action;
 use smithay_client_toolkit::shell::WaylandSurface as _;
@@ -29,6 +34,10 @@ use wayland_client::{EventQueue, Proxy as _, QueueHandle, backend::ObjectId, glo
 const PAGE: u32 = 0xff33_6699;
 const LATE: u32 = 0xff66_9933;
 const COVER: u32 = 0xff20_2020;
+
+/// What the person types at the lock screen: no capitals, so no Shift among
+/// the presses, and an Enter, which would send it.
+const PASSWORD: &str = "hunter2\n";
 
 fn session(name: &str) -> Session {
     Session::start(name, Backend::headless((1280, 800)))
@@ -113,6 +122,41 @@ fn hear_all(
     locker_queue.roundtrip(locker).expect("dispatch");
 }
 
+/// The person types the password, and each client has heard all that came
+/// of it when this returns. The compositor carries out a command between
+/// two of the first client's round trips, as `xwayland.rs`'s typing waits,
+/// and a round trip of each client after that is answered after anything
+/// sent it.
+fn type_password(session: &Session, clients: &mut [(&mut Desk, &mut EventQueue<Desk>)]) {
+    session.command(Command::Type(PASSWORD.to_owned()));
+    if let Some((desk, queue)) = clients.first_mut() {
+        queue.roundtrip(desk).expect("dispatch");
+    }
+    for (desk, queue) in clients {
+        queue.roundtrip(desk).expect("dispatch");
+    }
+}
+
+/// Every key of the password went to the lock screen, and none of it, nor
+/// the keyboard, to the window behind: in the order that says what held.
+/// `before` is the window's keyboard's last `enter` as the lock came up.
+fn the_lock_screen_heard_it(window: &Ear, lock_screen: &Ear, before: Option<u32>) {
+    assert!(
+        heard(window).keys.is_empty(),
+        "the window behind the lock screen heard the password"
+    );
+    assert_eq!(
+        heard(lock_screen).keys.len(),
+        PASSWORD.chars().count(),
+        "the lock screen heard every key of the password"
+    );
+    assert_eq!(
+        heard(window).enter_serial,
+        before,
+        "the window behind the lock screen had the keyboard"
+    );
+}
+
 /// Whether the window `upper` is above the window `lower`, the facts giving
 /// them bottom to top.
 fn above(facts: &HostFacts, upper: &str, lower: &str) -> bool {
@@ -125,6 +169,27 @@ fn above(facts: &HostFacts, upper: &str, lower: &str) -> bool {
     matches!((at(upper), at(lower)), (Some(upper), Some(lower)) if upper > lower)
 }
 
+/// The rule itself: what the person types at the lock screen goes to it,
+/// and to no window behind it.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn the_persons_keys_go_to_the_lock_screen_and_to_no_window() {
+    let session = session("lock-keys-typed");
+    let (mut desk, mut queue, _, _, ear) = page(&session);
+    let (mut locker, mut locker_queue, locker_qh, locker_ear) = locker(&session);
+    cover(&mut locker, &mut locker_queue, &locker_qh, &locker_ear);
+    until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
+    let before = heard(&ear).enter_serial;
+
+    type_password(
+        &session,
+        &mut [(&mut desk, &mut queue), (&mut locker, &mut locker_queue)],
+    );
+    the_lock_screen_heard_it(&ear, &locker_ear, before);
+
+    session.stop(((desk, queue), (locker, locker_queue)));
+}
+
 /// The issue's own case: a chat window, a terminal or a dialog that opens
 /// behind the lock screen while the person types their password.
 #[test]
@@ -135,18 +200,20 @@ fn a_window_that_opens_behind_the_lock_screen_takes_no_keys_from_it() {
     let (mut locker, mut locker_queue, locker_qh, locker_ear) = locker(&session);
     let held = cover(&mut locker, &mut locker_queue, &locker_qh, &locker_ear);
     until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
+    let before = heard(&ear).enter_serial;
 
     desk.open_coloured(&qh, "late", "late", LATE);
     until(&mut queue, &mut desk, |desk| desk.has_drawn(1));
     hear_all(&mut desk, &mut queue, &mut locker, &mut locker_queue);
+    type_password(
+        &session,
+        &mut [(&mut desk, &mut queue), (&mut locker, &mut locker_queue)],
+    );
+    the_lock_screen_heard_it(&ear, &locker_ear, before);
     assert_eq!(
         heard(&locker_ear).entered.as_ref(),
         Some(&held),
         "the lock screen keeps the keys"
-    );
-    assert!(
-        heard(&ear).entered.is_none(),
-        "the window that opened behind it has none of them"
     );
 
     // Unlocked, the window on top has them: the one that opened.
@@ -177,6 +244,14 @@ fn a_window_another_program_opens_behind_the_lock_screen_waits_for_the_person_on
     let other_ear = other.bind_keyboard(&other_globals, &other_qh);
     other.open_coloured(&other_qh, "late", "late", LATE);
     until(&mut other_queue, &mut other, |other| other.has_drawn(0));
+    type_password(
+        &session,
+        &mut [
+            (&mut other, &mut other_queue),
+            (&mut locker, &mut locker_queue),
+        ],
+    );
+    the_lock_screen_heard_it(&other_ear, &locker_ear, None);
 
     locker.unlock();
     locker_queue.roundtrip(&mut locker).expect("dispatch");
@@ -209,6 +284,7 @@ fn a_window_brought_forward_behind_the_lock_screen_takes_no_keys_from_it() {
     let (mut locker, mut locker_queue, locker_qh, locker_ear) = locker(&session);
     let held = cover(&mut locker, &mut locker_queue, &locker_qh, &locker_ear);
     until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
+    let before = heard(&ear).enter_serial;
     let serial = heard(&locker_ear).enter_serial.expect("entered");
     let surface = locker.covers[0].1.clone();
     locker.make_token_from(&locker_qh, &surface, serial);
@@ -223,14 +299,15 @@ fn a_window_brought_forward_behind_the_lock_screen_takes_no_keys_from_it() {
         above(&session.facts.read(), "page", "top"),
         "the page is brought forward"
     );
+    type_password(
+        &session,
+        &mut [(&mut desk, &mut queue), (&mut locker, &mut locker_queue)],
+    );
+    the_lock_screen_heard_it(&ear, &locker_ear, before);
     assert_eq!(
         heard(&locker_ear).entered.as_ref(),
         Some(&held),
         "the lock screen keeps the keys"
-    );
-    assert!(
-        heard(&ear).entered.is_none(),
-        "the window brought forward behind it has none of them"
     );
 
     session.stop(((desk, queue), (locker, locker_queue)));
@@ -238,9 +315,9 @@ fn a_window_brought_forward_behind_the_lock_screen_takes_no_keys_from_it() {
 
 /// Between the session locking and the lock screen's first surface, nothing
 /// has the keys. A window that closes then gives them to the window beneath
-/// it on any desktop, but not behind the lock, and the lock screen has them
-/// as it comes up. Seated: with nobody at the seat, a closing window hands
-/// the keyboard to no one anyway.
+/// it on any desktop, but not behind the lock, and what is typed then goes
+/// to nobody. The lock screen has them as it comes up. Seated: with nobody
+/// at the seat, a closing window hands the keyboard to no one anyway.
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_window_that_closes_before_the_lock_screen_is_up_gives_the_keys_to_no_other() {
@@ -249,24 +326,35 @@ fn a_window_that_closes_before_the_lock_screen_is_up_gives_the_keys_to_no_other(
     open_second(&mut desk, &mut queue, &qh, &ear, "top");
     let (mut locker, mut locker_queue, locker_qh, locker_ear) = locker(&session);
     until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
-    let last = heard(&ear).enter_serial;
+    let before = heard(&ear).enter_serial;
 
     desk.windows.remove(1);
     hear_all(&mut desk, &mut queue, &mut locker, &mut locker_queue);
+    type_password(
+        &session,
+        &mut [(&mut desk, &mut queue), (&mut locker, &mut locker_queue)],
+    );
     assert!(
-        heard(&ear).entered.is_none(),
-        "the window beneath took the keys behind the lock"
+        heard(&ear).keys.is_empty(),
+        "the window beneath heard what was typed behind the lock"
+    );
+    assert!(
+        heard(&locker_ear).keys.is_empty(),
+        "what was typed before the lock screen was up reached it"
     );
     assert_eq!(
         heard(&ear).enter_serial,
-        last,
+        before,
         "the keys went to the window beneath on the way"
     );
 
-    // The lock screen comes up, and has them.
+    // The lock screen comes up, has them, and hears the password.
     cover(&mut locker, &mut locker_queue, &locker_qh, &locker_ear);
-    hear_all(&mut desk, &mut queue, &mut locker, &mut locker_queue);
-    assert!(heard(&ear).entered.is_none(), "the page has none of them");
+    type_password(
+        &session,
+        &mut [(&mut desk, &mut queue), (&mut locker, &mut locker_queue)],
+    );
+    the_lock_screen_heard_it(&ear, &locker_ear, before);
 
     session.stop(((desk, queue), (locker, locker_queue)));
 }
@@ -290,6 +378,7 @@ fn a_tab_that_comes_forward_behind_the_lock_screen_takes_no_keys_from_it() {
     let (mut locker, mut locker_queue, locker_qh, locker_ear) = locker(&session);
     let held = cover(&mut locker, &mut locker_queue, &locker_qh, &locker_ear);
     until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
+    let before = heard(&ear).enter_serial;
 
     desk.windows.remove(1);
     hear_all(&mut desk, &mut queue, &mut locker, &mut locker_queue);
@@ -299,14 +388,15 @@ fn a_tab_that_comes_forward_behind_the_lock_screen_takes_no_keys_from_it() {
             .iter()
             .any(|surface| surface.title.as_deref() == Some("page") && surface.mapped)
     });
+    type_password(
+        &session,
+        &mut [(&mut desk, &mut queue), (&mut locker, &mut locker_queue)],
+    );
+    the_lock_screen_heard_it(&ear, &locker_ear, before);
     assert_eq!(
         heard(&locker_ear).entered.as_ref(),
         Some(&held),
         "the lock screen keeps the keys"
-    );
-    assert!(
-        heard(&ear).entered.is_none(),
-        "the tab that came forward behind it has none of them"
     );
 
     session.stop(((desk, queue), (locker, locker_queue)));
@@ -326,15 +416,37 @@ fn a_launcher_that_opens_behind_the_lock_screen_takes_no_keys_from_it() {
     desk.open_launcher(&qh, 40, LATE);
     until(&mut queue, &mut desk, |desk| desk.layers_drawn == 1);
     hear_all(&mut desk, &mut queue, &mut locker, &mut locker_queue);
+    type_password(
+        &session,
+        &mut [(&mut desk, &mut queue), (&mut locker, &mut locker_queue)],
+    );
+    the_lock_screen_heard_it(&ear, &locker_ear, None);
     assert_eq!(
         heard(&locker_ear).entered.as_ref(),
         Some(&held),
         "the lock screen keeps the keys"
     );
-    assert!(
-        heard(&ear).entered.is_none(),
-        "the launcher behind it has none of them"
-    );
 
     session.stop(((desk, queue), (locker, locker_queue)));
+}
+
+/// Neither protocol by which a program types for the person is offered. A
+/// virtual keyboard's keys and an input method's are sent straight to the
+/// client with the keyboard, past where perspicax keeps them on the lock
+/// screen (#197): one offered would need that first.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn no_protocol_types_around_the_lock_screen() {
+    let session = session("lock-keys-no-typing-protocols");
+    let (desk, queue, _, globals) = session.client();
+    for interface in [
+        "zwp_virtual_keyboard_manager_v1",
+        "zwp_input_method_manager_v2",
+    ] {
+        assert!(
+            !advertised(&globals, interface),
+            "{interface} is offered: its keys would go around the lock screen"
+        );
+    }
+    session.stop((desk, queue));
 }

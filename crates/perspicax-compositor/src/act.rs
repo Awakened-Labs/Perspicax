@@ -764,7 +764,9 @@ impl Compositor {
     /// and key bindings. Synthetic keys bypass it on purpose: an agent typing
     /// text must never end the session, switch VT or close a window by
     /// spelling a chord. Forwarding everything is also what makes the events
-    /// indistinguishable from a device's to the client.
+    /// indistinguishable from a device's to the client. They go out as a
+    /// device's do, through [`Compositor::send_key`], so a stand-in's keys
+    /// typed at the lock screen go only to it (#197).
     ///
     /// A stand-in person's press turns their attention, as one at a seat
     /// does (#257): an agent's never does.
@@ -781,7 +783,7 @@ impl Compositor {
                 .pressed(serial, Instant::now(), crate::origin::boot_ticks());
         }
         let time = self.now_ms();
-        keyboard.input::<(), _>(self, key, state, serial, time, |_, _, _| {
+        self.send_key::<()>(keyboard, key, state, serial, time, |_, _, _| {
             FilterResult::Forward
         });
     }

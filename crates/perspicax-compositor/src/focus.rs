@@ -16,6 +16,15 @@
 //! whoever moved the pointer: a hand, an agent, a grab. smithay calls these
 //! with the pointer's lock held, so nothing here may ask the pointer anything
 //! (its focus, its grab, a hold on it): only the target's client is asked.
+//!
+//! So does every key, and every change of the modifiers, whoever typed it and
+//! whatever moved the keyboard to where it goes. While the session is locked,
+//! neither goes anywhere but the lock screen (#197): what has the keyboard
+//! then has the password as it is typed. However the keyboard came to be
+//! somewhere else, a key bound there is dropped here. Before a key gets this
+//! far, [`Compositor::send_key`] has put the keyboard back on the lock
+//! screen, so the person can still unlock. smithay holds the keyboard's lock
+//! as it calls these, so only the lock is read, never the keyboard.
 
 use std::borrow::Cow;
 
@@ -88,6 +97,12 @@ impl FocusTarget {
             .and_then(|surface| surface.client())
             .and_then(|client| Some(client.get_data::<ClientState>()?.plan(self, event)))
             .unwrap_or_else(Plan::as_is)
+    }
+
+    /// Whether a key sent here now would go past the lock screen: the
+    /// session is locked, and this is not one of its lock surfaces.
+    fn past_the_lock(&self, data: &Compositor) -> bool {
+        data.lock.as_ref().is_some_and(|locked| !locked.hears(self))
     }
 
     /// The person's press sent as `serial` reached this target's client:
@@ -175,6 +190,15 @@ impl KeyboardTarget<Compositor> for FocusTarget {
         serial: Serial,
         time: u32,
     ) {
+        // Never past the lock screen. Which key it was is not said: it is a
+        // letter of the password.
+        if self.past_the_lock(data) {
+            tracing::warn!(
+                origin = ?crate::lock::origin_of(self),
+                "while locked, a key was kept from what is not the lock screen"
+            );
+            return;
+        }
         // An Enter starts what was typed, at a terminal or a launcher, and
         // what starts now under the client it reached is the person's
         // (#259). No other key starts anything: a password typed at a
@@ -198,6 +222,10 @@ impl KeyboardTarget<Compositor> for FocusTarget {
         modifiers: ModifiersState,
         serial: Serial,
     ) {
+        // Nor which modifiers are down as it is typed.
+        if self.past_the_lock(data) {
+            return;
+        }
         delegate!(self, target => KeyboardTarget::modifiers(target, seat, data, modifiers, serial));
     }
 }
