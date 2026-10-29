@@ -749,6 +749,10 @@ impl Compositor {
     /// or the menu or window a closed menu hung from. A window focused for
     /// itself goes through [`Self::focus_surface`]. While the session is
     /// locked, only to the lock's own surfaces.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a way to the keyboard, and it asks may_take_keyboard (#127)"
+    )]
     pub(crate) fn focus_plain(&mut self, surface: WlSurface) {
         if !self.may_take_keyboard(&surface) {
             return;
@@ -774,7 +778,9 @@ impl Compositor {
     ///
     /// [`Self::focus_plain`] and [`Self::focus_surface`] ask, which is every
     /// way to the keyboard but a menu's grab, refused while locked (#82) and
-    /// to a client without the keys (#187).
+    /// to a client without the keys (#187). Clippy refuses `set_focus`
+    /// anywhere else. Should a way be missed all the same, the keys still go
+    /// to the lock screen as they are typed (#197, [`Self::send_key`]).
     fn may_take_keyboard(&self, surface: &WlSurface) -> bool {
         match &self.lock {
             Some(locked) => locked.covers(surface),
@@ -838,6 +844,10 @@ impl Compositor {
     /// `focus_changed` of a new focus but not of none, so what has to follow
     /// is done here: no window looks active any more, nor is named so to X
     /// clients. Every focus cleared to none goes through this.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "gives the keyboard to nothing, which the lock allows"
+    )]
     pub(crate) fn clear_focus(&mut self) {
         if let Some(keyboard) = self.keyboard.clone() {
             keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
@@ -958,6 +968,10 @@ impl Compositor {
     /// keys go back to it then, the topmost window that wants no attention
     /// ([`Self::window_for_keys`]): not one that opened behind the lock,
     /// which nobody at it asked for (#259).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a way to the keyboard, and it asks may_take_keyboard (#127)"
+    )]
     pub(crate) fn focus_surface(&mut self, surface: WlSurface, id: SurfaceId) {
         if !self.may_take_keyboard(&surface) {
             return;
@@ -1181,6 +1195,11 @@ impl Compositor {
 impl CompositorHandler for Compositor {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor
+    }
+
+    /// A surface went: if it was a lock screen, it covers nothing now.
+    fn destroyed(&mut self, surface: &WlSurface) {
+        self.uncover(surface);
     }
 
     /// Every client carries one of two kinds of data: ours, inserted in
@@ -1768,6 +1787,19 @@ impl SeatHandler for Compositor {
     /// start (see `new_toplevel`), because the toolkits it hosts for reading
     /// render differently when they believe they are in the background.
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&FocusTarget>) {
+        // While locked, only the lock screen may have the keys, and every way
+        // to them asks (#127): one that did not is said here, as it happens,
+        // and put right once smithay lets go of the keyboard (#197).
+        if let (Some(locked), Some(target)) = (&self.lock, focused)
+            && !locked.hears(target)
+        {
+            tracing::warn!(
+                origin = ?crate::lock::origin_of(target),
+                "while locked, the keyboard went to what is not the lock screen"
+            );
+            self.loop_handle
+                .insert_idle(|state| state.keep_keys_on_lock());
+        }
         // X clients read which window has the keyboard off the root.
         #[cfg(feature = "xwayland")]
         self.tell_active_x11(match focused {

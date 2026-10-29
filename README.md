@@ -1479,6 +1479,17 @@ only a lock asked for afterwards is refused. When a program called what the
 rule names is refused, the screen says so ([Notices](#notices)), and
 `perspicax doctor` and the settings app say what weakens the rule.
 
+While the screen is locked, every key you type goes to the lock screen and
+nowhere else. A window that opens behind it, asks to come forward or comes
+forward as another closes takes none of them, nor does a launcher. Should
+some way to the keyboard be missed all the same, the keyboard is put back
+on the lock screen as each key is typed, and a key bound anywhere else is
+dropped, so your password never reaches a window you cannot see. A monitor
+unplugged while locked, a laptop undocked say, hands its lock screen's keys
+to one still up, the one on the monitor the pointer is on if there is one.
+Nor can a program type for you there: perspicax offers neither a virtual
+keyboard nor an input method.
+
 | Protocol | `[protocols]` key | Spoken by | While locked | When the rule narrows |
 |---|---|---|---|---|
 | `ext-foreign-toplevel-list-v1` | `foreign-toplevel-list` | window lists | nothing new is told; told on unlock | every window closed, list finished |

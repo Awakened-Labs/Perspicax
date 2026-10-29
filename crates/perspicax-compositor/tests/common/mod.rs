@@ -1861,6 +1861,14 @@ impl Desk {
         self.outputs.outputs().next().is_none()
     }
 
+    /// Whether this client was told of a monitor called `name`, and not yet
+    /// that it went.
+    pub fn has_monitor(&self, name: &str) -> bool {
+        self.outputs
+            .outputs()
+            .any(|output| self.output_name(&output).as_deref() == Some(name))
+    }
+
     /// A pointer of our own, on the seat `bind_taskbar` bound or a new one.
     pub fn bind_pointer(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
         let seat = self.seat.get_or_insert_with(|| {
@@ -2235,6 +2243,20 @@ impl Desk {
             .get_lock_surface(&surface, &output, qh, colour);
         self.covers.push((cover, surface.clone()));
         surface
+    }
+
+    /// Take down the lock surface on `surface`, as swaylock does when its
+    /// monitor goes: the lock surface, then the surface under it. The
+    /// session stays locked.
+    pub fn uncover(&mut self, surface: &wl_surface::WlSurface) {
+        let at = self
+            .covers
+            .iter()
+            .position(|(_, covering)| covering == surface)
+            .expect("one of our lock surfaces");
+        let (cover, surface) = self.covers.remove(at);
+        cover.destroy();
+        surface.destroy();
     }
 
     /// Hide the pointer while it is over us, as swaylock does the moment it

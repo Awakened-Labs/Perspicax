@@ -798,6 +798,11 @@ impl Compositor {
                 grab.ungrab(PopupUngrabStrategy::All);
                 return;
             }
+            // Never while locked: `grab` refuses a menu's grab then (#82).
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "a menu's grab, refused while locked (#82)"
+            )]
             keyboard.set_focus(self, grab.current_grab(), serial);
             keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
         }

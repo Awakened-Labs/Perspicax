@@ -4,4 +4,11 @@
 disallowed-methods = [
     { path = "smithay::desktop::space::Space::element_under", reason = "reads the order windows were raised in; ask shell::window_under, which finds a window kept on top in front" },
     { path = "smithay::desktop::space::Space::render_elements_for_output", reason = "draws the order windows were raised in, and every layer surface at the output's corner; draw from shell::stack" },
+    # While the session is locked, the keys go to the lock screen and nothing
+    # else (#127, #197): a key goes out through one place, which keeps it
+    # there, and the keyboard is given through the helpers that ask the lock.
+    { path = "smithay::input::keyboard::KeyboardHandle::input", reason = "send a key through Compositor::send_key, which keeps it on the lock screen while locked (#197)" },
+    { path = "smithay::input::keyboard::KeyboardHandle::input_intercept", reason = "send a key through Compositor::send_key, which keeps it on the lock screen while locked (#197)" },
+    { path = "smithay::input::keyboard::KeyboardHandle::input_forward", reason = "send a key through Compositor::send_key, which keeps it on the lock screen while locked (#197)" },
+    { path = "smithay::input::keyboard::KeyboardHandle::set_focus", reason = "give the keyboard through focus_plain, focus_surface or clear_focus, which ask whether the lock allows it (#127)" },
 ]

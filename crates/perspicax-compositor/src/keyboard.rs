@@ -16,13 +16,27 @@
 //! the state without a `modifiers` event, so the focused client would go on
 //! reading keys without Caps Lock, and without a word to the lights. Both are
 //! sent here by hand.
+//!
+//! Every key goes out through [`Compositor::send_key`]: a person's at the
+//! seat, a stand-in's for a test, an agent's. While the session is locked it
+//! goes to the lock screen, whatever the keyboard was given to on the way
+//! (#197). Each way of giving it asks whether the lock allows it (#127), but
+//! that is a list, and a way it misses is the password typed into a window
+//! behind the lock, Enter and all. So the keyboard is put back on the lock
+//! screen as each key goes, and what it reaches is fenced as it is sent
+//! (`crate::focus`). Smithay's own ways out, `KeyboardHandle::input` and the
+//! halves it is made of, are refused by clippy everywhere else.
 
 use std::sync::PoisonError;
 
 use perspicax_node::SurfaceId;
 use smithay::{
-    input::keyboard::{Error, KeyboardTarget as _, Layout, XkbConfig},
-    utils::SERIAL_COUNTER,
+    backend::input::KeyState,
+    input::keyboard::{
+        Error, FilterResult, KeyboardHandle, KeyboardTarget as _, Keycode, KeysymHandle, Layout,
+        ModifiersState, XkbConfig,
+    },
+    utils::{SERIAL_COUNTER, Serial},
 };
 
 use crate::{act::Keys, state::Compositor};
@@ -54,6 +68,43 @@ impl Keymap {
 }
 
 impl Compositor {
+    /// Send one key to whatever has the keyboard, unless `filter`, which
+    /// sees it first, keeps it: a binding or an escape hatch. What `filter`
+    /// keeps is returned, and the key goes nowhere.
+    ///
+    /// While the session is locked, a key that would go anywhere but the lock
+    /// screen is a way to the keyboard the lock's gate missed: it is said,
+    /// and the keyboard is put back before the key goes (#197). Between the
+    /// filter and the sending, so nothing can move it in between.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one place a key goes out, kept on the lock screen while locked (#197)"
+    )]
+    pub(crate) fn send_key<T>(
+        &mut self,
+        keyboard: &KeyboardHandle<Self>,
+        keycode: Keycode,
+        state: KeyState,
+        serial: Serial,
+        time: u32,
+        filter: impl FnOnce(&mut Self, &ModifiersState, KeysymHandle<'_>) -> FilterResult<T>,
+    ) -> Option<T> {
+        let (filtered, mods_changed) = keyboard.input_intercept(self, keycode, state, filter);
+        if let FilterResult::Intercept(kept) = filtered {
+            return Some(kept);
+        }
+        if !self.keys_with_the_lock() {
+            tracing::warn!(
+                origin = ?keyboard.current_focus().as_ref().map(crate::lock::origin_of),
+                grabbed = keyboard.is_grabbed(),
+                "while locked, a key was going to what is not the lock screen: the lock screen has the keys again"
+            );
+            self.keep_keys_on_lock();
+        }
+        keyboard.input_forward(self, keycode, state, serial, time, mods_changed);
+        None
+    }
+
     /// Give the seat's keyboard a new keymap, and the table agents type from
     /// the same one, keeping the layout in use, Caps Lock and Num Lock.
     ///

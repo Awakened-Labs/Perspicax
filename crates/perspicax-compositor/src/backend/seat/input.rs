@@ -187,8 +187,8 @@ fn key(state: &mut Compositor, keycode: Keycode, pressed: KeyState, time: u32) {
     // A tap of the Logo key, finished by this release: done once the client
     // has seen the release, so it never believes the key is still down.
     let mut tapped = None;
-    let kept = keyboard.input(
-        state,
+    let kept = state.send_key(
+        &keyboard,
         keycode,
         pressed,
         serial,
