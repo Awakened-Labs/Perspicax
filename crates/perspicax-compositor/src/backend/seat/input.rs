@@ -332,15 +332,7 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
             session.settle_transitions();
         }
         let hit = state.pointed(at);
-        // A panel or launcher that takes the keyboard on a click gets it,
-        // without anything being raised: layers stack by layer, not by click.
-        if let Some(surface) = hit
-            .as_ref()
-            .filter(|hit| hit.window.is_none() && hit.takes_focus)
-            .and_then(|hit| hit.surface.clone())
-        {
-            state.focus_plain(surface);
-        }
+        state.focus_pressed_layer(hit.as_ref());
         let frame = hit.as_ref().and_then(|hit| hit.frame);
         let over = hit.as_ref().and_then(|hit| hit.window.clone());
         // Focus and raise before the press is delivered, so the client

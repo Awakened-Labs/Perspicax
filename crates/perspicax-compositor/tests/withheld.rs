@@ -1045,6 +1045,38 @@ fn a_launcher_a_binding_of_the_persons_starts_takes_the_keys() {
     session.stop((desk, queue));
 }
 
+/// A launcher shown without the keys has them once the person clicks it,
+/// as a panel that takes them on a click does: what they click on is what
+/// they asked for.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_launcher_shown_without_the_keys_takes_them_when_the_person_clicks_it() {
+    use perspicax_policy::{Button, Mods};
+
+    let session = seated("withheld-launcher-clicked");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let (mut other, mut other_queue, other_qh, other_ear) = client(&session);
+    let launcher = show_launcher(&mut other, &mut other_queue, &other_qh);
+    session.wait_for(launcher_shown);
+    assert!(
+        heard(&other_ear).entered.is_none(),
+        "shown without the keys"
+    );
+
+    // In the strip, across the top of the screen.
+    session.command(Do::Click {
+        at: (640, 60),
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    until(&mut other_queue, &mut other, |_| {
+        heard(&other_ear).entered.as_ref() == Some(&launcher)
+    });
+    until(&mut queue, &mut desk, |desk| !has_keys(desk, &ear, 0));
+    session.stop(((desk, queue), (other, other_queue)));
+}
+
 /// The person's binding asks the shell for its start menu. The binding
 /// took their press, and hands it on to the shell, so the menu the shell
 /// shows in answer, a launcher, takes the keys though the terminal had them.

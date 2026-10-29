@@ -52,10 +52,6 @@ pub(crate) struct Hit {
     /// and no window, as a panel's menu does.
     pub(crate) window: Option<Framed>,
     /// Set when it is a layer surface that may take the keyboard on a click.
-    #[cfg_attr(
-        not(feature = "seat"),
-        expect(dead_code, reason = "the seat's input path")
-    )]
     pub(crate) takes_focus: bool,
     /// The surface there (a subsurface, a popup, the thing itself) and its
     /// origin in global space -- the pair `PointerHandle::motion` wants.
@@ -302,6 +298,21 @@ impl Compositor {
         }
     }
 
+    /// A button went down over `hit`: a panel or launcher there that takes
+    /// the keyboard on a click gets it, without anything being raised, for
+    /// layers stack by layer, not by click. So a launcher shown without the
+    /// keys, nobody having asked for it, has them once it is clicked (#267).
+    /// Before the focus policy, which decides about windows alone; and only
+    /// for a press, not for a scroll that sets off a binding.
+    pub(crate) fn focus_pressed_layer(&mut self, hit: Option<&Hit>) {
+        if let Some(surface) = hit
+            .filter(|hit| hit.window.is_none() && hit.takes_focus)
+            .and_then(|hit| hit.surface.clone())
+        {
+            self.focus_plain(surface);
+        }
+    }
+
     /// A button went down over `hit`: the focus policy focuses and raises
     /// the window clicked, as every model does. A click over no window
     /// changes nothing.
@@ -342,6 +353,7 @@ impl Compositor {
         let time = self.now_ms();
         // Focus and raise before the press is delivered, and before a
         // binding, as a seat does.
+        self.focus_pressed_layer(hit.as_ref());
         self.follow_press(hit.as_ref());
         if !self.bound_press(hit.as_ref(), at, code, mods, time) {
             self.stand_in_button(&pointer, serial, code, ButtonState::Pressed, time);
