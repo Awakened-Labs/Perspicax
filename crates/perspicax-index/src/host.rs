@@ -316,6 +316,14 @@ pub struct SurfaceFacts {
     /// the surfaces already has it in front; it says why a window raised
     /// since is still covered by this one.
     pub on_top: bool,
+    /// Fullscreen, whether or not it is in use: asked to be, for a Wayland
+    /// window, or said to be, for an X11 one. Once it has the keyboard, it
+    /// comes in front of everything under `overlay`.
+    pub fullscreen: bool,
+    /// Drawn over the panels: for a window, that it is the fullscreen window
+    /// in use; for an X11 menu, that it hangs from that window. Never of a
+    /// surface not on screen.
+    pub over_panels: bool,
     /// What the host drew around this surface, in global space: a titlebar
     /// and a border, outside `geometry`, and, round a window an agent may act
     /// on where consent is by grant, the line marking it out.
@@ -378,6 +386,8 @@ impl SurfaceFacts {
             behind_tab: None,
             shaded: false,
             on_top: false,
+            fullscreen: false,
+            over_panels: false,
             frame: Vec::new(),
             drawn_opacity: None,
             app_id: None,
@@ -495,6 +505,21 @@ impl SurfaceFacts {
     #[must_use]
     pub fn tabbed(mut self, tabs: impl IntoIterator<Item = SurfaceId>) -> Self {
         self.tabs = tabs.into_iter().collect();
+        self
+    }
+
+    /// The same surface, a fullscreen window not in use.
+    #[must_use]
+    pub fn fullscreen(mut self) -> Self {
+        self.fullscreen = true;
+        self
+    }
+
+    /// The same surface, the fullscreen window in use.
+    #[must_use]
+    pub fn fullscreen_in_use(mut self) -> Self {
+        self.fullscreen = true;
+        self.over_panels = true;
         self
     }
 

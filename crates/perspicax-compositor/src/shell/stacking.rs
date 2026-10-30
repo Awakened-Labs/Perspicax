@@ -224,7 +224,7 @@ mod drawn {
 
 /// Whether a window is fullscreen: asked to be, for a Wayland window, or
 /// said to be, for an X11 one.
-fn is_fullscreen(window: &Framed) -> bool {
+pub(crate) fn is_fullscreen(window: &Framed) -> bool {
     if let Some(toplevel) = window.toplevel() {
         return toplevel.with_pending_state(|pending| {
             pending.states.contains(xdg_toplevel::State::Fullscreen)
