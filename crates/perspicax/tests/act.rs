@@ -44,7 +44,9 @@ use perspicax::{
     session,
 };
 use perspicax_compositor::{Backend, Config, Facts, Host, Requests, Stop};
-use perspicax_index::{Index, PointerButton, Receipt, Refusal, Selector, Verb};
+use perspicax_index::{
+    Index, PointerButton, Receipt, Refusal, Selector, Verb, WindowReceipt, WindowVerb,
+};
 use perspicax_mcp::{Denied, Desktop, Perspicax, ScreenshotParams, dto};
 use perspicax_node::{NodeId, Origin, Role, SurfaceId};
 use rmcp::handler::server::wrapper::Parameters;
@@ -83,6 +85,8 @@ struct Drive {
     acts: Vec<Act>,
     /// The covered control, and what the gate said about acting on it.
     covered: Option<Act>,
+    /// Its window raised, and what the gate said of the control after that.
+    raised: Option<(Result<WindowReceipt, Denied>, Result<Receipt, Denied>)>,
     /// Nodes that no compositor attributed to a process, which should be
     /// none of them -- see [`drive`] for the one exception.
     unattributed: Vec<u64>,
@@ -264,6 +268,21 @@ fn a_covered_control_is_refused_and_the_refusal_names_the_surface_in_the_way() {
         covered.app, covered.selector, covered.seen.node, covered.seen.surface, by.0
     );
 
+    // And what clears it (#147). Every click has gone by then and may have left
+    // a menu up, so what is asserted is the one refusal: the window that was
+    // in the way is in the way no longer. The control may be refused for
+    // another reason, a window repainting as it takes the keys having made
+    // what was read of it stale.
+    let (raised, again) = drive.raised.as_ref().expect("a covered control was raised");
+    let raised = raised.as_ref().expect("the window is raised");
+    assert!(raised.focus_landed(), "{raised:?}");
+    assert!(
+        !matches!(again, Err(Denied::Refused(Refusal::Occluded { by: still })) if *still == by),
+        "{} is still covered by surface {} once raised: {again:?}",
+        covered.selector,
+        by.0
+    );
+
     assert_eq!(drive.screenshot_failed, Some(true));
     assert_eq!(drive.screenshot["captured"], false);
 }
@@ -390,6 +409,14 @@ async fn drive(facts: &Facts, host: &Host) -> Drive {
     let covered = target_covered.map(click);
     let acts = targets.into_iter().map(click).collect();
 
+    // Last, for it changes what every other target was chosen against.
+    let raised = covered.as_ref().and_then(|covered: &Act| {
+        let surface = SurfaceId(covered.seen.surface?);
+        let selector = Selector::parse(&covered.selector).expect("built from the grammar");
+        let raised = desk.act_window(surface, WindowVerb::Raise);
+        Some((raised, desk.act(&selector, &Verb::Focus)))
+    });
+
     // The two tools that take no arguments, called for real rather than
     // projected -- `window_list` is the agent's entry point and `screenshot`,
     // in a build without `capture`, is the one that has to refuse.
@@ -416,6 +443,7 @@ async fn drive(facts: &Facts, host: &Host) -> Drive {
         screenshot_failed: shot.is_error,
         acts,
         covered,
+        raised,
         unattributed,
         total,
     }
