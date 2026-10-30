@@ -5,27 +5,33 @@
 //! while it has them smithay's grab decides where input goes: the menu's own
 //! application takes the pointer as it would without the menu, a press
 //! anywhere else closes the menu, and the keyboard goes to the menu alone.
-//! Issue #185: given to anything else, the keyboard was ignored. The hand
-//! passing over another window under focus-follows-mouse is not giving it
-//! the keys, and leaves the menu open, the window under the hand unraised.
+//! Issue #185: given to anything else, the keyboard was ignored. A click on
+//! another window raised it and left the keys behind, and a launcher, a
+//! window the person asked for or one activated came up without them. Now
+//! the keyboard going anywhere but the menu's own window and menus closes
+//! the menu first, as a click outside it would. The hand passing over
+//! another window under focus-follows-mouse is not giving it the keys, and
+//! leaves the menu open, the window under the hand unraised.
 //!
 //! With a person at the seat, where alone a menu takes the grab. The hand
-//! finds what is under it from the clients' buffers, so this needs the
-//! `capture` feature. Like the other live tests it binds a real Wayland
-//! socket, so it needs `XDG_RUNTIME_DIR`, and is `#[ignore]`d for
+//! finds what is under it from the clients' buffers, so its tests need the
+//! `capture` feature. Like the other live tests these bind a real Wayland
+//! socket, so they need `XDG_RUNTIME_DIR`, and are `#[ignore]`d for
 //! `ci/live-tests.sh` to run.
-
-#![cfg(feature = "capture")]
 
 mod common;
 
-use common::{Desk, Ear, Session, heard, menu_with_the_keyboard, until};
-use perspicax_compositor::{Backend, Command};
+use common::{Desk, Ear, Session, Told, heard, menu_with_the_keyboard, until};
+use perspicax_compositor::Backend;
 use perspicax_index::HostFacts;
-use perspicax_node::{Rect, SurfaceId};
-use perspicax_policy::{Focus, FocusModel};
+use perspicax_node::SurfaceId;
+use perspicax_policy::Action;
 use smithay_client_toolkit::shell::{WaylandSurface as _, xdg::popup::Popup};
-use wayland_client::{EventQueue, Proxy as _, QueueHandle};
+use wayland_client::{EventQueue, Proxy as _, QueueHandle, backend::ObjectId};
+
+/// Linux's code for the left button.
+#[cfg(feature = "capture")]
+const BTN_LEFT: u32 = 0x110;
 
 /// One monitor, with a person at it: only a person's menu takes the grab.
 fn seated(name: &str) -> Session {
@@ -42,7 +48,8 @@ fn titled(facts: &HostFacts, title: &str) -> Option<SurfaceId> {
 }
 
 /// Where the window titled `title` is, on the desk.
-fn geometry(facts: &HostFacts, title: &str) -> Rect {
+#[cfg(feature = "capture")]
+fn geometry(facts: &HostFacts, title: &str) -> perspicax_node::Rect {
     facts
         .surfaces()
         .iter()
@@ -77,12 +84,31 @@ fn opened(
     titled(&session.facts.read(), title).expect("waited for")
 }
 
+/// Put a focus policy in force, as a seat does from `[focus]`.
+#[cfg(feature = "capture")]
+fn policy(session: &Session, model: perspicax_policy::FocusModel, autoraise: bool) {
+    session.command(perspicax_compositor::Command::FocusPolicy(
+        perspicax_policy::Focus { model, autoraise },
+    ));
+}
+
+/// A person's click at `at`.
+#[cfg(feature = "capture")]
+fn click(session: &Session, at: (i32, i32), button: perspicax_policy::Button) {
+    session.command(perspicax_compositor::Command::Click {
+        at,
+        button,
+        mods: perspicax_policy::Mods::default(),
+    });
+}
+
 /// Two applications at the seat.
 ///
-/// "b" has a window, "b", a taskbar, a pointer and a keyboard. "a" has a
-/// window, "a", opened after it and over it with the keys, and a pointer and
-/// keyboard of its own; and once [`Pair::open_the_menu`] has run, a menu of
-/// "a" holding the pointer and keyboard.
+/// "b" has a window, "b", a taskbar, the shell's channel, a pointer and a
+/// keyboard: it stands in for the shell too. "a" has a window, "a", opened
+/// after it and over it with the keys, and a pointer and keyboard of its
+/// own; and once [`Pair::open_the_menu`] has run, a menu of "a" holding the
+/// pointer and keyboard.
 struct Pair {
     a: Desk,
     a_queue: EventQueue<Desk>,
@@ -90,6 +116,7 @@ struct Pair {
     a_ear: Ear,
     b: Desk,
     b_queue: EventQueue<Desk>,
+    b_qh: QueueHandle<Desk>,
     b_ear: Ear,
     a_id: SurfaceId,
     /// The menu of "a", once open: the client's own handle, kept so that it
@@ -101,6 +128,8 @@ impl Pair {
     fn start(session: &Session) -> Self {
         let (mut b, mut b_queue, b_qh, b_globals) = session.client();
         b.bind_taskbar(&b_globals, &b_qh);
+        b.bind_shell(&b_globals, &b_qh);
+        b.bind_activation(&b_globals, &b_qh);
         b.bind_pointer(&b_globals, &b_qh);
         let b_ear = b.bind_keyboard(&b_globals, &b_qh);
         opened(session, &mut b, &mut b_queue, &b_qh, "b");
@@ -111,6 +140,7 @@ impl Pair {
         });
 
         let (mut a, mut a_queue, a_qh, a_globals) = session.client();
+        a.bind_activation(&a_globals, &a_qh);
         a.bind_pointer(&a_globals, &a_qh);
         let a_ear = a.bind_keyboard(&a_globals, &a_qh);
         let a_id = opened(session, &mut a, &mut a_queue, &a_qh, "a");
@@ -131,6 +161,7 @@ impl Pair {
             a_ear,
             b,
             b_queue,
+            b_qh,
             b_ear,
             a_id,
             menu: None,
@@ -158,6 +189,7 @@ impl Pair {
     }
 
     /// A point of "b" that "a", and so its menu, does not cover: a corner.
+    #[cfg(feature = "capture")]
     fn b_alone(session: &Session) -> (i32, i32) {
         let facts = session.wait_for(|_| true);
         let (a, b) = (geometry(&facts, "a"), geometry(&facts, "b"));
@@ -174,6 +206,24 @@ impl Pair {
         .unwrap_or_else(|| panic!("{a:?} covers every corner of {b:?}"))
     }
 
+    /// Show a launcher on "b", as the shell shows its start menu or fuzzel
+    /// shows itself: a strip over everything that asks for every key,
+    /// drawn. Its surface.
+    fn show_launcher(&mut self) -> ObjectId {
+        let before = self.b.layers_drawn;
+        self.b.open_launcher(&self.b_qh, 40, 0xff20_4060);
+        let surface = self
+            .b
+            .layers
+            .last()
+            .expect("just opened")
+            .0
+            .wl_surface()
+            .id();
+        until(&mut self.b_queue, &mut self.b, |b| b.layers_drawn > before);
+        surface
+    }
+
     /// Let both clients hear whatever the compositor sent them.
     fn settle(&mut self) {
         for _ in 0..3 {
@@ -188,9 +238,222 @@ impl Pair {
         heard(&self.a_ear).entered.as_ref() == Some(&menu.id())
     }
 
+    /// Whether the keyboard is on the `nth` window of "a", as it last heard.
+    fn keys_on_a(&self, nth: usize) -> bool {
+        heard(&self.a_ear).entered.as_ref() == Some(&self.a.windows[nth].wl_surface().id())
+    }
+
+    /// Whether the keyboard is on the window of "b", as it last heard.
+    fn keys_on_b(&self) -> bool {
+        heard(&self.b_ear).entered.as_ref() == Some(&self.b.windows[0].wl_surface().id())
+    }
+
     fn stop(self, session: Session) {
         session.stop(((self.a, self.a_queue), (self.b, self.b_queue)));
     }
+}
+
+/// The issue's own case: a menu of "a" is open, and the person clicks "b".
+/// The menu closes, "b" comes to the top with the keys, and the click
+/// reaches it. Before, "b" came to the top and the keys went back to "a",
+/// so what the person typed next went to the window behind.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_click_on_another_window_closes_the_menu_and_gives_that_window_the_keys() {
+    use perspicax_policy::{Button, FocusModel};
+
+    let session = seated("menu-makes-way-click");
+    let mut pair = Pair::with_the_menu(&session);
+    let at = Pair::b_alone(&session);
+    policy(&session, FocusModel::Click, false);
+
+    click(&session, at, Button::Left);
+    until(&mut pair.a_queue, &mut pair.a, |a| a.popups_done == 1);
+    until(&mut pair.b_queue, &mut pair.b, |b| b.buttons.len() == 2);
+    pair.settle();
+
+    assert!(pair.keys_on_b(), "the keys went with the click");
+    assert!(heard(&pair.a_ear).entered.is_none(), "and left a");
+    assert_eq!(pair.b.buttons, [(BTN_LEFT, true), (BTN_LEFT, false)]);
+    let facts = session.wait_for(|_| true);
+    assert_eq!(on_top(&facts).as_deref(), Some("b"));
+
+    pair.stop(session);
+}
+
+/// A right-click on "b" while a menu of "a" is open opens the menu of "b":
+/// "b" has the keys by the time its click reaches it, so its menu may take
+/// them (#187). Before, the keys were still with "a", and the menu of "b"
+/// was dismissed as one asked for by a program without them.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_right_click_on_another_window_opens_that_windows_menu() {
+    use perspicax_policy::{Button, FocusModel};
+    use smithay_client_toolkit::shell::xdg::XdgSurface as _;
+
+    let session = seated("menu-makes-way-right-click");
+    let mut pair = Pair::with_the_menu(&session);
+    let at = Pair::b_alone(&session);
+    policy(&session, FocusModel::Click, false);
+
+    click(&session, at, Button::Right);
+    until(&mut pair.b_queue, &mut pair.b, |b| b.pressed.is_some());
+    let serial = pair.b.pressed.expect("waited for");
+    let menu = pair.b.open_menu(
+        &pair.b_qh,
+        pair.b.windows[0].xdg_surface(),
+        (10, 10),
+        (120, 80),
+        serial,
+    );
+    pair.settle();
+
+    assert_eq!(pair.b.popups_done, 0, "the menu of b was not dismissed");
+    assert_eq!(
+        heard(&pair.b_ear).entered.as_ref(),
+        Some(&menu.wl_surface().id()),
+        "it has the keys"
+    );
+    assert_eq!(pair.a.popups_done, 1, "and the menu of a closed");
+
+    pair.stop(session);
+}
+
+/// A click on the window the menu was opened from is that application's
+/// own: it reaches the window, and the menu stays open, as it does under
+/// smithay's grab, for the application to close it if it means to.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_click_on_the_menus_own_window_goes_to_it() {
+    use perspicax_policy::{Button, FocusModel};
+
+    let session = seated("menu-makes-way-own");
+    let mut pair = Pair::with_the_menu(&session);
+    let facts = session.wait_for(|_| true);
+    let a = geometry(&facts, "a");
+    // Its bottom right, past the menu.
+    let at = ((a.x1 - 10.0) as i32, (a.y1 - 10.0) as i32);
+    policy(&session, FocusModel::Click, false);
+
+    click(&session, at, Button::Left);
+    until(&mut pair.a_queue, &mut pair.a, |a| a.buttons.len() == 2);
+    pair.settle();
+
+    assert_eq!(pair.a.popups_done, 0, "the menu is still open");
+    assert!(pair.keys_in_the_menu(), "with the keys");
+    assert!(pair.b.buttons.is_empty());
+
+    pair.stop(session);
+}
+
+/// The person's key asks the shell for its start menu while a window's
+/// menu is open. The start menu takes the keys as it shows, the person
+/// having asked for it (#267), and the window's menu closes. Once the start
+/// menu goes, the keys go back to the window. Before, the start menu showed
+/// and the keys stayed in the window's menu.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_launcher_the_person_asks_for_closes_the_menu_and_takes_the_keys() {
+    let session = seated("menu-makes-way-launcher");
+    let mut pair = Pair::with_the_menu(&session);
+
+    // The binding hands the person's press on to the shell, "b".
+    session.press_bound(Action::StartMenu);
+    until(&mut pair.b_queue, &mut pair.b, |b| {
+        b.told.iter().any(|told| matches!(told, Told::StartMenu(_)))
+    });
+    let launcher = pair.show_launcher();
+    pair.settle();
+
+    assert_eq!(
+        heard(&pair.b_ear).entered.as_ref(),
+        Some(&launcher),
+        "the start menu has the keys"
+    );
+    assert_eq!(pair.a.popups_done, 1, "and the window's menu closed");
+
+    pair.b.layers.clear();
+    pair.b_queue.roundtrip(&mut pair.b).expect("closed");
+    until(&mut pair.a_queue, &mut pair.a, |pair_a| {
+        heard(&pair.a_ear).entered.as_ref() == Some(&pair_a.windows[0].wl_surface().id())
+    });
+
+    pair.stop(session);
+}
+
+/// A launcher nobody asked for takes no keys as it shows (#267), so it
+/// closes no menu either: a program cannot close the person's menu by
+/// showing one.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_launcher_nobody_asked_for_leaves_the_menu_open() {
+    let session = seated("menu-makes-way-launcher-unasked");
+    let mut pair = Pair::with_the_menu(&session);
+
+    pair.show_launcher();
+    pair.settle();
+
+    assert_eq!(pair.a.popups_done, 0, "the menu is still open");
+    assert!(pair.keys_in_the_menu(), "with the keys");
+    assert!(heard(&pair.b_ear).entered.is_none());
+
+    pair.stop(session);
+}
+
+/// The application whose menu is open opens another window: it has the
+/// keys, so the window is its, asked for (#259), and takes them as it
+/// opens; the menu closes. Another window of the same application is not
+/// the menu's: had the application closed the menu itself, the keys would
+/// have gone back to the window it was opened from. Before, the window
+/// opened and the keys stayed in the menu.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_the_menus_application_opens_takes_the_keys_and_closes_the_menu() {
+    let session = seated("menu-makes-way-opens");
+    let mut pair = Pair::with_the_menu(&session);
+
+    opened(
+        &session,
+        &mut pair.a,
+        &mut pair.a_queue,
+        &pair.a_qh,
+        "another",
+    );
+    until(&mut pair.a_queue, &mut pair.a, |a| a.has_drawn(1));
+    pair.settle();
+
+    assert!(pair.keys_on_a(1), "the new window has the keys");
+    assert_eq!(pair.a.popups_done, 1, "and the menu closed");
+
+    pair.stop(session);
+}
+
+/// A token made by "a" while its menu has the keys, as "Open link" picked
+/// from it makes one, and spent by "b", as the browser handed the link
+/// does. "b" comes forward with the keys, and the menu closes, whether or
+/// not "a" got round to closing it. Before, "b" came forward without them.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_activated_while_a_menu_is_open_takes_the_keys_and_closes_it() {
+    let session = seated("menu-makes-way-activated");
+    let mut pair = Pair::with_the_menu(&session);
+
+    let serial = heard(&pair.a_ear).enter_serial.expect("the menu's");
+    pair.a.make_token(&pair.a_qh, 0, serial);
+    until(&mut pair.a_queue, &mut pair.a, |a| !a.tokens.is_empty());
+    let token = pair.a.tokens.remove(0);
+    pair.b.spend_token(&token, 0);
+    pair.b_queue.roundtrip(&mut pair.b).expect("spent");
+    session.wait_for(|facts| on_top(facts).as_deref() == Some("b"));
+    pair.settle();
+
+    assert!(pair.keys_on_b(), "b has the keys");
+    assert_eq!(pair.a.popups_done, 1, "and the menu closed");
+
+    pair.stop(session);
 }
 
 /// Under focus-follows-mouse with autoraise, the hand passing from the menu
@@ -198,16 +461,17 @@ impl Pair {
 /// while the menu holds the pointer, smithay tells "b" nothing, and the
 /// hand over it is not pointing at it. Before, "b" was raised over the
 /// menu, and handed keys the menu's grab ignored.
+#[cfg(feature = "capture")]
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_hand_passing_over_another_window_leaves_the_menu_open() {
+    use perspicax_compositor::Command;
+    use perspicax_policy::FocusModel;
+
     let session = seated("menu-makes-way-hover");
     let mut pair = Pair::with_the_menu(&session);
     let over_b = Pair::b_alone(&session);
-    session.command(Command::FocusPolicy(Focus {
-        model: FocusModel::Sloppy,
-        autoraise: true,
-    }));
+    policy(&session, FocusModel::Sloppy, true);
 
     // The hand starts at the origin.
     session.command(Command::Motion { by: over_b });

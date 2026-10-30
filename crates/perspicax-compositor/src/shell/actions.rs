@@ -13,9 +13,10 @@
 //! first, as a click outside it would close it
 //! ([`Compositor::dismiss_menu`]). A binding that is not about the window
 //! (a layout, a program started, the shell's menus) leaves it open; which
-//! is which is `Action::on_focused_window`. The keyboard handed anywhere
-//! else while a menu holds it, by a click on another window say, does not
-//! close it yet: #185.
+//! is which is `Action::on_focused_window`. What it brings up may close it
+//! after: the keyboard handed anywhere else while a menu holds it -- to the
+//! shell's start menu, a window the program opens, another window clicked
+//! -- closes the menu as it goes (`Compositor::menu_makes_way_for`, #185).
 
 use perspicax_node::SurfaceId;
 use perspicax_policy::{Action, Change, Decision, cycle};

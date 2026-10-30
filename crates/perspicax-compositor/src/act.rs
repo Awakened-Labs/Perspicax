@@ -465,9 +465,10 @@ impl Compositor {
     /// client's surface closes the menu, and a scroll there reaches nothing;
     /// the menu's own application, its window and its menus, takes the
     /// pointer as it does the person's. The keyboard goes only to the menu
-    /// holding it: given to anything else, smithay ignores it, and a tab
-    /// brought forward would be raised over the menu, or put its window
-    /// away and the menu with it. `None` when no menu holds them,
+    /// holding it: given to anything else, it closes the menu under the
+    /// person, as their own click elsewhere does (#185), and a tab brought
+    /// forward would be raised over the menu, or put its window away and
+    /// the menu with it. `None` when no menu holds them,
     /// [`Compositor::held_menu_root`]'s answer: one dismissed but not yet
     /// destroyed holds nothing.
     fn menu_in_the_way(&self, action: &Action, target: &Target) -> Option<SurfaceId> {
