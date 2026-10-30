@@ -1227,7 +1227,15 @@ Alt+Tab, Logo+arrows and the rest close the menu first, as a click outside it
 would, then act on the window. A key that is not about the window, a layout
 switched, leaves the menu open. Switching workspace acts on the monitor of
 the window whose menu is open, and a window left behind takes its menu with
-it, so the keys go to whatever is in front where the person went. In both,
+it, so the keys go to whatever is in front where the person went. The keys
+going anywhere else close the menu too, as a click outside it would: a click
+on another window, which has the keys and the click; the start menu or a
+launcher the person asked for; a window they asked for, or one brought
+forward for them. The click that closes a menu does what it would have done
+with no menu open, a binding on the desktop, a move on a titlebar. A click
+in the menu's own window is its application's, and the menu stays open for
+the application to close. The pointer only passing over another window,
+under focus-follows-mouse, leaves it open. In both,
 too, a fullscreen window
 covers the panels while it is the one in use, and goes back under them when
 another window, the start menu or a launcher takes the keyboard. A menu of
