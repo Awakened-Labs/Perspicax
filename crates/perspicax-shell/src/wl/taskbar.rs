@@ -5,7 +5,10 @@
 //! unless `[protocols]` says otherwise; without it the panels list no
 //! windows, and are otherwise as they were. Bringing a window forward,
 //! putting it away and closing it are the compositor's to do, as a person's
-//! click or key would.
+//! click or key would. With a person at the seat it does them only for the
+//! person (#270): the press on a task, which reaches the panel, or on the
+//! menu or the pie that has the keys, is what lets it. So each is asked as
+//! the press comes, and before a menu or a pie lets go of the keys.
 //!
 //! A right-click on a task opens its window's menu beside it, built from
 //! what perspicax tells its own shell of the window, if it does. What is

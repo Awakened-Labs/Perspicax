@@ -139,6 +139,7 @@ struct Apps {
 impl Apps {
     fn start(session: &Session) -> Self {
         let (mut b, mut b_queue, b_qh, b_globals) = session.client();
+        b.bind_taskbar(&b_globals, &b_qh);
         b.bind_pointer(&b_globals, &b_qh);
         b.open_panel(&b_qh, "panel", 30, 0xff20_2020);
         until(&mut b_queue, &mut b, |_| {
@@ -157,13 +158,14 @@ impl Apps {
 
         let (mut a, mut a_queue, a_qh, a_globals) = session.client();
         a.bind_pointer(&a_globals, &a_qh);
-        a.bind_taskbar(&a_globals, &a_qh);
         let ear = a.bind_keyboard(&a_globals, &a_qh);
         let own = opened(session, &mut a, &mut a_queue, &a_qh, "own");
-        // Picked in the taskbar: it opened without the keys, "elsewhere"
-        // having them (#259), and has them once the person gives them.
-        until(&mut a_queue, &mut a, |a| a.task("own").is_some());
-        a.activate("own");
+        // Picked in the taskbar of "b", the program in use (#270): it opened
+        // without the keys, "elsewhere" having them (#259), and has them once
+        // the person gives them.
+        until(&mut b_queue, &mut b, |b| b.task("own").is_some());
+        b.activate("own");
+        b_queue.roundtrip(&mut b).expect("the pick sent");
         let own_surface = a.windows[0].wl_surface().id();
         until(&mut a_queue, &mut a, |_| {
             heard(&ear).entered.as_ref() == Some(&own_surface)

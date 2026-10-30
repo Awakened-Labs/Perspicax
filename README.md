@@ -1064,9 +1064,7 @@ lost -- started through `systemd-run`, `gtk-launch` or D-Bus activation, or
 by a launcher that exited first and handed it no token; prompts of daemons
 started at login, pinentry and polkit agents, open without them (#268); a
 token that names no input is forgotten as it is made, so spending one marks
-nothing (#269); and any program admitted to `foreign-toplevel-management`,
-which is any by default, can still give a window the keys with its
-`activate` request (#270).
+nothing (#269).
 
 Nor does a launcher take the keys by showing (#267). A launcher is a layer
 over the windows that asks for every key: fuzzel, a screenshot tool's
@@ -1092,6 +1090,35 @@ first picture is the person's latest press, so the launcher shows without
 the keys, as a window opens without them; and a launcher whose descent from
 the press is lost, a service started at login that a binding asks over D-Bus
 to show itself say, shows without them until it is clicked.
+
+Nor does a taskbar do anything to a window for itself (#270). A program
+admitted to `foreign-toplevel-management`, which is any by default, may ask
+to bring a window forward, minimize, maximize, fullscreen or close it.
+Bringing one forward gives it the keys, and minimizing or closing the window
+in use hands them to the one beneath, so one request used to take the rest
+of a password typed at a terminal's `sudo` prompt. With a person at the seat
+a taskbar's request is done only if the person asked its program for it, as
+for a launcher: it has the keys, a window switcher say; or their latest
+press, under ten seconds old, reached it or started it -- a task clicked on
+waybar or the shell's panel, a pie or a task's menu, a binding that runs
+`wlrctl`, an Enter at a terminal. That lasts until they press anything else,
+so a click that brings forward a window on another workspace, which moves
+the keys twice, is done whole. Never just because nothing has the keys. Any
+other request is ignored, and logged. A program asking to bring its own
+window forward has it marked on the taskbar as wanting attention, as one
+whose token was refused does; another program's window is left unmarked,
+since no program may say a window not its own wants attention. A window
+picked while the taskbar's own pie or menu has the keys takes them as that
+goes. Headless, with nobody at the seat, a taskbar acts as asked, as before.
+Left open: the request names no press, so a click an agent or a screen
+reader makes on a task, which is not the person's, is refused, unless the
+person's own press reached the panel moments before, a binding that opened
+a menu say, when it is taken as theirs; under sloppy or strict focus the
+pointer moves the keys without a press, so a program the person clicked may
+act until they next press something; a switcher that picks on a key other
+than Enter, once it has let go of the keys, is refused; a pager can still
+switch workspace for itself with `ext-workspace` (#278); and any X client
+can minimize the X11 window in use (#279).
 
 A new window opens on the monitor under the pointer, in the room its panels
 leave, cascaded from the top-left corner: 32 pixels further in for each
@@ -1468,8 +1495,8 @@ never = ["ennius"]             # what no agent is given, whatever grants it
 
 `[protocols]` names the programs that may use the protocols reaching past
 their own windows: a taskbar's list of windows (`foreign-toplevel-list`, and
-`foreign-toplevel-management` to activate and close them), a pager
-(`workspace`), a screenshot tool (`screencopy`), a display tool
+`foreign-toplevel-management` to activate and close them, for the person),
+a pager (`workspace`), a screenshot tool (`screencopy`), a display tool
 (`output-management`), the desktop shell (`shell`), which is told when a
 key asks for a menu or a pie or changes the volume, what is made of each
 window and which want attention, and why something the person asked for was

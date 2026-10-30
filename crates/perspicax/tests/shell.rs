@@ -299,8 +299,11 @@ fn an_agent_brings_a_window_forward_by_its_tab() {
 
 /// Issue #259: with a person at the seat, a window of another program that
 /// opens while they are at one opens without the keys, and its tab says it
-/// wants attention, to an agent as to a screen reader. Brought forward by a
-/// click on its tab, it wants it no longer.
+/// wants attention, to an agent as to a screen reader. An agent's click on
+/// its tab brings nothing forward, for an agent's clicks are not the
+/// person's, and the taskbar acts only for them (#270). Brought forward by
+/// a click on its tab once the person's press has reached the shell, it
+/// wants it no longer.
 #[test]
 #[ignore = "needs a live accessibility bus, and PERSPICAX_SHELL"]
 fn a_window_that_opened_without_the_keys_says_so_on_its_tab_until_brought_forward() {
@@ -317,6 +320,20 @@ fn a_window_that_opened_without_the_keys_says_so_on_its_tab_until_brought_forwar
             |index, facts| described(index, facts, "Second", Some("Wants attention")),
         );
 
+        hosted.click("tablist:Taskbar>tab:Second", PointerButton::Left);
+        thread::sleep(SETTLE);
+        hosted.desk.read(&mut |index, facts| {
+            assert!(
+                focused_last(facts, "First").is_some(),
+                "an agent's click brings nothing forward"
+            );
+            assert!(
+                described(index, facts, "Second", Some("Wants attention")).is_some(),
+                "and the tab still says the window wants attention"
+            );
+        });
+
+        hosted.press_reaching_the_shell();
         hosted.click("tablist:Taskbar>tab:Second", PointerButton::Left);
         hosted.wait_until(
             "the second window forward, wanting nothing",
@@ -343,6 +360,7 @@ fn a_window_refused_the_keys_it_asked_for_says_so_on_its_tab() {
             |index, facts| forward(index, facts, "First").filter(|_| first.made()),
         );
         let _second = hosted.window("Second");
+        hosted.press_reaching_the_shell();
         hosted.click("tablist:Taskbar>tab:Second", PointerButton::Left);
         hosted.wait_until("the second window forward", |index, facts| {
             forward(index, facts, "Second")
@@ -718,6 +736,16 @@ impl Hosted {
                 .command(command)
                 .expect("the compositor is there");
         }
+    }
+
+    /// The person presses something that reaches the shell, as a click on
+    /// its panel does, so what its taskbar asks next is theirs (#270).
+    /// Headless without `capture` no hand finds the panel to click, so a
+    /// binding asking the shell for a pie it has none of stands in: its key
+    /// is the press, the binding hands it on to the shell, and the shell
+    /// shows nothing, so the panel is left uncovered for an agent's click.
+    fn press_reaching_the_shell(&self) {
+        self.press_binding(Action::Pie("none".to_owned()));
     }
 
     /// Click what `selector` names with `button`, as an agent does.

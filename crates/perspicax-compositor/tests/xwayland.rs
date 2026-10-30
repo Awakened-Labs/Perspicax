@@ -286,10 +286,33 @@ fn focused_last(facts: &Facts) -> Option<String> {
         .clone()
 }
 
-/// The person picks the window `title` in the taskbar. One that opens while
-/// another program has the keys opens without them (#259): a Wayland window
-/// while an X11 one has them, or the other way about.
+/// The person picks the window `title` in `desk`'s taskbar, their press
+/// reaching it (#270): `desk` is bound as the shell, if it is not already,
+/// for the stand-in to hand the press to. One that opens while another
+/// program has the keys opens without them (#259): a Wayland window while
+/// an X11 one has them, or the other way about.
 fn pick(
+    session: &Session,
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    globals: &GlobalList,
+    qh: &QueueHandle<Desk>,
+    title: &str,
+) {
+    if desk.shell.is_none() {
+        desk.bind_shell(globals, qh);
+    }
+    desk.bind_taskbar(globals, qh);
+    until(queue, desk, |desk| desk.task(title).is_some());
+    common::press_reaching(session, desk, queue);
+    desk.activate(title);
+    queue.roundtrip(desk).expect("the pick sent");
+}
+
+/// The window `title` picked in the taskbar of `desk`, the program in use:
+/// a switcher, say, with the keys, so what it asks is the person's (#270),
+/// and nothing is pressed.
+fn pick_in_use(
     desk: &mut Desk,
     queue: &mut EventQueue<Desk>,
     globals: &GlobalList,
@@ -2000,7 +2023,14 @@ fn the_root_names_the_x11_window_with_the_keyboard_and_none_once_a_wayland_one_h
     let (mut desk, mut queue, qh, globals) = x11.session.client();
     desk.open_window(&qh, "wayland", "perspicax.test.wayland");
     until(&mut queue, &mut desk, |desk| desk.drawn == 1);
-    pick(&mut desk, &mut queue, &globals, &qh, "wayland");
+    pick(
+        &x11.session,
+        &mut desk,
+        &mut queue,
+        &globals,
+        &qh,
+        "wayland",
+    );
     assert!(
         x11.names_active(x11rb::NONE),
         "still names {:#x} with a Wayland window at the keyboard",
@@ -2178,7 +2208,14 @@ fn an_x11_window_asking_to_be_active_while_a_wayland_window_has_the_keys_takes_n
     let ear = desk.bind_keyboard(&globals, &qh);
     desk.open_window(&qh, "terminal", "terminal");
     let terminal = desk.windows[0].wl_surface().id();
-    pick(&mut desk, &mut queue, &globals, &qh, "terminal");
+    pick(
+        &x11.session,
+        &mut desk,
+        &mut queue,
+        &globals,
+        &qh,
+        "terminal",
+    );
     until(&mut queue, &mut desk, |_| {
         heard(&ear).entered.as_ref() == Some(&terminal)
     });
@@ -2287,7 +2324,7 @@ fn a_token_made_before_an_x11_window_opened_with_the_keys_brings_nothing_forward
     let token = desk.tokens.remove(0);
 
     let terminal = x11.open("terminal");
-    pick(&mut desk, &mut queue, &globals, &qh, "terminal");
+    pick_in_use(&mut desk, &mut queue, &globals, &qh, "terminal");
     eventually(Duration::from_secs(10), || {
         (x11.focus() == terminal).then_some(())
     })
@@ -2667,7 +2704,7 @@ fn an_x11_pointer_grab_confined_to_its_window_keeps_the_mouse_in_it() {
     x11.surface_where("beside", |surface| surface.mapped)
         .expect("the Wayland window on screen");
     let window = x11.open("game");
-    pick(&mut desk, &mut queue, &globals, &qh, "game");
+    pick_in_use(&mut desk, &mut queue, &globals, &qh, "game");
     assert!(
         eventually(Duration::from_secs(5), || {
             (focused_last(&x11.session.facts).as_deref() == Some("game")).then_some(())
@@ -3301,7 +3338,7 @@ fn an_agent_cannot_click_or_focus_an_x11_window_past_a_wayland_menu() {
     let ear = desk.bind_keyboard(&globals, &qh);
     desk.open_window(&qh, "page", "page");
     until(&mut queue, &mut desk, |desk| desk.drawn == 1);
-    pick(&mut desk, &mut queue, &globals, &qh, "page");
+    pick(&x11.session, &mut desk, &mut queue, &globals, &qh, "page");
     let page = id_of(&x11, "page");
     let _menu = menu_with_the_keyboard(&x11.session, &mut desk, &mut queue, &qh, &ear, page);
     let menu = x11
@@ -4035,7 +4072,14 @@ fn an_x11_window_refused_the_keys_it_asked_for_wants_attention() {
     let ear = desk.bind_keyboard(&globals, &qh);
     desk.open_window(&qh, "terminal", "terminal");
     let terminal = desk.windows[0].wl_surface().id();
-    pick(&mut desk, &mut queue, &globals, &qh, "terminal");
+    pick(
+        &x11.session,
+        &mut desk,
+        &mut queue,
+        &globals,
+        &qh,
+        "terminal",
+    );
     until(&mut queue, &mut desk, |desk| {
         heard(&ear).entered.as_ref() == Some(&terminal) && desk.told_of("behind").0.is_some()
     });

@@ -64,6 +64,31 @@ fn seated(name: &str) -> Session {
     Session::start(name, Backend::headless((1280, 800)).with_person())
 }
 
+/// A session with a person at the seat, and two workspaces side by side.
+fn seated_on_two_workspaces(name: &str) -> Session {
+    use perspicax_compositor::Virtual;
+    use perspicax_policy::{Access, Grid, Mode, Shape};
+
+    Session::start(
+        name,
+        Backend::Headless {
+            outputs: vec![Virtual::numbered(1, (1280, 800))],
+            workspaces: Shape {
+                mode: Mode::Spanning,
+                grid: Grid {
+                    columns: 2,
+                    rows: 1,
+                    wrap: false,
+                },
+            },
+            access: Access::open(),
+            person: true,
+            opacity: Default::default(),
+            agent: Default::default(),
+        },
+    )
+}
+
 fn titled<'a>(facts: &'a HostFacts, title: &str) -> Option<&'a SurfaceFacts> {
     facts
         .surfaces()
@@ -204,27 +229,9 @@ fn a_window_of_the_program_in_use_opens_with_the_keys() {
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_window_opening_where_nothing_has_the_keys_takes_them() {
-    use perspicax_compositor::Virtual;
-    use perspicax_policy::{Access, Action, Direction, Grid, Mode, Shape};
+    use perspicax_policy::{Action, Direction};
 
-    let session = Session::start(
-        "withheld-nothing",
-        Backend::Headless {
-            outputs: vec![Virtual::numbered(1, (1280, 800))],
-            workspaces: Shape {
-                mode: Mode::Spanning,
-                grid: Grid {
-                    columns: 2,
-                    rows: 1,
-                    wrap: false,
-                },
-            },
-            access: Access::open(),
-            person: true,
-            opacity: Default::default(),
-            agent: Default::default(),
-        },
-    );
+    let session = seated_on_two_workspaces("withheld-nothing");
     let (mut desk, mut queue, _, _, ear) = terminal(&session);
     session.perform(Action::Workspace(Direction::Right));
     until(&mut queue, &mut desk, |_| heard(&ear).entered.is_none());
@@ -264,8 +271,14 @@ fn a_window_its_program_maps_again_while_another_is_in_use_opens_without_the_key
         has_keys(other, &other_ear, 0)
     });
     let (mut desk, mut queue, _, _, ear) = program(&session, "terminal");
-    desk.activate("terminal");
+    let (mut panel, mut panel_queue) = panel(&session, 7);
+    pick(&session, &mut panel, &mut panel_queue, "terminal");
     until(&mut queue, &mut desk, |desk| has_keys(desk, &ear, 0));
+    // Told it is no longer active, and drawn so, before it goes: a window
+    // draws at every configure, which would map it again.
+    until(&mut other_queue, &mut other, |_| {
+        heard(&other_ear).entered.is_none()
+    });
 
     let surface = other.windows[0].wl_surface().clone();
     surface.attach(None, 0, 0);
@@ -283,7 +296,7 @@ fn a_window_its_program_maps_again_while_another_is_in_use_opens_without_the_key
     assert!(!has_keys(&other, &other_ear, 0), "the window back has none");
     assert_eq!(on_top(&session.facts.read()).as_deref(), Some("terminal"));
 
-    session.stop(((desk, queue), (other, other_queue)));
+    session.stop(((desk, queue), (other, other_queue), (panel, panel_queue)));
 }
 
 /// A window that opened without the keys has them once the program in use
@@ -407,9 +420,11 @@ fn panel(session: &Session, version: u32) -> (Desk, EventQueue<Desk>) {
     (panel, queue)
 }
 
-/// The person picks the window `title` in the panel's taskbar.
-fn pick(panel: &mut Desk, queue: &mut EventQueue<Desk>, title: &str) {
+/// The person picks the window `title` in the panel's taskbar: their press
+/// reaches the panel, and it asks for the window (#270).
+fn pick(session: &Session, panel: &mut Desk, queue: &mut EventQueue<Desk>, title: &str) {
     until(queue, panel, |panel| panel.task(title).is_some());
+    common::press_reaching(session, panel, queue);
     panel.activate(title);
     queue.roundtrip(panel).expect("the pick sent");
 }
@@ -452,7 +467,7 @@ fn a_window_that_opened_without_the_keys_wants_attention_until_the_person_picks_
 
     told_so(&mut panel, &mut panel_queue, "thief", true);
     assert!(!told_wanting(&mut panel, &mut panel_queue, "terminal"));
-    pick(&mut panel, &mut panel_queue, "thief");
+    pick(&session, &mut panel, &mut panel_queue, "thief");
     until(&mut thief_queue, &mut thief, |thief| {
         has_keys(thief, &thief_ear, 0)
     });
@@ -498,7 +513,7 @@ fn a_window_refused_the_keys_by_a_stale_token_wants_attention() {
     let token = other.tokens.remove(0);
     let (mut panel, mut panel_queue) = panel(&session, 7);
     let (mut desk, mut queue, _, _, ear) = program(&session, "terminal");
-    pick(&mut panel, &mut panel_queue, "terminal");
+    pick(&session, &mut panel, &mut panel_queue, "terminal");
     until(&mut queue, &mut desk, |desk| has_keys(desk, &ear, 0));
     assert!(!told_wanting(&mut panel, &mut panel_queue, "other"));
 
@@ -977,15 +992,13 @@ fn a_launcher_shown_where_nothing_has_the_keys_takes_none() {
 fn a_launcher_refused_the_keys_is_asked_again_only_as_it_next_wants_them() {
     let session = seated("withheld-launcher-again");
     let (desk, queue, _, _, _) = terminal(&session);
+    let (mut panel, mut panel_queue) = panel(&session, 7);
     let (mut other, mut other_queue, other_qh, _, other_ear) = program(&session, "other");
     until(&mut other_queue, &mut other, |other| other.has_drawn(0));
     let launcher = show_launcher(&mut other, &mut other_queue, &other_qh);
     assert!(heard(&other_ear).entered.is_none(), "neither has the keys");
 
-    until(&mut other_queue, &mut other, |other| {
-        other.task("other").is_some()
-    });
-    other.activate("other");
+    pick(&session, &mut panel, &mut panel_queue, "other");
     until(&mut other_queue, &mut other, |other| {
         has_keys(other, &other_ear, 0)
     });
@@ -1010,7 +1023,7 @@ fn a_launcher_refused_the_keys_is_asked_again_only_as_it_next_wants_them() {
         heard(&other_ear).entered.as_ref() == Some(&launcher)
     });
 
-    session.stop(((desk, queue), (other, other_queue)));
+    session.stop(((desk, queue), (other, other_queue), (panel, panel_queue)));
 }
 
 /// fuzzel, from a binding of the person's: what the binding started is the
@@ -1108,6 +1121,309 @@ fn a_menu_a_binding_asks_the_shell_for_takes_the_keys() {
     });
     until(&mut queue, &mut desk, |desk| !has_keys(desk, &ear, 0));
     session.stop(((desk, queue), (shell, shell_queue)));
+}
+
+/// A program with a taskbar and nothing else: no window of its own, and
+/// none of the person's presses reach it. What it asks of a window, it asks
+/// for itself.
+fn background_taskbar(session: &Session) -> (Desk, EventQueue<Desk>) {
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    queue.roundtrip(&mut desk).expect("bound");
+    (desk, queue)
+}
+
+/// The person at the terminal, picked in the panel over the window of
+/// another program, "other", which had the keys before it: the window the
+/// keys would go to, were the terminal to go, and one wanting no attention.
+#[expect(
+    clippy::type_complexity,
+    reason = "three clients, as the tests take them"
+)]
+fn terminal_over_other(
+    session: &Session,
+) -> (
+    (Desk, EventQueue<Desk>, Ear),
+    (Desk, EventQueue<Desk>, Ear),
+    (Desk, EventQueue<Desk>),
+) {
+    let (mut other, mut other_queue, _, _, other_ear) = program(session, "other");
+    until(&mut other_queue, &mut other, |other| {
+        has_keys(other, &other_ear, 0)
+    });
+    let (mut desk, mut queue, _, _, ear) = program(session, "terminal");
+    let (mut panel, mut panel_queue) = panel(session, 7);
+    pick(session, &mut panel, &mut panel_queue, "terminal");
+    until(&mut queue, &mut desk, |desk| has_keys(desk, &ear, 0));
+    session.wait_for(|facts| stack(facts) == ["other", "terminal"]);
+    assert!(!told_wanting(&mut panel, &mut panel_queue, "other"));
+    (
+        (desk, queue, ear),
+        (other, other_queue, other_ear),
+        (panel, panel_queue),
+    )
+}
+
+/// The issue's own case (#270): the person types at a terminal, and another
+/// program asks its taskbar to bring its own window forward, as any program
+/// admitted to foreign-toplevel-management may. Nobody asked it to: the
+/// terminal keeps the keys, the window stays beneath it, and its tab wants
+/// attention, as one whose token was refused does.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_program_that_brings_its_own_window_forward_while_the_person_types_takes_no_keys() {
+    let session = seated("withheld-taskbar");
+    let ((mut desk, mut queue, ear), (mut other, mut other_queue, other_ear), mut panel) =
+        terminal_over_other(&session);
+    types(&session, &mut desk, &mut queue, "sudo");
+
+    other.activate("other");
+    other_queue.roundtrip(&mut other).expect("the request sent");
+    told_so(&mut panel.0, &mut panel.1, "other", true);
+    queue.roundtrip(&mut desk).expect("dispatch");
+    other_queue.roundtrip(&mut other).expect("dispatch");
+    assert!(has_keys(&desk, &ear, 0), "the terminal keeps the keys");
+    assert!(heard(&other_ear).entered.is_none(), "the program has none");
+    assert_eq!(
+        stack(&session.facts.read()),
+        ["other", "terminal"],
+        "beneath the terminal"
+    );
+
+    session.stop(((desk, queue), (other, other_queue), panel));
+}
+
+/// Nor may a program bring another program's window forward, nor mark it:
+/// no program says a window not its own wants attention, which would change
+/// which window the keys go back to.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_program_that_brings_another_programs_window_forward_moves_and_marks_nothing() {
+    let session = seated("withheld-taskbar-another");
+    let ((mut desk, mut queue, ear), other, mut panel) = terminal_over_other(&session);
+    let (mut thief, mut thief_queue) = background_taskbar(&session);
+
+    until(&mut thief_queue, &mut thief, |thief| {
+        thief.task("other").is_some()
+    });
+    thief.activate("other");
+    thief_queue.roundtrip(&mut thief).expect("the request sent");
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert!(has_keys(&desk, &ear, 0), "the terminal keeps the keys");
+    assert!(
+        !told_wanting(&mut panel.0, &mut panel.1, "other"),
+        "and the window is marked by nobody"
+    );
+    assert_eq!(stack(&session.facts.read()), ["other", "terminal"]);
+
+    session.stop((
+        (desk, queue),
+        (other.0, other.1),
+        panel,
+        (thief, thief_queue),
+    ));
+}
+
+/// Nor minimize the window in use, nor close it: either hands the keys to
+/// the window beneath, and the rest of a password with them.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_program_can_neither_minimize_nor_close_the_window_in_use() {
+    use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::State;
+
+    let session = seated("withheld-taskbar-minimize");
+    let ((mut desk, mut queue, ear), (mut other, mut other_queue, other_ear), panel) =
+        terminal_over_other(&session);
+    let (mut thief, mut thief_queue) = background_taskbar(&session);
+
+    until(&mut thief_queue, &mut thief, |thief| {
+        thief.task("terminal").is_some()
+    });
+    let terminal = thief.task("terminal").expect("listed").handle.clone();
+    terminal.set_minimized();
+    terminal.close();
+    thief_queue
+        .roundtrip(&mut thief)
+        .expect("the requests sent");
+    queue.roundtrip(&mut desk).expect("dispatch");
+    other_queue.roundtrip(&mut other).expect("dispatch");
+    thief_queue.roundtrip(&mut thief).expect("dispatch");
+    assert!(has_keys(&desk, &ear, 0), "the terminal keeps the keys");
+    assert!(
+        heard(&other_ear).entered.is_none(),
+        "and nothing beneath has any"
+    );
+    assert_eq!(desk.asked_to_close, 0, "nor is the terminal asked to close");
+    assert!(
+        !thief.task("terminal").expect("listed").is(State::Minimized),
+        "nor minimized"
+    );
+
+    session.stop((
+        (desk, queue),
+        (other, other_queue),
+        panel,
+        (thief, thief_queue),
+    ));
+}
+
+/// Nor take the person to another workspace, bringing back a window there
+/// or bringing it forward: showing the workspace moves the keys. Not even
+/// from an empty desk, where nothing has them, as a launcher shown there
+/// takes none.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_program_brings_back_no_window_on_another_workspace() {
+    use perspicax_policy::{Action, Direction};
+
+    let session = seated_on_two_workspaces("withheld-taskbar-workspace");
+    let (mut other, mut other_queue, _, _, other_ear) = program(&session, "other");
+    until(&mut other_queue, &mut other, |other| {
+        has_keys(other, &other_ear, 0)
+    });
+    session.perform(Action::Workspace(Direction::Right));
+    until(&mut other_queue, &mut other, |_| {
+        heard(&other_ear).entered.is_none()
+    });
+    let (mut thief, mut thief_queue) = background_taskbar(&session);
+    until(&mut thief_queue, &mut thief, |thief| {
+        thief.task("other").is_some()
+    });
+
+    let handle = thief.task("other").expect("listed").handle.clone();
+    handle.unset_minimized();
+    thief_queue.roundtrip(&mut thief).expect("the request sent");
+    assert!(
+        titled(&session.facts.read(), "other").is_none(),
+        "its workspace is not shown"
+    );
+    thief.activate("other");
+    thief_queue.roundtrip(&mut thief).expect("the request sent");
+    other_queue.roundtrip(&mut other).expect("dispatch");
+    assert!(heard(&other_ear).entered.is_none(), "nothing has the keys");
+    assert!(titled(&session.facts.read(), "other").is_none());
+
+    session.stop(((other, other_queue), (thief, thief_queue)));
+}
+
+/// A taskbar the person's press reached brings a window forward with the
+/// keys: a task clicked. Until they press anything else, and then it may
+/// bring nothing forward.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_taskbar_the_persons_press_reached_brings_a_window_forward_until_they_press_again() {
+    let session = seated("withheld-taskbar-pressed");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let (mut panel, mut panel_queue) = panel(&session, 7);
+    let (mut other, mut other_queue, _, _, other_ear) = program(&session, "other");
+    until(&mut panel_queue, &mut panel, |panel| {
+        panel.task("other").is_some()
+    });
+
+    common::press_reaching(&session, &mut panel, &mut panel_queue);
+    panel.activate("other");
+    panel_queue.roundtrip(&mut panel).expect("the pick sent");
+    until(&mut other_queue, &mut other, |other| {
+        has_keys(other, &other_ear, 0)
+    });
+
+    types(&session, &mut other, &mut other_queue, "x");
+    panel.activate("terminal");
+    panel_queue.roundtrip(&mut panel).expect("the pick sent");
+    other_queue.roundtrip(&mut other).expect("dispatch");
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert!(has_keys(&other, &other_ear, 0), "pressed since");
+    assert!(!has_keys(&desk, &ear, 0));
+
+    session.stop(((desk, queue), (other, other_queue), (panel, panel_queue)));
+}
+
+/// A taskbar of the program in use brings a window forward, a switcher
+/// say: the person is behind what the program they use asks for.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_taskbar_of_the_program_in_use_brings_a_window_forward() {
+    let session = seated("withheld-taskbar-in-use");
+    let (mut desk, mut queue, _, _, _) = terminal(&session);
+    let (mut other, mut other_queue, _, _, other_ear) = program(&session, "other");
+    until(&mut queue, &mut desk, |desk| desk.task("other").is_some());
+
+    desk.activate("other");
+    queue.roundtrip(&mut desk).expect("the pick sent");
+    until(&mut other_queue, &mut other, |other| {
+        has_keys(other, &other_ear, 0)
+    });
+
+    session.stop(((desk, queue), (other, other_queue)));
+}
+
+/// A window that opened without the keys, picked while a launcher of the
+/// taskbar's own has them -- the shell's pie, a task's menu -- comes
+/// forward, and has them once the launcher goes: the person asked for it.
+/// Not the window it came forward over, which the keys would go back to
+/// were it still marked as wanting attention.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_picked_while_the_taskbars_own_launcher_has_the_keys_has_them_once_it_goes() {
+    let session = seated("withheld-taskbar-launcher");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let (mut other, mut other_queue, _, _, other_ear) = program(&session, "other");
+    let (mut panel, mut panel_queue) = panel(&session, 7);
+    told_so(&mut panel, &mut panel_queue, "other", true);
+
+    common::press_reaching(&session, &mut panel, &mut panel_queue);
+    let panel_qh = panel_queue.handle();
+    show_launcher(&mut panel, &mut panel_queue, &panel_qh);
+    until(&mut queue, &mut desk, |desk| !has_keys(desk, &ear, 0));
+    panel.activate("other");
+    panel_queue.roundtrip(&mut panel).expect("the pick sent");
+    session.wait_for(|facts| on_top(facts).as_deref() == Some("other"));
+
+    panel.layers.clear();
+    panel_queue
+        .roundtrip(&mut panel)
+        .expect("the launcher gone");
+    until(&mut other_queue, &mut other, |other| {
+        has_keys(other, &other_ear, 0)
+    });
+    told_so(&mut panel, &mut panel_queue, "other", false);
+
+    session.stop(((desk, queue), (other, other_queue), (panel, panel_queue)));
+}
+
+/// The person clicks a panel, which never has the keys, and what its
+/// taskbar asks next is theirs: the click reached it.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_taskbar_whose_panel_the_person_clicks_brings_a_window_forward() {
+    use perspicax_policy::{Button, Mods};
+
+    let session = seated("withheld-taskbar-clicked");
+    let (desk, queue, _, _, _) = terminal(&session);
+    let (mut other, mut other_queue, _, _, other_ear) = program(&session, "other");
+    let (mut bar, mut bar_queue, bar_qh, bar_globals) = session.client();
+    bar.bind_taskbar(&bar_globals, &bar_qh);
+    bar.bind_pointer(&bar_globals, &bar_qh);
+    bar.open_panel(&bar_qh, "panel", 40, 0xff22_2222);
+    until(&mut bar_queue, &mut bar, |bar| {
+        bar.layers_drawn > 0 && bar.task("other").is_some()
+    });
+
+    // On the panel, across the top of the screen.
+    session.command(Do::Click {
+        at: (640, 20),
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    until(&mut bar_queue, &mut bar, |bar| bar.pressed.is_some());
+    bar.activate("other");
+    bar_queue.roundtrip(&mut bar).expect("the pick sent");
+    until(&mut other_queue, &mut other, |other| {
+        has_keys(other, &other_ear, 0)
+    });
+
+    session.stop(((desk, queue), (other, other_queue), (bar, bar_queue)));
 }
 
 /// Not a test: the program a [`Probe`] is, in a process of its own.

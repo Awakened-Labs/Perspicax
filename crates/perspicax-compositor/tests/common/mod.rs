@@ -509,6 +509,26 @@ where
     registries * told
 }
 
+/// The person presses something that reaches `taskbar`, as a click on a
+/// task does, and it has been told so before this returns: so what it asks
+/// of a window next is the person's (#270). Without `capture` no hand finds
+/// a task to click, so a binding that asks the shell for its start menu
+/// stands in: its key is the person's press, and the binding hands it on to
+/// the shell, which `taskbar` must be -- the only client bound to the
+/// shell's channel.
+pub fn press_reaching(session: &Session, taskbar: &mut Desk, queue: &mut EventQueue<Desk>) {
+    let asked = |taskbar: &Desk| {
+        taskbar
+            .told
+            .iter()
+            .filter(|told| matches!(told, Told::StartMenu(_)))
+            .count()
+    };
+    let before = asked(taskbar);
+    session.press_bound(perspicax_policy::Action::StartMenu);
+    until(queue, taskbar, |taskbar| asked(taskbar) > before);
+}
+
 /// Dispatch until `done`, or fail after five seconds, then one more round
 /// trip to flush whatever was sent beside it.
 pub fn until<D>(queue: &mut EventQueue<D>, state: &mut D, done: impl Fn(&D) -> bool) {
