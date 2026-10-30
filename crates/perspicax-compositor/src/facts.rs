@@ -295,6 +295,11 @@ impl Compositor {
                 // `restack` worked it out: kept on top by the person, or
                 // with the window it hangs from.
                 facts.on_top = crate::shell::is_kept_on_top(window);
+                facts.fullscreen = crate::shell::is_fullscreen(window);
+                // Only `restack` puts a window over the panels or back, and
+                // it looks only at the windows on screen: one parked keeps
+                // what it had.
+                facts.over_panels = facts.mapped && crate::shell::covers_panels(window);
                 if facts.mapped {
                     facts.drawn_opacity = Some(self.opacity_of(window, in_use))
                         .filter(|&percent| percent < perspicax_policy::OPAQUE);
@@ -458,8 +463,11 @@ impl Compositor {
             behind_tab: hidden.1,
             // Rolled up, its frame is the bar alone, and covers only that.
             shaded: crate::shell::is_shaded(window),
-            // Set by `host_facts`, which every window passes through.
+            // Set by `host_facts`, which every window passes through, as
+            // are the two after it.
             on_top: false,
+            fullscreen: false,
+            over_panels: false,
             // A parked window draws nothing, frame included.
             frame: if parked {
                 Vec::new()
@@ -621,6 +629,8 @@ impl Compositor {
             behind_tab: None,
             shaded: false,
             on_top: false,
+            fullscreen: false,
+            over_panels: false,
             frame: Vec::new(),
             // Layers and lock covers are drawn as their clients drew them.
             drawn_opacity: None,

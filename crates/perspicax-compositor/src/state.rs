@@ -795,13 +795,13 @@ impl Compositor {
     fn may_take_keyboard(&self, surface: &WlSurface) -> bool {
         match &self.lock {
             Some(locked) => locked.covers(surface),
-            None => {
-                self.is_launcher(surface)
-                    || !self
-                        .keyboard_root()
-                        .is_some_and(|held| self.is_launcher(&held))
-            }
+            None => self.is_launcher(surface) || self.launcher_with_keys().is_none(),
         }
+    }
+
+    /// The launcher holding the keyboard, if one is.
+    pub(crate) fn launcher_with_keys(&self) -> Option<WlSurface> {
+        self.keyboard_root().filter(|held| self.is_launcher(held))
     }
 
     /// Before the keyboard goes to `to`, or to nothing: a window's menu that

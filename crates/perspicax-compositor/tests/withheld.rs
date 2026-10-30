@@ -211,6 +211,46 @@ fn a_window_that_opens_without_the_keys_goes_just_beneath_the_window_in_use() {
     session.stop(((desk, queue), (thief, thief_queue)));
 }
 
+/// An agent's raise gives the keys to a window that opened without them, and
+/// as with anything that hands them over, it wants no more attention: when
+/// they next come back, they come to it, for it is on top.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_that_opened_without_the_keys_is_heeded_as_a_raise_gives_them() {
+    let session = seated("withheld-raised");
+    let (mut desk, mut queue, qh, _, ear) = terminal(&session);
+    desk.open_window(&qh, "editor", "editor");
+    until(&mut queue, &mut desk, |desk| has_keys(desk, &ear, 1));
+    desk.activate("terminal");
+    until(&mut queue, &mut desk, |desk| has_keys(desk, &ear, 0));
+    session.wait_for(|facts| stack(facts) == ["editor", "terminal"]);
+    let (mut thief, mut thief_queue, _, _, thief_ear) = program(&session, "thief");
+    until(&mut thief_queue, &mut thief, |thief| thief.has_drawn(0));
+    let facts = session.wait_for(|facts| stack(facts) == ["editor", "thief", "terminal"]);
+    let id = |facts: &HostFacts, title| titled(facts, title).expect("a window").id;
+    let (thief_id, terminal_id) = (id(&facts, "thief"), id(&facts, "terminal"));
+    let host = perspicax_compositor::Host::new(&session.facts, &session.requests);
+
+    host.act(thief_id, &perspicax_index::Action::Raise)
+        .expect("dispatched");
+    until(&mut thief_queue, &mut thief, |thief| {
+        has_keys(thief, &thief_ear, 0)
+    });
+    session.wait_for(|facts| stack(facts) == ["editor", "terminal", "thief"]);
+
+    host.act(terminal_id, &perspicax_index::Action::Focus)
+        .expect("dispatched");
+    until(&mut queue, &mut desk, |desk| has_keys(desk, &ear, 0));
+    desk.windows.remove(0);
+    queue.roundtrip(&mut desk).expect("dispatch");
+    until(&mut thief_queue, &mut thief, |thief| {
+        has_keys(thief, &thief_ear, 0)
+    });
+    session.wait_for(|facts| stack(facts) == ["editor", "thief"]);
+
+    session.stop(((desk, queue), (thief, thief_queue)));
+}
+
 /// A dialog of the program in use, or another of its windows: the person
 /// is behind what the program they are using asks for.
 #[test]

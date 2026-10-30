@@ -1456,7 +1456,7 @@ impl Compositor {
 
     /// Raise an X11 window over the others: on screen, and in X's own
     /// stacking.
-    fn raise_x11(&mut self, window: &Framed, x11: &X11Surface) {
+    pub(crate) fn raise_x11(&mut self, window: &Framed, x11: &X11Surface) {
         self.space.raise_element(window, false);
         if let Some(wm) = self.xwayland.wm.as_mut() {
             let _ = wm.raise_window(x11);

@@ -69,7 +69,7 @@ pub(crate) use opacity::alpha;
 pub(crate) use snap::SnapPreview;
 #[cfg(any(feature = "seat", feature = "capture"))]
 pub(crate) use stacking::{Stack, stack};
-pub(crate) use stacking::{as_drawn, covers_panels, is_kept_on_top, window_under};
+pub(crate) use stacking::{as_drawn, covers_panels, is_fullscreen, is_kept_on_top, window_under};
 pub(crate) use withdrawn::Withdrawn;
 pub(crate) use withheld::wants_attention;
 #[cfg(feature = "seat")]

@@ -28,7 +28,7 @@
 
 use std::{collections::HashMap, time::Instant};
 
-use perspicax_index::{Action, PointerButton, Refusal};
+use perspicax_index::{Action, PointerButton, Refusal, WindowVerb};
 use perspicax_node::{Rect, SurfaceId};
 use perspicax_policy::Button;
 use smithay::{
@@ -154,26 +154,29 @@ pub enum ActError {
     /// ignored the keyboard given to anything but the menu. `popup` is the
     /// menu holding them, the submenu when one is open. Choosing from it,
     /// clicking anywhere in its own application, and focusing its window,
-    /// still go ahead, as they do for the person (#157).
+    /// still go ahead, as they do for the person (#157). A raise is refused
+    /// the same under a launcher holding the keyboard, `popup` naming it: a
+    /// window raised there would be given them when it goes (#147).
     ///
     /// A refusal, like [`ActError::FocusElsewhere`], decided here because
     /// only this loop knows what holds the pointer in the same turn as the
     /// act. `perspicax` hands it to the agent as `Refusal::MenuOpen`.
-    #[error("menu {} holds the pointer and keyboard: nothing was dispatched", popup.0)]
+    #[error("menu {} has the keyboard: nothing was dispatched", popup.0)]
     MenuOpen { popup: SurfaceId },
-    /// A click or a scroll aimed at something the person can no longer see.
-    /// The gate judged it against the facts as the agent read them; by the
-    /// time this loop came to send the events, a menu had opened over it, a
-    /// window had been raised over it, or it had moved out of view (#158).
-    /// Nothing was dispatched: with the pointer's focus given explicitly, the
-    /// click would still have reached the node's surface, at a point the
-    /// person sees something else on.
+    /// A click or a scroll aimed at something the person can no longer see,
+    /// or a raise the desk no longer allows. The gate judged it against the
+    /// facts as the agent read them; by the time this loop came to send the
+    /// events, a menu had opened over it, a window had been raised over it,
+    /// or it had moved out of view (#158). Nothing was dispatched: with the
+    /// pointer's focus given explicitly, the click would still have reached
+    /// the node's surface, at a point the person sees something else on, and
+    /// a raise would have changed what they are looking at on stale word.
     ///
-    /// The gate's own refusal, `perspicax_index::check_rect`, asked again of
-    /// facts this loop built in the same turn ([`Compositor::host_facts`]),
-    /// from its own measurements: a plain headless build, where smithay has
-    /// no buffer sizes to hit-test with, refuses the same. `perspicax` hands
-    /// it to the agent unchanged.
+    /// The gate's own refusal, `perspicax_index::check_rect` or
+    /// `check_window`, asked again of facts this loop built in the same turn
+    /// ([`Compositor::host_facts`]), from its own measurements: a plain
+    /// headless build, where smithay has no buffer sizes to hit-test with,
+    /// refuses the same. `perspicax` hands it to the agent unchanged.
     #[error("judged again as it was sent, {0}: nothing was dispatched")]
     OutOfSight(Refusal),
 }
@@ -387,19 +390,21 @@ impl Compositor {
             .and_then(|hold| shell::id_of(&hold.window))
         {
             let moves_pointer = matches!(action, Action::Click { .. } | Action::Scroll { .. });
-            let moves_keyboard = matches!(action, Action::Focus | Action::Forward) && surface != by;
+            let moves_keyboard =
+                matches!(action, Action::Focus | Action::Forward | Action::Raise) && surface != by;
             if moves_pointer || moves_keyboard {
                 return Err(ActError::PointerCaptured { by });
             }
         }
         // A window verb addresses a window wherever it is: a tab behind
         // another is parked, and closing a window on a hidden workspace is
-        // still closing it. Input goes only to what is on screen, which may
-        // be a panel or a wallpaper as well as a window. An X11 menu is no
-        // window to close or bring forward, any more than a Wayland one is:
-        // smithay would destroy it, having no `WM_DELETE_WINDOW` to ask by.
+        // still closing it. A window put away since the gate is found here
+        // to be told so. Input goes only to what is on screen, which may be a
+        // panel or a wallpaper as well as a window. An X11 menu is no window
+        // to close or bring forward, any more than a Wayland one is: smithay
+        // would destroy it, having no `WM_DELETE_WINDOW` to ask by.
         let target = match action {
-            Action::Close | Action::Forward => self
+            Action::Close | Action::Forward | Action::Raise => self
                 .any_window(surface)
                 .filter(|window| !shell::places_itself(window))
                 .map(Target::Window),
@@ -425,12 +430,32 @@ impl Compositor {
         if let Some(popup) = self.menu_in_the_way(action, &target) {
             return Err(ActError::MenuOpen { popup });
         }
+        // A launcher has every key until it goes, and then they go to the
+        // window on top: a window raised under it would be given them then,
+        // though the person is choosing from the launcher (#147).
+        if matches!(action, Action::Raise)
+            && let Some(popup) = self
+                .launcher_with_keys()
+                .and_then(|launcher| self.layer_owning(&launcher))
+        {
+            return Err(ActError::MenuOpen { popup });
+        }
         // Last, nearest the events: whether the person can see what a click
         // or a scroll lands on, now. The gate asked it of the facts the agent
         // read, and a menu or a window may have opened over it since (#158).
-        if let Action::Click { at, .. } | Action::Scroll { at, .. } = action {
-            let now = self.host_facts(self.window_in_use());
-            perspicax_index::check_rect(&now, surface, *at).map_err(ActError::OutOfSight)?;
+        // A raise is asked again whole, for what it would leave in sight and
+        // what it would hide are as much a matter of now.
+        match action {
+            Action::Click { at, .. } | Action::Scroll { at, .. } => {
+                let now = self.host_facts(self.window_in_use());
+                perspicax_index::check_rect(&now, surface, *at).map_err(ActError::OutOfSight)?;
+            }
+            Action::Raise => {
+                let now = self.host_facts(self.window_in_use());
+                perspicax_index::check_window(&now, surface, &WindowVerb::Raise)
+                    .map_err(ActError::OutOfSight)?;
+            }
+            Action::Type { .. } | Action::Focus | Action::Close | Action::Forward => {}
         }
         let focus_before = self.keyboard_owner();
 
@@ -447,10 +472,12 @@ impl Compositor {
                 self.activate_tab(window);
                 Ok(())
             }
+            (Action::Raise, Target::Window(window)) => self.act_raise(window, surface),
             // Found by `any_window`, so never a layer or a menu.
-            (Action::Close | Action::Forward, Target::Layer(..) | Target::Popup(..)) => {
-                Err(ActError::NoSuchSurface(surface.0))
-            }
+            (
+                Action::Close | Action::Forward | Action::Raise,
+                Target::Layer(..) | Target::Popup(..),
+            ) => Err(ActError::NoSuchSurface(surface.0)),
         }?;
 
         Ok(Dispatched {
@@ -468,7 +495,8 @@ impl Compositor {
     /// holding it: given to anything else, it closes the menu under the
     /// person, as their own click elsewhere does (#185), and a tab brought
     /// forward would be raised over the menu, or put its window away and
-    /// the menu with it. `None` when no menu holds them,
+    /// the menu with it, and so would another window raised. `None` when no
+    /// menu holds them,
     /// [`Compositor::held_menu_root`]'s answer: one dismissed but not yet
     /// destroyed holds nothing.
     fn menu_in_the_way(&self, action: &Action, target: &Target) -> Option<SurfaceId> {
@@ -479,13 +507,13 @@ impl Compositor {
                 .is_some_and(|reached| reached.id().same_client_as(&root.id())),
             // Its own window is already the one in use, and the front of its
             // group (#97); the menu holding the keyboard has it already.
-            (Action::Focus | Action::Forward, Target::Window(window)) => {
+            (Action::Focus | Action::Forward | Action::Raise, Target::Window(window)) => {
                 !shell::is_toplevel_of(window, &root)
             }
-            (Action::Focus | Action::Forward, Target::Popup(placed)) => {
+            (Action::Focus | Action::Forward | Action::Raise, Target::Popup(placed)) => {
                 !find_popup_root_surface(&placed.popup).is_ok_and(|from| from == root)
             }
-            (Action::Focus | Action::Forward, Target::Layer(..)) => true,
+            (Action::Focus | Action::Forward | Action::Raise, Target::Layer(..)) => true,
             (Action::Type { .. } | Action::Close, _) => false,
         };
         if !past {
@@ -525,6 +553,26 @@ impl Compositor {
             }
         };
         self.focus_surface(wl_surface, id);
+        Ok(())
+    }
+
+    /// Bring this window in front of the others and give it the keyboard, as
+    /// a person's click on it does (`perspicax_policy::focus`), though nothing
+    /// was clicked.
+    ///
+    /// Raised first, so that whatever the keyboard's going repoints finds it
+    /// in front. A redraw of its own, since the keyboard moving is what would
+    /// have asked for one, and it may be here already. And the pointer, which
+    /// may rest on what was just covered, is told last, of what the facts now
+    /// say is in front: a window covered under a still pointer has it taken,
+    /// as if the hand had moved, and the keyboard stays where this left it.
+    fn act_raise(&mut self, window: &crate::framed::Framed, id: SurfaceId) -> Result<(), ActError> {
+        let surface = shell::surface_of(window).ok_or(ActError::NoSuchSurface(id.0))?;
+        self.raise_with_menus(window);
+        self.focus_surface(surface, id);
+        self.backend.redraw();
+        self.publish_facts();
+        self.repoint();
         Ok(())
     }
 

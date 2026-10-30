@@ -46,7 +46,7 @@ compositor:
 
 ```
 perspicax              the composition root — one binary, `perspicax --headless`
-perspicax-mcp          MCP server (rmcp, stdio or a Unix socket) — eleven tools, DTOs, receipts  [portable]
+perspicax-mcp          MCP server (rmcp, stdio or a Unix socket) — twelve tools, DTOs, receipts  [portable]
 perspicax-index        node cache, stable ids, selectors, deltas, refusals  [portable]
 perspicax-node         node schema — AccessKit types plus Origin and Visibility
 perspicax-policy       WM decisions as data — focus, bindings, placement, monitors, workspaces, snapping  [portable]
@@ -214,14 +214,15 @@ agent on its stdin. A request sent before `initialize` is answered with
 an error naming what to send first, and the server waits on.
 `--mcp-socket PATH` serves the same on a Unix socket instead, for an agent
 running inside the session it drives: see [An agent inside the
-session](#an-agent-inside-the-session). Eleven tools: `window_list`,
-`observe`, `resolve`, `act`, `window_close`, `tab_forward`, `window_focus`,
-`window_type`, `deltas`, `screenshot` and `launch`. The four window verbs act
-on a whole window by its surface: a close is a request the application may
-answer with a dialog, a tab is brought forward only where the person can
-already see its group, never by switching what they are looking at, and a
-window with no controls to name, a terminal or a game, is focused and typed
-into only while some of it can be seen. `launch` starts a program for the
+session](#an-agent-inside-the-session). Twelve tools: `window_list`,
+`observe`, `resolve`, `act`, `window_close`, `tab_forward`, `window_raise`,
+`window_focus`, `window_type`, `deltas`, `screenshot` and `launch`. The five
+window verbs act on a whole window by its surface: a close is a request the
+application may answer with a dialog, a tab is brought forward only where the
+person can already see its group, never by switching what they are looking
+at, a window on show is raised with the keys, and a window with no controls
+to name, a terminal or a game, is focused and typed into only while some of
+it can be seen. `launch` starts a program for the
 agent, no shell between, and answers its pid; on a seat, only one the
 person's `[agent] launch` names (see [An agent inside the
 session](#an-agent-inside-the-session)).
@@ -445,19 +446,21 @@ agent is never given.
 While a game holds the pointer ([see Mouse](#a-game-holding-the-pointer)), an
 agent's `click` and `scroll`, on the game or anywhere else, are refused as
 `pointer_captured`, naming the game as `captured_by`: they would move a pointer
-that may not move. So are its `focus`, `window_focus` and `tab_forward` on any
-other window, which would take the game's keyboard and the pointer with it.
-Only the person ends a hold, so waiting for them to pause does not help; the
-game itself can still be focused and typed into.
+that may not move. So are its `focus`, `window_focus`, `tab_forward` and
+`window_raise` on any other window, which would take the game's keyboard and
+the pointer with it. Only the person ends a hold, so waiting for them to pause
+does not help; the game itself can still be raised, focused and typed into.
 
 While a window's menu holds the pointer and keyboard, one the person opened
 with a right-click say, an agent's `click` and `scroll` on any other
 application are refused as `menu_open`, naming the menu as `popup`. A press
 there would close the menu under the person before it reached what was aimed
-at, and a scroll there would reach nothing. So are `focus`, `window_focus` and
-`tab_forward` on anything but that window and its menus: the menu keeps the
-keyboard, and a tab brought forward would be raised over it, or put its window
-away and the menu with it. The menu's own application can still be clicked
+at, and a scroll there would reach nothing. So are `focus`, `window_focus`,
+`tab_forward` and `window_raise` on anything but that window and its menus:
+the menu keeps the keyboard, and a tab brought forward or a window raised
+would be put over it, or a tab put its window away and the menu with it. The
+menu's own window can still be raised, and comes up with its menu open. The
+menu's own application can still be clicked
 and scrolled anywhere, as the person can, so choosing an item goes ahead, and
 so does typing at the menu. `window_close` still asks any window to close. The
 compositor makes the check in the same turn it would act, and it clears as
@@ -504,8 +507,39 @@ only: a client that leaves part of itself out of it has not said that part
 is see-through, and gains nothing by saying less than it paints. A node
 just beside a window can therefore be refused under its shadow, though a
 person can make it out and click it. The person can bring its window
-forward; an agent can't yet
-([#147](https://github.com/Awakened-Labs/Perspicax/issues/147)).
+forward, and so can an agent.
+
+**An agent can bring a window forward.** Nothing else it can do clears
+`occluded`: `window_focus` raises nothing, and its `click` goes to the pointer
+without the click-to-raise a person's has. `window_raise` puts a window in
+front of the others and gives it the keys, as a person's click on it does, and
+says what is left over it: `in_front`, or `still_covered` with `covered_by`,
+front first. It is the one window verb that changes what the person is looking
+at, so it asks more than the others:
+
+- It needs consent for the window it raises, not for the windows it covers:
+  most of a desk is the person's, and in front of what an agent works in. The
+  exception is a program no agent is ever given, there so the person can oversee
+  the agent. A raise that would cover any of what they can see of one is refused
+  as `never_granted`, naming it, for as long as the two overlap. Everything the
+  window draws counts, its shadow and its menus too, since a client can declare
+  its window as small as it likes. An X11 window's program is not known for one,
+  as consent is decided on its Xwayland server.
+- It waits for a person using the seat, as every act does.
+- It takes no keys from the fullscreen window in use, on any monitor, which
+  would send it back under the panels: `occluded`, naming it. A fullscreen window
+  they have left is raised over like any other, and one raised itself comes back
+  over the panels, and over what is kept on top, with the keys.
+- It brings nothing back: on a workspace not showing, a tab behind, minimized or
+  rolled up, a window is refused as it is for `window_focus`.
+- It does not pass a panel, a launcher, the lock or a window kept on top. Where
+  those would still hide all of the window it is refused as `occluded`, naming
+  what would be in front. While a launcher holds the keys it is refused as
+  `menu_open`, naming the launcher, covered or not: the keys go to the window on
+  top once a launcher goes, and they are the person's to give.
+
+The compositor judges a raise again as it sends it, against its own facts, as it
+does a click.
 
 **A menu covers what is under it.** A menu, a combo list or a tooltip is a
 popup: a surface of its own, drawn directly above the window or panel it hangs
@@ -647,7 +681,7 @@ acted on, and a click there lands there.
 `--mcp` has one client, whatever started perspicax, and on a seat that is the
 login. So the agent a person most wants beside them, one they can see and talk
 to in a terminal inside the session, cannot reach it: it would have to start
-the very session it is running in. `--mcp-socket` serves the same eleven tools
+the very session it is running in. `--mcp-socket` serves the same twelve tools
 on a Unix socket instead:
 
 ```sh

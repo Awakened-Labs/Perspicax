@@ -238,7 +238,7 @@ fn installing_into_ennius_adds_the_server_and_grants_its_tools_with_no_keyring()
     );
     assert_eq!(
         asked[1].matches("--tool mcp:perspicax:").count(),
-        11,
+        12,
         "{asked:?}"
     );
 }
@@ -261,7 +261,7 @@ fn enniuss_status_says_what_is_missing_and_is_no_failure() {
         "{text}"
     );
     assert!(
-        text.contains("grant   warn  1 of 11 granted; missing act,"),
+        text.contains("grant   warn  1 of 12 granted; missing act,"),
         "{text}"
     );
     assert!(

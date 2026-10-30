@@ -431,6 +431,50 @@ fn wallpaper(facts: &HostFacts) -> Option<SurfaceId> {
         .map(|surface| surface.id)
 }
 
+/// An agent raises the window under a pointer at rest: the pointer has the
+/// window now in front of it, as if the hand had moved. It clicks where the
+/// person sees it would.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_raised_under_a_still_pointer_has_it() {
+    let session = session("mouse-raised");
+    let (mut desk, mut queue, _qh) = with_window(&session);
+    let centre = centre_of_first(&session);
+    let first = session
+        .facts
+        .read()
+        .surfaces()
+        .iter()
+        .find(|surface| surface.title.as_deref() == Some("first"))
+        .map(|surface| surface.id)
+        .expect("the first window");
+
+    // Another client's window is over it, and a person's click there leaves
+    // the pointer resting on that one.
+    let (mut other, mut other_queue, other_qh, other_globals) = session.client();
+    other.bind_pointer(&other_globals, &other_qh);
+    other.open_window(&other_qh, "other", "other");
+    until(&mut other_queue, &mut other, |other| other.has_drawn(0));
+    session.wait_for(|facts| geometry(facts, "other").is_some());
+    click(&session, centre, Button::Left);
+    until(&mut other_queue, &mut other, |other| {
+        other.entered.is_some() && other.buttons.len() == 2
+    });
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert!(desk.entered.is_none(), "the pointer is on the other window");
+
+    // The hand does not move, and the window it rests on goes under.
+    perspicax_compositor::Host::new(&session.facts, &session.requests)
+        .act(first, &perspicax_index::Action::Raise)
+        .expect("dispatched");
+    until(&mut queue, &mut desk, |desk| desk.entered.is_some());
+    until(&mut other_queue, &mut other, |other| {
+        other.entered.is_none()
+    });
+
+    session.stop(((desk, queue), (other, other_queue)));
+}
+
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn an_overlay_that_comes_up_under_a_still_pointer_has_it_and_gives_it_back_when_it_goes() {

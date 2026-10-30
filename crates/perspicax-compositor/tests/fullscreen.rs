@@ -14,8 +14,8 @@
 mod common;
 
 use common::{Desk, Ear, Session, menu_with_the_keyboard, until};
-use perspicax_compositor::Backend;
-use perspicax_index::{HostFacts, SurfaceKind, judge};
+use perspicax_compositor::{ActError, Backend, Host};
+use perspicax_index::{Action as Verb, HostFacts, Refusal, SurfaceKind, judge};
 use perspicax_node::{Rect, SurfaceId, Visibility};
 use smithay_client_toolkit::shell::wlr_layer::Layer;
 use wayland_client::{EventQueue, QueueHandle};
@@ -246,6 +246,84 @@ fn a_fullscreen_window_in_use_covers_a_panel_on_the_top_layer() {
         at(window(&facts, "video")) > at(layer(&facts, "panel")),
         "the window is above the panel in the stack: {order:?}"
     );
+
+    session.stop((desk, queue));
+}
+
+/// The facts tell a fullscreen window from the fullscreen window in use: a
+/// window an agent would take the keys from, and one it would not.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_fullscreen_window_says_so_and_whether_it_is_in_use() {
+    let (session, mut desk, mut queue, qh) = video_under_a_panel("fullscreen-says");
+    let says = |facts: &HostFacts, title| {
+        let surface = facts.surface(window(facts, title)).expect("described");
+        (surface.fullscreen, surface.over_panels)
+    };
+    assert_eq!(says(&session.facts.read(), "video"), (false, false));
+
+    fullscreen(&desk, "video");
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| corner(facts, "video") == Visibility::Visible);
+    assert_eq!(says(&facts, "video"), (true, true));
+
+    desk.open_coloured(&qh, "other", "other", 0xffff_ffff);
+    until(&mut queue, &mut desk, |desk| desk.task("other").is_some());
+    desk.activate("other");
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| corner(facts, "video") != Visibility::Visible);
+    assert_eq!(says(&facts, "video"), (true, false));
+    assert_eq!(says(&facts, "other"), (false, false));
+
+    // Put away while in use, it is drawn over nothing, whatever it was
+    // stacked at when it went.
+    desk.activate("video");
+    queue.flush().expect("sent");
+    session.wait_for(|facts| says(facts, "video") == (true, true));
+    desk.task("video")
+        .expect("a known window")
+        .handle
+        .set_minimized();
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| !mapped(facts, "video"));
+    assert_eq!(says(&facts, "video"), (true, false));
+
+    session.stop((desk, queue));
+}
+
+/// An agent takes no keys from the fullscreen window in use, which would
+/// send it back under the panels. One the person has left is raised, and with
+/// the keys comes back over them.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_raise_takes_no_keys_from_a_fullscreen_window_in_use_and_brings_one_left_back() {
+    let (session, mut desk, mut queue, qh) = video_under_a_panel("fullscreen-raise");
+    desk.open_coloured(&qh, "other", "other", 0xffff_ffff);
+    until(&mut queue, &mut desk, |desk| desk.task("other").is_some());
+    desk.activate("video");
+    queue.flush().expect("sent");
+    fullscreen(&desk, "video");
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| corner(facts, "video") == Visibility::Visible);
+    let (video, other) = (window(&facts, "video"), window(&facts, "other"));
+    let host = Host::new(&session.facts, &session.requests);
+
+    assert_eq!(
+        host.act(other, &Verb::Raise).map(|_| ()),
+        Err(ActError::OutOfSight(Refusal::Occluded { by: video }))
+    );
+    assert_eq!(
+        corner(&session.facts.read(), "video"),
+        Visibility::Visible,
+        "it is still over the panel"
+    );
+
+    desk.activate("other");
+    queue.flush().expect("sent");
+    session.wait_for(|facts| corner(facts, "video") != Visibility::Visible);
+    let raised = host.act(video, &Verb::Raise).expect("left for another");
+    assert_eq!(raised.focus_after, Some(video));
+    assert_eq!(corner(&session.facts.read(), "video"), Visibility::Visible);
 
     session.stop((desk, queue));
 }

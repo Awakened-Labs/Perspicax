@@ -237,8 +237,9 @@ impl Desktop for Fake {
     }
 
     /// Through the real gate, against the fixture's facts, then a receipt
-    /// as if the window had done what it was asked: closed, come forward, or
-    /// taken the keyboard and drawn nothing.
+    /// as if the window had done what it was asked: closed, come forward,
+    /// come in front with the keyboard, or taken the keyboard and drawn
+    /// nothing.
     fn act_window(&self, surface: SurfaceId, verb: WindowVerb) -> Result<WindowReceipt, Denied> {
         self.windows_asked
             .lock()
@@ -250,6 +251,7 @@ impl Desktop for Fake {
         let (focus_after, witness) = match verb {
             WindowVerb::Close => (None, WindowWitness::Gone),
             WindowVerb::Forward => (None, WindowWitness::InFront),
+            WindowVerb::Raise => (Some(surface), WindowWitness::InFront),
             WindowVerb::Focus | WindowVerb::Type(_) => {
                 (Some(surface), WindowWitness::Drew(DamageWitness::Quiet))
             }

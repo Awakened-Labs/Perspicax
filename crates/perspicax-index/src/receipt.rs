@@ -115,6 +115,9 @@ pub enum WindowVerb {
     /// Bring a tab behind another to the front of its group, in the group's
     /// place, as clicking its tab does.
     Forward,
+    /// Bring a window on show in front of the others and give it keyboard
+    /// focus, as a person's click on it does.
+    Raise,
     /// Give the window keyboard focus, as [`Verb::Focus`] gives a node's.
     Focus,
     /// Type text into the window, which must hold keyboard focus, as
@@ -129,6 +132,7 @@ impl WindowVerb {
         match self {
             Self::Close => Action::Close,
             Self::Forward => Action::Forward,
+            Self::Raise => Action::Raise,
             Self::Focus => Action::Focus,
             Self::Type(text) => Action::Type { text: text.clone() },
         }
@@ -140,6 +144,7 @@ impl WindowVerb {
         match self {
             Self::Close => "close",
             Self::Forward => "forward",
+            Self::Raise => "raise",
             Self::Focus => "focus",
             Self::Type(_) => "type",
         }
@@ -165,6 +170,13 @@ pub enum WindowWitness {
     InFront,
     /// The tab is still behind `shown`.
     StillBehind { shown: SurfaceId },
+    /// The window raised still has `by` over some of it, front first: a panel
+    /// or a window kept on top, which a raise does not pass, or something
+    /// that came up since.
+    StillCovered { by: Vec<SurfaceId> },
+    /// The window raised is no longer on show: minimized, rolled up or left
+    /// on a workspace not showing, since it was raised.
+    PutAway,
     /// What a window focused or typed into drew meanwhile, anywhere in it:
     /// the evidence a node's receipt has, for the whole window.
     Drew(DamageWitness),

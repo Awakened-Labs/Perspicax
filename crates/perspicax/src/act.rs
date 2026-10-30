@@ -41,7 +41,7 @@ use std::{thread, time::Duration, time::Instant};
 use perspicax_compositor::{ActError, Facts, Host};
 use perspicax_index::{
     DamageWitness, HostFacts, Index, Receipt, Refusal, Selector, SurfaceFacts, Verb, WindowReceipt,
-    WindowVerb, WindowWitness, check_window,
+    WindowVerb, WindowWitness, check_window, raised_witness,
 };
 use perspicax_node::{Rect, SurfaceId};
 
@@ -199,8 +199,8 @@ fn witness(marked: &HostFacts, after: &HostFacts, surface: SurfaceId, rect: Rect
     })
 }
 
-/// Act on a whole window -- close it, bring a tab forward, focus it or type
-/// into it -- and report what became of it.
+/// Act on a whole window -- close it, bring a tab forward, raise it, focus it
+/// or type into it -- and report what became of it.
 ///
 /// The same order as [`act`], with a window in place of a node: the gate
 /// (`check_window`, in `perspicax-index`), the dispatch, the wait, and then
@@ -247,10 +247,10 @@ pub fn act_window(
 /// those read once it had been given time.
 ///
 /// A window gone is gone whatever was asked of it: typing `exit` into a
-/// terminal closes it. What a close or a tab brought forward does is not a
-/// change of pixels inside the window -- a closed window is gone, or a dialog
-/// asking about unsaved work has appeared beside it -- so for those no damage
-/// is watched. What focus and typing do is, and for them it is watched over
+/// terminal closes it. What a close, a tab brought forward or a raise does is
+/// not a change of pixels inside the window -- a closed window is gone, or a
+/// dialog asking about unsaved work has appeared beside it -- so for those no
+/// damage is watched. What focus and typing do is, and for them it is watched over
 /// the whole window, since keys aim at no part of it.
 fn seen(
     verb: &WindowVerb,
@@ -278,6 +278,7 @@ fn seen(
             None => WindowWitness::InFront,
             Some(shown) => WindowWitness::StillBehind { shown },
         },
+        WindowVerb::Raise => raised_witness(after, surface),
         WindowVerb::Focus | WindowVerb::Type(_) => {
             let whole = Rect::new(0.0, 0.0, now.geometry.width(), now.geometry.height());
             WindowWitness::Drew(witness(before, after, surface, whole))
@@ -420,6 +421,32 @@ mod tests {
                 appeared: vec![SurfaceId(2)]
             }
         );
+    }
+
+    /// What a raise did is what is over the window once it has been given
+    /// time, and whether it is there at all.
+    #[test]
+    fn a_window_raised_is_witnessed_by_what_is_over_it() {
+        let area = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let window = SurfaceFacts::new(SurfaceId(1), area);
+        let other = SurfaceFacts::new(SurfaceId(2), area);
+        let raised = |facts: &[SurfaceFacts]| {
+            let before = HostFacts::bottom_to_top([window.clone(), other.clone()], 1);
+            let after = HostFacts::bottom_to_top(facts.iter().cloned(), 2);
+            seen(&WindowVerb::Raise, &before, &after, SurfaceId(1))
+        };
+        assert_eq!(
+            raised(&[other.clone(), window.clone()]),
+            WindowWitness::InFront
+        );
+        assert_eq!(
+            raised(&[window.clone(), other.clone()]),
+            WindowWitness::StillCovered {
+                by: vec![SurfaceId(2)]
+            }
+        );
+        assert_eq!(raised(&[window.clone().unmapped()]), WindowWitness::PutAway);
+        assert_eq!(raised(core::slice::from_ref(&other)), WindowWitness::Gone);
     }
 
     #[test]
