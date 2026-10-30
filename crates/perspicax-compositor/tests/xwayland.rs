@@ -604,6 +604,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE_HIDDEN,
         _NET_WM_STATE_FOCUSED,
         _NET_ACTIVE_WINDOW,
+        _NET_CLIENT_LIST_STACKING,
         _NET_WM_MOVERESIZE,
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_POPUP_MENU,
@@ -1094,6 +1095,26 @@ impl X11 {
             .value32()
             .and_then(|mut value| value.next())
             .unwrap_or(x11rb::NONE)
+    }
+
+    /// The windows the root's `_NET_CLIENT_LIST_STACKING` names, bottom to
+    /// top: what an X client reads as what is in front of what.
+    fn stacking(&self) -> Vec<u32> {
+        self.x
+            .get_property(
+                false,
+                self.root,
+                self.atoms._NET_CLIENT_LIST_STACKING,
+                AtomEnum::WINDOW,
+                0,
+                1024,
+            )
+            .expect("get_property")
+            .reply()
+            .expect("_NET_CLIENT_LIST_STACKING")
+            .value32()
+            .map(Iterator::collect)
+            .unwrap_or_default()
     }
 
     /// Whether the root comes to name `window` as active, and still does a
@@ -3108,6 +3129,75 @@ fn id_of(x11: &X11, title: &str) -> perspicax_node::SurfaceId {
     x11.surface_where(title, |surface| surface.mapped)
         .unwrap_or_else(|| panic!("{title} never mapped"))
         .id
+}
+
+/// An agent's raise of an X11 window: it comes to the top on screen and in
+/// X's own stacking, with the keys, so that an X client asking what is on top
+/// is told what the person sees (#147).
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn raising_an_x11_window_raises_it_in_x_too() {
+    let x11 = X11::start("x11-raise", Backend::headless((1280, 800)).with_person());
+    let first = with_the_keyboard(&x11, "first");
+    let second = with_the_keyboard(&x11, "second");
+    assert!(x11.on_top("second"));
+    assert_eq!(x11.stacking().last(), Some(&second));
+
+    let host = Host::new(&x11.session.facts, &x11.session.requests);
+    host.act(id_of(&x11, "first"), &Verb::Raise)
+        .expect("dispatched");
+
+    assert!(x11.on_top("first"), "not in front: {:?}", x11.facts());
+    eventually(Duration::from_secs(5), || {
+        (x11.focus() == first).then_some(())
+    })
+    .expect("first never took the keyboard");
+    eventually(Duration::from_secs(5), || {
+        (x11.stacking().last() == Some(&first)).then_some(())
+    })
+    .unwrap_or_else(|| panic!("X has {:?} and first is {first}", x11.stacking()));
+
+    x11.stop();
+}
+
+/// A window of X's own, raised, would have its menu left behind it: an X11
+/// menu is a window here, as an xdg one is not. It comes up with its window,
+/// and in X's stacking the window stays where the menu is over it.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_menu_stays_over_the_window_raised() {
+    let x11 = X11::start(
+        "x11-raise-menu",
+        Backend::headless((1280, 800)).with_person(),
+    );
+    let steam = with_the_keyboard(&x11, "steam");
+    let other = with_the_keyboard(&x11, "other");
+    x11.menu_over("menu", (40, 40), (120, 80), Some(steam));
+    assert!(x11.on_top("menu"), "not in front: {:?}", x11.facts());
+    assert_eq!(x11.stacking().last(), Some(&other));
+
+    let host = Host::new(&x11.session.facts, &x11.session.requests);
+    let steam_id = id_of(&x11, "steam");
+    let other_id = id_of(&x11, "other");
+    host.act(steam_id, &Verb::Raise).expect("dispatched");
+
+    let facts = x11.facts();
+    let at = |id| {
+        facts
+            .surfaces()
+            .iter()
+            .position(|surface| surface.id == id)
+            .expect("described")
+    };
+    assert!(at(steam_id) > at(other_id), "not raised: {facts:?}");
+    assert!(x11.on_top("menu"), "left behind: {:?}", x11.facts());
+    assert_eq!(
+        x11.stacking().last(),
+        Some(&other),
+        "X would have it over its own menu"
+    );
+
+    x11.stop();
 }
 
 /// Issue #181: an X application's menu has the keyboard only through its

@@ -319,6 +319,35 @@ impl Compositor {
         }
     }
 
+    /// Raise `window` over the others, and its X11 menus over it: they are
+    /// windows here, as an xdg menu is not, and would be left behind.
+    ///
+    /// An X11 window is raised in X's own stacking too, as one activated is,
+    /// so a client asking what is on top is told the same. Not while it has a
+    /// menu open, which X would then have under it, and which is what it is
+    /// the client's business to have on top: a menu goes in no list of the
+    /// windows a window manager stacks.
+    pub(crate) fn raise_with_menus(&mut self, window: &Framed) {
+        let menus: Vec<Framed> = self
+            .space
+            .elements()
+            .filter(|other| {
+                super::places_itself(other) && self.hangs_from(other).as_ref() == Some(window)
+            })
+            .cloned()
+            .collect();
+        self.space.raise_element(window, false);
+        for menu in &menus {
+            self.space.raise_element(menu, false);
+        }
+        #[cfg(feature = "xwayland")]
+        if menus.is_empty()
+            && let Some(x11) = window.x11_surface().cloned()
+        {
+            self.raise_x11(window, &x11);
+        }
+    }
+
     /// Put `window` just beneath the window in use, or beneath the one the
     /// keys would go back to, if they are with no window: where a window
     /// the person did not ask for opens (#259), in sight, and behind what

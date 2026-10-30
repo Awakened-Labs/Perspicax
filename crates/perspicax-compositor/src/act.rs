@@ -566,7 +566,7 @@ impl Compositor {
     /// as if the hand had moved, and the keyboard stays where this left it.
     fn act_raise(&mut self, window: &crate::framed::Framed, id: SurfaceId) -> Result<(), ActError> {
         let surface = shell::surface_of(window).ok_or(ActError::NoSuchSurface(id.0))?;
-        self.space.raise_element(window, false);
+        self.raise_with_menus(window);
         self.focus_surface(surface, id);
         self.backend.redraw();
         self.publish_facts();
