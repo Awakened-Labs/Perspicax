@@ -117,6 +117,7 @@ use perspicax_node::{Origin, Rect, SurfaceId, Vec2, Visibility};
 use crate::{
     Consent,
     join::{PopupClaim, SurfaceClaim},
+    receipt::WindowWitness,
 };
 
 /// One surface, as its host currently sees it.
@@ -993,8 +994,15 @@ pub fn judge_window(facts: &HostFacts, surface: SurfaceId) -> Visibility {
         Ok(left) => left,
         Err(hidden) => return hidden,
     };
-    match left_under(facts, surface, left, |_| true) {
-        (left, Some(by)) if left.is_empty() => Visibility::Occluded { by },
+    let (left, over) = left_under(facts, surface, left, |_| true);
+    hidden_by(&left, &over)
+}
+
+/// What is left of a window says of what was over it: `Occluded`, by the
+/// one in front, when that is nothing.
+fn hidden_by(left: &[Rect], over: &[SurfaceId]) -> Visibility {
+    match over.first() {
+        Some(&by) if left.is_empty() => Visibility::Occluded { by },
         _ => Visibility::Visible,
     }
 }
@@ -1030,28 +1038,29 @@ fn on_monitors(facts: &HostFacts, rect: Rect) -> Vec<Rect> {
 }
 
 /// What is left of `left` under what `counts` of the surfaces above
-/// `surface`, from the top down, and the topmost of those that covered any
-/// of it: step 4 of [`judge_window`]. A surface not on screen covers nothing,
+/// `surface`, from the top down, and which of those covered any of it, front
+/// first: step 4 of [`judge_window`]. A surface not on screen covers nothing,
 /// and `surface`'s own menus are drawn as part of it.
 fn left_under(
     facts: &HostFacts,
     surface: SurfaceId,
     mut left: Vec<Rect>,
     counts: impl Fn(&SurfaceFacts) -> bool,
-) -> (Vec<Rect>, Option<SurfaceId>) {
+) -> (Vec<Rect>, Vec<SurfaceId>) {
     let above = facts
         .surfaces()
         .iter()
         .position(|candidate| candidate.id == surface)
         .map_or(0, |index| index + 1);
-    let mut front = None;
+    let mut over = Vec::new();
     for candidate in facts.surfaces()[above..].iter().rev() {
         if !candidate.mapped || menu_of(facts, candidate, surface) || !counts(candidate) {
             continue;
         }
         for cut in candidate.cuts() {
-            if front.is_none() && left.iter().any(|piece| overlaps(*piece, cut)) {
-                front = Some(candidate.id);
+            if over.last() != Some(&candidate.id) && left.iter().any(|piece| overlaps(*piece, cut))
+            {
+                over.push(candidate.id);
             }
             left = left
                 .into_iter()
@@ -1062,7 +1071,7 @@ fn left_under(
             break;
         }
     }
-    (left, front)
+    (left, over)
 }
 
 /// Whether raising a window, and giving it the keyboard, would leave any of
@@ -1097,11 +1106,34 @@ pub fn judge_raised(facts: &HostFacts, surface: SurfaceId) -> Visibility {
     if let Some(in_use) = in_use {
         return Visibility::Occluded { by: in_use.id };
     }
-    match left_under(facts, surface, left, |candidate| {
+    let (left, over) = left_under(facts, surface, left, |candidate| {
         !raise_passes(facts, target, candidate)
-    }) {
-        (left, Some(by)) if left.is_empty() => Visibility::Occluded { by },
-        _ => Visibility::Visible,
+    });
+    hidden_by(&left, &over)
+}
+
+/// What became of a window raised, from the facts read once it had been given
+/// time: in front of everything, or what is still over it, front first.
+///
+/// Over any of it, as the person would see it, on a monitor, for that is what
+/// a node of it would be refused under. A raise that left a panel or a window
+/// kept on top over a corner went as far as a raise can. Closed, or put away
+/// meanwhile, it is neither; a tab brought in front of it is that.
+#[must_use]
+pub fn raised_witness(facts: &HostFacts, surface: SurfaceId) -> WindowWitness {
+    let Some(window) = facts.surface(surface) else {
+        return WindowWitness::Gone;
+    };
+    let left = match on_show(facts, window) {
+        Ok(left) => left,
+        Err(Visibility::InactiveTab { shown }) => return WindowWitness::StillBehind { shown },
+        Err(_) => return WindowWitness::PutAway,
+    };
+    let (_, over) = left_under(facts, surface, left, |_| true);
+    if over.is_empty() {
+        WindowWitness::InFront
+    } else {
+        WindowWitness::StillCovered { by: over }
     }
 }
 
@@ -2187,6 +2219,80 @@ mod tests {
         let kept = SurfaceFacts::new(SurfaceId(4), rect(50.0, 50.0, 90.0, 90.0)).kept_on_top();
         let facts = HostFacts::bottom_to_top([target, kept, panel], 1);
         assert_eq!(hides(&facts), [4, 5]);
+    }
+
+    fn witness(facts: &HostFacts) -> WindowWitness {
+        raised_witness(facts, SurfaceId(1))
+    }
+
+    #[test]
+    fn nothing_over_it_is_in_front() {
+        let under = over(2);
+        let facts = HostFacts::bottom_to_top([under, window()], 1);
+        assert_eq!(witness(&facts), WindowWitness::InFront);
+    }
+
+    #[test]
+    fn a_window_beside_it_is_not_covering_it() {
+        let beside = SurfaceFacts::new(SurfaceId(2), rect(400.0, 0.0, 800.0, 300.0));
+        let facts = HostFacts::bottom_to_top([window(), beside], 1);
+        assert_eq!(witness(&facts), WindowWitness::InFront);
+    }
+
+    /// Everything over any of it, front first, as the person sees it: a
+    /// surface hidden under another where it would have covered is not named.
+    #[test]
+    fn what_covers_it_is_named_front_first() {
+        let strip = |id, y0, y1| SurfaceFacts::new(SurfaceId(id), rect(0.0, y0, 400.0, y1));
+        let beneath = strip(4, 10.0, 20.0);
+        let facts = HostFacts::bottom_to_top(
+            [
+                window(),
+                beneath,
+                strip(2, 0.0, 40.0),
+                strip(3, 100.0, 140.0),
+            ],
+            1,
+        );
+        assert_eq!(
+            witness(&facts),
+            WindowWitness::StillCovered {
+                by: vec![SurfaceId(3), SurfaceId(2)]
+            }
+        );
+    }
+
+    /// Its own menus are drawn as part of it, and what hangs past every
+    /// monitor is seen by nobody.
+    #[test]
+    fn its_own_menu_and_what_is_off_every_monitor_do_not_cover_it() {
+        let menu = SurfaceFacts::new(SurfaceId(5), rect(0.0, 0.0, 100.0, 100.0))
+            .hung_from(SurfaceId(1), Instant::now());
+        let facts = HostFacts::bottom_to_top([window(), menu], 1);
+        assert_eq!(witness(&facts), WindowWitness::InFront);
+
+        let off = SurfaceFacts::new(SurfaceId(2), rect(0.0, 0.0, 100.0, 100.0));
+        let facts = HostFacts::bottom_to_top([window(), off], 1)
+            .with_outputs([rect(200.0, 0.0, 1200.0, 1000.0)]);
+        assert_eq!(witness(&facts), WindowWitness::InFront);
+    }
+
+    #[test]
+    fn a_window_put_away_meanwhile_is_not_in_front() {
+        let alone = |window: SurfaceFacts| witness(&HostFacts::bottom_to_top([window], 1));
+        assert_eq!(alone(window().unmapped()), WindowWitness::PutAway);
+        assert_eq!(alone(window().on_workspace(3)), WindowWitness::PutAway);
+        assert_eq!(alone(window().rolled_up()), WindowWitness::PutAway);
+        assert_eq!(
+            alone(window().behind_tab(SurfaceId(7))),
+            WindowWitness::StillBehind {
+                shown: SurfaceId(7)
+            }
+        );
+        assert_eq!(
+            raised_witness(&HostFacts::bottom_to_top([window()], 1), SurfaceId(9)),
+            WindowWitness::Gone
+        );
     }
 
     #[test]

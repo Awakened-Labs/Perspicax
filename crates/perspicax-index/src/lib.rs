@@ -53,7 +53,7 @@ pub use crate::{
     cache::{Delta, Index},
     host::{
         HostFacts, Judgement, Layer, SurfaceFacts, SurfaceKind, Tally, judge, judge_raised,
-        judge_window,
+        judge_window, raised_witness,
     },
     id::Interner,
     join::{Evidence, Finding, Join, SurfaceClaim, WindowClaim, join},

@@ -776,9 +776,10 @@ pub struct WindowActed {
     /// Whether focus is on the window acted on, afterwards. Not "did it
     /// work", as in [`Acted`].
     pub focus_landed: bool,
-    /// `gone`, `still_open`, `in_front` or `still_behind`; and, for `focus`
-    /// and `type`, what the window drew while watched, anywhere in it:
-    /// `quiet`, `elsewhere` or `on_target`, as [`Damage`] has it.
+    /// `gone`, `still_open`, `in_front`, `still_behind`, `still_covered` or
+    /// `put_away`; and, for `focus` and `type`, what the window drew while
+    /// watched, anywhere in it: `quiet`, `elsewhere` or `on_target`, as
+    /// [`Damage`] has it.
     pub witness: &'static str,
     /// `quiet`, `elsewhere` or `on_target`: how many frames of damage
     /// arrived while watching.
@@ -791,25 +792,38 @@ pub struct WindowActed {
     /// `still_behind`: the tab still in front.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shown_tab: Option<u64>,
+    /// `still_covered`: what is still over some of the window, front first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub covered_by: Vec<u64>,
     /// How long the window was given to react.
     pub window_ms: u64,
 }
 
 impl From<&WindowReceipt> for WindowActed {
     fn from(receipt: &WindowReceipt) -> Self {
-        let (witness, appeared, shown_tab, frames) = match &receipt.witness {
-            WindowWitness::Gone => ("gone", Vec::new(), None, None),
-            WindowWitness::StillOpen { appeared } => (
-                "still_open",
-                appeared.iter().map(|surface| surface.0).collect(),
-                None,
-                None,
-            ),
-            WindowWitness::InFront => ("in_front", Vec::new(), None, None),
-            WindowWitness::StillBehind { shown } => {
-                ("still_behind", Vec::new(), Some(shown.0), None)
+        let ids = |surfaces: &[SurfaceId]| surfaces.iter().map(|surface| surface.0).collect();
+        let (mut appeared, mut covered_by, mut shown_tab, mut frames) =
+            (Vec::new(), Vec::new(), None, None);
+        let witness = match &receipt.witness {
+            WindowWitness::Gone => "gone",
+            WindowWitness::StillOpen { appeared: new } => {
+                appeared = ids(new);
+                "still_open"
             }
-            WindowWitness::Drew(damage) => (damage.name(), Vec::new(), None, Some(damage.frames())),
+            WindowWitness::InFront => "in_front",
+            WindowWitness::StillBehind { shown } => {
+                shown_tab = Some(shown.0);
+                "still_behind"
+            }
+            WindowWitness::StillCovered { by } => {
+                covered_by = ids(by);
+                "still_covered"
+            }
+            WindowWitness::PutAway => "put_away",
+            WindowWitness::Drew(damage) => {
+                frames = Some(damage.frames());
+                damage.name()
+            }
         };
         Self {
             surface: receipt.surface.0,
@@ -823,6 +837,7 @@ impl From<&WindowReceipt> for WindowActed {
             frames,
             appeared,
             shown_tab,
+            covered_by,
             window_ms: u64::try_from(receipt.window.as_millis()).unwrap_or(u64::MAX),
         }
     }
@@ -1478,6 +1493,25 @@ mod tests {
         let json = serde_json::to_value(WindowActed::from(&closed)).unwrap();
         assert_eq!(json["witness"], "gone");
         assert!(json.get("frames").is_none());
+        assert!(json.get("covered_by").is_none());
+
+        let covered = WindowReceipt {
+            witness: WindowWitness::StillCovered {
+                by: vec![SurfaceId(7), SurfaceId(3)],
+            },
+            ..closed.clone()
+        };
+        let json = serde_json::to_value(WindowActed::from(&covered)).unwrap();
+        assert_eq!(json["witness"], "still_covered");
+        assert_eq!(json["covered_by"], serde_json::json!([7, 3]));
+
+        let away = WindowReceipt {
+            witness: WindowWitness::PutAway,
+            ..closed
+        };
+        let json = serde_json::to_value(WindowActed::from(&away)).unwrap();
+        assert_eq!(json["witness"], "put_away");
+        assert!(json.get("covered_by").is_none());
         assert_eq!(json["focus_landed"], false);
     }
 
