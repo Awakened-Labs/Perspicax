@@ -3,7 +3,7 @@
 //! `perspicax-mcp` describes what it needs as a trait with six methods and
 //! never implements it, so that the agent-facing surface stays portable -- a
 //! GNOME extension or a KWin plugin satisfies the same six and gets the same
-//! eleven tools. This is that trait satisfied, here in the composition root,
+//! twelve tools. This is that trait satisfied, here in the composition root,
 //! because this is the only place that holds the index, the host's facts and
 //! the compositor's inbound channel at once.
 //!

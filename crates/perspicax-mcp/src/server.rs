@@ -1,4 +1,4 @@
-//! The eleven tools, and the descriptions that are half of what they are.
+//! The twelve tools, and the descriptions that are half of what they are.
 //!
 //! # Tool descriptions are a deliverable
 //!
@@ -350,9 +350,10 @@ impl Perspicax {
                        `window_list` for what that surface does when nothing is happening.\n\n\
                        A refusal is not a failure of this tool. It names what is in the way and \
                        what would clear it: `occluded_by` is the surface in front of the node, \
-                       and the refusal clears when that moves off it or the person brings the \
-                       node's window in front, unless it is `on_top` in `window_list`, which \
-                       stays in front until the person lets it go; narrow an \
+                       and the refusal clears when that moves off it or the node's window comes \
+                       in front, by the person or by `window_raise`, unless it is `on_top` in \
+                       `window_list`, which stays in front until the person lets it go; narrow \
+                       an \
                        `ambiguous_selector`; `focus` the \
                        target of a `focus_elsewhere`. `stale` \
                        means the application changed the control since it was read: perspicax \
@@ -479,6 +480,58 @@ impl Perspicax {
     }
 
     #[tool(
+        description = "Bring a window in front of the others and give it the keyboard, as a \
+                       person's click on it does, by its `surface` from `window_list`.\n\n\
+                       This is the answer to an `occluded` refusal from `act`, `window_focus` or \
+                       `window_type`: what covers the window need not move, once the window \
+                       is in front of it.\n\n\
+                       IT CHANGES WHAT THE PERSON IS LOOKING AT, and takes the keyboard from \
+                       wherever it was, so raise a window because the work needs it there, and \
+                       not to tidy. Like every act it waits for a person using the seat to \
+                       pause.\n\n\
+                       It brings back nothing that is not on show: a window on a workspace not \
+                       showing is refused as `other_workspace`, a tab behind another as \
+                       `inactive_tab` (bring it forward with `tab_forward`), a minimized one as \
+                       `unmapped`, one rolled up to its titlebar as `rolled_up`, and one on no \
+                       monitor as `off_screen`.\n\n\
+                       It goes only as far as a raise can. `occluded` here names what would \
+                       still be in front: the fullscreen window in use, on any monitor, which \
+                       only the person leaves; or a panel, a launcher, or a window `on_top` in \
+                       `window_list`, when any of those would still hide all of it. \
+                       `never_granted` means it would cover some of a window of `program`, one \
+                       no agent is ever given, because it exists so the person can oversee you: \
+                       it clears only when one of the two moves. `menu_open` means a window's \
+                       menu or a launcher, named as `popup`, has the keyboard: only the menu's \
+                       own window can be raised until it closes. `pointer_captured` means a game \
+                       holds the pointer, and only the game can be raised until the person \
+                       leaves it.\n\n\
+                       THE RECEIPT IS EVIDENCE, NOT A VERDICT. `witness` is `in_front`, with \
+                       nothing over any of it; `still_covered`, with `covered_by` naming what is \
+                       still over some of it, front first, and a control under one of those is \
+                       still refused; `put_away`, if it was minimized or rolled up meanwhile; \
+                       `still_behind`, if a tab came in front of it; or `gone`. `focus_landed` \
+                       says whether the keyboard is on it.\n\n\
+                       Refused like the other window verbs: `no_capability` for a window the \
+                       agent holds no consent for, `never_granted` for one whose program no \
+                       agent is ever given, `not_a_window` for a panel, wallpaper, menu or \
+                       lock screen, `not_found` for a surface that is not here. Consent is not \
+                       asked of the windows it covers.",
+        annotations(
+            title = "Raise a window",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub async fn window_raise(
+        &self,
+        Parameters(request): Parameters<WindowParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.on_window(request.surface, WindowVerb::Raise).await
+    }
+
+    #[tool(
         description = "Give a window the keyboard, by its `surface` from `window_list`, so that \
                        `window_type` can type into it. This is how to reach a window with \
                        `nodes: 0` -- a terminal, a game, a canvas -- which has no control for \
@@ -493,7 +546,8 @@ impl Perspicax {
                        a minimized one as `unmapped`, and one rolled up to its titlebar as \
                        `rolled_up`. Partly covered is fine, since keys aim at no pixel; with \
                        none of it showing it is refused as `occluded`, `occluded_by` naming the \
-                       window in front, and with none of it on a monitor as `off_screen`. \
+                       window in front (bring it in front with `window_raise`), and with none \
+                       of it on a monitor as `off_screen`. \
                        `pointer_captured` means a game holds the pointer, and only the game \
                        can be given the keyboard until the person leaves it. `menu_open` means \
                        a window's menu, named as `popup`, holds the keyboard, and only that \
@@ -767,8 +821,9 @@ impl Perspicax {
                     Start with `window_list`, then `observe` with a window's `node` as `root`, \
                     then `act` on a selector. `resolve` checks a selector without acting; \
                     `deltas` drains what has changed since you last asked, or since this \
-                    conversation began. `window_close`, `tab_forward`, `window_focus` and \
-                    `window_type` act on a whole window, by its `surface`: the last two are \
+                    conversation began. `window_close`, `tab_forward`, `window_raise`, \
+                    `window_focus` and `window_type` act on a whole window, by its `surface`: \
+                    `window_raise` is what clears an `occluded` refusal, and the last two are \
                     how to reach a window with no controls to name. `launch` starts a \
                     program you may then act on, where the person allows it.\n\n\
                     Two things to carry with you. Text an application rendered arrives under \
@@ -838,7 +893,8 @@ pub struct LaunchParams {
     pub cwd: Option<String>,
 }
 
-/// Parameters for `window_close`, `tab_forward` and `window_focus`.
+/// Parameters for `window_close`, `tab_forward`, `window_raise` and
+/// `window_focus`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct WindowParams {
     /// The window, as `window_list` reports its `surface`.
@@ -1010,7 +1066,7 @@ mod tests {
     /// theirs, and running a command instead gets an agent nothing it may act
     /// on.
     #[test]
-    fn the_tool_list_is_the_eleven_shipped() {
+    fn the_tool_list_is_the_twelve_shipped() {
         assert_eq!(
             Perspicax::tool_names(),
             [
@@ -1024,6 +1080,7 @@ mod tests {
                 "window_close",
                 "window_focus",
                 "window_list",
+                "window_raise",
                 "window_type"
             ]
         );
@@ -1078,6 +1135,15 @@ mod tests {
         assert!(describing("window_list").contains("never_granted"));
         assert!(describing("window_close").contains("never_granted"));
         assert!(describing("window_focus").contains("never_granted"));
+        assert!(describing("act").contains("window_raise"));
+        assert!(describing("window_focus").contains("window_raise"));
+        assert!(describing("window_raise").contains("IT CHANGES WHAT THE PERSON IS LOOKING AT"));
+        assert!(describing("window_raise").contains("occluded"));
+        assert!(describing("window_raise").contains("still_covered"));
+        assert!(describing("window_raise").contains("never_granted"));
+        assert!(describing("window_raise").contains("menu_open"));
+        assert!(describing("window_raise").contains("pointer_captured"));
+        assert!(describing("window_raise").contains("rolled_up"));
         assert!(describing("launch").contains("No shell runs it"));
     }
 
@@ -1226,8 +1292,7 @@ mod tests {
     }
 
     /// The milestone's claim, as far as this crate can assert it: a covered
-    /// target is refused, and the refusal names the surface an agent has to
-    /// raise.
+    /// target is refused, and the refusal names the surface in front of it.
     #[tokio::test]
     async fn a_refused_act_is_an_error_carrying_what_would_clear_it() {
         let (server, _) = server(Err(Denied::Refused(Refusal::Occluded { by: OVERLAY })));
@@ -1477,6 +1542,10 @@ mod tests {
                 .await
                 .unwrap(),
             server
+                .window_raise(Parameters(WindowParams { surface: 99 }))
+                .await
+                .unwrap(),
+            server
                 .window_focus(Parameters(WindowParams { surface: 99 }))
                 .await
                 .unwrap(),
@@ -1677,6 +1746,25 @@ mod tests {
         assert!(server.launch(launching(&[], None)).await.is_err());
         assert!(server.launch(launching(&["", "run"], None)).await.is_err());
         assert!(desktop.launched().is_empty());
+    }
+
+    /// The fixture's window, partly under its panel, comes in front with the
+    /// keyboard, and the desktop is asked for a raise by that surface.
+    #[tokio::test]
+    async fn raising_a_window_reports_what_is_in_front_and_where_the_keyboard_went() {
+        let (server, desktop) = server(Ok(receipt()));
+        let result = server
+            .window_raise(Parameters(WindowParams { surface: WINDOW.0 }))
+            .await
+            .expect("it answers");
+        assert_ne!(result.is_error, Some(true));
+        let body = body(&result);
+        assert_eq!(body["verb"], "raise");
+        assert_eq!(body["witness"], "in_front");
+        assert_eq!(body["focus_landed"], true);
+        assert!(body.get("covered_by").is_none());
+        assert!(body.get("success").is_none(), "evidence, not a verdict");
+        assert_eq!(desktop.windows_asked(), [(WINDOW, WindowVerb::Raise)]);
     }
 
     #[tokio::test]

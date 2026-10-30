@@ -1,8 +1,8 @@
 //! The agent interface -- an MCP server over stdio, or on a Unix socket.
 //!
-//! Eleven tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
-//! `tab_forward`, `window_focus`, `window_type`, `deltas`, `screenshot` and
-//! `launch`. Everything above them
+//! Twelve tools: `window_list`, `observe`, `resolve`, `act`, `window_close`,
+//! `tab_forward`, `window_raise`, `window_focus`, `window_type`, `deltas`,
+//! `screenshot` and `launch`. Everything above them
 //! is `rmcp` and everything below them is [`Desktop`], a trait with six
 //! methods that this crate never implements.
 //!
@@ -13,7 +13,7 @@
 //! restraint `perspicax-index` observes and it is load-bearing for the same
 //! reason: the agent interface is portable, so a port of this project to a
 //! GNOME extension or a KWin plugin re-implements [`Desktop`] and gets these
-//! eleven tools unchanged. A crate that cannot see a compositor cannot come to
+//! twelve tools unchanged. A crate that cannot see a compositor cannot come to
 //! depend on one.
 //!
 //! The consequence is that the act path is **injected, not imported**.
@@ -222,7 +222,7 @@ pub enum ServeError {
     Stopped(String),
 }
 
-/// Serve the eleven tools over stdio until the client goes away.
+/// Serve the twelve tools over stdio until the client goes away.
 ///
 /// # A conversation begins with `initialize`
 ///

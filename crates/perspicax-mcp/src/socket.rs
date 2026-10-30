@@ -163,7 +163,7 @@ impl Drop for Socket {
     }
 }
 
-/// Serve the eleven tools on `listener`, a conversation per connection and one
+/// Serve the twelve tools on `listener`, a conversation per connection and one
 /// at a time, for as long as the process runs.
 ///
 /// A connection ending, however it ends, ends its conversation and nothing

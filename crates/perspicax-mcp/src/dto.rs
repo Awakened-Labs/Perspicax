@@ -223,10 +223,11 @@ pub struct Refused {
     /// The refusal in words.
     pub message: String,
     /// `occluded`: the surface in front of the node, its shadow included. Try
-    /// again once it has moved off the node, or once the person has brought
-    /// the node's window in front of it. For `window_focus` and
+    /// again once it has moved off the node, or once the node's window is in
+    /// front of it, by the person or by `window_raise`. For `window_focus` and
     /// `window_type`, none of the window shows, and this is the surface in
-    /// front of it.
+    /// front of it. For `window_raise`, this is what would still be in front
+    /// of it once raised.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occluded_by: Option<u64>,
     /// `stale`: how many frames of damage the node owes. Zero is a real value --
@@ -763,7 +764,7 @@ pub struct WindowActed {
     /// Who owns it, from its connection credentials.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rendered_by: Option<Provenance>,
-    /// `close`, `forward`, `focus` or `type`.
+    /// `close`, `forward`, `raise`, `focus` or `type`.
     pub verb: &'static str,
     /// The round trip to the compositor's thread and back.
     pub dispatch_ms: f64,
@@ -1207,7 +1208,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Refused::from(&held)).unwrap(),
             serde_json::json!({"kind": "menu_open",
-            "message": "the open menu 9 holds the pointer and keyboard: choose from it, \
+            "message": "the open menu 9 has the keyboard: choose from it, \
                         or wait for it to close",
             "popup": 9})
         );

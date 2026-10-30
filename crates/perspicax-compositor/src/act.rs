@@ -154,12 +154,14 @@ pub enum ActError {
     /// ignored the keyboard given to anything but the menu. `popup` is the
     /// menu holding them, the submenu when one is open. Choosing from it,
     /// clicking anywhere in its own application, and focusing its window,
-    /// still go ahead, as they do for the person (#157).
+    /// still go ahead, as they do for the person (#157). A raise is refused
+    /// the same under a launcher holding the keyboard, `popup` naming it: a
+    /// window raised there would be given them when it goes (#147).
     ///
     /// A refusal, like [`ActError::FocusElsewhere`], decided here because
     /// only this loop knows what holds the pointer in the same turn as the
     /// act. `perspicax` hands it to the agent as `Refusal::MenuOpen`.
-    #[error("menu {} holds the pointer and keyboard: nothing was dispatched", popup.0)]
+    #[error("menu {} has the keyboard: nothing was dispatched", popup.0)]
     MenuOpen { popup: SurfaceId },
     /// A click or a scroll aimed at something the person can no longer see,
     /// or a raise the desk no longer allows. The gate judged it against the

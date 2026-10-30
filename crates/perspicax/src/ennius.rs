@@ -688,7 +688,7 @@ mod tests {
         assert!(
             rows[1]
                 .detail
-                .starts_with("granted 11 tools as `mcp:perspicax:*`"),
+                .starts_with("granted 12 tools as `mcp:perspicax:*`"),
             "{rows:?}"
         );
         assert_eq!(
@@ -719,7 +719,7 @@ mod tests {
         assert!(
             rows[1]
                 .detail
-                .starts_with("0 of 11 granted; missing act, deltas"),
+                .starts_with("0 of 12 granted; missing act, deltas"),
             "{rows:?}"
         );
         let rows = install(&scratch.this(), false, scratch.var());
@@ -851,7 +851,7 @@ mod tests {
             "{rows:?}"
         );
         assert!(
-            rows[1].detail.starts_with("would grant 11 tools"),
+            rows[1].detail.starts_with("would grant 12 tools"),
             "{rows:?}"
         );
         assert!(scratch.asked().is_empty());

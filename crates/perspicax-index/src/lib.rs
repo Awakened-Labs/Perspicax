@@ -197,7 +197,9 @@ pub enum Refusal {
     /// reach nothing, or focus on anything but that window and its menus,
     /// which the menu would keep from it (issue #157). `popup` is the menu
     /// holding them. Choose from it, act on its own application, or wait for
-    /// it to close.
+    /// it to close. A launcher that holds the keyboard is named for the same
+    /// answer to a raise, which would be given what the person types once the
+    /// launcher goes.
     ///
     /// The host decides this too, for the reason it decides
     /// [`FocusElsewhere`](Refusal::FocusElsewhere).
@@ -273,7 +275,7 @@ impl core::fmt::Display for Refusal {
             ),
             Self::MenuOpen { popup } => write!(
                 f,
-                "the open menu {} holds the pointer and keyboard: choose from it, \
+                "the open menu {} has the keyboard: choose from it, \
                  or wait for it to close",
                 popup.0
             ),
@@ -887,7 +889,7 @@ mod tests {
         };
         assert_eq!(
             held.to_string(),
-            "the open menu 9 holds the pointer and keyboard: choose from it, \
+            "the open menu 9 has the keyboard: choose from it, \
              or wait for it to close"
         );
     }
