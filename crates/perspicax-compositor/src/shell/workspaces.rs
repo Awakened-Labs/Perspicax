@@ -138,17 +138,14 @@ impl Compositor {
 
         // In a menu of a parked window, the keyboard is as lost: the menu
         // goes with its window, closed as a click outside it would close it,
-        // which lets go of the keyboard so it can move on. Only a menu that
-        // holds it: whatever else holds the pointer, a drag flipping the
-        // workspace say, is left be.
+        // as the keys move on to the window in front, or to nothing
+        // (`menu_makes_way_for`, #185). Only a menu that holds them closes:
+        // whatever else holds the pointer, a drag flipping the workspace
+        // say, is left be.
         let lost = self
             .window_in_use()
             .is_some_and(|id| self.parked_with(id).is_some());
         if lost {
-            if self.held_menu_root().is_some() {
-                self.let_go();
-                self.repoint();
-            }
             self.focus_top_window();
         }
         self.draw_switches();

@@ -748,7 +748,9 @@ impl Compositor {
     /// Give the keyboard to a surface as it is: a launcher, a lock screen,
     /// or the menu or window a closed menu hung from. A window focused for
     /// itself goes through [`Self::focus_surface`]. While the session is
-    /// locked, only to the lock's own surfaces.
+    /// locked, only to the lock's own surfaces. A window's menu holding the
+    /// keyboard closes first, unless `surface` is its own
+    /// ([`Self::menu_makes_way_for`]).
     #[expect(
         clippy::disallowed_methods,
         reason = "a way to the keyboard, and it asks may_take_keyboard (#127)"
@@ -757,6 +759,7 @@ impl Compositor {
         if !self.may_take_keyboard(&surface) {
             return;
         }
+        self.menu_makes_way_for(Some(&surface));
         if let Some(keyboard) = self.keyboard.clone() {
             keyboard.set_focus(self, Some(surface.into()), SERIAL_COUNTER.next_serial());
         }
@@ -784,6 +787,11 @@ impl Compositor {
     /// to a client without the keys (#187). Clippy refuses `set_focus`
     /// anywhere else. Should a way be missed all the same, the keys still go
     /// to the lock screen as they are typed (#197, [`Self::send_key`]).
+    ///
+    /// Nothing is refused while a window's menu holds the keyboard: the
+    /// session is not locked then, its grab refused while it is, and no
+    /// launcher holds the keyboard. So whatever is given it then has it,
+    /// the menu closing first ([`Self::menu_makes_way_for`]).
     fn may_take_keyboard(&self, surface: &WlSurface) -> bool {
         match &self.lock {
             Some(locked) => locked.covers(surface),
@@ -794,6 +802,41 @@ impl Compositor {
                         .is_some_and(|held| self.is_launcher(&held))
             }
         }
+    }
+
+    /// Before the keyboard goes to `to`, or to nothing: a window's menu that
+    /// holds it closes, as a click outside it closes it, unless `to` is of
+    /// that menu -- the window it was opened from, or a menu of that window
+    /// (#185). Smithay's grab ignores the keyboard given anywhere else, so a
+    /// window clicked came to the top with the keys left behind, and a
+    /// launcher, a window asked for or one activated came up without them.
+    /// The pointer goes to what is under it, so a click that gave the keys
+    /// away goes on to what it was aimed at.
+    ///
+    /// The window's own application keeps them as it does under the grab:
+    /// the window clicked in, or its menu closing and handing them back
+    /// (`hand_back_keyboard`), which smithay's grab still counts as held
+    /// then. Another window of the same application is somewhere else:
+    /// left to close its menu itself, the application would have the keys
+    /// handed back to the window the menu was opened from, not the one
+    /// given them.
+    ///
+    /// It ends the pointer's grab, which must never be done inside one of
+    /// smithay's pointer callbacks, and so it takes the pointer's lock and
+    /// the layer maps'. It never does inside one: a menu holds the keyboard
+    /// only while its grab holds the pointer too, and any other grab
+    /// replacing it ends both. So inside another grab's callback -- a tab
+    /// dragged, which brings tabs forward as it goes -- no menu holds
+    /// anything here.
+    fn menu_makes_way_for(&mut self, to: Option<&WlSurface>) {
+        let Some(root) = self.held_menu_root() else {
+            return;
+        };
+        if to.is_some_and(|to| self.menu_root(to.clone()) == root) {
+            return;
+        }
+        self.let_go();
+        self.repoint();
     }
 
     /// Whether the keyboard is with one of `client`'s surfaces: a window, a
@@ -846,12 +889,14 @@ impl Compositor {
     /// Take the keyboard from whatever has it. Smithay 0.7 tells
     /// `focus_changed` of a new focus but not of none, so what has to follow
     /// is done here: no window looks active any more, nor is named so to X
-    /// clients. Every focus cleared to none goes through this.
+    /// clients. Every focus cleared to none goes through this. A window's
+    /// menu holding the keyboard closes first ([`Self::menu_makes_way_for`]).
     #[expect(
         clippy::disallowed_methods,
         reason = "gives the keyboard to nothing, which the lock allows"
     )]
     pub(crate) fn clear_focus(&mut self) {
+        self.menu_makes_way_for(None);
         if let Some(keyboard) = self.keyboard.clone() {
             keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
         }
@@ -904,7 +949,8 @@ impl Compositor {
     /// [`Self::focus_surface`] refuses the window the keyboard. Giving it to
     /// nothing is not refused, and need not be: no caller asks while a lock
     /// surface or a launcher holds the keyboard, only once what held it has
-    /// gone, or while a window or a menu holds it.
+    /// gone, or while a window or a menu holds it. A window's menu holding
+    /// it closes, unless the window on top is the one it was opened from.
     pub(crate) fn focus_top_window(&mut self) {
         let Some(window) = self.window_for_keys() else {
             self.clear_focus();
@@ -971,6 +1017,9 @@ impl Compositor {
     /// keys go back to it then, the topmost window that wants no attention
     /// ([`Self::window_for_keys`]): not one that opened behind the lock,
     /// which nobody at it asked for (#259).
+    ///
+    /// A window's menu holding the keyboard closes first, unless this is
+    /// the window it was opened from ([`Self::menu_makes_way_for`]).
     #[expect(
         clippy::disallowed_methods,
         reason = "a way to the keyboard, and it asks may_take_keyboard (#127)"
@@ -979,6 +1028,7 @@ impl Compositor {
         if !self.may_take_keyboard(&surface) {
             return;
         }
+        self.menu_makes_way_for(Some(&surface));
         let Some(keyboard) = self.keyboard.clone() else {
             return;
         };
@@ -1757,7 +1807,12 @@ impl Compositor {
         seat: &WlSeat,
         serial: Serial,
     ) -> Option<(Framed, GrabStartData<Self>)> {
-        if !self.backend.has_person() {
+        // Nor while a window's menu holds the pointer: the only serial its
+        // grab answers to is the menu's, and the grab's start is made up, the
+        // desk's origin with no button down. A move from it would end the
+        // menu's grab without closing the menu, and carry the window off
+        // from where nobody pressed (#185).
+        if !self.backend.has_person() || self.held_menu_root().is_some() {
             return None;
         }
         let pointer = Seat::<Self>::from_resource(seat)?.get_pointer()?;

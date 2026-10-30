@@ -111,7 +111,7 @@ impl Compositor {
             return;
         };
         let grab = super::grabs::TabDragGrab::new(start, tab.clone());
-        pointer.set_grab(self, grab, serial, smithay::input::pointer::Focus::Clear);
+        self.take_pointer(&pointer, grab, serial);
     }
 
     /// The window whose titlebar a tab dragged to `at` would join, and the

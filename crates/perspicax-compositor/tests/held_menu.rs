@@ -12,7 +12,11 @@
 //! `MenuOpen`, naming the menu, and the menu stays open, as is bringing a
 //! tab forward, which gives it the keyboard. Choosing from the menu,
 //! clicking anywhere in its own application, and focusing its window, go
-//! ahead as they do for the person.
+//! ahead as they do for the person. The menu is the person's, and closes
+//! for them alone: their click on another window, its own application's
+//! other window too, gives that window the keys and closes the menu
+//! (#185), where an agent's click on the application's other window leaves
+//! it open.
 //!
 //! With a person at the seat, where alone a menu takes the grab. Like the
 //! other live tests it binds a real Wayland socket, so it needs

@@ -1637,12 +1637,14 @@ impl Compositor {
 
     /// The window and grab start for an X11 move or resize: a person at the
     /// seat and a button still held. X11 has no serial to check, so the held
-    /// button is the evidence that the drag is real.
+    /// button is the evidence that the drag is real. Not a window's menu
+    /// holding the pointer, whose grab holds no button, and starts at the
+    /// desk's origin (#185).
     fn x11_interactive(
         &self,
         x11: &X11Surface,
     ) -> Option<(Framed, smithay::input::pointer::GrabStartData<Self>)> {
-        if !self.backend.has_person() {
+        if !self.backend.has_person() || self.held_menu_root().is_some() {
             return None;
         }
         let pointer = self.pointer.as_ref()?;
