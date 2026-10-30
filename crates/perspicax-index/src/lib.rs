@@ -51,7 +51,10 @@ pub use perspicax_policy::{Never, Program};
 
 pub use crate::{
     cache::{Delta, Index},
-    host::{HostFacts, Judgement, Layer, SurfaceFacts, SurfaceKind, Tally, judge, judge_window},
+    host::{
+        HostFacts, Judgement, Layer, SurfaceFacts, SurfaceKind, Tally, judge, judge_raised,
+        judge_window,
+    },
     id::Interner,
     join::{Evidence, Finding, Join, SurfaceClaim, WindowClaim, join},
     receipt::{DamageWitness, Receipt, Verb, WindowReceipt, WindowVerb, WindowWitness},
@@ -556,6 +559,30 @@ pub fn check_window<'facts>(
         WindowVerb::Focus | WindowVerb::Type(_) => in_sight(&judge_window(facts, surface))?,
     }
     Ok(window)
+}
+
+/// What a raise needs of what is on the desk, past what any window verb needs
+/// ([`check_window`]): that it would leave some of the window in sight
+/// ([`judge_raised`]), and that it would hide nothing no agent is ever given.
+///
+/// The second is the one thing a raise asks about any window but its own. An
+/// agent is not asked to hold consent for what it covers, or it could raise
+/// nothing over the person's browser, which is what is usually in front. But
+/// a program no agent is ever given exists so the person can oversee the
+/// agent ([`Refusal::NeverGranted`]), and an agent covering it would be out
+/// of sight of what oversees it.
+///
+/// # Errors
+///
+/// The [`Refusal`] saying why not.
+pub fn check_raise(facts: &HostFacts, surface: SurfaceId) -> Result<(), Refusal> {
+    in_sight(&judge_raised(facts, surface))?;
+    for covered in host::raise_would_hide(facts, surface) {
+        if let Err(never @ Refusal::NeverGranted { .. }) = facts.consent().check(&covered.origin) {
+            return Err(never);
+        }
+    }
+    Ok(())
 }
 
 /// Where nodes come from.
@@ -1352,6 +1379,117 @@ mod tests {
             check_window(&facts, SurfaceId(1), &WindowVerb::Forward),
             Err(Refusal::NoCapability { .. })
         ));
+    }
+
+    /// An overseer: drawn by a program no agent is ever given.
+    fn overseer(area: Rect) -> SurfaceFacts {
+        SurfaceFacts::new(SurfaceId(2), area).owned_by(running(20, "/usr/bin/perspicax-settings"))
+    }
+
+    fn raising(above: impl IntoIterator<Item = SurfaceFacts>) -> Result<(), Refusal> {
+        check_raise(&desk(lone(), above), SurfaceId(1))
+    }
+
+    #[test]
+    fn raising_over_a_program_never_granted_is_refused() {
+        assert_eq!(
+            raising([overseer(Rect::new(300.0, 200.0, 700.0, 500.0))]),
+            Err(Refusal::NeverGranted {
+                program: "perspicax-settings".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn raising_beside_a_program_never_granted_is_not_refused() {
+        assert_eq!(
+            raising([overseer(Rect::new(500.0, 0.0, 700.0, 300.0))]),
+            Ok(())
+        );
+    }
+
+    /// Already under the window, it is not hidden by a raise.
+    #[test]
+    fn a_program_never_granted_under_the_target_is_not_newly_covered() {
+        let facts = HostFacts::bottom_to_top(
+            [
+                overseer(Rect::new(0.0, 0.0, 100.0, 100.0)),
+                lone().owned_by(owned_by(10)),
+            ],
+            1,
+        )
+        .with_consent(Consent::Everyone);
+        assert_eq!(check_raise(&facts, SurfaceId(1)), Ok(()));
+    }
+
+    /// What is in the way is refused first: told of an overseer, an agent
+    /// might wait for that to move, and still be hidden by the panel.
+    #[test]
+    fn a_raise_that_would_not_show_is_refused_as_that_before_an_overseer() {
+        let area = Rect::new(-10.0, -10.0, 500.0, 400.0);
+        let panel = SurfaceFacts::new(SurfaceId(5), area)
+            .layered(Layer::Top, "panel")
+            .owned_by(owned_by(20));
+        assert_eq!(
+            raising([overseer(area), panel]),
+            Err(Refusal::Occluded { by: SurfaceId(5) })
+        );
+    }
+
+    /// Consent is not asked of what it covers: most of a desk is the
+    /// person's, and in front of what an agent works in.
+    #[test]
+    fn other_programs_need_no_consent_to_be_raised_over() {
+        let area = Rect::new(-10.0, -10.0, 500.0, 400.0);
+        let facts = HostFacts::bottom_to_top(
+            [
+                lone().owned_by(owned_by(10)),
+                SurfaceFacts::new(SurfaceId(2), area).owned_by(owned_by(20)),
+            ],
+            1,
+        )
+        .with_consent(Consent::granted(vec![10]));
+        assert_eq!(check_raise(&facts, SurfaceId(1)), Ok(()));
+    }
+
+    /// A fullscreen window with the keyboard comes in front of panels and of
+    /// what is kept on top, so an overseer there is hidden by it where it
+    /// would not be by another window.
+    #[test]
+    fn a_fullscreen_target_may_not_cover_an_overseer_kept_on_top_or_on_a_panel() {
+        let area = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let kept = || overseer(area).kept_on_top();
+        let panel = || overseer(area).layered(Layer::Top, "overseer");
+        let never = Err(Refusal::NeverGranted {
+            program: "perspicax-settings".to_owned(),
+        });
+        for above in [kept(), panel()] {
+            let facts = desk(lone().fullscreen(), [above.clone()]);
+            assert_eq!(check_raise(&facts, SurfaceId(1)), never, "{above:?}");
+            // An ordinary window, raised, stays under it.
+            let facts = desk(lone(), [above]);
+            assert_eq!(check_raise(&facts, SurfaceId(1)), Ok(()));
+        }
+    }
+
+    /// An X11 window's origin is its server's, the unit consent is decided
+    /// on, and `Consent::check` asks no X client's name: an overseer running
+    /// under X11 is not known for one.
+    #[test]
+    fn an_overseer_under_x11_is_not_known_for_one() {
+        let x11 = SurfaceFacts::new(SurfaceId(2), Rect::new(300.0, 200.0, 700.0, 500.0)).owned_by(
+            Origin::X11(Box::new(perspicax_node::X11Origin {
+                server: 30,
+                client: Some(ProcessOrigin {
+                    pid: 31,
+                    exe: Some("/usr/bin/perspicax-settings".to_owned()),
+                    cgroup: None,
+                    sandbox: None,
+                }),
+                basis: perspicax_node::X11Basis::XRes,
+            })),
+        );
+        assert_eq!(raising([x11]), Ok(()));
     }
 
     /// A rect is judged in its window's space, wherever the window is, and
