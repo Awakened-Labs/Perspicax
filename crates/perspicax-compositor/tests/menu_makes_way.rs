@@ -456,6 +456,73 @@ fn a_window_activated_while_a_menu_is_open_takes_the_keys_and_closes_it() {
     pair.stop(session);
 }
 
+/// A `[mouse]` binding on the desktop acts on the click that closes the
+/// menu: here, the thumb button asking the shell for its start menu. The
+/// press is past the menu's application, so the menu closes first, as
+/// smithay's grab would close it, and the press is then the compositor's to
+/// look a binding up for. Before, no binding was looked for while the menu
+/// held the pointer, and the click did nothing but close it.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_desktop_binding_acts_on_the_click_that_closes_the_menu() {
+    use perspicax_compositor::Command;
+    use perspicax_policy::{Button, Context, Gesture, Mods, MouseBindings, MouseChord};
+
+    let session = seated("menu-makes-way-binding");
+    let mut pair = Pair::with_the_menu(&session);
+    session.command(Command::MouseBindings(MouseBindings::default().bind(
+        Context::Desktop,
+        MouseChord {
+            mods: Mods::default(),
+            gesture: Gesture::Press(Button::Side),
+        },
+        Action::StartMenu,
+    )));
+
+    // The empty desk's far corner, past every window.
+    click(&session, (1270, 1014), Button::Side);
+    until(&mut pair.a_queue, &mut pair.a, |a| a.popups_done == 1);
+    until(&mut pair.b_queue, &mut pair.b, |b| {
+        b.told.iter().any(|told| matches!(told, Told::StartMenu(_)))
+    });
+
+    pair.stop(session);
+}
+
+/// A task picked in a panel while a window's menu is open: the press on
+/// the panel closes the menu and reaches the panel, so its pick is one the
+/// person asked for (#270), and the window picked comes forward with the
+/// keys.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_task_picked_in_a_panel_while_a_menu_is_open_comes_forward_with_the_keys() {
+    use perspicax_policy::Button;
+
+    let session = seated("menu-makes-way-panel");
+    let mut pair = Pair::with_the_menu(&session);
+    let before = pair.b.layers_drawn;
+    pair.b.open_panel(&pair.b_qh, "panel", 30, 0xff20_2020);
+    until(&mut pair.b_queue, &mut pair.b, |b| b.layers_drawn > before);
+
+    click(&session, (640, 10), Button::Left);
+    until(&mut pair.b_queue, &mut pair.b, |b| b.buttons.len() == 2);
+    until(&mut pair.a_queue, &mut pair.a, |a| a.popups_done == 1);
+    pair.b.activate("b");
+    pair.b_queue.roundtrip(&mut pair.b).expect("the pick sent");
+    until(&mut pair.b_queue, &mut pair.b, |_| {
+        heard(&pair.b_ear).entered.is_some()
+    });
+    pair.settle();
+
+    assert!(pair.keys_on_b(), "the window picked has the keys");
+    let facts = session.wait_for(|_| true);
+    assert_eq!(on_top(&facts).as_deref(), Some("b"));
+
+    pair.stop(session);
+}
+
 /// Under focus-follows-mouse with autoraise, the hand passing from the menu
 /// over "b" leaves the menu open, with the keys, and "b" where it was:
 /// while the menu holds the pointer, smithay tells "b" nothing, and the

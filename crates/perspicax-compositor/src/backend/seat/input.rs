@@ -332,6 +332,9 @@ fn button(state: &mut Compositor, code: u32, pressed: ButtonState, time: u32) {
             session.settle_transitions();
         }
         let hit = state.pointed(at);
+        // A window's menu the press is past closes before anything acts on
+        // the press, as smithay's grab would close it once it reached it.
+        state.press_past_menu(hit.as_ref());
         state.focus_pressed_layer(hit.as_ref());
         let frame = hit.as_ref().and_then(|hit| hit.frame);
         let over = hit.as_ref().and_then(|hit| hit.window.clone());

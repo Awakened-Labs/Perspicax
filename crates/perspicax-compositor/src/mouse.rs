@@ -36,7 +36,7 @@ use smithay::{
         RelativeMotionEvent,
     },
     output::Output,
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    reexports::wayland_server::{Resource as _, protocol::wl_surface::WlSurface},
     utils::{Logical, Point, SERIAL_COUNTER, Serial},
     wayland::seat::WaylandFocus,
 };
@@ -308,6 +308,29 @@ impl Compositor {
         }
     }
 
+    /// A button went down over `hit` while a window's menu holds the pointer
+    /// and keyboard. Unless it is over the menu's own application, the menu
+    /// closes, as smithay's grab closes it for such a press, only first
+    /// (#185). The keyboard goes back to the window the menu was opened
+    /// from, and the pointer to what is under it. Then the focus policy, a
+    /// `[mouse]` binding and a window's frame have the press as though no
+    /// menu had been open. Otherwise no binding is looked for while the
+    /// menu holds the pointer, and a press on the menu's own window's
+    /// titlebar starts a move whose grab ends the menu's, leaving the menu
+    /// drawn as the window moves. Called first, by the seat and the
+    /// stand-in alike.
+    pub(crate) fn press_past_menu(&mut self, hit: Option<&Hit>) {
+        let Some(root) = self.held_menu_root() else {
+            return;
+        };
+        let own = hit
+            .and_then(|hit| hit.surface.as_ref())
+            .is_some_and(|surface| surface.id().same_client_as(&root.id()));
+        if !own {
+            self.dismiss_menu();
+        }
+    }
+
     /// A button went down over `hit`: a panel or launcher there that takes
     /// the keyboard on a click gets it, without anything being raised, for
     /// layers stack by layer, not by click. So a launcher shown without the
@@ -362,7 +385,8 @@ impl Compositor {
             .pressed(serial, Instant::now(), crate::origin::boot_ticks());
         let time = self.now_ms();
         // Focus and raise before the press is delivered, and before a
-        // binding, as a seat does.
+        // binding, as a seat does: the menu it is past closed first.
+        self.press_past_menu(hit.as_ref());
         self.focus_pressed_layer(hit.as_ref());
         self.follow_press(hit.as_ref());
         if !self.bound_press(hit.as_ref(), at, code, mods, time) {
