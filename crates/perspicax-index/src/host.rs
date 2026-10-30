@@ -680,6 +680,15 @@ impl SurfaceFacts {
         self.drawn.union(self.geometry)
     }
 
+    /// What this surface takes from whatever is under it: the frame the host
+    /// drew, and, unless it is rolled up, everything it draws.
+    pub(crate) fn cuts(&self) -> impl Iterator<Item = Rect> + '_ {
+        self.frame
+            .iter()
+            .copied()
+            .chain((!self.shaded).then(|| self.covers()))
+    }
+
     /// Why nothing of this surface's own is drawn, when nothing is: asked
     /// before any arithmetic, because the geometry of a surface that is not
     /// drawn means nothing.
@@ -954,14 +963,27 @@ pub fn judge_window(facts: &HostFacts, surface: SurfaceId) -> Visibility {
     let Some(target) = facts.surface(surface) else {
         return Visibility::Unknown;
     };
+    let left = match on_show(facts, target) {
+        Ok(left) => left,
+        Err(hidden) => return hidden,
+    };
+    match left_under(facts, surface, left, |_| true) {
+        (left, Some(by)) if left.is_empty() => Visibility::Occluded { by },
+        _ => Visibility::Visible,
+    }
+}
+
+/// What of a window is on a monitor, before anything over it is looked at,
+/// or why none is: steps 2 and 3 of [`judge_window`].
+fn on_show(facts: &HostFacts, target: &SurfaceFacts) -> Result<Vec<Rect>, Visibility> {
     if let Some(hidden) = target.not_drawn() {
-        return hidden;
+        return Err(hidden);
     }
     let geometry = target.geometry.abs();
     if geometry.is_empty() {
-        return Visibility::Unmapped;
+        return Err(Visibility::Unmapped);
     }
-    let mut left: Vec<Rect> = if facts.outputs.is_empty() {
+    let left: Vec<Rect> = if facts.outputs.is_empty() {
         vec![geometry]
     } else {
         facts
@@ -972,9 +994,21 @@ pub fn judge_window(facts: &HostFacts, surface: SurfaceId) -> Visibility {
             .collect()
     };
     if left.is_empty() {
-        return Visibility::OffScreen;
+        return Err(Visibility::OffScreen);
     }
+    Ok(left)
+}
 
+/// What is left of `left` under what `counts` of the surfaces above
+/// `surface`, from the top down, and the topmost of those that covered any
+/// of it: step 4 of [`judge_window`]. A surface not on screen covers nothing,
+/// and `surface`'s own menus are drawn as part of it.
+fn left_under(
+    facts: &HostFacts,
+    surface: SurfaceId,
+    mut left: Vec<Rect>,
+    counts: impl Fn(&SurfaceFacts) -> bool,
+) -> (Vec<Rect>, Option<SurfaceId>) {
     let above = facts
         .surfaces()
         .iter()
@@ -982,15 +1016,10 @@ pub fn judge_window(facts: &HostFacts, surface: SurfaceId) -> Visibility {
         .map_or(0, |index| index + 1);
     let mut front = None;
     for candidate in facts.surfaces()[above..].iter().rev() {
-        if !candidate.mapped || menu_of(facts, candidate, surface) {
+        if !candidate.mapped || menu_of(facts, candidate, surface) || !counts(candidate) {
             continue;
         }
-        let covered = candidate
-            .frame
-            .iter()
-            .copied()
-            .chain((!candidate.shaded).then(|| candidate.covers()));
-        for cut in covered {
+        for cut in candidate.cuts() {
             if front.is_none() && left.iter().any(|piece| overlaps(*piece, cut)) {
                 front = Some(candidate.id);
             }
@@ -1000,12 +1029,10 @@ pub fn judge_window(facts: &HostFacts, surface: SurfaceId) -> Visibility {
                 .collect();
         }
         if left.is_empty() {
-            return Visibility::Occluded {
-                by: front.unwrap_or(candidate.id),
-            };
+            break;
         }
     }
-    Visibility::Visible
+    (left, front)
 }
 
 /// Whether `candidate` is one of `window`'s menus, or a menu of one of them.
