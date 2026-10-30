@@ -1807,7 +1807,12 @@ impl Compositor {
         seat: &WlSeat,
         serial: Serial,
     ) -> Option<(Framed, GrabStartData<Self>)> {
-        if !self.backend.has_person() {
+        // Nor while a window's menu holds the pointer: the only serial its
+        // grab answers to is the menu's, and the grab's start is made up, the
+        // desk's origin with no button down. A move from it would end the
+        // menu's grab without closing the menu, and carry the window off
+        // from where nobody pressed (#185).
+        if !self.backend.has_person() || self.held_menu_root().is_some() {
             return None;
         }
         let pointer = Seat::<Self>::from_resource(seat)?.get_pointer()?;

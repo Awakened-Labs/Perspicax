@@ -3363,6 +3363,46 @@ fn an_agent_cannot_click_or_focus_an_x11_window_past_a_wayland_menu() {
     x11.session.stop((desk, queue));
 }
 
+/// Issue #185: while a Wayland window's menu holds the pointer, an X
+/// client's `_NET_WM_MOVERESIZE` is refused. X11 has no serial to check, so
+/// a grab of the pointer is taken as the press a drag begins with, but the
+/// menu's holds no button and starts at the desk's origin. A move from it
+/// ended the menu's grab without closing the menu, taking its keys, and
+/// would have carried the window off from where nobody pressed. The menu
+/// stays open, with the keys.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_move_asked_for_while_a_wayland_menu_holds_the_pointer_is_refused() {
+    let x11 = X11::start(
+        "x11-move-past-a-menu",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let behind = x11.open("behind");
+    // A Wayland window opened after it, with the keyboard, and its menu.
+    let (mut desk, mut queue, qh, globals) = x11.session.client();
+    desk.bind_pointer(&globals, &qh);
+    let ear = desk.bind_keyboard(&globals, &qh);
+    desk.open_window(&qh, "page", "page");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    pick(&x11.session, &mut desk, &mut queue, &globals, &qh, "page");
+    let page = id_of(&x11, "page");
+    let menu = menu_with_the_keyboard(&x11.session, &mut desk, &mut queue, &qh, &ear, page);
+
+    let move_ = 8;
+    x11.ask(behind, x11.atoms._NET_WM_MOVERESIZE, [10, 10, move_, 1, 1]);
+    x11.settled(behind);
+    queue.roundtrip(&mut desk).expect("a round trip");
+
+    assert_eq!(desk.popups_done, 0, "the menu is still open");
+    assert_eq!(
+        heard(&ear).entered.as_ref(),
+        Some(&menu.wl_surface().id()),
+        "with the keys"
+    );
+
+    x11.session.stop((desk, queue));
+}
+
 /// Issue #158: an X application's menu places itself, and smithay follows it
 /// when it moves with nothing published, so the facts last published can
 /// still have it where it was. An agent's click on the window it moved over

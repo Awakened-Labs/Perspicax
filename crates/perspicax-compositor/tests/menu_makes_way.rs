@@ -122,6 +122,8 @@ struct Pair {
     /// The menu of "a", once open: the client's own handle, kept so that it
     /// stays open.
     menu: Option<Popup>,
+    /// The serial the menu grabbed with: the window's keyboard enter.
+    menu_serial: Option<u32>,
 }
 
 impl Pair {
@@ -165,12 +167,15 @@ impl Pair {
             b_ear,
             a_id,
             menu: None,
+            menu_serial: None,
         }
     }
 
     /// Open the menu of "a" that holds the pointer and keyboard, as a
     /// right-click does.
     fn open_the_menu(&mut self, session: &Session) {
+        // What `menu_with_the_keyboard` grabs with.
+        self.menu_serial = heard(&self.a_ear).enter_serial;
         self.menu = Some(menu_with_the_keyboard(
             session,
             &mut self.a,
@@ -519,6 +524,30 @@ fn a_task_picked_in_a_panel_while_a_menu_is_open_comes_forward_with_the_keys() {
     assert!(pair.keys_on_b(), "the window picked has the keys");
     let facts = session.wait_for(|_| true);
     assert_eq!(on_top(&facts).as_deref(), Some("b"));
+
+    pair.stop(session);
+}
+
+/// The application asks to move its window with its menu's own serial,
+/// while the menu holds the pointer. That serial names the menu's grab, not
+/// a press holding the pointer, and the move is refused: the menu stays
+/// open, with the keys. Before, a move was started from the grab's made-up
+/// start, the desk's origin with no button down. Its grab ended the menu's,
+/// taking the keys back to the window with the menu still drawn, and the
+/// window would have followed the hand from where nobody pressed.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_move_asked_for_with_the_menus_serial_is_refused() {
+    let session = seated("menu-makes-way-move");
+    let mut pair = Pair::with_the_menu(&session);
+
+    let seat = pair.a.seat.clone().expect("a's seat");
+    let serial = pair.menu_serial.expect("the menu's");
+    pair.a.windows[0].move_(&seat, serial);
+    pair.settle();
+
+    assert_eq!(pair.a.popups_done, 0, "the menu is still open");
+    assert!(pair.keys_in_the_menu(), "with the keys");
 
     pair.stop(session);
 }

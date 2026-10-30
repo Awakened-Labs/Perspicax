@@ -45,7 +45,9 @@ use smithay::{
     },
     input::{
         Seat,
-        pointer::{CursorIcon, CursorImageStatus, Focus, GrabStartData},
+        pointer::{
+            CursorIcon, CursorImageStatus, Focus, GrabStartData, PointerGrab, PointerHandle,
+        },
     },
     output::Output,
     reexports::{
@@ -677,7 +679,7 @@ impl Compositor {
         // titlebar leaves it as it is.
         let filled = Self::filling(window).is_some() || Self::is_snapped(window);
         let grab = MoveGrab::new(start, window.clone(), origin, filled, self.desk_jumps);
-        pointer.set_grab(self, grab, serial, Focus::Clear);
+        self.take_pointer(&pointer, grab, serial);
         // After, not before: replacing a grab unsets the one before it.
         self.hand = Some(Hand::Moving(window.clone()));
     }
@@ -740,12 +742,28 @@ impl Compositor {
             return;
         };
         let grab = ResizeGrab::new(start, window.clone(), edges, rect(bounds));
-        pointer.set_grab(self, grab, serial, Focus::Clear);
+        self.take_pointer(&pointer, grab, serial);
         // After, as for a move: a window being resized is in hand too.
         self.hand = Some(Hand::Resizing(window.clone()));
         // The arrow for these edges for the whole resize, however it began:
         // from a frame, with the drag modifier, or asked for by a client.
         self.cursor = CursorImageStatus::Named(resize_cursor(edges));
+    }
+
+    /// Take the pointer with `grab`, for a move, a resize or a tab's drag. A
+    /// window's menu holding it closes first, as a click outside it would
+    /// (#185): replaced while open, the menu's grab lets go of the keyboard
+    /// too, but the menu stays drawn, over a window carried off under it. A
+    /// press past the menu has closed it already (`press_past_menu`); what is
+    /// left is a drag with the modifier held on the menu's own window.
+    pub(crate) fn take_pointer(
+        &mut self,
+        pointer: &PointerHandle<Self>,
+        grab: impl PointerGrab<Self> + 'static,
+        serial: Serial,
+    ) {
+        self.dismiss_menu();
+        pointer.set_grab(self, grab, serial, Focus::Clear);
     }
 
     /// Keep a popup on screen: flip or slide it, as its positioner allows, so
