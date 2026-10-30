@@ -33,9 +33,30 @@ use wayland_client::{EventQueue, Proxy as _, QueueHandle, backend::ObjectId};
 #[cfg(feature = "capture")]
 const BTN_LEFT: u32 = 0x110;
 
-/// One monitor, with a person at it: only a person's menu takes the grab.
+/// One monitor with two workspaces side by side, and a person at it: only a
+/// person's menu takes the grab.
 fn seated(name: &str) -> Session {
-    Session::start(name, Backend::headless((1280, 1024)).with_person())
+    use perspicax_compositor::Virtual;
+    use perspicax_policy::{Access, Grid, Mode, Shape};
+
+    Session::start(
+        name,
+        Backend::Headless {
+            outputs: vec![Virtual::numbered(1, (1280, 1024))],
+            workspaces: Shape {
+                mode: Mode::Spanning,
+                grid: Grid {
+                    columns: 2,
+                    rows: 1,
+                    wrap: false,
+                },
+            },
+            access: Access::open(),
+            person: true,
+            opacity: Default::default(),
+            agent: Default::default(),
+        },
+    )
 }
 
 /// The mapped window titled `title`.
@@ -548,6 +569,53 @@ fn a_move_asked_for_with_the_menus_serial_is_refused() {
 
     assert_eq!(pair.a.popups_done, 0, "the menu is still open");
     assert!(pair.keys_in_the_menu(), "with the keys");
+
+    pair.stop(session);
+}
+
+/// A menu asked for on a window that is not on screen, sent to another
+/// workspace, is dismissed, and takes no keys: the window is in nobody's
+/// use, and its menu would have had what the person typed, unseen. Its
+/// application has the keys, in its other window, so the grab is no theft
+/// (#187); the window is what is wrong. Before, the menu took them.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_asked_for_on_a_window_not_on_screen_is_dismissed() {
+    use perspicax_policy::Direction;
+    use smithay_client_toolkit::shell::xdg::XdgSurface as _;
+
+    let session = seated("menu-makes-way-parked");
+    let mut pair = Pair::start(&session);
+    let away = opened(&session, &mut pair.a, &mut pair.a_queue, &pair.a_qh, "away");
+    until(&mut pair.a_queue, &mut pair.a, |_| {
+        heard(&pair.a_ear).entered.is_some()
+    });
+    assert!(
+        pair.keys_on_a(1),
+        "its application had the keys, so it took them"
+    );
+    session.perform(Action::SendToWorkspace(Direction::Right));
+    session.wait_for(|facts| {
+        facts
+            .surface(away)
+            .is_some_and(|away| away.off_workspace == Some(2))
+    });
+    until(&mut pair.a_queue, &mut pair.a, |a| {
+        heard(&pair.a_ear).entered.as_ref() == Some(&a.windows[0].wl_surface().id())
+    });
+
+    let serial = heard(&pair.a_ear).enter_serial.expect("entered");
+    let _menu = pair.a.open_menu(
+        &pair.a_qh,
+        pair.a.windows[1].xdg_surface(),
+        (40, 30),
+        (120, 80),
+        serial,
+    );
+    pair.settle();
+
+    assert_eq!(pair.a.popups_done, 1, "the menu was dismissed");
+    assert!(pair.keys_on_a(0), "and the keys stayed where they were");
 
     pair.stop(session);
 }

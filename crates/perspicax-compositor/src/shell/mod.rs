@@ -794,28 +794,52 @@ impl Compositor {
     /// Route the keyboard and pointer to a popup chain (a menu, say) until it
     /// is dismissed, so a click outside closes it the way every desktop does.
     /// Not for a window rolled up to its titlebar, which has no menus.
+    ///
+    /// Nor for one that is not on screen, minimized or on a workspace not
+    /// shown: nobody is using it, and its menu would have what the person
+    /// types, unseen (#185). That one is dismissed, as a grab refused while
+    /// locked is.
     pub(crate) fn grab_popup(&mut self, popup: PopupSurface, seat: &Seat<Self>, serial: Serial) {
-        let kind = PopupKind::Xdg(popup);
-        let Some(root) = find_popup_root_surface(&kind).ok().filter(|root| {
-            self.window_for(root)
-                .is_some_and(|window| !is_shaded(&window))
-        }) else {
-            return;
-        };
-        let Ok(mut grab) = self
-            .popups
-            .grab_popup::<Self>(root.into(), kind, seat, serial)
+        let Some((root, window)) = find_popup_root_surface(&PopupKind::Xdg(popup.clone()))
+            .ok()
+            .and_then(|root| Some((root.clone(), self.window_for(&root)?)))
         else {
             return;
         };
-        if let Some(keyboard) = seat.get_keyboard() {
-            if keyboard.is_grabbed()
-                && !(keyboard.has_grab(serial)
-                    || keyboard.has_grab(grab.previous_serial().unwrap_or(serial)))
-            {
-                grab.ungrab(PopupUngrabStrategy::All);
-                return;
-            }
+        if !self.space.elements().any(|shown| *shown == window) {
+            popup.send_popup_done();
+            return;
+        }
+        if is_shaded(&window) {
+            return;
+        }
+        let Ok(mut grab) =
+            self.popups
+                .grab_popup::<Self>(root.into(), PopupKind::Xdg(popup), seat, serial)
+        else {
+            return;
+        };
+        // Both asked before either is taken: refused by the pointer once the
+        // keyboard had been taken, the menu held the keys with `self.menu`
+        // unset, so that nothing could see it held them.
+        let keyboard = seat.get_keyboard();
+        let pointer = seat.get_pointer();
+        let previous = grab.previous_serial();
+        let keyboard_free = keyboard.as_ref().is_none_or(|keyboard| {
+            !keyboard.is_grabbed()
+                || keyboard.has_grab(serial)
+                || keyboard.has_grab(previous.unwrap_or(serial))
+        });
+        let pointer_free = pointer.as_ref().is_none_or(|pointer| {
+            !pointer.is_grabbed()
+                || pointer.has_grab(serial)
+                || pointer.has_grab(previous.unwrap_or_else(|| grab.serial()))
+        });
+        if !(keyboard_free && pointer_free) {
+            grab.ungrab(PopupUngrabStrategy::All);
+            return;
+        }
+        if let Some(keyboard) = keyboard {
             // Never while locked: `grab` refuses a menu's grab then (#82).
             #[expect(
                 clippy::disallowed_methods,
@@ -824,14 +848,7 @@ impl Compositor {
             keyboard.set_focus(self, grab.current_grab(), serial);
             keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
         }
-        if let Some(pointer) = seat.get_pointer() {
-            if pointer.is_grabbed()
-                && !(pointer.has_grab(serial)
-                    || pointer.has_grab(grab.previous_serial().unwrap_or_else(|| grab.serial())))
-            {
-                grab.ungrab(PopupUngrabStrategy::All);
-                return;
-            }
+        if let Some(pointer) = pointer {
             pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
         }
         self.menu = Some(grab);
