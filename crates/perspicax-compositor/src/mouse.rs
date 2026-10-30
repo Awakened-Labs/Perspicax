@@ -283,7 +283,17 @@ impl Compositor {
     /// the keyboard goes, and it goes there. Asked after every motion, on
     /// either backend, and before the hold is settled, so the window in use
     /// is the one the policy chose.
+    ///
+    /// Not while a window's menu holds the pointer and keyboard. The menu
+    /// holds the pointer for its own application, and smithay tells any
+    /// other window under the hand nothing, so the hand is not pointing at
+    /// that window. Asked, the policy would hand it keys the menu's grab
+    /// ignores, and under autoraise raise it over the menu (#185). A click
+    /// outside the menu is what closes it.
     pub(crate) fn follow_pointer(&mut self, hit: Option<&Hit>) {
+        if self.held_menu_root().is_some() {
+            return;
+        }
         // The focus policy is about windows. Over a panel, or an X11 menu,
         // it has nothing to say: passing it the panel as "no window" would
         // make strict focus drop the keyboard every time the pointer crossed
