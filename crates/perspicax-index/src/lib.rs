@@ -535,6 +535,11 @@ pub fn check_readable(facts: &HostFacts, surface: SurfaceId) -> Result<&SurfaceF
 ///   hidden workspace, a tab behind, minimized or rolled up, it is refused
 ///   for the reason its nodes are, and covered wholly, as occluded by the
 ///   window in front.
+/// - Raising it is the one verb that changes what the person is looking at,
+///   and so the one that needs more than its own window's consent: see
+///   [`check_raise`]. It brings nothing into view that is not on show, for
+///   the reason the others do not, and it is the way out of being covered,
+///   so being covered wholly is no reason to refuse it.
 ///
 /// # Errors
 ///
@@ -557,6 +562,7 @@ pub fn check_window<'facts>(
             }
         }
         WindowVerb::Focus | WindowVerb::Type(_) => in_sight(&judge_window(facts, surface))?,
+        WindowVerb::Raise => check_raise(facts, surface)?,
     }
     Ok(window)
 }
@@ -739,6 +745,9 @@ pub enum Action {
     Close,
     /// Bring this surface's window to the front of its tab group.
     Forward,
+    /// Bring this surface's window in front of the others and give it the
+    /// keyboard.
+    Raise,
 }
 
 /// A pointer button, in the usual left/middle/right sense.
@@ -1179,7 +1188,7 @@ mod tests {
         )
         .with_consent(Consent::Everyone);
         for id in 1..=5 {
-            for verb in [WindowVerb::Close, WindowVerb::Forward]
+            for verb in [WindowVerb::Close, WindowVerb::Forward, WindowVerb::Raise]
                 .into_iter()
                 .chain(keys())
             {

@@ -8,7 +8,8 @@
 //! a point the person saw something else on (issue #158). Now a click or a
 //! scroll is judged again, against facts built in the turn that sends it,
 //! and refused as the gate would refuse it, naming what covers the node
-//! now. Nothing is sent. Focus and typing aim at no pixel, and are not.
+//! now. Nothing is sent. Focus and typing aim at no pixel, and are not. A
+//! raise changes what the person is looking at, and is judged again whole.
 //!
 //! Each act here is sent to the compositor directly, past the gate, as one
 //! the gate judged before the cover opened arrives. Like the other live
@@ -161,6 +162,59 @@ fn a_click_or_scroll_on_a_window_covered_since_is_refused_naming_what_covers_it(
     until(&mut queue, &mut desk, |desk| desk.scrolls == 1);
     assert_eq!(desk.pointed.as_ref(), Some(desk.windows[1].wl_surface()));
     assert_eq!(desk.buttons, [(BTN_LEFT, true), (BTN_LEFT, false)]);
+
+    session.stop((desk, queue));
+}
+
+/// Something a raise does not pass, up since the gate judged it: the window
+/// stays where it is, and the keyboard does too. Before it came up, the raise
+/// went ahead.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_raise_under_something_up_since_the_gate_is_refused_naming_it() {
+    let session = session("judged-again-raise");
+    let (mut desk, mut queue, qh, _) = session.client();
+    let under = opened(&session, &mut desk, &mut queue, &qh, "under");
+    let over = opened(&session, &mut desk, &mut queue, &qh, "over");
+    let order = |facts: &HostFacts| {
+        facts
+            .surfaces()
+            .iter()
+            .filter(|surface| surface.title.is_some())
+            .map(|surface| surface.id)
+            .collect::<Vec<_>>()
+    };
+
+    desk.open_strip(&qh, Layer::Overlay, "cover", 1024, 0xff44_4444);
+    until(&mut queue, &mut desk, |_| {
+        layer(&session.facts.read(), "cover").is_some()
+    });
+    let cover = layer(&session.facts.read(), "cover").expect("waited for");
+    let host = Host::new(&session.facts, &session.requests);
+    let before = host
+        .act(over, &Verb::Focus)
+        .expect("the keyboard is over's");
+    assert_eq!(before.focus_after, Some(over));
+    assert_eq!(
+        host.act(under, &Verb::Raise).map(|_| ()),
+        Err(ActError::OutOfSight(Refusal::Occluded { by: cover }))
+    );
+    let facts = session.facts.read();
+    assert_eq!(order(&facts), [under, over], "nothing was raised");
+    assert_eq!(
+        host.act(over, &Verb::Focus).expect("still").focus_before,
+        Some(over),
+        "the keyboard did not move"
+    );
+
+    desk.layers.clear();
+    queue.roundtrip(&mut desk).expect("destroyed");
+    session.wait_for(|facts| layer(facts, "cover").is_none());
+    let raised = host
+        .act(under, &Verb::Raise)
+        .expect("nothing in the way now");
+    assert_eq!(raised.focus_after, Some(under));
+    assert_eq!(order(&session.facts.read()), [over, under]);
 
     session.stop((desk, queue));
 }

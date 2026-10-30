@@ -579,6 +579,29 @@ fn tab_forward_past_a_menu_is_refused() {
     apps.stop(session);
 }
 
+/// Raised, another window would take the keys and the menu with them, and
+/// its own application's other window is another window. The menu's own
+/// window may be raised: the menu comes up with it, and keeps the keys.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn raise_past_a_menu_is_refused() {
+    let session = seated("held-menu-raise");
+    let mut apps = Apps::with_the_menu(&session);
+    let host = Host::new(&session.facts, &session.requests);
+
+    let refused = Err(ActError::MenuOpen { popup: apps.menu() });
+    assert_eq!(host.act(apps.elsewhere, &Verb::Raise).map(|_| ()), refused);
+    assert_eq!(host.act(apps.own, &Verb::Raise).map(|_| ()), refused);
+
+    let dispatched = host.act(apps.page, &Verb::Raise).expect("its own window");
+    assert_eq!(dispatched.focus_after, Some(apps.page));
+
+    apps.settle();
+    assert_eq!(apps.a.popups_done, 0, "the menu is still open");
+
+    apps.stop(session);
+}
+
 /// Closing a window asks its client to, and gives nothing the pointer or
 /// the keyboard: past a menu it still goes ahead, and the menu stays open.
 #[test]

@@ -19,8 +19,9 @@
 mod common;
 
 use common::{Desk, Ear, Session, heard, until};
-use perspicax_compositor::Backend;
-use perspicax_index::HostFacts;
+use perspicax_compositor::{ActError, Backend, Host};
+use perspicax_index::{Action as Verb, HostFacts, SurfaceKind};
+use perspicax_node::SurfaceId;
 use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::{EventQueue, Proxy as _, QueueHandle, backend::ObjectId, globals::GlobalList};
 
@@ -233,6 +234,51 @@ fn a_window_brought_forward_under_a_launcher_takes_no_keys_from_it() {
 /// spend the token, and its window comes forward with the keys. The keys
 /// leaving a launcher do not move the person on, as their going anywhere
 /// else would.
+/// A launcher has every key until it goes, and they go then to the window on
+/// top. So an agent raises nothing under one, seen by the person or not: the
+/// window would be given what they typed next, for picking from the launcher.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_raise_under_a_launcher_is_refused_naming_it() {
+    let session = session("launcher-raise");
+    let (mut desk, mut queue, qh, _, _) = page(&session);
+    desk.open_window(&qh, "over", "over");
+    until(&mut queue, &mut desk, |desk| desk.has_drawn(1));
+    session.wait_for(|facts| above(facts, "over", "page"));
+    let (mut launcher, mut launcher_queue, _, launcher_ear) = launcher(&session);
+
+    let facts = session.facts.read();
+    let first = |wanted: &dyn Fn(&SurfaceKind, Option<&str>) -> bool| -> SurfaceId {
+        facts
+            .surfaces()
+            .iter()
+            .find(|surface| wanted(&surface.kind, surface.title.as_deref()))
+            .map(|surface| surface.id)
+            .expect("on the desk")
+    };
+    let page_window = first(&|_, title| title == Some("page"));
+    let up = first(&|kind, _| matches!(kind, SurfaceKind::Layer { .. }));
+
+    let host = Host::new(&session.facts, &session.requests);
+    assert_eq!(
+        host.act(page_window, &Verb::Raise).map(|_| ()),
+        Err(ActError::MenuOpen { popup: up })
+    );
+    hear_all(&mut desk, &mut queue, &mut launcher, &mut launcher_queue);
+    assert!(
+        above(&session.facts.read(), "over", "page"),
+        "nothing was raised"
+    );
+    let launcher_surface = launcher.layers[0].0.wl_surface().id();
+    assert_eq!(
+        heard(&launcher_ear).entered,
+        Some(launcher_surface),
+        "the launcher still has the keys"
+    );
+
+    session.stop(((desk, queue), (launcher, launcher_queue)));
+}
+
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_token_the_launcher_made_brings_a_window_forward_once_it_has_gone() {

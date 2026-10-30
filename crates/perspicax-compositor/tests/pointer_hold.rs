@@ -511,7 +511,9 @@ fn an_agent_cannot_take_a_pointer_a_game_holds() {
     // The keyboard elsewhere, and the pointer with it.
     assert_eq!(host.act(other, &Verb::Focus).map(|_| ()), refused);
     assert_eq!(host.act(other, &Verb::Forward).map(|_| ()), refused);
-    // The game itself may still be focused and typed into.
+    assert_eq!(host.act(other, &Verb::Raise).map(|_| ()), refused);
+    // The game itself may still be raised, focused and typed into.
+    assert!(host.act(game, &Verb::Raise).is_ok());
     assert!(host.act(game, &Verb::Focus).is_ok());
     assert!(
         host.act(

@@ -1,10 +1,12 @@
-//! An agent's window verbs, as the compositor carries them out: `Close`
-//! and `Forward` through `Host::act`, the path `window_close` and
-//! `tab_forward` take, and `Focus` and `Type` addressed to a window by its
-//! surface, the path `window_focus` and `window_type` take (#38).
+//! An agent's window verbs, as the compositor carries them out: `Close`,
+//! `Forward` and `Raise` through `Host::act`, the path `window_close`,
+//! `tab_forward` and `window_raise` take, and `Focus` and `Type` addressed to
+//! a window by its surface, the path `window_focus` and `window_type` take
+//! (#38).
 //!
 //! A tab behind another comes forward in its group's place; a close reaches
-//! the client as a request; and while the session is locked neither is done.
+//! the client as a request; a window covered is raised with the keys (#147);
+//! and while the session is locked none is done.
 //! A window this client draws has no accessibility tree, as foot and a game
 //! have none, and it is focused and typed into by surface, without being
 //! raised. The gate that decides whether an agent may ask is
@@ -19,7 +21,9 @@ mod common;
 
 use common::{Session, heard, until};
 use perspicax_compositor::{ActError, Backend, Host};
-use perspicax_index::{Action as Verb, HostFacts, Refusal, WindowVerb, check_window};
+use perspicax_index::{
+    Action as Verb, HostFacts, Refusal, WindowVerb, WindowWitness, check_window, raised_witness,
+};
 use perspicax_node::SurfaceId;
 use perspicax_policy::{Action, Grid, Mode, Shape};
 use smithay_client_toolkit::shell::WaylandSurface as _;
@@ -93,7 +97,7 @@ fn close_asks_the_client() {
 
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
-fn neither_is_done_while_locked() {
+fn none_is_done_while_locked() {
     let session = session("verbs-locked");
     let host = Host::new(&session.facts, &session.requests);
     let (mut desk, mut queue, qh, globals) = session.client();
@@ -108,6 +112,7 @@ fn neither_is_done_while_locked() {
     until(&mut queue, &mut desk, |desk| desk.locked);
     assert_eq!(host.act(first, &Verb::Close), Err(ActError::Locked));
     assert_eq!(host.act(first, &Verb::Forward), Err(ActError::Locked));
+    assert_eq!(host.act(first, &Verb::Raise), Err(ActError::Locked));
     queue.roundtrip(&mut desk).expect("dispatch");
     assert_eq!(desk.asked_to_close, 0);
 
@@ -280,6 +285,136 @@ fn a_window_on_a_workspace_not_showing_is_not_focused_or_typed_into_by_surface()
             Refusal::OtherWorkspace { workspace: 1 }
         );
     }
+
+    session.stop((desk, queue));
+}
+
+/// Two windows, the first under the second maximized over it, which has the
+/// keyboard. Returns them, with the client's keyboard.
+fn one_wholly_over_another(
+    session: &Session,
+) -> (
+    common::Desk,
+    wayland_client::EventQueue<common::Desk>,
+    SurfaceId,
+    SurfaceId,
+    common::Ear,
+) {
+    let (mut desk, mut queue, qh, globals) = session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    desk.open_window(&qh, "lower", "lower");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    desk.open_window(&qh, "upper", "upper");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 2);
+    let facts = session.wait_for(|facts| facts.surfaces().len() == 2);
+    let (lower, upper) = (id(&facts, "lower"), id(&facts, "upper"));
+    session.perform(Action::ToggleMaximize);
+    session.wait_for(|facts| {
+        let (under, over) = (facts.surface(lower), facts.surface(upper));
+        under
+            .zip(over)
+            .is_some_and(|(under, over)| over.geometry.intersect(under.geometry) == under.geometry)
+    });
+    (desk, queue, lower, upper, ear)
+}
+
+/// What nothing else an agent can do clears: a window with none of it
+/// showing comes in front, with the keys. Its nodes are no longer refused.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn raise_brings_a_covered_window_to_the_front_with_the_keys() {
+    let session = session("verbs-raise");
+    let host = Host::new(&session.facts, &session.requests);
+    let (mut desk, mut queue, lower, upper, ear) = one_wholly_over_another(&session);
+    let facts = session.facts.read();
+    assert_eq!(
+        check_window(&facts, lower, &WindowVerb::Focus).unwrap_err(),
+        Refusal::Occluded { by: upper }
+    );
+    assert!(check_window(&facts, lower, &WindowVerb::Raise).is_ok());
+
+    let dispatched = host.act(lower, &Verb::Raise).expect("dispatched");
+    assert_eq!(dispatched.focus_before, Some(upper));
+    assert_eq!(dispatched.focus_after, Some(lower));
+
+    let facts = session.facts.read();
+    assert!(height(&facts, lower) > height(&facts, upper), "in front");
+    assert_eq!(raised_witness(&facts, lower), WindowWitness::InFront);
+    assert!(check_window(&facts, lower, &WindowVerb::Focus).is_ok());
+    let first = desk.windows[0].wl_surface().id();
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&first)
+    });
+
+    // Asked again, nothing changes: it is where it was asked to be.
+    let again = host.act(lower, &Verb::Raise).expect("dispatched");
+    assert_eq!(again.focus_before, Some(lower));
+    assert_eq!(again.focus_after, Some(lower));
+    let facts = session.facts.read();
+    assert!(height(&facts, lower) > height(&facts, upper));
+
+    session.stop((desk, queue));
+}
+
+/// A raise brings nothing back: a window put away since the gate read the
+/// facts is refused as the gate would refuse it, and stays away.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_minimized_since_the_gate_is_refused_as_unmapped() {
+    let session = session("verbs-raise-minimized");
+    let host = Host::new(&session.facts, &session.requests);
+    let (desk, queue, lower, upper, _ear) = one_wholly_over_another(&session);
+
+    session.perform(Action::Minimize);
+    session.wait_for(|facts| facts.surface(upper).is_some_and(|upper| !upper.mapped));
+    assert_eq!(
+        host.act(upper, &Verb::Raise).map(|_| ()),
+        Err(ActError::OutOfSight(Refusal::Unmapped))
+    );
+    let facts = session.facts.read();
+    assert!(!facts.surface(upper).expect("described").mapped);
+    assert_eq!(facts.surface(lower).map(|lower| lower.mapped), Some(true));
+
+    session.stop((desk, queue));
+}
+
+/// A raise goes no further than the windows kept on top: the window comes in
+/// front of the rest with the keys, and the receipt says what is left over
+/// it. Wholly under one, there is nothing to raise it to.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn raise_stays_behind_a_window_kept_on_top_and_says_so() {
+    let session = session("verbs-raise-kept");
+    let host = Host::new(&session.facts, &session.requests);
+    let (mut desk, mut queue, qh, _) = session.client();
+    desk.open_window(&qh, "lower", "lower");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    desk.open_window(&qh, "kept", "kept");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 2);
+    let facts = session.wait_for(|facts| facts.surfaces().len() == 2);
+    let (lower, kept) = (id(&facts, "lower"), id(&facts, "kept"));
+    session.perform(Action::ToggleOnTop);
+    session.wait_for(|facts| facts.surface(kept).is_some_and(|kept| kept.on_top));
+
+    let dispatched = host.act(lower, &Verb::Raise).expect("dispatched");
+    assert_eq!(dispatched.focus_after, Some(lower));
+    assert_eq!(
+        raised_witness(&session.facts.read(), lower),
+        WindowWitness::StillCovered { by: vec![kept] }
+    );
+
+    host.act(kept, &Verb::Focus).expect("dispatched");
+    session.perform(Action::ToggleMaximize);
+    session.wait_for(|facts| {
+        let (under, over) = (facts.surface(lower), facts.surface(kept));
+        under
+            .zip(over)
+            .is_some_and(|(under, over)| over.geometry.intersect(under.geometry) == under.geometry)
+    });
+    assert_eq!(
+        host.act(lower, &Verb::Raise).map(|_| ()),
+        Err(ActError::OutOfSight(Refusal::Occluded { by: kept }))
+    );
 
     session.stop((desk, queue));
 }

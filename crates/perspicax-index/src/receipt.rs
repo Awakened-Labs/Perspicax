@@ -115,6 +115,9 @@ pub enum WindowVerb {
     /// Bring a tab behind another to the front of its group, in the group's
     /// place, as clicking its tab does.
     Forward,
+    /// Bring a window on show in front of the others and give it keyboard
+    /// focus, as a person's click on it does.
+    Raise,
     /// Give the window keyboard focus, as [`Verb::Focus`] gives a node's.
     Focus,
     /// Type text into the window, which must hold keyboard focus, as
@@ -129,6 +132,7 @@ impl WindowVerb {
         match self {
             Self::Close => Action::Close,
             Self::Forward => Action::Forward,
+            Self::Raise => Action::Raise,
             Self::Focus => Action::Focus,
             Self::Type(text) => Action::Type { text: text.clone() },
         }
@@ -140,6 +144,7 @@ impl WindowVerb {
         match self {
             Self::Close => "close",
             Self::Forward => "forward",
+            Self::Raise => "raise",
             Self::Focus => "focus",
             Self::Type(_) => "type",
         }

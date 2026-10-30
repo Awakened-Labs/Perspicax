@@ -143,7 +143,14 @@ fn a_drag_held_still_keeps_an_agent_off_the_seat() {
     let typing = Verb::Type {
         text: "x".to_owned(),
     };
-    for verb in [click(), scroll, typing, Verb::Focus, Verb::Close] {
+    for verb in [
+        click(),
+        scroll,
+        typing,
+        Verb::Focus,
+        Verb::Close,
+        Verb::Raise,
+    ] {
         assert_eq!(host.act(back, &verb).map(|_| ()), refused, "{verb:?}");
     }
     queue.roundtrip(&mut desk).expect("a roundtrip");
