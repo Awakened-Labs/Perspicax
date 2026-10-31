@@ -8,7 +8,8 @@
 //! typed, and Enter would send it, as a chat message, a shell command or a
 //! confirmed dialog. Before the lock screen is up there is nothing to take
 //! the keys from, and a window closing then gives them to no other.
-//! Unlocked, the window on top has them, often the one that opened meanwhile.
+//! Unlocked, the window on top has them, often the one that opened meanwhile,
+//! unless a launcher had them as the session locked (`launcher_keyboard.rs`).
 //!
 //! A lock screen that goes while the session is locked, as swaylock's does
 //! when its monitor is unplugged, hands the keys to one still up, or to

@@ -19,7 +19,12 @@
 //! one in front, and on any desktop each of those moves the keyboard. Here
 //! none does: whatever took it would get the password as it is typed, and
 //! Enter would send it. Unlocked, the window on top has the keyboard, often
-//! the one that opened meanwhile.
+//! the one that opened meanwhile, unless a launcher had it as the session
+//! locked and is still up (#203). It is drawn over everything, so it is what
+//! the person types at, and the keys would otherwise go, unseen, to the window
+//! beneath. Only the launcher that had them: being top-most by then earns one
+//! none, since nobody may have asked for it (#267). One mapped again meanwhile
+//! is a new layer, and did not have them.
 //!
 //! A gate at every way to the keyboard is a list, and a way it misses sends
 //! the password to whatever took the keys. So the rule is kept where keys go
@@ -139,6 +144,9 @@ pub(crate) struct Locked {
     pub(crate) holder: ExtSessionLockV1,
     /// The holder's lock surfaces, and only the holder's.
     pub(crate) surfaces: Vec<Cover>,
+    /// The launcher that had the keys as the session locked, which has them
+    /// back as it unlocks if it is a launcher still (#203).
+    launcher: Option<SurfaceId>,
 }
 
 /// One lock surface, the output it covers, and its id for the facts.
@@ -150,11 +158,13 @@ pub(crate) struct Cover {
 }
 
 impl Locked {
-    /// Locked by `holder`, and nothing covering any output yet.
-    fn by(holder: ExtSessionLockV1) -> Self {
+    /// Locked by `holder`, with `launcher` having had the keys, and nothing
+    /// covering any output yet.
+    fn by(holder: ExtSessionLockV1, launcher: Option<SurfaceId>) -> Self {
         Self {
             holder,
             surfaces: Vec::new(),
+            launcher,
         }
     }
 
@@ -251,7 +261,11 @@ impl SessionLockHandler for Compositor {
         tracing::info!("session locked");
         // Before the keyboard goes, which would call it unfocused.
         self.end_capture(Heard::Cancelled(Reason::Locked));
-        self.lock = Some(Locked::by(lock));
+        // Asked while it has them. A launcher's menu having them counts.
+        let launcher = self
+            .launcher_with_keys()
+            .and_then(|held| self.layer_id(&held));
+        self.lock = Some(Locked::by(lock, launcher));
         // A switch being drawn is not finished behind the lock, nor after it.
         self.backend.settle_transitions();
         self.let_go();
@@ -263,15 +277,20 @@ impl SessionLockHandler for Compositor {
         self.publish_facts();
     }
 
-    /// Unlock, by the holder: no other lock's unlock gets this far. The
+    /// Unlock, by the holder: no other lock's unlock gets this far. The keys
+    /// go back to the launcher that had them as the session locked, if it is
+    /// a launcher still, and otherwise to the window on top (#203). The
     /// window under the pointer has it back at once. As the lock surface
     /// loses it, smithay puts the compositor's arrow back, so the cursor the
     /// lock client asked for, which for swaylock is none at all, goes too,
     /// until the window sets its own.
     fn unlock(&mut self) {
         tracing::info!("session unlocked");
-        self.lock = None;
-        self.focus_top_window();
+        let launcher = self.lock.take().and_then(|locked| locked.launcher);
+        match launcher.and_then(|id| self.launcher_by_id(id)) {
+            Some(launcher) => self.focus_plain(launcher),
+            None => self.focus_top_window(),
+        }
         self.repoint();
         self.backend.redraw();
         self.publish_facts();
