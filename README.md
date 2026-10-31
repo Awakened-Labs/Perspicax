@@ -560,7 +560,10 @@ application's menus are popups too
 they put themselves, over every window as they open. GTK 3 and Qt name the
 window a menu was opened from, and their menus are joined to their items as a
 Wayland application's are. Steam and GTK 4 name none, and such a menu is
-joined only to items that are a window of their own.
+joined only to items that are a window of their own. A chain of menus, each
+opened from the last, goes 64 deep, more than fit across any monitor
+([#226](https://github.com/Awakened-Labs/Perspicax/issues/226)): the next is
+told it is done as it opens, as a click outside it would tell it.
 
 **Text an application rendered is marked as such.** Every string reaches an
 agent under `untrusted_text`, beside the credentials of the process that drew
@@ -1027,6 +1030,14 @@ commit that asks, and returns with a new id. One whose monitor is unplugged
 while it is away is told it is closed. A launcher that asks for every key,
 new or back, has them from the first picture it draws, and not before, if
 the person asked for it (#267).
+
+A monitor keeps 256 layer-shell surfaces, far more than a desktop has
+([#226](https://github.com/Awakened-Labs/Perspicax/issues/226)). The next, new
+or asked for again, is told it is closed, as layer-shell allows, and one that
+goes makes room. So a program that fills a monitor keeps out the next panel or
+launcher of any other, the shell's menus included, as one covering the screen
+with a single layer already can. The lock screen is not a layer, and is not
+kept out.
 
 And once it has them it keeps them while it is up, as layer-shell says the
 top-most one that asks for every key does: fuzzel, say, or the shell's own
