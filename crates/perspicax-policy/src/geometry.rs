@@ -33,6 +33,25 @@ impl Rect {
 /// does the size in bytes of a titlebar two worlds wide, drawn at scale 4.
 pub const FAR: i32 = 1 << 16;
 
+/// How many layer surfaces one monitor keeps: a panel, a launcher, a
+/// wallpaper, and far more than a desktop has of them. The next is told it is
+/// closed.
+///
+/// [`FAR`] bounds what each one asks for, not what they ask for together.
+/// Smithay 0.7.0 carries the room each exclusive layer leaves on to the next
+/// in plain `i32`, and places the next from that, so enough of them on one
+/// monitor overflow it, however small each number is (#226). A layer can move
+/// that room's corner by its zone and a margin, and shrink it by its zone and
+/// two margins, and where one is placed adds all of that up: five [`FAR`]s
+/// for each, and five besides for the monitor and the layer being placed.
+/// Walking them is also what every commit on a layer costs.
+pub const MOST_LAYERS_ON_A_MONITOR: usize = 256;
+
+const _: () = assert!(
+    (5 * MOST_LAYERS_ON_A_MONITOR as i64 + 5) * FAR as i64 <= i32::MAX as i64,
+    "a monitor's layers add up past an i32"
+);
+
 /// `rect` held to the world: each edge further than [`FAR`] from 0 brought
 /// back to it. At least a pixel is kept, so a rectangle wholly past an edge
 /// is the pixel at that edge, not nothing: what is held is still somewhere.

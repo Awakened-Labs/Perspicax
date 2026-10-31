@@ -52,9 +52,12 @@
 //! A side below 1 is left as sent, for smithay to refuse as it does.
 //!
 //! That bounds what each layer adds, not what they add together: smithay
-//! carries the room one exclusive layer leaves on to the next, so some
-//! 11 000 of them on one monitor would still overflow it. Smithay master adds
-//! a layer's numbers saturating (Smithay/smithay#1759), which ends that.
+//! carries the room one exclusive layer leaves on to the next. So how many a
+//! monitor keeps is held too ([`perspicax_policy::MOST_LAYERS_ON_A_MONITOR`],
+//! and see `layers`). Smithay master adds a layer's numbers saturating
+//! (Smithay/smithay#1759), but what it would answer for so many is no use
+//! either, and walking them is what each of their commits costs, so that
+//! hold stays.
 //!
 //! # When to delete this
 //!

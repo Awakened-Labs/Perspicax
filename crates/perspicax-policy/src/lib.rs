@@ -79,8 +79,8 @@ pub use crate::{
         tab_rects, titlebar, wash,
     },
     geometry::{
-        DRAG_THRESHOLD, Edges, FAR, Rect, anchor, carry, clear_of, dragged, edges_near, in_world,
-        neighbour, place, resize, settle, unmaximized_at,
+        DRAG_THRESHOLD, Edges, FAR, MOST_LAYERS_ON_A_MONITOR, Rect, anchor, carry, clear_of,
+        dragged, edges_near, in_world, neighbour, place, resize, settle, unmaximized_at,
     },
     hatch::{Hatch, hatch},
     heads::{Head, HeadChange, HeadMode, ModeChoice, Rejection, SCALES, check_heads, pick_mode},
