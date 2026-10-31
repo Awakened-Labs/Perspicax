@@ -2228,6 +2228,42 @@ fn an_agents_click_on_a_workspace_switches_to_it() {
     shell.stop_with(session);
 }
 
+/// With a person at the seat, the pager switches for their click and not for
+/// an agent's, which is not their press (#278).
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_persons_click_on_a_workspace_switches_to_it_and_an_agents_does_not() {
+    let session = Session::start("shell-pager-seated", four_workspaces().with_person());
+    let shell = Shell::start(&session, "pager-seated", PAGER_FIRST);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_pager(&globals, &qh);
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.active_workspaces() == ["1"]
+    });
+    until_colour(&session, (cell(0).0 as usize, 770), LIT);
+
+    // Time for the shell to hear the click and ask: nothing says it has.
+    click(&session, panel, cell(2), PointerButton::Left);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert_eq!(desk.active_workspaces(), ["1"], "an agent's click");
+
+    session.command(Command::Click {
+        at: (cell(2).0 as i32, 780),
+        button: perspicax_policy::Button::Left,
+        mods: perspicax_policy::Mods::default(),
+    });
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.active_workspaces() == ["3"]
+    });
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn with_the_taskbar_rule_off_the_panel_still_runs() {

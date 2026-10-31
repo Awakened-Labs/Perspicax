@@ -1145,15 +1145,28 @@ whose token was refused does; another program's window is left unmarked,
 since no program may say a window not its own wants attention. A window
 picked while the taskbar's own pie or menu has the keys takes them as that
 goes. Headless, with nobody at the seat, a taskbar acts as asked, as before.
-Left open: the request names no press, so a click an agent or a screen
-reader makes on a task, which is not the person's, is refused, unless the
-person's own press reached the panel moments before, a binding that opened
-a menu say, when it is taken as theirs; under sloppy or strict focus the
-pointer moves the keys without a press, so a program the person clicked may
-act until they next press something; a switcher that picks on a key other
-than Enter, once it has let go of the keys, is refused; a pager can still
-switch workspace for itself with `ext-workspace` (#278); and any X client
-can minimize the X11 window in use (#279).
+
+A pager is asked the same (#278). Switching workspace parks the window in
+use and hands the keys to the window on top where it lands, so with a person
+at the seat a switch a pager asks for through `ext-workspace` is done only if
+they asked its program for it: a cell clicked on waybar or the shell's panel,
+say. Anything else is ignored, and logged, and marks nothing. A turn of the
+wheel over a program is no asking: it never gives one the keys either. A key
+binding, the wheel over the desktop and an agent's `window_raise` switch as
+they did. Headless, with nobody at the seat, a pager switches as asked.
+
+Left open: neither request names a press, so a click an agent or a screen
+reader makes on a task or a workspace, which is not the person's, is refused,
+unless the person's own press reached the panel moments before, a binding
+that opened a menu say, when it is taken as theirs; under sloppy or strict
+focus the pointer moves the keys without a press, so a program the person
+clicked may act until they next press something; a switcher that picks on a
+key other than Enter, once it has let go of the keys, is refused; a pager
+that switches on the wheel, or a command a panel runs on the wheel that
+switches through `ext-workspace`, is refused unless the person clicked it
+under ten seconds ago, though waybar's `ext/workspaces` and the shell's pager
+switch only on a click; and any X client can minimize the X11 window in use
+(#279).
 
 A new window opens on the monitor under the pointer, in the room its panels
 leave, cascaded from the top-left corner: 32 pixels further in for each
