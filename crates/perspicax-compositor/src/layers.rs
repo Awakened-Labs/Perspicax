@@ -22,7 +22,8 @@
 //! ([`Compositor::launcher_asked_for`]). Any other is shown without them,
 //! over everything all the same, and has them only once it is clicked.
 //! Before, any program could show one and have the rest of a password typed
-//! at a terminal's `sudo` prompt, Enter and all.
+//! at a terminal's `sudo` prompt, Enter and all. The session locking takes the
+//! keys from one that has them, and unlocking gives them back to it (#203).
 //!
 //! # Unmapped by its client
 //!
@@ -527,6 +528,14 @@ impl Compositor {
                 .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
                 .is_some_and(wants_every_key)
         })
+    }
+
+    /// The surface of the launcher an id names, while it is one. Asked by id,
+    /// so a layer mapped again, which has a new one, is not taken for what it
+    /// was: it comes back as a new layer.
+    pub(crate) fn launcher_by_id(&self, id: SurfaceId) -> Option<WlSurface> {
+        let (layer, _) = self.layer_by_id(id)?;
+        wants_every_key(&layer).then(|| layer.wl_surface().clone())
     }
 
     /// The layer surface an id names, with where it is in global space.

@@ -1036,7 +1036,8 @@ but takes none of the keys typed at the launcher. It has them once the
 launcher goes, being on top then, if the person asked for it; one another
 program opened meanwhile waits beneath the window they were using, marked
 (#259). Only another launcher takes them, the newest being the top-most
-(#131).
+(#131). The screen locking takes them from it, and unlocking gives them back,
+if it is still up (#203).
 
 Nor does a token any program made bring a window forward with the keys. An
 application asks for that with an activation token from the program the
@@ -2568,7 +2569,12 @@ terminal or a dialog that pops up while you type your password never sees it.
 Unlocked, the window under the pointer has the pointer back, and its own cursor
 with it, and the window you were using has the keyboard again: one another
 program opened meanwhile waits beneath it, marked as wanting attention
-(#259).
+(#259). If a launcher had the keyboard as the screen locked, and is still up,
+it has the keyboard again instead, being what you would type at (#203). That
+goes only for the launcher that had it: one that another program showed, before
+the lock or behind it, takes nothing by being on top. One that closes when it
+loses the keyboard, as the shell's menus and pies do, is gone by then, and the
+window has it.
 
 The program that locked the screen holds the lock, and only it can unlock it.
 Another program that asks to lock while it runs is refused, and cannot unlock
