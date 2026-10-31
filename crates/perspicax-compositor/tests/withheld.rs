@@ -1466,6 +1466,262 @@ fn a_taskbar_whose_panel_the_person_clicks_brings_a_window_forward() {
     session.stop(((desk, queue), (other, other_queue), (bar, bar_queue)));
 }
 
+/// A program with a pager and nothing else, told the workspaces: no window
+/// of its own, and none of the person's presses reach it. What it asks for,
+/// it asks for itself.
+fn background_pager(session: &Session) -> (Desk, EventQueue<Desk>) {
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_pager(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| {
+        desk.active_workspaces() == ["1"]
+    });
+    (desk, queue)
+}
+
+/// A panel with a pager, the first client to bind the shell, so a binding
+/// asking the shell for its start menu hands it the person's press.
+fn paging_panel(session: &Session) -> (Desk, EventQueue<Desk>) {
+    let (mut panel, mut queue, qh, globals) = session.client();
+    panel.bind_shell(&globals, &qh);
+    panel.bind_pager(&globals, &qh);
+    until(&mut queue, &mut panel, |panel| {
+        panel.active_workspaces() == ["1"]
+    });
+    (panel, queue)
+}
+
+/// A program with a pager and one window, "other", alone on workspace 2,
+/// which it opened with the keys while the person was there. They are back
+/// on workspace 1 now, and nothing has the keys. A switch to workspace 2
+/// would hand them to it.
+fn alone_on_the_second_workspace(session: &Session) -> (Desk, EventQueue<Desk>, Ear) {
+    use perspicax_policy::Action;
+
+    let (mut desk, mut queue, qh, globals) = session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    desk.bind_pager(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| {
+        desk.active_workspaces() == ["1"]
+    });
+    session.perform(Action::GoToWorkspace(2));
+    until(&mut queue, &mut desk, |desk| {
+        desk.active_workspaces() == ["2"]
+    });
+    desk.open_window(&qh, "other", "other");
+    until(&mut queue, &mut desk, |desk| {
+        !desk.windows.is_empty() && has_keys(desk, &ear, 0)
+    });
+    session.perform(Action::GoToWorkspace(1));
+    until(&mut queue, &mut desk, |desk| {
+        desk.active_workspaces() == ["1"] && !has_keys(desk, &ear, 0)
+    });
+    (desk, queue, ear)
+}
+
+/// Let what `desk` just asked be done, and what it was told in answer be
+/// heard: the request reaches the compositor before the first answer, and
+/// what that did is sent before the second.
+fn settled(desk: &mut Desk, queue: &mut EventQueue<Desk>) {
+    queue.roundtrip(desk).expect("the request sent");
+    queue.roundtrip(desk).expect("dispatch");
+}
+
+/// The issue's own case (#278): the person types at a terminal, and a
+/// program whose window is alone on another workspace asks its pager for
+/// that workspace, as any program admitted to ext-workspace may. Nobody asked
+/// it to: the workspace stays, and the terminal keeps the keys.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_program_that_switches_to_its_own_window_while_the_person_types_takes_no_keys() {
+    let session = seated_on_two_workspaces("withheld-pager");
+    let (mut other, mut other_queue, other_ear) = alone_on_the_second_workspace(&session);
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    types(&session, &mut desk, &mut queue, "sudo");
+
+    other.switch_to("2");
+    settled(&mut other, &mut other_queue);
+    settled(&mut desk, &mut queue);
+    assert_eq!(other.active_workspaces(), ["1"], "the workspace stays");
+    assert!(has_keys(&desk, &ear, 0), "the terminal keeps the keys");
+    assert!(heard(&other_ear).entered.is_none(), "the program has none");
+
+    session.stop(((desk, queue), (other, other_queue)));
+}
+
+/// With no window anywhere else, a program could still take the keys from
+/// the window in use by switching to an empty workspace, and they would go
+/// nowhere. The window in use keeps them.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_program_that_switches_to_an_empty_workspace_takes_nothing_from_the_window_in_use() {
+    let session = seated_on_two_workspaces("withheld-pager-empty");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let (mut pager, mut pager_queue) = background_pager(&session);
+
+    pager.switch_to("2");
+    settled(&mut pager, &mut pager_queue);
+    settled(&mut desk, &mut queue);
+    assert_eq!(pager.active_workspaces(), ["1"], "the workspace stays");
+    assert!(has_keys(&desk, &ear, 0), "the terminal keeps the keys");
+
+    session.stop(((desk, queue), (pager, pager_queue)));
+}
+
+/// Nothing having the keys is no asking: a window may take them then, and so
+/// a program that could switch then could leave the person nothing to type
+/// at, and open a window to take what they type next.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_pager_nobody_asked_switches_nothing_while_nothing_has_the_keys() {
+    let session = seated_on_two_workspaces("withheld-pager-nothing");
+    let (mut pager, mut pager_queue) = background_pager(&session);
+
+    pager.switch_to("2");
+    settled(&mut pager, &mut pager_queue);
+    assert_eq!(pager.active_workspaces(), ["1"], "the workspace stays");
+
+    session.stop((pager, pager_queue));
+}
+
+/// The person's press reaches a pager, which never has the keys, and the
+/// workspace it asks for next is theirs: a cell clicked. Until they press
+/// anything else, and then it may switch nothing.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_pager_the_persons_press_reached_switches_until_they_press_again() {
+    let session = seated_on_two_workspaces("withheld-pager-pressed");
+    let (mut other, mut other_queue, other_ear) = alone_on_the_second_workspace(&session);
+    let (desk, queue, _, _, _) = terminal(&session);
+    let (mut panel, mut panel_queue) = paging_panel(&session);
+
+    common::press_reaching(&session, &mut panel, &mut panel_queue);
+    panel.switch_to("2");
+    until(&mut panel_queue, &mut panel, |panel| {
+        panel.active_workspaces() == ["2"]
+    });
+    until(&mut other_queue, &mut other, |other| {
+        has_keys(other, &other_ear, 0)
+    });
+
+    types(&session, &mut other, &mut other_queue, "x");
+    panel.switch_to("1");
+    settled(&mut panel, &mut panel_queue);
+    settled(&mut other, &mut other_queue);
+    assert_eq!(panel.active_workspaces(), ["2"], "pressed since");
+    assert!(has_keys(&other, &other_ear, 0));
+
+    session.stop(((desk, queue), (other, other_queue), (panel, panel_queue)));
+}
+
+/// A pager of the program in use switches: the person is behind what the
+/// program they use asks for, and it gives up keys it has already.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_pager_of_the_program_in_use_switches() {
+    let session = seated_on_two_workspaces("withheld-pager-in-use");
+    let (mut desk, mut queue, qh, globals, _) = terminal(&session);
+    desk.bind_pager(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| {
+        desk.active_workspaces() == ["1"]
+    });
+
+    desk.switch_to("2");
+    until(&mut queue, &mut desk, |desk| {
+        desk.active_workspaces() == ["2"]
+    });
+
+    session.stop((desk, queue));
+}
+
+/// What was refused is gone, not waiting: a commit after the person's press
+/// has reached the pager does not carry out what it asked before.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_switch_refused_does_not_wait_for_a_later_commit() {
+    let session = seated_on_two_workspaces("withheld-pager-gone");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let (mut panel, mut panel_queue) = paging_panel(&session);
+
+    panel.switch_to("2");
+    settled(&mut panel, &mut panel_queue);
+    common::press_reaching(&session, &mut panel, &mut panel_queue);
+    panel.pager.as_ref().expect("bound").commit();
+    settled(&mut panel, &mut panel_queue);
+    settled(&mut desk, &mut queue);
+    assert_eq!(panel.active_workspaces(), ["1"], "the workspace stays");
+    assert!(has_keys(&desk, &ear, 0), "the terminal keeps the keys");
+
+    session.stop(((desk, queue), (panel, panel_queue)));
+}
+
+/// A panel with a pager and a pointer, across the top of the screen, drawn.
+#[cfg(feature = "capture")]
+fn drawn_paging_panel(session: &Session) -> (Desk, EventQueue<Desk>) {
+    let (mut bar, mut queue, qh, globals) = session.client();
+    bar.bind_pager(&globals, &qh);
+    bar.bind_pointer(&globals, &qh);
+    bar.open_panel(&qh, "panel", 40, 0xff22_2222);
+    until(&mut queue, &mut bar, |bar| {
+        bar.layers_drawn > 0 && bar.active_workspaces() == ["1"]
+    });
+    (bar, queue)
+}
+
+/// The person clicks a pager, and what it asks next is theirs: the click
+/// reached it.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_pager_the_person_clicks_switches() {
+    use perspicax_policy::{Button, Mods};
+
+    let session = seated_on_two_workspaces("withheld-pager-clicked");
+    let (desk, queue, _, _, _) = terminal(&session);
+    let (mut bar, mut bar_queue) = drawn_paging_panel(&session);
+
+    session.command(Do::Click {
+        at: (640, 20),
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    until(&mut bar_queue, &mut bar, |bar| bar.pressed.is_some());
+    bar.switch_to("2");
+    until(&mut bar_queue, &mut bar, |bar| {
+        bar.active_workspaces() == ["2"]
+    });
+
+    session.stop(((desk, queue), (bar, bar_queue)));
+}
+
+/// A turn of the wheel is no asking: it never gives a program the keys, and
+/// the person may scroll over anything on the way to anything else. The
+/// pager hears it, and may switch nothing for it.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_turn_of_the_wheel_over_a_pager_does_not_let_it_switch() {
+    use perspicax_policy::Mods;
+
+    let session = seated_on_two_workspaces("withheld-pager-wheel");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let (mut bar, mut bar_queue) = drawn_paging_panel(&session);
+    types(&session, &mut desk, &mut queue, "sudo");
+
+    session.command(Do::Scroll {
+        at: (640, 20),
+        v120: (0, 120),
+        mods: Mods::default(),
+    });
+    until(&mut bar_queue, &mut bar, |bar| bar.scrolls > 0);
+    bar.switch_to("2");
+    settled(&mut bar, &mut bar_queue);
+    settled(&mut desk, &mut queue);
+    assert_eq!(bar.active_workspaces(), ["1"], "the workspace stays");
+    assert!(has_keys(&desk, &ear, 0), "the terminal keeps the keys");
+
+    session.stop(((desk, queue), (bar, bar_queue)));
+}
+
 /// Not a test: the program a [`Probe`] is, in a process of its own.
 #[test]
 #[ignore = "a program in a process of its own, for the tests that start one"]

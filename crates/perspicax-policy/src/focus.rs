@@ -382,8 +382,9 @@ impl<S: PartialEq, C: PartialEq> Attention<S, C> {
     /// Whether the person asked something of `client`, whatever has the
     /// keys, `holder`: as a window is asked for, but never for nothing
     /// having them. What a launcher shows -- a layer over the windows that
-    /// wants every key -- takes the keys only if it was (#267), and what a
-    /// taskbar asks of a window is done only if it was (#270).
+    /// wants every key -- takes the keys only if it was (#267), what a
+    /// taskbar asks of a window is done only if it was (#270), and so is a
+    /// switch a pager asks for (#278).
     ///
     /// It was if it has the keys, a run box the terminal in use opened say,
     /// or if their latest press, under [`ACTIVATION_WINDOW`] old, reached it

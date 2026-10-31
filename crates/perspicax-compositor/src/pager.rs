@@ -11,6 +11,17 @@
 //! Switching goes through `perspicax_policy::Workspaces::go_to`, as a key
 //! binding does, so a pager's click and a person's key cannot disagree.
 //!
+//! And done only for the person (#278). A switch parks the window in use and
+//! hands the keys to the window on top where it lands, so a program nobody
+//! asked could take the rest of a password typed at a terminal's `sudo` prompt
+//! with one request. With a person at the seat a pager switches only if they
+//! asked it to ([`perspicax_policy::Attention::asked_of`]): it has the keys, or
+//! their latest press reached it, a cell clicked, or started it. A turn of the
+//! wheel over it is no such press. Anything else is ignored, and what was
+//! asked does not wait for a later commit. Nothing is marked: a pager names a
+//! workspace, not a window. Headless, with nobody at the seat, a pager switches
+//! as asked.
+//!
 //! Fed like the taskbar protocols: after every publication of the facts,
 //! [`Compositor::sync_workspaces`] compares what the grid looks like with
 //! what was last sent and sends the difference. Nothing is sent while the
@@ -224,6 +235,10 @@ impl Compositor {
             .map(|(_, group, cell)| (group, cell))
             .collect();
         if self.lock.is_some() || !self.gate.admits(Protocol::Workspace, client) {
+            return;
+        }
+        if !asked.is_empty() && !self.asked_of(Some(client)) {
+            tracing::info!("a pager's switch ignored: the person did not ask its program for it");
             return;
         }
         let mut switched = false;
