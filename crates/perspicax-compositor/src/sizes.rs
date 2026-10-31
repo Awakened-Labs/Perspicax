@@ -69,7 +69,8 @@
 //! so are the pool's and the dmabuf's (#2197); the layer's is in none.
 //! The layer's numbers are held until a release carries #1759. Nothing
 //! upstream holds a positioner's yet: #2214, which would have, was closed
-//! unmerged.
+//! unmerged. What a chain of popups adds up to is held by how long one goes
+//! (`popup`), and nothing upstream holds that either.
 
 use smithay::{
     reexports::{

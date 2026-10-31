@@ -52,6 +52,25 @@ const _: () = assert!(
     "a monitor's layers add up past an i32"
 );
 
+/// How long a chain of popups may be, each hung from the last: a window's
+/// menu is the first. More submenus than fit across the widest monitor, at
+/// 200 pixels each; the next is told it is done.
+///
+/// [`FAR`] bounds how far each hangs from the last, not how far the last
+/// hangs from the first. Smithay 0.7.0 adds a chain up from the end and down
+/// from the start, each saturating, so one long enough to saturate has two
+/// answers (#226). Each popup can add an anchor, an offset and its own width,
+/// three [`FAR`]s, and one more is where the chain's window begins. Smithay
+/// also walks the whole chain, recursively, for each popup in it, at every
+/// commit on a surface: the time that takes is the first thing a long chain
+/// costs, and the stack is another.
+pub const DEEPEST_POPUP: usize = 64;
+
+const _: () = assert!(
+    (3 * DEEPEST_POPUP as i64 + 1) * FAR as i64 <= i32::MAX as i64,
+    "a chain of popups adds up past an i32"
+);
+
 /// `rect` held to the world: each edge further than [`FAR`] from 0 brought
 /// back to it. At least a pixel is kept, so a rectangle wholly past an edge
 /// is the pixel at that edge, not nothing: what is held is still somewhere.
