@@ -42,9 +42,10 @@ pub const FAR: i32 = 1 << 16;
 /// in plain `i32`, and places the next from that, so enough of them on one
 /// monitor overflow it, however small each number is (#226). A layer can move
 /// that room's corner by its zone and a margin, and shrink it by its zone and
-/// two margins, and where one is placed adds all of that up: five [`FAR`]s
+/// two margins, and where one is placed adds those up: at most five [`FAR`]s
 /// for each, and five besides for the monitor and the layer being placed.
-/// Walking them is also what every commit on a layer costs.
+/// Walking them is also what every commit on a layer costs: a commit among
+/// some thousands takes a noticeable part of a second.
 pub const MOST_LAYERS_ON_A_MONITOR: usize = 256;
 
 const _: () = assert!(
@@ -60,10 +61,10 @@ const _: () = assert!(
 /// hangs from the first. Smithay 0.7.0 adds a chain up from the end and down
 /// from the start, each saturating, so one long enough to saturate has two
 /// answers (#226). Each popup can add an anchor, an offset and its own width,
-/// three [`FAR`]s, and one more is where the chain's window begins. Smithay
-/// also walks the whole chain, recursively, for each popup in it, at every
-/// commit on a surface: the time that takes is the first thing a long chain
-/// costs, and the stack is another.
+/// three [`FAR`]s, and one more is where the chain's window begins. Long
+/// before that, smithay's walks of the chain, which pass each popup up through
+/// every one above it, stall the compositor: a commit at the end of a chain a
+/// thousand long takes seconds, for every client.
 pub const DEEPEST_POPUP: usize = 64;
 
 const _: () = assert!(

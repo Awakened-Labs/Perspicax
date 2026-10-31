@@ -24,6 +24,7 @@ use perspicax_index::{HostFacts, SurfaceKind};
 use perspicax_policy::{DEEPEST_POPUP, MOST_LAYERS_ON_A_MONITOR, Place, Side};
 use smithay_client_toolkit::shell::{
     WaylandSurface as _,
+    wlr_layer::Anchor,
     xdg::{XdgSurface as _, popup::Popup},
 };
 use wayland_client::{EventQueue, QueueHandle, protocol::wl_surface::WlSurface};
@@ -62,14 +63,16 @@ fn knows(facts: &HostFacts, namespace: &str) -> bool {
 }
 
 /// Have the newest layer ask for all the numbers it can, which is what adds
-/// up fastest: the most room, past the widest margin, once its first commit
-/// is taken in.
+/// up fastest: the most room, past the widest margins, anchored to every edge,
+/// the shape smithay takes most off what it carries for. On main, 10 923 of
+/// these overflowed it (`layer.rs:361`).
 fn ask_for_the_most(desk: &mut Desk) {
     let nth = desk.layers.len() - 1;
     desk.leave_undrawn(nth);
     let panel = &desk.layers[nth].0;
+    panel.set_anchor(Anchor::all());
     panel.set_exclusive_zone(i32::MAX);
-    panel.set_margin(i32::MAX, 0, 0, 0);
+    panel.set_margin(i32::MAX, i32::MAX, i32::MAX, i32::MAX);
     panel.commit();
 }
 
