@@ -28,17 +28,26 @@
 //! the menu, including past the window's edge. A seat, and headless with
 //! `capture`, check the two agree at every commit in a debug build
 //! (`check_hung_as_drawn`).
+//!
+//! # How deep
+//!
+//! Smithay adds that chain up from the popup, and down from the window to
+//! draw it, and saturates each. So a chain long enough to saturate would have
+//! two answers, and a long one costs each commit a walk of every popup in it,
+//! recursively (#226). So one past [`DEEPEST_POPUP`] is told it is done as it
+//! opens, and is never tracked: [`too_deep`].
 
 use std::sync::PoisonError;
 
 use perspicax_node::{SurfaceId, Vec2};
+use perspicax_policy::DEEPEST_POPUP;
 use smithay::{
     desktop::{PopupKind, PopupManager, find_popup_root_surface, get_popup_toplevel_coords},
     reexports::wayland_server::{Resource as _, protocol::wl_surface::WlSurface},
     utils::{Logical, Point},
     wayland::{
         compositor::{get_role, with_states},
-        shell::xdg::{XDG_TOPLEVEL_ROLE, XdgPopupSurfaceData},
+        shell::xdg::{PopupSurface, XDG_POPUP_ROLE, XDG_TOPLEVEL_ROLE, XdgPopupSurfaceData},
     },
 };
 
@@ -78,6 +87,37 @@ pub(crate) fn hung(popup: &PopupKind) -> Option<Hung> {
         from,
         at: Vec2::new(f64::from(at.x), f64::from(at.y)),
     })
+}
+
+/// Whether `popup` is further down its chain than [`DEEPEST_POPUP`].
+///
+/// Counted from each popup's role state, which a popup that was refused has
+/// as well, so the popups of one refused are refused too. That matters: not
+/// tracked, it is no parent smithay can find, and smithay would file a child
+/// tracked under it as a first popup of the window. And the walk goes no
+/// further than the limit, so a chain of refused popups, as long as its
+/// client likes, costs no more to ask about than one that fits.
+pub(crate) fn too_deep(popup: &PopupSurface) -> bool {
+    let mut parent = popup.get_parent_surface();
+    let mut depth = 1;
+    while let Some(surface) = parent.filter(|surface| get_role(surface) == Some(XDG_POPUP_ROLE)) {
+        depth += 1;
+        if depth > DEEPEST_POPUP {
+            return true;
+        }
+        parent = with_states(&surface, |states| {
+            states
+                .data_map
+                .get::<XdgPopupSurfaceData>()
+                .and_then(|data| {
+                    data.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .parent
+                        .clone()
+                })
+        });
+    }
+    false
 }
 
 impl crate::state::Compositor {

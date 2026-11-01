@@ -33,6 +33,45 @@ impl Rect {
 /// does the size in bytes of a titlebar two worlds wide, drawn at scale 4.
 pub const FAR: i32 = 1 << 16;
 
+/// How many layer surfaces one monitor keeps: a panel, a launcher, a
+/// wallpaper, and far more than a desktop has of them. The next is told it is
+/// closed.
+///
+/// [`FAR`] bounds what each one asks for, not what they ask for together.
+/// Smithay 0.7.0 carries the room each exclusive layer leaves on to the next
+/// in plain `i32`, and places the next from that, so enough of them on one
+/// monitor overflow it, however small each number is (#226). A layer can move
+/// that room's corner by its zone and a margin, and shrink it by its zone and
+/// two margins, and where one is placed adds those up: at most five [`FAR`]s
+/// for each, and five besides for the monitor and the layer being placed.
+/// Walking them is also what every commit on a layer costs: a commit among
+/// some thousands takes a noticeable part of a second.
+pub const MOST_LAYERS_ON_A_MONITOR: usize = 256;
+
+const _: () = assert!(
+    (5 * MOST_LAYERS_ON_A_MONITOR as i64 + 5) * FAR as i64 <= i32::MAX as i64,
+    "a monitor's layers add up past an i32"
+);
+
+/// How long a chain of popups may be, each hung from the last: a window's
+/// menu is the first. More submenus than fit across the widest monitor, at
+/// 200 pixels each; the next is told it is done.
+///
+/// [`FAR`] bounds how far each hangs from the last, not how far the last
+/// hangs from the first. Smithay 0.7.0 adds a chain up from the end and down
+/// from the start, each saturating, so one long enough to saturate has two
+/// answers (#226). Each popup can add an anchor, an offset and its own width,
+/// three [`FAR`]s, and one more is where the chain's window begins. Long
+/// before that, smithay's walks of the chain, which pass each popup up through
+/// every one above it, stall the compositor: a commit at the end of a chain a
+/// thousand long takes seconds, for every client.
+pub const DEEPEST_POPUP: usize = 64;
+
+const _: () = assert!(
+    (3 * DEEPEST_POPUP as i64 + 1) * FAR as i64 <= i32::MAX as i64,
+    "a chain of popups adds up past an i32"
+);
+
 /// `rect` held to the world: each edge further than [`FAR`] from 0 brought
 /// back to it. At least a pixel is kept, so a rectangle wholly past an edge
 /// is the pixel at that edge, not nothing: what is held is still somewhere.

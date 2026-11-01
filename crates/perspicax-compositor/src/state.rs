@@ -1530,7 +1530,13 @@ impl XdgShellHandler for Compositor {
         // panel's own menu is given to it later (see `layers`). And so is one
         // from a window rolled up to its titlebar, which keeps the keyboard,
         // so that a key can ask for one: nothing of it is drawn to hang it
-        // from.
+        // from. Nor is one further down a chain than smithay's sums are held
+        // for (see `popup`), whatever it hangs from.
+        if popup::too_deep(&surface) {
+            tracing::warn!("popup refused: its chain is as long as they go");
+            surface.send_popup_done();
+            return;
+        }
         if find_popup_root_surface(&PopupKind::Xdg(surface.clone())).is_ok_and(|root| {
             self.is_withdrawn(&root)
                 || self.is_withdrawn_layer(&root)

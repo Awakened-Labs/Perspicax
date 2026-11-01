@@ -1262,10 +1262,39 @@ impl Desk {
         height: u32,
         colour: u32,
     ) {
+        self.open_panel_at(qh, namespace, height, colour, None);
+    }
+
+    /// A panel, as [`Self::open_panel`] opens one, asking for the monitor
+    /// called `monitor`, of which this client must have been told.
+    pub fn open_panel_on(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        namespace: &str,
+        height: u32,
+        colour: u32,
+        monitor: &str,
+    ) {
+        let output = self
+            .outputs
+            .outputs()
+            .find(|output| self.output_name(output).as_deref() == Some(monitor))
+            .expect("a monitor of that name");
+        self.open_panel_at(qh, namespace, height, colour, Some(&output));
+    }
+
+    fn open_panel_at(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        namespace: &str,
+        height: u32,
+        colour: u32,
+        output: Option<&wl_output::WlOutput>,
+    ) {
         let surface = self.compositor.create_surface(qh);
         let panel =
             self.layer_shell
-                .create_layer_surface(qh, surface, Layer::Top, Some(namespace), None);
+                .create_layer_surface(qh, surface, Layer::Top, Some(namespace), output);
         panel.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
         panel.set_size(0, height);
         panel.set_exclusive_zone(i32::try_from(height).expect("a panel's height"));

@@ -46,6 +46,19 @@
 //! from then. It comes back as a new layer, with a new id, and, like a new
 //! one, it takes the keyboard, if it wants every key, only once it shows
 //! something, and only if the person asked for it, asked again.
+//!
+//! # How many
+//!
+//! A monitor keeps [`MOST_LAYERS_ON_A_MONITOR`] layers, new ones and those
+//! back from being unmapped alike. The next is told it is closed, as one is
+//! when there is no screen to put it on, which layer-shell has it destroy
+//! (#226). Smithay carries the room each layer leaves on to the next in plain
+//! `i32`, and what it adds is bounded by holding how many it adds: its own
+//! `map_layer` and `unmap_layer` arrange too, but only what `map_layer` was
+//! given. Which layers does not matter, and neither does how long they have
+//! been there, so a program that fills a monitor keeps out the next layer of
+//! any other, as a program covering the screen with one layer already can.
+//! The lock screen is no layer, and is not kept out.
 
 use std::{cell::Cell, sync::PoisonError};
 
@@ -67,6 +80,7 @@ use smithay::{
 };
 
 use perspicax_node::SurfaceId;
+use perspicax_policy::MOST_LAYERS_ON_A_MONITOR;
 
 use crate::state::Compositor;
 
@@ -325,7 +339,21 @@ impl Compositor {
     /// no room yet, but one mapped again asked before it went, so its room is
     /// kept now, and the windows that fill are fitted to what is left: its
     /// own commit, which arranges again, finds nothing more changed.
+    ///
+    /// Every layer a map holds comes through here, so one past
+    /// [`MOST_LAYERS_ON_A_MONITOR`] is told it is closed instead, and every
+    /// arrangement of that map, smithay's own included, adds up no more than
+    /// that many: see "How many".
     fn map_layer_on(&mut self, surface: WlrLayerSurface, namespace: String, output: &Output) {
+        if layer_map_for_output(output).layers().count() >= MOST_LAYERS_ON_A_MONITOR {
+            tracing::warn!(
+                namespace,
+                output = output.name(),
+                "layer surface refused: its monitor has as many as it keeps"
+            );
+            surface.send_close();
+            return;
+        }
         let layer = LayerSurface::new(surface, namespace);
         let id = self.mint_surface_id();
         layer.user_data().insert_if_missing(|| id);
