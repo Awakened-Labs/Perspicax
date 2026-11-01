@@ -982,6 +982,21 @@ brings back, as Openbox takes it. And the root's `_NET_ACTIVE_WINDOW` names
 the X11 window with the keyboard, or none while a Wayland window has it,
 which Wine goes by for the window in front.
 
+X clients are not kept from one another (#279). Every one of them shares one
+Xwayland, and X puts no walls between the clients of a server: any of them
+can read what is typed into another's window, put input into it, and
+minimize, withdraw or destroy it. So the X11 window in use can be taken away
+under the person's hands, and the keys go to the window beneath, as when a
+window closes. That window may be a Wayland program's, and the rest of what
+they were typing goes to it. perspicax can't refuse this: an X request does
+not say which client sent it, and a window another client withdrew looks just
+like one its own client closed. Holding the keys back each time would cost a
+click whenever an X11 program closes a window or Wine minimizes one. None of
+this reaches a Wayland window the person is typing in: X clients are not sent
+its keys, and can't take them from it (#256, #259). So take every X11 program
+as able to see and act on every other. An Xwayland of its own for a sensitive
+program is #289.
+
 An X11 application's menus, tooltips and drag icons place themselves: they
 bypass the window manager (override-redirect, in X's terms), and are left to
 their application, as any X11 window manager leaves them. Each is drawn where
@@ -1172,12 +1187,12 @@ unless the person's own press reached the panel moments before, a binding
 that opened a menu say, when it is taken as theirs; under sloppy or strict
 focus the pointer moves the keys without a press, so a program the person
 clicked may act until they next press something; a switcher that picks on a
-key other than Enter, once it has let go of the keys, is refused; a pager
+key other than Enter, once it has let go of the keys, is refused; and a pager
 that switches on the wheel, or a command a panel runs on the wheel that
 switches through `ext-workspace`, is refused unless the person clicked it
 under ten seconds ago, though waybar's `ext/workspaces` and the shell's pager
-switch only on a click; and any X client can minimize the X11 window in use
-(#279).
+switch only on a click. None of this binds X clients, which act on one
+another's windows as they always could (#279).
 
 A new window opens on the monitor under the pointer, in the room its panels
 leave, cascaded from the top-left corner: 32 pixels further in for each
