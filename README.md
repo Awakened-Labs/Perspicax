@@ -1878,6 +1878,24 @@ from an application's own titlebar
 ([#241](https://github.com/Awakened-Labs/Perspicax/issues/241)) or from a key
 ([#239](https://github.com/Awakened-Labs/Perspicax/issues/239)).
 
+A left click on a task brings its window forward: restored, onto its
+workspace, raised and given the keys. A middle click asks it to close. A left
+click puts the window away only if it has the keys and nothing a raise would
+pass is over it (#291). Under sloppy focus the pointer gives the keys to a
+window it crosses on its way down to the panel, without raising it, so the
+window with the keys may still be behind another. Its task then brings it
+forward, and a second click puts it away. Only what overlaps the window, as
+the person sees it, counts: its frame and its window, never a shadow, and not
+its own menus. A window beside it that touches none of it counts for nothing.
+A window kept on top counts only against another kept on top, since no raise
+passes it. With a terminal over a browser and a calculator kept on top over
+both, the pointer crossing the browser from the terminal leaves the browser's
+task to bring it forward, under the calculator. With the calculator alone over
+it, the task puts it away. perspicax tells the shell which windows are covered
+over `perspicax-shell-v1` from version 9, from the same publication that tells
+it which window has the keys. Against a compositor that does not tell it, a
+left click puts away the window with the keys whatever is over it.
+
 A task whose window wants the person's attention -- it opened without the
 keys, or its program asked to bring it forward and was refused (#259) -- is
 ringed in the accent, and its `Tab` is described as wanting attention, until
