@@ -51,6 +51,17 @@
 //! person has not given it the keys since. A taskbar marks it. A shell
 //! bound earlier is never told the bit, as for a pie.
 //!
+//! From version 9 a shell is told, of each window, whether it is covered:
+//! whether raising it would bring it in front of some of what is over it
+//! ([`raise_would_uncover`]). A taskbar puts away the window with the keys
+//! only when it is not (#291), for under sloppy focus the pointer gives the
+//! keys to a window it crosses on its way to the taskbar without raising it.
+//! It is worked out from each publication of the facts, the same that tells
+//! the taskbar which window is active, so the two never disagree; and at
+//! every one, whether a shell is bound or not, so a shell that binds between
+//! two is told what the last found. A shell bound earlier is never told the
+//! bit.
+//!
 //! When a save changes the config's `[shell]` table, every shell is told to
 //! read it again, and applies it in place.
 //!
@@ -69,10 +80,11 @@
 //! ignored.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Mutex, PoisonError},
 };
 
+use perspicax_index::{HostFacts, SurfaceKind, raise_would_uncover};
 use perspicax_node::SurfaceId;
 use perspicax_policy::{Home, Protocol, VolumeKey};
 use perspicax_protocols::shell::v1::server::perspicax_shell_v1::{self, PerspicaxShellV1};
@@ -99,6 +111,10 @@ use crate::{
 /// The version a shell is told from whether a window wants attention: a
 /// bit of `window_state`, for which wayland-scanner makes no constant.
 const WANTS_ATTENTION_SINCE: u32 = 7;
+
+/// The version a shell is told from whether a window is covered: a bit of
+/// `window_state`, as `wants_attention` is.
+const COVERED_SINCE: u32 = 9;
 
 /// Which menu a binding asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +166,9 @@ pub(crate) struct Shells {
     /// Something the shells are told of the windows may have changed since
     /// they were: work out what did at the next turn of the loop.
     stale: bool,
+    /// The windows a raise would bring in front of some of what covers them,
+    /// as of the facts last published.
+    covered: BTreeSet<SurfaceId>,
 }
 
 /// What one shell was last told of each window, by the window's id: kept
@@ -172,7 +191,7 @@ impl Shells {
     /// Advertise the global, filtered by `gate`.
     pub(crate) fn new(display: &DisplayHandle, gate: &Gate) -> Self {
         display.create_global::<Compositor, PerspicaxShellV1, _>(
-            8,
+            9,
             Filtered {
                 gate: gate.clone(),
                 protocol: Protocol::Shell,
@@ -185,6 +204,18 @@ impl Shells {
     /// window, the handles a taskbar or a pager holds, the rules.
     pub(crate) fn windows_changed(&mut self) {
         self.stale = true;
+    }
+
+    /// Work out, from `facts` about to be published, which windows are
+    /// covered: what a shell of version 9 is told.
+    pub(crate) fn cover(&mut self, facts: &HostFacts) {
+        self.covered = facts
+            .surfaces()
+            .iter()
+            .filter(|surface| surface.kind == SurfaceKind::Window)
+            .filter(|surface| raise_would_uncover(facts, surface.id))
+            .map(|surface| surface.id)
+            .collect();
     }
 }
 
@@ -430,6 +461,11 @@ impl Compositor {
         state.set(
             WindowState::WantsAttention,
             version >= WANTS_ATTENTION_SINCE && wants_attention(&front),
+        );
+        state.set(
+            WindowState::Covered,
+            version >= COVERED_SINCE
+                && id_of(&front).is_some_and(|id| self.shells.covered.contains(&id)),
         );
         let mut capabilities = WindowCapabilities::empty();
         capabilities.set(WindowCapabilities::Workspace, home.is_some());

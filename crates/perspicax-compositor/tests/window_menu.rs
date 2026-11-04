@@ -544,6 +544,73 @@ fn a_tab_behind_another_is_told_its_groups_state() {
     session.stop((desk, queue));
 }
 
+/// Whether the shell was told this window is covered.
+fn covered(told: &WindowTold) -> bool {
+    told.state.contains(WindowState::Covered)
+}
+
+/// From version 9 a shell is told which windows a raise would bring in
+/// front of some of what is over them (#291), so a taskbar brings the window
+/// with the keys forward rather than putting it away. The two windows open
+/// cascaded, the second over a corner of the first. A window kept on top is
+/// over an ordinary one, but no raise passes it, so it counts for nothing
+/// against it; against another kept on top, it counts. A shell bound at
+/// version 8 is never told.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_shell_is_told_which_windows_a_raise_would_bring_in_front() {
+    let (session, mut desk, mut queue, _qh) =
+        windows("told-covered", one_monitor(1, 1), &["lower", "upper"]);
+    told(&mut desk, &mut queue, "lower", covered);
+    assert!(!covered(&told(&mut desk, &mut queue, "upper", |_| true)));
+
+    desk.activate("lower");
+    told(&mut desk, &mut queue, "upper", covered);
+    let lower = told(&mut desk, &mut queue, "lower", |told| !covered(told));
+    assert_eq!(lower.state, WindowState::empty(), "raised over the other");
+
+    // The upper kept on top, as calcy is: over the lower, and no raise of the
+    // lower would pass it.
+    let (shell, upper) = (shell(&desk), handle(&desk, "upper"));
+    shell.set_on_top(&upper, 1);
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| surface(facts, "upper").on_top);
+    assert!(height(&facts, "upper") > height(&facts, "lower"));
+    told(&mut desk, &mut queue, "upper", |told| {
+        told.state == WindowState::OnTop
+    });
+    queue.roundtrip(&mut desk).expect("the compositor answers");
+    assert!(
+        !covered(desk.told_of("lower").0.expect("told")),
+        "a window kept on top counts for nothing against an ordinary one"
+    );
+
+    // Both kept on top: the one raised last is in front, and counts.
+    shell.set_on_top(&handle(&desk, "lower"), 1);
+    queue.flush().expect("sent");
+    told(&mut desk, &mut queue, "upper", |told| {
+        told.state == WindowState::OnTop | WindowState::Covered
+    });
+    told(&mut desk, &mut queue, "lower", |told| {
+        told.state == WindowState::OnTop
+    });
+
+    // A shell of version 8 is told the rest, never this.
+    let (mut old, mut old_queue, old_qh, old_globals) = session.client();
+    old.bind_shell_v8(&old_globals, &old_qh);
+    old.bind_taskbar(&old_globals, &old_qh);
+    old.bind_pager(&old_globals, &old_qh);
+    for title in ["lower", "upper"] {
+        let seen = told(&mut old, &mut old_queue, title, |told| {
+            told.state.contains(WindowState::OnTop)
+        });
+        assert!(!covered(&seen), "{title}: {seen:?}");
+    }
+    assert!(old.windows_told.iter().all(|told| !covered(told)));
+
+    session.stop(((desk, queue), (old, old_queue)));
+}
+
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_shell_bound_at_version_4_is_told_nothing_of_windows() {

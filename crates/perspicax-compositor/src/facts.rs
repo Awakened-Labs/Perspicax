@@ -234,7 +234,12 @@ impl Compositor {
         let in_use = self.window_in_use();
         self.restack(in_use);
         self.generation += 1;
-        self.facts.publish(self.host_facts(in_use));
+        let facts = self.host_facts(in_use);
+        // Which windows are covered, from the same snapshot that tells a
+        // taskbar which is active, so a shell is never told one without the
+        // other.
+        self.shells.cover(&facts);
+        self.facts.publish(facts);
         self.announce();
     }
 

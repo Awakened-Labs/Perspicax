@@ -21,9 +21,9 @@
     protocol carries: the person asked for a menu or a pie, or pressed a
     volume key, the config changed, the session should end, the keyboard's
     layouts and which is in use, what is made of each window and which
-    want the person's attention, what the person chose in a window's menu,
-    and what the person asked for that perspicax refused, for the shell to
-    say why in words.
+    want the person's attention or are covered, what the person chose in a
+    window's menu, and what the person asked for that perspicax refused, for
+    the shell to say why in words.
 
     Everything else the shell does, it does as any other client would.
     Its wallpaper, panel and menus are layer-shell surfaces, its taskbar
@@ -39,7 +39,7 @@
     is locked the compositor sends nothing and ignores every request.
   </description>
 
-  <interface name="perspicax_shell_v1" version="8">
+  <interface name="perspicax_shell_v1" version="9">
     <description summary="a shell's binding to the compositor">
       Bound once by a shell. Several shells may bind it; each is told the
       same things.
@@ -195,12 +195,26 @@
         token stale, say. It wants it until the person gives it the keys,
         by a click, the taskbar, Alt+Tab or a token of their own. The
         window with the keys never wants it.
+
+        From version 9, a window is covered when raising it would bring it
+        in front of some of what is over it: of its frame and its window, as
+        the person sees them on a monitor, a window a raise passes hides some
+        piece nothing in front of that window hides already. A raise passes
+        an ordinary window, and one kept on top only for a window kept on top
+        itself; it passes no panel, nor anything on the overlay layer. A
+        shadow hides nothing, and a window's own menus are drawn as part of
+        it. A window not on screen is never covered. A taskbar puts away the
+        window with the keys only when it is not covered, and brings it
+        forward otherwise: under sloppy focus the pointer gives the keys to a
+        window it crosses on its way to the taskbar, without raising it.
       </description>
       <entry name="sticky" value="1" summary="on every workspace"/>
       <entry name="on_top" value="2" summary="kept in front of the other windows"/>
       <entry name="shaded" value="4" summary="rolled up to its titlebar"/>
       <entry name="wants_attention" value="8" since="7"
              summary="it wants the keys, which the person has not given it"/>
+      <entry name="covered" value="16" since="9"
+             summary="raising it would bring it in front of some of what covers it"/>
     </enum>
 
     <enum name="window_capabilities" bitfield="true" since="5">
