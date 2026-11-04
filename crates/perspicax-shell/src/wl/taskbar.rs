@@ -10,6 +10,11 @@
 //! menu or the pie that has the keys, is what lets it. So each is asked as
 //! the press comes, and before a menu or a pie lets go of the keys.
 //!
+//! A left click puts away the window with the keys only if perspicax says
+//! nothing a raise would pass is over it, over its channel from version 9,
+//! and otherwise brings it forward (#291). Under sloppy focus the pointer
+//! gives the keys to a window it crosses on its way to the panel.
+//!
 //! A right-click on a task opens its window's menu beside it, built from
 //! what perspicax tells its own shell of the window, if it does. What is
 //! chosen there is asked of the window by this protocol where it can be:
