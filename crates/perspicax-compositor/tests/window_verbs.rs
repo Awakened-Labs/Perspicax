@@ -28,6 +28,7 @@ use perspicax_node::SurfaceId;
 use perspicax_policy::{Action, Grid, Mode, Shape};
 use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::Proxy as _;
+use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::State;
 
 fn session(name: &str) -> Session {
     Session::start(name, Backend::headless((1280, 1024)))
@@ -69,6 +70,52 @@ fn forward_brings_a_tab_behind_to_the_front_of_its_group() {
         facts.surface(second).unwrap().behind_tab == Some(first)
             && facts.surface(first).unwrap().mapped
     });
+
+    session.stop((desk, queue));
+}
+
+/// A tab minimized behind its group is not brought forward: one the person
+/// brings forward comes back from minimized, and an agent brings back
+/// nothing put away. The facts say only that it is behind, so the gate
+/// cannot tell, and it is refused as the act is carried out (#220).
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn forward_brings_no_tab_minimized_behind_its_group() {
+    let session = session("verbs-forward-minimized");
+    let host = Host::new(&session.facts, &session.requests);
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.open_window(&qh, "first", "first");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    desk.open_window(&qh, "second", "second");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 2);
+    session.perform(Action::TabWithPrevious);
+    let facts = session.wait_for(|facts| {
+        facts
+            .surfaces()
+            .iter()
+            .any(|surface| surface.behind_tab.is_some())
+    });
+    let (first, second) = (id(&facts, "first"), id(&facts, "second"));
+    desk.bind_taskbar(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.task("first").is_some());
+    desk.task("first").expect("listed").handle.set_minimized();
+    until(&mut queue, &mut desk, |desk| {
+        desk.task("first")
+            .is_some_and(|task| task.is(State::Minimized))
+    });
+
+    assert_eq!(
+        host.act(first, &Verb::Forward).map(|_| ()),
+        Err(ActError::OutOfSight(Refusal::Unmapped))
+    );
+    let facts = session.facts.read();
+    assert_eq!(facts.surface(first).unwrap().behind_tab, Some(second));
+    assert!(facts.surface(second).unwrap().mapped, "left in front");
+    assert!(
+        desk.task("first")
+            .is_some_and(|task| task.is(State::Minimized)),
+        "left minimized"
+    );
 
     session.stop((desk, queue));
 }

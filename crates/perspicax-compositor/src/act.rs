@@ -455,7 +455,18 @@ impl Compositor {
                 perspicax_index::check_window(&now, surface, &WindowVerb::Raise)
                     .map_err(ActError::OutOfSight)?;
             }
-            Action::Type { .. } | Action::Focus | Action::Close | Action::Forward => {}
+            // A tab the person minimized behind its group comes forward
+            // minimized no longer, and an agent brings back nothing the
+            // person put away. The facts say only that it is behind, so the
+            // gate could not tell (#220).
+            Action::Forward => {
+                if let Target::Window(window) = &target
+                    && Self::is_minimized(window)
+                {
+                    return Err(ActError::OutOfSight(Refusal::Unmapped));
+                }
+            }
+            Action::Type { .. } | Action::Focus | Action::Close => {}
         }
         let focus_before = self.keyboard_owner();
 

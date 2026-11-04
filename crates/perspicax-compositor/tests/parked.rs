@@ -7,7 +7,10 @@
 //! workspace not showing -- the tab in front having closed, say -- waits
 //! there with its group, in its place, rather than being drawn in front of
 //! the person and given the keys while still parked on its own, to vanish at
-//! the next switch.
+//! the next switch. A tab the person chooses is another matter: one
+//! minimized behind its group comes back from minimized, and a taskbar's
+//! pick of a tab in a group elsewhere shows its workspace, as a pick of any
+//! window does.
 //!
 //! Every test counts the windows of a title the facts list: one both parked
 //! and drawn is listed twice, and both entries say it is not drawn, so
@@ -25,6 +28,7 @@ use perspicax_index::HostFacts;
 use perspicax_policy::{Access, Action, Direction, Grid, Mode, Shape, Towards};
 use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::{EventQueue, QueueHandle, globals::GlobalList};
+use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::State;
 
 /// Where a window is, as the facts an agent reads tell it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +225,73 @@ fn per_output_a_tab_coming_forward_is_judged_on_its_groups_monitor() {
         corner(&cycled, "first").0 >= 1280.0,
         "on the right monitor, with its group: {cycled:?}"
     );
+
+    session.stop((desk, queue));
+}
+
+/// A tab minimized behind its group -- by a taskbar, or by its own program --
+/// is brought forward by the person: they chose it, so it comes back from
+/// minimized, in front of its group, with the keys. It was drawn while still
+/// minimized, and parked.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_minimized_tab_the_person_brings_forward_comes_back() {
+    let session = seated("parked-chosen-minimized");
+    let (mut desk, mut queue, qh, globals) = grouped(&session);
+    // Asked by the program in use, with the keys, as a switcher's request
+    // is the person's (#270).
+    desk.bind_taskbar(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.task("first").is_some());
+    desk.task("first").expect("listed").handle.set_minimized();
+    until(&mut queue, &mut desk, |desk| {
+        desk.task("first")
+            .is_some_and(|task| task.is(State::Minimized))
+    });
+    let before = focused_at(&session.facts.read(), "second");
+
+    session.perform(Action::CycleTab { forward: true });
+    let cycled = session.wait_for(|facts| listed(facts, "second") == [Seen::Behind]);
+    assert_eq!(
+        listed(&cycled, "first"),
+        [Seen::Shown],
+        "one window, on screen: {cycled:?}"
+    );
+    assert!(focused_at(&cycled, "first") > before, "given the keys");
+    until(&mut queue, &mut desk, |desk| {
+        desk.task("first")
+            .is_some_and(|task| !task.is(State::Minimized))
+    });
+
+    session.stop((desk, queue));
+}
+
+/// A taskbar's pick of a tab behind a group on a workspace not showing
+/// brings the person to it, as a pick of any window does: its workspace is
+/// shown, and it is in front of its group with the keys. It was drawn on the
+/// workspace in front of them, while still parked on its own.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_taskbar_pick_of_a_tab_in_a_group_elsewhere_shows_its_workspace() {
+    let session = seated("parked-picked-tab");
+    let (mut desk, mut queue, qh, globals) = grouped(&session);
+    session.perform(Action::Workspace(Direction::Right));
+    session.wait_for(|facts| listed(facts, "second") == [Seen::Away(1)]);
+
+    desk.bind_shell(&globals, &qh);
+    desk.bind_taskbar(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.task("first").is_some());
+    common::press_reaching(&session, &mut desk, &mut queue);
+    let before = focused_at(&session.facts.read(), "first");
+    desk.activate("first");
+    queue.roundtrip(&mut desk).expect("the pick sent");
+
+    let picked = session.wait_for(|facts| listed(facts, "second") == [Seen::Behind]);
+    assert_eq!(
+        listed(&picked, "first"),
+        [Seen::Shown],
+        "one window, on screen: {picked:?}"
+    );
+    assert!(focused_at(&picked, "first") > before, "given the keys");
 
     session.stop((desk, queue));
 }

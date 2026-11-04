@@ -96,7 +96,7 @@ impl Compositor {
             return;
         };
         self.tabs.activate(id);
-        self.bring_forward(tab, &place);
+        self.bring_chosen_forward(tab, &place);
     }
 
     /// Start dragging `tab` by its titlebar with the middle button.
@@ -235,7 +235,7 @@ impl Compositor {
             return;
         };
         if let (Some(next), Some(place)) = (self.any_window(next), self.window_for_id(focused)) {
-            self.bring_forward(&next, &place);
+            self.bring_chosen_forward(&next, &place);
         }
     }
 
@@ -275,6 +275,18 @@ impl Compositor {
         if let Some(heir) = self.any_window(heir) {
             self.bring_forward(&heir, window);
         }
+    }
+
+    /// Bring forward a tab the person chose -- by its tab on the titlebar,
+    /// Logo+Tab or a taskbar -- into `place`'s place. Minimized behind its
+    /// group, it is minimized no longer: they asked to see it. A tab that
+    /// comes forward because the one in front went is not chosen, and one
+    /// minimized takes its group off screen with it.
+    fn bring_chosen_forward(&mut self, tab: &Framed, place: &Framed) {
+        if placement(tab, |placement| std::mem::take(&mut placement.minimized)) {
+            self.tell_minimized(tab, false);
+        }
+        self.bring_forward(tab, place);
     }
 
     /// Put `front` where `place` is, as the group's front tab: on its
