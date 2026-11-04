@@ -103,7 +103,8 @@ pub(crate) struct Placement {
     /// `opacity-reset`. See [`Compositor::opacity_of`].
     pub(crate) opacity: Option<u8>,
     /// Put wholly on screen as it opened, or found with a place of its own
-    /// already. From then on, where it goes is the person's. See
+    /// already: at its first picture, or as it first came back, if it was
+    /// parked by then. From then on, where it goes is the person's. See
     /// [`Compositor::settle_new`].
     pub(crate) settled: bool,
     /// The step of the cascade a Wayland window was given at `get_toplevel`,
@@ -285,13 +286,19 @@ impl Compositor {
     ///
     /// Once. After that, where a window goes is the person's, and one
     /// dragged partly off the screen stays there. A window that opens
-    /// filling its monitor, snapped, in a tab group or parked already has a
-    /// place, and keeps it. Only with a person at the seat: headless, a
-    /// window stays where the cascade put it (see the module doc).
+    /// filling its monitor, snapped or in a tab group already has a place,
+    /// and keeps it. One parked by then -- minimized, or switched away from
+    /// before it drew -- has no place on screen to settle, and is settled as
+    /// it first comes back ([`Self::open_in_place`], #220). Only with a
+    /// person at the seat: headless, a window stays where the cascade put it
+    /// (see the module doc).
     pub(crate) fn settle_new(&mut self, window: &Framed, on: Option<Output>) {
         if !self.backend.has_person() || places_itself(window) {
             return;
         }
+        let Some(client) = self.extent(window) else {
+            return;
+        };
         if placement(window, |placement| {
             std::mem::replace(&mut placement.settled, true)
         }) {
@@ -300,10 +307,6 @@ impl Compositor {
         if Self::filling(window).is_some() || Self::is_snapped(window) || self.is_tabbed(window) {
             return;
         }
-        // Parked, it has no place on screen to settle.
-        let Some(client) = self.extent(window) else {
-            return;
-        };
         let area = on
             .or_else(|| self.space.output_under(client.loc.to_f64()).next().cloned())
             .or_else(|| self.output_of(window))
@@ -344,6 +347,17 @@ impl Compositor {
             to = ?to,
             "opened wholly on screen"
         );
+    }
+
+    /// A Wayland window opens in front of the person: where its program's
+    /// last window closed, if it did, and then wholly on screen. At its
+    /// first picture, the first time it can be known by its program and
+    /// its size is known; or, parked by then, as it first comes back
+    /// (`unpark_window`). Once either way: both halves are done only to a
+    /// window not yet settled. An X11 one was placed as it mapped.
+    pub(crate) fn open_in_place(&mut self, window: &Framed) {
+        let on = self.place_remembered(window);
+        self.settle_new(window, on);
     }
 
     /// Where a window is and how big, in the global space: where it was

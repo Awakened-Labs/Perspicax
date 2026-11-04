@@ -10,7 +10,9 @@
 //! the next switch. A tab the person chooses is another matter: one
 //! minimized behind its group comes back from minimized, and a taskbar's
 //! pick of a tab in a group elsewhere shows its workspace, as a pick of any
-//! window does.
+//! window does. And a window that draws its first picture while parked --
+//! minimized, or switched away from -- opens as it first comes back: where
+//! its program's last window closed, and wholly on screen.
 //!
 //! Every test counts the windows of a title the facts list: one both parked
 //! and drawn is listed twice, and both entries say it is not drawn, so
@@ -22,12 +24,14 @@
 
 mod common;
 
-use common::{Configured, Desk, Said, Session, until};
+use common::{Configured, Desk, Said, Session, WINDOW, until};
 use perspicax_compositor::{Backend, Virtual};
 use perspicax_index::HostFacts;
 use perspicax_policy::{Access, Action, Direction, Grid, Mode, Shape, Towards};
-use smithay_client_toolkit::shell::WaylandSurface as _;
-use wayland_client::{EventQueue, QueueHandle, globals::GlobalList};
+use smithay_client_toolkit::shell::{WaylandSurface as _, xdg::XdgSurface as _};
+use wayland_client::{
+    EventQueue, QueueHandle, globals::GlobalList, protocol::wl_surface::WlSurface,
+};
 use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::State;
 
 /// Where a window is, as the facts an agent reads tell it.
@@ -294,6 +298,184 @@ fn a_taskbar_pick_of_a_tab_in_a_group_elsewhere_shows_its_workspace() {
     assert!(focused_at(&picked, "first") > before, "given the keys");
 
     session.stop((desk, queue));
+}
+
+/// A window whose first picture comes after the person switched away from
+/// it opens where its program's last window closed as it comes back, not at
+/// that picture. It was put there at once, on the workspace in front of
+/// the person, while still parked on its own.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_first_drawn_on_a_workspace_not_showing_opens_where_its_program_was_as_it_comes_back() {
+    let session = seated("parked-remembered");
+    let (mut desk, mut queue, qh, _globals) = session.client();
+    desk.open_window(&qh, "last", "app.x");
+    until(&mut queue, &mut desk, |desk| desk.has_drawn(0));
+    session.wait_for(|facts| corner(facts, "last") == (0.0, 0.0));
+    close(&session, &mut desk, &mut queue, 0, "last");
+
+    // The next window of its program is made, and cascaded a step in, but
+    // has not drawn when the person switches away.
+    let surface = open_undrawn(&session, &mut desk, &mut queue, &qh, "next", "app.x");
+    session.perform(Action::Workspace(Direction::Right));
+    session.wait_for(|facts| listed(facts, "next") == [Seen::Away(1)]);
+
+    let drawn = draw_late(&session, &mut desk, &mut queue, &surface, "next", WINDOW);
+    assert_eq!(
+        listed(&drawn, "next"),
+        [Seen::Away(1)],
+        "one window, waiting on workspace 1: {drawn:?}"
+    );
+
+    session.perform(Action::Workspace(Direction::Left));
+    let back = session.wait_for(|facts| listed(facts, "next") == [Seen::Shown]);
+    assert_eq!(
+        corner(&back, "next"),
+        (0.0, 0.0),
+        "where its program's last window closed, not the cascade's (32, 32)"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// A window minimized before its first picture is put wholly on screen as
+/// it comes back. It was marked as settled, with nothing settled, and so
+/// came back hanging off its monitor.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_minimized_before_it_drew_is_put_wholly_on_screen_as_it_comes_back() {
+    let session = seated("parked-unsettled");
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.open_window(&qh, "first", "app.first");
+    until(&mut queue, &mut desk, |desk| desk.has_drawn(0));
+    session.wait_for(|facts| listed(facts, "first") == [Seen::Shown]);
+
+    // Cascaded to (32, 32), with the keys, as a window of the program in
+    // use, and minimized before it draws.
+    let surface = open_undrawn(&session, &mut desk, &mut queue, &qh, "wide", "app.wide");
+    session.wait_for(|facts| focused_at(facts, "wide") > focused_at(facts, "first"));
+    desk.bind_taskbar(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.task("wide").is_some());
+    session.perform(Action::Minimize);
+    until(&mut queue, &mut desk, |desk| {
+        desk.task("wide")
+            .is_some_and(|task| task.is(State::Minimized))
+    });
+
+    // 1500 wide, on a monitor 1280 wide.
+    let drawn = draw_late(
+        &session,
+        &mut desk,
+        &mut queue,
+        &surface,
+        "wide",
+        (1500, 600),
+    );
+    assert_eq!(
+        listed(&drawn, "wide"),
+        [Seen::Hidden],
+        "one window, minimized: {drawn:?}"
+    );
+
+    // Restored by the program in use, which has the keys back.
+    desk.task("wide").expect("listed").handle.unset_minimized();
+    queue.roundtrip(&mut desk).expect("the request sent");
+    let back = session.wait_for(|facts| listed(facts, "wide") == [Seen::Shown]);
+    assert_eq!(
+        corner(&back, "wide"),
+        (0.0, 32.0),
+        "at the left edge, where the cascade put its top"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// A window switched away from and back to before it drew opens at its
+/// first picture, as any window does: coming back with nothing drawn, it
+/// has no size yet to settle by.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_window_back_on_screen_before_it_drew_is_put_wholly_on_screen_at_its_first_picture() {
+    let session = seated("parked-back-undrawn");
+    let (mut desk, mut queue, qh, _globals) = session.client();
+    desk.open_window(&qh, "first", "app.first");
+    until(&mut queue, &mut desk, |desk| desk.has_drawn(0));
+    session.wait_for(|facts| listed(facts, "first") == [Seen::Shown]);
+
+    let surface = open_undrawn(&session, &mut desk, &mut queue, &qh, "wide", "app.wide");
+    session.perform(Action::Workspace(Direction::Right));
+    session.wait_for(|facts| listed(facts, "wide") == [Seen::Away(1)]);
+    // Back on its workspace, and with nothing drawn, not yet said to be.
+    session.perform(Action::Workspace(Direction::Left));
+    session.wait_for(|facts| listed(facts, "wide") == [Seen::Hidden]);
+
+    // Cascaded to (32, 32), and 1500 wide on a monitor 1280 wide.
+    let drawn = draw_late(
+        &session,
+        &mut desk,
+        &mut queue,
+        &surface,
+        "wide",
+        (1500, 600),
+    );
+    assert_eq!(listed(&drawn, "wide"), [Seen::Shown]);
+    session.wait_for(|facts| corner(facts, "wide") == (0.0, 32.0));
+
+    session.stop((desk, queue));
+}
+
+/// Open a window of `app` that declares its geometry and acknowledges its
+/// configures but draws nothing, as a program slow to its first picture
+/// does, and wait for the facts to have it: its surface.
+fn open_undrawn(
+    session: &Session,
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    qh: &QueueHandle<Desk>,
+    title: &str,
+    app: &str,
+) -> WlSurface {
+    desk.open_blank(qh, title);
+    let window = desk.blank.last().expect("just opened").clone();
+    window.set_app_id(app);
+    window.commit();
+    until(queue, desk, |desk| desk.blank_configured > 0);
+    session.wait_for(|facts| listed(facts, title).len() == 1);
+    window.wl_surface().clone()
+}
+
+/// Its first picture, `size` big, at last, declared as its geometry: the
+/// facts once the compositor has taken it in.
+fn draw_late(
+    session: &Session,
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    surface: &WlSurface,
+    title: &str,
+    size: (u32, u32),
+) -> HostFacts {
+    let window = desk
+        .blank
+        .iter()
+        .find(|window| window.wl_surface() == surface)
+        .expect("opened undrawn")
+        .clone();
+    let (width, height) = (
+        i32::try_from(size.0).unwrap(),
+        i32::try_from(size.1).unwrap(),
+    );
+    window
+        .xdg_surface()
+        .set_window_geometry(0, 0, width, height);
+    desk.paint(surface, size, 0xff33_6699);
+    surface.commit();
+    queue.roundtrip(desk).expect("the picture taken in");
+    session.wait_for(|facts| {
+        facts
+            .surfaces()
+            .iter()
+            .any(|drawn| drawn.title.as_deref() == Some(title) && drawn.damage_generation > 0)
+    })
 }
 
 /// Each window titled `title` the facts list now, and where. A window both

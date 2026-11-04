@@ -1391,8 +1391,7 @@ impl CompositorHandler for Compositor {
                         && window.toplevel().is_some()
                         && matches!(taken.own, damage::Buffer::New(_))
                     {
-                        let on = self.place_remembered(&window);
-                        self.settle_new(&window, on);
+                        self.open_in_place(&window);
                     }
                     shell::id_of(&window)
                 }

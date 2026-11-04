@@ -7,8 +7,8 @@
 //! unmapped by its client, and given to the next window of its program as
 //! that one opens. An X11 window gets it as it maps. A Wayland window gets it
 //! at its first picture, because it names its program only after it has been
-//! placed. Either way it is then settled onto its monitor, as any new window
-//! is ([`Compositor::settle_new`]).
+//! placed, or, parked by then, as it first comes back. Either way it is then
+//! settled onto its monitor, as any new window is ([`Compositor::settle_new`]).
 //!
 //! Before it, a place the window asks for itself: an X11 window's
 //! USPosition or PPosition (see `crate::xwayland`). xdg-session-management
@@ -146,7 +146,12 @@ impl Compositor {
     /// It was cascaded at `get_toplevel`, before it said what it was. That
     /// step of the cascade is given back, as an X11 window placed this way
     /// never takes one, unless another window has been placed since.
+    ///
+    /// Not a window parked by then, minimized or switched away from before
+    /// it drew: it is put in place as it first comes back, rather than on
+    /// screen behind the rule's back ([`Self::open_in_place`], #220).
     pub(crate) fn place_remembered(&mut self, window: &Framed) -> Option<Output> {
+        self.space.element_location(window)?;
         let (at, output) = self.remembered_place(window)?;
         self.move_window(window, at);
         self.window_moved(window);
