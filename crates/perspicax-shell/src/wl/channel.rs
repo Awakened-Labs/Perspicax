@@ -12,7 +12,10 @@
 //! words on the screen, with why. Which windows want the person's
 //! attention, from version 7, the taskbar marks. A lock program refused,
 //! from version 8, is said the same way: a lock screen that came up and was
-//! not the one perspicax lets lock it (#178).
+//! not the one perspicax lets lock it (#178). Which windows are covered, from
+//! version 9, is what a left click on a task asks before putting its window
+//! away: one with the keyboard that something is over is brought forward
+//! instead (#291).
 
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::{self, PerspicaxShellV1};
 #[cfg(any(feature = "menus", feature = "panel"))]
@@ -36,7 +39,7 @@ use crate::model::tasks::Placing;
 /// this program out; the shell still draws, and its menus open only by
 /// pointer.
 pub(super) fn bind(globals: &GlobalList, qh: &QueueHandle<App>) -> Option<PerspicaxShellV1> {
-    let bound = globals.bind::<PerspicaxShellV1, _, _>(qh, 1..=8, ()).ok();
+    let bound = globals.bind::<PerspicaxShellV1, _, _>(qh, 1..=9, ()).ok();
     if bound.is_none() {
         tracing::info!("the compositor offers no perspicax_shell_v1; no menu will open on a key");
     }
@@ -193,6 +196,8 @@ impl Dispatch<PerspicaxShellV1, ()> for App {
                 if app.panels.tasks.unwant_all() {
                     app.panels_changed();
                 }
+                #[cfg(feature = "panel")]
+                app.panels.tasks.uncover_all();
             }
             #[cfg(feature = "panel")]
             Event::ToplevelState {
@@ -204,6 +209,7 @@ impl Dispatch<PerspicaxShellV1, ()> for App {
                 if app.panels.tasks.want(&toplevel, wants_attention(state)) {
                     app.panels_changed();
                 }
+                app.panels.tasks.cover(&toplevel, covered(state));
                 #[cfg(feature = "menus")]
                 {
                     let workspace = workspace.and_then(|ws| app.workspaces.model.serial_of(&ws));
@@ -272,6 +278,18 @@ fn wants_attention(state: WEnum<WindowState>) -> bool {
     }
 }
 
+/// Whether perspicax told, in a window's `state`, that it is covered: that
+/// raising it would bring it in front of some of what is over it.
+#[cfg(feature = "panel")]
+fn covered(state: WEnum<WindowState>) -> bool {
+    match state {
+        WEnum::Value(state) => state.contains(WindowState::Covered),
+        WEnum::Unknown(bits) => {
+            WindowState::from_bits_truncate(bits).contains(WindowState::Covered)
+        }
+    }
+}
+
 /// Where a window stands, from what perspicax told: its `state` and its
 /// `capabilities`, with any bit a later version adds left out, and the
 /// serial of the `workspace` it is on.
@@ -333,7 +351,7 @@ mod tests {
     #[cfg(all(feature = "panel", feature = "menus"))]
     #[test]
     fn a_windows_state_is_read_bit_by_bit_leaving_out_a_later_versions() {
-        let later = 16;
+        let later = 32;
         let told = placing(
             WEnum::Unknown(WindowState::OnTop.bits() | later),
             WEnum::Unknown(WindowCapabilities::Shade.bits() | later),
@@ -360,7 +378,7 @@ mod tests {
     #[cfg(feature = "panel")]
     #[test]
     fn a_window_wanting_attention_is_read_beside_a_later_versions_bits() {
-        let later = 16;
+        let later = 32;
         assert!(wants_attention(WEnum::Value(
             WindowState::OnTop | WindowState::WantsAttention
         )));
@@ -371,5 +389,19 @@ mod tests {
             WindowState::Sticky.bits() | later
         )));
         assert!(!wants_attention(WEnum::Value(WindowState::empty())));
+    }
+
+    #[cfg(feature = "panel")]
+    #[test]
+    fn a_covered_window_is_read_beside_a_later_versions_bits() {
+        let later = 32;
+        assert!(covered(WEnum::Value(
+            WindowState::OnTop | WindowState::Covered
+        )));
+        assert!(covered(WEnum::Unknown(WindowState::Covered.bits() | later)));
+        assert!(!covered(WEnum::Unknown(
+            WindowState::WantsAttention.bits() | later
+        )));
+        assert!(!covered(WEnum::Value(WindowState::empty())));
     }
 }

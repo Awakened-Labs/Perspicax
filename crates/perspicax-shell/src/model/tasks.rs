@@ -16,7 +16,13 @@
 //! apart from what is listed, so that it never draws a panel again. From
 //! version 7 it tells whether a window wants the person's attention, which
 //! its task is marked with: that is listed, and takes effect as it is told,
-//! since perspicax sends no `done` of its own.
+//! since perspicax sends no `done` of its own. From version 9 it tells
+//! whether a window is covered: whether raising it would bring it in front
+//! of some of what is over it. A left click puts away the window with the
+//! keyboard only when it is not (#291): under sloppy focus the pointer gives
+//! the keyboard to a window it crosses on its way to the panel, without
+//! raising it, and a click on that window's task is to bring it forward. It
+//! draws nothing, so it is kept apart from what is listed too.
 //!
 //! Generic over the handle the compositor gave each window and the monitors
 //! it names, so that the shell keeps its Wayland objects here and a test
@@ -47,6 +53,9 @@ struct Toplevel<H, O> {
     /// As perspicax last told it; `None` until it does.
     #[cfg(feature = "menus")]
     placing: Option<Placing>,
+    /// perspicax says raising it would bring it in front of some of what is
+    /// over it: a window, and not one kept on top unless it is too.
+    covered: bool,
 }
 
 /// A window, as a taskbar lists it.
@@ -163,6 +172,7 @@ impl<H: PartialEq, O: Clone + PartialEq> Tasks<H, O> {
             pending: Window::default(),
             #[cfg(feature = "menus")]
             placing: None,
+            covered: false,
         });
         self.next += 1;
     }
@@ -297,6 +307,23 @@ impl<H: PartialEq, O: Clone + PartialEq> Tasks<H, O> {
         changed
     }
 
+    /// Take in whether perspicax told the window `handle` is covered. Nothing
+    /// listed changes.
+    pub(crate) fn cover(&mut self, handle: &H, covered: bool) {
+        if let Some(toplevel) = self.each.iter_mut().find(|known| known.handle == *handle) {
+            toplevel.covered = covered;
+        }
+    }
+
+    /// Forget which windows are covered, as when perspicax stops telling: a
+    /// click puts away the window with the keyboard, as it did before it was
+    /// ever told.
+    pub(crate) fn uncover_all(&mut self) {
+        for toplevel in &mut self.each {
+            toplevel.covered = false;
+        }
+    }
+
     /// Take in what perspicax told of the window `handle` is: where it
     /// stands, and what can be made of it.
     #[cfg(feature = "menus")]
@@ -340,13 +367,15 @@ impl<H: PartialEq, O: Clone + PartialEq> Tasks<H, O> {
 
     /// What pressing `button` on the task of window `serial` asks of it,
     /// with the handle to ask it by. A left click brings a window forward,
-    /// or puts it away if it is forward already; a middle click closes it;
-    /// a right click opens its menu.
+    /// or puts it away if it is forward already: it has the keyboard, and
+    /// nothing a raise would pass is over it. A middle click closes it; a
+    /// right click opens its menu.
     pub(crate) fn pressed(&self, serial: u64, button: Button) -> Option<(&H, Ask)> {
         let toplevel = self.each.iter().find(|known| known.serial == serial)?;
         let window = toplevel.now.as_ref()?;
+        let forward = window.active && !window.minimized && !toplevel.covered;
         let ask = match button {
-            Button::Left if window.active && !window.minimized => Ask::Minimize,
+            Button::Left if forward => Ask::Minimize,
             Button::Left => Ask::Activate,
             Button::Middle => Ask::Close,
             #[cfg(feature = "menus")]
@@ -507,6 +536,55 @@ mod tests {
             "minimized: brought back"
         );
         assert_eq!(tasks.pressed(99, Button::Left), None, "no such task");
+    }
+
+    /// Under sloppy focus, Mail has the keyboard from the pointer crossing
+    /// it on its way to the panel, and the Editor is still over some of it:
+    /// a click brings it forward. Once nothing is over it, a click puts it
+    /// away, as it does when perspicax stops telling, or never told.
+    #[test]
+    fn the_active_task_under_another_window_is_brought_forward_not_put_away() {
+        let mut tasks = Windows::default();
+        opened(&mut tasks, 1, "Editor", "DP-1");
+        opened(&mut tasks, 2, "Mail", "DP-1");
+        tasks.tell(
+            &2,
+            Told::State {
+                active: true,
+                minimized: false,
+                maximized: false,
+            },
+        );
+        tasks.tell(&2, Told::Done);
+        let mail = serial(&tasks, "Mail");
+
+        tasks.cover(&2, true);
+        assert_eq!(
+            tasks.pressed(mail, Button::Left),
+            Some((&2, Ask::Activate)),
+            "covered: brought forward"
+        );
+        assert_eq!(
+            tasks.pressed(mail, Button::Middle),
+            Some((&2, Ask::Close)),
+            "a middle click closes it all the same"
+        );
+        tasks.cover(&2, false);
+        assert_eq!(
+            tasks.pressed(mail, Button::Left),
+            Some((&2, Ask::Minimize)),
+            "in front: put away"
+        );
+
+        tasks.cover(&2, true);
+        tasks.cover(&99, true);
+        tasks.uncover_all();
+        assert_eq!(
+            tasks.pressed(mail, Button::Left),
+            Some((&2, Ask::Minimize)),
+            "no longer told"
+        );
+        assert!(!tasks.tell(&2, Told::Done), "nothing listed changed");
     }
 
     #[test]

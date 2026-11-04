@@ -1801,6 +1801,119 @@ fn an_agents_click_on_a_task_brings_its_window_forward() {
     shell.stop_with(session);
 }
 
+/// The title of the window drawn in front of the others.
+#[cfg(feature = "capture")]
+fn in_front(facts: &HostFacts) -> Option<String> {
+    facts
+        .surfaces()
+        .iter()
+        .rfind(|surface| surface.mapped && surface.kind == SurfaceKind::Window)?
+        .title
+        .clone()
+}
+
+/// Under sloppy focus the pointer gives the keys to a window it crosses on
+/// its way to the panel, without raising it (#291). A click on that window's
+/// task brings it forward, rather than putting it away for having the keys;
+/// a second puts it away. A window kept on top over it, as a calculator kept
+/// there is, counts for nothing: no raise would pass it, so the first click
+/// puts the window away.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_click_on_the_task_of_a_window_with_the_keys_under_another_brings_it_forward() {
+    use perspicax_policy::{Focus, FocusModel};
+    use perspicax_protocols::shell::v1::client::perspicax_shell_v1::WindowState;
+
+    let session = Session::start("shell-task-covered", Backend::headless((1280, 800)));
+    let shell = Shell::start(&session, "task-covered", CLASSIC);
+    let facts = session.wait_for(|facts| panels(facts).len() == 1);
+    let (_, panel, _) = panels(&facts)[0].clone();
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.bind_shell(&globals, &qh);
+    desk.open_coloured(&qh, "lower", "lower", 0xffff_8000);
+    desk.open_coloured(&qh, "upper", "upper", 0xff00_80ff);
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.task("lower").is_some() && activated(desk, "upper")
+    });
+    let lower_task = (PANEL_HEIGHT + TASK / 2.0, 20.0);
+
+    // The pointer onto the corner of the lower window the upper, cascaded
+    // down and right of it, leaves showing.
+    session.command(Command::FocusPolicy(Focus {
+        model: FocusModel::Sloppy,
+        autoraise: false,
+    }));
+    let facts = session.wait_for(|facts| in_front(facts).as_deref() == Some("upper"));
+    let lower = facts
+        .surfaces()
+        .iter()
+        .find(|surface| surface.title.as_deref() == Some("lower"))
+        .expect("open")
+        .geometry;
+    session.command(Command::Motion {
+        by: ((lower.x0 + 5.0) as i32, (lower.y0 + 5.0) as i32),
+    });
+    common::until(&mut queue, &mut desk, |desk| activated(desk, "lower"));
+    // And the shell told it is covered, as this client is, in the same turn.
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.told_of("lower")
+            .0
+            .is_some_and(|told| told.state.contains(WindowState::Covered))
+    });
+    assert_eq!(
+        in_front(&session.wait_for(|_| true)).as_deref(),
+        Some("upper"),
+        "the keys without a raise"
+    );
+
+    click(&session, panel, lower_task, PointerButton::Left);
+    session.wait_for(|facts| in_front(facts).as_deref() == Some("lower"));
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.task("lower")
+            .is_some_and(|task| task.is(State::Activated) && !task.is(State::Minimized))
+    });
+
+    click(&session, panel, lower_task, PointerButton::Left);
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.task("lower")
+            .is_some_and(|task| task.is(State::Minimized))
+    });
+
+    // Back, with the keys, and the upper kept on top over it.
+    click(&session, panel, lower_task, PointerButton::Left);
+    common::until(&mut queue, &mut desk, |desk| activated(desk, "lower"));
+    let upper = desk.task("upper").expect("listed").handle.clone();
+    desk.shell.clone().expect("bound").set_on_top(&upper, 1);
+    queue.flush().expect("sent");
+    session.wait_for(|facts| {
+        in_front(facts).as_deref() == Some("upper")
+            && facts
+                .surfaces()
+                .iter()
+                .any(|surface| surface.title.as_deref() == Some("upper") && surface.on_top)
+    });
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.told_of("upper")
+            .0
+            .is_some_and(|told| told.state.contains(WindowState::OnTop))
+    });
+    assert!(
+        activated(&desk, "lower"),
+        "kept on top, and raised, not given the keys"
+    );
+
+    click(&session, panel, lower_task, PointerButton::Left);
+    common::until(&mut queue, &mut desk, |desk| {
+        desk.task("lower")
+            .is_some_and(|task| task.is(State::Minimized))
+    });
+
+    drop((desk, queue));
+    shell.stop_with(session);
+}
+
 /// A person's right click on a task opens its window's menu beside it, and
 /// what is chosen there is made of the window. A second right click on the
 /// task only closes the menu, and the menu goes with its window. The clicks
