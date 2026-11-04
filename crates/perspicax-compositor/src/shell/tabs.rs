@@ -295,6 +295,12 @@ impl Compositor {
     /// out among the other windows. One that draws its own frame has no
     /// titlebar of ours to roll up to, and comes forward unrolled, and the
     /// group with it.
+    ///
+    /// Whether it is on screen is the rule's, as for any window (see
+    /// `shell::workspaces`). A group on a workspace not showing, or a tab
+    /// minimized, keeps it parked: it takes the group's place and state all
+    /// the same, to come back with them, but is neither raised nor given the
+    /// keys unseen (#220).
     fn bring_forward(&mut self, front: &Framed, place: &Framed) {
         let (Some(id), Some(from)) = (id_of(front), id_of(place)) else {
             return;
@@ -326,6 +332,17 @@ impl Compositor {
             })
         });
 
+        // In the group's place before the rule judges it: per output, the
+        // monitor a window is on decides its workspace, and a tab behind was
+        // parked where the group was when it went behind, which need not be
+        // where the group is now.
+        if let Some(location) = location {
+            if self.space.element_location(front).is_some() {
+                self.space.map_element(front.clone(), location, false);
+            } else {
+                placement(front, |placement| placement.parked = Some(location));
+            }
+        }
         self.workspaces.share(id, from);
         self.show_what_belongs();
         // After it is shown, for unparking refits it by its own state, and
@@ -361,12 +378,16 @@ impl Compositor {
                     if let Some(x11) = front.x11_surface() {
                         let _ = x11.configure(smithay::utils::Rectangle::new(location, size));
                     }
-                    self.space.map_element(front.clone(), location, false);
+                    if self.space.element_location(front).is_some() {
+                        self.space.map_element(front.clone(), location, false);
+                    }
                 }
             }
         }
-        self.space.raise_element(front, false);
-        self.focus_window(front);
+        if self.space.element_location(front).is_some() {
+            self.space.raise_element(front, false);
+            self.focus_window(front);
+        }
         self.backend.redraw();
         self.publish_facts();
     }
