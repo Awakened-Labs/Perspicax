@@ -400,29 +400,17 @@ impl Compositor {
             self.shade(window, false);
         }
         let Some(surface) = window.toplevel().cloned() else {
-            let shown = self.space.element_location(window).is_some();
             match fill {
                 // An X11 window has no xdg state to carry being maximized, so
                 // it is snapped to the whole monitor instead, which is the
-                // same rect by the same path.
-                Fill::Maximized if shown => {
+                // same rect by the same path. Parked, it is told, and snapped
+                // once it comes back.
+                Fill::Maximized => {
                     self.snap(
                         window,
                         perspicax_policy::Zone::Top,
                         on.and_then(Output::from_resource),
                     );
-                }
-                // Parked, it is told, and snapped once it comes back.
-                Fill::Maximized => {
-                    Self::restore_from_parked(window);
-                    placement(window, |placement| {
-                        placement.snapped = Some(perspicax_policy::Zone::Top);
-                    });
-                    #[cfg(feature = "xwayland")]
-                    if let Some(x11) = window.x11_surface() {
-                        let _ = x11.set_maximized(true);
-                    }
-                    self.publish_facts();
                 }
                 Fill::Fullscreen => {
                     #[cfg(feature = "xwayland")]
