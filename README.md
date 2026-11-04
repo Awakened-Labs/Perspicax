@@ -353,9 +353,11 @@ workspace, a window that is a tab behind another as `inactive_tab`, naming the
 tab in front, and a node hanging off the edge of every monitor as `off_screen`.
 A node of a window rolled up to its titlebar is refused as `rolled_up`, and
 so are `tab_forward` into a group rolled up and `window_focus` and
-`window_type` on one, though `window_close` still closes one. None is cleared
-by the agent switching the person's screen on its own, or unrolling what the
-person rolled up.
+`window_type` on one, though `window_close` still closes one. A tab the
+person minimized behind its group is refused as `unmapped` by `tab_forward`:
+one the person brings forward comes back from minimized, and an agent brings
+back nothing they put away. None is cleared by the agent switching the
+person's screen on its own, or unrolling what the person rolled up.
 
 A control its own application says is not being shown is refused as
 `not_showing`: Firefox's menu bar, hidden until Alt is pressed, and the page of
@@ -1211,10 +1213,11 @@ where it was last time says, opens there. That is its own top-left corner,
 not our frame's, on the monitor most of it is on, or the one under the
 pointer if that monitor is gone, and it is slid and shrunk onto it the same
 way. A Wayland window has no way to ask for a place, so its program's last
-one is remembered instead (below). All this is done once, as a window opens:
-after that, where it goes is the person's, and a window dragged partly off
-the screen stays there. With nobody at the seat, a window stays where the
-cascade put it, at the size it chose.
+one is remembered instead (below). All this is done once, as a window opens,
+or as it first comes back if it was minimized or switched away from before
+it first drew (#220): after that, where it goes is the person's, and a window
+dragged partly off the screen stays there. With nobody at the seat, a window
+stays where the cascade put it, at the size it chose.
 
 With a person at the seat, a program's next window opens where its last one
 closed, so a Wayland program, which cannot ask, still opens where it was
@@ -1274,6 +1277,9 @@ Plasma's and Windows' habits:
   them. Logo+G does the same from the keyboard with the window focused before,
   Logo+Tab steps through the tabs, and Logo+Shift+G takes one out. A window
   that draws its own frame gets a strip of tabs above it while it is grouped.
+  A tab minimized behind its group comes back when you bring it forward. One
+  that comes forward as the tab in front closes, while its group is on a
+  workspace not showing, waits there with the group, and takes no keys.
 
 `minimal` is Fluxbox's and Enlightenment's: focus follows the pointer, a 2×2
 grid of workspaces that wraps, and resting the pointer against an edge of the
@@ -1879,11 +1885,13 @@ from an application's own titlebar
 ([#239](https://github.com/Awakened-Labs/Perspicax/issues/239)).
 
 A left click on a task brings its window forward: restored, onto its
-workspace, raised and given the keys. A middle click asks it to close. A left
-click puts the window away only if it has the keys and nothing a raise would
-pass is over it (#291). Under sloppy focus the pointer gives the keys to a
-window it crosses on its way down to the panel, without raising it, so the
-window with the keys may still be behind another. Its task then brings it
+workspace, raised and given the keys. A tab behind another comes to the front
+of its group first, and is brought the same way, from a group on a workspace
+not showing too (#220). A middle click asks it to close. A left click puts the
+window away only if it has the keys and nothing a raise would pass is over it
+(#291). Under sloppy focus the pointer gives the keys to a window it crosses
+on its way down to the panel, without raising it, so the window with the keys
+may still be behind another. Its task then brings it
 forward, and a second click puts it away. Only what overlaps the window, as
 the person sees it, counts: its frame and its window, never a shadow, and not
 its own menus. A window beside it that touches none of it counts for nothing.
