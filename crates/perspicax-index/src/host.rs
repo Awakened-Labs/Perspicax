@@ -716,6 +716,16 @@ impl SurfaceFacts {
             .chain((!self.shaded).then(|| self.covers()))
     }
 
+    /// What the person sees of this surface, in global space: the frame the
+    /// host drew and, unless it is rolled up, its window. Never its shadow,
+    /// which hides nothing of what is under it.
+    fn seen(&self) -> impl Iterator<Item = Rect> + '_ {
+        self.frame
+            .iter()
+            .copied()
+            .chain((!self.shaded).then_some(self.geometry.abs()))
+    }
+
     /// Why nothing of this surface's own is drawn, when nothing is: asked
     /// before any arithmetic, because the geometry of a surface that is not
     /// drawn means nothing.
@@ -1137,6 +1147,55 @@ pub fn raised_witness(facts: &HostFacts, surface: SurfaceId) -> WindowWitness {
     }
 }
 
+/// Whether raising a window would bring it in front of some of what is over
+/// it now: of what the person sees of it ([`SurfaceFacts::seen`]), on a
+/// monitor, a surface a raise passes ([`raise_passes`]) hides some piece
+/// nothing else in front hides already. What a taskbar asks before putting
+/// away the window with the keyboard (#291): under sloppy focus the pointer
+/// gives the keys to a window it crosses without raising it, and a click on
+/// that window's task is to bring it forward, not put it away.
+///
+/// So a window beside it, touching none of it, covers nothing, and nor does
+/// a shadow; a window kept on top covers an ordinary window, but no raise
+/// passes it; and the window's own menus are drawn as part of it. A window
+/// not on screen has nothing over it a raise would pass: it is brought back,
+/// not raised.
+#[must_use]
+pub fn raise_would_uncover(facts: &HostFacts, surface: SurfaceId) -> bool {
+    let Some(target) = facts.surface(surface).filter(|target| target.mapped) else {
+        return false;
+    };
+    let mut left: Vec<Rect> = target
+        .seen()
+        .flat_map(|rect| on_monitors(facts, rect))
+        .collect();
+    let above = facts
+        .surfaces()
+        .iter()
+        .position(|candidate| candidate.id == surface)
+        .map_or(0, |index| index + 1);
+    for candidate in facts.surfaces()[above..].iter().rev() {
+        if left.is_empty() {
+            break;
+        }
+        if !candidate.mapped || menu_of(facts, candidate, surface) {
+            continue;
+        }
+        let mut hides = false;
+        for cut in candidate.seen() {
+            hides |= left.iter().any(|piece| overlaps(*piece, cut));
+            left = left
+                .into_iter()
+                .flat_map(|piece| subtract(piece, cut))
+                .collect();
+        }
+        if hides && raise_passes(facts, target, candidate) {
+            return true;
+        }
+    }
+    false
+}
+
 /// The surfaces above a window that raising it would cover some of what the
 /// person can see of: what an agent's raise would hide from them.
 ///
@@ -1173,10 +1232,7 @@ pub(crate) fn raise_would_hide(facts: &HostFacts, surface: SurfaceId) -> Vec<&Su
         })
         .filter(|candidate| {
             let showing = candidate
-                .frame
-                .iter()
-                .copied()
-                .chain((!candidate.shaded).then_some(candidate.geometry.abs()))
+                .seen()
                 .flat_map(|rect| on_monitors(facts, rect))
                 .collect();
             let (showing, _) = left_under(facts, candidate.id, showing, |_| true);
@@ -2219,6 +2275,134 @@ mod tests {
         let kept = SurfaceFacts::new(SurfaceId(4), rect(50.0, 50.0, 90.0, 90.0)).kept_on_top();
         let facts = HostFacts::bottom_to_top([target, kept, panel], 1);
         assert_eq!(hides(&facts), [4, 5]);
+    }
+
+    /// Whether raising the window at the origin would bring it in front of
+    /// some of what is over it.
+    fn uncovers(facts: &HostFacts) -> bool {
+        raise_would_uncover(facts, SurfaceId(1))
+    }
+
+    /// Over the right-hand quarter of the window at the origin, a window
+    /// `id`.
+    fn overlapping(id: u64) -> SurfaceFacts {
+        SurfaceFacts::new(SurfaceId(id), rect(300.0, 100.0, 700.0, 500.0))
+    }
+
+    /// Foot over part of vivaldi: a raise would bring vivaldi in front of it.
+    /// Beside it, under it, or with nothing over it, there is nothing to
+    /// raise it in front of.
+    #[test]
+    fn a_window_over_some_of_it_is_what_a_raise_uncovers() {
+        let facts = HostFacts::bottom_to_top([window(), overlapping(2)], 1);
+        assert!(uncovers(&facts));
+
+        let beside = SurfaceFacts::new(SurfaceId(2), rect(400.0, 0.0, 800.0, 300.0));
+        let facts = HostFacts::bottom_to_top([window(), beside], 1);
+        assert!(!uncovers(&facts), "touching none of it");
+
+        let facts = HostFacts::bottom_to_top([overlapping(2), window()], 1);
+        assert!(!uncovers(&facts), "under it");
+        assert!(!uncovers(&HostFacts::bottom_to_top([window()], 1)));
+    }
+
+    /// Calcy kept on top over vivaldi: no raise passes it, so it does not
+    /// count against vivaldi. One kept on top does count against another.
+    #[test]
+    fn a_window_kept_on_top_counts_only_against_another_kept_on_top() {
+        let facts = HostFacts::bottom_to_top([window(), overlapping(3).kept_on_top()], 1);
+        assert!(!uncovers(&facts));
+
+        let facts =
+            HostFacts::bottom_to_top([window().kept_on_top(), overlapping(3).kept_on_top()], 1);
+        assert!(uncovers(&facts));
+
+        // Foot over vivaldi, and calcy over both.
+        let facts =
+            HostFacts::bottom_to_top([window(), overlapping(2), overlapping(3).kept_on_top()], 1);
+        assert!(
+            !uncovers(&facts),
+            "foot hides only what calcy hides already"
+        );
+        let calcy = SurfaceFacts::new(SurfaceId(3), rect(300.0, 100.0, 350.0, 150.0)).kept_on_top();
+        let facts = HostFacts::bottom_to_top([window(), overlapping(2), calcy], 1);
+        assert!(uncovers(&facts), "foot hides more than calcy does");
+    }
+
+    /// Neither a panel nor anything else a raise does not pass counts, and
+    /// the window's own menu comes up with it.
+    #[test]
+    fn a_panel_a_launcher_and_its_own_menu_count_for_nothing() {
+        let panel = SurfaceFacts::new(SurfaceId(5), rect(0.0, 260.0, 1000.0, 300.0))
+            .layered(Layer::Top, "panel");
+        let launcher = over(6).layered(Layer::Overlay, "launcher");
+        let menu = overlapping(7).hung_from(SurfaceId(1), Instant::now());
+        for surface in [panel, launcher, menu, over(8).lock_cover()] {
+            let facts = HostFacts::bottom_to_top([window(), surface], 1);
+            assert!(!uncovers(&facts), "{facts:?}");
+        }
+        // Another window's menu is that window's.
+        let theirs = overlapping(7).hung_from(SurfaceId(2), Instant::now());
+        let beside = SurfaceFacts::new(SurfaceId(2), rect(800.0, 0.0, 900.0, 100.0));
+        let facts = HostFacts::bottom_to_top([window(), beside, theirs], 1);
+        assert!(uncovers(&facts));
+    }
+
+    /// What the person sees of each window is its frame and its window,
+    /// never a shadow; and only on a monitor.
+    #[test]
+    fn a_shadow_or_a_piece_off_every_monitor_covers_nothing() {
+        let shadowed = SurfaceFacts::new(SurfaceId(2), rect(410.0, 0.0, 800.0, 300.0))
+            .drawing_over(rect(390.0, -20.0, 820.0, 320.0));
+        let facts = HostFacts::bottom_to_top([window(), shadowed], 1);
+        assert!(!uncovers(&facts), "its shadow");
+
+        let titlebar = SurfaceFacts::new(SurfaceId(2), rect(410.0, 0.0, 800.0, 300.0))
+            .framed([rect(390.0, -20.0, 820.0, 0.0)]);
+        let facts = HostFacts::bottom_to_top([window(), titlebar], 1);
+        assert!(!uncovers(&facts), "its titlebar is above the window");
+        let facts = HostFacts::bottom_to_top(
+            [
+                window().framed([rect(-5.0, -30.0, 405.0, 0.0)]),
+                overlapping(2).framed([rect(380.0, -10.0, 700.0, 100.0)]),
+            ],
+            1,
+        );
+        assert!(uncovers(&facts), "over its titlebar");
+
+        let off_monitor = SurfaceFacts::new(SurfaceId(2), rect(350.0, 0.0, 800.0, 300.0));
+        let facts = HostFacts::bottom_to_top([window(), off_monitor], 1)
+            .with_outputs([rect(400.0, 0.0, 1400.0, 1000.0)]);
+        assert!(!uncovers(&facts), "where they meet is on no monitor");
+    }
+
+    /// A window not on screen is brought back, not raised.
+    #[test]
+    fn a_window_not_on_screen_has_nothing_over_it_to_raise_it_in_front_of() {
+        for target in [
+            window().unmapped(),
+            window().on_workspace(3),
+            window().behind_tab(SurfaceId(7)),
+        ] {
+            let facts = HostFacts::bottom_to_top([target, overlapping(2)], 1);
+            assert!(!uncovers(&facts), "{facts:?}");
+        }
+        let facts = HostFacts::bottom_to_top([window(), overlapping(2)], 1);
+        assert!(!raise_would_uncover(&facts, SurfaceId(9)), "never heard of");
+        let facts = HostFacts::bottom_to_top([window(), overlapping(2).unmapped()], 1);
+        assert!(!uncovers(&facts), "what is over it is not on screen");
+    }
+
+    /// Rolled up, what is seen of it is its titlebar.
+    #[test]
+    fn a_window_rolled_up_is_covered_by_what_is_over_its_titlebar() {
+        let rolled = window().framed([rect(0.0, -20.0, 400.0, 0.0)]).rolled_up();
+        let below_its_bar = SurfaceFacts::new(SurfaceId(2), rect(0.0, 50.0, 400.0, 300.0));
+        let facts = HostFacts::bottom_to_top([rolled.clone(), below_its_bar], 1);
+        assert!(!uncovers(&facts), "where its client would be");
+        let over_its_bar = SurfaceFacts::new(SurfaceId(2), rect(0.0, -30.0, 100.0, 10.0));
+        let facts = HostFacts::bottom_to_top([rolled, over_its_bar], 1);
+        assert!(uncovers(&facts));
     }
 
     fn witness(facts: &HostFacts) -> WindowWitness {
