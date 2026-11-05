@@ -207,7 +207,7 @@ impl Compositor {
         if !self.backend.has_person() {
             return;
         }
-        self.loop_handle.insert_idle(|state| {
+        self.idles.queue(|state| {
             state.repoint();
             state.settle_hold();
         });

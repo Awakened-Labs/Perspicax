@@ -51,6 +51,7 @@ mod grants;
 mod heads;
 mod hold;
 pub mod host;
+mod idles;
 mod keyboard;
 mod layers;
 mod lock;
@@ -284,8 +285,18 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
     // Before the socket, so a seat that cannot come up -- no session, no GPU,
     // no monitor -- is refused before any client has been accepted by a
     // compositor that cannot show it anything.
+    // What the loop is asked to run once idle, kept apart from calloop's own
+    // idles so that it can be run to any depth before the loop waits again
+    // (#224). See `idles`.
+    let idles = idles::Idles::default();
     let backend = Running::start(config, &handle, &event_loop.handle())?;
-    let mut state = Compositor::new(&handle, event_loop.handle(), backend, facts.clone());
+    let mut state = Compositor::new(
+        &handle,
+        event_loop.handle(),
+        idles.clone(),
+        backend,
+        facts.clone(),
+    );
     Running::attach(&mut state, &event_loop.handle())?;
     if let Some(path) = &config.places {
         state.keep_places_at(path.clone());
@@ -420,6 +431,17 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         // Before the next dispatch can accept a client: see `reap_spawned`.
         state.reap_spawned();
         state.backend.reap();
+        // What the events and the clients asked for once the loop is idle --
+        // a screencopy, a layout, a hold -- and what those ask for in turn,
+        // to any depth, before anything is flushed (#224).
+        let left = idles.run(&mut state, idles::MOST_ROUNDS);
+        if left > 0 {
+            tracing::warn!(
+                left,
+                most = idles::MOST_ROUNDS,
+                "a chain of idles did not end; the rest wait a turn"
+            );
+        }
         // calloop runs idles only at the end of a dispatch, after its wait,
         // and the clients were dispatched after that: what they just asked
         // for once the loop is idle -- a monitor's next frame, a screencopy,

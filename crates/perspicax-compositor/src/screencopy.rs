@@ -120,7 +120,7 @@ impl Compositor {
         {
             return;
         }
-        self.loop_handle.insert_idle(move |state: &mut Self| {
+        self.idles.queue(move |state: &mut Self| {
             let (moved, waiting) = std::mem::take(&mut state.screencopy.waiting)
                 .into_iter()
                 .partition(|(frame, _)| shows_pointer(frame));
