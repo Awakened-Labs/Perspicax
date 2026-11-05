@@ -1059,6 +1059,10 @@ fn place(layer: &LayerSurface, panel: &Panel) {
 impl App {
     /// The panels' news changed what they show: draw them again once the
     /// loop is idle, with the icon of any application new to them.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the shell's own loop: nothing on it waits for the compositor's turn (#224)"
+    )]
     pub(super) fn panels_changed(&mut self) {
         if !self.panels.mark_stale() {
             return;

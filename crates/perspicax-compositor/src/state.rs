@@ -343,8 +343,13 @@ pub struct Compositor {
     /// [`crate::screencopy`].
     #[cfg(feature = "capture")]
     pub(crate) screencopy: crate::screencopy::Screencopy,
-    /// The event loop, for the handlers that must schedule work on it.
+    /// The event loop, for the timers and sources the handlers must put on
+    /// it. What they ask to run once the loop is idle goes on `idles`.
     pub(crate) loop_handle: LoopHandle<'static, Self>,
+    /// What waits for the loop's idle turn: a copy, a layout, a hold, and on
+    /// a seat a monitor's frame. The loop runs it to any depth before it
+    /// flushes (#224). See [`crate::idles`].
+    pub(crate) idles: crate::idles::Idles<Self>,
     /// How to start a program against this compositor. Set by `run` once the
     /// socket exists, so `None` only before any client could connect.
     pub(crate) launch: Option<crate::Launch>,
@@ -380,6 +385,7 @@ impl Compositor {
     pub(crate) fn new(
         display: &DisplayHandle,
         event_loop: LoopHandle<'static, Self>,
+        idles: crate::idles::Idles<Self>,
         backend: Running,
         facts: Facts,
     ) -> Self {
@@ -493,6 +499,7 @@ impl Compositor {
             #[cfg(feature = "capture")]
             screencopy,
             loop_handle: event_loop,
+            idles,
             idle_inhibit: IdleInhibitManagerState::new::<Self>(display),
             inhibitors: Vec::new(),
             launch: None,
@@ -1448,8 +1455,8 @@ impl CompositorHandler for Compositor {
         // its frame -- once this commit has been taken in, not halfway.
         #[cfg(feature = "capture")]
         if !self.screencopy.waiting.is_empty() {
-            self.loop_handle
-                .insert_idle(|state: &mut Self| state.flush_screencopy());
+            self.idles
+                .queue(|state: &mut Self| state.flush_screencopy());
         }
     }
 }
@@ -1860,8 +1867,7 @@ impl SeatHandler for Compositor {
                 origin = ?crate::lock::origin_of(target),
                 "while locked, the keyboard went to what is not the lock screen"
             );
-            self.loop_handle
-                .insert_idle(|state| state.keep_keys_on_lock());
+            self.idles.queue(|state| state.keep_keys_on_lock());
         }
         // X clients read which window has the keyboard off the root.
         #[cfg(feature = "xwayland")]
@@ -1909,8 +1915,7 @@ impl SeatHandler for Compositor {
         // keyboard, and reading or switching its layout now would wait on
         // that lock for ever. Once the loop is idle the keyboard is free.
         if self.layout_memory.switching() == perspicax_policy::Switching::Window {
-            self.loop_handle
-                .insert_idle(move |state| state.follow_layout(window));
+            self.idles.queue(move |state| state.follow_layout(window));
         }
         // Which window is lit, and which are dimmed, follows the keyboard:
         // the next frame is drawn knowing. Only asked for here, which takes
