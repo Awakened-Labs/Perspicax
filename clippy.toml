@@ -11,4 +11,9 @@ disallowed-methods = [
     { path = "smithay::input::keyboard::KeyboardHandle::input_intercept", reason = "send a key through Compositor::send_key, which keeps it on the lock screen while locked (#197)" },
     { path = "smithay::input::keyboard::KeyboardHandle::input_forward", reason = "send a key through Compositor::send_key, which keeps it on the lock screen while locked (#197)" },
     { path = "smithay::input::keyboard::KeyboardHandle::set_focus", reason = "give the keyboard through focus_plain, focus_surface or clear_focus, which ask whether the lock allows it (#127)" },
+    # What waits for the compositor's idle turn goes on its own list, which the
+    # loop runs to any depth before it flushes (#130, #224). calloop's own
+    # idles run once per dispatch, after its wait, and one queued by another
+    # waits a poll. The shell's loop is its own, and the one exception.
+    { path = "calloop::LoopHandle::insert_idle", reason = "queue it on Compositor::idles, or the seat Session's, which the loop runs in the turn that asked (#224); only the shell's own loop may use calloop's" },
 ]
