@@ -752,9 +752,19 @@ impl Compositor {
         let Some(bounds) = self.space.element_geometry(window) else {
             return;
         };
-        let grab = ResizeGrab::new(start, window.clone(), edges, rect(bounds));
+        let from = rect(bounds);
+        let grab = ResizeGrab::new(start, window.clone(), edges, from);
         self.take_pointer(&pointer, grab, serial);
-        // After, as for a move: a window being resized is in hand too.
+        // After, not before, as for a move: replacing a grab unsets the one
+        // before it, which finishes its own window's resize. This one's
+        // record and hand are written once that is done.
+        placement(window, |placement| {
+            placement.resize = Some(Resize {
+                start: from,
+                edges,
+                released: false,
+            });
+        });
         self.hand = Some(Hand::Resizing(window.clone()));
         // The arrow for these edges for the whole resize, however it began:
         // from a frame, with the drag modifier, or asked for by a client.
