@@ -1299,9 +1299,12 @@ In both, a window being moved or resized stays in hand: switching
 workspace by a key, a number or a pager takes it along, as an edge does one
 being moved (resizing up to an edge never flips), sending it to another
 workspace takes the person with it, and one minimized while held stays
-minimized. A tab dragged with the middle button cannot come along without its
-group, so a switch calls the drag off, and the tab waits with its group where
-it was picked up. In both, a window's own menu, a right-click menu say, holds
+minimized. A window already being resized is not taken up again: a second
+press on its edge, or its program asking again, leaves the resize going as
+it was, its far edge still. A tab dragged with the middle button cannot
+come along without its group, so a switch calls the drag off, and the tab
+waits with its group where it was picked up. In both, a window's own menu,
+a right-click menu say, holds
 the keyboard while it is open, and a key on the window still works: Alt+F4,
 Alt+Tab, Logo+arrows and the rest close the menu first, as a click outside it
 would, then act on the window. A key that is not about the window, a layout
