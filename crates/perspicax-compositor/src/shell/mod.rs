@@ -725,7 +725,9 @@ impl Compositor {
         }
     }
 
-    /// Start resizing a window with the pointer.
+    /// Start resizing a window with the pointer, unless it is being resized
+    /// already: its client asking again, or another press on its frame, is
+    /// the resize under way, which goes on as it was (#221).
     pub(crate) fn start_resize(
         &mut self,
         window: &Framed,
@@ -740,12 +742,29 @@ impl Compositor {
         if Self::filling(window).is_some() || is_shaded(window) {
             return;
         }
+        // Taken up again, its resize would end as the new one began: its
+        // client told it is over mid-drag, and its edge no longer held. A
+        // client asking again also asks from its first press, which would
+        // pull the window by the whole drag a second time.
+        if matches!(&self.hand, Some(Hand::Resizing(held)) if held == window) {
+            return;
+        }
         let Some(bounds) = self.space.element_geometry(window) else {
             return;
         };
-        let grab = ResizeGrab::new(start, window.clone(), edges, rect(bounds));
+        let from = rect(bounds);
+        let grab = ResizeGrab::new(start, window.clone(), edges, from);
         self.take_pointer(&pointer, grab, serial);
-        // After, as for a move: a window being resized is in hand too.
+        // After, not before, as for a move: replacing a grab unsets the one
+        // before it, which finishes its own window's resize. This one's
+        // record and hand are written once that is done.
+        placement(window, |placement| {
+            placement.resize = Some(Resize {
+                start: from,
+                edges,
+                released: false,
+            });
+        });
         self.hand = Some(Hand::Resizing(window.clone()));
         // The arrow for these edges for the whole resize, however it began:
         // from a frame, with the drag modifier, or asked for by a client.

@@ -39,7 +39,7 @@ use smithay::{
     wayland::{compositor::with_states, shell::xdg::SurfaceCachedState},
 };
 
-use super::{Resize, placement};
+use super::placement;
 use crate::{framed::Framed, state::Compositor};
 
 /// The half of `PointerGrab` neither grab changes: scrolling, frames and
@@ -216,13 +216,6 @@ impl ResizeGrab {
         edges: Edges,
         from: Rect,
     ) -> Self {
-        placement(&window, |placement| {
-            placement.resize = Some(Resize {
-                start: from,
-                edges,
-                released: false,
-            });
-        });
         Self {
             start,
             window,

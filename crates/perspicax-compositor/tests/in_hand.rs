@@ -11,7 +11,8 @@
 //! monitor under it, which is not always the one it left. A window being
 //! resized is as much in hand as one being moved, and goes along too. One
 //! minimized while held stays minimized, and a resize comes back with the
-//! edge it was not resized by where it was.
+//! edge it was not resized by where it was. A resize its client asks for
+//! again is the one under way, and goes on keeping that edge still.
 //!
 //! The person's hand is [`Command::Press`], a client asking to be moved or
 //! resized, and
@@ -381,6 +382,62 @@ fn a_window_minimized_while_being_resized_comes_back_with_its_far_edge_where_it_
     session.perform(Action::CycleFocus);
     let shown = session.wait_for(|facts| seen(facts, "held") == Seen::Shown);
     assert_eq!(geometry(&shown, "held"), back);
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_resize_asked_for_again_goes_on_as_it_was() {
+    let session = session("in-hand-resized-again", Mode::Spanning);
+    let (mut desk, mut queue, _qh) = with_windows(&session);
+    let from = geometry(&session.facts.read(), "held");
+
+    // Pulled 20 out of its left edge, and its client asks again with the
+    // same press, the button still down.
+    resize_held(&session, &mut desk, &mut queue, ResizeEdge::Left);
+    let held = desk.windows[1].wl_surface().clone();
+    let told = desk.said_to(&held).len();
+    let seat = desk.seat.clone().expect("our pointer's seat");
+    desk.windows[1].resize(&seat, desk.pressed.expect("pressed"), ResizeEdge::Left);
+    queue.roundtrip(&mut desk).expect("round trip");
+
+    // Its client answers 100 narrower than it was, a size of its own, and
+    // the edge it is not resized by stays where it was.
+    desk.declaring
+        .push((desk.windows[1].clone(), Some((0, 0, 300, 300))));
+    session.command(Command::Motion { by: (-40, 0) });
+    until(&mut queue, &mut desk, |desk| {
+        desk.offered == Some((460, 300))
+    });
+    queue.roundtrip(&mut desk).expect("round trip");
+    let narrowed = session.wait_for(|facts| {
+        let at = geometry(facts, "held");
+        at.x1 - at.x0 == 300.0
+    });
+    let back = Rect {
+        x0: from.x0 + 100.0,
+        ..from
+    };
+    assert_eq!(geometry(&narrowed, "held"), back);
+    // And it was never told the resize was over while the button was down.
+    let resizing: Vec<_> = desk.said_to(&held)[told..]
+        .iter()
+        .filter_map(|said| match said {
+            Said::Configure(configured) => Some(configured.resizing),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        resizing.iter().all(|resizing| *resizing),
+        "told the resize was over mid-drag: {resizing:?}"
+    );
+
+    // Let go, it is where the resize left it.
+    release(&session);
+    until(&mut queue, &mut desk, |desk| !desk.resizing);
+    queue.roundtrip(&mut desk).expect("round trip");
+    assert_eq!(geometry(&session.facts.read(), "held"), back);
 
     session.stop((desk, queue));
 }
