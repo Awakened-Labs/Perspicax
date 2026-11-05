@@ -13,7 +13,11 @@
 //!
 //! Driven by vblank, not a timer ([`Pace`]). A commit marks every output as
 //! owing a frame, and one waiting for nothing asks for the loop's next idle
-//! turn to render in. A frame queued on the CRTC awaits its vblank, and the
+//! turn to render in ([`crate::idles`]): the same turn of the loop, before
+//! anything is flushed, even when it was a render that asked -- a render
+//! relights what is under the pointer, which asks every monitor again, and
+//! another that was waiting for nothing draws in that turn too (#224). A
+//! frame queued on the CRTC awaits its vblank, and the
 //! vblank renders again only if something was committed meanwhile. A render
 //! with nothing new to show queues no frame and brings no vblank, so a timer
 //! of one refresh stands in for it. A quiet desktop therefore costs almost
@@ -100,6 +104,7 @@ use super::{
 use crate::{
     Error,
     backdrop::{self, Arrived},
+    idles::Idles,
     state::Compositor,
 };
 
@@ -180,6 +185,10 @@ pub(crate) struct Session {
     renderer: GlesRenderer,
     heads: Vec<Head>,
     handle: LoopHandle<'static, Compositor>,
+    /// Where a monitor asks for its turn to draw: the compositor's own list,
+    /// run to any depth before the loop waits again (#224). See
+    /// [`crate::idles`].
+    idles: Idles<Compositor>,
     /// Keys whose press the compositor kept (an escape hatch or a binding),
     /// so their release is swallowed too: a client must never see half of a
     /// chord it was not given.
@@ -277,6 +286,7 @@ impl Session {
     /// console.
     pub(crate) fn open(
         handle: &LoopHandle<'static, Compositor>,
+        idles: &Idles<Compositor>,
         config_path: Option<PathBuf>,
     ) -> Result<Self, Error> {
         // Perspicax's lockup, decoded meanwhile, so the lock screen has it
@@ -421,6 +431,7 @@ impl Session {
             renderer,
             heads: Vec::new(),
             handle: handle.clone(),
+            idles: idles.clone(),
             swallowed: Vec::new(),
             settings,
             config_path,
@@ -459,8 +470,7 @@ impl Session {
         for head in &mut self.heads {
             if head.pace.changed() {
                 let crtc = head.crtc;
-                self.handle
-                    .insert_idle(move |state| came(state, crtc, Cue::Turn));
+                self.idles.queue(move |state| came(state, crtc, Cue::Turn));
             }
         }
     }

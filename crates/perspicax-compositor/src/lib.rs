@@ -287,9 +287,9 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
     // compositor that cannot show it anything.
     // What the loop is asked to run once idle, kept apart from calloop's own
     // idles so that it can be run to any depth before the loop waits again
-    // (#224). See `idles`.
+    // (#224). Made first: the seat and the compositor each keep a clone.
     let idles = idles::Idles::default();
-    let backend = Running::start(config, &handle, &event_loop.handle())?;
+    let backend = Running::start(config, &handle, &event_loop.handle(), &idles)?;
     let mut state = Compositor::new(
         &handle,
         event_loop.handle(),
@@ -432,8 +432,12 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
         state.reap_spawned();
         state.backend.reap();
         // What the events and the clients asked for once the loop is idle --
-        // a screencopy, a layout, a hold -- and what those ask for in turn,
-        // to any depth, before anything is flushed (#224).
+        // a monitor's next frame, a screencopy, a layout, a hold -- and what
+        // those ask for in turn, to any depth, before anything is flushed.
+        // calloop's own idles run only at the end of a dispatch, after its
+        // wait, and the clients are dispatched after that, so what they asked
+        // for waited out the next one, up to a frame on a still desktop
+        // (#130); and one queued by another waited again (#224). See `idles`.
         let left = idles.run(&mut state, idles::MOST_ROUNDS);
         if left > 0 {
             tracing::warn!(
@@ -441,14 +445,6 @@ pub fn run(config: &Config, facts: &Facts, requests: &Requests, stop: &Stop) -> 
                 most = idles::MOST_ROUNDS,
                 "a chain of idles did not end; the rest wait a turn"
             );
-        }
-        // calloop runs idles only at the end of a dispatch, after its wait,
-        // and the clients were dispatched after that: what they just asked
-        // for once the loop is idle -- a monitor's next frame, a screencopy,
-        // a layout, a hold -- would wait out the next one, up to a frame on a
-        // still desktop (#130). Nothing is waited for here.
-        if let Err(error) = event_loop.dispatch(Some(Duration::ZERO), &mut state) {
-            break Err(Error::EventLoop(error.to_string()));
         }
         // After the idles: one of them follows the keyboard into a window's
         // layout, and the shells hear of it in this turn.

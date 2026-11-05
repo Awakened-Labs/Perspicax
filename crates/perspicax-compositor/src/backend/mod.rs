@@ -38,7 +38,9 @@ use smithay::{
 
 use perspicax_policy::{Access, MouseBindings, Never, Opacity, Place, Rule, Shape};
 
-use crate::{Config, Error, FRAME_INTERVAL, shell_protocol::Refused, state::Compositor};
+use crate::{
+    Config, Error, FRAME_INTERVAL, idles::Idles, shell_protocol::Refused, state::Compositor,
+};
 
 /// Where the compositor puts its output and gets its input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,6 +283,8 @@ impl Running {
         display: &DisplayHandle,
         #[cfg_attr(not(feature = "seat"), expect(unused_variables, reason = "the seat's"))]
         event_loop: &LoopHandle<'static, Compositor>,
+        #[cfg_attr(not(feature = "seat"), expect(unused_variables, reason = "the seat's"))]
+        idles: &Idles<Compositor>,
     ) -> Result<Self, Error> {
         config.backend.ensure_built()?;
         match &config.backend {
@@ -306,6 +310,7 @@ impl Running {
             #[cfg(feature = "seat")]
             Backend::Seat => Ok(Self::Seat(Box::new(seat::Session::open(
                 event_loop,
+                idles,
                 config.config.clone(),
             )?))),
             #[cfg(not(feature = "seat"))]
