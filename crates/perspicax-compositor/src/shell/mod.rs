@@ -725,7 +725,9 @@ impl Compositor {
         }
     }
 
-    /// Start resizing a window with the pointer.
+    /// Start resizing a window with the pointer, unless it is being resized
+    /// already: its client asking again, or another press on its frame, is
+    /// the resize under way, which goes on as it was (#221).
     pub(crate) fn start_resize(
         &mut self,
         window: &Framed,
@@ -738,6 +740,13 @@ impl Compositor {
         };
         // A window rolled up to its titlebar has no client's edge to drag.
         if Self::filling(window).is_some() || is_shaded(window) {
+            return;
+        }
+        // Taken up again, its resize would end as the new one began: its
+        // client told it is over mid-drag, and its edge no longer held. A
+        // client asking again also asks from its first press, which would
+        // pull the window by the whole drag a second time.
+        if matches!(&self.hand, Some(Hand::Resizing(held)) if held == window) {
             return;
         }
         let Some(bounds) = self.space.element_geometry(window) else {

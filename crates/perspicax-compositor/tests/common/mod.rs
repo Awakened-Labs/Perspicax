@@ -845,6 +845,8 @@ pub struct Configured {
     pub fullscreen: bool,
     /// Tiled against any edge: snapped to a half or a quarter.
     pub tiled: bool,
+    /// Told it is being resized.
+    pub resizing: bool,
     /// The most room it was told it has (`xdg_toplevel.configure_bounds`),
     /// the last time it was told: SCTK keeps it from one configure to the
     /// next.
@@ -866,6 +868,7 @@ impl Configured {
                 || configure.is_tiled_right()
                 || configure.is_tiled_top()
                 || configure.is_tiled_bottom(),
+            resizing: configure.is_resizing(),
             bounds: configure.suggested_bounds,
         }
     }
