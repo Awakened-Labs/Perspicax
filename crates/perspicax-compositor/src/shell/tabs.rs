@@ -96,7 +96,7 @@ impl Compositor {
             return;
         };
         self.tabs.activate(id);
-        self.bring_forward(tab, &place);
+        self.bring_chosen_forward(tab, &place);
     }
 
     /// Start dragging `tab` by its titlebar with the middle button.
@@ -235,7 +235,7 @@ impl Compositor {
             return;
         };
         if let (Some(next), Some(place)) = (self.any_window(next), self.window_for_id(focused)) {
-            self.bring_forward(&next, &place);
+            self.bring_chosen_forward(&next, &place);
         }
     }
 
@@ -277,6 +277,18 @@ impl Compositor {
         }
     }
 
+    /// Bring forward a tab the person chose -- by its tab on the titlebar,
+    /// Logo+Tab or a taskbar -- into `place`'s place. Minimized behind its
+    /// group, it is minimized no longer: they asked to see it. A tab that
+    /// comes forward because the one in front went is not chosen, and one
+    /// minimized takes its group off screen with it.
+    fn bring_chosen_forward(&mut self, tab: &Framed, place: &Framed) {
+        if placement(tab, |placement| std::mem::take(&mut placement.minimized)) {
+            self.tell_minimized(tab, false);
+        }
+        self.bring_forward(tab, place);
+    }
+
     /// Put `front` where `place` is, as the group's front tab: on its
     /// workspace, at its location and size, maximized or snapped as it is.
     /// `place` is parked if the groups say it is no longer in front.
@@ -295,6 +307,12 @@ impl Compositor {
     /// out among the other windows. One that draws its own frame has no
     /// titlebar of ours to roll up to, and comes forward unrolled, and the
     /// group with it.
+    ///
+    /// Whether it is on screen is the rule's, as for any window (see
+    /// `shell::workspaces`). A group on a workspace not showing, or a tab
+    /// minimized, keeps it parked: it takes the group's place and state all
+    /// the same, to come back with them, but is neither raised nor given the
+    /// keys unseen (#220).
     fn bring_forward(&mut self, front: &Framed, place: &Framed) {
         let (Some(id), Some(from)) = (id_of(front), id_of(place)) else {
             return;
@@ -326,6 +344,17 @@ impl Compositor {
             })
         });
 
+        // In the group's place before the rule judges it: per output, the
+        // monitor a window is on decides its workspace, and a tab behind was
+        // parked where the group was when it went behind, which need not be
+        // where the group is now.
+        if let Some(location) = location {
+            if self.space.element_location(front).is_some() {
+                self.space.map_element(front.clone(), location, false);
+            } else {
+                placement(front, |placement| placement.parked = Some(location));
+            }
+        }
         self.workspaces.share(id, from);
         self.show_what_belongs();
         // After it is shown, for unparking refits it by its own state, and
@@ -361,12 +390,16 @@ impl Compositor {
                     if let Some(x11) = front.x11_surface() {
                         let _ = x11.configure(smithay::utils::Rectangle::new(location, size));
                     }
-                    self.space.map_element(front.clone(), location, false);
+                    if self.space.element_location(front).is_some() {
+                        self.space.map_element(front.clone(), location, false);
+                    }
                 }
             }
         }
-        self.space.raise_element(front, false);
-        self.focus_window(front);
+        if self.space.element_location(front).is_some() {
+            self.space.raise_element(front, false);
+            self.focus_window(front);
+        }
         self.backend.redraw();
         self.publish_facts();
     }

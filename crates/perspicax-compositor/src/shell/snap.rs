@@ -54,6 +54,10 @@ pub(crate) struct SnapPreview {
 impl Compositor {
     /// Snap a window to a zone of `output`, or of the output it is mostly
     /// on.
+    ///
+    /// A parked window -- minimized, or on a workspace not showing -- is
+    /// only told, as [`Compositor::fill`] tells one. It stays parked, and
+    /// snaps when it comes back (see `unpark_window`).
     pub(crate) fn snap(&mut self, window: &Framed, zone: Zone, output: Option<Output>) {
         if zone == Zone::Top {
             self.clear_tiling(window);
@@ -63,6 +67,17 @@ impl Compositor {
                 self.fill(window, super::Fill::Maximized, None);
                 return;
             }
+        }
+        if self.space.element_location(window).is_none() {
+            Self::restore_from_parked(window);
+            placement(window, |placement| placement.snapped = Some(zone));
+            #[cfg(feature = "xwayland")]
+            if let Some(x11) = window.x11_surface() {
+                let _ = x11.set_fullscreen(false);
+                let _ = x11.set_maximized(zone == Zone::Top);
+            }
+            self.publish_facts();
+            return;
         }
         let Some(output) = output.or_else(|| self.output_of(window)) else {
             return;
@@ -118,7 +133,8 @@ impl Compositor {
     }
 
     /// Take a window out of its zone: back to the size it had before it was
-    /// snapped, at `at`, or where it was.
+    /// snapped, at `at`, or where it was. A parked window is told, and comes
+    /// back there when it comes back at all.
     pub(crate) fn unsnap(&mut self, window: &Framed, at: Option<Point<i32, Logical>>) {
         let restore = placement(window, |placement| {
             placement.snapped = None;
@@ -145,7 +161,11 @@ impl Compositor {
         if let Some(x11) = window.x11_surface() {
             let _ = x11.configure(Rectangle::new(to, restore.size));
         }
-        self.space.map_element(window.clone(), to, false);
+        if self.space.element_location(window).is_some() {
+            self.space.map_element(window.clone(), to, false);
+        } else {
+            placement(window, |placement| placement.parked = Some(to));
+        }
         self.backend.redraw();
         self.publish_facts();
     }

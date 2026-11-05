@@ -385,10 +385,11 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, SurfaceId> for Compositor {
 }
 
 impl Compositor {
-    /// Bring a window to the person, as clicking it in a taskbar does: a tab
-    /// behind another comes forward in its group's place; anything else is
-    /// restored, onto its workspace, raised and given the keyboard. Only
-    /// when the person asked the taskbar for it (#270).
+    /// Bring a window to the person, as clicking it in a taskbar does: it is
+    /// restored, onto its workspace, raised and given the keyboard. A tab
+    /// behind another comes forward in its group's place first, and is then
+    /// brought as any window is, from a group on a workspace not showing
+    /// too (#220). Only when the person asked the taskbar for it (#270).
     ///
     /// Asked for, it wants their attention no longer, keyboard or not. A
     /// launcher of the taskbar's own may have the keys -- the shell's pie,
@@ -396,10 +397,7 @@ impl Compositor {
     /// topmost window that wants none, which would pass over this one, were
     /// it still marked, for the window it was raised over.
     pub(crate) fn activate_window(&mut self, window: &crate::framed::Framed) {
-        if self.behind_tab(window).is_some() {
-            self.activate_tab(window);
-            return;
-        }
+        self.activate_tab(window);
         let (Some(surface), Some(id)) = (surface_of(window), crate::shell::id_of(window)) else {
             return;
         };

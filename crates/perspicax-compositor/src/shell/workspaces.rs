@@ -414,12 +414,20 @@ impl Compositor {
     /// one made fullscreen while it was parked becomes it. Mapped, it is not
     /// yet counted on its monitor; the next frame counts it, and tells it it
     /// may draw ([`Compositor::settle_outputs`]).
+    ///
+    /// A Wayland window that drew its first picture while parked opens now,
+    /// as it would have then: where its program was, and wholly on screen
+    /// ([`Compositor::open_in_place`]). One yet to draw opens at its first
+    /// picture, with a size to settle.
     fn unpark_window(&mut self, window: &Framed) {
         self.parked.retain(|parked| parked != window);
         let parked = placement(window, |placement| placement.parked.take());
         let at = self.unpark(window, parked.unwrap_or_default());
         self.space.map_element(window.clone(), at, false);
         self.refit(window);
+        if window.toplevel().is_some() && id_of(window).is_some_and(|id| self.has_presented(id)) {
+            self.open_in_place(window);
+        }
     }
 
     /// The monitor a window is on, by name, whether it is on screen or

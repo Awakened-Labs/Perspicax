@@ -1180,6 +1180,18 @@ impl X11 {
         })
     }
 
+    /// Each window titled `title` the facts list now: whether it is drawn,
+    /// and the workspace it is left on. A window both parked and drawn is
+    /// listed twice (#220).
+    fn listed(&self, title: &str) -> Vec<(bool, Option<u16>)> {
+        self.facts()
+            .surfaces()
+            .iter()
+            .filter(|surface| surface.title.as_deref() == Some(title))
+            .map(|surface| (surface.mapped, surface.off_workspace))
+            .collect()
+    }
+
     fn perform(&self, action: Action) {
         self.session.perform(action);
     }
@@ -1716,6 +1728,90 @@ fn an_x11_window_on_a_workspace_not_showing_that_asks_for_fullscreen_stays_there
     .unwrap_or_else(|| panic!("never filled its monitor once shown: {:?}", x11.facts()));
 
     x11.stop();
+}
+
+/// Issue #220: a maximized window left on a workspace not showing, asking
+/// there to be maximized no longer, is told it is not, and waits on its own
+/// workspace to come back where it was before it was maximized. It was put
+/// back on screen, on the workspace in front of the person, while still
+/// parked on its own: drawn, and listed twice.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_unmaximized_on_a_workspace_not_showing_stays_there_until_shown() {
+    let x11 = X11::start("x11-parked-unmaximize", two_workspaces().with_person());
+    let window = x11.open("game");
+    let before = x11
+        .surface_where("game", |surface| surface.frame.len() == 4)
+        .map(|surface| rect_of(&surface))
+        .expect("framed");
+    x11.ask_maximized(window, ADD);
+    x11.surface_where("game", |surface| surface.frame.len() == 1)
+        .expect("never maximized");
+    x11.perform(Action::Workspace(perspicax_policy::Direction::Right));
+    x11.surface_where("game", |surface| surface.off_workspace.is_some())
+        .expect("never left behind");
+
+    x11.ask_maximized(window, REMOVE);
+    assert!(
+        x11.answered(window, x11.atoms._NET_WM_STATE),
+        "never answered"
+    );
+    x11.settled(window);
+    let state = x11.net_wm_state(window);
+    assert!(!state.contains(&x11.atoms._NET_WM_STATE_MAXIMIZED_VERT));
+    assert_eq!(
+        x11.listed("game"),
+        vec![(false, Some(1))],
+        "one window, left on workspace 1: {:?}",
+        x11.facts()
+    );
+
+    x11.perform(Action::Workspace(perspicax_policy::Direction::Left));
+    x11.surface_where("game", |surface| {
+        surface.mapped && surface.frame.len() == 4 && rect_of(surface) == before
+    })
+    .unwrap_or_else(|| panic!("never back where it was, {before:?}: {:?}", x11.facts()));
+
+    x11.stop();
+}
+
+/// Issue #220: a taskbar maximizing a window on a workspace not showing --
+/// the person's pick, as a task's menu has it -- tells it it is maximized,
+/// and it fills its monitor once its workspace is shown, not before.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_a_taskbar_maximizes_on_a_workspace_not_showing_stays_there_until_shown() {
+    let x11 = X11::start(
+        "x11-parked-taskbar-maximize",
+        two_workspaces().with_person(),
+    );
+    let window = x11.open("game");
+    x11.perform(Action::Workspace(perspicax_policy::Direction::Right));
+    x11.surface_where("game", |surface| surface.off_workspace.is_some())
+        .expect("never left behind");
+    let (mut desk, mut queue, qh, globals) = x11.session.client();
+    desk.bind_shell(&globals, &qh);
+    desk.bind_taskbar(&globals, &qh);
+    until(&mut queue, &mut desk, |desk| desk.task("game").is_some());
+
+    common::press_reaching(&x11.session, &mut desk, &mut queue);
+    desk.task("game").expect("listed").handle.set_maximized();
+    queue.roundtrip(&mut desk).expect("the request sent");
+    x11.settled(window);
+    let state = x11.net_wm_state(window);
+    assert!(state.contains(&x11.atoms._NET_WM_STATE_MAXIMIZED_VERT));
+    assert_eq!(
+        x11.listed("game"),
+        vec![(false, Some(1))],
+        "one window, left on workspace 1: {:?}",
+        x11.facts()
+    );
+
+    x11.perform(Action::Workspace(perspicax_policy::Direction::Left));
+    x11.surface_where("game", |surface| surface.mapped && surface.frame.len() == 1)
+        .unwrap_or_else(|| panic!("never maximized once shown: {:?}", x11.facts()));
+
+    x11.session.stop((desk, queue));
 }
 
 /// Issue #90: with nobody at the seat a window asking to go fullscreen stays
