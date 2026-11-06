@@ -3641,6 +3641,109 @@ fn what_an_x11_submenu_draws_is_its_menus_windows_damage_too() {
     x11.stop();
 }
 
+/// Issue #232: an X11 menu closing is a frame of the window it hung from,
+/// where it was: what it covered shows again there, as a Wayland menu's
+/// closing does (#42). Choosing an item that changes nothing else -- Copy --
+/// closes its menu and nothing more, and without this its receipt would not
+/// see it.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_menu_closing_is_a_frame_of_its_window_where_it_was() {
+    let x11 = X11::start("x11-menu-closing", Backend::headless((1280, 800)));
+    let window = x11.open("page");
+    let page = id_of(&x11, "page");
+    let (x0, y0, _, _) = rect_of(x11.facts().surface(page).expect("the page"));
+    let menu = x11.menu_over(
+        "menu",
+        ((x0 + 260.0) as i16, (y0 + 40.0) as i16),
+        (120, 100),
+        Some(window),
+    );
+    let was = Rect::new(0.0, 0.0, 120.0, 100.0) + from_page(&x11, page, "menu");
+    let before = frames_of(&x11, page);
+
+    x11.x.unmap_window(menu).expect("unmap_window");
+    x11.x.flush().expect("flush");
+
+    let closed = page_damaged(&x11, page, before, was).unwrap_or_else(|| {
+        panic!(
+            "the page has no frame where the menu was, {was:?}: {:?}",
+            x11.facts().surface(page)
+        )
+    });
+    assert_eq!(
+        closed.damage_generation,
+        before + 1,
+        "one frame: {closed:?}"
+    );
+
+    x11.stop();
+}
+
+/// Issue #232: a menu that showed nothing closes without a frame of its
+/// window: it uncovered nothing. GTK 3 maps an input-only window that places
+/// itself as each menu opens; this one names the page.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_menu_that_showed_nothing_closes_without_a_frame_of_its_window() {
+    let x11 = X11::start("x11-menu-closing-unseen", Backend::headless((1280, 800)));
+    let window = x11.open("page");
+    let page = id_of(&x11, "page");
+    let (x0, y0, _, _) = rect_of(x11.facts().surface(page).expect("the page"));
+    let grab = x11.x.generate_id().expect("an X id");
+    x11.x
+        .create_window(
+            0,
+            grab,
+            x11.root,
+            (x0 + 20.0) as i16,
+            (y0 + 20.0) as i16,
+            10,
+            10,
+            0,
+            WindowClass::INPUT_ONLY,
+            0,
+            &CreateWindowAux::new().override_redirect(1),
+        )
+        .expect("create_window");
+    x11.x
+        .change_property8(
+            PropMode::REPLACE,
+            grab,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            b"grab",
+        )
+        .expect("WM_NAME");
+    x11.transient(grab, window);
+    x11.x.map_window(grab).expect("map_window");
+    x11.x.flush().expect("flush");
+    x11.surface_where("grab", |grab| grab.hangs_from() == Some(page))
+        .unwrap_or_else(|| panic!("never described as the page's: {:?}", x11.facts()));
+    let before = frames_of(&x11, page);
+
+    x11.x.unmap_window(grab).expect("unmap_window");
+    x11.x.flush().expect("flush");
+    eventually(Duration::from_secs(5), || {
+        let facts = x11.facts();
+        let gone = facts
+            .surfaces()
+            .iter()
+            .all(|surface| surface.title.as_deref() != Some("grab"));
+        gone.then_some(())
+    })
+    .unwrap_or_else(|| panic!("it never closed: {:?}", x11.facts()));
+
+    assert_eq!(
+        frames_of(&x11, page),
+        before,
+        "{:?}",
+        x11.facts().surface(page)
+    );
+
+    x11.stop();
+}
+
 /// Issue #232: a menu of nothing draws on no window, even over one, and a
 /// dialog of the window is a window of its own: what either draws is no
 /// other window's damage.

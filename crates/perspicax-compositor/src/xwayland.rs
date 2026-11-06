@@ -1642,6 +1642,7 @@ impl Compositor {
     fn forget_x11(&mut self, x11: &X11Surface) {
         self.xwayland.deciding.remove(&x11.window_id());
         if let Some(window) = self.x11_window(x11) {
+            self.x11_menu_closed(&window);
             self.forget_window(&window);
             self.refocus_after_close(x11.wl_surface().as_ref());
             self.backend.redraw();
@@ -1649,6 +1650,22 @@ impl Compositor {
         }
         if let Some(side) = &self.xwayland.side {
             side.forget_active(x11.window_id());
+        }
+    }
+
+    /// An X11 menu closing is a frame of the window it hung from, where it
+    /// was, as a Wayland menu's is (`popup_destroyed`): what it covered shows
+    /// again there (#232). Xwayland takes no picture away as an X window
+    /// unmaps, so no commit says so. Choosing an item that changes nothing
+    /// else -- Copy -- closes its menu and nothing more, and without this its
+    /// receipt would not see it. Nothing for a menu that showed nothing by
+    /// then, as GTK 3's input-only one shows nothing, or one that took its
+    /// picture away, counted as it did.
+    fn x11_menu_closed(&mut self, menu: &Framed) {
+        let showed = shell::id_of(menu).is_some_and(|id| self.has_presented(id));
+        if let (true, Some((from, at))) = (showed, self.x11_hung(menu)) {
+            let whole = crate::damage::to_rect(Rectangle::from_size(menu.geometry().size)) + at;
+            self.record_damage(from, vec![whole]);
         }
     }
 
