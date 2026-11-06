@@ -1384,6 +1384,36 @@ fn an_x11_window_is_not_granted_by_a_key() {
     x11.stop();
 }
 
+/// A desk that grants its Xwayland, as a person could grant a server of its
+/// own (#289), consents to every X11 window on it, since consent for X11 is
+/// the server's, and marks each out as a seat marks a granted window: the
+/// line round its frame goes out with its facts, four strips beside the
+/// frame's four.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_is_marked_out_where_its_xwayland_is_granted() {
+    let x11 = X11::start(
+        "x11-grant-server",
+        Backend::headless((1280, 1024)).granting_xwayland(),
+    );
+    x11.open("page");
+    let page = x11
+        .surface_where("page", |surface| matches!(surface.origin, Origin::X11(_)))
+        .unwrap_or_else(|| panic!("never attributed: {:?}", x11.facts()));
+    let Origin::X11(origin) = &page.origin else {
+        unreachable!("attributed to X11")
+    };
+    assert_eq!(
+        x11.facts().consent(),
+        &perspicax_index::Consent::granted(vec![origin.server]),
+        "Xwayland, and nothing else"
+    );
+    x11.surface_where("page", |surface| surface.frame.len() == 8)
+        .unwrap_or_else(|| panic!("never marked out: {:?}", x11.facts()));
+
+    x11.stop();
+}
+
 /// Issue #90: a window minimized by the person, then brought back, is told
 /// both: iconic, then normal, which is the change Wine restores a window on.
 /// Brought back, it takes the keyboard -- the surface Xwayland gave it is

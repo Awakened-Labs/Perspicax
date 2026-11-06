@@ -86,6 +86,10 @@ pub(crate) enum Why {
     Launch,
     /// A program an agent launched started it, and runs yet.
     Lineage,
+    /// The session's Xwayland, granted as it came up because a headless
+    /// desk was asked to ([`crate::Backend::granting_xwayland`]).
+    #[cfg_attr(not(feature = "xwayland"), expect(dead_code, reason = "Xwayland's"))]
+    Xwayland,
 }
 
 /// One process granted.

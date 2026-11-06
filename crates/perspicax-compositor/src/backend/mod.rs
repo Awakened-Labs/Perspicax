@@ -101,6 +101,13 @@ pub struct Agent {
     /// person's list is about what they grant, and nothing is granted where
     /// consent is everyone's. See [`Backend::withholding`].
     pub never: Never,
+    /// Whether the session's Xwayland is granted to the agent once it is
+    /// up, and with it every X11 window, since consent for X11 is the
+    /// server's. Nothing on a seat grants it: it stands in for a server of
+    /// its own that a person could grant (#289), for the tests of how a
+    /// granted X11 window looks. Off by default. See
+    /// [`Backend::granting_xwayland`].
+    pub xwayland: bool,
 }
 
 impl Default for Agent {
@@ -109,6 +116,7 @@ impl Default for Agent {
             by_grant: false,
             launch: Rule::Any,
             never: Never::FLOOR,
+            xwayland: false,
         }
     }
 }
@@ -175,6 +183,19 @@ impl Backend {
     pub fn granting(mut self) -> Self {
         if let Self::Headless { agent, .. } = &mut self {
             agent.by_grant = true;
+        }
+        self
+    }
+
+    /// The same, with the session's Xwayland granted once it is up, and so
+    /// every X11 window on it: what a person could grant were X11
+    /// applications on a server of their own (#289), which nothing on a
+    /// seat can grant yet.
+    #[must_use]
+    pub fn granting_xwayland(mut self) -> Self {
+        if let Self::Headless { agent, .. } = &mut self {
+            agent.by_grant = true;
+            agent.xwayland = true;
         }
         self
     }
@@ -613,6 +634,18 @@ impl Running {
             Self::Headless { agent, .. } => &agent.never,
             #[cfg(feature = "seat")]
             Self::Seat(session) => &session.settings.agent.never,
+        }
+    }
+
+    /// Whether the session's Xwayland is granted to the agent as it comes
+    /// up. Headless, only where a test asked. On a seat, never: X11
+    /// consent is the one server's, which every X client shares.
+    #[cfg_attr(not(feature = "xwayland"), expect(dead_code, reason = "Xwayland's"))]
+    pub(crate) fn grants_xwayland(&self) -> bool {
+        match self {
+            Self::Headless { agent, .. } => agent.xwayland,
+            #[cfg(feature = "seat")]
+            Self::Seat(_) => false,
         }
     }
 
