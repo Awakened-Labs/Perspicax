@@ -322,9 +322,11 @@ mod taking {
         })
     }
 
+    /// A picture of one window by itself, with its menus: an xdg window's
+    /// are drawn with it, and an X11 window's beside it ([`menus_beside`]).
     fn plan_window(state: &Compositor, id: SurfaceId) -> Result<Plan, ActError> {
         let window = state.any_window(id).ok_or(ActError::NoSuchSurface(id.0))?;
-        let (origin, permitted) = origin(state, id);
+        let (drawn_by, permitted) = origin(state, id);
         // Refused rather than painted over: a picture of nothing but the
         // block would only say that it was refused.
         if !permitted {
@@ -342,39 +344,107 @@ mod taking {
                 "the window has drawn nothing yet".to_owned(),
             ));
         }
+        // Its menus are in front of it and where they are, past its edge
+        // included, so the picture is made big enough to take them in.
+        let menus = menus_beside(state, &window);
+        let whole = menus.iter().fold(bbox, |whole, (_, menu, offset)| {
+            whole.merge(moved(menu.whole_bbox(), *offset))
+        });
+        let at = Point::from((0, 0)) - whole.loc;
+
+        // Front first, the menus before the window, as they are drawn. A
+        // menu is drawn opaque, as X11 menus are on the monitor, and painted
+        // over unless the agent may see it, as there: consent to X11 is the
+        // server's, so a menu of a window it may see is one it may see too,
+        // unless the menu is not yet attributed.
+        let (mut windows, mut drawn, mut redacted) = (Vec::new(), Vec::new(), Vec::new());
+        for (menu_id, menu, offset) in menus {
+            let (menu_by, shown) = origin(state, menu_id);
+            let from = at + offset;
+            let geometry = menu.geometry();
+            let entry = Drawn {
+                surface: menu_id,
+                rect: crate::damage::to_rect(Rectangle::new(from + geometry.loc, geometry.size)),
+                origin: menu_by,
+            };
+            if shown {
+                drawn.push(entry);
+            } else {
+                redacted.push(entry);
+            }
+            windows.push(Placed {
+                cover: moved(menu.whole_bbox(), from),
+                window: menu,
+                at: from,
+                redacted: !shown,
+                raised: false,
+                alpha: 1.0,
+                rolled: false,
+                shadow: false,
+            });
+        }
         let geometry = window.geometry();
-        let at = Point::from((0, 0)) - bbox.loc;
+        drawn.push(Drawn {
+            surface: id,
+            rect: crate::damage::to_rect(Rectangle::new(at + geometry.loc, geometry.size)),
+            origin: drawn_by,
+        });
+        windows.push(Placed {
+            window,
+            at,
+            cover: moved(bbox, at),
+            redacted: false,
+            raised: false,
+            // A picture of the window alone: nothing is behind it to show
+            // through, so it is drawn whole.
+            alpha: 1.0,
+            rolled: false,
+            shadow: false,
+        });
         Ok(Plan {
-            size: (bbox.size.w, bbox.size.h).into(),
+            size: (whole.size.w, whole.size.h).into(),
             scale: 1.0,
             output: None,
             overlay: Vec::new(),
             top: Vec::new(),
-            windows: vec![Placed {
-                window,
-                at,
-                cover: Rectangle::from_size(bbox.size),
-                redacted: false,
-                raised: false,
-                // A picture of the window alone: nothing is behind it to
-                // show through, so it is drawn whole.
-                alpha: 1.0,
-                rolled: false,
-                shadow: false,
-            }],
+            windows,
             lower: Vec::new(),
-            drawn: vec![Drawn {
-                surface: id,
-                rect: crate::damage::to_rect(Rectangle::new(
-                    geometry.loc - bbox.loc,
-                    geometry.size,
-                )),
-                origin,
-            }],
-            redacted: Vec::new(),
+            drawn,
+            redacted,
             pointer: None,
             backdrop: None,
         })
+    }
+
+    /// `window`'s X11 menus, front first, each with its id and where its
+    /// surface's origin is from the window's: windows of their own here,
+    /// where smithay draws an xdg window's with it ([`Framed::elements`]).
+    /// Measured from where a parked window comes back to, as its facts are.
+    fn menus_beside(
+        state: &Compositor,
+        window: &Framed,
+    ) -> Vec<(SurfaceId, Framed, Point<i32, Logical>)> {
+        let surface_at = |window: &Framed| Some(state.place_of(window)? - window.geometry().loc);
+        let Some(own) = surface_at(window) else {
+            return Vec::new();
+        };
+        state
+            .menus_of(window)
+            .into_iter()
+            .filter_map(|menu| {
+                let offset = surface_at(&menu)? - own;
+                Some((id_of(&menu)?, menu, offset))
+            })
+            .collect()
+    }
+
+    /// `rect`, moved by `by`.
+    fn moved(
+        mut rect: Rectangle<i32, Logical>,
+        by: Point<i32, Logical>,
+    ) -> Rectangle<i32, Logical> {
+        rect.loc += by;
+        rect
     }
 
     /// Draw a plan with whichever renderer this backend has, and the

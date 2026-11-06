@@ -811,6 +811,19 @@ impl X11 {
     /// given: as GTK 3's and Qt's menus name the window they were opened
     /// from, and their submenus the menu.
     fn menu_over(&self, title: &str, at: (i16, i16), size: (u16, u16), over: Option<u32>) -> u32 {
+        self.menu_coloured(title, at, size, over, self.white)
+    }
+
+    /// The same, filled with the X pixel `background` rather than white:
+    /// `0xRRGGBB`, on Xwayland's true-colour root.
+    fn menu_coloured(
+        &self,
+        title: &str,
+        at: (i16, i16),
+        size: (u16, u16),
+        over: Option<u32>,
+        background: u32,
+    ) -> u32 {
         let window = self.x.generate_id().expect("an X id");
         self.x
             .create_window(
@@ -825,7 +838,7 @@ impl X11 {
                 WindowClass::INPUT_OUTPUT,
                 0,
                 &CreateWindowAux::new()
-                    .background_pixel(self.white)
+                    .background_pixel(background)
                     .override_redirect(1)
                     .event_mask(EventMask::PROPERTY_CHANGE | EventMask::BUTTON_PRESS),
             )
@@ -3500,6 +3513,204 @@ fn x11_menus_naming_each_other_hang_from_nothing() {
             "{title}"
         );
     }
+
+    x11.stop();
+}
+
+/// Colours a picture is read for, ARGB as `drawn_in` takes them. An X
+/// window is filled with the same, less the alpha: see [`x_pixel`].
+#[cfg(feature = "capture")]
+const ORANGE: u32 = 0xffee_8822;
+#[cfg(feature = "capture")]
+const BLUE: u32 = 0xff33_6699;
+#[cfg(feature = "capture")]
+const WHITE: u32 = 0xffff_ffff;
+
+/// The X pixel for `argb`, on Xwayland's true-colour root.
+#[cfg(feature = "capture")]
+fn x_pixel(argb: u32) -> u32 {
+    argb & 0x00ff_ffff
+}
+
+/// Each surface a picture accounts for, front first, and where it is in it.
+#[cfg(feature = "capture")]
+fn accounted(shot: &perspicax_index::Shot) -> Vec<(perspicax_node::SurfaceId, Rect)> {
+    shot.drawn
+        .iter()
+        .map(|drawn| (drawn.surface, drawn.rect))
+        .collect()
+}
+
+/// Issue #231: an X11 window's picture shows its menus, where they are, as a
+/// Wayland window's shows its own. Each is a window of its own here, which
+/// smithay does not draw with the window, so the picture takes them in,
+/// growing past any edge of the window one hangs past -- a menu past its
+/// right, a tooltip past its top left -- and its account lists them in front
+/// of the window, front first.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_picture_of_an_x11_window_shows_its_menus_where_they_are() {
+    let x11 = X11::start("x11-picture-menu", Backend::headless((1280, 800)));
+    let host = Host::new(&x11.session.facts, &x11.session.requests);
+    let window = x11.open("page");
+    let page = id_of(&x11, "page");
+    let (x0, y0, x1, _) = rect_of(x11.facts().surface(page).expect("the page"));
+    // Over the page's right edge, half on it and half past it.
+    x11.menu_coloured(
+        "menu",
+        (x1 as i16 - 60, y0 as i16 + 40),
+        (120, 100),
+        Some(window),
+        x_pixel(ORANGE),
+    );
+    // Over its top left corner, half past it each way.
+    x11.menu_coloured(
+        "tooltip",
+        (x0 as i16 - 30, y0 as i16 - 20),
+        (60, 40),
+        Some(window),
+        x_pixel(BLUE),
+    );
+    let (menu, tooltip) = (id_of(&x11, "menu"), id_of(&x11, "tooltip"));
+
+    let shot = host
+        .capture(perspicax_index::ShotTarget::Window(page))
+        .expect("a picture");
+    assert_eq!(
+        (shot.width, shot.height),
+        (410, 220),
+        "the page, and what hangs past it"
+    );
+    let on_tooltip = Rect::new(0.0, 0.0, 60.0, 40.0);
+    let on_menu = Rect::new(290.0, 60.0, 410.0, 160.0);
+    let on_page = Rect::new(30.0, 20.0, 350.0, 220.0);
+    assert_eq!(common::drawn_in(&shot, BLUE), [on_tooltip], "the tooltip");
+    assert_eq!(common::drawn_in(&shot, ORANGE), [on_menu], "the menu");
+    assert_eq!(common::drawn_in(&shot, WHITE), [on_page], "the page");
+    assert_eq!(
+        accounted(&shot),
+        [(tooltip, on_tooltip), (menu, on_menu), (page, on_page)]
+    );
+    assert!(shot.redacted.is_empty(), "headless consents to everything");
+
+    x11.stop();
+}
+
+/// Issue #231: a submenu is in the picture too, in front of its menu, since
+/// it hangs from the menu's window. A menu of another window, or of nothing,
+/// is in neither the picture nor its account, even over the window: what is
+/// pictured with a window is the menus that hang from it. Nor is a dialog of
+/// the window, which hangs from it too but is a window, pictured on its own.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_picture_of_an_x11_window_shows_its_submenu_and_no_other_menu() {
+    let x11 = X11::start("x11-picture-submenu", Backend::headless((1280, 800)));
+    let host = Host::new(&x11.session.facts, &x11.session.requests);
+    let window = x11.open("page");
+    let other = x11.open("other");
+    let page = id_of(&x11, "page");
+    let (x0, y0, _, _) = rect_of(x11.facts().surface(page).expect("the page"));
+    let on_page = |x: f64, y: f64| ((x0 + x) as i16, (y0 + y) as i16);
+    let menu_window = x11.menu_coloured(
+        "menu",
+        on_page(20.0, 20.0),
+        (100, 60),
+        Some(window),
+        x_pixel(ORANGE),
+    );
+    x11.menu_coloured(
+        "submenu",
+        on_page(100.0, 40.0),
+        (100, 60),
+        Some(menu_window),
+        x_pixel(BLUE),
+    );
+    x11.menu_coloured(
+        "other's",
+        on_page(20.0, 120.0),
+        (60, 40),
+        Some(other),
+        x_pixel(ORANGE),
+    );
+    x11.menu_coloured(
+        "nobody's",
+        on_page(200.0, 120.0),
+        (60, 40),
+        None,
+        x_pixel(ORANGE),
+    );
+    let dialog = x11.create_at("dialog", (0, 0, 100, 60), None);
+    x11.transient(dialog, window);
+    x11.mapped(dialog, "dialog");
+    let (menu, submenu) = (id_of(&x11, "menu"), id_of(&x11, "submenu"));
+
+    let shot = host
+        .capture(perspicax_index::ShotTarget::Window(page))
+        .expect("a picture");
+    assert_eq!((shot.width, shot.height), (320, 200), "the page alone");
+    let on_menu = Rect::new(20.0, 20.0, 120.0, 80.0);
+    let on_submenu = Rect::new(100.0, 40.0, 200.0, 100.0);
+    assert_eq!(
+        common::drawn_in(&shot, BLUE),
+        [on_submenu],
+        "the submenu, in front"
+    );
+    assert_eq!(
+        common::drawn_in(&shot, ORANGE),
+        [on_menu],
+        "the menu, and no other"
+    );
+    assert_eq!(
+        accounted(&shot),
+        [
+            (submenu, on_submenu),
+            (menu, on_menu),
+            (page, Rect::new(0.0, 0.0, 320.0, 200.0))
+        ]
+    );
+
+    x11.stop();
+}
+
+/// Issue #231: a minimized window is pictured whole, as it would look with
+/// nothing over it, and its menu with it, where the menu is from where the
+/// window comes back to.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_picture_of_a_minimized_x11_window_shows_its_menu_where_it_is() {
+    let x11 = X11::start(
+        "x11-picture-minimized",
+        Backend::headless((1280, 800)).with_person(),
+    );
+    let host = Host::new(&x11.session.facts, &x11.session.requests);
+    let window = x11.open("page");
+    let page = id_of(&x11, "page");
+    let (x0, y0, _, _) = rect_of(x11.facts().surface(page).expect("the page"));
+    x11.menu_coloured(
+        "menu",
+        (x0 as i16 + 40, y0 as i16 + 40),
+        (100, 60),
+        Some(window),
+        x_pixel(ORANGE),
+    );
+    let menu = id_of(&x11, "menu");
+    x11.change_state(window, ICONIC);
+    x11.surface_where("page", |surface| !surface.mapped)
+        .unwrap_or_else(|| panic!("never minimized: {:?}", x11.facts()));
+
+    let shot = host
+        .capture(perspicax_index::ShotTarget::Window(page))
+        .expect("a picture");
+    assert_eq!((shot.width, shot.height), (320, 200));
+    let on_menu = Rect::new(40.0, 40.0, 140.0, 100.0);
+    assert_eq!(common::drawn_in(&shot, ORANGE), [on_menu], "the menu");
+    assert_eq!(
+        accounted(&shot),
+        [(menu, on_menu), (page, Rect::new(0.0, 0.0, 320.0, 200.0))]
+    );
 
     x11.stop();
 }

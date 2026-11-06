@@ -403,10 +403,7 @@ impl Compositor {
         // Where we put it, which is a fact this compositor owns outright. A
         // parked window is described where it will come back to.
         let parked = self.parked.contains(window);
-        let location = match self.space.element_location(window) {
-            Some(location) => location,
-            None => crate::shell::placement(window, |placement| placement.parked)?,
-        };
+        let location = self.place_of(window)?;
 
         // Where the window is inside its surface, and how big: the geometry
         // its client declared, clipped to what it draws, or the full bounds
@@ -663,10 +660,7 @@ impl Compositor {
         window: &Framed,
         x11: &smithay::xwayland::X11Surface,
     ) -> Option<SurfaceFacts> {
-        let location = match self.space.element_location(window) {
-            Some(location) => location,
-            None => crate::shell::placement(window, |placement| placement.parked)?,
-        };
+        let location = self.place_of(window)?;
         let size = x11.geometry().size;
         let placed = smithay::utils::Rectangle::new(location, size);
         let mut facts = match x11.wl_surface() {
