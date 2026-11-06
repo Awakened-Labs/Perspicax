@@ -1429,6 +1429,14 @@ impl CompositorHandler for Compositor {
                 self.popups_shown.remove(&own);
             }
         }
+        // An X11 menu is a window of its own here, so its frames are its
+        // own, as a window's are, and the window it hangs from keeps its
+        // copy, where the menu is drawn on it, as a Wayland menu's does
+        // (#232).
+        #[cfg(feature = "xwayland")]
+        if let Some((from, at)) = self.window_for(&root).and_then(|menu| self.x11_hung(&menu)) {
+            self.record_damage(from, taken.rects.iter().map(|rect| *rect + at).collect());
+        }
         if let Some(id) = id {
             // Whether there is anything to look at is the root's own picture,
             // and a commit that brought none leaves it as it was. A menu's

@@ -241,7 +241,7 @@ impl Compositor {
     /// The window `window` is a dialog or a menu of, mapped or parked: its
     /// xdg parent, or the window its X11 `WM_TRANSIENT_FOR` names, through
     /// any menus between.
-    fn hangs_from(&self, window: &Framed) -> Option<Framed> {
+    pub(crate) fn hangs_from(&self, window: &Framed) -> Option<Framed> {
         if let Some(toplevel) = window.toplevel() {
             return self.window_for(&toplevel.parent()?);
         }

@@ -100,7 +100,10 @@
 //! menus between, as GTK 3 and Qt name the window a menu was opened from and
 //! a submenu its menu. One that names none -- Steam's, GTK 4's -- hangs from
 //! nothing. It came on screen when X mapped it, which makes it anew each
-//! time, so a menu read before then is never taken for it.
+//! time, so a menu read before then is never taken for it. What it draws is
+//! its own, and the window it hangs from keeps a copy, where the menu is
+//! drawn on it, its closing included, as a Wayland menu's window does
+//! (issue #232): so a receipt for an item that closed its menu reads there.
 //!
 //! The keyboard above all. Smithay gives an X11 window the keyboard by
 //! telling X: `SetInputFocus` of nothing for the window that had it, then of
@@ -144,7 +147,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use perspicax_node::{Origin, SurfaceId, X11Basis, X11Origin};
+use perspicax_node::{Origin, SurfaceId, Vec2, X11Basis, X11Origin};
 use perspicax_policy::{Process, Zone};
 use smithay::{
     desktop::Window,
@@ -868,6 +871,23 @@ impl Compositor {
             named = window.x11_surface()?.is_transient_for()?;
         }
         None
+    }
+
+    /// Where an X11 menu draws on the window it hangs from, as
+    /// [`popup::hung`](crate::popup::hung) says of a Wayland one: that
+    /// window, and where the menu's surface begins in the window's (#232).
+    /// `None` for a window that does not place itself -- a dialog of the
+    /// window is a window of its own -- and for a menu of nothing.
+    pub(crate) fn x11_hung(&self, menu: &Framed) -> Option<(SurfaceId, Vec2)> {
+        if !shell::places_itself(menu) {
+            return None;
+        }
+        let window = self.hangs_from(menu)?;
+        let at = self.surface_place(menu)? - self.surface_place(&window)?;
+        Some((
+            shell::id_of(&window)?,
+            Vec2::new(f64::from(at.x), f64::from(at.y)),
+        ))
     }
 
     /// The mapped or parked window for the X window `id`.
@@ -1625,6 +1645,7 @@ impl Compositor {
     fn forget_x11(&mut self, x11: &X11Surface) {
         self.xwayland.deciding.remove(&x11.window_id());
         if let Some(window) = self.x11_window(x11) {
+            self.x11_menu_closed(&window);
             self.forget_window(&window);
             self.refocus_after_close(x11.wl_surface().as_ref());
             self.backend.redraw();
@@ -1632,6 +1653,22 @@ impl Compositor {
         }
         if let Some(side) = &self.xwayland.side {
             side.forget_active(x11.window_id());
+        }
+    }
+
+    /// An X11 menu closing is a frame of the window it hung from, where it
+    /// was, as a Wayland menu's is (`popup_destroyed`): what it covered shows
+    /// again there (#232). Xwayland takes no picture away as an X window
+    /// unmaps, so no commit says so. Choosing an item that changes nothing
+    /// else -- Copy -- closes its menu and nothing more, and without this its
+    /// receipt would not see it. Nothing for a menu that showed nothing by
+    /// then, as GTK 3's input-only one shows nothing, or one that took its
+    /// picture away, counted as it did.
+    fn x11_menu_closed(&mut self, menu: &Framed) {
+        let showed = shell::id_of(menu).is_some_and(|id| self.has_presented(id));
+        if let (true, Some((from, at))) = (showed, self.x11_hung(menu)) {
+            let whole = crate::damage::to_rect(Rectangle::from_size(menu.geometry().size)) + at;
+            self.record_damage(from, vec![whole]);
         }
     }
 

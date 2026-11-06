@@ -1018,8 +1018,12 @@ application's menu (#159): hung from the window its `WM_TRANSIENT_FOR` names,
 through any menus between, or from nothing when it names none. It is in the
 picture of the window it hangs from, as a Wayland application's is: in front
 of the window, where it is, past the window's edge included. The picture's
-`drawn` lists it (#231). One that hangs from nothing is in no window's
-picture, and only a picture of its monitor shows it. Two things are left:
+`drawn` lists it (#231). What it draws, and its closing, are that window's
+damage too, where it is drawn, as a Wayland menu's are: a receipt for an item
+whose choosing closed the menu reads them there, `on_target` (#232). One that
+hangs from nothing is in no window's picture, and only a picture of its
+monitor shows it; once it has closed, a receipt for one of its items reads
+`quiet`. Two things are left:
 - under sloppy or strict focus, a menu still closes if the pointer crosses
   another window on its way to an item (#183);
 - an X program that bypasses the window manager to take the keyboard for
