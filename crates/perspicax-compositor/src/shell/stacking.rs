@@ -253,6 +253,25 @@ impl Compositor {
         None
     }
 
+    /// Whether `menu` is one of `window`'s X11 menus: one that places itself
+    /// and hangs from `window`, directly or through the menus between.
+    fn is_menu_of(&self, menu: &Framed, window: &Framed) -> bool {
+        super::places_itself(menu) && self.hangs_from(menu).as_ref() == Some(window)
+    }
+
+    /// `window`'s X11 menus, front first: windows of their own here, where
+    /// smithay draws an xdg window's with it. Never parked, having no
+    /// workspace of their own, so only the space need be asked. None without
+    /// `xwayland`.
+    #[cfg(feature = "capture")]
+    pub(crate) fn menus_of(&self, window: &Framed) -> Vec<Framed> {
+        as_drawn(&self.space)
+            .rev()
+            .filter(|other| self.is_menu_of(other, window))
+            .cloned()
+            .collect()
+    }
+
     /// Whether `window` is kept in front of the other windows: by the
     /// person, or with the window it hangs from, and so on up.
     fn keeps_on_top(&self, window: &Framed) -> bool {
@@ -331,9 +350,7 @@ impl Compositor {
         let menus: Vec<Framed> = self
             .space
             .elements()
-            .filter(|other| {
-                super::places_itself(other) && self.hangs_from(other).as_ref() == Some(window)
-            })
+            .filter(|other| self.is_menu_of(other, window))
             .cloned()
             .collect();
         self.space.raise_element(window, false);

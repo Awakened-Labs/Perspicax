@@ -607,6 +607,14 @@ impl Compositor {
         self.backend.redraw();
     }
 
+    /// Where a window's geometry is in the space: where it is on screen, or,
+    /// parked, where it comes back to.
+    pub(crate) fn place_of(&self, window: &Framed) -> Option<Point<i32, Logical>> {
+        self.space
+            .element_location(window)
+            .or_else(|| placement(window, |placement| placement.parked))
+    }
+
     /// A parked window with this id: minimized, or on another workspace.
     pub(crate) fn parked_with(&self, id: SurfaceId) -> Option<Framed> {
         self.parked

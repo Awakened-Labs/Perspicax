@@ -163,10 +163,11 @@ pub enum Refusal {
     /// panel, a wallpaper, a menu, a lock screen. They are part of the desk,
     /// and nothing closes them, brings them forward, focuses them or types
     /// into them by surface but their own program.
-    /// A picture of a menu is refused the same way. A Wayland application's
-    /// menu is drawn as part of its window's picture, which is the one to ask
-    /// for; an X11 application's is in none, and only a picture of its
-    /// monitor shows it.
+    /// A picture of a menu is refused the same way. A menu is drawn in the
+    /// picture of the window it hangs from, a Wayland application's and an
+    /// X11 application's alike, and that is the one to ask for. An X11 menu
+    /// that names no window it was opened from is in none, and only a
+    /// picture of its monitor shows it.
     NotAWindow,
     /// Typing was asked of a node whose window does not hold the keyboard.
     /// Keys go where focus is, so typing anyway would land them in `focused`
@@ -1202,8 +1203,8 @@ mod tests {
         }
     }
 
-    /// A menu is drawn as part of its window's picture, so a picture of the
-    /// menu is refused, pointing the agent at the window.
+    /// A menu is drawn in the picture of the window it hangs from, so a
+    /// picture of the menu is refused, pointing the agent at the window.
     #[test]
     fn a_picture_of_a_menu_is_refused_as_not_a_window() {
         let area = Rect::new(0.0, 0.0, 400.0, 300.0);
@@ -1214,7 +1215,8 @@ mod tests {
                     .owned_by(owned_by(10))
                     .hung_from(SurfaceId(1), std::time::Instant::now()),
                 // An X11 menu that names no window: in no window's picture,
-                // and still no window to picture on its own.
+                // only its monitor's, and still no window to picture on its
+                // own.
                 SurfaceFacts::new(SurfaceId(3), area)
                     .owned_by(owned_by(10))
                     .hung_from_nothing(std::time::Instant::now()),

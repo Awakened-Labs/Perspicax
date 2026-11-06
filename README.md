@@ -670,9 +670,11 @@ reading applies to it. A picture of the monitor shows a window rolled up as
 the person sees it, its titlebar and what is under the rest. A picture of
 that window alone shows it whole, as one of a minimized window does: it is
 a reading of the window, which the agent may read already, and without the
-shadow it casts. A picture never shows a window halfway rolled up: what is
-pictured, and what an agent is told, is where it is going, from the moment
-it sets off.
+shadow it casts. A picture of a window alone shows the menus that hang from
+it too, where they are, past its edge included, an X11 application's as well
+as a Wayland application's (#231). A picture never shows a window halfway
+rolled up: what is pictured, and what an agent is told, is where it is going,
+from the moment it sets off.
 
 **A frame's looks change nothing an agent is told.** Its strips are proven
 to cover what is under them, square: a pixel outside a rounded corner's arc,
@@ -1013,9 +1015,11 @@ and undimmed, while the menu is open. Given the keyboard, as before #181, the
 window lost it and the application closed its menu: Steam's closed as soon as
 the pointer reached one. An agent sees each as a popup, as it sees a Wayland
 application's menu (#159): hung from the window its `WM_TRANSIENT_FOR` names,
-through any menus between, or from nothing when it names none. Unlike a
-Wayland application's, it is in no window's picture, and only a picture of its
-monitor shows it. Two things are left:
+through any menus between, or from nothing when it names none. It is in the
+picture of the window it hangs from, as a Wayland application's is: in front
+of the window, where it is, past the window's edge included. The picture's
+`drawn` lists it (#231). One that hangs from nothing is in no window's
+picture, and only a picture of its monitor shows it. Two things are left:
 - under sloppy or strict focus, a menu still closes if the pointer crosses
   another window on its way to an item (#183);
 - an X program that bypasses the window manager to take the keyboard for
