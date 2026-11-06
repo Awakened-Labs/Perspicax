@@ -144,7 +144,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use perspicax_node::{Origin, SurfaceId, X11Basis, X11Origin};
+use perspicax_node::{Origin, SurfaceId, Vec2, X11Basis, X11Origin};
 use perspicax_policy::{Process, Zone};
 use smithay::{
     desktop::Window,
@@ -868,6 +868,23 @@ impl Compositor {
             named = window.x11_surface()?.is_transient_for()?;
         }
         None
+    }
+
+    /// Where an X11 menu draws on the window it hangs from, as
+    /// [`popup::hung`](crate::popup::hung) says of a Wayland one: that
+    /// window, and where the menu's surface begins in the window's (#232).
+    /// `None` for a window that does not place itself -- a dialog of the
+    /// window is a window of its own -- and for a menu of nothing.
+    pub(crate) fn x11_hung(&self, menu: &Framed) -> Option<(SurfaceId, Vec2)> {
+        if !shell::places_itself(menu) {
+            return None;
+        }
+        let window = self.hangs_from(menu)?;
+        let at = self.surface_place(menu)? - self.surface_place(&window)?;
+        Some((
+            shell::id_of(&window)?,
+            Vec2::new(f64::from(at.x), f64::from(at.y)),
+        ))
     }
 
     /// The mapped or parked window for the X window `id`.

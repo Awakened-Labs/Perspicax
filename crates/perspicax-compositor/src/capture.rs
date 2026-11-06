@@ -424,15 +424,14 @@ mod taking {
         state: &Compositor,
         window: &Framed,
     ) -> Vec<(SurfaceId, Framed, Point<i32, Logical>)> {
-        let surface_at = |window: &Framed| Some(state.place_of(window)? - window.geometry().loc);
-        let Some(own) = surface_at(window) else {
+        let Some(own) = state.surface_place(window) else {
             return Vec::new();
         };
         state
             .menus_of(window)
             .into_iter()
             .filter_map(|menu| {
-                let offset = surface_at(&menu)? - own;
+                let offset = state.surface_place(&menu)? - own;
                 Some((id_of(&menu)?, menu, offset))
             })
             .collect()

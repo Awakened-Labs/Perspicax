@@ -1250,6 +1250,29 @@ impl X11 {
             .expect("_NET_WM_WINDOW_TYPE");
     }
 
+    /// Draw a mark on `window`, titled `title`: a patch of its background
+    /// drawn again, where nothing else draws, so damage there can only be
+    /// this. Once the compositor has it, where it is in the window's own
+    /// surface.
+    fn mark(&self, window: u32, title: &str) -> Rect {
+        let (x, y, width, height) = (3, 5, 7, 11);
+        self.x
+            .clear_area(false, window, x, y, width, height)
+            .expect("clear_area");
+        self.x.flush().expect("flush");
+        let mark = Rect::new(
+            f64::from(x),
+            f64::from(y),
+            f64::from(x) + f64::from(width),
+            f64::from(y) + f64::from(height),
+        );
+        self.surface_where(title, |surface| {
+            surface.damage.iter().any(|(_, drawn)| *drawn == mark)
+        })
+        .unwrap_or_else(|| panic!("{title}'s mark never arrived: {:?}", self.facts()));
+        mark
+    }
+
     /// Map `window`, titled `title`, and wait for the compositor to have it
     /// on screen: where its client's corner is.
     fn mapped(&self, window: u32, title: &str) -> (f64, f64) {
@@ -3513,6 +3536,140 @@ fn x11_menus_naming_each_other_hang_from_nothing() {
             "{title}"
         );
     }
+
+    x11.stop();
+}
+
+/// How far the window titled `title` is from `page`'s corner: what moves
+/// something in its surface into the page's.
+fn from_page(x11: &X11, page: perspicax_node::SurfaceId, title: &str) -> perspicax_node::Vec2 {
+    let facts = x11.facts();
+    let corner = |id| {
+        facts
+            .surface(id)
+            .unwrap_or_else(|| panic!("{id:?} is gone: {facts:?}"))
+            .geometry
+            .origin()
+            .to_vec2()
+    };
+    corner(id_of(x11, title)) - corner(page)
+}
+
+/// How many frames of damage `page` has taken.
+fn frames_of(x11: &X11, page: perspicax_node::SurfaceId) -> u64 {
+    x11.facts()
+        .surface(page)
+        .expect("the page")
+        .damage_generation
+}
+
+/// Whether the damage `page` has taken since generation `since` takes in
+/// `rect`, exactly, in the page's own surface.
+fn page_damaged(
+    x11: &X11,
+    page: perspicax_node::SurfaceId,
+    since: u64,
+    rect: Rect,
+) -> Option<SurfaceFacts> {
+    eventually(Duration::from_secs(5), || {
+        let facts = x11.facts();
+        let page = facts.surface(page)?;
+        page.damage
+            .iter()
+            .any(|(generation, drawn)| *generation > since && *drawn == rect)
+            .then(|| page.clone())
+    })
+}
+
+/// Issue #232: what an X11 menu draws is the damage of the window it hangs
+/// from too, where the menu is drawn on it, past the window's edge included,
+/// as a Wayland menu's is (#42). A receipt for one of its items reads that
+/// once the menu has closed.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn what_an_x11_menu_draws_is_its_windows_damage_too_where_it_is_drawn() {
+    let x11 = X11::start("x11-menu-damage", Backend::headless((1280, 800)));
+    let window = x11.open("page");
+    let page = id_of(&x11, "page");
+    let (x0, y0, _, _) = rect_of(x11.facts().surface(page).expect("the page"));
+    // Past the page's right edge, which is at 320.
+    let menu = x11.menu_over(
+        "menu",
+        ((x0 + 260.0) as i16, (y0 + 40.0) as i16),
+        (120, 100),
+        Some(window),
+    );
+    let before = frames_of(&x11, page);
+
+    let mark = x11.mark(menu, "menu");
+
+    let on_page = mark + from_page(&x11, page, "menu");
+    assert_eq!(on_page, Rect::new(263.0, 45.0, 270.0, 56.0));
+    assert!(
+        page_damaged(&x11, page, before, on_page).is_some(),
+        "the page has no copy of the menu's mark at {on_page:?}: {:?}",
+        x11.facts().surface(page)
+    );
+
+    x11.stop();
+}
+
+/// Issue #232: what a submenu draws is the damage of its menu's window, where
+/// the submenu is drawn on it, as it hangs from that window through its menu.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn what_an_x11_submenu_draws_is_its_menus_windows_damage_too() {
+    let x11 = X11::start("x11-submenu-damage", Backend::headless((1280, 800)));
+    let window = x11.open("page");
+    let page = id_of(&x11, "page");
+    let (x0, y0, _, _) = rect_of(x11.facts().surface(page).expect("the page"));
+    let on_page = |x: f64, y: f64| ((x0 + x) as i16, (y0 + y) as i16);
+    let menu = x11.menu_over("menu", on_page(20.0, 20.0), (100, 60), Some(window));
+    let submenu = x11.menu_over("submenu", on_page(100.0, 40.0), (100, 60), Some(menu));
+    let before = frames_of(&x11, page);
+
+    let mark = x11.mark(submenu, "submenu");
+
+    let on_page = mark + from_page(&x11, page, "submenu");
+    assert_eq!(on_page, Rect::new(103.0, 45.0, 110.0, 56.0));
+    assert!(
+        page_damaged(&x11, page, before, on_page).is_some(),
+        "the page has no copy of the submenu's mark at {on_page:?}: {:?}",
+        x11.facts().surface(page)
+    );
+
+    x11.stop();
+}
+
+/// Issue #232: a menu of nothing draws on no window, even over one, and a
+/// dialog of the window is a window of its own: what either draws is no
+/// other window's damage.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn what_an_x11_menu_of_nothing_or_a_dialog_draws_is_no_other_windows_damage() {
+    let x11 = X11::start("x11-menu-damage-kept", Backend::headless((1280, 800)));
+    let window = x11.open("page");
+    let page = id_of(&x11, "page");
+    let (x0, y0, _, _) = rect_of(x11.facts().surface(page).expect("the page"));
+    let nobodys = x11.menu(
+        "nobody's",
+        ((x0 + 20.0) as i16, (y0 + 20.0) as i16),
+        (100, 60),
+    );
+    let dialog = x11.create_at("dialog", (0, 0, 100, 60), None);
+    x11.transient(dialog, window);
+    x11.mapped(dialog, "dialog");
+    let before = frames_of(&x11, page);
+
+    x11.mark(nobodys, "nobody's");
+    x11.mark(dialog, "dialog");
+
+    assert_eq!(
+        frames_of(&x11, page),
+        before,
+        "{:?}",
+        x11.facts().surface(page)
+    );
 
     x11.stop();
 }

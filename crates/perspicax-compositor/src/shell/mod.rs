@@ -615,6 +615,17 @@ impl Compositor {
             .or_else(|| placement(window, |placement| placement.parked))
     }
 
+    /// Where a window's surface begins in the space: where its geometry is,
+    /// back by where its geometry is in its surface. What places an X11
+    /// menu on the window it hangs from, in its picture and in its damage.
+    #[cfg_attr(
+        not(any(feature = "xwayland", feature = "capture")),
+        expect(dead_code, reason = "an X11 menu's place, in a picture or its damage")
+    )]
+    pub(crate) fn surface_place(&self, window: &Framed) -> Option<Point<i32, Logical>> {
+        Some(self.place_of(window)? - window.geometry().loc)
+    }
+
     /// A parked window with this id: minimized, or on another workspace.
     pub(crate) fn parked_with(&self, id: SurfaceId) -> Option<Framed> {
         self.parked
