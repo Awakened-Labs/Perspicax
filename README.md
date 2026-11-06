@@ -649,10 +649,12 @@ not known for it.
 it never may (`never_granted`), and `deltas` says when that changes. On
 screen, each it may is marked out: a line round it, in front of its shadow,
 and its titlebar, where perspicax draws one, in the agent's colours
-(`[decorations.agent]`). Logo+A that grants nothing -- an X11 window, one
-nobody can say which process drew, one whose process cannot be held, or a
-program no agent is given -- draws the line round the window a moment in
-`refused-colour`, and the shell says why in words
+(`[decorations.agent]`). Its menus and tooltips are not marked: they are
+drawn over its line, an X11 application's as a Wayland application's, and
+the agent may act on them all the same. Logo+A that grants nothing -- an
+X11 window, one nobody can say which process drew, one whose process cannot
+be held, or a program no agent is given -- draws the line round the window
+a moment in `refused-colour`, and the shell says why in words
 ([see Notices](#notices)), as the log does. Headless, where every window is
 an agent's, nothing is marked.
 
