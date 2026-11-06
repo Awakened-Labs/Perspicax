@@ -167,10 +167,9 @@ pub fn act(
 /// Choosing an item usually closes its menu, so a node on a popup may be on a
 /// surface that is gone by the time this is read. The window the menu hung
 /// from keeps a copy of what it drew, its closing included, where it was drawn
-/// (#42), so that is read in the menu's place: from its own mark, at the
-/// rect's place in that window. An X11 window keeps no such copy of its
-/// menu's: what is read there is only what the window itself drew, often
-/// nothing. A menu that hung from nothing is quiet once it is gone.
+/// -- a Wayland menu's (#42) and an X11 one's (#232) alike -- so that is read
+/// in the menu's place: from its own mark, at the rect's place in that
+/// window. A menu that hung from nothing is quiet once it is gone.
 fn witness(marked: &HostFacts, after: &HostFacts, surface: SurfaceId, rect: Rect) -> DamageWitness {
     let read = |facts: &SurfaceFacts, before: u64, rect: Rect| {
         let frames = facts.damage_generation.saturating_sub(before);

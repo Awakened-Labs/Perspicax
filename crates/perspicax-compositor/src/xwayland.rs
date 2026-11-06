@@ -100,7 +100,10 @@
 //! menus between, as GTK 3 and Qt name the window a menu was opened from and
 //! a submenu its menu. One that names none -- Steam's, GTK 4's -- hangs from
 //! nothing. It came on screen when X mapped it, which makes it anew each
-//! time, so a menu read before then is never taken for it.
+//! time, so a menu read before then is never taken for it. What it draws is
+//! its own, and the window it hangs from keeps a copy, where the menu is
+//! drawn on it, its closing included, as a Wayland menu's window does
+//! (issue #232): so a receipt for an item that closed its menu reads there.
 //!
 //! The keyboard above all. Smithay gives an X11 window the keyboard by
 //! telling X: `SetInputFocus` of nothing for the window that had it, then of
