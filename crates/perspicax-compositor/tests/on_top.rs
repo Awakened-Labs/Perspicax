@@ -6,22 +6,28 @@
 //! under the fullscreen window in use. What it covers is judged covered by
 //! it, a dialog of it is kept on top with it, and a tab group is kept as
 //! one. Cycling focus walks the windows as it did before any was kept on
-//! top, and the keyboard goes back where it went then. The binding is
-//! carried out with [`Session::perform`]; the titlebar's button needs a
-//! seat. X11's dialogs and menus are in `xwayland.rs`.
+//! top, and the keyboard goes back where it went then. A menu of the window
+//! in use is in front of a window kept on top, though its window is not,
+//! and under the panels (#234): in the facts, under the pointer and in a
+//! picture. The binding is carried out with [`Session::perform`]; the
+//! titlebar's button needs a seat. X11's dialogs and menus are in
+//! `xwayland.rs`.
 //!
 //! Like the other live tests it binds a real Wayland socket, so it needs
 //! `XDG_RUNTIME_DIR`, and is `#[ignore]`d for `ci/live-tests.sh` to run.
 
 mod common;
 
-use common::{Desk, Session, until};
+use common::{Desk, Session, configured, menu_with_the_keyboard_on, until};
 use perspicax_compositor::{Backend, Virtual};
 use perspicax_index::{HostFacts, SurfaceFacts, SurfaceKind, judge};
-use perspicax_node::{Rect, Visibility};
+use perspicax_node::{Rect, SurfaceId, Visibility};
 use perspicax_policy::{Access, Action, Direction, Grid, Mode, Shape};
-use smithay_client_toolkit::shell::wlr_layer::Layer;
-use wayland_client::{EventQueue, QueueHandle};
+use smithay_client_toolkit::shell::{
+    wlr_layer::Layer,
+    xdg::{XdgSurface as _, popup::Popup},
+};
+use wayland_client::{EventQueue, QueueHandle, globals::GlobalList};
 use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::State;
 
 fn surface<'a>(facts: &'a HostFacts, title: &str) -> &'a SurfaceFacts {
@@ -126,14 +132,22 @@ fn two_workspaces() -> Backend {
 /// Windows of these titles, opened in turn, with a taskbar to raise them
 /// by. The last has the keyboard and the top of the stack.
 fn windows(name: &str, titles: &[&str]) -> (Session, Desk, EventQueue<Desk>, QueueHandle<Desk>) {
-    windows_on(name, titles, Backend::headless((800, 600)))
+    let (session, desk, queue, qh, _) = windows_on(name, titles, Backend::headless((800, 600)));
+    (session, desk, queue, qh)
 }
 
+/// [`windows`], on `backend`, with the globals for binding more.
 fn windows_on(
     name: &str,
     titles: &[&str],
     backend: Backend,
-) -> (Session, Desk, EventQueue<Desk>, QueueHandle<Desk>) {
+) -> (
+    Session,
+    Desk,
+    EventQueue<Desk>,
+    QueueHandle<Desk>,
+    GlobalList,
+) {
     let session = Session::start(name, backend);
     let (mut desk, mut queue, qh, globals) = session.client();
     desk.bind_taskbar(&globals, &qh);
@@ -146,16 +160,31 @@ fn windows_on(
     session.wait_for(|facts| {
         stacked(facts).len() == titles.len() && focused_last(facts).as_deref() == Some(*last)
     });
-    (session, desk, queue, qh)
+    (session, desk, queue, qh, globals)
 }
 
 /// "kept", kept on top, under "other", raised since.
 fn kept_under_another(name: &str) -> (Session, Desk, EventQueue<Desk>, QueueHandle<Desk>) {
-    let (session, mut desk, mut queue, qh) = windows(name, &["kept", "other"]);
+    let (session, desk, queue, qh, _) = kept_under_another_with_globals(name);
+    (session, desk, queue, qh)
+}
+
+/// [`kept_under_another`], with the globals for binding more.
+fn kept_under_another_with_globals(
+    name: &str,
+) -> (
+    Session,
+    Desk,
+    EventQueue<Desk>,
+    QueueHandle<Desk>,
+    GlobalList,
+) {
+    let (session, mut desk, mut queue, qh, globals) =
+        windows_on(name, &["kept", "other"], Backend::headless((800, 600)));
     activate(&session, &mut desk, &mut queue, "kept");
     toggle(&session, "kept", true);
     activate(&session, &mut desk, &mut queue, "other");
-    (session, desk, queue, qh)
+    (session, desk, queue, qh, globals)
 }
 
 #[test]
@@ -293,7 +322,7 @@ fn a_panel_stays_over_a_window_kept_on_top() {
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_window_kept_on_top_is_in_front_again_once_restored_and_once_its_workspace_is_back() {
-    let (session, mut desk, mut queue, _qh) =
+    let (session, mut desk, mut queue, _qh, _) =
         windows_on("on-top-parked", &["kept", "other"], two_workspaces());
     activate(&session, &mut desk, &mut queue, "kept");
     toggle(&session, "kept", true);
@@ -557,6 +586,269 @@ fn a_click_where_a_window_kept_on_top_overlaps_another_lands_on_it() {
     });
 
     session.wait_for(|facts| focused_last(facts).as_deref() == Some("kept"));
+
+    session.stop((desk, queue));
+}
+
+/// How big a menu here is.
+const MENU: (u32, u32) = (120, 80);
+
+/// Where a surface is in the facts, counted from the bottom.
+fn place(facts: &HostFacts, id: SurfaceId) -> usize {
+    facts
+        .surfaces()
+        .iter()
+        .position(|surface| surface.id == id)
+        .expect("a surface of that id")
+}
+
+/// The popups the facts list.
+fn popups(facts: &HostFacts) -> Vec<&SurfaceFacts> {
+    facts
+        .surfaces()
+        .iter()
+        .filter(|surface| matches!(surface.kind, SurfaceKind::Popup { .. }))
+        .collect()
+}
+
+/// A popup of "other", this client's second window, drawn in `colour` over
+/// the middle of "kept", once the facts describe it: where "kept" is in
+/// front of "other", so the popup is either over "kept" or under it. A
+/// popup without the grab, as a tooltip is. Placed in "other"'s window
+/// geometry, as xdg-shell places a popup.
+fn popup_over_kept(
+    session: &Session,
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    qh: &QueueHandle<Desk>,
+    colour: u32,
+) -> (Popup, SurfaceId) {
+    let facts = session.wait_for(|_| true);
+    let (kept, other) = (
+        surface(&facts, "kept").geometry,
+        surface(&facts, "other").geometry,
+    );
+    let at = (
+        (kept.x0 + 40.0 - other.x0) as i32,
+        (kept.y0 + 40.0 - other.y0) as i32,
+    );
+    let popup = desk.open_popup(qh, desk.windows[1].xdg_surface(), at, MENU);
+    configured(desk, queue, 1);
+    desk.paint(popup.wl_surface(), MENU, colour);
+    popup.wl_surface().commit();
+    queue.flush().expect("sent");
+    let facts = session.wait_for(|facts| popups(facts).iter().any(|popup| popup.mapped));
+    let shown = popups(&facts)[0];
+    let (area, kept) = (shown.geometry, surface(&facts, "kept").geometry);
+    assert!(
+        area.x0 > kept.x0 && area.y0 > kept.y0 && area.x1 < kept.x1 && area.y1 < kept.y1,
+        "the popup is not over the window kept on top: {area:?} and {kept:?}"
+    );
+    (popup, shown.id)
+}
+
+/// The middle of the popup `id`, in its own space and on the desk.
+fn middle_of(facts: &HostFacts, id: SurfaceId) -> (Rect, (i32, i32)) {
+    let area = facts.surface(id).expect("the popup").geometry;
+    let (x, y) = ((area.x0 + area.x1) / 2.0, (area.y0 + area.y1) / 2.0);
+    (
+        Rect::new(x - 5.0, y - 5.0, x + 5.0, y + 5.0),
+        (x as i32, y as i32),
+    )
+}
+
+/// Where the popup `id` is over "kept", as a node of "kept" is given: in
+/// "kept"'s own space.
+fn under_the_popup(facts: &HostFacts, id: SurfaceId) -> Rect {
+    let (node, _) = middle_of(facts, id);
+    let kept = surface(facts, "kept").geometry;
+    Rect::new(
+        node.x0 - kept.x0,
+        node.y0 - kept.y0,
+        node.x1 - kept.x0,
+        node.y1 - kept.y0,
+    )
+}
+
+/// Issue #234: a tooltip of the window in use, a popup that takes no grab,
+/// opens in front of a window kept on top, where the window it hangs from is
+/// behind that one, and covers what is under it there. Once the window kept
+/// on top is in use, the tooltip goes back with its own window, behind it.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_tooltip_of_the_window_in_use_opens_in_front_of_a_window_kept_on_top() {
+    let (session, mut desk, mut queue, qh) = kept_under_another("on-top-tooltip");
+
+    let (_popup, tooltip) = popup_over_kept(&session, &mut desk, &mut queue, &qh, 0xffee_8822);
+
+    let facts = session.wait_for(|facts| place(facts, tooltip) > height(facts, "kept"));
+    assert_eq!(popups(&facts).len(), 1, "listed once: {facts:?}");
+    assert_eq!(
+        judge(
+            &facts,
+            surface(&facts, "kept").id,
+            under_the_popup(&facts, tooltip)
+        )
+        .visibility,
+        Visibility::Occluded { by: tooltip },
+        "the window kept on top is covered where the tooltip is"
+    );
+
+    activate(&session, &mut desk, &mut queue, "kept");
+    session.wait_for(|facts| place(facts, tooltip) < height(facts, "kept"));
+
+    session.stop((desk, queue));
+}
+
+/// Issue #234: a right-click menu of the window in use, which takes the
+/// keyboard, opens in front of a window kept on top. Its keys are its
+/// window's, so its window is still the one in use (#97).
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_of_the_window_in_use_opens_in_front_of_a_window_kept_on_top() {
+    // A person at the seat, for a menu to take the keyboard.
+    let session = Session::start("on-top-menu", Backend::headless((800, 600)).with_person());
+    let (mut desk, mut queue, qh, globals) = session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    let with_the_keys = |title: &'static str| {
+        let facts = &session.facts;
+        move |_: &Desk| focused_last(&facts.read()).as_deref() == Some(title)
+    };
+    desk.open_window(&qh, "kept", "kept");
+    until(&mut queue, &mut desk, with_the_keys("kept"));
+    session.perform(Action::ToggleOnTop);
+    session.wait_for(|facts| surface(facts, "kept").on_top);
+    // Its client has the keys, so its next window takes them.
+    desk.open_window(&qh, "other", "other");
+    until(&mut queue, &mut desk, with_the_keys("other"));
+    let facts = session.facts.read();
+    let other = surface(&facts, "other").id;
+
+    let _menu = menu_with_the_keyboard_on(&session, &mut desk, &mut queue, &qh, &ear, other, 1);
+
+    let facts = session.wait_for(|facts| popups(facts).iter().any(|popup| popup.mapped));
+    let menu = popups(&facts)[0].id;
+    let (area, kept) = (
+        facts.surface(menu).expect("the menu").geometry,
+        surface(&facts, "kept").geometry,
+    );
+    assert!(
+        area.x1 < kept.x1 && area.y1 < kept.y1,
+        "the menu is not over the window kept on top: {area:?} and {kept:?}"
+    );
+    let facts = session.wait_for(|facts| place(facts, menu) > height(facts, "kept"));
+    assert_eq!(
+        judge(
+            &facts,
+            surface(&facts, "kept").id,
+            under_the_popup(&facts, menu)
+        )
+        .visibility,
+        Visibility::Occluded { by: menu },
+        "the window kept on top is covered where the menu is"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// Issue #234: in front of every window, but under the panels, as every
+/// window but the fullscreen one in use is.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_menu_of_the_window_in_use_stays_under_the_panels() {
+    let (session, mut desk, mut queue, qh) = kept_under_another("on-top-menu-panel");
+    desk.open_strip(&qh, Layer::Top, "panel", 40, 0xff00_0000);
+    until(&mut queue, &mut desk, |desk| desk.layers_drawn == 1);
+    let (_popup, tooltip) = popup_over_kept(&session, &mut desk, &mut queue, &qh, 0xffee_8822);
+
+    let facts = session.wait_for(|facts| place(facts, tooltip) > height(facts, "kept"));
+    let panel = facts
+        .surfaces()
+        .iter()
+        .position(|surface| matches!(surface.kind, SurfaceKind::Layer { .. }))
+        .expect("the panel");
+    assert!(
+        place(&facts, tooltip) < panel,
+        "the popup is over the panel: {facts:?}"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// Issue #234: what is drawn is what is pointed at. A person's click where
+/// the menu of the window in use is over a window kept on top lands on the
+/// menu.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_click_on_a_menu_of_the_window_in_use_over_a_window_kept_on_top_reaches_it() {
+    use perspicax_compositor::Command;
+    use perspicax_policy::{Button, Mods};
+
+    let (session, mut desk, mut queue, qh, globals) =
+        kept_under_another_with_globals("on-top-menu-click");
+    desk.bind_pointer(&globals, &qh);
+    let (popup, tooltip) = popup_over_kept(&session, &mut desk, &mut queue, &qh, 0xffee_8822);
+    let facts = session.wait_for(|facts| place(facts, tooltip) > height(facts, "kept"));
+    let (_, at) = middle_of(&facts, tooltip);
+
+    session.command(Command::Click {
+        at,
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+
+    until(&mut queue, &mut desk, |desk| !desk.buttons.is_empty());
+    assert_eq!(
+        desk.pointed.as_ref(),
+        Some(popup.wl_surface()),
+        "the click landed elsewhere"
+    );
+
+    session.stop((desk, queue));
+}
+
+/// Issue #234: a picture shows the menu of the window in use over a window
+/// kept on top, as the screen does.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_picture_shows_the_menu_of_the_window_in_use_over_a_window_kept_on_top() {
+    use perspicax_compositor::Host;
+    use perspicax_index::ShotTarget;
+
+    const BLUE: u32 = 0xff33_6699;
+    const ORANGE: u32 = 0xffee_8822;
+    let session = Session::start("on-top-menu-picture", Backend::headless((800, 600)));
+    let host = Host::new(&session.facts, &session.requests);
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_taskbar(&globals, &qh);
+    desk.open_coloured(&qh, "kept", "kept", BLUE);
+    until(&mut queue, &mut desk, |desk| desk.drawn == 1);
+    desk.open_window(&qh, "other", "other");
+    until(&mut queue, &mut desk, |desk| desk.drawn == 2);
+    until(&mut queue, &mut desk, |desk| desk.task("kept").is_some());
+    session.wait_for(|facts| focused_last(facts).as_deref() == Some("other"));
+    activate(&session, &mut desk, &mut queue, "kept");
+    toggle(&session, "kept", true);
+    activate(&session, &mut desk, &mut queue, "other");
+    let (_popup, tooltip) = popup_over_kept(&session, &mut desk, &mut queue, &qh, ORANGE);
+    let facts = session.wait_for(|facts| place(facts, tooltip) > height(facts, "kept"));
+    let area = facts.surface(tooltip).expect("the popup").geometry;
+
+    let shot = host.capture(ShotTarget::Output(None)).expect("a picture");
+
+    let pixel = |x: f64, y: f64| {
+        let at = ((y as usize) * shot.width as usize + x as usize) * 4;
+        <[u8; 4]>::try_from(&shot.rgba[at..at + 4]).expect("a pixel")
+    };
+    let (x, y) = ((area.x0 + area.x1) / 2.0, (area.y0 + area.y1) / 2.0);
+    assert_eq!(pixel(x, y), common::rgba(ORANGE), "the menu, over kept");
+    assert_eq!(
+        pixel(area.x1 + 5.0, y),
+        common::rgba(BLUE),
+        "the window kept on top, beside the menu"
+    );
 
     session.stop((desk, queue));
 }

@@ -503,9 +503,10 @@ pub struct Window {
     pub kind: &'static str,
     /// For a popup, the window or panel it hangs from, through any menus
     /// between. It covers what is under it, that window's own nodes
-    /// included: a Wayland application's is drawn directly above its window,
-    /// an X11 application's where it puts itself. Absent for an X11 menu that
-    /// names no window it was opened from.
+    /// included: a Wayland application's is drawn above its window, an X11
+    /// application's where it puts itself, and either in front of every
+    /// window while the window it hangs from is in use. Absent for an X11
+    /// menu that names no window it was opened from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<u64>,
     /// For a layer surface, which layer it stacks in: `background` and

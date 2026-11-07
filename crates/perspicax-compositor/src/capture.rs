@@ -72,8 +72,7 @@ mod taking {
             Pictures, Running,
             cursor::{self, Cursor},
         },
-        framed::Framed,
-        framed::FramedElement,
+        framed::{Framed, FramedElement, Menus},
         shell::{Stack, id_of},
         state::Compositor,
     };
@@ -108,7 +107,8 @@ mod taking {
         scale: f64,
         output: Option<String>,
         /// Front to back: `overlay` surfaces, a fullscreen window in use,
-        /// the panels, the windows, and the wallpaper beneath them.
+        /// the panels, the menus of the window in use, the windows, and the
+        /// wallpaper beneath them.
         overlay: Vec<(LayerSurface, Point<i32, Logical>)>,
         top: Vec<(LayerSurface, Point<i32, Logical>)>,
         windows: Vec<Placed>,
@@ -148,6 +148,10 @@ mod taking {
         /// window by itself, which ends a grip's width past its frame,
         /// would cut the shadow short, and has none.
         shadow: bool,
+        /// Drawn with its menus, without them, or them alone: the window in
+        /// use's are drawn apart from it, in front of every other window, as
+        /// on the monitor (#234).
+        menus: Menus,
     }
 
     pub(super) fn take(state: &mut Compositor, target: &ShotTarget) -> Result<Shot, ActError> {
@@ -260,17 +264,45 @@ mod taking {
         }
 
         let mut windows = Vec::new();
-        let in_front = stack.raised.iter().map(|piece| (true, piece));
-        for (raised, (window, at)) in
-            in_front.chain(stack.windows.iter().map(|piece| (false, piece)))
-        {
+        let pieces = stack
+            .raised
+            .iter()
+            .map(|piece| (true, Menus::With, piece))
+            .chain(stack.menus.iter().map(|piece| (false, Menus::Only, piece)))
+            .chain(
+                stack
+                    .windows
+                    .iter()
+                    .map(|piece| (false, stack.menus_of(&piece.0), piece)),
+            );
+        for (raised, menus, (window, at)) in pieces {
+            let id = id_of(window);
+            let hidden = id.is_some_and(|id| !origin(state, id).1);
+            let alpha = crate::shell::alpha(state.opacity_of(window, in_use));
+            if menus == Menus::Only {
+                // Painted over as its window is, but listed nowhere, as a
+                // Wayland window's menus are not (#297).
+                let Some(bbox) = window.menus_bbox() else {
+                    continue;
+                };
+                windows.push(Placed {
+                    window: window.clone(),
+                    at: *at,
+                    cover: moved(bbox, *at),
+                    redacted: hidden,
+                    raised,
+                    alpha,
+                    rolled: false,
+                    shadow: false,
+                    menus,
+                });
+                continue;
+            }
             let (Some(bbox), Some(location)) =
                 (space.element_bbox(window), space.element_location(window))
             else {
                 continue;
             };
-            let id = id_of(window);
-            let hidden = id.is_some_and(|id| !origin(state, id).1);
             let cover = Rectangle::new(bbox.loc - area.loc, bbox.size);
             // Rolled up, its client is not in the picture, and the bar is
             // this compositor's; the block over a redacted one's bar still
@@ -288,9 +320,10 @@ mod taking {
                 cover,
                 redacted: hidden,
                 raised,
-                alpha: crate::shell::alpha(state.opacity_of(window, in_use)),
+                alpha,
                 rolled,
                 shadow: true,
+                menus,
             });
         }
         for (layer, at) in &stack.lower {
@@ -381,6 +414,7 @@ mod taking {
                 alpha: 1.0,
                 rolled: false,
                 shadow: false,
+                menus: Menus::With,
             });
         }
         let geometry = window.geometry();
@@ -400,6 +434,7 @@ mod taking {
             alpha: 1.0,
             rolled: false,
             shadow: false,
+            menus: Menus::With,
         });
         Ok(Plan {
             size: (whole.size.w, whole.size.h).into(),
@@ -542,6 +577,7 @@ mod taking {
                                     rolled: placed.rolled,
                                     rolling: None,
                                     shadow: placed.shadow,
+                                    menus: placed.menus,
                                 },
                             )
                             .into_iter()
@@ -563,6 +599,24 @@ mod taking {
         elements.extend(layers(renderer, &plan.top));
         elements.extend(windows(renderer, false));
         elements.extend(layers(renderer, &plan.lower));
+        // A client's surface is drawn once, where it stands: a window's
+        // menus drawn apart from it are not drawn with it too (#234).
+        #[cfg(debug_assertions)]
+        {
+            use smithay::backend::renderer::element::Element as _;
+
+            let mut surfaces = std::collections::HashSet::new();
+            for element in &elements {
+                if let Scene::Window(FramedElement::Surface(surface)) | Scene::Surface(surface) =
+                    element
+                {
+                    assert!(
+                        surfaces.insert(surface.id().clone()),
+                        "a surface drawn twice in one picture"
+                    );
+                }
+            }
+        }
         let ground = plan
             .backdrop
             .as_ref()

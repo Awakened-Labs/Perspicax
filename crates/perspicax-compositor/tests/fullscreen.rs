@@ -391,10 +391,24 @@ fn a_fullscreen_window_whose_own_menu_is_open_stays_over_the_panel() {
     let video = window(&facts, "video");
 
     let _menu = menu_with_the_keyboard(&session, &mut desk, &mut queue, &qh, &ear, video);
+    let facts = session.facts.read();
     assert_eq!(
-        corner(&session.facts.read(), "video"),
+        corner(&facts, "video"),
         Visibility::Visible,
         "the panel came over the video while its menu was open"
+    );
+    // Its menu is over the panel with it, not with the menus of a window
+    // in use under the panels (#234).
+    let place = |id: SurfaceId| facts.surfaces().iter().position(|surface| surface.id == id);
+    let menu = facts
+        .surfaces()
+        .iter()
+        .find(|surface| matches!(surface.kind, SurfaceKind::Popup { .. }))
+        .expect("the menu")
+        .id;
+    assert!(
+        place(menu) > place(layer(&facts, "panel")),
+        "the video's menu is under the panel: {facts:?}"
     );
 
     session.stop((desk, queue));

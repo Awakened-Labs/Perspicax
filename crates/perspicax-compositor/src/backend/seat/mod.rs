@@ -1249,12 +1249,25 @@ fn render(state: &mut Compositor, crtc: crtc::Handle) -> (Drew, bool) {
 }
 
 /// What `stack` shows, front to back, at `scale`: each layer surface and
-/// window where the stack puts it.
+/// window where the stack puts it, and the menus of the window in use in
+/// front of every window but the one over the panels.
 fn scene(renderer: &mut GlesRenderer, stack: &crate::shell::Stack, scale: f64) -> Vec<Elements> {
+    use crate::framed::Menus;
+
     let mut elements = layer_elements(renderer, &stack.overlay, scale);
-    elements.extend(window_elements(renderer, &stack.raised, scale));
+    elements.extend(window_elements(renderer, &stack.raised, scale, |_| {
+        Menus::With
+    }));
     elements.extend(layer_elements(renderer, &stack.top, scale));
-    elements.extend(window_elements(renderer, &stack.windows, scale));
+    elements.extend(window_elements(
+        renderer,
+        stack.menus.as_slice(),
+        scale,
+        |_| Menus::Only,
+    ));
+    elements.extend(window_elements(renderer, &stack.windows, scale, |window| {
+        stack.menus_of(window)
+    }));
     elements.extend(layer_elements(renderer, &stack.lower, scale));
     elements
 }
@@ -1288,7 +1301,8 @@ fn layer_elements(
         .collect()
 }
 
-/// Windows, each where the stack puts it, at the alpha it is dressed in.
+/// Windows, each where the stack puts it, at the alpha it is dressed in,
+/// with its menus or not as `menus` says.
 fn window_elements(
     renderer: &mut GlesRenderer,
     pieces: &[(
@@ -1296,10 +1310,11 @@ fn window_elements(
         smithay::utils::Point<i32, smithay::utils::Logical>,
     )],
     scale: f64,
+    menus: impl Fn(&crate::framed::Framed) -> crate::framed::Menus,
 ) -> Vec<Elements> {
-    use smithay::backend::renderer::element::{AsRenderElements, Wrap};
+    use smithay::backend::renderer::element::Wrap;
 
-    use crate::framed::FramedElement;
+    use crate::framed::{Drawn, FramedElement};
 
     let at_scale = smithay::utils::Scale::from(scale);
     pieces
@@ -1307,11 +1322,12 @@ fn window_elements(
         .flat_map(|(window, at)| {
             // Read before drawing, which holds the same dress.
             let alpha = window.alpha();
-            window.render_elements::<FramedElement<GlesRenderer>>(
+            window.elements::<GlesRenderer, FramedElement<GlesRenderer>>(
                 renderer,
                 at.to_physical_precise_round(scale),
                 at_scale,
                 alpha,
+                Drawn::as_shown(window, menus(window)),
             )
         })
         .map(|element| Elements::Space(SpaceRenderElements::Element(Wrap::from(element))))

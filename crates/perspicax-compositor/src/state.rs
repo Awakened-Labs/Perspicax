@@ -907,6 +907,9 @@ impl Compositor {
         if let Some(keyboard) = self.keyboard.clone() {
             keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
         }
+        // No window is in use: a fullscreen one goes back under the panels,
+        // and the menus of the one left go back with it (#234).
+        self.restack(None);
         // Nor does anything have the person's attention (#257).
         self.attention.keys_to(None, false);
         // No window is lit or undimmed now. See `focus_changed`.

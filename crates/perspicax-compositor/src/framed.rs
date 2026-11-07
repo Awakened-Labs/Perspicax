@@ -63,7 +63,7 @@ use smithay::{
             },
         },
     },
-    desktop::{PopupManager, Window, space::SpaceElement},
+    desktop::{PopupKind, PopupManager, Window, space::SpaceElement},
     output::Output,
     utils::{IsAlive, Logical, Physical, Point, Rectangle, Scale, Size, Transform},
 };
@@ -91,6 +91,33 @@ pub(crate) struct Drawn {
     pub(crate) rolling: Option<f32>,
     /// With the shadow it casts, if it casts one.
     pub(crate) shadow: bool,
+    /// Whether its menus are drawn with it.
+    pub(crate) menus: Menus,
+}
+
+impl Drawn {
+    /// `window` as the monitor shows it: rolled up, or rolling, as it is, and
+    /// with its shadow.
+    pub(crate) fn as_shown(window: &Framed, menus: Menus) -> Self {
+        Self {
+            rolled: is_shaded(window),
+            rolling: window.rolling_share(),
+            shadow: true,
+            menus,
+        }
+    }
+}
+
+/// Which of a window is drawn: an xdg window's menus are drawn apart from it
+/// while it is in use, in front of every window (#234).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Menus {
+    /// The window and its menus in front of it.
+    With,
+    /// The window, and none of its menus.
+    Without,
+    /// Its menus, and nothing else of it.
+    Only,
 }
 
 /// A titlebar's title and buttons, rasterised, and what they were rasterised
@@ -475,6 +502,37 @@ impl Framed {
         });
     }
 
+    /// An xdg window's menus, front first, each with where its surface's
+    /// origin is from the window's: where smithay's `Window::render_elements`
+    /// draws them. None for an X11 window, whose menus are windows of their
+    /// own.
+    fn menus(&self) -> Vec<(PopupKind, Point<i32, Logical>)> {
+        let Some(toplevel) = self.0.toplevel() else {
+            return Vec::new();
+        };
+        let geometry = self.geometry();
+        PopupManager::popups_for_surface(toplevel.wl_surface())
+            .map(|(popup, offset)| {
+                let at = geometry.loc + offset - popup.geometry().loc;
+                (popup, at)
+            })
+            .collect()
+    }
+
+    /// The bounds of an xdg window's menus together, from its surface's
+    /// origin, as [`SpaceElement::bbox`] is: what is drawn of them apart from
+    /// it while it is in use (#234), and painted over in a picture. `None`
+    /// while it has none open.
+    #[cfg(feature = "capture")]
+    pub(crate) fn menus_bbox(&self) -> Option<Rectangle<i32, Logical>> {
+        self.menus()
+            .into_iter()
+            .map(|(popup, at)| {
+                smithay::desktop::utils::bbox_from_surface_tree(popup.wl_surface(), at)
+            })
+            .reduce(|all, menu| all.merge(menu))
+    }
+
     /// The window's bounds as if it were not rolled up: its client, its
     /// menus and the frame round it. A picture of the window alone is this
     /// big, rolled up or not.
@@ -598,9 +656,12 @@ impl Framed {
     /// outline between. The outline is in front of the client's own
     /// picture, for a client's shadow is drawn just where it goes, and would
     /// hide it. Its menus are in front of all of it, as they are of the
-    /// titlebar: the index stacks them directly above their window (#112),
-    /// and what is drawn is what it describes. The title is over the light
-    /// behind its button, and both are over the bar.
+    /// titlebar: the index stacks them above their window (#112), and what
+    /// is drawn is what it describes. The title is over the light behind
+    /// its button, and both are over the bar.
+    ///
+    /// Its `menus` alone, or all of it but them, for the window in use,
+    /// whose menus are drawn in front of every window (#234).
     ///
     /// `rolled` up to its titlebar, the frame alone, measured from a client
     /// of no height, and nothing of the client: what is drawn of a window
@@ -644,50 +705,42 @@ impl Framed {
         };
 
         // An xdg window's menus and its own tree, apart, as smithay's
-        // `Window::render_elements` draws them together. An X11 window's
-        // menus are windows of their own.
-        let (menus, own): (
-            Vec<WaylandSurfaceRenderElement<R>>,
-            Vec<WaylandSurfaceRenderElement<R>>,
-        ) = match self.0.toplevel() {
-            // Rolled up, nothing of the client is drawn, nor its menus,
-            // which it has none of then.
-            _ if height == 0 => (Vec::new(), Vec::new()),
-            Some(toplevel) => {
-                let root = toplevel.wl_surface();
-                let mut menus = Vec::new();
-                for (popup, offset) in PopupManager::popups_for_surface(root) {
-                    let offset = (geometry.loc + offset - popup.geometry().loc)
-                        .to_physical_precise_round(scale);
-                    menus.extend(render_elements_from_surface_tree(
+        // `Window::render_elements` draws them together: the menus may be
+        // drawn without the window, or the window without them. An X11
+        // window's menus are windows of their own. Rolled up, nothing of the
+        // client is drawn, nor its menus, which it has none of then.
+        let mut elements: Vec<C> = Vec::new();
+        if height > 0 && drawn.menus != Menus::Without {
+            for (popup, at) in self.menus() {
+                elements.extend(
+                    render_elements_from_surface_tree(
                         renderer,
                         popup.wl_surface(),
-                        location + offset,
+                        location + at.to_physical_precise_round(scale),
                         scale,
                         alpha,
                         Kind::Unspecified,
-                    ));
-                }
-                let own = render_elements_from_surface_tree(
-                    renderer,
-                    root,
-                    location,
-                    scale,
-                    alpha,
-                    Kind::Unspecified,
+                    )
+                    .into_iter()
+                    .map(|element| C::from(FramedElement::Surface(element))),
                 );
-                (menus, own)
             }
-            None => (
-                Vec::new(),
-                self.0.render_elements(renderer, location, scale, alpha),
+        }
+        if drawn.menus == Menus::Only {
+            return elements;
+        }
+        let own: Vec<WaylandSurfaceRenderElement<R>> = match self.0.toplevel() {
+            _ if height == 0 => Vec::new(),
+            Some(toplevel) => render_elements_from_surface_tree(
+                renderer,
+                toplevel.wl_surface(),
+                location,
+                scale,
+                alpha,
+                Kind::Unspecified,
             ),
+            None => self.0.render_elements(renderer, location, scale, alpha),
         };
-
-        let mut elements: Vec<C> = menus
-            .into_iter()
-            .map(|element| C::from(FramedElement::Surface(element)))
-            .collect();
         let drawing = Drawing {
             origin,
             scale,
@@ -957,7 +1010,8 @@ where
 {
     type RenderElement = FramedElement<R>;
 
-    /// The window as it is drawn: see [`Framed::elements`].
+    /// The window as it is drawn, its menus with it: see
+    /// [`Framed::elements`].
     fn render_elements<C: From<Self::RenderElement>>(
         &self,
         renderer: &mut R,
@@ -965,11 +1019,12 @@ where
         scale: Scale<f64>,
         alpha: f32,
     ) -> Vec<C> {
-        let drawn = Drawn {
-            rolled: is_shaded(self),
-            rolling: self.rolling_share(),
-            shadow: true,
-        };
-        self.elements(renderer, location, scale, alpha, drawn)
+        self.elements(
+            renderer,
+            location,
+            scale,
+            alpha,
+            Drawn::as_shown(self, Menus::With),
+        )
     }
 }
