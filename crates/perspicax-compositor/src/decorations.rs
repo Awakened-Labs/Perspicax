@@ -13,7 +13,7 @@
 //!
 //! An X11 window is framed unless its Motif hints say it draws its own,
 //! which is what `X11Surface::is_decorated` means. Override-redirect windows
-//! (menus, tooltips) are never framed.
+//! (menus, tooltips) are never framed, nor marked out.
 //!
 //! Where a frame goes is pure policy (`perspicax_policy::frame`). Its pixels
 //! are drawn by [`crate::framed::Framed`] on the seat. Its facts go out with
@@ -24,6 +24,8 @@
 //! colours, and a line round it, outside its frame, whoever draws the frame.
 //! The line is drawn wherever the window is, in a picture too, and goes out
 //! with the frame's facts, for it covers what is under it as a titlebar does.
+//! A window's menus are drawn over its line and have none of their own, an
+//! X11 application's as a Wayland application's.
 
 use std::cell::Cell;
 
@@ -216,11 +218,16 @@ impl Compositor {
     /// even with `outline = 0`: the person asked for no mark, not for no
     /// answer to a key they pressed.
     ///
+    /// None either for one that [places itself](crate::shell::places_itself),
+    /// an X11 menu or tooltip, which is never framed (#181) and is drawn over
+    /// the line of the window it hangs from, as a Wayland application's menu
+    /// is (#233). The agent may act on it all the same.
+    ///
     /// What the line is drawn from and what its facts say both ask here,
     /// so a window covers no more and no less than it is drawn with.
     pub(crate) fn outline_of(&self, window: &Framed) -> i32 {
         let outline = self.backend.decorations().agent.outline;
-        if Self::look(window) == Look::Fullscreen {
+        if crate::shell::places_itself(window) || Self::look(window) == Look::Fullscreen {
             0
         } else if self.marked(window) {
             outline

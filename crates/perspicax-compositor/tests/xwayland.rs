@@ -21,7 +21,9 @@
 //! so the window it was opened from keeps the keyboard. The pointer's tests
 //! need `capture`, and put a focus policy in force with
 //! `Command::FocusPolicy`. To an agent each is a popup (issue #159), hung
-//! from the window its `WM_TRANSIENT_FOR` names, or from nothing.
+//! from the window its `WM_TRANSIENT_FOR` names, or from nothing. On a desk
+//! that grants its Xwayland, a window is marked out as a seat marks a
+//! granted one, and its menus never are (issue #233).
 //!
 //! The keys (issue #259): with a person at the seat an X11 window takes them
 //! as it opens only if they asked for it, as a Wayland window does, and the
@@ -1381,6 +1383,96 @@ fn an_x11_window_is_not_granted_by_a_key() {
         )]
     );
     drop((shell, queue));
+    x11.stop();
+}
+
+/// A desk that grants its Xwayland, as a person could grant a server of its
+/// own (#289), consents to every X11 window on it, since consent for X11 is
+/// the server's, and marks each out as a seat marks a granted window: the
+/// line round its frame goes out with its facts, four strips beside the
+/// frame's four.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_is_marked_out_where_its_xwayland_is_granted() {
+    let x11 = X11::start(
+        "x11-grant-server",
+        Backend::headless((1280, 1024)).granting_xwayland(),
+    );
+    x11.open("page");
+    let page = x11
+        .surface_where("page", |surface| matches!(surface.origin, Origin::X11(_)))
+        .unwrap_or_else(|| panic!("never attributed: {:?}", x11.facts()));
+    let Origin::X11(origin) = &page.origin else {
+        unreachable!("attributed to X11")
+    };
+    assert_eq!(
+        x11.facts().consent(),
+        &perspicax_index::Consent::granted(vec![origin.server]),
+        "Xwayland, and nothing else"
+    );
+    x11.surface_where("page", |surface| surface.frame.len() == 8)
+        .unwrap_or_else(|| panic!("never marked out: {:?}", x11.facts()));
+
+    x11.stop();
+}
+
+/// Issue #233: a page on a desk that grants its Xwayland, marked out, and a
+/// menu filled with `background` that hangs from it across its right edge:
+/// their facts, once the menu is one the agent may act on. Not before, for a
+/// menu nobody has named the process of yet is unmarked whatever the line's
+/// rule says.
+fn granted_page_and_menu(x11: &X11, background: u32) -> (SurfaceFacts, SurfaceFacts) {
+    let window = x11.open("page");
+    let page = x11
+        .surface_where("page", |surface| surface.frame.len() == 8)
+        .unwrap_or_else(|| panic!("the page was never marked out: {:?}", x11.facts()));
+    let (_, y0, x1, _) = rect_of(&page);
+    x11.menu_coloured(
+        "menu",
+        (x1 as i16 - 60, y0 as i16 + 40),
+        (120, 100),
+        Some(window),
+        background,
+    );
+    let menu = eventually(Duration::from_secs(10), || {
+        let facts = x11.facts();
+        facts
+            .surfaces()
+            .iter()
+            .find(|surface| {
+                surface.title.as_deref() == Some("menu")
+                    && surface.mapped
+                    && facts.consent().permits(&surface.origin)
+            })
+            .cloned()
+    })
+    .unwrap_or_else(|| panic!("the menu was never the agent's: {:?}", x11.facts()));
+    let page = x11
+        .surface_where("page", |_| true)
+        .expect("the page, still there");
+    (page, menu)
+}
+
+/// Issue #233: a menu places itself, so it is never framed (#181), and it is
+/// never marked out either. The line goes round the window it hangs from and
+/// the menu is drawn over it, as a Wayland application's menu is. So where
+/// the agent may act on both, the window's facts carry the line and the
+/// menu's carry none.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_granted_x11_windows_menu_is_not_outlined() {
+    let x11 = X11::start(
+        "x11-mark-menu",
+        Backend::headless((1280, 1024)).granting_xwayland(),
+    );
+    let (page, menu) = granted_page_and_menu(&x11, x11.white);
+    assert!(
+        menu.frame.is_empty(),
+        "the menu is not marked out: {:?}",
+        menu.frame
+    );
+    assert_eq!(page.frame.len(), 8, "its window still is");
+
     x11.stop();
 }
 
@@ -3785,6 +3877,9 @@ const ORANGE: u32 = 0xffee_8822;
 const BLUE: u32 = 0xff33_6699;
 #[cfg(feature = "capture")]
 const WHITE: u32 = 0xffff_ffff;
+/// `[decorations.agent] outline-colour`, by default.
+#[cfg(feature = "capture")]
+const OUTLINE: u32 = 0xffb3_7feb;
 
 /// The X pixel for `argb`, on Xwayland's true-colour root.
 #[cfg(feature = "capture")]
@@ -3970,6 +4065,48 @@ fn a_picture_of_a_minimized_x11_window_shows_its_menu_where_it_is() {
     assert_eq!(
         accounted(&shot),
         [(menu, on_menu), (page, Rect::new(0.0, 0.0, 320.0, 200.0))]
+    );
+
+    x11.stop();
+}
+
+/// Issue #233: a picture of the monitor draws the line round a window the
+/// agent may act on where the window's facts say it is, and nowhere else:
+/// none round the menu that hangs from it past its edge, though the agent
+/// may act on the menu too.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_picture_shows_no_line_round_a_granted_x11_windows_menu() {
+    let x11 = X11::start(
+        "x11-picture-mark",
+        Backend::headless((1280, 1024)).granting_xwayland(),
+    );
+    let host = Host::new(&x11.session.facts, &x11.session.requests);
+    let (page, menu) = granted_page_and_menu(&x11, x_pixel(ORANGE));
+    let line = page
+        .frame
+        .iter()
+        .copied()
+        .reduce(|around, strip| around.union(strip))
+        .expect("the page's frame and line");
+
+    let shot = host
+        .capture(perspicax_index::ShotTarget::Output(None))
+        .expect("a picture");
+    // The page is in the monitor's corner, so its line begins past the top
+    // and the left of the picture.
+    let monitor = Rect::new(
+        0.0,
+        0.0,
+        f64::from(shot.width) / shot.scale,
+        f64::from(shot.height) / shot.scale,
+    );
+    assert_eq!(common::drawn_in(&shot, ORANGE), [menu.geometry], "the menu");
+    assert_eq!(
+        common::drawn_in(&shot, OUTLINE),
+        [line.intersect(monitor)],
+        "the line, round the page alone"
     );
 
     x11.stop();

@@ -260,6 +260,15 @@ pub(crate) fn start(
                     }
                 }
                 state.xwayland.server = server_pid(display_number);
+                // Only where a headless desk was asked to: the stand-in for
+                // a server of its own a person grants (#289). Granted
+                // before `ready` starts anything, and for the session, since
+                // Xwayland is no child `reap_spawned` collects.
+                if state.backend.grants_xwayland()
+                    && let Some(server) = state.xwayland.server
+                {
+                    state.grant(server, crate::grants::Why::Xwayland);
+                }
                 state.xwayland.client = Some(client.clone());
                 state.xwayland.ask = provenance(&wm_handle, display_number);
                 state.xwayland.side = Side::open(&wm_handle, display_number);
