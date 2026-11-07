@@ -414,7 +414,8 @@ impl Compositor {
     /// Work out which windows are kept on top and which is in use, raise
     /// `focused`, the window in use -- the one with the keyboard, or whose
     /// own menu has it -- over the panels if it is fullscreen, with its X11
-    /// menus, and put every other window back among the windows.
+    /// menus, and put every other window back among the windows. Then tell
+    /// X (`Compositor::tell_x11_stack`, #236).
     ///
     /// Told which window is in use rather than asking: while the seat is
     /// reporting a change of focus it holds the keyboard, and asking it then
@@ -465,6 +466,8 @@ impl Compositor {
         if moved || !menus.is_empty() || redraw {
             self.backend.redraw();
         }
+        #[cfg(feature = "xwayland")]
+        self.tell_x11_stack();
     }
 
     /// Raise `window` over the others, and its X11 menus over it: they are
