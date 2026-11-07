@@ -302,14 +302,15 @@ Code among them, rather than the pipe Python's `subprocess.PIPE` or Rust's
 menu is `kind: layer`, with the `layer` it stacks in and the
 `untrusted_namespace` its program gave it, and a screen locker's cover is
 `kind: lock_cover`. A menu, a combo list or a tooltip an application opened is
-`kind: popup`, with `from` naming the window or panel it hangs from: drawn
-over it, and covering what is under it (see "A menu covers what is under it",
-below). An X11 application's has a `from` only if it names the window it was
-opened from: GTK 3's and Qt's do, Steam's and GTK 4's do not. An agent can
-read and click a panel or a menu as it would a window; a window verb aimed at
-one is refused as `not_a_window`. A window rolled up to its titlebar is
-`shaded: true`, and one the person keeps on top of the others is
-`on_top: true`, as are its dialogs and menus, kept there with it.
+`kind: popup`, with `from` naming the window or panel it hangs from: drawn over
+it, over every window while that window is the one in use, and covering what is
+under it (see "A menu covers what is under it", below). An X11 application's has
+a `from` only if it names the window it was opened from: GTK 3's and Qt's do,
+Steam's and GTK 4's do not. An agent can read and click a panel or a menu as it
+would a window; a window verb aimed at one is refused as `not_a_window`. A
+window rolled up to its titlebar is `shaded: true`, and one the person keeps on
+top of the others is `on_top: true`, as are its dialogs and menus, kept there
+with it.
 
 An agent names a control and never a coordinate — the rectangle comes from the
 index and turning it into anything global is the compositor's job, so an agent
@@ -545,25 +546,28 @@ does a click.
 
 **A menu covers what is under it.** A menu, a combo list or a tooltip is a
 popup: a surface of its own, drawn directly above the window or panel it hangs
-from, where it takes the pointer. So a control under an open menu is refused as
-`occluded`, naming the menu, whether it is another application's or one of the
-menu's own window: a click there would land on the menu. One that holds the
-pointer and keyboard also keeps an agent's acts off every other application
-until it closes, refused as `menu_open`. And a menu's own
-items are judged inside the menu, an item hanging past its window's edge
-included, and an agent's click on one lands on the menu. Toolkits disagree
-about where they measure a menu's items from: GTK 3 from the menu itself, GTK
-4 from its window. Perspicax tells which by where the items land in each, and
-joins a menu to its items only when exactly one puts them on the menu; until
-it can, its window's menus are refused as `menu_unplaced`. A menu of a window
-that has drawn nothing yet covers what is under it all the same. An X11
-application's menus are popups too
+from, where it takes the pointer, and while that window is the one in use, in
+front of every window, kept on top or not
+([#234](https://github.com/Awakened-Labs/Perspicax/issues/234)). So a control
+under an open menu is refused as `occluded`, naming the menu, whether it is
+another application's or one of the menu's own window: a click there would land
+on the menu. One that holds the pointer and keyboard also keeps an agent's acts
+off every other application until it closes, refused as `menu_open`. And a
+menu's own items are judged inside the menu, an item hanging past its window's
+edge included, and an agent's click on one lands on the menu. Toolkits disagree
+about where they measure a menu's items from: GTK 3 from the menu itself, GTK 4
+from its window. Perspicax tells which by where the items land in each, and
+joins a menu to its items only when exactly one puts them on the menu; until it
+can, its window's menus are refused as `menu_unplaced`. A menu of a window that
+has drawn nothing yet covers what is under it all the same. An X11 application's
+menus are popups too
 ([#159](https://github.com/Awakened-Labs/Perspicax/issues/159)), drawn where
-they put themselves, over every window as they open. GTK 3 and Qt name the
+they put themselves, over every window as they open but one kept on top, which
+only the menus of the window in use are in front of. GTK 3 and Qt name the
 window a menu was opened from, and their menus are joined to their items as a
-Wayland application's are. Steam and GTK 4 name none, and such a menu is
-joined only to items that are a window of their own. A chain of menus, each
-opened from the last, goes 64 deep, more than fit across any monitor
+Wayland application's are. Steam and GTK 4 name none, and such a menu is joined
+only to items that are a window of their own. A chain of menus, each opened from
+the last, goes 64 deep, more than fit across any monitor
 ([#226](https://github.com/Awakened-Labs/Perspicax/issues/226)): the next is
 told it is done as it opens, as a click outside it would tell it.
 
@@ -1353,20 +1357,24 @@ roll up: one that draws its own has no titlebar of perspicax's to roll up to,
 and no button. An X11 window rolls up too, but is not told it has
 (`_NET_WM_STATE_SHADED`).
 
-In both, a window can be kept on top of the others: by `toggle-on-top` bound
-to a key, which neither profile binds, or by the triangle beside sticky on
+In both, a window can be kept on top of the others: by `toggle-on-top` bound to
+a key, which neither profile binds, or by the triangle beside sticky on
 `minimal`'s titlebar, filled while the window is kept. It is drawn in front of
 every window that is not kept on top, whichever of them is raised or has the
-keyboard, and of two kept on top, the one raised last is in front. Nothing
-else changes: Alt+Tab walks every window in turn as it did, each taking the
-keyboard, and a window closing gives the keyboard to the one raised last. Its
-dialogs and menus are kept on top with it, and let go with it. The panels stay
-over it, and a fullscreen window covers it while it is the one in use. A tab
-group is kept on top as one, and a tab taken out of it comes out among the
-others. A menu of a window that is not kept on top opens behind one that is,
-where they overlap (#234). An X11 window is kept on top as any other, but is
-not told it is, and an X11 application cannot keep a window of its own on top
-by asking (`_NET_WM_STATE_ABOVE`, #236).
+keyboard, and of two kept on top, the one raised last is in front. Nothing else
+changes: Alt+Tab walks every window in turn as it did, each taking the keyboard,
+and a window closing gives the keyboard to the one raised last. Its dialogs and
+menus are kept on top with it, and let go with it. The panels stay over it, and
+a fullscreen window covers it while it is the one in use. A tab group is kept on
+top as one, and a tab taken out of it comes out among the others. A menu, a
+combo list or a tooltip of the window in use -- the one with the keys, or whose
+own menu has them -- is in front of every window, kept on top or not, and under
+the panels, though its window is behind (#234). Another window's stays with its
+window, so a menu of a window the person has left goes back behind one kept on
+top with it. An X11 menu that names no window it was opened from, as Steam's and
+GTK 4's do, still opens behind a window kept on top (#302). An X11 window is
+kept on top as any other, but is not told it is, and an X11 application cannot
+keep a window of its own on top by asking (`_NET_WM_STATE_ABOVE`, #236).
 
 In both, a workspace switch slides: the new workspace comes in from the side
 the person went towards, across a wrap too, and along the grid for a switch by

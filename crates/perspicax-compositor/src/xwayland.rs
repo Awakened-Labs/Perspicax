@@ -123,11 +123,12 @@
 //! drawn, hit and told an agent, and its dialogs and menus with it, by the
 //! window their `WM_TRANSIENT_FOR` names (`shell::stacking`). The menus of
 //! the window in use come in front of it all the same (issue #234), where
-//! they name that window: one that names none stays where it was raised. X
-//! is told none of it. Smithay does not list `_NET_WM_STATE_ABOVE` as supported, so no
-//! client asks to be kept on top that way and none is told it is; X's own
-//! stacking order is not made to match, and a window asking to be restacked
-//! (`configure_request`'s `Reorder`) is not answered either (issue #236).
+//! they name that window: one that names none stays where it was raised
+//! (issue #302). X is told none of it. Smithay does not list
+//! `_NET_WM_STATE_ABOVE` as supported, so no client asks to be kept on top
+//! that way and none is told it is; X's own stacking order is not made to
+//! match, and a window asking to be restacked (`configure_request`'s
+//! `Reorder`) is not answered either (issue #236).
 //!
 //! # Started eagerly, not lazily
 //!

@@ -47,7 +47,7 @@
 //! and a menu of a window the person has left goes back with it. Which
 //! window is in use is worked out in [`Compositor::restack`] too, and kept
 //! with where each window stands. An X11 menu that names no window it hangs
-//! from stands with none, where it was raised.
+//! from stands with none, where it was raised (#302).
 //!
 //! So whatever asks what is in front reads the stack through [`as_drawn`]:
 //! the screen and pictures, through [`stack`]; the pointer, through
