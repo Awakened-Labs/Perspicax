@@ -412,6 +412,9 @@ struct Wants {
     /// ICCCM's initial state, iconic: as `xterm -iconic` starts, and Wine
     /// starts a program shown minimized.
     minimized: bool,
+    /// Kept on top: as GTK writes it for a window kept above before it is
+    /// shown, and Wine for a topmost one.
+    above: bool,
 }
 
 impl Wants {
@@ -421,6 +424,7 @@ impl Wants {
             maximized: state.contains(&atoms._NET_WM_STATE_MAXIMIZED_HORZ)
                 && state.contains(&atoms._NET_WM_STATE_MAXIMIZED_VERT),
             minimized: matches!(initial, Some(WmHintsState::Iconic)),
+            above: state.contains(&atoms._NET_WM_STATE_ABOVE),
         }
     }
 }
@@ -452,10 +456,17 @@ enum Asked {
     /// EWMH's `_NET_ACTIVE_WINDOW`: for `window` to be the active one, with
     /// `stamp` the X time of the input behind the request, or 0 for none.
     Activate { window: u32, stamp: u32 },
-    /// EWMH's `_NET_WM_STATE` with `_NET_WM_STATE_HIDDEN`: for `window` to
-    /// be minimized, or brought back. Smithay's window manager answers the
-    /// other states asked for beside it, if any.
-    Hidden { window: u32, change: Change },
+    /// EWMH's `_NET_WM_STATE` with `_NET_WM_STATE_HIDDEN` or
+    /// `_NET_WM_STATE_ABOVE`, or both, for one message may name two: for
+    /// `window` to be minimized or brought back, and to be kept on top or
+    /// let go. Smithay's window manager answers the other states asked for
+    /// beside them, if any.
+    State {
+        window: u32,
+        change: Change,
+        hidden: bool,
+        above: bool,
+    },
 }
 
 impl Asked {
@@ -471,11 +482,21 @@ impl Asked {
                 stamp: data[1],
             });
         }
-        if message.type_ == atoms._NET_WM_STATE && data[1..=2].contains(&atoms._NET_WM_STATE_HIDDEN)
-        {
-            return Change::read(data[0]).map(|change| Self::Hidden { window, change });
+        if message.type_ != atoms._NET_WM_STATE {
+            return None;
         }
-        None
+        let names = &data[1..=2];
+        let hidden = names.contains(&atoms._NET_WM_STATE_HIDDEN);
+        let above = names.contains(&atoms._NET_WM_STATE_ABOVE);
+        if !hidden && !above {
+            return None;
+        }
+        Change::read(data[0]).map(|change| Self::State {
+            window,
+            change,
+            hidden,
+            above,
+        })
     }
 }
 
@@ -1068,10 +1089,11 @@ impl Compositor {
     /// a titlebar button, a shell, a tab coming to the front -- is told from
     /// one place.
     ///
-    /// Only the person's own flag ([`shell::is_on_top`]): a dialog kept on
-    /// top with its window is not told, the state being a window's own to
-    /// ask for and drop. Parked windows too, which are kept on top as they
-    /// come back.
+    /// Only the person's own flag ([`shell::is_on_top`]), which a tab group
+    /// keeps on its tab in front, so every tab of a group kept on top is
+    /// told: a dialog kept on top with its window is not, the state being a
+    /// window's own to ask for and drop. Parked windows too, which are kept
+    /// on top as they come back.
     pub(crate) fn tell_x11_stack(&mut self) {
         let Some(side) = &self.xwayland.side else {
             return;
@@ -1083,7 +1105,7 @@ impl Compositor {
             if shell::places_itself(window) {
                 continue;
             }
-            let above = shell::is_on_top(window);
+            let above = shell::is_on_top(&self.front_of(window));
             window.user_data().insert_if_missing(SaidAbove::default);
             let said = window
                 .user_data()
@@ -1275,6 +1297,11 @@ impl XwmHandler for Compositor {
         self.settle_new(&window, on);
         self.fit_frame(&window);
         self.adopt(&window);
+        // Kept on top as it asked, before anything works out where it
+        // stands, as the person keeps a window.
+        if wants.above {
+            placement(&window, |placement| placement.on_top = true);
+        }
         // Maximized first, so that leaving fullscreen lands on it; both
         // before it takes the keyboard, whose activation is the first write.
         if wants.maximized {
@@ -1562,7 +1589,12 @@ impl Compositor {
     fn x11_asked(&mut self, asked: Asked) {
         match asked {
             Asked::Activate { window, stamp } => self.activate_x11(window, stamp),
-            Asked::Hidden { window, change } => self.hide_x11(window, change),
+            Asked::State {
+                window,
+                change,
+                hidden,
+                above,
+            } => self.state_x11(window, change, hidden, above),
         }
     }
 
@@ -1613,19 +1645,34 @@ impl Compositor {
         }
     }
 
-    /// An X11 window asking with `_NET_WM_STATE_HIDDEN` to be minimized or
-    /// brought back. EWMH would have a window manager ignore that, the state
-    /// being its own to set, but a program that asks waits for an answer, so
-    /// it is taken as `WM_CHANGE_STATE` is, as Openbox takes it. Answered in
-    /// `_NET_WM_STATE` as well, which is what was asked about.
-    fn hide_x11(&mut self, window: u32, change: Change) {
+    /// An X11 window asking in `_NET_WM_STATE` for what Smithay's window
+    /// manager drops: to be minimized or brought back, with
+    /// `_NET_WM_STATE_HIDDEN`, and to be kept on top or let go, with
+    /// `_NET_WM_STATE_ABOVE`. Answered in `_NET_WM_STATE`, which is what
+    /// was asked about, whatever came of it.
+    ///
+    /// EWMH would have a window manager ignore `_NET_WM_STATE_HIDDEN`, the
+    /// state being its own to set, but a program that asks waits for an
+    /// answer, so it is taken as `WM_CHANGE_STATE` is, as Openbox takes it.
+    ///
+    /// Kept on top as the person keeps a window, only with a person at the
+    /// seat, as for a request of any other kind: a player's own "always on
+    /// top", mpv's `--ontop`, Wine's topmost window. A tab's group is kept
+    /// through the tab in front, as the person keeps one.
+    fn state_x11(&mut self, window: u32, change: Change, hidden: bool, above: bool) {
         let Some((window, x11)) = self.managed_x11_by_id(window) else {
             return;
         };
-        if change.applied_to(Self::is_minimized(&window)) {
-            self.minimize_asked(&x11);
-        } else {
-            self.unminimize_asked(&x11);
+        if hidden {
+            if change.applied_to(Self::is_minimized(&window)) {
+                self.minimize_asked(&x11);
+            } else {
+                self.unminimize_asked(&x11);
+            }
+        }
+        if above && let Some(window) = self.honoured(&x11) {
+            let front = self.front_of(&window);
+            self.set_on_top(&front, change.applied_to(shell::is_on_top(&front)));
         }
         self.answer_net_wm_state(&x11);
     }
@@ -1975,18 +2022,68 @@ mod tests {
         let second = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [0_u32, 3, 7, 1, 0]);
         assert_eq!(
             Asked::read(&first, &atoms),
-            Some(Asked::Hidden {
+            Some(Asked::State {
                 window: 0x40_0001,
                 change: Change::Add,
+                hidden: true,
+                above: false,
             })
         );
         assert_eq!(
             Asked::read(&second, &atoms),
-            Some(Asked::Hidden {
+            Some(Asked::State {
                 window: 0x40_0001,
                 change: Change::Remove,
+                hidden: true,
+                above: false,
             })
         );
+    }
+
+    #[test]
+    fn a_request_to_be_kept_on_top_is_found_in_either_place() {
+        let atoms = atoms();
+        let first = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [2_u32, 8, 0, 1, 0]);
+        let second = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [1_u32, 3, 8, 1, 0]);
+        assert_eq!(
+            Asked::read(&first, &atoms),
+            Some(Asked::State {
+                window: 0x40_0001,
+                change: Change::Toggle,
+                hidden: false,
+                above: true,
+            })
+        );
+        assert_eq!(
+            Asked::read(&second, &atoms),
+            Some(Asked::State {
+                window: 0x40_0001,
+                change: Change::Add,
+                hidden: false,
+                above: true,
+            })
+        );
+    }
+
+    #[test]
+    fn one_request_may_ask_to_be_hidden_and_kept_on_top_at_once() {
+        let message = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [0_u32, 8, 7, 1, 0]);
+        assert_eq!(
+            Asked::read(&message, &atoms()),
+            Some(Asked::State {
+                window: 0x40_0001,
+                change: Change::Remove,
+                hidden: true,
+                above: true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_window_asks_to_start_kept_on_top_with_above_in_its_state() {
+        let atoms = atoms();
+        assert!(Wants::read(&[3, 8], None, &atoms).above);
+        assert!(!Wants::read(&[3], None, &atoms).above);
     }
 
     #[test]

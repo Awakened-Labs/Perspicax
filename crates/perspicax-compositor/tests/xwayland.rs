@@ -626,6 +626,7 @@ const ICONIC: u32 = 3;
 /// `_NET_WM_STATE`'s actions.
 const REMOVE: u32 = 0;
 const ADD: u32 = 1;
+const TOGGLE: u32 = 2;
 
 /// EWMH's sources of a request: an application, or a pager or taskbar --
 /// which Wine says it is when it asks to be active.
@@ -4991,6 +4992,91 @@ fn an_x11_window_kept_on_top_and_withdrawn_is_told_it_no_longer_is() {
     x11.surface_where("kept", |surface| surface.mapped && !surface.on_top)
         .unwrap_or_else(|| panic!("never mapped again, let go: {:?}", x11.facts()));
     assert!(x11.says_above(window, false), "told again");
+    x11.stop();
+}
+
+/// Issue #236: a window asking in `_NET_WM_STATE` to be kept on top is, as
+/// the person keeps one -- in front of a window that takes the keys after
+/// it -- and asking back lets it go, each way of asking answered. Smithay
+/// dropped the request, unanswered.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_asking_to_be_kept_on_top_is_and_asking_back_lets_it_go() {
+    let x11 = X11::start(
+        "x11-asks-above",
+        Backend::headless((1280, 800)).with_person(),
+    );
+    let player = with_the_keyboard(&x11, "player");
+    let above = x11.atoms._NET_WM_STATE_ABOVE;
+    let ask = |action, kept: bool| {
+        x11.ask_state(player, action, above, 0);
+        assert!(
+            x11.answered(player, x11.atoms._NET_WM_STATE),
+            "never answered"
+        );
+        x11.surface_where("player", |surface| surface.on_top == kept)
+            .unwrap_or_else(|| panic!("not {kept}: {:?}", x11.facts()));
+        assert!(
+            x11.says_above(player, kept),
+            "told otherwise: {:?}",
+            x11.net_wm_state(player)
+        );
+    };
+
+    ask(ADD, true);
+    with_the_keyboard(&x11, "other");
+    assert!(x11.on_top("player"), "not in front: {:?}", x11.facts());
+
+    ask(TOGGLE, false);
+    ask(TOGGLE, true);
+    ask(REMOVE, false);
+    x11.stop();
+}
+
+/// Issue #236: with nobody at the seat a window asking to be kept on top
+/// stays among the others, as for a request of any other kind, and is still
+/// answered.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn with_nobody_at_the_seat_an_x11_window_asking_to_be_kept_on_top_stays_and_is_answered() {
+    let x11 = X11::start("x11-nobody-above", Backend::headless((1280, 800)));
+    let player = x11.open("player");
+
+    x11.ask_state(player, ADD, x11.atoms._NET_WM_STATE_ABOVE, 0);
+    assert!(
+        x11.answered(player, x11.atoms._NET_WM_STATE),
+        "never answered"
+    );
+    assert!(x11.says_above(player, false), "told it is");
+    assert!(
+        x11.facts()
+            .surfaces()
+            .iter()
+            .any(|surface| surface.title.as_deref() == Some("player") && !surface.on_top),
+        "an agent's desk kept it on top"
+    );
+    x11.stop();
+}
+
+/// Issue #236: a window that says before it maps that it is to be kept on
+/// top, as GTK writes it for a window kept above before it is shown, opens
+/// kept on top, and told so.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_mapping_asking_to_be_kept_on_top_opens_kept_on_top() {
+    let x11 = X11::start(
+        "x11-maps-above",
+        Backend::headless((1280, 800)).with_person(),
+    );
+    let player = x11.open_with_state("player", &[x11.atoms._NET_WM_STATE_ABOVE]);
+
+    x11.surface_where("player", |surface| surface.on_top)
+        .unwrap_or_else(|| panic!("never kept on top: {:?}", x11.facts()));
+    assert!(
+        x11.says_above(player, true),
+        "not told: {:?}",
+        x11.net_wm_state(player)
+    );
     x11.stop();
 }
 
