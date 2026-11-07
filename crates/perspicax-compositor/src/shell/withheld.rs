@@ -14,6 +14,16 @@
 //! for, granted as it is spent once the window is open
 //! (`request_activation`), which is why a window withheld is in the space.
 //!
+//! A dialog another program opens for a window of the program in use is
+//! asked for too: the portal's file chooser, opened for Firefox's window by
+//! another program, D-Bus started, that the person's press never reached
+//! (#235, #268). Its parent is named through xdg-foreign (`crate::foreign`)
+//! only after `get_toplevel`, where the rest is judged, so it is judged again
+//! at its first picture, as it opens ([`Compositor::asked_through_parent`]),
+//! and given the keys then as a token spent on it would give them. A
+//! program names only its own windows to another, so no program but the one
+//! in use can have a dialog opened with the keys this way.
+//!
 //! Any other window opens without them, as Mutter and KWin open one: just
 //! beneath the window in use, in sight but behind what the person is typing
 //! into, not told it is active, and marked as wanting attention until it
@@ -149,6 +159,41 @@ impl Compositor {
             surface = ?id_of(window).map(|id| id.0),
             "opened without the keys: the person did not ask for it"
         );
+    }
+
+    /// Whether the person asked for `window`, which opened without the keys,
+    /// through the window it hangs from: a dialog another program opened for
+    /// a window of the program they are using, as the portal opens a file
+    /// chooser for Firefox's (#235, #268). Its own program's dialogs were
+    /// asked for as they opened, through it. Only an xdg window's parent is
+    /// another program's; an X11 window's is Xwayland's, as it is.
+    pub(crate) fn asked_through_parent(&self, window: &Framed) -> bool {
+        if !wants_attention(window) {
+            return false;
+        }
+        self.hangs_from(window)
+            .and_then(|parent| parent.toplevel()?.wl_surface().client())
+            .is_some_and(|client| self.asked_of(Some(&client)))
+    }
+
+    /// Give `window`, which opened without the keys, the keys as it opens
+    /// after all: raised, and focused, as a token spent on it would.
+    pub(crate) fn heed_as_it_opens(&mut self, window: &Framed) {
+        let (Some(id), Some(surface)) = (
+            id_of(window),
+            window
+                .toplevel()
+                .map(|toplevel| toplevel.wl_surface().clone()),
+        ) else {
+            return;
+        };
+        tracing::info!(
+            surface = id.0,
+            "opened for the window in use: it takes the keys after all"
+        );
+        self.space.raise_element(window, false);
+        self.focus_surface(surface, id);
+        self.backend.redraw();
     }
 
     /// `window`'s program asked to bring it forward with the keys, and was

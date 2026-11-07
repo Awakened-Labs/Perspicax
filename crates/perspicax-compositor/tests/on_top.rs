@@ -9,16 +9,18 @@
 //! top, and the keyboard goes back where it went then. A menu of the window
 //! in use is in front of a window kept on top, though its window is not,
 //! and under the panels (#234): in the facts, under the pointer and in a
-//! picture. The binding is carried out with [`Session::perform`]; the
-//! titlebar's button needs a seat. X11's dialogs and menus are in
-//! `xwayland.rs`.
+//! picture. A dialog another program opens for a window kept on top, as the
+//! desktop portal opens its file chooser, is kept on top with it too (#235),
+//! and let go once the window is no longer named to it. The binding is
+//! carried out with [`Session::perform`]; the titlebar's button needs a
+//! seat. X11's dialogs and menus are in `xwayland.rs`.
 //!
 //! Like the other live tests it binds a real Wayland socket, so it needs
 //! `XDG_RUNTIME_DIR`, and is `#[ignore]`d for `ci/live-tests.sh` to run.
 
 mod common;
 
-use common::{Desk, Session, configured, menu_with_the_keyboard_on, until};
+use common::{Desk, Session, configured, hand_over, menu_with_the_keyboard_on, until};
 use perspicax_compositor::{Backend, Virtual};
 use perspicax_index::{HostFacts, SurfaceFacts, SurfaceKind, judge};
 use perspicax_node::{Rect, SurfaceId, Visibility};
@@ -28,6 +30,9 @@ use smithay_client_toolkit::shell::{
     xdg::{XdgSurface as _, popup::Popup},
 };
 use wayland_client::{EventQueue, QueueHandle, globals::GlobalList};
+use wayland_protocols::xdg::foreign::zv2::client::{
+    zxdg_exported_v2::ZxdgExportedV2, zxdg_imported_v2::ZxdgImportedV2,
+};
 use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::State;
 
 fn surface<'a>(facts: &'a HostFacts, title: &str) -> &'a SurfaceFacts {
@@ -153,7 +158,7 @@ fn windows_on(
     desk.bind_taskbar(&globals, &qh);
     for (nth, title) in titles.iter().enumerate() {
         desk.open_window(&qh, title, title);
-        until(&mut queue, &mut desk, |desk| desk.drawn == nth + 1);
+        until(&mut queue, &mut desk, |desk| desk.has_drawn(nth));
         until(&mut queue, &mut desk, |desk| desk.task(title).is_some());
     }
     let last = titles.last().expect("a window at least");
@@ -482,6 +487,125 @@ fn a_dialog_is_kept_on_top_with_its_window_and_let_go_with_it() {
     assert!(!surface(&facts, "dialog").on_top, "let go with it");
 
     session.stop((desk, queue));
+}
+
+/// A second program, the portal, with the window its dialog is for: the
+/// export by that window's program, and the portal's import of it.
+struct Portal {
+    desk: Desk,
+    queue: EventQueue<Desk>,
+    exported: ZxdgExportedV2,
+    imported: ZxdgImportedV2,
+}
+
+/// The portal opening "dialog" for `desk`'s first window, "kept", which its
+/// program exported and handed it, as Firefox hands the portal the window a
+/// file chooser is for; and "dialog" on screen.
+fn portal_dialog_for_kept(
+    session: &Session,
+    desk: &mut Desk,
+    queue: &mut EventQueue<Desk>,
+    qh: &QueueHandle<Desk>,
+    globals: &GlobalList,
+) -> Portal {
+    desk.bind_foreign(globals, qh);
+    let (exported, handle) = hand_over(queue, desk, qh, 0);
+    let (mut portal, mut portal_queue, portal_qh, portal_globals) = session.client();
+    portal.bind_foreign(&portal_globals, &portal_qh);
+    let imported = portal.import(&portal_qh, &handle);
+    portal.open_dialog_for(&portal_qh, "dialog", "portal", &imported);
+    until(&mut portal_queue, &mut portal, |portal| portal.has_drawn(0));
+    Portal {
+        desk: portal,
+        queue: portal_queue,
+        exported,
+        imported,
+    }
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_dialog_another_program_opens_for_a_window_kept_on_top_opens_in_front_of_it_and_is_kept_on_top_with_it()
+ {
+    let (session, mut desk, mut queue, qh, globals) =
+        kept_under_another_with_globals("on-top-foreign-dialog");
+    let portal = portal_dialog_for_kept(&session, &mut desk, &mut queue, &qh, &globals);
+    let facts = session.wait_for(|facts| focused_last(facts).as_deref() == Some("dialog"));
+
+    assert_eq!(stacked(&facts), ["other", "kept", "dialog"]);
+    assert!(surface(&facts, "dialog").on_top, "with its window");
+    activate(&session, &mut desk, &mut queue, "other");
+    assert_eq!(
+        stacked(&session.wait_for(|_| true)),
+        ["other", "kept", "dialog"],
+        "the other raised, both are still in front of it"
+    );
+
+    session.stop(((desk, queue), (portal.desk, portal.queue)));
+}
+
+/// The issue's case, with a person at the seat: the portal, another program
+/// the person's press never reached, opens its file chooser for the window
+/// kept on top, which is in use. It takes the keys as it opens, so it is in
+/// front of that window, not just beneath it (#235).
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_dialog_another_program_opens_for_a_window_kept_on_top_in_use_opens_in_front_of_it_with_a_person_at_the_seat()
+ {
+    let (session, mut desk, mut queue, qh, globals) = windows_on(
+        "on-top-foreign-seated",
+        &["kept", "other"],
+        Backend::headless((800, 600)).with_person(),
+    );
+    activate(&session, &mut desk, &mut queue, "kept");
+    toggle(&session, "kept", true);
+    let portal = portal_dialog_for_kept(&session, &mut desk, &mut queue, &qh, &globals);
+
+    let facts = session.wait_for(|facts| focused_last(facts).as_deref() == Some("dialog"));
+    assert_eq!(stacked(&facts), ["other", "kept", "dialog"]);
+    assert!(surface(&facts, "dialog").on_top, "with its window");
+
+    session.stop(((desk, queue), (portal.desk, portal.queue)));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_dialog_another_program_opened_for_a_window_kept_on_top_is_let_go_once_the_window_is_no_longer_exported()
+ {
+    let (session, mut desk, mut queue, qh, globals) =
+        kept_under_another_with_globals("on-top-foreign-unexported");
+    let portal = portal_dialog_for_kept(&session, &mut desk, &mut queue, &qh, &globals);
+    session.wait_for(|facts| surface(facts, "dialog").on_top);
+
+    portal.exported.destroy();
+    queue.flush().expect("sent");
+
+    let facts = session.wait_for(|facts| !surface(facts, "dialog").on_top);
+    assert_eq!(
+        stacked(&facts),
+        ["other", "dialog", "kept"],
+        "among the others, behind the window it no longer hangs from"
+    );
+
+    session.stop(((desk, queue), (portal.desk, portal.queue)));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_dialog_another_program_opened_for_a_window_kept_on_top_is_let_go_once_its_program_lets_the_window_go()
+ {
+    let (session, mut desk, mut queue, qh, globals) =
+        kept_under_another_with_globals("on-top-foreign-unimported");
+    let portal = portal_dialog_for_kept(&session, &mut desk, &mut queue, &qh, &globals);
+    session.wait_for(|facts| surface(facts, "dialog").on_top);
+
+    portal.imported.destroy();
+    portal.queue.flush().expect("sent");
+
+    let facts = session.wait_for(|facts| !surface(facts, "dialog").on_top);
+    assert_eq!(stacked(&facts), ["other", "dialog", "kept"]);
+
+    session.stop(((desk, queue), (portal.desk, portal.queue)));
 }
 
 /// "first" kept on top, with "second" made a tab of it and in front, under

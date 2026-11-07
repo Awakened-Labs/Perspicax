@@ -1114,33 +1114,36 @@ there.
 
 Nor does a window take the keys by opening (#259). With a person at the
 seat, a window takes them as it opens only if the person asked for it: a
-window of the program they are using, a dialog say; any window while nothing
-has the keys; or one their latest press, under ten seconds old, reached or
-started -- a dock or a notification clicked opening a window of its own, a
-binding, an Enter at a terminal. What a press started is what began under
-the program it reached, after it, or what a binding started: and only a
-click or an Enter starts anything, never a letter, so a background job of a
-terminal that starts a program while the person types a password there takes
-none of it. A token is the other way to be asked for: perspicax hands one to
-what its bindings start, and its shell to what the person picks from a menu,
-as `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`, so a program that hands
-on to a copy of itself already running brings that copy's window forward,
-and no other start is handed one, whatever perspicax was started with. Any
-other window opens without the keys, as Mutter and KWin open one: just
-beneath the window in use, in sight but behind what the person is typing
-into, not told it is active, and marked on the taskbar as wanting attention
-until they give it the keys, with a click, the taskbar, Alt+Tab or a token.
-So is a window whose program asked to bring it forward and was refused. When
-the window in use closes, the keys pass over a marked window for the one
-beneath it, unless it is all there is. A splash screen closing before its
-program's window opens costs that window nothing: the person pressed nothing
-meanwhile. Headless, with nobody at the seat, every window takes the keys as
-it opens, as before. Left open: a program whose first window takes more than
-ten seconds opens without them, as does one whose descent from the press is
-lost -- started through `systemd-run`, `gtk-launch` or D-Bus activation, or
-by a launcher that exited first and handed it no token; prompts of daemons
-started at login, pinentry and polkit agents, open without them (#268); a
-token that names no input is forgotten as it is made, so spending one marks
+window of the program they are using, a dialog say, or a dialog another
+program opens for one of its windows, as the desktop portal opens a file
+chooser for Firefox's (named through xdg-foreign, #235); any window while
+nothing has the keys; or one their latest press, under ten seconds old,
+reached or started -- a dock or a notification clicked opening a window of
+its own, a binding, an Enter at a terminal. What a press started is what
+began under the program it reached, after it, or what a binding started: and
+only a click or an Enter starts anything, never a letter, so a background
+job of a terminal that starts a program while the person types a password
+there takes none of it. A token is the other way to be asked for: perspicax
+hands one to what its bindings start, and its shell to what the person picks
+from a menu, as `XDG_ACTIVATION_TOKEN` and `DESKTOP_STARTUP_ID`, so a
+program that hands on to a copy of itself already running brings that copy's
+window forward, and no other start is handed one, whatever perspicax was
+started with. Any other window opens without the keys, as Mutter and KWin
+open one: just beneath the window in use, in sight but behind what the
+person is typing into, not told it is active, and marked on the taskbar as
+wanting attention until they give it the keys, with a click, the taskbar,
+Alt+Tab or a token. So is a window whose program asked to bring it forward
+and was refused. When the window in use closes, the keys pass over a marked
+window for the one beneath it, unless it is all there is. A splash screen
+closing before its program's window opens costs that window nothing: the
+person pressed nothing meanwhile. Headless, with nobody at the seat, every
+window takes the keys as it opens, as before. Left open: a program whose
+first window takes more than ten seconds opens without them, as does one
+whose descent from the press is lost -- started through `systemd-run`,
+`gtk-launch` or D-Bus activation, or by a launcher that exited first and
+handed it no token; prompts of daemons started at login that name no window
+they are for, pinentry and polkit agents, open without them (#268); a token
+that names no input is forgotten as it is made, so spending one marks
 nothing (#269).
 
 Nor does a launcher take the keys by showing (#267). A launcher is a layer
@@ -1364,17 +1367,19 @@ every window that is not kept on top, whichever of them is raised or has the
 keyboard, and of two kept on top, the one raised last is in front. Nothing else
 changes: Alt+Tab walks every window in turn as it did, each taking the keyboard,
 and a window closing gives the keyboard to the one raised last. Its dialogs and
-menus are kept on top with it, and let go with it. The panels stay over it, and
-a fullscreen window covers it while it is the one in use. A tab group is kept on
-top as one, and a tab taken out of it comes out among the others. A menu, a
-combo list or a tooltip of the window in use -- the one with the keys, or whose
-own menu has them -- is in front of every window, kept on top or not, and under
-the panels, though its window is behind (#234). Another window's stays with its
-window, so a menu of a window the person has left goes back behind one kept on
-top with it. An X11 menu that names no window it was opened from, as Steam's and
-GTK 4's do, still opens behind a window kept on top (#302). An X11 window is
-kept on top as any other, but is not told it is, and an X11 application cannot
-keep a window of its own on top by asking (`_NET_WM_STATE_ABOVE`, #236).
+menus are kept on top with it, and let go with it, a dialog another program
+opens for it too, as the desktop portal opens a file chooser for Firefox (#235).
+The panels stay over it, and a fullscreen window covers it while it is the one
+in use. A tab group is kept on top as one, and a tab taken out of it comes out
+among the others. A menu, a combo list or a tooltip of the window in use -- the
+one with the keys, or whose own menu has them -- is in front of every window,
+kept on top or not, and under the panels, though its window is behind (#234).
+Another window's stays with its window, so a menu of a window the person has
+left goes back behind one kept on top with it. An X11 menu that names no window
+it was opened from, as Steam's and GTK 4's do, still opens behind a window kept
+on top (#302). An X11 window is kept on top as any other, but is not told it is,
+and an X11 application cannot keep a window of its own on top by asking
+(`_NET_WM_STATE_ABOVE`, #236).
 
 In both, a workspace switch slides: the new workspace comes in from the side
 the person went towards, across a wrap too, and along the grid for a switch by

@@ -121,7 +121,11 @@ use crate::state::Compositor;
 /// `Dispatch<$interface, $data>`, answered by smithay's `$smithay` unless
 /// `$refused` refuses the request. A check that refuses has already posted
 /// the protocol's error, where the protocol names one; one that does not may
-/// have taken a number in the request into the world first.
+/// have taken a number in the request into the world first. A request that
+/// makes an object can be refused only with an error: wayland-backend lets
+/// the object go unmade only for a client already ended, and panics
+/// otherwise. Shared with the other protocols smithay leaves a check out of
+/// (`foreign`).
 macro_rules! checked {
     ($interface:ty: $data:ty => $smithay:ty, $refused:path) => {
         const _: () = {
@@ -161,6 +165,7 @@ macro_rules! checked {
         };
     };
 }
+pub(crate) use checked;
 
 /// Whether a rectangle this wide and high covers anything.
 fn has_area(width: i32, height: i32) -> bool {

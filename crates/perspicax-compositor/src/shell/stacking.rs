@@ -34,10 +34,12 @@
 //!
 //! A dialog or a menu stands with the window it hangs from. One of a window
 //! kept on top is kept on top with it: worked out afresh each time from the
-//! window it hangs from, never copied, so it is let go with its window. An
-//! X11 menu, which is a window of its own here, is raised over the panels
-//! with the fullscreen window it hangs from, as an xdg menu, drawn with its
-//! window, always was; it was drawn under it, out of sight.
+//! window it hangs from, never copied, so it is let go with its window. So
+//! is a dialog another program opens for it, as the desktop portal opens a
+//! file chooser, its window named through xdg-foreign (`crate::foreign`,
+//! #235). An X11 menu, which is a window of its own here, is raised over the
+//! panels with the fullscreen window it hangs from, as an xdg menu, drawn
+//! with its window, always was; it was drawn under it, out of sight.
 //!
 //! The menus of the window in use are the exception (#234): they are drawn
 //! in front of every window, kept ones included, and under the panels, so a
@@ -357,8 +359,9 @@ pub(crate) fn is_fullscreen(window: &Framed) -> bool {
 
 impl Compositor {
     /// The window `window` is a dialog or a menu of, mapped or parked: its
-    /// xdg parent, or the window its X11 `WM_TRANSIENT_FOR` names, through
-    /// any menus between.
+    /// xdg parent, another program's if one was named through xdg-foreign
+    /// (`crate::foreign`), or the window its X11 `WM_TRANSIENT_FOR` names,
+    /// through any menus between.
     pub(crate) fn hangs_from(&self, window: &Framed) -> Option<Framed> {
         if let Some(toplevel) = window.toplevel() {
             return self.window_for(&toplevel.parent()?);

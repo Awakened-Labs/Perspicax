@@ -21,6 +21,12 @@
 //! does, is asked the same as it comes to want them (#267), but never for
 //! nothing having the keys: one nobody asked for is shown without them.
 //!
+//! A dialog another program opens for a window of the program in use, as
+//! the desktop portal opens a file chooser for Firefox's window, is asked
+//! for too, its parent named through xdg-foreign (#235): it takes the keys
+//! as it opens, over that window. One opened for a program the person has
+//! left opens without them, as any other window.
+//!
 //! Each test has programs, each a client of its own with a window and a
 //! keyboard, and some a program in a process of its own: a copy of this
 //! binary running [`window_probe`], started by this one, as a terminal
@@ -41,7 +47,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::{Desk, Ear, Session, heard, until};
+use common::{Desk, Ear, Session, hand_over, heard, until};
 use perspicax_compositor::{Backend, Command as Do};
 use perspicax_index::{HostFacts, SurfaceFacts, SurfaceKind};
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::WindowState;
@@ -439,6 +445,88 @@ fn a_window_that_opened_without_the_keys_stays_beneath_as_it_goes_where_its_prog
     assert!(has_keys(&desk, &ear, 0));
 
     session.stop(((desk, queue), (other, other_queue)));
+}
+
+/// "firefox", a program exported to the portal: its window, and the handle
+/// it hands on, as Firefox hands the portal the window a file chooser is
+/// for.
+fn exported(session: &Session) -> (Desk, EventQueue<Desk>, Ear, String) {
+    let (mut firefox, mut queue, qh, globals, ear) = program(session, "firefox");
+    firefox.bind_foreign(&globals, &qh);
+    let (_exported, handle) = hand_over(&mut queue, &mut firefox, &qh, 0);
+    (firefox, queue, ear, handle)
+}
+
+/// The portal, a program of its own that the person's press never reached,
+/// with its file chooser open for the window `handle` names, drawn.
+fn portal_dialog(session: &Session, handle: &str) -> (Desk, EventQueue<Desk>, Ear) {
+    let (mut portal, mut queue, qh, globals) = session.client();
+    let ear = portal.bind_keyboard(&globals, &qh);
+    portal.bind_foreign(&globals, &qh);
+    let imported = portal.import(&qh, handle);
+    portal.open_dialog_for(&qh, "file chooser", "portal", &imported);
+    until(&mut queue, &mut portal, |portal| portal.has_drawn(0));
+    (portal, queue, ear)
+}
+
+/// The issue's case: the person asks Firefox for a file, and the portal
+/// opens its file chooser for Firefox's window. It takes the keys as it
+/// opens, over that window, though it is another program's.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_dialog_another_program_opens_for_the_program_in_use_opens_with_the_keys() {
+    let session = seated("withheld-foreign");
+    let (mut firefox, mut firefox_queue, firefox_ear, handle) = exported(&session);
+    until(&mut firefox_queue, &mut firefox, |firefox| {
+        has_keys(firefox, &firefox_ear, 0)
+    });
+
+    let (mut portal, mut portal_queue, portal_ear) = portal_dialog(&session, &handle);
+    until(&mut portal_queue, &mut portal, |portal| {
+        has_keys(portal, &portal_ear, 0)
+    });
+    assert!(
+        portal.activations_of(0).contains(&true),
+        "told it is active: {:?}",
+        portal.activations_of(0)
+    );
+    let facts = session.wait_for(|facts| on_top(facts).as_deref() == Some("file chooser"));
+    assert_eq!(stack(&facts), ["firefox", "file chooser"]);
+    assert!(given_keys(&facts, "file chooser"));
+    drop(facts);
+
+    session.stop(((firefox, firefox_queue), (portal, portal_queue)));
+}
+
+/// The person moved on from Firefox to a terminal before the portal's file
+/// chooser opened: it opens without the keys, beneath the terminal, as any
+/// other window nobody asked for, and what they type stays the terminal's.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_dialog_another_program_opens_for_a_program_not_in_use_opens_without_the_keys() {
+    let session = seated("withheld-foreign-left");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let (firefox, firefox_queue, _, handle) = exported(&session);
+    types(&session, &mut desk, &mut queue, "sudo");
+
+    let (mut portal, mut portal_queue, portal_ear) = portal_dialog(&session, &handle);
+    queue.roundtrip(&mut desk).expect("dispatch");
+    portal_queue.roundtrip(&mut portal).expect("dispatch");
+    assert!(has_keys(&desk, &ear, 0), "the terminal keeps the keys");
+    assert!(heard(&portal_ear).entered.is_none(), "the dialog has none");
+    let facts = session.facts.read();
+    assert_eq!(
+        stack(&facts),
+        ["firefox", "file chooser", "terminal"],
+        "beneath the terminal"
+    );
+    assert!(!given_keys(&facts, "file chooser"));
+    drop(facts);
+
+    session.stop((
+        (desk, queue),
+        ((firefox, firefox_queue), (portal, portal_queue)),
+    ));
 }
 
 /// Whether a window has drawn, so has a size.
