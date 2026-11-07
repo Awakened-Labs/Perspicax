@@ -158,7 +158,7 @@ fn windows_on(
     desk.bind_taskbar(&globals, &qh);
     for (nth, title) in titles.iter().enumerate() {
         desk.open_window(&qh, title, title);
-        until(&mut queue, &mut desk, |desk| desk.drawn == nth + 1);
+        until(&mut queue, &mut desk, |desk| desk.has_drawn(nth));
         until(&mut queue, &mut desk, |desk| desk.task(title).is_some());
     }
     let last = titles.last().expect("a window at least");
@@ -514,7 +514,7 @@ fn portal_dialog_for_kept(
     portal.bind_foreign(&portal_globals, &portal_qh);
     let imported = portal.import(&portal_qh, &handle);
     portal.open_dialog_for(&portal_qh, "dialog", "portal", &imported);
-    until(&mut portal_queue, &mut portal, |portal| portal.drawn == 1);
+    until(&mut portal_queue, &mut portal, |portal| portal.has_drawn(0));
     Portal {
         desk: portal,
         queue: portal_queue,
@@ -540,6 +540,30 @@ fn a_dialog_another_program_opens_for_a_window_kept_on_top_opens_in_front_of_it_
         ["other", "kept", "dialog"],
         "the other raised, both are still in front of it"
     );
+
+    session.stop(((desk, queue), (portal.desk, portal.queue)));
+}
+
+/// The issue's case, with a person at the seat: the portal, another program
+/// the person's press never reached, opens its file chooser for the window
+/// kept on top, which is in use. It takes the keys as it opens, so it is in
+/// front of that window, not just beneath it (#235).
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_dialog_another_program_opens_for_a_window_kept_on_top_in_use_opens_in_front_of_it_with_a_person_at_the_seat()
+ {
+    let (session, mut desk, mut queue, qh, globals) = windows_on(
+        "on-top-foreign-seated",
+        &["kept", "other"],
+        Backend::headless((800, 600)).with_person(),
+    );
+    activate(&session, &mut desk, &mut queue, "kept");
+    toggle(&session, "kept", true);
+    let portal = portal_dialog_for_kept(&session, &mut desk, &mut queue, &qh, &globals);
+
+    let facts = session.wait_for(|facts| focused_last(facts).as_deref() == Some("dialog"));
+    assert_eq!(stacked(&facts), ["other", "kept", "dialog"]);
+    assert!(surface(&facts, "dialog").on_top, "with its window");
 
     session.stop(((desk, queue), (portal.desk, portal.queue)));
 }

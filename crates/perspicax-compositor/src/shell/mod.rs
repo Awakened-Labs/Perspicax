@@ -355,11 +355,19 @@ impl Compositor {
     /// last window closed, if it did, and then wholly on screen. At its
     /// first picture, the first time it can be known by its program and
     /// its size is known; or, parked by then, as it first comes back
-    /// (`unpark_window`). Once either way: both halves are done only to a
+    /// (`unpark_window`). Once either way: each part is done only to a
     /// window not yet settled. An X11 one was placed as it mapped.
+    ///
+    /// One that opened without the keys takes them now if it is a dialog
+    /// another program opened for the window in use, its parent named only
+    /// since it was judged (`withheld`, #235).
     pub(crate) fn open_in_place(&mut self, window: &Framed) {
+        let opening = !placement(window, |placement| placement.settled);
         let on = self.place_remembered(window);
         self.settle_new(window, on);
+        if opening && self.asked_through_parent(window) {
+            self.heed_as_it_opens(window);
+        }
     }
 
     /// Where a window is and how big, in the global space: where it was
