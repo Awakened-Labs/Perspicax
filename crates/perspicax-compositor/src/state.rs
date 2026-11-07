@@ -88,6 +88,7 @@ use smithay::{
         xdg_activation::{
             XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
         },
+        xdg_foreign::XdgForeignState,
     },
 };
 
@@ -294,6 +295,9 @@ pub struct Compositor {
     /// RAII handles for the primary-selection and xdg-activation globals.
     primary_selection: PrimarySelectionState,
     activation: XdgActivationState,
+    /// The windows programs have exported, for another program's dialog to
+    /// hang from: xdg-foreign. See [`crate::foreign`].
+    pub(crate) foreign: XdgForeignState,
     /// Panels, launchers, wallpapers: the layer-shell global. See
     /// [`crate::layers`].
     pub(crate) layer_shell: WlrLayerShellState,
@@ -474,6 +478,7 @@ impl Compositor {
             tab_drop: None,
             primary_selection: PrimarySelectionState::new::<Self>(display),
             activation: XdgActivationState::new::<Self>(display),
+            foreign: XdgForeignState::new::<Self>(display),
             layer_shell: WlrLayerShellState::new::<Self>(display),
             // Only what `[protocols] session-lock` admits may lock, so no
             // other client can put a lock screen of its own up to be typed
@@ -1509,7 +1514,9 @@ impl XdgShellHandler for Compositor {
 
     /// A window given a parent, or another, is kept on top with it or let
     /// go (`shell::stacking`). It may be given one after it shows, with
-    /// nothing drawn after that would publish it.
+    /// nothing drawn after that would publish it. Another program's window
+    /// is given and taken away here too, through xdg-foreign
+    /// (`crate::foreign`).
     fn parent_changed(&mut self, _surface: ToplevelSurface) {
         self.backend.redraw();
         self.publish_facts();

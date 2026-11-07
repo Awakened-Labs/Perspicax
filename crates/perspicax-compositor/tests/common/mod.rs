@@ -96,6 +96,12 @@ use wayland_protocols::xdg::{
         xdg_activation_token_v1::{self, XdgActivationTokenV1},
         xdg_activation_v1::XdgActivationV1,
     },
+    foreign::zv2::client::{
+        zxdg_exported_v2::{self, ZxdgExportedV2},
+        zxdg_exporter_v2::ZxdgExporterV2,
+        zxdg_imported_v2::{self, ZxdgImportedV2},
+        zxdg_importer_v2::ZxdgImporterV2,
+    },
     shell::client::{xdg_positioner, xdg_surface},
 };
 use wayland_protocols_wlr::{
@@ -541,6 +547,20 @@ pub fn until<D>(queue: &mut EventQueue<D>, state: &mut D, done: impl Fn(&D) -> b
         }
     }
     queue.roundtrip(state).expect("flush");
+}
+
+/// Export `desk`'s `nth` window and wait for its handle: what its program
+/// hands the portal as the window a dialog is for. `bind_foreign` first.
+pub fn hand_over(
+    queue: &mut EventQueue<Desk>,
+    desk: &mut Desk,
+    qh: &QueueHandle<Desk>,
+    nth: usize,
+) -> (ZxdgExportedV2, String) {
+    let exported = desk.export(qh, nth);
+    until(queue, desk, |desk| desk.handle_of(&exported).is_some());
+    let handle = desk.handle_of(&exported).expect("a handle");
+    (exported, handle)
 }
 
 /// A colour as written, ARGB, as the pixel a screencopy reads back.
@@ -1002,6 +1022,14 @@ pub struct Desk {
     /// The activation tokens [`Self::make_token`] asked for and kept, in the
     /// order they came.
     pub tokens: Vec<String>,
+    /// xdg-foreign's two globals, once [`Self::bind_foreign`] binds them.
+    pub exporter: Option<ZxdgExporterV2>,
+    pub importer: Option<ZxdgImporterV2>,
+    /// The handle each export of ours was given, once it came: what a
+    /// program hands the portal as its `parent_window`.
+    pub handles: HashMap<ObjectId, String>,
+    /// The imports of ours the compositor said are gone, or never were.
+    pub imports_gone: Vec<ObjectId>,
     pub taskbar: Option<ZwlrForeignToplevelManagerV1>,
     pub taskbar_finished: bool,
     pub tasked: Vec<Tasked>,
@@ -1136,6 +1164,10 @@ impl Desk {
             activation: None,
             tokens_spent: 0,
             tokens: Vec::new(),
+            exporter: None,
+            importer: None,
+            handles: HashMap::new(),
+            imports_gone: Vec::new(),
             taskbar: None,
             taskbar_finished: false,
             tasked: Vec::new(),
@@ -1380,6 +1412,27 @@ impl Desk {
         window.set_title(title);
         window.set_app_id(app_id);
         window.set_parent(Some(&self.windows[parent]));
+        window.commit();
+        self.windows.push(window);
+    }
+
+    /// Open a dialog, drawn white, over another program's window, `parent`,
+    /// imported: as the desktop portal opens its file chooser over the
+    /// window of the program that asked for it. The parent is set before
+    /// the first commit, as GTK sets it.
+    pub fn open_dialog_for(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        title: &str,
+        app_id: &str,
+        parent: &ZxdgImportedV2,
+    ) {
+        self.colours.push(0xffff_ffff);
+        let surface = self.compositor.create_surface(qh);
+        let window = self.xdg.create_window(surface, WindowDecorations::None, qh);
+        window.set_title(title);
+        window.set_app_id(app_id);
+        parent.set_parent_of(window.wl_surface());
         window.commit();
         self.windows.push(window);
     }
@@ -2353,6 +2406,56 @@ impl Desk {
         self.locked = false;
     }
 
+    /// Bind xdg-foreign's exporter and importer, v2, through which a program
+    /// names one of its windows for another program's dialog to hang from.
+    /// Panics if either is not advertised.
+    pub fn bind_foreign(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
+        self.exporter = Some(
+            globals
+                .bind::<ZxdgExporterV2, _, _>(qh, 1..=1, ())
+                .expect("zxdg_exporter_v2"),
+        );
+        self.importer = Some(
+            globals
+                .bind::<ZxdgImporterV2, _, _>(qh, 1..=1, ())
+                .expect("zxdg_importer_v2"),
+        );
+    }
+
+    /// Export the `nth` window, as Firefox does before it asks the portal for
+    /// a file chooser. Its handle comes in `handles`; see
+    /// [`Self::handle_of`]. Panics if `bind_foreign` has not been called.
+    pub fn export(&self, qh: &QueueHandle<Self>, nth: usize) -> ZxdgExportedV2 {
+        self.export_surface(qh, self.windows[nth].wl_surface())
+    }
+
+    /// Export `surface`, whatever it is.
+    pub fn export_surface(
+        &self,
+        qh: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+    ) -> ZxdgExportedV2 {
+        self.exporter
+            .as_ref()
+            .expect("bind_foreign first")
+            .export_toplevel(surface, qh, ())
+    }
+
+    /// The handle `exported` was given, once it has come.
+    pub fn handle_of(&self, exported: &ZxdgExportedV2) -> Option<String> {
+        self.handles.get(&exported.id()).cloned()
+    }
+
+    /// Import another program's window by the handle it was given, as the
+    /// portal does with the `parent_window` it is handed. Panics if
+    /// `bind_foreign` has not been called.
+    pub fn import(&self, qh: &QueueHandle<Self>, handle: &str) -> ZxdgImportedV2 {
+        self.importer
+            .as_ref()
+            .expect("bind_foreign first")
+            .import_toplevel(handle.to_owned(), qh, ())
+    }
+
     /// Bind `xdg_activation_v1`, through which a client asks for one of its
     /// windows to be brought forward. Panics if it is not advertised.
     pub fn bind_activation(&mut self, globals: &GlobalList, qh: &QueueHandle<Self>) {
@@ -3261,6 +3364,60 @@ impl Dispatch<XdgActivationV1, ()> for Desk {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<ZxdgExporterV2, ()> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &ZxdgExporterV2,
+        _: <ZxdgExporterV2 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZxdgImporterV2, ()> for Desk {
+    fn event(
+        _: &mut Self,
+        _: &ZxdgImporterV2,
+        _: <ZxdgImporterV2 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZxdgExportedV2, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        exported: &ZxdgExportedV2,
+        event: zxdg_exported_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zxdg_exported_v2::Event::Handle { handle } = event {
+            desk.handles.insert(exported.id(), handle);
+        }
+    }
+}
+
+impl Dispatch<ZxdgImportedV2, ()> for Desk {
+    fn event(
+        desk: &mut Self,
+        imported: &ZxdgImportedV2,
+        event: zxdg_imported_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zxdg_imported_v2::Event::Destroyed = event {
+            desk.imports_gone.push(imported.id());
+        }
     }
 }
 
