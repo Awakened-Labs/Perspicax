@@ -7,9 +7,10 @@
 //! to their window, stops at a popup.
 //!
 //! It is described to the index as a surface of its own too (issue #112),
-//! with an id minted for each `xdg_popup` (`Compositor::popup_ids`), directly
-//! above the window or panel it hangs from, where smithay draws it and finds
-//! the pointer on it: it covers what is under it, that window included, and
+//! with an id minted for each `xdg_popup` (`Compositor::popup_ids`), above
+//! the window or panel it hangs from, and in front of every window while the
+//! window it hangs from is in use (issue #234), where it is drawn and the
+//! pointer finds it: it covers what is under it, that window included, and
 //! its menu's accessible nodes are joined to it once the index can say which
 //! they are. What it draws is counted as its own, and its window keeps a copy,
 //! moved by where the popup is drawn on it (issue #42), so a receipt for the

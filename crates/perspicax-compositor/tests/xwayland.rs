@@ -4942,6 +4942,126 @@ fn an_x11_menu_of_the_window_in_use_opens_in_front_of_a_window_kept_on_top() {
     x11.stop();
 }
 
+/// Issue #234: a menu of the window in use, drawn in front of a window kept
+/// on top, is painted over in a picture when the agent may not see its
+/// window, as the window is: nothing of it shows over the window kept on
+/// top, which the agent may see. X11 windows are the agent's here, and a
+/// Wayland window of this test's own is not.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn a_menu_of_a_window_not_granted_is_painted_over_in_front_of_a_window_kept_on_top() {
+    use perspicax_compositor::Host;
+    use smithay_client_toolkit::shell::xdg::XdgSurface as _;
+
+    let x11 = X11::start(
+        "x11-in-use-menu-redacted",
+        Backend::headless((1280, 1024))
+            .granting_xwayland()
+            .with_person(),
+    );
+    let host = Host::new(&x11.session.facts, &x11.session.requests);
+    with_the_keyboard(&x11, "kept");
+    x11.perform(Action::ToggleOnTop);
+    x11.surface_where("kept", |surface| {
+        surface.on_top && x11.facts().consent().permits(&surface.origin)
+    })
+    .unwrap_or_else(|| panic!("never kept on top, or never the agent's: {:?}", x11.facts()));
+    let (mut desk, mut queue, qh, _) = x11.session.client();
+    desk.open_window(&qh, "page", "page");
+    let titled = |facts: &HostFacts, title: &str| {
+        facts
+            .surfaces()
+            .iter()
+            .find(|surface| surface.title.as_deref() == Some(title) && surface.mapped)
+            .cloned()
+    };
+    until(&mut queue, &mut desk, |_| {
+        titled(&x11.facts(), "page").is_some()
+    });
+    // It opened without the keys, which the person gave "kept"; it is under
+    // "kept" in the order the windows were raised, so cycling comes to it.
+    x11.perform(Action::CycleFocus);
+    let in_use = |facts: &HostFacts| {
+        facts
+            .surfaces()
+            .iter()
+            .filter(|surface| surface.focused_at.is_some())
+            .max_by_key(|surface| surface.focused_at)
+            .and_then(|surface| surface.title.as_deref())
+            == Some("page")
+    };
+    until(&mut queue, &mut desk, |_| in_use(&x11.facts()));
+    let facts = x11.facts();
+    let (kept, page) = (
+        titled(&facts, "kept").expect("kept").geometry,
+        titled(&facts, "page").expect("page").geometry,
+    );
+    let at = (
+        (kept.x0 + 40.0 - page.x0) as i32,
+        (kept.y0 + 40.0 - page.y0) as i32,
+    );
+    let popup = desk.open_popup(&qh, desk.windows[0].xdg_surface(), at, (120, 80));
+    common::configured(&mut desk, &mut queue, 1);
+    desk.paint(popup.wl_surface(), (120, 80), ORANGE);
+    popup.wl_surface().commit();
+    queue.flush().expect("sent");
+    let shown = |facts: &HostFacts| {
+        facts
+            .surfaces()
+            .iter()
+            .find(|surface| matches!(surface.kind, SurfaceKind::Popup { .. }) && surface.mapped)
+            .cloned()
+    };
+    until(&mut queue, &mut desk, |_| shown(&x11.facts()).is_some());
+    let menu = shown(&x11.facts()).expect("waited for");
+    let area = menu.geometry;
+    assert!(
+        area.x0 > kept.x0 && area.y0 > kept.y0 && area.x1 < kept.x1 && area.y1 < kept.y1,
+        "the menu is not over the window kept on top: {area:?} and {kept:?}"
+    );
+    assert!(
+        page.x1 - 5.0 > kept.x1 || page.y1 - 5.0 > kept.y1,
+        "no corner of the page is clear of the window kept on top: {page:?}"
+    );
+
+    let shot = host
+        .capture(perspicax_index::ShotTarget::Output(None))
+        .expect("a picture");
+
+    let pixel = |x: f64, y: f64| {
+        let at = ((y as usize) * shot.width as usize + x as usize) * 4;
+        <[u8; 4]>::try_from(&shot.rgba[at..at + 4]).expect("a pixel")
+    };
+    assert!(
+        shot.redacted
+            .iter()
+            .any(|drawn| drawn.surface == titled(&facts, "page").expect("page").id),
+        "the page is the agent's: {:?}",
+        x11.facts().consent()
+    );
+    let painted_over = pixel(page.x1 - 5.0, page.y1 - 5.0);
+    assert_ne!(painted_over, common::rgba(WHITE), "the page, painted over");
+    assert!(
+        common::drawn_in(&shot, ORANGE).is_empty(),
+        "the menu shows: {:?}",
+        common::drawn_in(&shot, ORANGE)
+    );
+    let middle = (area.y0 + area.y1) / 2.0;
+    assert_eq!(
+        pixel((area.x0 + area.x1) / 2.0, middle),
+        painted_over,
+        "the menu, painted over in front of the window kept on top"
+    );
+    assert_eq!(
+        pixel(area.x1 + 5.0, middle),
+        common::rgba(WHITE),
+        "the window kept on top, beside the menu"
+    );
+    drop(popup);
+    x11.session.stop((desk, queue));
+}
+
 /// Issue #259: an X11 window asking to be active with an X time nothing
 /// vouches for is refused the keys, and wants the person's attention: the
 /// shell is told, for its taskbar to say so.

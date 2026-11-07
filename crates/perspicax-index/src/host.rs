@@ -147,9 +147,11 @@ pub enum SurfaceKind {
     LockCover,
     /// A menu, a combo list or a tooltip: an `xdg_popup`, a surface of its
     /// own that its client places beside a window or panel and that is drawn
-    /// directly above it. It covers what is under it, the window it hangs from
-    /// included, and its accessible nodes are joined to it, not to that
-    /// window, once the index can say which they are (issue #112).
+    /// above it: directly above, but for a menu of the window in use, which
+    /// is in front of every window (issue #234). It covers what is under it,
+    /// the window it hangs from included, and its accessible nodes are joined
+    /// to it, not to that window, once the index can say which they are
+    /// (issue #112).
     Popup {
         /// The window or panel it hangs from, through any menus between: a
         /// submenu's is its menu's. It may be a surface these facts do not
@@ -234,7 +236,7 @@ pub struct SurfaceFacts {
     /// never less than `geometry`, is what it covers: see
     /// [`SurfaceFacts::covers`]. Not the frame the host drew around it,
     /// which is `frame`, and not its menus, which are surfaces of their own
-    /// ([`SurfaceKind::Popup`]) stacked directly above it.
+    /// ([`SurfaceKind::Popup`]) stacked above it.
     pub drawn: Rect,
     /// Where the client says it is opaque, in surface-local coordinates: its
     /// own surface's region, and each of its subsurfaces', placed where the

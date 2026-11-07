@@ -285,6 +285,12 @@ impl Compositor {
         let (raised, windows): (Vec<&crate::framed::Framed>, Vec<_>) =
             crate::shell::as_drawn(&self.space)
                 .partition(|window| crate::shell::covers_panels(window));
+        // The window in use whose menus are drawn apart from it, in front
+        // of every other window and under the panels (issue #234): as
+        // `restack` last worked it out, which is what is drawn, and not
+        // `in_use`, which an agent's click is judged again with before any
+        // restack.
+        let apart = crate::shell::menus_apart(&self.space);
         // How see-through each window on screen is drawn, for an agent
         // puzzled by a picture. Never judged by: see `drawn_opacity`.
         //
@@ -292,7 +298,8 @@ impl Compositor {
         // finds the pointer on them (issue #112): its popups before its
         // client's own surfaces. A window not described -- one that has drawn
         // nothing yet -- still has its menus described, for smithay draws
-        // them all the same, over whatever is under them.
+        // them all the same, over whatever is under them. The window in
+        // use's are over every window, after them all.
         let window = |window: &crate::framed::Framed| {
             let facts = self.facts_for(window).map(|facts| {
                 let mut facts = self.grouped(window, facts);
@@ -311,7 +318,11 @@ impl Compositor {
                 }
                 facts
             });
-            let popups = self.window_popups(window);
+            let popups = if apart == Some(window) {
+                Vec::new()
+            } else {
+                self.window_popups(window)
+            };
             facts.into_iter().chain(popups).collect::<Vec<_>>()
         };
         let layer = |(layer, placed): &(smithay::desktop::LayerSurface, _)| {
@@ -349,6 +360,11 @@ impl Compositor {
             .iter()
             .flat_map(layer)
             .chain(self.parked.iter().chain(windows).flat_map(window))
+            .chain(
+                apart
+                    .into_iter()
+                    .flat_map(|window| self.window_popups(window)),
+            )
             .chain(top.iter().flat_map(layer))
             .chain(raised.into_iter().flat_map(window))
             .chain(overlay.iter().flat_map(layer))

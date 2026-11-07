@@ -19,11 +19,13 @@
 //! still the one in use while it is open (issue #97): those tests have a
 //! person, and a keyboard of their own to see where the keys went.
 //!
-//! A menu is also a surface of its own in the facts (issue #112), directly
-//! above the window or panel it hangs from, as smithay draws it and finds
-//! the pointer on it: it covers what is under it, that window's own nodes
-//! included, and a node joined to it is judged inside it, past its window's
-//! edge too. The tests from `a_menu_is_a_surface_of_its_own` on check that.
+//! A menu is also a surface of its own in the facts (issue #112), above the
+//! window or panel it hangs from, as it is drawn and the pointer finds it --
+//! directly above, but for a menu of the window in use, which is in front of
+//! every window (issue #234, in `on_top.rs`): it covers what is under it,
+//! that window's own nodes included, and a node joined to it is judged
+//! inside it, past its window's edge too. The tests from
+//! `a_menu_is_a_surface_of_its_own` on check that.
 //!
 //! Like the other live tests these bind a real Wayland socket, so they need
 //! `XDG_RUNTIME_DIR`, and are `#[ignore]`d for `ci/live-tests.sh` to run.

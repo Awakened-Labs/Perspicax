@@ -175,7 +175,9 @@ pub(super) fn drawn(head: &mut Head) {
 /// overlays; the windows over the panels; the panels; a wipe's bar; the
 /// workspaces drawn over the arriving one (a crossfade's old one); the
 /// arriving one, with the windows that stay put in their places among its
-/// own; the workspaces under it; the wallpaper.
+/// own; the workspaces under it; the wallpaper. Each window with its menus,
+/// moved and cut as it is: the window in use's too, which `stack.menus` has
+/// drawn apart from it at any other time, in front of every window (#234).
 pub(super) fn elements(
     renderer: &mut GlesRenderer,
     head: &Head,
@@ -262,7 +264,9 @@ fn arriving(
     for piece in pieces {
         let piece = std::slice::from_ref(piece);
         if still(&piece[0].0) {
-            elements.extend(window_elements(renderer, piece, scale));
+            elements.extend(window_elements(renderer, piece, scale, |_| {
+                crate::framed::Menus::With
+            }));
         } else {
             elements.extend(moved(renderer, piece, &frame.arriving, size, scale));
         }

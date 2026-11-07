@@ -61,7 +61,7 @@ use std::cell::Cell;
 
 use smithay::{
     desktop::{
-        Space,
+        Space, WindowSurfaceType,
         space::{RenderZindex, SpaceElement as _},
     },
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
@@ -172,23 +172,67 @@ pub(crate) fn as_drawn(space: &Space<Framed>) -> impl DoubleEndedIterator<Item =
         .flat_map(move |rank| space.elements().filter(move |window| tier(window) == rank))
 }
 
+/// The xdg window in use, whose menus are drawn apart from it, in front of
+/// every other window and under the panels (#234). `None` while no window
+/// is in use, while an X11 one is, whose menus are windows of their own in
+/// [`as_drawn`], and while the one in use is fullscreen over the panels,
+/// with its menus over them too.
+pub(crate) fn menus_apart(space: &Space<Framed>) -> Option<&Framed> {
+    space
+        .elements()
+        .find(|window| is_in_use(window) && !covers_panels(window) && window.toplevel().is_some())
+}
+
 /// The window drawn frontmost at `at` whose input region takes it, and
 /// where its surface's origin is: what smithay's `Space::element_under`
 /// answers, asked of the windows as they are drawn ([`as_drawn`]) rather
-/// than in the order they were raised.
+/// than in the order they were raised. The fullscreen window in use first,
+/// then the menus of the window in use, drawn in front of every other
+/// window ([`menus_apart`]), then the rest: a window found at one of its
+/// menus is found with them, as smithay's `surface_under` looks at a
+/// window's menus first.
 pub(crate) fn window_under(
     space: &Space<Framed>,
     at: Point<f64, Logical>,
 ) -> Option<(&Framed, Point<i32, Logical>)> {
-    as_drawn(space).rev().find_map(|window| {
+    let found = |window: &Framed| {
         if !space.element_bbox(window)?.to_f64().contains(at) {
             return None;
         }
         let origin = space.element_location(window)? - window.geometry().loc;
         window
             .is_in_input_region(&(at - origin.to_f64()))
-            .then_some((window, origin))
-    })
+            .then_some(origin)
+    };
+    let over_panels = |window: &&Framed| covers_panels(window);
+    as_drawn(space)
+        .rev()
+        .take_while(over_panels)
+        .find_map(|window| Some((window, found(window)?)))
+        .or_else(|| menu_under(space, at))
+        .or_else(|| {
+            as_drawn(space)
+                .rev()
+                .skip_while(over_panels)
+                .find_map(|window| Some((window, found(window)?)))
+        })
+}
+
+/// The window in use, where one of the menus drawn apart from it is at
+/// `at`, and where its surface's origin is. A menu's subsurfaces are its
+/// own, which smithay looks in only when asked for them too.
+fn menu_under(
+    space: &Space<Framed>,
+    at: Point<f64, Logical>,
+) -> Option<(&Framed, Point<i32, Logical>)> {
+    let window = menus_apart(space).filter(|window| !super::is_shaded(window))?;
+    let origin = space.element_location(window)? - window.geometry().loc;
+    window
+        .surface_under(
+            at - origin.to_f64(),
+            WindowSurfaceType::POPUP | WindowSurfaceType::SUBSURFACE,
+        )
+        .map(|_| (window, origin))
 }
 
 #[cfg(any(feature = "seat", feature = "capture"))]
@@ -204,8 +248,8 @@ mod drawn {
         wayland::shell::wlr_layer::Layer,
     };
 
-    use super::{as_drawn, covers_panels};
-    use crate::framed::Framed;
+    use super::{as_drawn, covers_panels, menus_apart};
+    use crate::framed::{Framed, Menus};
 
     /// What a monitor shows, front to back: each group in front of the next,
     /// and within one, each piece in front of the next. A piece is where its
@@ -217,11 +261,26 @@ mod drawn {
         pub(crate) raised: Vec<(Framed, Point<i32, Logical>)>,
         /// `top` surfaces: the panels.
         pub(crate) top: Vec<(LayerSurface, Point<i32, Logical>)>,
+        /// The window in use, whose menus alone are drawn here, in front of
+        /// every other window ([`menus_apart`]): where it is drawn, as in
+        /// `windows`, which draws it without them.
+        pub(crate) menus: Option<(Framed, Point<i32, Logical>)>,
         /// The other windows, those kept on top in front, and the X11 menus
         /// of the window in use in front of them.
         pub(crate) windows: Vec<(Framed, Point<i32, Logical>)>,
         /// `bottom` and `background` surfaces: the wallpaper.
         pub(crate) lower: Vec<(LayerSurface, Point<i32, Logical>)>,
+    }
+
+    impl Stack {
+        /// Whether `window`, of `windows`, is drawn with its menus: not
+        /// when they are drawn apart from it, in `menus`.
+        pub(crate) fn menus_of(&self, window: &Framed) -> Menus {
+            match &self.menus {
+                Some((apart, _)) if apart == window => Menus::Without,
+                _ => Menus::With,
+            }
+        }
     }
 
     /// How `space` stacks on `output`, or `None` for an output it does not
@@ -238,6 +297,7 @@ mod drawn {
             overlay: Vec::new(),
             raised: Vec::new(),
             top: Vec::new(),
+            menus: None,
             windows: Vec::new(),
             lower: Vec::new(),
         };
@@ -270,6 +330,12 @@ mod drawn {
                 stack.windows.push(piece);
             }
         }
+        // Wherever its menus are: what of them is off this monitor is cut
+        // away as it is drawn, as what is of a window.
+        stack.menus = menus_apart(space).and_then(|window| {
+            let location = space.element_location(window)?;
+            Some((window.clone(), location - window.geometry().loc - area.loc))
+        });
         Some(stack)
     }
 }

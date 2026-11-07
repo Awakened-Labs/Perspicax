@@ -2,8 +2,8 @@
 //! begins in their coordinates (issue #112).
 //!
 //! A window's nodes are joined to it whole ([`Index::join_subtree`]). A menu
-//! is a surface of its own, an `xdg_popup` drawn directly above the window it
-//! hangs from, and its nodes hang somewhere in its application's tree: under
+//! is a surface of its own, an `xdg_popup` drawn above the window it hangs
+//! from, and its nodes hang somewhere in its application's tree: under
 //! that window, or beside it as a window of their own.
 //! [`join_popups`](crate::join::join_popups) decides which part of the tree
 //! each open menu is. This is the index's half: gathering what could be a
@@ -526,7 +526,7 @@ mod tests {
 
     /// Issue #112's first failure, on the window's own nodes: a button under
     /// its window's own open menu was judged visible, and the menu took the
-    /// click. The menu is drawn directly above its window, and covers it.
+    /// click. The menu is drawn above its window, and covers it.
     #[test]
     fn a_windows_own_node_under_its_open_menu_is_covered_by_it() {
         let opened = Instant::now();

@@ -95,9 +95,9 @@ fn a_granted_window_is_outlined_over_its_own_shadow() {
 }
 
 /// A window's menu is drawn in front of the line round it, as it is in front
-/// of its titlebar: the index stacks a menu directly above its window
-/// (#112), and the picture is what it describes. The line still runs where
-/// the menu is not.
+/// of its titlebar: the index stacks a menu above its window (#112), and
+/// the picture is what it describes. The line still runs where the menu is
+/// not.
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn a_granted_windows_menu_is_drawn_over_its_outline() {
