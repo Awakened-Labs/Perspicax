@@ -39,6 +39,16 @@
 //! with the fullscreen window it hangs from, as an xdg menu, drawn with its
 //! window, always was; it was drawn under it, out of sight.
 //!
+//! The menus of the window in use are the exception (#234): they are drawn
+//! in front of every window, kept ones included, and under the panels, so a
+//! right-click menu, a combo list or a tooltip of the window being worked in
+//! is never hidden under a small window kept on top in a corner. Every other
+//! window's menus stand with it: a tooltip of a window behind stays behind,
+//! and a menu of a window the person has left goes back with it. Which
+//! window is in use is worked out in [`Compositor::restack`] too, and kept
+//! with where each window stands. An X11 menu that names no window it hangs
+//! from stands with none, where it was raised.
+//!
 //! So whatever asks what is in front reads the stack through [`as_drawn`]:
 //! the screen and pictures, through [`stack`]; the pointer, through
 //! [`window_under`]; and the facts an agent is judged by. None of them can
@@ -80,21 +90,28 @@ pub(crate) fn covers_panels(window: &Framed) -> bool {
     window.z_index() > RenderZindex::Top as u8
 }
 
-/// Whether a window is drawn in front of the others, as [`Compositor::restack`]
-/// last worked it out. Kept apart from the person's own flag, in a cell of
-/// its own, because it is read while windows are drawn and hit, where
-/// nothing but the space is to hand.
-struct Kept(Cell<bool>);
+/// Where a window stands among the others, as [`Compositor::restack`] last
+/// worked it out: whether it is kept in front of them, and whether it is in
+/// use. Kept apart from the person's own flag, in cells of their own,
+/// because they are read while windows are drawn and hit, where nothing but
+/// the space is to hand.
+#[derive(Default)]
+struct Standing {
+    kept: Cell<bool>,
+    in_use: Cell<bool>,
+}
 
-/// Mark `window` kept on top or not, saying whether that changed.
-fn mark_kept(window: &Framed, kept: bool) -> bool {
+/// Mark where `window` stands, saying whether that changed.
+fn stand(window: &Framed, kept: bool, in_use: bool) -> bool {
+    window.user_data().insert_if_missing(Standing::default);
     window
         .user_data()
-        .insert_if_missing(|| Kept(Cell::new(false)));
-    window
-        .user_data()
-        .get::<Kept>()
-        .is_some_and(|flag| flag.0.replace(kept) != kept)
+        .get::<Standing>()
+        .is_some_and(|standing| {
+            let moved = standing.kept.replace(kept) != kept;
+            let handed = standing.in_use.replace(in_use) != in_use;
+            moved || handed
+        })
 }
 
 /// Whether `window` is kept in front of the other windows. A window never
@@ -102,23 +119,57 @@ fn mark_kept(window: &Framed, kept: bool) -> bool {
 pub(crate) fn is_kept_on_top(window: &Framed) -> bool {
     window
         .user_data()
-        .get::<Kept>()
-        .is_some_and(|flag| flag.0.get())
+        .get::<Standing>()
+        .is_some_and(|standing| standing.kept.get())
+}
+
+/// Whether `window` is the window in use, or one of its X11 menus: the
+/// window with the keyboard, or whose own menu has it. A window never worked
+/// out yet is not.
+fn is_in_use(window: &Framed) -> bool {
+    window
+        .user_data()
+        .get::<Standing>()
+        .is_some_and(|standing| standing.in_use.get())
+}
+
+/// The ranks windows are drawn in, back to front.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tier {
+    /// The windows not kept on top.
+    Among,
+    /// Those kept on top, in front of the rest.
+    Kept,
+    /// The X11 menus of the window in use, in front of every window: a
+    /// right-click menu of the window being worked in is never hidden under
+    /// one kept on top (#234).
+    MenusInUse,
+    /// The fullscreen window in use, and its X11 menus, over the panels.
+    OverPanels,
+}
+
+/// The tier `window` is drawn in.
+fn tier(window: &Framed) -> Tier {
+    if covers_panels(window) {
+        Tier::OverPanels
+    } else if super::places_itself(window) && is_in_use(window) {
+        Tier::MenusInUse
+    } else if is_kept_on_top(window) {
+        Tier::Kept
+    } else {
+        Tier::Among
+    }
 }
 
 /// The windows in `space` back to front, as they are drawn: the order they
-/// were raised in, with those kept on top in front of the rest, and the
-/// fullscreen window in use in front of them all. Three passes over the
-/// space rather than a sorted copy, since the pointer asks at every motion.
+/// were raised in, with those kept on top in front of the rest, the X11
+/// menus of the window in use in front of those, and the fullscreen window
+/// in use in front of them all. A pass over the space per tier rather than
+/// a sorted copy, since the pointer asks at every motion.
 pub(crate) fn as_drawn(space: &Space<Framed>) -> impl DoubleEndedIterator<Item = &Framed> {
-    let among = |kept: bool| {
-        space
-            .elements()
-            .filter(move |window| !covers_panels(window) && is_kept_on_top(window) == kept)
-    };
-    among(false)
-        .chain(among(true))
-        .chain(space.elements().filter(|window| covers_panels(window)))
+    [Tier::Among, Tier::Kept, Tier::MenusInUse, Tier::OverPanels]
+        .into_iter()
+        .flat_map(move |rank| space.elements().filter(move |window| tier(window) == rank))
 }
 
 /// The window drawn frontmost at `at` whose input region takes it, and
@@ -166,7 +217,8 @@ mod drawn {
         pub(crate) raised: Vec<(Framed, Point<i32, Logical>)>,
         /// `top` surfaces: the panels.
         pub(crate) top: Vec<(LayerSurface, Point<i32, Logical>)>,
-        /// The other windows, those kept on top in front.
+        /// The other windows, those kept on top in front, and the X11 menus
+        /// of the window in use in front of them.
         pub(crate) windows: Vec<(Framed, Point<i32, Logical>)>,
         /// `bottom` and `background` surfaces: the wallpaper.
         pub(crate) lower: Vec<(LayerSurface, Point<i32, Logical>)>,
@@ -280,19 +332,31 @@ impl Compositor {
             .any(|window| super::is_on_top(&window))
     }
 
-    /// Work out which windows are kept on top, raise `focused`, the window
-    /// in use -- the one with the keyboard, or whose own menu has it -- over
-    /// the panels if it is fullscreen, with its X11 menus, and put every
-    /// other window back among the windows.
+    /// The window `window` stands with: the one an X11 menu hangs from, or
+    /// the window itself. `None` for a menu of nothing.
+    fn stands_with(&self, window: &Framed) -> Option<SurfaceId> {
+        if super::places_itself(window) {
+            self.hangs_from(window).as_ref().and_then(id_of)
+        } else {
+            id_of(window)
+        }
+    }
+
+    /// Work out which windows are kept on top and which is in use, raise
+    /// `focused`, the window in use -- the one with the keyboard, or whose
+    /// own menu has it -- over the panels if it is fullscreen, with its X11
+    /// menus, and put every other window back among the windows.
     ///
     /// Told which window is in use rather than asking: while the seat is
     /// reporting a change of focus it holds the keyboard, and asking it then
     /// would wait on itself.
     pub(crate) fn restack(&mut self, focused: Option<SurfaceId>) {
-        // Parked windows too: a workspace sliding in draws its own.
+        // Parked windows too: a workspace sliding in draws its own, and one
+        // parked while in use is not in use once it is back.
         let mut redraw = false;
         for window in self.space.elements().chain(&self.parked) {
-            redraw |= mark_kept(window, self.keeps_on_top(window));
+            let in_use = focused.is_some() && self.stands_with(window) == focused;
+            redraw |= stand(window, self.keeps_on_top(window), in_use);
         }
         let raised = focused
             .and_then(|id| self.window_for_id(id))
@@ -304,11 +368,7 @@ impl Compositor {
         let (mut moved, mut menus) = (false, Vec::new());
         for window in self.space.elements() {
             let menu = super::places_itself(window);
-            let stands_with = if menu {
-                self.hangs_from(window).as_ref().and_then(id_of)
-            } else {
-                id_of(window)
-            };
+            let stands_with = self.stands_with(window);
             let over = raised.is_some() && stands_with == raised;
             let z = if over { OVER_PANELS } else { AMONG_WINDOWS };
             if window.z_index() == z {

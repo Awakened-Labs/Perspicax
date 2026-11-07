@@ -4892,6 +4892,56 @@ fn an_x11_menu_of_a_fullscreen_window_left_for_another_goes_back_under_it_with_i
     x11.stop();
 }
 
+/// Issue #234: a menu of the window in use opens in front of a window kept
+/// on top, where the window it hangs from is behind it, and goes back with
+/// its window when the one kept on top takes the keys.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_menu_of_the_window_in_use_opens_in_front_of_a_window_kept_on_top() {
+    let (x11, kept) = kept_on_top_under_another("x11-in-use-menu");
+    let other = x11.focus();
+    let (x0, y0, x1, y1) = rect_of(
+        &x11.surface_where("kept", |surface| surface.mapped)
+            .expect("kept"),
+    );
+    // Over the middle of the window kept on top, so it is the menu or that
+    // window there, whichever is in front.
+    let at = (x0 as i16 + 40, y0 as i16 + 40);
+    assert!(
+        f64::from(at.0 + 120) < x1 && f64::from(at.1 + 80) < y1,
+        "the menu is not over the window kept on top"
+    );
+    let kept_id = id_of(&x11, "kept");
+    x11.menu_over("menu", at, (120, 80), Some(other));
+    let menu = id_of(&x11, "menu");
+    let in_front = |facts: &HostFacts| {
+        let place = |id| facts.surfaces().iter().position(|surface| surface.id == id);
+        place(menu) > place(kept_id)
+    };
+
+    assert!(
+        eventually(Duration::from_secs(5), || in_front(&x11.facts())
+            .then_some(()))
+        .is_some(),
+        "behind the window kept on top: {:?}",
+        x11.facts()
+    );
+
+    x11.perform(Action::CycleFocus);
+    eventually(Duration::from_secs(5), || {
+        (x11.focus() == kept).then_some(())
+    })
+    .expect("the window kept on top never took the keys");
+    assert!(
+        eventually(Duration::from_secs(5), || (!in_front(&x11.facts()))
+            .then_some(()))
+        .is_some(),
+        "still in front of the window kept on top: {:?}",
+        x11.facts()
+    );
+    x11.stop();
+}
+
 /// Issue #259: an X11 window asking to be active with an X time nothing
 /// vouches for is refused the keys, and wants the person's attention: the
 /// shell is told, for its taskbar to say so.
