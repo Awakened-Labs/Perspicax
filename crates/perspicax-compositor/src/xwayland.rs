@@ -117,18 +117,37 @@
 //! pointer grab is invisible here, so sloppy focus still follows the pointer
 //! across another window on its way to a menu item (issue #183).
 //!
-//! # Kept on top
+//! # Kept on top, and what is in front
 //!
 //! A window the person keeps on top (issue #64) is kept there in what is
 //! drawn, hit and told an agent, and its dialogs and menus with it, by the
 //! window their `WM_TRANSIENT_FOR` names (`shell::stacking`). The menus of
 //! the window in use come in front of it all the same (issue #234), where
 //! they name that window: one that names none stays where it was raised
-//! (issue #302). X is told none of it. Smithay does not list
-//! `_NET_WM_STATE_ABOVE` as supported, so no client asks to be kept on top
-//! that way and none is told it is; X's own stacking order is not made to
-//! match, and a window asking to be restacked (`configure_request`'s
-//! `Reorder`) is not answered either (issue #236).
+//! (issue #302).
+//!
+//! X is told (issue #236). Smithay has no word for being kept on top, so
+//! [`Side`] adds `_NET_WM_STATE_ABOVE` to the root's `_NET_SUPPORTED`, and
+//! keeps it in the `_NET_WM_STATE` of each window the person keeps on top,
+//! though Smithay writes that property whole, without it, whenever another
+//! of its states changes -- as the keyboard comes and goes. A client that
+//! reads between Smithay's write and the side thread's finds it missing
+//! for a moment, as one may find the root named as active. A client may
+//! ask to be kept on top that way, or let go, before its window maps or
+//! after -- mpv's `--ontop`, GTK's keep-above, Wine's topmost windows --
+//! and is kept as the person keeps a window, with a person at the seat. A
+//! dialog kept on top with its window is not told, the state being its
+//! window's.
+//!
+//! And X stacks the windows it manages as they are drawn
+//! (`Compositor::stack_x11`), so `_NET_CLIENT_LIST_STACKING` and
+//! `XQueryTree` say what the person sees: a window kept on top in front of
+//! one raised since, and every raise heard, a click or Alt+Tab included. A
+//! window only ever goes down in X, under the one drawn in front of it, so
+//! never over a menu its client has over it; the menus themselves are their
+//! clients' to stack. A window asking X to restack it (`configure_request`'s
+//! `Reorder`) is answered as a request not granted is, with where it is,
+//! and stays: a client brings its window forward by asking to be active.
 //!
 //! # Started eagerly, not lazily
 //!
@@ -138,12 +157,12 @@
 //! false` in the config turns it off.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashSet,
     os::fd::OwnedFd,
     process::Stdio,
     sync::{
-        Arc,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicU32, Ordering},
         mpsc,
     },
@@ -223,6 +242,9 @@ pub(crate) struct Xwayland {
     /// The connection that tells windows what Smithay's window manager does
     /// not. See [`Side`].
     side: Option<Side>,
+    /// The windows X stacks, by X window id, back to front, as it was last
+    /// told to stack them: see [`Compositor::stack_x11`].
+    stacked: Vec<u32>,
     /// The source that started Xwayland, which holds its display. See
     /// [`stop`].
     source: Option<RegistrationToken>,
@@ -396,7 +418,9 @@ x11rb::atom_manager! {
         _NET_WM_STATE_MAXIMIZED_HORZ,
         _NET_WM_STATE_MAXIMIZED_VERT,
         _NET_WM_STATE_HIDDEN,
+        _NET_WM_STATE_ABOVE,
         _NET_ACTIVE_WINDOW,
+        _NET_SUPPORTED,
     }
 }
 
@@ -410,6 +434,9 @@ struct Wants {
     /// ICCCM's initial state, iconic: as `xterm -iconic` starts, and Wine
     /// starts a program shown minimized.
     minimized: bool,
+    /// Kept on top: as GTK writes it for a window kept above before it is
+    /// shown, and Wine for a topmost one.
+    above: bool,
 }
 
 impl Wants {
@@ -419,6 +446,7 @@ impl Wants {
             maximized: state.contains(&atoms._NET_WM_STATE_MAXIMIZED_HORZ)
                 && state.contains(&atoms._NET_WM_STATE_MAXIMIZED_VERT),
             minimized: matches!(initial, Some(WmHintsState::Iconic)),
+            above: state.contains(&atoms._NET_WM_STATE_ABOVE),
         }
     }
 }
@@ -450,10 +478,17 @@ enum Asked {
     /// EWMH's `_NET_ACTIVE_WINDOW`: for `window` to be the active one, with
     /// `stamp` the X time of the input behind the request, or 0 for none.
     Activate { window: u32, stamp: u32 },
-    /// EWMH's `_NET_WM_STATE` with `_NET_WM_STATE_HIDDEN`: for `window` to
-    /// be minimized, or brought back. Smithay's window manager answers the
-    /// other states asked for beside it, if any.
-    Hidden { window: u32, change: Change },
+    /// EWMH's `_NET_WM_STATE` with `_NET_WM_STATE_HIDDEN` or
+    /// `_NET_WM_STATE_ABOVE`, or both, for one message may name two: for
+    /// `window` to be minimized or brought back, and to be kept on top or
+    /// let go. Smithay's window manager answers the other states asked for
+    /// beside them, if any.
+    State {
+        window: u32,
+        change: Change,
+        hidden: bool,
+        above: bool,
+    },
 }
 
 impl Asked {
@@ -469,11 +504,21 @@ impl Asked {
                 stamp: data[1],
             });
         }
-        if message.type_ == atoms._NET_WM_STATE && data[1..=2].contains(&atoms._NET_WM_STATE_HIDDEN)
-        {
-            return Change::read(data[0]).map(|change| Self::Hidden { window, change });
+        if message.type_ != atoms._NET_WM_STATE {
+            return None;
         }
-        None
+        let names = &data[1..=2];
+        let hidden = names.contains(&atoms._NET_WM_STATE_HIDDEN);
+        let above = names.contains(&atoms._NET_WM_STATE_ABOVE);
+        if !hidden && !above {
+            return None;
+        }
+        Change::read(data[0]).map(|change| Self::State {
+            window,
+            change,
+            hidden,
+            above,
+        })
     }
 }
 
@@ -516,11 +561,13 @@ fn activation_age(now: u32, stamp: u32) -> Duration {
 
 /// Perspicax's own X connection, beside the window manager's, for what
 /// Smithay's window manager does not write: `WM_STATE` as a window is
-/// minimized and brought back, and the root's `_NET_ACTIVE_WINDOW`. Smithay
-/// writes the first only by mapping or unmapping a window's frame, and
-/// unmapping the frame would cost the window the surface Xwayland gave it;
-/// the second it writes wrong. Writes from the compositor's thread, so
-/// nothing there waits on Xwayland, and listens on a thread of its own: see
+/// minimized and brought back, the root's `_NET_ACTIVE_WINDOW`, and
+/// `_NET_WM_STATE_ABOVE` on a window kept on top. Smithay writes the first
+/// only by mapping or unmapping a window's frame, and unmapping the frame
+/// would cost the window the surface Xwayland gave it; the second it writes
+/// wrong; the third it has no word for, and wipes from `_NET_WM_STATE` each
+/// time it writes its own. Writes from the compositor's thread, so nothing
+/// there waits on Xwayland, and listens on a thread of its own: see
 /// [`Side::listen`].
 #[derive(Clone)]
 pub(crate) struct Side {
@@ -530,12 +577,16 @@ pub(crate) struct Side {
     /// The X11 window with the keyboard, or `NONE`: what the root's
     /// `_NET_ACTIVE_WINDOW` is kept saying.
     active: Arc<AtomicU32>,
+    /// The X11 windows the person keeps on top: those whose `_NET_WM_STATE`
+    /// is kept saying `_NET_WM_STATE_ABOVE`. See [`Side::keep_above`].
+    kept: Arc<Mutex<HashSet<u32>>>,
 }
 
 impl Side {
-    /// Connect to `display`, learn the atoms, and listen. Without it, X11
-    /// windows are minimized as before, untold, the root names none as
-    /// active, and a window cannot ask to be.
+    /// Connect to `display`, learn the atoms, say a window can be kept on
+    /// top, and listen. Without it, X11 windows are minimized as before,
+    /// untold, the root names none as active, and a window cannot ask to
+    /// be; nor is one kept on top told it is.
     fn open(handle: &LoopHandle<'static, Compositor>, display: u32) -> Option<Self> {
         let opened = x11rb::connect(Some(&format!(":{display}")))
             .map_err(|error| error.to_string())
@@ -550,6 +601,7 @@ impl Side {
                     atoms,
                     root,
                     active: Arc::default(),
+                    kept: Arc::default(),
                 })
             });
         let side = opened
@@ -557,15 +609,34 @@ impl Side {
                 tracing::warn!(%error, "no side X connection: X11 windows are not told they are minimized");
             })
             .ok()?;
+        side.support_above();
         side.listen(handle);
         Some(side)
     }
 
+    /// Add `_NET_WM_STATE_ABOVE` to the root's `_NET_SUPPORTED`, which
+    /// Smithay leaves it out of: a client that knows to ask to be kept on
+    /// top asks only where the window manager says it can be. Smithay wrote
+    /// its list as it started, and read replies after, so its list has
+    /// landed: this adds to it rather than being written over.
+    fn support_above(&self) {
+        let _ = self.connection.change_property32(
+            PropMode::APPEND,
+            self.root,
+            self.atoms._NET_SUPPORTED,
+            AtomEnum::ATOM,
+            &[self.atoms._NET_WM_STATE_ABOVE],
+        );
+        let _ = self.connection.flush();
+    }
+
     /// Hear what Smithay's window manager drops, on a thread of its own: a
-    /// client asking to be active, passed to the compositor's loop, and the
+    /// client asking to be active, passed to the compositor's loop; the
     /// root's property changes, so the root goes on naming the window with
-    /// the keyboard when Smithay writes otherwise there. A thread, as for
-    /// XRes, because that is answered by reading the root back, and a read
+    /// the keyboard when Smithay writes otherwise there; and the
+    /// `_NET_WM_STATE` of a window kept on top, or let go, so it goes on
+    /// saying so when Smithay writes its own over it. A thread, as for XRes,
+    /// because those are answered by reading the property back, and a read
     /// on the compositor's thread would wait on Xwayland. Everything else it
     /// hears it drops, the errors that come back for writes to a window
     /// already gone included. It ends when Xwayland does, its connection
@@ -615,6 +686,11 @@ impl Side {
                                 && notify.atom == side.atoms._NET_ACTIVE_WINDOW =>
                         {
                             side.keep_active();
+                        }
+                        Event::PropertyNotify(notify)
+                            if notify.atom == side.atoms._NET_WM_STATE =>
+                        {
+                            side.keep_above(notify.window);
                         }
                         _ => {}
                     }
@@ -670,6 +746,139 @@ impl Side {
         }
     }
 
+    /// Keep `window` on top in what X is told, or let it go: whether its
+    /// `_NET_WM_STATE` says `_NET_WM_STATE_ABOVE`. Only written to from
+    /// here, and only nothing: the change is heard on the side thread, which
+    /// puts the state right ([`Side::keep_above`]). The window's changes are
+    /// heard from now on, so Smithay's writing its own state over it is
+    /// heard too.
+    pub(crate) fn set_above(&self, window: u32, above: bool) {
+        let _ = self.connection.change_window_attributes(
+            window,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+        );
+        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+        if above {
+            kept.insert(window);
+        } else {
+            kept.remove(&window);
+        }
+        drop(kept);
+        self.answer(window);
+    }
+
+    /// `window`'s `_NET_WM_STATE` changed, on the side thread: put
+    /// `_NET_WM_STATE_ABOVE` right in it, if it is wrong. Smithay keeps a
+    /// state of its own and writes the whole of it whenever any of it
+    /// changes -- as the window gains or loses the keyboard, say -- with no
+    /// `_NET_WM_STATE_ABOVE` in it: so a window kept on top has it added
+    /// again, a moment after. Appended, which leaves the rest as it is
+    /// whatever Smithay has just written. A window let go has it taken out,
+    /// under a grab of the server: the rest of the state, read and written
+    /// back, cannot then change between the two. Smithay does not read
+    /// `_NET_WM_STATE` back, so this cannot go back and forth with it; nor
+    /// with itself, since what it writes is right when read again.
+    fn keep_above(&self, window: u32) {
+        let Some(says) = self.net_wm_state(window) else {
+            return;
+        };
+        let kept = self
+            .kept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&window);
+        let above = self.atoms._NET_WM_STATE_ABOVE;
+        if kept && !says.contains(&above) {
+            let _ = self.connection.change_property32(
+                PropMode::APPEND,
+                window,
+                self.atoms._NET_WM_STATE,
+                AtomEnum::ATOM,
+                &[above],
+            );
+            let _ = self.connection.flush();
+        } else if !kept && says.contains(&above) {
+            self.unsay_above(window);
+        }
+    }
+
+    /// Take `_NET_WM_STATE_ABOVE` out of `window`'s `_NET_WM_STATE`, on the
+    /// side thread, under a grab of the server: see [`Side::keep_above`].
+    fn unsay_above(&self, window: u32) {
+        if self.connection.grab_server().is_err() {
+            return;
+        }
+        if let Some(says) = self.net_wm_state(window) {
+            let above = self.atoms._NET_WM_STATE_ABOVE;
+            let rest: Vec<u32> = says.iter().copied().filter(|atom| *atom != above).collect();
+            if rest.len() != says.len() {
+                let _ = self.connection.change_property32(
+                    PropMode::REPLACE,
+                    window,
+                    self.atoms._NET_WM_STATE,
+                    AtomEnum::ATOM,
+                    &rest,
+                );
+            }
+        }
+        let _ = self.connection.ungrab_server();
+        let _ = self.connection.flush();
+    }
+
+    /// `window`'s `_NET_WM_STATE` as X has it now, or `None` for a window
+    /// gone. A round trip: never on the compositor's thread but at a map
+    /// ([`Side::wants`]).
+    fn net_wm_state(&self, window: u32) -> Option<Vec<u32>> {
+        let reply = self
+            .connection
+            .get_property(
+                false,
+                window,
+                self.atoms._NET_WM_STATE,
+                AtomEnum::ATOM,
+                0,
+                32,
+            )
+            .ok()?
+            .reply()
+            .ok()?;
+        Some(reply.value32().map(Iterator::collect).unwrap_or_default())
+    }
+
+    /// A window withdrawn: if it is kept on top, it is told it no longer
+    /// is, at once, as EWMH has a window manager take a withdrawn window's
+    /// state away, so it maps again as a new window would. Written whole,
+    /// before it is told it is withdrawn, which a client may map it again
+    /// on: Smithay has just taken back every state it gave it, so nothing
+    /// else is left to say, and whichever of the two connections' writes
+    /// lands last says the same.
+    fn withdrawn(&self, window: u32) {
+        let kept = self
+            .kept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&window);
+        if kept {
+            let _ = self.connection.change_property32(
+                PropMode::REPLACE,
+                window,
+                self.atoms._NET_WM_STATE,
+                AtomEnum::ATOM,
+                &[],
+            );
+            let _ = self.connection.flush();
+        }
+    }
+
+    /// A window gone: no longer kept on top, nor named as active.
+    fn forget(&self, window: u32) {
+        self.kept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&window);
+        self.forget_active(window);
+    }
+
     /// Answer a request to be active without changing which is: naming the
     /// same window again still tells a client the root's property changed.
     fn answer_active(&self) {
@@ -694,20 +903,7 @@ impl Side {
     /// keeps the hints, because a window started minimized must be told so,
     /// and only this connection can tell it.
     fn wants(&self, x11: &X11Surface) -> Wants {
-        let state: Vec<u32> = self
-            .connection
-            .get_property(
-                false,
-                x11.window_id(),
-                self.atoms._NET_WM_STATE,
-                AtomEnum::ATOM,
-                0,
-                32,
-            )
-            .ok()
-            .and_then(|cookie| cookie.reply().ok())
-            .and_then(|reply| reply.value32().map(Iterator::collect))
-            .unwrap_or_default();
+        let state = self.net_wm_state(x11.window_id()).unwrap_or_default();
         let initial = x11.hints().and_then(|hints| hints.initial_state);
         Wants::read(&state, initial, &self.atoms)
     }
@@ -751,6 +947,11 @@ struct MappedAt(Instant);
 /// on the window starts programs under (#259). Never the pid the window
 /// claims for itself, which any X client may write.
 struct Attested(Process);
+
+/// Whether X was last told the window is kept on top: what
+/// [`Compositor::tell_x11_stack`] compares the person's flag with.
+#[derive(Default)]
+struct SaidAbove(Cell<bool>);
 
 impl Compositor {
     /// The origin of an X11 window, as far as it is known.
@@ -823,11 +1024,11 @@ impl Compositor {
         if self.attention.started(&lineage, Instant::now()).is_none() {
             return;
         }
-        let (Some(x11), Some(id)) = (window.x11_surface().cloned(), shell::id_of(window)) else {
+        let Some(id) = shell::id_of(window) else {
             return;
         };
         tracing::debug!(surface = id.0, "started by the person's latest press");
-        self.raise_x11(window, &x11);
+        self.space.raise_element(window, false);
         self.focus_x11(window, id);
         self.backend.redraw();
     }
@@ -900,6 +1101,79 @@ impl Compositor {
             shell::id_of(&window)?,
             Vec2::new(f64::from(at.x), f64::from(at.y)),
         ))
+    }
+
+    /// Tell X what is in front of what, as it is drawn: each window the
+    /// person keeps on top is told `_NET_WM_STATE_ABOVE`, and one let go is
+    /// told it no longer is, and X stacks the windows it manages in the
+    /// order they are drawn. Run at the end of every `restack`, which runs
+    /// whenever the keyboard moves and before every publication of the
+    /// facts, so whatever keeps a window on top or lets it go, or raises one
+    /// -- a binding, a titlebar button, a click, Alt+Tab, a shell, an agent,
+    /// a tab coming to the front -- is told from one place.
+    ///
+    /// Only the person's own flag ([`shell::is_on_top`]), which a tab group
+    /// keeps on its tab in front, so every tab of a group kept on top is
+    /// told: a dialog kept on top with its window is not, the state being a
+    /// window's own to ask for and drop. Parked windows too, which are kept
+    /// on top as they come back.
+    pub(crate) fn tell_x11_stack(&mut self) {
+        self.tell_x11_kept();
+        self.stack_x11();
+    }
+
+    /// Tell each window the person keeps on top that it is, and each let go
+    /// that it no longer is: see [`Compositor::tell_x11_stack`].
+    fn tell_x11_kept(&self) {
+        let Some(side) = &self.xwayland.side else {
+            return;
+        };
+        for window in self.space.elements().chain(&self.parked) {
+            let Some(x11) = window.x11_surface() else {
+                continue;
+            };
+            if shell::places_itself(window) {
+                continue;
+            }
+            let above = shell::is_on_top(&self.front_of(window));
+            window.user_data().insert_if_missing(SaidAbove::default);
+            let said = window
+                .user_data()
+                .get::<SaidAbove>()
+                .is_some_and(|said| said.0.replace(above));
+            if said != above {
+                side.set_above(x11.window_id(), above);
+            }
+        }
+    }
+
+    /// Stack the windows X manages as they are drawn ([`shell::as_drawn`]),
+    /// if that has changed since X was last told: `_NET_CLIENT_LIST_STACKING`,
+    /// and X's own order, which a client reads with `XQueryTree`. So a window
+    /// kept on top is over one raised since, in X as on screen, and a raise
+    /// of any kind is heard.
+    ///
+    /// Each is put directly under the one drawn in front of it, the window
+    /// drawn frontmost staying where it is: a window only ever goes down in
+    /// X, so never over a menu its client has put over it. That is what
+    /// Smithay's `update_stacking_order_downwards` does, given the windows
+    /// front first; its docs have it and `_upwards` the other way about,
+    /// and its code is what X hears. Menus, tooltips and the like are their
+    /// clients' to stack, as an X11 window manager leaves them: X keeps
+    /// them wherever their clients put them.
+    fn stack_x11(&mut self) {
+        let order: Vec<X11Surface> = shell::as_drawn(&self.space)
+            .filter(|window| !shell::places_itself(window))
+            .filter_map(|window| window.x11_surface().cloned())
+            .collect();
+        let ids: Vec<u32> = order.iter().map(X11Surface::window_id).collect();
+        if ids == self.xwayland.stacked {
+            return;
+        }
+        if let Some(wm) = self.xwayland.wm.as_mut() {
+            let _ = wm.update_stacking_order_downwards(order.iter().rev());
+        }
+        self.xwayland.stacked = ids;
     }
 
     /// The mapped or parked window for the X window `id`.
@@ -1008,6 +1282,14 @@ impl XwmHandler for Compositor {
 
     fn new_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
+    /// X has mapped a window's frame, and Smithay has only now put it among
+    /// the windows X stacks, on top, wherever it is drawn: one that opened
+    /// beneath the window in use is stacked there again.
+    fn map_window_notify(&mut self, _xwm: XwmId, _window: X11Surface) {
+        self.xwayland.stacked.clear();
+        self.stack_x11();
+    }
+
     /// A title or class changed, or the window a menu hangs from: published
     /// now, as a Wayland window's is, rather than whenever the window next
     /// draws.
@@ -1082,6 +1364,11 @@ impl XwmHandler for Compositor {
         self.settle_new(&window, on);
         self.fit_frame(&window);
         self.adopt(&window);
+        // Kept on top as it asked, before anything works out where it
+        // stands, as the person keeps a window.
+        if wants.above {
+            placement(&window, |placement| placement.on_top = true);
+        }
         // Maximized first, so that leaving fullscreen lands on it; both
         // before it takes the keyboard, whose activation is the first write.
         if wants.maximized {
@@ -1102,9 +1389,6 @@ impl XwmHandler for Compositor {
         if wants.minimized {
             self.minimize(&window);
         } else if asked_for {
-            if let Some(wm) = self.xwayland.wm.as_mut() {
-                let _ = wm.raise_window(&x11);
-            }
             self.focus_x11(&window, id);
         } else {
             self.open_without_keys(&window);
@@ -1161,7 +1445,10 @@ impl XwmHandler for Compositor {
     /// client's: that is the window manager's. Nor is the size of a window
     /// that fills its monitor or a zone: it keeps it, and is told the rect
     /// it has, as ICCCM answers a request not granted. A game going
-    /// fullscreen asks for sizes as it sets its mode.
+    /// fullscreen asks for sizes as it sets its mode. Nor is a place in the
+    /// stack: a request to be restacked is not granted, and Smithay's
+    /// answer to every request, the rect the window has, says so (see "Kept
+    /// on top, and what is in front" above).
     fn configure_request(
         &mut self,
         _xwm: XwmId,
@@ -1369,7 +1656,12 @@ impl Compositor {
     fn x11_asked(&mut self, asked: Asked) {
         match asked {
             Asked::Activate { window, stamp } => self.activate_x11(window, stamp),
-            Asked::Hidden { window, change } => self.hide_x11(window, change),
+            Asked::State {
+                window,
+                change,
+                hidden,
+                above,
+            } => self.state_x11(window, change, hidden, above),
         }
     }
 
@@ -1399,17 +1691,17 @@ impl Compositor {
         let asked = self
             .managed_x11_by_id(window)
             .filter(|_| self.backend.has_person());
-        if let Some((window, x11)) = asked {
+        if let Some((window, _)) = asked {
             let now = Clock::<Monotonic>::new().now().as_millis();
             let input = stamp != x11rb::CURRENT_TIME && self.x11_has_focus();
             if perspicax_policy::grants_activation(activation_age(now, stamp), input) {
                 self.restore(&window);
-                self.raise_x11(&window, &x11);
+                self.space.raise_element(&window, false);
                 if let Some(id) = shell::id_of(&window) {
                     self.focus_x11(&window, id);
                 }
             } else {
-                self.bring_back_x11(&window, &x11);
+                self.bring_back_x11(&window);
                 self.refused_keys(&window);
             }
             self.backend.redraw();
@@ -1420,19 +1712,34 @@ impl Compositor {
         }
     }
 
-    /// An X11 window asking with `_NET_WM_STATE_HIDDEN` to be minimized or
-    /// brought back. EWMH would have a window manager ignore that, the state
-    /// being its own to set, but a program that asks waits for an answer, so
-    /// it is taken as `WM_CHANGE_STATE` is, as Openbox takes it. Answered in
-    /// `_NET_WM_STATE` as well, which is what was asked about.
-    fn hide_x11(&mut self, window: u32, change: Change) {
+    /// An X11 window asking in `_NET_WM_STATE` for what Smithay's window
+    /// manager drops: to be minimized or brought back, with
+    /// `_NET_WM_STATE_HIDDEN`, and to be kept on top or let go, with
+    /// `_NET_WM_STATE_ABOVE`. Answered in `_NET_WM_STATE`, which is what
+    /// was asked about, whatever came of it.
+    ///
+    /// EWMH would have a window manager ignore `_NET_WM_STATE_HIDDEN`, the
+    /// state being its own to set, but a program that asks waits for an
+    /// answer, so it is taken as `WM_CHANGE_STATE` is, as Openbox takes it.
+    ///
+    /// Kept on top as the person keeps a window, only with a person at the
+    /// seat, as for a request of any other kind: a player's own "always on
+    /// top", mpv's `--ontop`, Wine's topmost window. A tab's group is kept
+    /// through the tab in front, as the person keeps one.
+    fn state_x11(&mut self, window: u32, change: Change, hidden: bool, above: bool) {
         let Some((window, x11)) = self.managed_x11_by_id(window) else {
             return;
         };
-        if change.applied_to(Self::is_minimized(&window)) {
-            self.minimize_asked(&x11);
-        } else {
-            self.unminimize_asked(&x11);
+        if hidden {
+            if change.applied_to(Self::is_minimized(&window)) {
+                self.minimize_asked(&x11);
+            } else {
+                self.unminimize_asked(&x11);
+            }
+        }
+        if above && let Some(window) = self.honoured(&x11) {
+            let front = self.front_of(&window);
+            self.set_on_top(&front, change.applied_to(shell::is_on_top(&front)));
         }
         self.answer_net_wm_state(&x11);
     }
@@ -1456,7 +1763,7 @@ impl Compositor {
             return;
         };
         if self.backend.has_person() && Self::is_minimized(&window) {
-            self.bring_back_x11(&window, x11);
+            self.bring_back_x11(&window);
             self.publish_facts();
         } else {
             self.answer_wm_state(&window, x11);
@@ -1465,10 +1772,10 @@ impl Compositor {
 
     /// Bring an X11 window back from minimized where it is, and raise it if
     /// it shows: what a window asking with no input behind it gets.
-    fn bring_back_x11(&mut self, window: &Framed, x11: &X11Surface) {
+    fn bring_back_x11(&mut self, window: &Framed) {
         self.unminimize(window);
         if self.space.element_location(window).is_some() {
-            self.raise_x11(window, x11);
+            self.space.raise_element(window, false);
         }
     }
 
@@ -1484,15 +1791,6 @@ impl Compositor {
             }
             None => Some(id),
         };
-    }
-
-    /// Raise an X11 window over the others: on screen, and in X's own
-    /// stacking.
-    pub(crate) fn raise_x11(&mut self, window: &Framed, x11: &X11Surface) {
-        self.space.raise_element(window, false);
-        if let Some(wm) = self.xwayland.wm.as_mut() {
-            let _ = wm.raise_window(x11);
-        }
     }
 
     /// Tell an X11 window it was minimized, or brought back: ICCCM's
@@ -1543,13 +1841,16 @@ impl Compositor {
     /// a window manager do: Wine maps a window again only once it has seen
     /// that. Smithay unmaps the frame of its own accord and writes nothing.
     /// And take back the states this window manager gave it, as EWMH has it,
-    /// so it maps again as a new window would and not, say, still focused or
-    /// fullscreen.
+    /// so it maps again as a new window would and not, say, still focused,
+    /// fullscreen or kept on top.
     fn withdraw_x11(&self, x11: &X11Surface) {
         let _ = x11.set_activated(false);
         let _ = x11.set_fullscreen(false);
         let _ = x11.set_maximized(false);
         let _ = x11.set_suspended(false);
+        if let Some(side) = &self.xwayland.side {
+            side.withdrawn(x11.window_id());
+        }
         self.tell_wm_state(x11, WmState::Withdrawn);
     }
 
@@ -1664,7 +1965,7 @@ impl Compositor {
             self.publish_facts();
         }
         if let Some(side) = &self.xwayland.side {
-            side.forget_active(x11.window_id());
+            side.forget(x11.window_id());
         }
     }
 
@@ -1717,6 +2018,8 @@ mod tests {
             _NET_WM_STATE_MAXIMIZED_VERT: 5,
             _NET_ACTIVE_WINDOW: 6,
             _NET_WM_STATE_HIDDEN: 7,
+            _NET_WM_STATE_ABOVE: 8,
+            _NET_SUPPORTED: 9,
         }
     }
 
@@ -1777,18 +2080,68 @@ mod tests {
         let second = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [0_u32, 3, 7, 1, 0]);
         assert_eq!(
             Asked::read(&first, &atoms),
-            Some(Asked::Hidden {
+            Some(Asked::State {
                 window: 0x40_0001,
                 change: Change::Add,
+                hidden: true,
+                above: false,
             })
         );
         assert_eq!(
             Asked::read(&second, &atoms),
-            Some(Asked::Hidden {
+            Some(Asked::State {
                 window: 0x40_0001,
                 change: Change::Remove,
+                hidden: true,
+                above: false,
             })
         );
+    }
+
+    #[test]
+    fn a_request_to_be_kept_on_top_is_found_in_either_place() {
+        let atoms = atoms();
+        let first = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [2_u32, 8, 0, 1, 0]);
+        let second = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [1_u32, 3, 8, 1, 0]);
+        assert_eq!(
+            Asked::read(&first, &atoms),
+            Some(Asked::State {
+                window: 0x40_0001,
+                change: Change::Toggle,
+                hidden: false,
+                above: true,
+            })
+        );
+        assert_eq!(
+            Asked::read(&second, &atoms),
+            Some(Asked::State {
+                window: 0x40_0001,
+                change: Change::Add,
+                hidden: false,
+                above: true,
+            })
+        );
+    }
+
+    #[test]
+    fn one_request_may_ask_to_be_hidden_and_kept_on_top_at_once() {
+        let message = ClientMessageEvent::new(32, 0x40_0001_u32, 2_u32, [0_u32, 8, 7, 1, 0]);
+        assert_eq!(
+            Asked::read(&message, &atoms()),
+            Some(Asked::State {
+                window: 0x40_0001,
+                change: Change::Remove,
+                hidden: true,
+                above: true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_window_asks_to_start_kept_on_top_with_above_in_its_state() {
+        let atoms = atoms();
+        assert!(Wants::read(&[3, 8], None, &atoms).above);
+        assert!(!Wants::read(&[3], None, &atoms).above);
     }
 
     #[test]

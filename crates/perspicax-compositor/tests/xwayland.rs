@@ -605,7 +605,9 @@ x11rb::atom_manager! {
         _NET_WM_STATE_MAXIMIZED_VERT,
         _NET_WM_STATE_HIDDEN,
         _NET_WM_STATE_FOCUSED,
+        _NET_WM_STATE_ABOVE,
         _NET_ACTIVE_WINDOW,
+        _NET_SUPPORTED,
         _NET_CLIENT_LIST_STACKING,
         _NET_WM_MOVERESIZE,
         _NET_WM_WINDOW_TYPE,
@@ -624,6 +626,7 @@ const ICONIC: u32 = 3;
 /// `_NET_WM_STATE`'s actions.
 const REMOVE: u32 = 0;
 const ADD: u32 = 1;
+const TOGGLE: u32 = 2;
 
 /// EWMH's sources of a request: an application, or a pager or taskbar --
 /// which Wine says it is when it asks to be active.
@@ -1073,6 +1076,17 @@ impl X11 {
             .unwrap_or_default()
     }
 
+    /// Whether the window comes to be told it is in `state`, ICCCM's
+    /// `WM_STATE`. Told on a connection of the compositor's own, which the X
+    /// server keeps in no order with the window manager's, nor with what the
+    /// facts say, so it is waited for: a client waits for the change too.
+    fn told_wm_state(&self, window: u32, state: u32) -> bool {
+        eventually(Duration::from_secs(5), || {
+            (self.wm_state(window) == [state, 0]).then_some(())
+        })
+        .is_some()
+    }
+
     /// The window's `_NET_WM_STATE`.
     fn net_wm_state(&self, window: u32) -> Vec<u32> {
         self.x
@@ -1087,6 +1101,42 @@ impl X11 {
             .expect("get_property")
             .reply()
             .expect("_NET_WM_STATE")
+            .value32()
+            .map(Iterator::collect)
+            .unwrap_or_default()
+    }
+
+    /// Whether `window`'s `_NET_WM_STATE` comes to say it is kept on top,
+    /// or not, and still does a moment later: Smithay writes its own state
+    /// over it as the keyboard comes and goes, and that must not be the last
+    /// word.
+    fn says_above(&self, window: u32, above: bool) -> bool {
+        let says = || {
+            self.net_wm_state(window)
+                .contains(&self.atoms._NET_WM_STATE_ABOVE)
+                == above
+        };
+        let said = eventually(Duration::from_secs(5), || says().then_some(()));
+        said.is_some() && {
+            thread::sleep(Duration::from_millis(300));
+            says()
+        }
+    }
+
+    /// What the root's `_NET_SUPPORTED` says the window manager can do.
+    fn supported(&self) -> Vec<u32> {
+        self.x
+            .get_property(
+                false,
+                self.root,
+                self.atoms._NET_SUPPORTED,
+                AtomEnum::ATOM,
+                0,
+                1024,
+            )
+            .expect("get_property")
+            .reply()
+            .expect("_NET_SUPPORTED")
             .value32()
             .map(Iterator::collect)
             .unwrap_or_default()
@@ -1130,6 +1180,37 @@ impl X11 {
             .value32()
             .map(Iterator::collect)
             .unwrap_or_default()
+    }
+
+    /// The root's children, bottom to top: what X itself has in front of
+    /// what, as a client reads it with `XQueryTree`, menus included.
+    fn x_order(&self) -> Vec<u32> {
+        self.x
+            .query_tree(self.root)
+            .expect("query_tree")
+            .reply()
+            .expect("the root's children")
+            .children
+    }
+
+    /// The frame the window manager put `window` in: what X stacks among the
+    /// root's children.
+    fn frame_of(&self, window: u32) -> u32 {
+        self.x
+            .query_tree(window)
+            .expect("query_tree")
+            .reply()
+            .expect("the window's parent")
+            .parent
+    }
+
+    /// Whether the root's `_NET_CLIENT_LIST_STACKING` comes to name `window`
+    /// last, in front of the rest.
+    fn stacked_last(&self, window: u32) -> bool {
+        eventually(Duration::from_secs(5), || {
+            (self.stacking().last() == Some(&window)).then_some(())
+        })
+        .is_some()
     }
 
     /// Whether the root comes to name `window` as active, and still does a
@@ -1337,7 +1418,11 @@ fn an_x11_window_that_iconifies_itself_is_minimized_and_told_it_is_iconic() {
         !surface.mapped && surface.off_workspace.is_none()
     })
     .unwrap_or_else(|| panic!("never minimized: {:?}", x11.facts()));
-    assert_eq!(x11.wm_state(window), [ICONIC, 0]);
+    assert!(
+        x11.told_wm_state(window, ICONIC),
+        "never told: {:?}",
+        x11.wm_state(window)
+    );
     assert!(
         x11.net_wm_state(window)
             .contains(&x11.atoms._NET_WM_STATE_HIDDEN)
@@ -2099,7 +2184,11 @@ fn an_x11_window_that_maps_iconic_starts_minimized_and_is_told_so() {
     x11.perform(Action::CycleFocus);
     x11.surface_where("game", |surface| surface.mapped)
         .unwrap_or_else(|| panic!("never brought back: {:?}", x11.facts()));
-    assert_eq!(x11.wm_state(game), [NORMAL, 0]);
+    assert!(
+        x11.told_wm_state(game, NORMAL),
+        "never told: {:?}",
+        x11.wm_state(game)
+    );
     eventually(Duration::from_secs(10), || {
         (x11.focus() == game).then_some(())
     })
@@ -2119,7 +2208,11 @@ fn with_nobody_at_the_seat_an_x11_window_that_maps_iconic_is_placed_as_any_other
 
     x11.surface_where("game", |surface| surface.mapped)
         .unwrap_or_else(|| panic!("never mapped: {:?}", x11.facts()));
-    assert_eq!(x11.wm_state(game), [NORMAL, 0]);
+    assert!(
+        x11.told_wm_state(game, NORMAL),
+        "never told: {:?}",
+        x11.wm_state(game)
+    );
     assert!(
         !x11.net_wm_state(game)
             .contains(&x11.atoms._NET_WM_STATE_HIDDEN)
@@ -2397,7 +2490,11 @@ fn a_minimized_x11_window_asking_to_be_active_without_input_comes_back() {
     x11.activate(second, PAGER, 0);
     x11.surface_where("second", |surface| surface.mapped)
         .unwrap_or_else(|| panic!("never came back: {:?}", x11.facts()));
-    assert_eq!(x11.wm_state(second), [NORMAL, 0]);
+    assert!(
+        x11.told_wm_state(second, NORMAL),
+        "never told: {:?}",
+        x11.wm_state(second)
+    );
     assert!(x11.on_top("second"), "came back underneath");
     assert_eq!(
         x11.focus(),
@@ -3385,8 +3482,11 @@ fn raising_an_x11_window_raises_it_in_x_too() {
 }
 
 /// A window of X's own, raised, would have its menu left behind it: an X11
-/// menu is a window here, as an xdg one is not. It comes up with its window,
-/// and in X's stacking the window stays where the menu is over it.
+/// menu is a window here, as an xdg one is not. It comes up with its window.
+/// X hears of the raise, and still has the menu over the window (#236): a
+/// window only ever goes down in X, under the one drawn in front of it. The
+/// menu opened before the other window, which X then has between them, so
+/// raising the window over the other in X would put it over its menu.
 #[test]
 #[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
 fn an_x11_menu_stays_over_the_window_raised() {
@@ -3395,10 +3495,16 @@ fn an_x11_menu_stays_over_the_window_raised() {
         Backend::headless((1280, 800)).with_person(),
     );
     let steam = with_the_keyboard(&x11, "steam");
+    let menu = x11.menu_over("menu", (40, 40), (120, 80), Some(steam));
     let other = with_the_keyboard(&x11, "other");
-    x11.menu_over("menu", (40, 40), (120, 80), Some(steam));
-    assert!(x11.on_top("menu"), "not in front: {:?}", x11.facts());
-    assert_eq!(x11.stacking().last(), Some(&other));
+    assert!(x11.on_top("other"), "not in front: {:?}", x11.facts());
+    assert!(x11.stacked_last(other), "X has {:?}", x11.stacking());
+    let order = x11.x_order();
+    let place = |window| order.iter().position(|child| *child == window);
+    assert!(
+        place(x11.frame_of(steam)) < place(menu) && place(menu) < place(x11.frame_of(other)),
+        "X has the menu elsewhere: {order:?}"
+    );
 
     let host = Host::new(&x11.session.facts, &x11.session.requests);
     let steam_id = id_of(&x11, "steam");
@@ -3415,10 +3521,16 @@ fn an_x11_menu_stays_over_the_window_raised() {
     };
     assert!(at(steam_id) > at(other_id), "not raised: {facts:?}");
     assert!(x11.on_top("menu"), "left behind: {:?}", x11.facts());
-    assert_eq!(
-        x11.stacking().last(),
-        Some(&other),
-        "X would have it over its own menu"
+    assert!(
+        x11.stacked_last(steam),
+        "X never told: {:?}",
+        x11.stacking()
+    );
+    let order = x11.x_order();
+    let place = |window| order.iter().position(|child| *child == window);
+    assert!(
+        place(menu) > place(x11.frame_of(steam)),
+        "X has the window over its own menu: {order:?}"
     );
 
     x11.stop();
@@ -4839,6 +4951,243 @@ fn x11_windows_naming_each_other_in_transient_for_are_kept_on_top_without_hangin
     x11.perform(Action::ToggleOnTop);
     x11.surface_where("one", |surface| !surface.on_top)
         .unwrap_or_else(|| panic!("never let go with two: {:?}", x11.facts()));
+    x11.stop();
+}
+
+/// Issue #236: the root says a window can be kept on top, beside what
+/// Smithay says: a client that knows to ask to be -- mpv's `--ontop`, GTK's
+/// keep-above -- asks only where the window manager says it can be.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn the_root_says_an_x11_window_can_be_kept_on_top() {
+    let x11 = X11::start("x11-supports-above", Backend::headless((1280, 800)));
+
+    let supported = eventually(Duration::from_secs(5), || {
+        let supported = x11.supported();
+        supported
+            .contains(&x11.atoms._NET_WM_STATE_ABOVE)
+            .then_some(supported)
+    })
+    .unwrap_or_else(|| panic!("not said: {:?}", x11.supported()));
+    assert!(
+        supported.contains(&x11.atoms._NET_WM_STATE_HIDDEN),
+        "Smithay's own list written over: {supported:?}"
+    );
+    x11.stop();
+}
+
+/// Issue #236: a window the person keeps on top is told it is, in
+/// `_NET_WM_STATE`, as a player's own "always on top" reads it, and stays
+/// told as the keyboard leaves it and comes back, though Smithay writes its
+/// own state over it each time. Let go, it is told it no longer is.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_kept_on_top_is_told_it_is_as_the_keyboard_comes_and_goes() {
+    let (x11, kept) = kept_on_top_under_another("x11-told-above");
+
+    // Smithay has written the state of a window that lost the keyboard.
+    assert!(says_focused(&x11, kept, false));
+    assert!(
+        x11.says_above(kept, true),
+        "not told: {:?}",
+        x11.net_wm_state(kept)
+    );
+
+    x11.perform(Action::CycleFocus);
+    assert!(says_focused(&x11, kept, true), "never took the keys back");
+    assert!(
+        x11.says_above(kept, true),
+        "no longer told: {:?}",
+        x11.net_wm_state(kept)
+    );
+
+    x11.perform(Action::ToggleOnTop);
+    x11.surface_where("kept", |surface| !surface.on_top)
+        .unwrap_or_else(|| panic!("never let go: {:?}", x11.facts()));
+    assert!(
+        x11.says_above(kept, false),
+        "still told: {:?}",
+        x11.net_wm_state(kept)
+    );
+    assert!(says_focused(&x11, kept, true), "the rest of its state lost");
+    x11.stop();
+}
+
+/// Issue #236: a dialog kept on top with its window is not told it is: the
+/// state is a window's own, which its client asks for and drops, and the
+/// dialog's client asked for nothing.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_dialog_kept_on_top_with_its_window_is_not_told_it_is() {
+    let (x11, kept) = kept_on_top_under_another("x11-told-above-dialog");
+    let dialog = x11.create_at("dialog", (0, 0, 200, 120), None);
+    x11.transient(dialog, kept);
+    x11.mapped(dialog, "dialog");
+    x11.surface_where("dialog", |surface| surface.on_top)
+        .unwrap_or_else(|| panic!("never kept on top with its window: {:?}", x11.facts()));
+
+    assert!(
+        x11.says_above(dialog, false),
+        "told: {:?}",
+        x11.net_wm_state(dialog)
+    );
+    assert!(x11.says_above(kept, true), "its window no longer told");
+    x11.stop();
+}
+
+/// Issue #236: a window kept on top that its client withdraws is told it no
+/// longer is by the time it is told it is withdrawn, which a client maps it
+/// again on, as EWMH has a window manager take a withdrawn window's state
+/// away. Mapped again, it comes back as a new window would, not kept on top.
+/// Withdrawn without the keys, so Smithay has nothing of its own to write
+/// over the state then.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_kept_on_top_and_withdrawn_is_told_it_no_longer_is() {
+    let (x11, window) = kept_on_top_under_another("x11-withdrawn-above");
+    assert!(says_focused(&x11, window, false));
+    assert!(x11.says_above(window, true), "never told");
+
+    x11.drain();
+    x11.x.unmap_window(window).expect("unmap_window");
+    x11.x.flush().expect("flush");
+    assert!(x11.answered(window, x11.atoms.WM_STATE), "never told");
+    assert_eq!(x11.wm_state(window), [WITHDRAWN, 0]);
+    assert!(
+        !x11.net_wm_state(window)
+            .contains(&x11.atoms._NET_WM_STATE_ABOVE),
+        "still told as it was withdrawn: {:?}",
+        x11.net_wm_state(window)
+    );
+
+    x11.x.map_window(window).expect("map_window");
+    x11.x.flush().expect("flush");
+    x11.surface_where("kept", |surface| surface.mapped && !surface.on_top)
+        .unwrap_or_else(|| panic!("never mapped again, let go: {:?}", x11.facts()));
+    assert!(x11.says_above(window, false), "told again");
+    x11.stop();
+}
+
+/// Issue #236: X stacks the windows it manages as they are drawn, so a
+/// window kept on top is over one that took the keys and the top of the
+/// stack since, in `_NET_CLIENT_LIST_STACKING` and in X's own order; and,
+/// let go, the window Alt+Tab raises over it is over it in X too, which X
+/// never heard of before.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn x_stacks_an_x11_window_kept_on_top_over_one_raised_since() {
+    let (x11, kept) = kept_on_top_under_another("x11-stacked-above");
+    let other = x11.focus();
+
+    assert!(x11.stacked_last(kept), "X has {:?}", x11.stacking());
+    let order = x11.x_order();
+    let place = |window| order.iter().position(|child| *child == window);
+    assert!(
+        place(x11.frame_of(kept)) > place(x11.frame_of(other)),
+        "X has the other in front: {order:?}"
+    );
+
+    x11.perform(Action::CycleFocus);
+    eventually(Duration::from_secs(5), || {
+        (x11.focus() == kept).then_some(())
+    })
+    .expect("the window kept on top never took the keys");
+    x11.perform(Action::ToggleOnTop);
+    x11.surface_where("kept", |surface| !surface.on_top)
+        .unwrap_or_else(|| panic!("never let go: {:?}", x11.facts()));
+    x11.perform(Action::CycleFocus);
+    eventually(Duration::from_secs(5), || {
+        (x11.focus() == other).then_some(())
+    })
+    .expect("the other never took the keys");
+
+    assert!(x11.on_top("other"), "not in front: {:?}", x11.facts());
+    assert!(x11.stacked_last(other), "X has {:?}", x11.stacking());
+    x11.stop();
+}
+
+/// Issue #236: a window asking in `_NET_WM_STATE` to be kept on top is, as
+/// the person keeps one -- in front of a window that takes the keys after
+/// it -- and asking back lets it go, each way of asking answered. Smithay
+/// dropped the request, unanswered.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_asking_to_be_kept_on_top_is_and_asking_back_lets_it_go() {
+    let x11 = X11::start(
+        "x11-asks-above",
+        Backend::headless((1280, 800)).with_person(),
+    );
+    let player = with_the_keyboard(&x11, "player");
+    let above = x11.atoms._NET_WM_STATE_ABOVE;
+    let ask = |action, kept: bool| {
+        x11.ask_state(player, action, above, 0);
+        assert!(
+            x11.answered(player, x11.atoms._NET_WM_STATE),
+            "never answered"
+        );
+        x11.surface_where("player", |surface| surface.on_top == kept)
+            .unwrap_or_else(|| panic!("not {kept}: {:?}", x11.facts()));
+        assert!(
+            x11.says_above(player, kept),
+            "told otherwise: {:?}",
+            x11.net_wm_state(player)
+        );
+    };
+
+    ask(ADD, true);
+    with_the_keyboard(&x11, "other");
+    assert!(x11.on_top("player"), "not in front: {:?}", x11.facts());
+
+    ask(TOGGLE, false);
+    ask(TOGGLE, true);
+    ask(REMOVE, false);
+    x11.stop();
+}
+
+/// Issue #236: with nobody at the seat a window asking to be kept on top
+/// stays among the others, as for a request of any other kind, and is still
+/// answered.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn with_nobody_at_the_seat_an_x11_window_asking_to_be_kept_on_top_stays_and_is_answered() {
+    let x11 = X11::start("x11-nobody-above", Backend::headless((1280, 800)));
+    let player = x11.open("player");
+
+    x11.ask_state(player, ADD, x11.atoms._NET_WM_STATE_ABOVE, 0);
+    assert!(
+        x11.answered(player, x11.atoms._NET_WM_STATE),
+        "never answered"
+    );
+    assert!(x11.says_above(player, false), "told it is");
+    assert!(
+        x11.facts()
+            .surfaces()
+            .iter()
+            .any(|surface| surface.title.as_deref() == Some("player") && !surface.on_top),
+        "an agent's desk kept it on top"
+    );
+    x11.stop();
+}
+
+/// Issue #236: a window that says before it maps that it is to be kept on
+/// top, as GTK writes it for a window kept above before it is shown, opens
+/// kept on top, and told so.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_window_mapping_asking_to_be_kept_on_top_opens_kept_on_top() {
+    let x11 = X11::start(
+        "x11-maps-above",
+        Backend::headless((1280, 800)).with_person(),
+    );
+    let player = x11.open_with_state("player", &[x11.atoms._NET_WM_STATE_ABOVE]);
+
+    x11.surface_where("player", |surface| surface.on_top)
+        .unwrap_or_else(|| panic!("never kept on top: {:?}", x11.facts()));
+    assert!(
+        x11.says_above(player, true),
+        "not told: {:?}",
+        x11.net_wm_state(player)
+    );
     x11.stop();
 }
 

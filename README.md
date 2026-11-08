@@ -1377,9 +1377,17 @@ kept on top or not, and under the panels, though its window is behind (#234).
 Another window's stays with its window, so a menu of a window the person has
 left goes back behind one kept on top with it. An X11 menu that names no window
 it was opened from, as Steam's and GTK 4's do, still opens behind a window kept
-on top (#302). An X11 window is kept on top as any other, but is not told it is,
-and an X11 application cannot keep a window of its own on top by asking
-(`_NET_WM_STATE_ABOVE`, #236).
+on top (#302). An X11 window kept on top is told it is (`_NET_WM_STATE_ABOVE`),
+so a player's own "always on top" shows it ticked, and an X11 application can
+keep a window of its own on top by asking, as mpv's `--ontop`, GTK's
+keep-above and Wine's topmost windows do: with a person at the seat, as for
+any request, and let go by asking again or as any other (#236). A dialog kept
+on top with its window is not told, the state being its window's. X stacks
+the X11 windows as they are drawn, too, so a program reading the order
+(`_NET_CLIENT_LIST_STACKING`, `XQueryTree`) reads what the person sees, a
+window kept on top in front, while a menu stays over its window. One asking X
+to restack its own window is answered with where it is, and stays: a window
+comes forward by asking to be active.
 
 In both, a workspace switch slides: the new workspace comes in from the side
 the person went towards, across a wrap too, and along the grid for a switch by

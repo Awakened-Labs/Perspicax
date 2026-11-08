@@ -53,8 +53,10 @@
 //!
 //! So whatever asks what is in front reads the stack through [`as_drawn`]:
 //! the screen and pictures, through [`stack`]; the pointer, through
-//! [`window_under`]; and the facts an agent is judged by. None of them can
-//! disagree with another. Smithay's own readers of its stack,
+//! [`window_under`]; the facts an agent is judged by; and X, which stacks
+//! its windows as they are drawn and tells a window kept on top that it is
+//! (`Compositor::tell_x11_stack`, #236). None of them can disagree with
+//! another. Smithay's own readers of its stack,
 //! `Space::element_under` and `Space::render_elements_for_output`, are
 //! refused by `clippy.toml`, so no new one reads the raise order as if it
 //! were what is drawn.
@@ -414,7 +416,8 @@ impl Compositor {
     /// Work out which windows are kept on top and which is in use, raise
     /// `focused`, the window in use -- the one with the keyboard, or whose
     /// own menu has it -- over the panels if it is fullscreen, with its X11
-    /// menus, and put every other window back among the windows.
+    /// menus, and put every other window back among the windows. Then tell
+    /// X (`Compositor::tell_x11_stack`, #236).
     ///
     /// Told which window is in use rather than asking: while the seat is
     /// reporting a change of focus it holds the keyboard, and asking it then
@@ -465,16 +468,15 @@ impl Compositor {
         if moved || !menus.is_empty() || redraw {
             self.backend.redraw();
         }
+        #[cfg(feature = "xwayland")]
+        self.tell_x11_stack();
     }
 
     /// Raise `window` over the others, and its X11 menus over it: they are
-    /// windows here, as an xdg menu is not, and would be left behind.
-    ///
-    /// An X11 window is raised in X's own stacking too, as one activated is,
-    /// so a client asking what is on top is told the same. Not while it has a
-    /// menu open, which X would then have under it, and which is what it is
-    /// the client's business to have on top: a menu goes in no list of the
-    /// windows a window manager stacks.
+    /// windows here, as an xdg menu is not, and would be left behind. X
+    /// hears of it as of any change to what is drawn, from `restack`, and
+    /// keeps the window under a menu it has open: see
+    /// `Compositor::stack_x11`.
     pub(crate) fn raise_with_menus(&mut self, window: &Framed) {
         let menus: Vec<Framed> = self
             .space
@@ -485,12 +487,6 @@ impl Compositor {
         self.space.raise_element(window, false);
         for menu in &menus {
             self.space.raise_element(menu, false);
-        }
-        #[cfg(feature = "xwayland")]
-        if menus.is_empty()
-            && let Some(x11) = window.x11_surface().cloned()
-        {
-            self.raise_x11(window, &x11);
         }
     }
 
