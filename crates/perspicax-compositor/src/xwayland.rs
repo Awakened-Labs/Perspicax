@@ -117,18 +117,37 @@
 //! pointer grab is invisible here, so sloppy focus still follows the pointer
 //! across another window on its way to a menu item (issue #183).
 //!
-//! # Kept on top
+//! # Kept on top, and what is in front
 //!
 //! A window the person keeps on top (issue #64) is kept there in what is
 //! drawn, hit and told an agent, and its dialogs and menus with it, by the
 //! window their `WM_TRANSIENT_FOR` names (`shell::stacking`). The menus of
 //! the window in use come in front of it all the same (issue #234), where
 //! they name that window: one that names none stays where it was raised
-//! (issue #302). X is told none of it. Smithay does not list
-//! `_NET_WM_STATE_ABOVE` as supported, so no client asks to be kept on top
-//! that way and none is told it is; X's own stacking order is not made to
-//! match, and a window asking to be restacked (`configure_request`'s
-//! `Reorder`) is not answered either (issue #236).
+//! (issue #302).
+//!
+//! X is told (issue #236). Smithay has no word for being kept on top, so
+//! [`Side`] adds `_NET_WM_STATE_ABOVE` to the root's `_NET_SUPPORTED`, and
+//! keeps it in the `_NET_WM_STATE` of each window the person keeps on top,
+//! though Smithay writes that property whole, without it, whenever another
+//! of its states changes -- as the keyboard comes and goes. A client that
+//! reads between Smithay's write and the side thread's finds it missing
+//! for a moment, as one may find the root named as active. A client may
+//! ask to be kept on top that way, or let go, before its window maps or
+//! after -- mpv's `--ontop`, GTK's keep-above, Wine's topmost windows --
+//! and is kept as the person keeps a window, with a person at the seat. A
+//! dialog kept on top with its window is not told, the state being its
+//! window's.
+//!
+//! And X stacks the windows it manages as they are drawn
+//! (`Compositor::stack_x11`), so `_NET_CLIENT_LIST_STACKING` and
+//! `XQueryTree` say what the person sees: a window kept on top in front of
+//! one raised since, and every raise heard, a click or Alt+Tab included. A
+//! window only ever goes down in X, under the one drawn in front of it, so
+//! never over a menu its client has over it; the menus themselves are their
+//! clients' to stack. A window asking X to restack it (`configure_request`'s
+//! `Reorder`) is answered as a request not granted is, with where it is,
+//! and stays: a client brings its window forward by asking to be active.
 //!
 //! # Started eagerly, not lazily
 //!
@@ -1426,7 +1445,10 @@ impl XwmHandler for Compositor {
     /// client's: that is the window manager's. Nor is the size of a window
     /// that fills its monitor or a zone: it keeps it, and is told the rect
     /// it has, as ICCCM answers a request not granted. A game going
-    /// fullscreen asks for sizes as it sets its mode.
+    /// fullscreen asks for sizes as it sets its mode. Nor is a place in the
+    /// stack: a request to be restacked is not granted, and Smithay's
+    /// answer to every request, the rect the window has, says so (see "Kept
+    /// on top, and what is in front" above).
     fn configure_request(
         &mut self,
         _xwm: XwmId,

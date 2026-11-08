@@ -53,8 +53,10 @@
 //!
 //! So whatever asks what is in front reads the stack through [`as_drawn`]:
 //! the screen and pictures, through [`stack`]; the pointer, through
-//! [`window_under`]; and the facts an agent is judged by. None of them can
-//! disagree with another. Smithay's own readers of its stack,
+//! [`window_under`]; the facts an agent is judged by; and X, which stacks
+//! its windows as they are drawn and tells a window kept on top that it is
+//! (`Compositor::tell_x11_stack`, #236). None of them can disagree with
+//! another. Smithay's own readers of its stack,
 //! `Space::element_under` and `Space::render_elements_for_output`, are
 //! refused by `clippy.toml`, so no new one reads the raise order as if it
 //! were what is drawn.
