@@ -223,6 +223,9 @@ pub(crate) struct Xwayland {
     /// The connection that tells windows what Smithay's window manager does
     /// not. See [`Side`].
     side: Option<Side>,
+    /// The windows X stacks, by X window id, back to front, as it was last
+    /// told to stack them: see [`Compositor::stack_x11`].
+    stacked: Vec<u32>,
     /// The source that started Xwayland, which holds its display. See
     /// [`stop`].
     source: Option<RegistrationToken>,
@@ -1002,11 +1005,11 @@ impl Compositor {
         if self.attention.started(&lineage, Instant::now()).is_none() {
             return;
         }
-        let (Some(x11), Some(id)) = (window.x11_surface().cloned(), shell::id_of(window)) else {
+        let Some(id) = shell::id_of(window) else {
             return;
         };
         tracing::debug!(surface = id.0, "started by the person's latest press");
-        self.raise_x11(window, &x11);
+        self.space.raise_element(window, false);
         self.focus_x11(window, id);
         self.backend.redraw();
     }
@@ -1083,11 +1086,12 @@ impl Compositor {
 
     /// Tell X what is in front of what, as it is drawn: each window the
     /// person keeps on top is told `_NET_WM_STATE_ABOVE`, and one let go is
-    /// told it no longer is. Run at the end of every `restack`, which runs
+    /// told it no longer is, and X stacks the windows it manages in the
+    /// order they are drawn. Run at the end of every `restack`, which runs
     /// whenever the keyboard moves and before every publication of the
-    /// facts, so whatever keeps a window on top or lets it go -- a binding,
-    /// a titlebar button, a shell, a tab coming to the front -- is told from
-    /// one place.
+    /// facts, so whatever keeps a window on top or lets it go, or raises one
+    /// -- a binding, a titlebar button, a click, Alt+Tab, a shell, an agent,
+    /// a tab coming to the front -- is told from one place.
     ///
     /// Only the person's own flag ([`shell::is_on_top`]), which a tab group
     /// keeps on its tab in front, so every tab of a group kept on top is
@@ -1095,6 +1099,13 @@ impl Compositor {
     /// window's own to ask for and drop. Parked windows too, which are kept
     /// on top as they come back.
     pub(crate) fn tell_x11_stack(&mut self) {
+        self.tell_x11_kept();
+        self.stack_x11();
+    }
+
+    /// Tell each window the person keeps on top that it is, and each let go
+    /// that it no longer is: see [`Compositor::tell_x11_stack`].
+    fn tell_x11_kept(&self) {
         let Some(side) = &self.xwayland.side else {
             return;
         };
@@ -1115,6 +1126,35 @@ impl Compositor {
                 side.set_above(x11.window_id(), above);
             }
         }
+    }
+
+    /// Stack the windows X manages as they are drawn ([`shell::as_drawn`]),
+    /// if that has changed since X was last told: `_NET_CLIENT_LIST_STACKING`,
+    /// and X's own order, which a client reads with `XQueryTree`. So a window
+    /// kept on top is over one raised since, in X as on screen, and a raise
+    /// of any kind is heard.
+    ///
+    /// Each is put directly under the one drawn in front of it, the window
+    /// drawn frontmost staying where it is: a window only ever goes down in
+    /// X, so never over a menu its client has put over it. That is what
+    /// Smithay's `update_stacking_order_downwards` does, given the windows
+    /// front first; its docs have it and `_upwards` the other way about,
+    /// and its code is what X hears. Menus, tooltips and the like are their
+    /// clients' to stack, as an X11 window manager leaves them: X keeps
+    /// them wherever their clients put them.
+    fn stack_x11(&mut self) {
+        let order: Vec<X11Surface> = shell::as_drawn(&self.space)
+            .filter(|window| !shell::places_itself(window))
+            .filter_map(|window| window.x11_surface().cloned())
+            .collect();
+        let ids: Vec<u32> = order.iter().map(X11Surface::window_id).collect();
+        if ids == self.xwayland.stacked {
+            return;
+        }
+        if let Some(wm) = self.xwayland.wm.as_mut() {
+            let _ = wm.update_stacking_order_downwards(order.iter().rev());
+        }
+        self.xwayland.stacked = ids;
     }
 
     /// The mapped or parked window for the X window `id`.
@@ -1223,6 +1263,14 @@ impl XwmHandler for Compositor {
 
     fn new_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
+    /// X has mapped a window's frame, and Smithay has only now put it among
+    /// the windows X stacks, on top, wherever it is drawn: one that opened
+    /// beneath the window in use is stacked there again.
+    fn map_window_notify(&mut self, _xwm: XwmId, _window: X11Surface) {
+        self.xwayland.stacked.clear();
+        self.stack_x11();
+    }
+
     /// A title or class changed, or the window a menu hangs from: published
     /// now, as a Wayland window's is, rather than whenever the window next
     /// draws.
@@ -1322,9 +1370,6 @@ impl XwmHandler for Compositor {
         if wants.minimized {
             self.minimize(&window);
         } else if asked_for {
-            if let Some(wm) = self.xwayland.wm.as_mut() {
-                let _ = wm.raise_window(&x11);
-            }
             self.focus_x11(&window, id);
         } else {
             self.open_without_keys(&window);
@@ -1624,17 +1669,17 @@ impl Compositor {
         let asked = self
             .managed_x11_by_id(window)
             .filter(|_| self.backend.has_person());
-        if let Some((window, x11)) = asked {
+        if let Some((window, _)) = asked {
             let now = Clock::<Monotonic>::new().now().as_millis();
             let input = stamp != x11rb::CURRENT_TIME && self.x11_has_focus();
             if perspicax_policy::grants_activation(activation_age(now, stamp), input) {
                 self.restore(&window);
-                self.raise_x11(&window, &x11);
+                self.space.raise_element(&window, false);
                 if let Some(id) = shell::id_of(&window) {
                     self.focus_x11(&window, id);
                 }
             } else {
-                self.bring_back_x11(&window, &x11);
+                self.bring_back_x11(&window);
                 self.refused_keys(&window);
             }
             self.backend.redraw();
@@ -1696,7 +1741,7 @@ impl Compositor {
             return;
         };
         if self.backend.has_person() && Self::is_minimized(&window) {
-            self.bring_back_x11(&window, x11);
+            self.bring_back_x11(&window);
             self.publish_facts();
         } else {
             self.answer_wm_state(&window, x11);
@@ -1705,10 +1750,10 @@ impl Compositor {
 
     /// Bring an X11 window back from minimized where it is, and raise it if
     /// it shows: what a window asking with no input behind it gets.
-    fn bring_back_x11(&mut self, window: &Framed, x11: &X11Surface) {
+    fn bring_back_x11(&mut self, window: &Framed) {
         self.unminimize(window);
         if self.space.element_location(window).is_some() {
-            self.raise_x11(window, x11);
+            self.space.raise_element(window, false);
         }
     }
 
@@ -1724,15 +1769,6 @@ impl Compositor {
             }
             None => Some(id),
         };
-    }
-
-    /// Raise an X11 window over the others: on screen, and in X's own
-    /// stacking.
-    pub(crate) fn raise_x11(&mut self, window: &Framed, x11: &X11Surface) {
-        self.space.raise_element(window, false);
-        if let Some(wm) = self.xwayland.wm.as_mut() {
-            let _ = wm.raise_window(x11);
-        }
     }
 
     /// Tell an X11 window it was minimized, or brought back: ICCCM's

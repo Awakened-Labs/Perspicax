@@ -1076,6 +1076,17 @@ impl X11 {
             .unwrap_or_default()
     }
 
+    /// Whether the window comes to be told it is in `state`, ICCCM's
+    /// `WM_STATE`. Told on a connection of the compositor's own, which the X
+    /// server keeps in no order with the window manager's, nor with what the
+    /// facts say, so it is waited for: a client waits for the change too.
+    fn told_wm_state(&self, window: u32, state: u32) -> bool {
+        eventually(Duration::from_secs(5), || {
+            (self.wm_state(window) == [state, 0]).then_some(())
+        })
+        .is_some()
+    }
+
     /// The window's `_NET_WM_STATE`.
     fn net_wm_state(&self, window: u32) -> Vec<u32> {
         self.x
@@ -1169,6 +1180,37 @@ impl X11 {
             .value32()
             .map(Iterator::collect)
             .unwrap_or_default()
+    }
+
+    /// The root's children, bottom to top: what X itself has in front of
+    /// what, as a client reads it with `XQueryTree`, menus included.
+    fn x_order(&self) -> Vec<u32> {
+        self.x
+            .query_tree(self.root)
+            .expect("query_tree")
+            .reply()
+            .expect("the root's children")
+            .children
+    }
+
+    /// The frame the window manager put `window` in: what X stacks among the
+    /// root's children.
+    fn frame_of(&self, window: u32) -> u32 {
+        self.x
+            .query_tree(window)
+            .expect("query_tree")
+            .reply()
+            .expect("the window's parent")
+            .parent
+    }
+
+    /// Whether the root's `_NET_CLIENT_LIST_STACKING` comes to name `window`
+    /// last, in front of the rest.
+    fn stacked_last(&self, window: u32) -> bool {
+        eventually(Duration::from_secs(5), || {
+            (self.stacking().last() == Some(&window)).then_some(())
+        })
+        .is_some()
     }
 
     /// Whether the root comes to name `window` as active, and still does a
@@ -1376,7 +1418,11 @@ fn an_x11_window_that_iconifies_itself_is_minimized_and_told_it_is_iconic() {
         !surface.mapped && surface.off_workspace.is_none()
     })
     .unwrap_or_else(|| panic!("never minimized: {:?}", x11.facts()));
-    assert_eq!(x11.wm_state(window), [ICONIC, 0]);
+    assert!(
+        x11.told_wm_state(window, ICONIC),
+        "never told: {:?}",
+        x11.wm_state(window)
+    );
     assert!(
         x11.net_wm_state(window)
             .contains(&x11.atoms._NET_WM_STATE_HIDDEN)
@@ -2138,7 +2184,11 @@ fn an_x11_window_that_maps_iconic_starts_minimized_and_is_told_so() {
     x11.perform(Action::CycleFocus);
     x11.surface_where("game", |surface| surface.mapped)
         .unwrap_or_else(|| panic!("never brought back: {:?}", x11.facts()));
-    assert_eq!(x11.wm_state(game), [NORMAL, 0]);
+    assert!(
+        x11.told_wm_state(game, NORMAL),
+        "never told: {:?}",
+        x11.wm_state(game)
+    );
     eventually(Duration::from_secs(10), || {
         (x11.focus() == game).then_some(())
     })
@@ -2158,7 +2208,11 @@ fn with_nobody_at_the_seat_an_x11_window_that_maps_iconic_is_placed_as_any_other
 
     x11.surface_where("game", |surface| surface.mapped)
         .unwrap_or_else(|| panic!("never mapped: {:?}", x11.facts()));
-    assert_eq!(x11.wm_state(game), [NORMAL, 0]);
+    assert!(
+        x11.told_wm_state(game, NORMAL),
+        "never told: {:?}",
+        x11.wm_state(game)
+    );
     assert!(
         !x11.net_wm_state(game)
             .contains(&x11.atoms._NET_WM_STATE_HIDDEN)
@@ -2436,7 +2490,11 @@ fn a_minimized_x11_window_asking_to_be_active_without_input_comes_back() {
     x11.activate(second, PAGER, 0);
     x11.surface_where("second", |surface| surface.mapped)
         .unwrap_or_else(|| panic!("never came back: {:?}", x11.facts()));
-    assert_eq!(x11.wm_state(second), [NORMAL, 0]);
+    assert!(
+        x11.told_wm_state(second, NORMAL),
+        "never told: {:?}",
+        x11.wm_state(second)
+    );
     assert!(x11.on_top("second"), "came back underneath");
     assert_eq!(
         x11.focus(),
@@ -3424,8 +3482,11 @@ fn raising_an_x11_window_raises_it_in_x_too() {
 }
 
 /// A window of X's own, raised, would have its menu left behind it: an X11
-/// menu is a window here, as an xdg one is not. It comes up with its window,
-/// and in X's stacking the window stays where the menu is over it.
+/// menu is a window here, as an xdg one is not. It comes up with its window.
+/// X hears of the raise, and still has the menu over the window (#236): a
+/// window only ever goes down in X, under the one drawn in front of it. The
+/// menu opened before the other window, which X then has between them, so
+/// raising the window over the other in X would put it over its menu.
 #[test]
 #[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
 fn an_x11_menu_stays_over_the_window_raised() {
@@ -3434,10 +3495,16 @@ fn an_x11_menu_stays_over_the_window_raised() {
         Backend::headless((1280, 800)).with_person(),
     );
     let steam = with_the_keyboard(&x11, "steam");
+    let menu = x11.menu_over("menu", (40, 40), (120, 80), Some(steam));
     let other = with_the_keyboard(&x11, "other");
-    x11.menu_over("menu", (40, 40), (120, 80), Some(steam));
-    assert!(x11.on_top("menu"), "not in front: {:?}", x11.facts());
-    assert_eq!(x11.stacking().last(), Some(&other));
+    assert!(x11.on_top("other"), "not in front: {:?}", x11.facts());
+    assert!(x11.stacked_last(other), "X has {:?}", x11.stacking());
+    let order = x11.x_order();
+    let place = |window| order.iter().position(|child| *child == window);
+    assert!(
+        place(x11.frame_of(steam)) < place(menu) && place(menu) < place(x11.frame_of(other)),
+        "X has the menu elsewhere: {order:?}"
+    );
 
     let host = Host::new(&x11.session.facts, &x11.session.requests);
     let steam_id = id_of(&x11, "steam");
@@ -3454,10 +3521,16 @@ fn an_x11_menu_stays_over_the_window_raised() {
     };
     assert!(at(steam_id) > at(other_id), "not raised: {facts:?}");
     assert!(x11.on_top("menu"), "left behind: {:?}", x11.facts());
-    assert_eq!(
-        x11.stacking().last(),
-        Some(&other),
-        "X would have it over its own menu"
+    assert!(
+        x11.stacked_last(steam),
+        "X never told: {:?}",
+        x11.stacking()
+    );
+    let order = x11.x_order();
+    let place = |window| order.iter().position(|child| *child == window);
+    assert!(
+        place(menu) > place(x11.frame_of(steam)),
+        "X has the window over its own menu: {order:?}"
     );
 
     x11.stop();
@@ -4992,6 +5065,44 @@ fn an_x11_window_kept_on_top_and_withdrawn_is_told_it_no_longer_is() {
     x11.surface_where("kept", |surface| surface.mapped && !surface.on_top)
         .unwrap_or_else(|| panic!("never mapped again, let go: {:?}", x11.facts()));
     assert!(x11.says_above(window, false), "told again");
+    x11.stop();
+}
+
+/// Issue #236: X stacks the windows it manages as they are drawn, so a
+/// window kept on top is over one that took the keys and the top of the
+/// stack since, in `_NET_CLIENT_LIST_STACKING` and in X's own order; and,
+/// let go, the window Alt+Tab raises over it is over it in X too, which X
+/// never heard of before.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn x_stacks_an_x11_window_kept_on_top_over_one_raised_since() {
+    let (x11, kept) = kept_on_top_under_another("x11-stacked-above");
+    let other = x11.focus();
+
+    assert!(x11.stacked_last(kept), "X has {:?}", x11.stacking());
+    let order = x11.x_order();
+    let place = |window| order.iter().position(|child| *child == window);
+    assert!(
+        place(x11.frame_of(kept)) > place(x11.frame_of(other)),
+        "X has the other in front: {order:?}"
+    );
+
+    x11.perform(Action::CycleFocus);
+    eventually(Duration::from_secs(5), || {
+        (x11.focus() == kept).then_some(())
+    })
+    .expect("the window kept on top never took the keys");
+    x11.perform(Action::ToggleOnTop);
+    x11.surface_where("kept", |surface| !surface.on_top)
+        .unwrap_or_else(|| panic!("never let go: {:?}", x11.facts()));
+    x11.perform(Action::CycleFocus);
+    eventually(Duration::from_secs(5), || {
+        (x11.focus() == other).then_some(())
+    })
+    .expect("the other never took the keys");
+
+    assert!(x11.on_top("other"), "not in front: {:?}", x11.facts());
+    assert!(x11.stacked_last(other), "X has {:?}", x11.stacking());
     x11.stop();
 }
 
