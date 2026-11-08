@@ -91,7 +91,8 @@ impl FocusTarget {
     /// What to send of a pointer `event`, and what owed to send before it.
     /// Everything as it is to a client this compositor did not accept
     /// itself: Xwayland, which is smithay's, and keeps reading for the X11
-    /// applications behind it.
+    /// applications behind it, a frozen one too, since the X server holds
+    /// what that one is sent (#245).
     fn plan(&self, event: Event<'_>) -> Plan {
         self.wl_surface()
             .and_then(|surface| surface.client())
