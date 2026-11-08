@@ -179,6 +179,62 @@ fn under_window_switching_each_window_keeps_its_own_layout() {
     session.stop((desk, queue));
 }
 
+/// #237: under `switching = "window"`, a layout switched in the turn a
+/// window takes the keyboard is that window's. The layout used to follow
+/// the keyboard only once the loop was idle, after the switch, and undid
+/// it: the window was put back in its own layout, and the one the keyboard
+/// left was remembered in the layout just switched to.
+///
+/// A taskbar's click and a panel's switch, sent together, are handled in
+/// one turn, ahead of the idle, every time.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_layout_switched_in_the_turn_the_keyboard_arrives_is_that_windows() {
+    let session = Session::start("keyboard-same-turn", Backend::headless((1280, 1024)));
+    session.command(Command::Keymap(keymap("us,ru")));
+    session.command(Command::LayoutSwitching(Switching::Window));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    let ear = desk.bind_keyboard(&globals, &qh);
+    desk.bind_taskbar(&globals, &qh);
+    desk.bind_shell(&globals, &qh);
+    desk.open_window(&qh, "first", "first");
+    desk.open_window(&qh, "second", "second");
+    until(&mut queue, &mut desk, |desk| {
+        desk.drawn == 2 && desk.task("first").is_some() && desk.task("second").is_some()
+    });
+    until(&mut queue, &mut desk, |_| heard(&ear).layouts == 2);
+    let first = desk.windows[0].wl_surface().id();
+    let second = desk.windows[1].wl_surface().id();
+    let shell = desk.shell.clone().expect("bound");
+
+    desk.activate("second");
+    until(&mut queue, &mut desk, |_| {
+        heard(&ear).entered.as_ref() == Some(&second)
+    });
+    assert_eq!(heard(&ear).group(), 0, "the second window in English");
+
+    // To the first window, and Russian, in one turn.
+    desk.activate("first");
+    shell.set_layout(1);
+    until(&mut queue, &mut desk, |_| {
+        let heard = heard(&ear);
+        heard.entered.as_ref() == Some(&first) && heard.group() == 1
+    });
+    queue.roundtrip(&mut desk).expect("flush");
+    queue
+        .roundtrip(&mut desk)
+        .expect("and again, past an idle turn");
+    assert_eq!(heard(&ear).group(), 1, "the switch kept");
+
+    // The second window was left in English, and keeps it; the first, Russian.
+    desk.activate("second");
+    until(&mut queue, &mut desk, |_| heard(&ear).group() == 0);
+    desk.activate("first");
+    until(&mut queue, &mut desk, |_| heard(&ear).group() == 1);
+
+    session.stop((desk, queue));
+}
+
 /// Issue #97: under `switching = "window"`, a window's own menu taking the
 /// keyboard is not the keyboard leaving the window: its keys are the
 /// window's. A layout switched while the menu is open is the window's, and

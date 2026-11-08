@@ -1929,11 +1929,15 @@ impl SeatHandler for Compositor {
         // A fullscreen window covers the panels only while it is in use.
         self.restack(window);
         // The window in use is typed in its own layout, when each has one.
-        // Not here: smithay calls this from inside `set_focus`, holding the
-        // keyboard, and reading or switching its layout now would wait on
-        // that lock for ever. Once the loop is idle the keyboard is free.
-        if self.layout_memory.switching() == perspicax_policy::Switching::Window {
-            self.idles.queue(move |state| state.follow_layout(window));
+        // Only noted here: smithay calls this from inside `set_focus`,
+        // holding the keyboard, and reading or switching its layout now
+        // would wait on that lock for ever. The layout follows before
+        // anything next reads, switches or types in it, and otherwise once
+        // the loop is idle, so a switch made in between is this window's
+        // (#237).
+        self.layout_memory.moved(window);
+        if self.layout_memory.has_moved() {
+            self.idles.queue(|state| state.follow_layout());
         }
         // Which window is lit, and which are dimmed, follows the keyboard:
         // the next frame is drawn knowing. Only asked for here, which takes
