@@ -10,7 +10,8 @@
 //!
 //! Under `switching = "window"` each window keeps its own layout
 //! ([`perspicax_policy::LayoutMemory`]), switched to when it takes the
-//! keyboard.
+//! keyboard: before anything next reads, switches or types in the layout,
+//! so a switch made just after is that window's (#237).
 //!
 //! Putting the locks back is quiet in smithay: `set_modifier_state` changes
 //! the state without a `modifiers` event, so the focused client would go on
@@ -29,7 +30,6 @@
 
 use std::sync::PoisonError;
 
-use perspicax_node::SurfaceId;
 use smithay::{
     backend::input::KeyState,
     input::keyboard::{
@@ -76,6 +76,10 @@ impl Compositor {
     /// screen is a way to the keyboard the lock's gate missed: it is said,
     /// and the keyboard is put back before the key goes (#197). Between the
     /// filter and the sending, so nothing can move it in between.
+    ///
+    /// The key is pressed in the layout of what has the keyboard: one that
+    /// went to a window in this turn has its layout first, so the first key
+    /// typed there, or xkb's own switch, is not in the last window's (#237).
     #[expect(
         clippy::disallowed_methods,
         reason = "the one place a key goes out, kept on the lock screen while locked (#197)"
@@ -89,6 +93,7 @@ impl Compositor {
         time: u32,
         filter: impl FnOnce(&mut Self, &ModifiersState, KeysymHandle<'_>) -> FilterResult<T>,
     ) -> Option<T> {
+        self.follow_layout();
         let (filtered, mods_changed) = keyboard.input_intercept(self, keycode, state, filter);
         if let FilterResult::Intercept(kept) = filtered {
             return Some(kept);
@@ -169,8 +174,16 @@ impl Compositor {
             .collect()
     }
 
-    /// The layout in use, counted from 0, and how many the keymap has.
+    /// The layout in use, counted from 0, and how many the keymap has, once
+    /// the layout has followed the keyboard ([`Self::follow_layout`]).
     pub(crate) fn layouts(&mut self) -> Option<(u32, u32)> {
+        self.follow_layout();
+        self.xkb_layouts()
+    }
+
+    /// The same, as xkb has them, without following the keyboard first:
+    /// for [`Self::follow_layout`].
+    fn xkb_layouts(&mut self) -> Option<(u32, u32)> {
         let keyboard = self.keyboard.clone()?;
         keyboard.with_xkb_state(self, |context| {
             let xkb = context.xkb().lock().unwrap_or_else(PoisonError::into_inner);
@@ -179,10 +192,19 @@ impl Compositor {
         })
     }
 
-    /// Lock the keyboard into a layout, counted from 0. The focused client
-    /// is told by smithay, which sends the new group with the modifiers,
-    /// and the lights by `led_state_changed`, which smithay calls.
+    /// Lock the keyboard into a layout, counted from 0, once the layout has
+    /// followed the keyboard: a switch made after it moved is the window's
+    /// it went to. The focused client is told by smithay, which sends the
+    /// new group with the modifiers, and the lights by `led_state_changed`,
+    /// which smithay calls.
     pub(crate) fn lock_layout(&mut self, layout: u32) {
+        self.follow_layout();
+        self.xkb_lock_layout(layout);
+    }
+
+    /// The same, without following the keyboard first: for
+    /// [`Self::follow_layout`].
+    fn xkb_lock_layout(&mut self, layout: u32) {
         let Some(keyboard) = self.keyboard.clone() else {
             return;
         };
@@ -208,16 +230,26 @@ impl Compositor {
         }
     }
 
-    /// The keyboard went to `window`, or to something that is not a window:
-    /// when each window has its own layout, remember the one the last window
-    /// was typed in, and switch to this one's.
-    pub(crate) fn follow_layout(&mut self, window: Option<SurfaceId>) {
-        let Some((active, count)) = self.layouts() else {
+    /// When each window has its own layout and the keyboard has moved since
+    /// the layout last followed it: remember the layout in use as the one
+    /// the window it left was typed in, and switch to the one it went to's.
+    ///
+    /// `focus_changed` only notes the move, as smithay calls it holding the
+    /// keyboard. It is followed here before anything reads, switches or
+    /// types in the layout, and otherwise once the loop is idle. Only an
+    /// idle used to follow it, after whatever else the turn had done: a
+    /// switch made in the turn the keyboard moved was undone, and remembered
+    /// as the layout of the window it left (#237).
+    pub(crate) fn follow_layout(&mut self) {
+        if !self.layout_memory.has_moved() {
+            return;
+        }
+        let Some((active, count)) = self.xkb_layouts() else {
             return;
         };
-        if let Some(layout) = self.layout_memory.focus(window, active) {
+        if let Some(layout) = self.layout_memory.follow(active) {
             // Kept from a keymap that had more layouts than this one.
-            self.lock_layout(layout.min(count - 1));
+            self.xkb_lock_layout(layout.min(count - 1));
         }
     }
 }

@@ -2523,7 +2523,9 @@ light their LEDs on every keyboard, one plugged in later included.
 Under `switching = "window"`, a window is typed in the layout it was last typed
 in, and a new one starts in the first. The panel, the start menu or the lock
 screen taking the keyboard changes nothing. A window's own menu is typed as
-the window, so a layout switched while it is open stays that window's.
+the window, so a layout switched while it is open stays that window's. So is
+one switched the moment the window takes the keyboard, by a binding, the panel
+or xkb's own toggle, and the window left keeps the layout it was left in.
 
 With two layouts or more, the panel's `layout` item shows the one in use, its
 name in capitals (`US`, `RU`), and a click moves to the next. An agent reads it
