@@ -134,8 +134,12 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 # unchanged from the 1.7 we use elsewhere, and 3.x adds `name` /
 # `instructions` on `#[tool_handler]`, which is where this server introduces
 # itself. Written as the floor rather than pinned with `=`, like every other
-# dependency here; CI's `--locked` is what makes the build reproducible.
-rmcp = { version = "3.2", features = ["server", "macros", "transport-io"] }
+# dependency here; CI's `--locked` is what makes the build reproducible. The
+# floor is 3.9: every 3.x before it is named by RUSTSEC-2026-0457, -0461 or
+# -0462, which `cargo deny` refuses. All three are in rmcp's OAuth client and
+# Streamable HTTP transports, which these features never build, so a floor
+# below 3.9 would be refused for code this server does not contain.
+rmcp = { version = "3.9", features = ["server", "macros", "transport-io"] }
 # The JSON Schema for each tool's parameters, derived. `rmcp` re-exports the
 # version it was built against as `rmcp::schemars`, and the params structs
 # derive through that re-export rather than this dependency, so the two cannot
