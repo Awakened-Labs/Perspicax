@@ -394,12 +394,12 @@ it has read: one silent call does not cost the rest of the tree.
 Asking where a control is can cost the application more than a second.
 Flutter's bridge answers by asking itself and waiting, so the question
 freezes the whole application for 25 seconds, and the answer then has no
-geometry in it. A client frozen while a person moves the pointer over it
-stops reading what the compositor sends, and is disconnected once a megabyte
-waits for it: half a minute or more of an ordinary mouse moving. So perspicax
-never asks. Flutter's controls hang beneath a plug that its own process
-embeds in a socket, and the application says three things at once that mark
-it: the socket has no place, the plug is on the socket's own bus, and the
+geometry in it. A frozen client reads nothing the compositor sends it
+meanwhile. The pointer moving over it is owed to it rather than sent, but
+everything else waits, and it is disconnected once a megabyte does. So
+perspicax never asks. Flutter's controls hang beneath a plug that its own
+process embeds in a socket, and the application says three things at once that
+mark it: the socket has no place, the plug is on the socket's own bus, and the
 plug has no parent of its own. perspicax knows the plug by those, and asks
 neither it nor anything beneath it where it is. Its controls are refused as
 `unplaced`, and a Flutter application is never frozen by being read.
@@ -1852,17 +1852,19 @@ any piece of it.
 
 perspicax starts it as the session starts, before `autostart`, and starts it
 again if it crashes, or if it loses its connection to perspicax; the log says
-which. A client that stops reading while input is sent to it is cut off once
-a megabyte waits for it, half a minute or more of an ordinary mouse moving
-over it, and the log says when it stopped. The shell warns of anything that
-kept it from reading for a quarter of a second or more. A shell that refuses
-its config waits for the file to be saved again. A save that changes
-`[shell]` reaches it in place, without a restart. The tray needs a D-Bus
-session bus, and a text-console login has none: start the session under one,
-`dbus-run-session -- perspicax --seat`, or as `perspicax --session`, which
-starts one itself. With `--mcp`, `perspicax --seat --mcp --own-bus` instead,
-so that bus holds nothing of the agent's wire: see [What acting looks
-like](#what-acting-looks-like).
+which. A client that stops reading is cut off once a megabyte waits for it,
+and the log says when it stopped. A pointer moving over it adds nothing to
+that: it is owed only the latest motion, paid as soon as it reads again.
+Keys, a window's changes and a drag over it still wait. Xwayland reads on
+whatever its X applications do, so one frozen costs the rest nothing. The
+shell warns of anything that kept it from reading for a quarter of a second
+or more. A shell that refuses its config waits for the file to be saved again.
+A save that changes `[shell]` reaches it in place, without a restart. The tray
+needs a D-Bus session bus, and a text-console login has none: start the
+session under one, `dbus-run-session -- perspicax --seat`, or as
+`perspicax --session`, which starts one itself. With `--mcp`,
+`perspicax --seat --mcp --own-bus` instead, so that bus holds nothing of the
+agent's wire: see [What acting looks like](#what-acting-looks-like).
 
 The session tells its bus what it is and where its displays are, so that a
 program D-Bus starts on request -- a keyring's unlock prompt, a notification

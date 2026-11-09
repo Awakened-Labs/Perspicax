@@ -379,7 +379,8 @@ pub struct Compositor {
     started: Instant,
     /// The clients this compositor accepted, each with its state, until
     /// they go: flushed one by one, to see which have stopped reading
-    /// (see [`Compositor::flush_each`]). Xwayland is smithay's, and not here.
+    /// (see [`Compositor::flush_each`]). Xwayland is smithay's, and not here:
+    /// a frozen X client does not stop it reading (#245).
     clients: Vec<(ClientId, Arc<ClientState>)>,
 }
 

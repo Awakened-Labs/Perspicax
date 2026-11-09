@@ -128,8 +128,10 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// it is needed. A pointer moving over it fills none of it now, since it is
 /// owed one motion rather than sent each (#169, see `owed`). What still
 /// piles up is what is not motion -- keys, configures, a drag's motion,
-/// which smithay sends itself (#246) -- and everything Xwayland is sent,
-/// which is smithay's client and is owed nothing (#245).
+/// which smithay sends itself (#246). Xwayland, smithay's client, is sent
+/// every motion still, and needs to be owed none: it reads on whatever its
+/// X clients do. The X server keeps what a frozen one is sent in a buffer
+/// of its own, and lets no X client grab it (#245).
 const MOST_UNREAD: usize = 1 << 20;
 
 /// What shows where no window is, once the splash is over and while the
