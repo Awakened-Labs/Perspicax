@@ -13,6 +13,12 @@
 //! keyboard: before anything next reads, switches or types in the layout,
 //! so a switch made just after is that window's (#237).
 //!
+//! A keymap is names, and xkb is first asked about them when it compiles
+//! them. [`Keymap::check`] asks it without the keyboard, so a name it lacks
+//! is refused where the config is judged, naming the key that wrote it,
+//! rather than only logged when the keyboard is given it (#215). Some names
+//! never reach xkb at all: one it would crash on.
+//!
 //! Putting the locks back is quiet in smithay: `set_modifier_state` changes
 //! the state without a `modifiers` event, so the focused client would go on
 //! reading keys without Caps Lock, and without a word to the lights. Both are
@@ -34,7 +40,7 @@ use smithay::{
     backend::input::KeyState,
     input::keyboard::{
         Error, FilterResult, KeyboardHandle, KeyboardTarget as _, Keycode, KeysymHandle, Layout,
-        ModifiersState, XkbConfig,
+        ModifiersState, XkbConfig, xkb,
     },
     utils::{SERIAL_COUNTER, Serial},
 };
@@ -64,6 +70,130 @@ impl Keymap {
             variant: &self.variant,
             options: self.options.clone(),
         }
+    }
+
+    /// Whether xkb compiles this keymap, as the seat's keyboard would: asked
+    /// without the keyboard, so a config is judged by it before the keyboard
+    /// is given it (#215).
+    ///
+    /// # Errors
+    ///
+    /// The `[input.keyboard]` key that writes what xkb lacks, and why. xkb
+    /// says why only in its log, as the paths it searched, so the keymap's
+    /// parts are compiled one at a time instead: the rules, then each layout
+    /// and its variant. A model or an option xkb does not know never fails
+    /// it: xkb drops the name and compiles the rest. Only a broken file of
+    /// its own fails there, and that is said of the keymap as a whole.
+    pub fn check(&self) -> Result<(), Uncompiled> {
+        self.readable()?;
+        let mut context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        // Its words are said in the key's instead, and `config check`'s are
+        // shown whole.
+        context.set_log_level(xkb::LogLevel::Critical);
+        let compiles = |keymap: &Self| {
+            xkb::Keymap::new_from_names(
+                &context,
+                &keymap.rules,
+                &keymap.model,
+                &keymap.layout,
+                &keymap.variant,
+                keymap.options.clone(),
+                xkb::COMPILE_NO_FLAGS,
+            )
+            .is_some()
+        };
+        if compiles(self) {
+            return Ok(());
+        }
+        Err(self.fault(compiles))
+    }
+
+    /// Which part of this keymap, which xkb does not compile, it fails on:
+    /// the first that fails alone, or else the whole.
+    fn fault(&self, compiles: impl Fn(&Self) -> bool) -> Uncompiled {
+        let alone = |layout: &str, variant: &str| Self {
+            rules: self.rules.clone(),
+            layout: layout.to_owned(),
+            variant: variant.to_owned(),
+            ..Self::default()
+        };
+        if !self.rules.is_empty() && !compiles(&alone("", "")) {
+            return Uncompiled::new(
+                "input.keyboard.rules",
+                format!("xkb has no rules “{}”", self.rules),
+            );
+        }
+        let mut variants = self.variant.split(',');
+        for layout in self.layout.split(',') {
+            let variant = variants.next().unwrap_or_default();
+            let (layout, variant) = (layout.trim(), variant.trim());
+            if !compiles(&alone(layout, "")) {
+                return Uncompiled::new(
+                    "input.keyboard.layout",
+                    format!("xkb has no layout “{layout}”"),
+                );
+            }
+            if !variant.is_empty() && !compiles(&alone(layout, variant)) {
+                return Uncompiled::new(
+                    "input.keyboard.variant",
+                    format!("xkb's layout “{layout}” has no variant “{variant}”"),
+                );
+            }
+        }
+        Uncompiled::new(
+            "input.keyboard",
+            "xkb cannot compile this keymap".to_owned(),
+        )
+    }
+
+    /// Whether xkbcommon may be handed these names at all. Its Rust binding
+    /// panics on a NUL in one, and libxkbcommon 1.13 crashes on a layout list
+    /// with an empty name followed by another, as "us,,ru" (#215): either
+    /// would end the session rather than refuse a save.
+    fn readable(&self) -> Result<(), Uncompiled> {
+        let names = [
+            ("input.keyboard.rules", self.rules.as_str()),
+            ("input.keyboard.model", &self.model),
+            ("input.keyboard.layout", &self.layout),
+            ("input.keyboard.variant", &self.variant),
+            (
+                "input.keyboard.options",
+                self.options.as_deref().unwrap_or_default(),
+            ),
+        ];
+        if let Some((key, _)) = names.into_iter().find(|(_, name)| name.contains('\0')) {
+            return Err(Uncompiled::new(
+                key,
+                "holds a NUL character, which xkb cannot read".to_owned(),
+            ));
+        }
+        let mut layouts = self.layout.split(',');
+        if self.layout.contains(',') && layouts.any(|name| name.trim().is_empty()) {
+            return Err(Uncompiled::new(
+                "input.keyboard.layout",
+                format!("“{}” has a layout with no name", self.layout),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Why xkb cannot compile a [`Keymap`]: the `[input.keyboard]` key that
+/// writes what it lacks, and why, said as the config says a value it cannot
+/// use, so a refusal reads the same whichever of them found it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("`{key}`: {reason}")]
+pub struct Uncompiled {
+    /// The key, as `input.keyboard.layout`; `input.keyboard` for the
+    /// keymap as a whole.
+    pub key: &'static str,
+    /// Why, naming what xkb lacks as the file writes it.
+    pub reason: String,
+}
+
+impl Uncompiled {
+    fn new(key: &'static str, reason: String) -> Self {
+        Self { key, reason }
     }
 }
 
@@ -119,7 +249,8 @@ impl Compositor {
     ///
     /// # Errors
     ///
-    /// xkb could not compile the names. The keyboard keeps its old keymap.
+    /// xkb could not compile the names, or could not be handed them (see
+    /// [`Keymap::check`]). The keyboard keeps its old keymap.
     pub(crate) fn set_keymap(
         &mut self,
         keymap: &Keymap,
@@ -128,6 +259,7 @@ impl Compositor {
         let Some(keyboard) = self.keyboard.clone() else {
             return Ok(());
         };
+        keymap.readable().map_err(|_| Error::BadKeymap)?;
         let before = keyboard.modifier_state();
         let layout = self.layouts().map_or(0, |(active, _)| active);
         keyboard.set_xkb_config(self, keymap.xkb())?;
@@ -267,6 +399,82 @@ fn short(written: Option<&str>, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn keymap(layout: &str, variant: &str) -> Keymap {
+        Keymap {
+            layout: layout.to_owned(),
+            variant: variant.to_owned(),
+            ..Keymap::default()
+        }
+    }
+
+    /// What `check` says of `keymap`, as the config would show it.
+    fn refused(keymap: &Keymap) -> String {
+        keymap.check().expect_err("refused").to_string()
+    }
+
+    #[test]
+    fn a_keymap_xkb_knows_is_checked_and_taken() {
+        let keymap = Keymap {
+            options: Some("ctrl:nocaps,grp:alt_shift_toggle".to_owned()),
+            ..keymap("us,ru", ",phonetic")
+        };
+        assert_eq!(keymap.check(), Ok(()));
+        assert_eq!(Keymap::default().check(), Ok(()), "xkb's own default");
+    }
+
+    #[test]
+    fn a_layout_xkb_lacks_is_refused_naming_it_and_not_the_others() {
+        assert_eq!(
+            refused(&keymap("us,rux", "")),
+            "`input.keyboard.layout`: xkb has no layout “rux”"
+        );
+    }
+
+    #[test]
+    fn a_variant_its_layout_lacks_is_refused_naming_both() {
+        assert_eq!(
+            refused(&keymap("us,ru", ",nope")),
+            "`input.keyboard.variant`: xkb's layout “ru” has no variant “nope”"
+        );
+    }
+
+    #[test]
+    fn rules_xkb_lacks_are_refused_before_the_layouts_read_through_them() {
+        let keymap = Keymap {
+            rules: "nope".to_owned(),
+            ..keymap("us", "")
+        };
+        assert_eq!(
+            refused(&keymap),
+            "`input.keyboard.rules`: xkb has no rules “nope”"
+        );
+    }
+
+    #[test]
+    fn a_name_holding_a_nul_is_refused_without_asking_xkb() {
+        // xkbcommon's binding would panic on it, ending the session.
+        assert_eq!(
+            refused(&keymap("us\0", "")),
+            "`input.keyboard.layout`: holds a NUL character, which xkb cannot read"
+        );
+        let options = Keymap {
+            options: Some("ctrl:nocaps\0".to_owned()),
+            ..Keymap::default()
+        };
+        assert!(refused(&options).starts_with("`input.keyboard.options`"));
+    }
+
+    #[test]
+    fn a_layout_with_no_name_among_others_is_refused_without_asking_xkb() {
+        // libxkbcommon 1.13 crashes on the first two.
+        for written in ["us,,ru", "us, ,ru", ",us", "us,ru,"] {
+            assert_eq!(
+                refused(&keymap(written, "")),
+                format!("`input.keyboard.layout`: “{written}” has a layout with no name"),
+            );
+        }
+    }
 
     #[test]
     fn a_layout_is_labelled_as_the_config_wrote_it_or_by_xkbs_name() {
