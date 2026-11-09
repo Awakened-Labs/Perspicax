@@ -1469,9 +1469,10 @@ either refuses it, naming the key and why. It exits 66 for a file named that
 is not there, and 1 for a check it could not make. With no file where a
 session would look, it says a session there runs the classic profile, and
 exits 0. A shell it cannot find, or one too old to be asked, is said to be,
-and `[shell]` is checked as if the shell had every component. A keyboard
-layout xkb cannot make is not caught yet: the file is taken, and the
-keyboard keeps its old layout, which the log and the screen say (#215).
+and `[shell]` is checked as if the shell had every component. The keymap
+`[input.keyboard]` names is compiled as the keyboard would compile it, and
+one xkb cannot make is refused by the key that names what it lacks:
+`` `input.keyboard.layout`: xkb has no layout “rux” ``.
 
 ```toml
 profile = "minimal"            # or "classic"; minimal focuses under the pointer
