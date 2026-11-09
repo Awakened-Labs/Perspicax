@@ -269,6 +269,10 @@ impl Compositor {
             Refused::Keymap(layout) => (Refusal::Keymap, layout),
             Refused::Lock(program) => (Refusal::Lock, program),
         };
+        // A Wayland string cannot hold a NUL, and the event's own code
+        // panics on one, ending the session: one the config wrote, as a
+        // layout or a program's name, is shown as a replacement character.
+        let subject = subject.replace('\0', "\u{fffd}");
         let since = match kind {
             Refusal::Lock => LOCK_REFUSED_SINCE,
             _ => perspicax_shell_v1::EVT_REFUSED_SINCE,

@@ -1469,9 +1469,10 @@ either refuses it, naming the key and why. It exits 66 for a file named that
 is not there, and 1 for a check it could not make. With no file where a
 session would look, it says a session there runs the classic profile, and
 exits 0. A shell it cannot find, or one too old to be asked, is said to be,
-and `[shell]` is checked as if the shell had every component. A keyboard
-layout xkb cannot make is not caught yet: the file is taken, and the
-keyboard keeps its old layout, which the log and the screen say (#215).
+and `[shell]` is checked as if the shell had every component. The keymap
+`[input.keyboard]` names is compiled as the keyboard would compile it, and
+one xkb cannot make is refused by the key that names what it lacks:
+`` `input.keyboard.layout`: xkb has no layout “rux” ``.
 
 ```toml
 profile = "minimal"            # or "classic"; minimal focuses under the pointer
@@ -2242,9 +2243,9 @@ a refusal or a change of volume, and a notice takes no clicks.
 | Logo+A on a window nobody can say which program drew | Not given to an agent | Nobody knows which program drew this window |
 | Logo+A on a window whose program cannot be held | Not given to an agent | Its program can't be held, so its grant couldn't end with it |
 | Logo+A on a program `[agent] never` names | Not given to an agent | No agent is ever given ennius |
-| a save of the config perspicax refuses | Config not applied: the one in use is kept | why, in a line: `` `shell.mixer.step`: 99 is outside 1 to 25 percent ``, or a line and column then what is wrong there, for a file that is not TOML |
+| a save of the config perspicax refuses | Config not applied: the one in use is kept | why, in a line: `` `shell.mixer.step`: 99 is outside 1 to 25 percent `` or `` `input.keyboard.layout`: xkb has no layout “rux” ``, or a line and column then what is wrong there, for a file that is not TOML |
 | a save the shell cannot use, though perspicax took it | Shell settings not applied | why, in a line, the same way |
-| a keyboard layout xkb cannot make | Keyboard layout not applied | xkb could not compile “us,nowhere”; the keyboard keeps its old one |
+| a keyboard layout xkb made when the file was read, and not when the keyboard was given it, its own files changed between | Keyboard layout not applied | xkb could not compile “us,nowhere”; the keyboard keeps its old one |
 | a program called as the lock program is, not the one `[protocols] session-lock` admits | A lock screen was refused | A program called swaylock asked to lock the screen, and is not the one [protocols] session-lock lets lock it |
 
 A notice holds only words of the person's own or the config's: the program
@@ -2514,6 +2515,13 @@ switching = "window"           # each window keeps its own layout; "global",
 "Logo+Space" = "next-layout"   # classic's own; also previous-layout, and
                                # layout-1 to layout-4 for one in particular
 ```
+
+A layout, a variant or rules xkb does not have are refused with the whole
+file, by the key that names them, at login, at a save and by `perspicax config
+check` alike, and so is a layout list with an empty name in it, as `"us,,ru"`,
+on which xkb itself would crash. A model or an option xkb does not know,
+and a fifth layout, it drops without a word and compiles the rest: those are
+not caught yet (#309).
 
 xkb's own switching options, `grp:alt_shift_toggle` and the like, work as
 well. classic binds Logo+Space, so applications no longer get it. A program

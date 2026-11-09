@@ -16,6 +16,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
+use perspicax_compositor::Keymap;
 use perspicax_config::Built;
 
 use crate::lock;
@@ -116,8 +117,9 @@ pub fn shell() -> Option<PathBuf> {
 /// A shell that could not be run, or that ended without an answer.
 pub fn check(path: &Path, built: Built, shell: Option<&Path>) -> Result<Vec<Said>> {
     let shown = path.display();
-    let ours = match perspicax_config::load(path, built) {
-        Ok(_) => Said::Takes(format!("{shown}: perspicax takes it")),
+    let read = perspicax_config::load(path, built).and_then(|config| compiled(&config, built));
+    let ours = match read {
+        Ok(()) => Said::Takes(format!("{shown}: perspicax takes it")),
         Err(error) => Said::Refuses(format!("{shown}: perspicax refuses it: {error}")),
     };
     let theirs = match shell {
@@ -128,6 +130,33 @@ pub fn check(path: &Path, built: Built, shell: Option<&Path>) -> Result<Vec<Said
         )),
     };
     Ok(vec![ours, theirs])
+}
+
+/// Whether xkb compiles the keymap `[input.keyboard]` names, as the seat's
+/// keyboard would: a layout xkb lacks is refused here, naming the key, and
+/// not only logged once a session is given it (#215). A build without a seat
+/// refuses `[input]` itself, and gives no keyboard a keymap from the file.
+fn compiled(
+    config: &perspicax_config::Config,
+    built: Built,
+) -> Result<(), perspicax_config::Error> {
+    if !built.seat {
+        return Ok(());
+    }
+    let keyboard = &config.keyboard;
+    let keymap = Keymap {
+        rules: keyboard.rules.clone(),
+        model: keyboard.model.clone(),
+        layout: keyboard.layout.clone(),
+        variant: keyboard.variant.clone(),
+        options: keyboard.options.clone(),
+    };
+    keymap
+        .check()
+        .map_err(|uncompiled| perspicax_config::Error::Invalid {
+            key: uncompiled.key.to_owned(),
+            reason: uncompiled.reason,
+        })
 }
 
 /// Run the shell at `shell` with `--check` on `path`, and read its answer
@@ -253,6 +282,31 @@ mod tests {
         let shell = scratch.shell("thread 'main' panicked", 101);
         let error = check(&config, EVERYTHING, Some(&shell)).unwrap_err();
         assert!(error.to_string().contains("panicked"), "{error}");
+    }
+
+    #[test]
+    fn a_layout_xkb_cannot_compile_is_refused_naming_its_key() {
+        let scratch = Scratch::new("keymap");
+        let config = scratch.config("[input.keyboard]\nlayout = \"us,rux\"\n");
+        let said = check(&config, EVERYTHING, None).unwrap();
+        let Said::Refuses(line) = &said[0] else {
+            panic!("{said:?}");
+        };
+        assert!(
+            line.ends_with(
+                "perspicax refuses it: `input.keyboard.layout`: xkb has no layout “rux”"
+            ),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_keymap_xkb_compiles_is_taken() {
+        let scratch = Scratch::new("keymap-taken");
+        let config =
+            scratch.config("[input.keyboard]\nlayout = \"us,ru\"\nvariant = \",phonetic\"\n");
+        let said = check(&config, EVERYTHING, None).unwrap();
+        assert!(matches!(&said[0], Said::Takes(_)), "{said:?}");
     }
 
     #[test]

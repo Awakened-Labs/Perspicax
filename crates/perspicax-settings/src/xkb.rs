@@ -1,7 +1,7 @@
 //! The keyboard layouts xkb knows, by name and description, read from its
 //! registry: the `.lst` file beside its rules, as `setxkbmap` reads it. A
 //! layout is picked from these, so the Keyboard page never writes one xkb
-//! does not know: the session only logs such a layout and keeps the old one.
+//! does not know: `perspicax config check`, the judge, would refuse it.
 //!
 //! The `.lst` file lists xkb's main layouts and leaves out its extras, and a
 //! person can keep layouts of their own in `~/.config/xkb`. So a layout

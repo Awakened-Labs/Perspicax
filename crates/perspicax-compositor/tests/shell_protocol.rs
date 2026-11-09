@@ -247,6 +247,37 @@ fn a_keymap_xkb_cannot_compile_is_told_to_a_shell_that_knows_refusals() {
 
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_keymap_xkb_would_crash_on_is_refused_and_the_compositor_lives() {
+    let session = Session::start("shell-keymap-unreadable", backend(Access::open()));
+    let (mut desk, mut queue, qh, globals) = session.client();
+    desk.bind_shell(&globals, &qh);
+    queue.roundtrip(&mut desk).expect("bound");
+
+    // libxkbcommon 1.13 crashes on an empty layout followed by another, and
+    // xkbcommon's binding panics on a NUL: neither reaches it (#215). Nor
+    // does the NUL reach the wire, whose event code panics on one too.
+    for (layout, told) in [("us,,ru", "us,,ru"), ("us\0", "us\u{fffd}")] {
+        desk.told.clear();
+        session.command(Command::Keymap(Keymap {
+            layout: layout.to_owned(),
+            ..Keymap::default()
+        }));
+        until(&mut queue, &mut desk, |desk| !desk.told.is_empty());
+        assert_eq!(
+            desk.told,
+            [Told::Refused(
+                Ok(perspicax_shell_v1::Refusal::Keymap),
+                told.to_owned()
+            )],
+        );
+    }
+    assert!(!session.ended());
+
+    session.stop((desk, queue));
+}
+
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
 fn the_shell_is_told_nothing_and_ends_nothing_while_locked() {
     let session = Session::start("shell-locked", backend(Access::open()));
     let (mut desk, mut queue, qh, globals) = session.client();

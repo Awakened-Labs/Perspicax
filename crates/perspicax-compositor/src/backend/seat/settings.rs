@@ -18,6 +18,11 @@
 //! changed, and is started or stopped when `enabled` was turned on or off
 //! (see [`supervise`]).
 //!
+//! A file is refused whole, as `perspicax config check` refuses it, when the
+//! config does or when xkb cannot compile the keymap it names (#215): at
+//! start on the text console, and at a save by keeping the config in use, so
+//! nothing of a save is applied without the rest.
+//!
 //! Saving is watched with inotify on the file's *directory*, not the file:
 //! most editors save by writing a new file and renaming it over the old one,
 //! and a watch on the old file's inode would hear nothing after the first
@@ -32,7 +37,7 @@ use std::{
 };
 
 use perspicax_config::{
-    Built, Config, Logo, Pointer, Role,
+    Built, Config, Keyboard, Logo, Pointer, Role,
     autostart::{self, Skip},
 };
 use smithay::{
@@ -162,18 +167,42 @@ fn settle_then_reload(state: &mut Compositor) {
 /// Read the config as the session starts, or the classic profile without a
 /// path: a refusal names the file, for the text console that shows it.
 pub(super) fn load(path: Option<&Path>) -> Result<Config, Error> {
-    read(path).map_err(|error| match path {
+    read(path, None).map_err(|error| match path {
         Some(path) => Error::Config(format!("{}: {error}", path.display())),
         None => Error::Config(error.to_string()),
     })
 }
 
-/// Read the config, or the classic profile without a path.
-fn read(path: Option<&Path>) -> Result<Config, perspicax_config::Error> {
-    let Some(path) = path else {
-        return Ok(Config::profile(perspicax_config::Profile::Classic, BUILT));
+/// Read the config, or the classic profile without a path, and refuse one
+/// whose keymap xkb cannot compile, in the words `perspicax config check`
+/// refuses it in (#215). `running` is the keymap the keyboard already has,
+/// which is not compiled again: a save that leaves it alone costs no compile.
+fn read(path: Option<&Path>, running: Option<&Keymap>) -> Result<Config, perspicax_config::Error> {
+    let config = match path {
+        Some(path) => perspicax_config::load(path, BUILT)?,
+        None => Config::profile(perspicax_config::Profile::Classic, BUILT),
     };
-    perspicax_config::load(path, BUILT)
+    let keymap = keymap(&config.keyboard);
+    if running != Some(&keymap) {
+        keymap
+            .check()
+            .map_err(|uncompiled| perspicax_config::Error::Invalid {
+                key: uncompiled.key.to_owned(),
+                reason: uncompiled.reason,
+            })?;
+    }
+    Ok(config)
+}
+
+/// The keymap `[input.keyboard]` names.
+fn keymap(keyboard: &Keyboard) -> Keymap {
+    Keymap {
+        rules: keyboard.rules.clone(),
+        model: keyboard.model.clone(),
+        layout: keyboard.layout.clone(),
+        variant: keyboard.variant.clone(),
+        options: keyboard.options.clone(),
+    }
 }
 
 /// Give the seat's keyboard the configured keymap and repeat. `numlock` sets
@@ -184,13 +213,9 @@ pub(super) fn apply_keyboard(state: &mut Compositor, numlock: Option<bool>) {
     };
     let settings = session.settings.keyboard.clone();
     state.layout_memory.set_switching(settings.switching);
-    let keymap = Keymap {
-        rules: settings.rules,
-        model: settings.model,
-        layout: settings.layout,
-        variant: settings.variant,
-        options: settings.options,
-    };
+    // The file was checked as it was read, so this fails only if xkb's own
+    // files changed since.
+    let keymap = keymap(&settings);
     if let Err(error) = state.set_keymap(&keymap, numlock) {
         tracing::error!(
             ?error,
@@ -198,8 +223,8 @@ pub(super) fn apply_keyboard(state: &mut Compositor, numlock: Option<bool>) {
             "xkb could not compile that layout; the keyboard keeps its old one"
         );
         state.tell_shell_refused(Refused::Keymap(keymap.layout));
-        return;
     }
+    // Whatever became of the keymap: the repeat is not part of it (#215).
     if let Some(keyboard) = &state.keyboard {
         keyboard.change_repeat_info(settings.repeat_rate, settings.repeat_delay);
     }
@@ -242,14 +267,15 @@ pub(super) fn configure(device: &mut Device, pointer: &Pointer) {
 }
 
 /// Re-read the config and apply whatever changed. A config that no longer
-/// parses is reported and the old one kept: a typo mid-session must not cost
-/// the person their bindings. The log has the whole of why, and the shell is
+/// parses, or names a keymap xkb cannot compile, is reported and the old one
+/// kept whole: a typo mid-session must not cost the person their bindings,
+/// nor apply half of a save. The log has the whole of why, and the shell is
 /// told it in a line, to show the person.
 pub(crate) fn reload(state: &mut Compositor) {
     let Running::Seat(session) = &mut state.backend else {
         return;
     };
-    let fresh = match read(session.config_path.as_deref()) {
+    let fresh = match read(session.config_path.as_deref(), Some(&state.keymap)) {
         Ok(fresh) => fresh,
         Err(error) => {
             tracing::error!(
@@ -684,6 +710,55 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).ok();
         }
+    }
+
+    #[test]
+    fn a_save_naming_a_keymap_xkb_cannot_compile_is_refused_whole_naming_its_key() {
+        let scratch = Scratch::new("keymap");
+        let config = scratch.file(
+            "config.toml",
+            "[input.keyboard]\nlayout = \"us,rux\"\nrepeat-rate = 40\n",
+            0o644,
+        );
+        let refused = read(Some(&config), Some(&Keymap::default())).unwrap_err();
+        assert_eq!(
+            refused.in_a_line(),
+            "`input.keyboard.layout`: xkb has no layout “rux”",
+            "the line the shell is told"
+        );
+    }
+
+    #[test]
+    fn a_session_starting_with_a_keymap_xkb_cannot_compile_is_refused_naming_the_file() {
+        let scratch = Scratch::new("keymap-start");
+        let config = scratch.file(
+            "config.toml",
+            "[input.keyboard]\nlayout = \"us,,ru\"\n",
+            0o644,
+        );
+        let Err(Error::Config(said)) = load(Some(&config)) else {
+            panic!("taken");
+        };
+        assert_eq!(
+            said,
+            format!(
+                "{}: `input.keyboard.layout`: “us,,ru” has a layout with no name",
+                config.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_keymap_xkb_compiles_is_taken_at_start_and_at_a_save() {
+        let scratch = Scratch::new("keymap-taken");
+        let config = scratch.file(
+            "config.toml",
+            "[input.keyboard]\nlayout = \"us,ru\"\nvariant = \",phonetic\"\n",
+            0o644,
+        );
+        assert!(load(Some(&config)).is_ok());
+        assert!(read(Some(&config), Some(&Keymap::default())).is_ok());
+        assert!(load(None).is_ok(), "the classic profile's");
     }
 
     #[test]

@@ -84,7 +84,7 @@ pub use crate::{
     backend::{Agent, Backend, Virtual},
     facts::{Facts, SessionFacts},
     host::{Command, Host, LaunchError, Request, Requests},
-    keyboard::Keymap,
+    keyboard::{Keymap, Uncompiled},
 };
 
 use std::{
