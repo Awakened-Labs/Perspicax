@@ -324,6 +324,12 @@ impl Fake {
         .expect("written");
     }
 
+    /// Make no record stream, and so answer none, from now on: a server
+    /// slow to make one.
+    pub(super) fn hold_records(&self) {
+        self.lock().records_held = true;
+    }
+
     /// End the stream of `index`.
     pub(super) fn stops(&self, index: u32) {
         let mut shared = self.lock();
@@ -346,6 +352,16 @@ impl Fake {
     /// The channel of the newest record stream made, while there is one.
     pub(super) fn recording(&self) -> Option<u32> {
         newest_made(&self.lock().records).map(|record| record.channel)
+    }
+
+    /// How many record streams the clients hold, made or not.
+    pub(super) fn recordings(&self) -> usize {
+        self.lock().records.len()
+    }
+
+    /// How many clients are connected.
+    pub(super) fn clients(&self) -> usize {
+        self.lock().connections.len()
     }
 
     /// Send `samples`, as recorded, on `channel`: to the client whose
