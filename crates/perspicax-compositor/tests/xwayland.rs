@@ -40,12 +40,13 @@
 mod common;
 
 use std::{
+    path::{Path, PathBuf},
     process::{self, Child, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
-use common::{Desk, Ear, Session, Told, heard, menu_with_the_keyboard, until};
+use common::{Desk, Ear, Renamed, Session, Told, heard, menu_with_the_keyboard, until};
 use perspicax_compositor::{
     ActError, Backend, Command, Config, Error, Facts, Host, Requests, Stop,
 };
@@ -53,7 +54,7 @@ use perspicax_index::{
     Action as Verb, HostFacts, PointerButton, Refusal, SurfaceFacts, SurfaceKind, judge,
 };
 use perspicax_node::{Origin, Rect, Visibility, X11Basis};
-use perspicax_policy::{Action, Button, Focus, FocusModel, Mods, Opacity};
+use perspicax_policy::{Action, Button, Focus, FocusModel, Mods, Opacity, Program, Prompts};
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1;
 use smithay_client_toolkit::shell::WaylandSurface as _;
 use wayland_client::{EventQueue, Proxy as _, QueueHandle, backend::ObjectId, globals::GlobalList};
@@ -5725,46 +5726,192 @@ fn a_wayland_program_started_by_an_enter_at_an_x11_terminal_opens_with_the_keys(
     x11.stop();
 }
 
+/// Issue #268: the person signs a commit at a Wayland terminal, with an
+/// Enter, and gpg-agent's pinentry comes up -- an X11 one, pinentry-gtk-2 --
+/// a program already running, which the Enter never started. Named a prompt,
+/// it opens without the keys, X11 being one client for every X client, and
+/// takes them as soon as XRes names its process.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_prompt_takes_the_keys_as_xres_names_it_after_an_enter_at_a_wayland_terminal() {
+    let x11 = X11::start("x11-prompt", Backend::headless((1280, 1024)).with_person());
+    let pinentry = named_a_prompt(&x11, "pinentry-gtk-2", "x11-prompt");
+    let mut terminal = Terminal::open(&x11);
+    let probe = Probe::x11_gated(&x11, &pinentry.0);
+    // Long enough for the probe's start to be a tick or more before the
+    // Enter's: a start is told in hundredths of a second.
+    thread::sleep(Duration::from_millis(50));
+    terminal.types(&x11, "git commit -S\n");
+
+    probe.open_gate();
+    assert!(
+        x11.given_keys("probe"),
+        "never took the keys: {:?}",
+        x11.facts()
+    );
+    assert!(!terminal.has_keys(), "the terminal kept them");
+    drop(probe);
+
+    terminal.stop(x11);
+}
+
+/// And once the person has typed since the Enter, a letter of a password
+/// at the terminal, an X11 prompt is none they wait on: it keeps none of
+/// the keys once XRes has named its process.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_prompt_opens_without_the_keys_once_the_person_has_typed_since() {
+    let x11 = X11::start(
+        "x11-prompt-typed",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let pinentry = named_a_prompt(&x11, "pinentry-gtk-2", "x11-prompt-typed");
+    let mut terminal = Terminal::open(&x11);
+    let probe = Probe::x11_gated(&x11, &pinentry.0);
+    thread::sleep(Duration::from_millis(50));
+    terminal.types(&x11, "sudo true\n");
+    terminal.types(&x11, "hunt");
+
+    probe.open_gate();
+    x11.attributed("probe");
+    assert!(terminal.has_keys(), "the terminal keeps the keys");
+    assert_ne!(
+        focused_last(&x11.session.facts).as_deref(),
+        Some("probe"),
+        "the prompt took the keys"
+    );
+    drop(probe);
+
+    terminal.stop(x11);
+}
+
+/// An X11 prompt named bare is the copy the system installed, proven of the
+/// process XRes names as a Wayland client's is as it connects: one merely
+/// called so, in a folder the person may write, keeps none of the keys.
+#[test]
+#[ignore = "starts Xwayland on a real Wayland socket; needs XDG_RUNTIME_DIR and Xwayland"]
+fn an_x11_prompt_named_bare_is_only_the_systems_copy() {
+    let x11 = X11::start(
+        "x11-prompt-bare",
+        Backend::headless((1280, 1024)).with_person(),
+    );
+    let called = Renamed::called("pinentry-gtk-2", "x11-prompt-bare");
+    x11.session
+        .command(Command::Prompts(Prompts::new(vec![Program::parse(
+            "pinentry-gtk-2",
+        )])));
+    let mut terminal = Terminal::open(&x11);
+    let probe = Probe::x11_gated(&x11, &called.0);
+    thread::sleep(Duration::from_millis(50));
+    terminal.types(&x11, "git commit -S\n");
+
+    probe.open_gate();
+    x11.attributed("probe");
+    assert!(terminal.has_keys(), "the terminal keeps the keys");
+    assert_ne!(
+        focused_last(&x11.session.facts).as_deref(),
+        Some("probe"),
+        "the prompt took the keys"
+    );
+    drop(probe);
+
+    terminal.stop(x11);
+}
+
+/// A copy of this binary called `program`, named a prompt by its whole path.
+/// Kept until its test is done, as the file its probe runs.
+fn named_a_prompt(x11: &X11, program: &str, tag: &str) -> Renamed {
+    let renamed = Renamed::called(program, tag);
+    x11.session
+        .command(Command::Prompts(Prompts::new(vec![Program::parse(
+            &renamed.0.to_string_lossy(),
+        )])));
+    renamed
+}
+
 /// Set, to what [`window_probe`] opens its window on -- `x11:` and a
 /// display, or `wayland:` and a socket -- for the copy of this binary it
 /// runs in.
 const PROBE: &str = "PERSPICAX_XWAYLAND_PROBE";
+/// A file an X11 probe waits for before it maps its window, where it has
+/// one.
+const GATE: &str = "PERSPICAX_XWAYLAND_GATE";
 
 /// A program in a process of its own, as a terminal starts one: a copy of
 /// this binary running [`window_probe`], its window titled "probe". Killed
 /// and reaped as it is dropped, whether its test passes or not.
-struct Probe(Child);
+struct Probe {
+    child: Child,
+    /// The file it waits for before it maps its window, where it has one.
+    gate: Option<PathBuf>,
+}
 
 impl Probe {
     /// One with an X11 window.
     fn x11(x11: &X11) -> Self {
-        let display = x11.session.facts.x11_display().expect("Xwayland is ready");
-        Self::start(format!("x11:{display}"))
+        Self::start(Self::on_x11(x11), &this_binary(), None)
+    }
+
+    /// One with an X11 window, running from `exe`, a copy of this binary
+    /// under another name, started now and mapping its window only once its
+    /// gate opens: a program already running, as a daemon is, whatever the
+    /// person presses meanwhile.
+    fn x11_gated(x11: &X11, exe: &Path) -> Self {
+        // Beside the session's socket, and named for it: never the socket.
+        let dir = std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR");
+        let gate = Path::new(&dir).join(format!("{}.x11-gate", x11.session.socket()));
+        let _ = std::fs::remove_file(&gate);
+        Self::start(Self::on_x11(x11), exe, Some(gate))
     }
 
     /// One with a Wayland window.
     fn wayland(x11: &X11) -> Self {
-        Self::start(format!("wayland:{}", x11.session.socket()))
+        Self::start(
+            format!("wayland:{}", x11.session.socket()),
+            &this_binary(),
+            None,
+        )
     }
 
-    fn start(on: String) -> Self {
+    fn on_x11(x11: &X11) -> String {
+        let display = x11.session.facts.x11_display().expect("Xwayland is ready");
+        format!("x11:{display}")
+    }
+
+    fn start(on: String, exe: &Path, gate: Option<PathBuf>) -> Self {
         // Its panics on stderr, beside this test's; its harness's report
         // nowhere.
-        let child = process::Command::new(std::env::current_exe().expect("this test's binary"))
+        let mut command = process::Command::new(exe);
+        command
             .args(["--exact", "window_probe", "--ignored", "--nocapture"])
             .env(PROBE, on)
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("the probe starts");
-        Self(child)
+            .stdout(Stdio::null());
+        if let Some(gate) = &gate {
+            command.env(GATE, gate);
+        }
+        let child = command.spawn().expect("the probe starts");
+        Self { child, gate }
+    }
+
+    /// Let it map its window.
+    fn open_gate(&self) {
+        let gate = self.gate.as_ref().expect("a probe with a gate");
+        std::fs::write(gate, b"").expect("the gate opens");
     }
 }
 
 impl Drop for Probe {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(gate) = &self.gate {
+            let _ = std::fs::remove_file(gate);
+        }
     }
+}
+
+fn this_binary() -> PathBuf {
+    std::env::current_exe().expect("this test's binary")
 }
 
 /// Not a test: the program a [`Probe`] is, in a process of its own.
@@ -5799,6 +5946,11 @@ fn window_probe() {
             b"probe",
         )
         .expect("WM_NAME");
+        if let Some(gate) = std::env::var_os(GATE) {
+            while !Path::new(&gate).exists() {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
         x.map_window(window).expect("map_window");
         x.flush().expect("flush");
         loop {
