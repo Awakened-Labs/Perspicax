@@ -9,10 +9,11 @@
 //! changes.
 //!
 //! The thread runs a calloop loop of its own, as the shell's does, woken by
-//! the socket and by what the shell asks. What it reads reaches the shell's
-//! loop as [`News`]: everything the server holds, once for each wake that
-//! changed any of it, so a burst of changes is told once. Dropping the
-//! [`Running`] the shell holds ends the thread.
+//! its sockets, the one that follows the server and the one it records on
+//! while it records anything, and by what the shell asks. What it reads
+//! reaches the shell's loop as [`News`]: everything the server holds, once
+//! for each wake that changed any of it, so a burst of changes is told
+//! once. Dropping the [`Running`] the shell holds ends the thread.
 
 mod chime;
 mod client;

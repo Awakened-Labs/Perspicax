@@ -15,12 +15,17 @@
 //!
 //! It records, too: a record stream asked for gets a channel, and a test
 //! sends samples on it, or on any channel, as a server sends what it
-//! records.
+//! records. A stream that does not keep its sink from suspending, of the
+//! monitor of a sink that does not play, is made, and answered, only once
+//! the sink plays, as pipewire-pulse links one; and a test can hold back
+//! every answer, as a server slow to make a stream does. A client's record
+//! streams are its own, and go with it when it hangs up, made or not.
 //!
-//! It answers what the client asks, one connection at a time, and keeps a
-//! line for each thing asked, to be counted. A change, made from a test or
-//! by what the client asked, is told the way a server tells it, as a
-//! subscription's event.
+//! It answers each connection on a thread of its own, as a server answers
+//! each client, and keeps a line for each thing asked, to be counted. A
+//! change, made from a test or by what a client asked, is told the way a
+//! server tells it, as a subscription's event, to each client that
+//! subscribed to it.
 
 use std::{
     ffi::{CStr, CString},
@@ -72,9 +77,9 @@ struct Shared {
     /// What programs play.
     streams: Vec<SinkInputInfo>,
     /// The list of them is not answered until the test says, and the
-    /// request held, by its sequence number.
+    /// request held: the client that asked, and its sequence number.
     streams_held: bool,
-    held: Option<u32>,
+    held: Option<(u32, u32)>,
     /// The sinks still being made, by index, each with the state a read of
     /// it is answered in.
     making: Vec<(u32, i32)>,
@@ -82,22 +87,46 @@ struct Shared {
     default_source: CString,
     /// What was asked, in order: one line each.
     asked: Vec<String>,
-    /// The connection being served, to write on.
-    writer: Option<UnixStream>,
-    version: u16,
-    /// What the client subscribed to: it is told of nothing else.
-    mask: SubscriptionMask,
-    /// The channel of the record stream the client asked for, while it has
-    /// one, and the channel the next gets.
-    recording: Option<u32>,
+    /// The clients connected, and the number the next gets.
+    connections: Vec<Connection>,
+    next_client: u32,
+    /// The record streams the clients asked for, made or not; whether
+    /// none is to be answered until the test says; and the channel the
+    /// next stream of any client gets.
+    records: Vec<Record>,
+    records_held: bool,
     channels: u32,
-    /// The playback stream the client made, while it has one.
+    /// The playback stream a client made, while it has one.
     playback: Option<Playback>,
 }
 
-/// A playback stream: its channel, the sink it plays into, and how much
-/// was asked for of it and has come.
+/// A client connected, served on a thread of its own.
+struct Connection {
+    /// Its number among the server's clients.
+    client: u32,
+    /// Its socket, to write on.
+    writer: UnixStream,
+    version: u16,
+    /// What it subscribed to: it is told of nothing else.
+    mask: SubscriptionMask,
+}
+
+/// A record stream a client asked for: its own, until it hangs up.
+struct Record {
+    client: u32,
+    channel: u32,
+    /// The source it records, by name.
+    source: String,
+    /// It does not keep its sink from suspending.
+    passive: bool,
+    /// The request to answer and its answer, until it is made.
+    unanswered: Option<(u32, CreateRecordStreamReply)>,
+}
+
+/// A playback stream: the client that made it, its channel, the sink it
+/// plays into, and how much was asked for of it and has come.
 struct Playback {
+    client: u32,
     channel: u32,
     sink: u32,
     asked: usize,
@@ -133,20 +162,21 @@ impl Fake {
             default: CString::new(SPEAKERS).expect("a name"),
             default_source: CString::new(MIC).expect("a name"),
             asked: Vec::new(),
-            writer: None,
-            version: MAX_VERSION,
-            mask: SubscriptionMask::empty(),
-            recording: None,
+            connections: Vec::new(),
+            next_client: 7,
+            records: Vec::new(),
+            records_held: false,
             channels: 7,
             playback: None,
         }));
-        let serving = Arc::clone(&shared);
+        let accepting = Arc::clone(&shared);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else {
                     return;
                 };
-                serve(&serving, stream);
+                let serving = Arc::clone(&accepting);
+                std::thread::spawn(move || serve(&serving, stream));
             }
         });
         Self { path, shared }
@@ -216,6 +246,7 @@ impl Fake {
             SinkState::Idle
         };
         shared.event(SubscriptionEventFacility::Sink, Some(index));
+        shared.answer_records();
     }
 
     /// Have the client numbered `client` play a stream of `index` into the
@@ -279,13 +310,24 @@ impl Fake {
         let Shared {
             streams,
             held,
-            writer,
-            version,
+            connections,
             ..
         } = &mut *shared;
-        let seq = held.take().expect("a request held");
-        let writer = writer.as_mut().expect("a client");
-        protocol::write_reply_message(writer, seq, &streams.clone(), *version).expect("written");
+        let (client, seq) = held.take().expect("a request held");
+        let connection = connection(connections, client).expect("the client that asked");
+        protocol::write_reply_message(
+            &mut connection.writer,
+            seq,
+            &streams.clone(),
+            connection.version,
+        )
+        .expect("written");
+    }
+
+    /// Make no record stream, and so answer none, from now on: a server
+    /// slow to make one.
+    pub(super) fn hold_records(&self) {
+        self.lock().records_held = true;
     }
 
     /// End the stream of `index`.
@@ -307,20 +349,42 @@ impl Fake {
             .map(|playback| (playback.sink, playback.came))
     }
 
-    /// The channel the client records on, while it does.
+    /// The channel of the newest record stream made, while there is one.
     pub(super) fn recording(&self) -> Option<u32> {
-        self.lock().recording
+        newest_made(&self.lock().records).map(|record| record.channel)
     }
 
-    /// Send `samples`, as recorded, on `channel`.
+    /// How many record streams the clients hold, made or not.
+    pub(super) fn recordings(&self) -> usize {
+        self.lock().records.len()
+    }
+
+    /// How many clients are connected.
+    pub(super) fn clients(&self) -> usize {
+        self.lock().connections.len()
+    }
+
+    /// Send `samples`, as recorded, on `channel`: to the client whose
+    /// stream it is, or, of none, to the client of the newest stream made.
     pub(super) fn send_samples(&self, channel: u32, samples: &[f32]) {
         let bytes: Vec<u8> = samples
             .iter()
             .flat_map(|sample| sample.to_le_bytes())
             .collect();
         let mut shared = self.lock();
-        let writer = shared.writer.as_mut().expect("a client");
-        protocol::write_memblock(writer, channel, &bytes, 0).expect("written");
+        let Shared {
+            records,
+            connections,
+            ..
+        } = &mut *shared;
+        let client = records
+            .iter()
+            .find(|record| record.channel == channel)
+            .or_else(|| newest_made(records))
+            .expect("a client recording")
+            .client;
+        let connection = connection(connections, client).expect("the client recording");
+        protocol::write_memblock(&mut connection.writer, channel, &bytes, 0).expect("written");
     }
 
     /// Refuse the client the sources.
@@ -328,19 +392,19 @@ impl Fake {
         self.lock().sources_refused = true;
     }
 
-    /// Hang up on the client, as a server stopping does.
+    /// Hang up on every client, as a server stopping does.
     pub(super) fn hang_up(&self) {
-        if let Some(writer) = self.lock().writer.take() {
-            writer.shutdown(Shutdown::Both).ok();
+        for connection in &self.lock().connections {
+            connection.writer.shutdown(Shutdown::Both).ok();
         }
     }
 
-    /// Send a message of a command no protocol has: its number, 255, then
-    /// its sequence number.
+    /// Send the first client a message of a command no protocol has: its
+    /// number, 255, then its sequence number.
     pub(super) fn send_unknown(&self) {
         let message = [b'L', 0, 0, 0, 255, b'L', 0xff, 0xff, 0xff, 0xff];
         let mut shared = self.lock();
-        let writer = shared.writer.as_mut().expect("a client");
+        let writer = &mut shared.connections.first_mut().expect("a client").writer;
         let mut descriptor = [0; protocol::DESCRIPTOR_SIZE];
         protocol::encode_descriptor(
             &mut descriptor,
@@ -392,24 +456,31 @@ impl Shared {
             channel,
             length: ASKED as u32,
         });
-        if let Some(writer) = self.writer.as_mut() {
-            protocol::write_command_message(writer, u32::MAX, &request, self.version).ok();
+        let client = playback.client;
+        if let Some(connection) = connection(&mut self.connections, client) {
+            protocol::write_command_message(
+                &mut connection.writer,
+                u32::MAX,
+                &request,
+                connection.version,
+            )
+            .ok();
         }
     }
 
-    /// Tell the client the object of `index` changed.
+    /// Tell the clients the object of `index` changed.
     fn event(&mut self, facility: SubscriptionEventFacility, index: Option<u32>) {
         self.told(facility, SubscriptionEventType::Changed, index);
     }
 
-    /// Tell the client of `kind` of change to the object of `index`.
+    /// Tell each client that subscribed to it of `kind` of change to the
+    /// object of `index`.
     fn told(
         &mut self,
         facility: SubscriptionEventFacility,
         kind: SubscriptionEventType,
         index: Option<u32>,
     ) {
-        let version = self.version;
         let subscribed = match facility {
             SubscriptionEventFacility::Sink => SubscriptionMask::SINK,
             SubscriptionEventFacility::Source => SubscriptionMask::SOURCE,
@@ -418,22 +489,62 @@ impl Shared {
             SubscriptionEventFacility::SinkInput => SubscriptionMask::SINK_INPUT,
             _ => SubscriptionMask::ALL,
         };
-        if !self.mask.contains(subscribed) {
+        let event = Command::SubscribeEvent(SubscriptionEvent {
+            event_facility: facility,
+            event_type: kind,
+            index,
+        });
+        for connection in &mut self.connections {
+            if connection.mask.contains(subscribed) {
+                protocol::write_command_message(
+                    &mut connection.writer,
+                    u32::MAX,
+                    &event,
+                    connection.version,
+                )
+                .ok();
+            }
+        }
+    }
+
+    /// Make and answer each record stream asked for, unless the test holds
+    /// them back; but not one that does not keep its sink from suspending,
+    /// of the monitor of a sink that does not play: pipewire-pulse links
+    /// such a stream, and so answers it, only once its sink plays.
+    fn answer_records(&mut self) {
+        if self.records_held {
             return;
         }
-        if let Some(writer) = self.writer.as_mut() {
-            let event = SubscriptionEvent {
-                event_facility: facility,
-                event_type: kind,
-                index,
+        let Self {
+            records,
+            sinks,
+            connections,
+            ..
+        } = self;
+        for record in records.iter_mut() {
+            let asleep = record.passive
+                && sinks.iter().any(|sink| {
+                    sink.state != SinkState::Running
+                        && sink
+                            .monitor_source_name
+                            .as_ref()
+                            .is_some_and(|name| name.to_bytes() == record.source.as_bytes())
+                });
+            if asleep {
+                continue;
+            }
+            let Some((seq, reply)) = record.unanswered.take() else {
+                continue;
             };
-            protocol::write_command_message(
-                writer,
-                u32::MAX,
-                &Command::SubscribeEvent(event),
-                version,
-            )
-            .ok();
+            if let Some(connection) = connection(connections, record.client) {
+                protocol::write_reply_message(
+                    &mut connection.writer,
+                    seq,
+                    &reply,
+                    connection.version,
+                )
+                .ok();
+            }
         }
     }
 
@@ -494,18 +605,56 @@ fn read_sent(reader: &mut impl std::io::Read, version: u16) -> Option<Sent> {
     Some(Sent::Command(seq, Box::new(command)))
 }
 
-/// Serve one client until it goes.
+/// The client numbered `client`'s connection, while it is connected.
+fn connection(connections: &mut [Connection], client: u32) -> Option<&mut Connection> {
+    connections
+        .iter_mut()
+        .find(|connection| connection.client == client)
+}
+
+/// The newest record stream made, of any client.
+fn newest_made(records: &[Record]) -> Option<&Record> {
+    records
+        .iter()
+        .rev()
+        .find(|record| record.unanswered.is_none())
+}
+
+/// Serve one client until it goes: then so do its record streams, made or
+/// not, as a server frees a client's.
 fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
     let mut reader = BufReader::new(stream.try_clone().expect("a second handle"));
-    {
+    let client = {
         let mut shared = shared.lock().expect("the state");
-        shared.writer = Some(stream);
-        shared.version = MAX_VERSION;
-        shared.mask = SubscriptionMask::empty();
-    }
+        let client = shared.next_client;
+        shared.next_client += 1;
+        shared.connections.push(Connection {
+            client,
+            writer: stream,
+            version: MAX_VERSION,
+            mask: SubscriptionMask::empty(),
+        });
+        client
+    };
+    answer(shared, client, &mut reader);
+    let mut shared = shared.lock().expect("the state");
+    shared
+        .connections
+        .retain(|connection| connection.client != client);
+    shared.records.retain(|record| record.client != client);
+}
+
+/// Answer what the client numbered `client` asks, until it goes.
+fn answer(shared: &Mutex<Shared>, client: u32, reader: &mut impl std::io::Read) {
     loop {
-        let version = shared.lock().expect("the state").version;
-        let (seq, command) = match read_sent(&mut reader, version) {
+        let version = shared
+            .lock()
+            .expect("the state")
+            .connections
+            .iter()
+            .find(|connection| connection.client == client)
+            .map_or(MAX_VERSION, |connection| connection.version);
+        let (seq, command) = match read_sent(reader, version) {
             Some(Sent::Command(seq, command)) => (seq, *command),
             Some(Sent::Data(channel, length)) => {
                 shared.lock().expect("the state").played(channel, length);
@@ -514,9 +663,8 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
             None => return,
         };
         let mut shared = shared.lock().expect("the state");
-        let version = shared.version;
         let (mut changed, mut negotiated, mut profile, mut defaulted) = (None, None, None, false);
-        let mut subscribed = None;
+        let (mut subscribed, mut recorded) = (None, false);
         let (mut changed_source, mut changed_stream) = (None, None);
         let Shared {
             sinks,
@@ -530,15 +678,17 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
             default,
             default_source,
             asked,
-            writer,
-            recording,
+            connections,
+            records,
             channels,
             playback,
             ..
         } = &mut *shared;
-        let Some(writer) = writer.as_mut() else {
+        let Some(asking) = connection(connections, client) else {
             return;
         };
+        let version = asking.version;
+        let writer = &mut asking.writer;
         let found = |sinks: &[SinkInfo], name: Option<&CString>| {
             sinks.iter().position(|sink| Some(&sink.name) == name)
         };
@@ -555,7 +705,7 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
             Command::SetClientName(_) => protocol::write_reply_message(
                 writer,
                 seq,
-                &SetClientNameReply { client_id: 7 },
+                &SetClientNameReply { client_id: client },
                 version,
             ),
             Command::Subscribe(mask) => {
@@ -750,7 +900,6 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
                     protocol::write_error(writer, seq, &PulseError::NoEntity).expect("written");
                     continue;
                 }
-                *recording = Some(*channels);
                 let reply = CreateRecordStreamReply {
                     channel: *channels,
                     stream_index: *channels,
@@ -759,13 +908,23 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
                     buffer_attr: record.buffer_attr,
                     ..CreateRecordStreamReply::default()
                 };
+                // Answered once made: see `Shared::answer_records`.
+                records.push(Record {
+                    client,
+                    channel: *channels,
+                    source,
+                    passive: record.flags.no_inhibit_auto_suspend,
+                    unanswered: Some((seq, reply)),
+                });
                 *channels += 1;
-                protocol::write_reply_message(writer, seq, &reply, version)
+                recorded = true;
+                Ok(())
             }
             Command::CreatePlaybackStream(play) => {
                 let sink = play.sink_index.unwrap_or(u32::MAX);
                 asked.push(format!("play on {sink}"));
                 *playback = Some(Playback {
+                    client,
                     channel: *channels,
                     sink,
                     asked: ASKED,
@@ -794,12 +953,12 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
             }
             Command::DeleteRecordStream(channel) => {
                 asked.push(format!("unrecord {channel}"));
-                recording.take_if(|recording| *recording == channel);
+                records.retain(|record| record.client != client || record.channel != channel);
                 protocol::write_ack_message(writer, seq)
             }
             Command::GetSinkInputInfoList if *streams_held => {
                 asked.push("streams".to_owned());
-                *held = Some(seq);
+                *held = Some((client, seq));
                 Ok(())
             }
             Command::GetSinkInputInfoList => {
@@ -871,11 +1030,16 @@ fn serve(shared: &Mutex<Shared>, stream: UnixStream) {
         if written.is_err() {
             return;
         }
-        if let Some(version) = negotiated {
-            shared.version = version;
+        if let Some(connection) = connection(&mut shared.connections, client) {
+            if let Some(version) = negotiated {
+                connection.version = version;
+            }
+            if let Some(mask) = subscribed {
+                connection.mask = mask;
+            }
         }
-        if let Some(mask) = subscribed {
-            shared.mask = mask;
+        if recorded {
+            shared.answer_records();
         }
         if let Some(index) = changed {
             shared.event(SubscriptionEventFacility::Sink, Some(index));

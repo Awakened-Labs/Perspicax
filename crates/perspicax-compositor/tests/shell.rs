@@ -260,7 +260,9 @@ impl SoundServer {
         String::from_utf8_lossy(&said.stdout).into_owned()
     }
 
-    /// Wait until `ready` holds.
+    /// Wait until `ready` holds, ten seconds at most: a wait that runs out
+    /// fails the test at the line that waited, whichever wait it was.
+    #[track_caller]
     fn until(&self, ready: impl Fn(&Self) -> bool) {
         use std::time::{Duration, Instant};
 
@@ -268,7 +270,7 @@ impl SoundServer {
         while !ready(self) {
             assert!(
                 Instant::now() < deadline,
-                "the sound server never got ready"
+                "the sound server was not as waited for within ten seconds"
             );
             thread::sleep(Duration::from_millis(50));
         }

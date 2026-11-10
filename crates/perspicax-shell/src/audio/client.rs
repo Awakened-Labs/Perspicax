@@ -43,17 +43,30 @@
 //! recorded as a peak 25 times a second, told as they come; one the server
 //! refuses, or takes away, is not asked for again until the shell asks. A
 //! monitor is recorded not to keep its sink from suspending, as the bars'
-//! is, so it is asked for only while its sink plays (see `Facts::meter`):
-//! pipewire-pulse answers such a stream of a sink asleep only once it
-//! wakes, and one never answered is never let go of. An input is recorded
-//! as any recording program does, which wakes it.
+//! is, so it is asked for only while its sink plays (see `Facts::meter`).
+//! An input is recorded as any recording program does, which wakes it.
 //!
 //! While the moving bars are wanted, and something plays through the
 //! default output, its monitor is recorded, one channel of floats, and its
 //! spectrum told (see `levels`). Recording is what a VU meter does to a
 //! monitor; the stream is marked not to keep the output from suspending,
 //! and it is let go of as soon as nothing plays, or another output becomes
-//! the default, so a quiet desktop records nothing.
+//! the default.
+//!
+//! Every stream the shell records, the bars' and the meters', is made on a
+//! connection of its own, the recorder, opened once something is to be
+//! recorded and closed once nothing is. A stream is let go of by the
+//! channel the server's answer gives it, and pipewire-pulse answers one
+//! that does not keep its sink awake only once that sink plays: one asked
+//! for as a short sound began, and let go of once it ended, may have no
+//! answer to let go of it by for as long as the sink sleeps. Such a stream
+//! is let go of as soon as its answer comes, or else when the recorder
+//! closes, since the server lets go of every stream of a client that hangs
+//! up, answered or not. So while nothing plays and the mixer is shut, the
+//! shell holds no record stream on the server, and a quiet desktop records
+//! nothing. A recorder cut off while the server is still followed is as if
+//! each of its streams had been taken away; it is opened again only when
+//! the server next tells a change, or the shell next asks.
 
 use std::{
     collections::HashSet,
@@ -125,11 +138,16 @@ pub(super) struct Client {
     told_gone: bool,
     /// The moving bars are wanted.
     levels: bool,
-    /// The sources to meter, by name.
+    /// The sources to meter, by name, as the shell last asked; and those
+    /// of them still to meter, less any the server refused or took away.
     meters: Vec<String>,
+    to_meter: Vec<String>,
+    /// The connection streams are recorded on, while anything is.
+    recorder: Option<Recorder>,
 }
 
-/// A connection, and what it has read.
+/// The connection that follows the server: what it has read, the device
+/// being chosen, and the test sound.
 struct Link {
     wire: Wire,
     /// The socket's source in the loop.
@@ -153,25 +171,51 @@ struct Link {
     choosing: Option<(Side, u32, String, u64)>,
     /// How many choices there have been.
     chosen: u64,
-    /// The moving bars are wanted.
-    levels: bool,
-    /// The record stream they are read from, while there is one.
-    recording: Option<Recording>,
-    /// How many record streams have been asked for.
-    recordings: u64,
-    spectrum: Spectrum,
-    /// The bands to tell, newest, since they were last told.
-    heard: Option<[f32; BANDS]>,
     /// The test sound playing, and how many have been asked for.
     test: Option<Test>,
     tests: u64,
-    /// The sources to meter, by name; the record stream of each, and how
-    /// many have been asked for; and the peaks to tell, newest, since
-    /// they were last told.
-    wanted: Vec<String>,
+}
+
+/// What is to be recorded now: the monitor the moving bars read, if any;
+/// and each source to meter, with whether it is a monitor, which is
+/// recorded not to keep its sink from suspending.
+#[derive(Default)]
+struct Wanted {
+    levels: Option<String>,
+    meters: Vec<(String, bool)>,
+}
+
+impl Wanted {
+    fn is_nothing(&self) -> bool {
+        self.levels.is_none() && self.meters.is_empty()
+    }
+}
+
+/// The connection every stream the shell records is made on, open only
+/// while something is to be recorded: closed, it takes with it each stream
+/// still on it, answered or not.
+struct Recorder {
+    wire: Wire,
+    /// The socket's source in the loop.
+    source: RegistrationToken,
+    /// The server has answered the handshake and taken the shell's name:
+    /// nothing can be recorded before.
+    met: bool,
+    /// The record stream the bars are read from, while there is one; how
+    /// many have been asked for; and the bands to tell, newest, since they
+    /// were last told.
+    recording: Option<Recording>,
+    recordings: u64,
+    spectrum: Spectrum,
+    heard: Option<[f32; BANDS]>,
+    /// The record stream of each source metered, and how many have been
+    /// asked for; and the peaks to tell, newest, since they were last told.
     meters: Vec<Meter>,
     metered: u64,
     peaks: Vec<(String, f32)>,
+    /// The sources the server refused to meter, or stopped metering, for
+    /// the shell's next ask to bring back.
+    taken: Vec<String>,
 }
 
 /// A record stream of a source's peaks.
@@ -225,6 +269,8 @@ impl Client {
             told_gone: false,
             levels: false,
             meters: Vec::new(),
+            to_meter: Vec::new(),
+            recorder: None,
         }
     }
 
@@ -242,12 +288,15 @@ impl Client {
         }
     }
 
-    fn link(&mut self) -> Result<(), String> {
-        let path = self.server.clone().ok_or_else(|| {
+    /// Connect to the server and begin the handshake, `wake` called each
+    /// time the socket can be read, or written: the connection, and its
+    /// socket's source in the loop.
+    fn reach(&self, wake: fn(&mut Client)) -> Result<(Wire, RegistrationToken), String> {
+        let path = self.server.as_ref().ok_or_else(|| {
             "no sound server is named, and there is no runtime folder to find one in".to_owned()
         })?;
         let stream =
-            UnixStream::connect(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+            UnixStream::connect(path).map_err(|error| format!("{}: {error}", path.display()))?;
         let watched = stream.try_clone().map_err(|error| error.to_string())?;
         let mut wire = Wire::new(stream).map_err(|error| error.to_string())?;
         let cookie = pulseaudio::cookie_path_from_env()
@@ -265,12 +314,17 @@ impl Client {
             .handle
             .insert_source(
                 Generic::new(watched, Interest::BOTH, Mode::Edge),
-                |_, _, client: &mut Client| {
-                    client.ready();
+                move |_, _, client: &mut Client| {
+                    wake(client);
                     Ok(PostAction::Continue)
                 },
             )
             .map_err(|error| error.error.to_string())?;
+        Ok((wire, source))
+    }
+
+    fn link(&mut self) -> Result<(), String> {
+        let (wire, source) = self.reach(Client::ready)?;
         let deadline = self
             .handle
             .insert_source(Timer::from_duration(ANSWER_WITHIN), |_, (), client| {
@@ -282,7 +336,9 @@ impl Client {
                 TimeoutAction::Drop
             })
             .ok();
-        tracing::debug!(server = %path.display(), "connecting to the sound server");
+        tracing::debug!(server = ?self.server, "connecting to the sound server");
+        // What was taken away on the last connection is asked for again.
+        self.to_meter.clone_from(&self.meters);
         self.link = Some(Link {
             wire,
             source,
@@ -294,17 +350,8 @@ impl Client {
             changed: false,
             choosing: None,
             chosen: 0,
-            levels: self.levels,
-            recording: None,
-            recordings: 0,
-            spectrum: Spectrum::new(),
-            heard: None,
             test: None,
             tests: 0,
-            wanted: self.meters.clone(),
-            meters: Vec::new(),
-            metered: 0,
-            peaks: Vec::new(),
         });
         Ok(())
     }
@@ -319,8 +366,6 @@ impl Client {
                 link.receive(message)?;
             }
             link.advance()?;
-            link.follow_levels()?;
-            link.follow_meters()?;
             link.wire.flush()
         });
         if let Err(error) = result {
@@ -333,8 +378,6 @@ impl Client {
         let met = !std::mem::replace(&mut link.following, true);
         let deadline = met.then(|| link.deadline.take()).flatten();
         let facts = std::mem::take(&mut link.changed).then(|| Box::new(link.facts.clone()));
-        let heard = link.heard.take();
-        let peaks = std::mem::take(&mut link.peaks);
         if met {
             if let Some(deadline) = deadline {
                 self.handle.remove(deadline);
@@ -346,6 +389,68 @@ impl Client {
         if let Some(facts) = facts {
             self.tell(News::Facts(facts));
         }
+        self.record();
+    }
+
+    /// The recorder's socket can be read, or written, or both.
+    fn recorder_ready(&mut self) {
+        let Some(recorder) = &mut self.recorder else {
+            return;
+        };
+        let result = recorder.wire.pump().and_then(|incoming| {
+            for message in incoming {
+                recorder.receive(message)?;
+            }
+            recorder.wire.flush()
+        });
+        match result {
+            Ok(()) => self.record(),
+            Err(error) => self.recorder_lost(&error.to_string()),
+        }
+    }
+
+    /// Record what is wanted now, and stop recording the rest: open the
+    /// recorder once something is wanted, and close it once nothing is.
+    /// Then tell what was recorded since it was last told.
+    fn record(&mut self) {
+        if let Some(recorder) = &mut self.recorder {
+            for source in recorder.taken.drain(..) {
+                self.to_meter.retain(|meter| *meter != source);
+            }
+        }
+        let wanted = self
+            .link
+            .as_ref()
+            .map(|link| link.to_record(self.levels, &self.to_meter))
+            .unwrap_or_default();
+        if self.recorder.is_none() && !wanted.is_nothing() {
+            match self.reach(Client::recorder_ready) {
+                Ok((wire, source)) => {
+                    tracing::debug!("recording, on a connection of its own");
+                    self.recorder = Some(Recorder::new(wire, source));
+                }
+                Err(why) => {
+                    tracing::debug!("nothing can be recorded: {why}");
+                    return;
+                }
+            }
+        }
+        let Some(recorder) = &mut self.recorder else {
+            return;
+        };
+        let followed = recorder
+            .follow(&wanted)
+            .and_then(|()| recorder.wire.flush());
+        if let Err(error) = followed {
+            self.recorder_lost(&error.to_string());
+            return;
+        }
+        let heard = recorder.heard.take();
+        let peaks = std::mem::take(&mut recorder.peaks);
+        if wanted.is_nothing() {
+            tracing::debug!("nothing to record: the recorder is closed");
+            self.close_recorder();
+        }
         if let Some(bands) = heard {
             self.tell(News::Levels(bands));
         }
@@ -354,33 +459,44 @@ impl Client {
         }
     }
 
+    /// Close the recorder, if it is open: the server lets go of each stream
+    /// still on it, answered or not.
+    fn close_recorder(&mut self) {
+        if let Some(recorder) = self.recorder.take() {
+            self.handle.remove(recorder.source);
+        }
+    }
+
+    /// The recorder was cut off, for `why`, while the server may still be
+    /// followed: as if each of its streams had been taken away, its meters
+    /// are not asked for again until the shell asks, and the bars fall. It
+    /// is opened again only when something next calls for a record.
+    fn recorder_lost(&mut self, why: &str) {
+        let Some(recorder) = self.recorder.take() else {
+            return;
+        };
+        self.handle.remove(recorder.source);
+        tracing::debug!("the recorder was cut off: {why}");
+        let taken = recorder.meters.iter().map(|meter| &meter.source);
+        for source in taken.chain(&recorder.taken) {
+            self.to_meter.retain(|meter| meter != source);
+        }
+        if recorder.recording.is_some() {
+            self.tell(News::Levels([0.0; BANDS]));
+        }
+    }
+
     /// Do what the shell asked.
     pub(super) fn ask(&mut self, ask: Ask) {
         if let Ask::Meters(sources) = ask {
+            self.to_meter.clone_from(&sources);
             self.meters = sources;
-            if let Some(link) = &mut self.link {
-                link.wanted = self.meters.clone();
-                let followed = link.follow_meters().and_then(|()| link.wire.flush());
-                if let Err(error) = followed {
-                    self.lost(&error.to_string());
-                }
-            }
+            self.record();
             return;
         }
         if let Ask::Levels(on) = ask {
             self.levels = on;
-            if let Some(link) = &mut self.link {
-                link.levels = on;
-                let followed = link.follow_levels().and_then(|()| link.wire.flush());
-                if let Err(error) = followed {
-                    self.lost(&error.to_string());
-                    return;
-                }
-                let heard = link.heard.take();
-                if let Some(bands) = heard {
-                    self.tell(News::Levels(bands));
-                }
-            }
+            self.record();
             return;
         }
         let Some(link) = self.link.as_mut().filter(|link| link.first.is_empty()) else {
@@ -471,6 +587,8 @@ impl Client {
                 self.handle.remove(deadline);
             }
         }
+        // Nothing is recorded of a server not followed.
+        self.close_recorder();
         if !self.told_gone {
             tracing::info!("no sound server: {why}");
             self.told_gone = true;
@@ -510,18 +628,6 @@ impl Link {
             }
             Incoming::Event(command) => match *command {
                 Command::SubscribeEvent(event) => self.told(event)?,
-                Command::RecordStreamKilled(channel) => {
-                    self.recording
-                        .take_if(|recording| recording.channel == Some(channel));
-                    if let Some(at) = self
-                        .meters
-                        .iter()
-                        .position(|meter| meter.channel == Some(channel))
-                    {
-                        let meter = self.meters.remove(at);
-                        self.wanted.retain(|source| *source != meter.source);
-                    }
-                }
                 Command::Request(request) => {
                     if let Some(test) = self
                         .test
@@ -537,170 +643,37 @@ impl Link {
                 }
                 _ => {}
             },
-            Incoming::Data(channel, data) => self.recorded(channel, &data),
+            // Nothing is recorded on this connection: its one stream plays.
+            Incoming::Data(..) => {}
         }
         Ok(())
     }
 
-    /// Record the default output's monitor if the bars are wanted and
-    /// something plays through it, and stop recording if not, or if another
-    /// output is the default now.
-    fn follow_levels(&mut self) -> io::Result<()> {
-        let wanted = self
+    /// What is to be recorded now: the default output's monitor, if the
+    /// bars are wanted and something plays through it; and each of
+    /// `meters`, with whether it is a monitor. Nothing until the first read
+    /// is whole.
+    fn to_record(&self, levels: bool, meters: &[String]) -> Wanted {
+        if !self.first.is_empty() {
+            return Wanted::default();
+        }
+        let levels = self
             .facts
             .output()
-            .filter(|sink| self.levels && self.first.is_empty() && sink.running)
+            .filter(|sink| levels && sink.running)
             .and_then(|sink| sink.monitor.clone());
-        if self.recording.as_ref().map(|recording| &recording.source) == wanted.as_ref() {
-            return Ok(());
-        }
-        if let Some(recording) = self.recording.take() {
-            if let Some(channel) = recording.channel {
-                self.wire
-                    .send(&Command::DeleteRecordStream(channel), Expect::Done)?;
-            }
-            self.heard = Some([0.0; BANDS]);
-        }
-        let Some(source) = wanted else {
-            return Ok(());
-        };
-        self.recordings += 1;
-        let mut props = Props::new();
-        props.set(Prop::MediaName, c"Sound levels");
-        let record = RecordStreamParams {
-            sample_spec: SampleSpec {
-                format: SampleFormat::Float32Le,
-                channels: 1,
-                sample_rate: RATE,
-            },
-            channel_map: ChannelMap::mono(),
-            source_name: Some(cstring(source.clone())),
-            buffer_attr: BufferAttr {
-                max_length: u32::MAX,
-                target_length: u32::MAX,
-                pre_buffering: u32::MAX,
-                minimum_request_length: u32::MAX,
-                fragment_size: (HOP * 4) as u32,
-            },
-            flags: StreamFlags {
-                adjust_latency: true,
-                no_inhibit_auto_suspend: true,
-                no_move: true,
-                ..StreamFlags::default()
-            },
-            props,
-            ..RecordStreamParams::default()
-        };
-        self.wire.send(
-            &Command::CreateRecordStream(record),
-            Expect::Recording(self.recordings),
-        )?;
-        self.recording = Some(Recording {
-            id: self.recordings,
-            source,
-            channel: None,
-            leftover: Vec::new(),
-        });
-        Ok(())
-    }
-
-    /// Meter the sources wanted, and stop metering the rest, once the
-    /// first read is whole.
-    fn follow_meters(&mut self) -> io::Result<()> {
-        if !self.first.is_empty() {
-            return Ok(());
-        }
-        for meter in std::mem::take(&mut self.meters) {
-            if self.wanted.contains(&meter.source) {
-                self.meters.push(meter);
-            } else if let Some(channel) = meter.channel {
-                self.wire
-                    .send(&Command::DeleteRecordStream(channel), Expect::Done)?;
-            }
-        }
-        for source in self.wanted.clone() {
-            if self.meters.iter().any(|meter| meter.source == source) {
-                continue;
-            }
-            let monitor = self
-                .facts
-                .sinks
-                .iter()
-                .any(|sink| sink.monitor.as_ref() == Some(&source));
-            self.metered += 1;
-            let mut props = Props::new();
-            props.set(Prop::MediaName, c"Meter");
-            let record = RecordStreamParams {
-                sample_spec: SampleSpec {
-                    format: SampleFormat::Float32Le,
-                    channels: 1,
-                    sample_rate: PEAKS,
-                },
-                channel_map: ChannelMap::mono(),
-                source_name: Some(cstring(source.clone())),
-                buffer_attr: BufferAttr {
-                    max_length: u32::MAX,
-                    target_length: u32::MAX,
-                    pre_buffering: u32::MAX,
-                    minimum_request_length: u32::MAX,
-                    // A peak at a time.
-                    fragment_size: 4,
-                },
-                flags: StreamFlags {
-                    peak_detect: true,
-                    adjust_latency: true,
-                    no_inhibit_auto_suspend: monitor,
-                    no_move: true,
-                    ..StreamFlags::default()
-                },
-                props,
-                ..RecordStreamParams::default()
-            };
-            self.wire.send(
-                &Command::CreateRecordStream(record),
-                Expect::Meter(self.metered),
-            )?;
-            self.meters.push(Meter {
-                id: self.metered,
-                source,
-                channel: None,
-            });
-        }
-        Ok(())
-    }
-
-    /// What the stream of `channel` recorded.
-    fn recorded(&mut self, channel: u32, data: &[u8]) {
-        if let Some(meter) = self
-            .meters
+        let meters = meters
             .iter()
-            .find(|meter| meter.channel == Some(channel))
-        {
-            // The newest of the peaks that came at once.
-            if let Some(peak) = data.rchunks_exact(4).next() {
-                let peak = f32::from_le_bytes([peak[0], peak[1], peak[2], peak[3]]);
-                self.peaks.retain(|(source, _)| *source != meter.source);
-                self.peaks.push((meter.source.clone(), peak));
-            }
-            return;
-        }
-        let Some(recording) = self
-            .recording
-            .as_mut()
-            .filter(|recording| recording.channel == Some(channel))
-        else {
-            return;
-        };
-        recording.leftover.extend_from_slice(data);
-        let whole = recording.leftover.len() / 4 * 4;
-        let samples: Vec<f32> = recording.leftover[..whole]
-            .chunks_exact(4)
-            .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .map(|source| {
+                let monitor = self
+                    .facts
+                    .sinks
+                    .iter()
+                    .any(|sink| sink.monitor.as_ref() == Some(source));
+                (source.clone(), monitor)
+            })
             .collect();
-        recording.leftover.drain(..whole);
-        if let Some(bands) = self.spectrum.feed(&samples) {
-            self.heard = Some(bands);
-        }
+        Wanted { levels, meters }
     }
 
     fn replied(&mut self, expect: Expect, reply: Reply) -> io::Result<()> {
@@ -708,11 +681,8 @@ impl Link {
         let changed = match reply {
             Reply::Auth(auth) => {
                 self.wire.version = auth.version.min(MAX_VERSION);
-                let mut props = Props::new();
-                props.set(Prop::ApplicationName, c"perspicax-shell");
-                props.set(Prop::ApplicationId, c"perspicax-shell");
                 self.wire
-                    .send(&Command::SetClientName(props), Expect::Named)?;
+                    .send(&Command::SetClientName(named()), Expect::Named)?;
                 let mask = SubscriptionMask::SINK
                     | SubscriptionMask::SOURCE
                     | SubscriptionMask::CARD
@@ -760,29 +730,8 @@ impl Link {
                 }
                 false
             }
-            Reply::Recording(made) => {
-                let made_for = match expect {
-                    Expect::Recording(id) => self
-                        .recording
-                        .as_mut()
-                        .filter(|recording| recording.id == id)
-                        .map(|recording| &mut recording.channel),
-                    Expect::Meter(id) => self
-                        .meters
-                        .iter_mut()
-                        .find(|meter| meter.id == id)
-                        .map(|meter| &mut meter.channel),
-                    _ => return Ok(()),
-                };
-                match made_for {
-                    Some(channel) => *channel = Some(made.channel),
-                    // Let go of before the server made it.
-                    None => self
-                        .wire
-                        .send(&Command::DeleteRecordStream(made.channel), Expect::Done)?,
-                }
-                false
-            }
+            // Asked for on the recorder alone.
+            Reply::Recording(_) => false,
             Reply::Server(server) => {
                 self.read_first(Expect::Server);
                 let sink = server.default_sink_name.as_deref().map(text);
@@ -910,13 +859,6 @@ impl Link {
             Expect::Playback(id) => {
                 tracing::warn!("the test sound could not be played: {error:?}");
                 self.test.take_if(|test| test.id == id);
-            }
-            Expect::Meter(id) => {
-                tracing::debug!("a source could not be metered: {error:?}");
-                if let Some(at) = self.meters.iter().position(|meter| meter.id == id) {
-                    let meter = self.meters.remove(at);
-                    self.wanted.retain(|source| *source != meter.source);
-                }
             }
             _ => tracing::warn!("the sound server refused {expect:?}: {error:?}"),
         }
@@ -1130,6 +1072,277 @@ impl Link {
         }
         self.wire.send(command, expect)
     }
+}
+
+impl Recorder {
+    /// A recorder on `wire`, its handshake begun, watched by `source`.
+    fn new(wire: Wire, source: RegistrationToken) -> Self {
+        Self {
+            wire,
+            source,
+            met: false,
+            recording: None,
+            recordings: 0,
+            spectrum: Spectrum::new(),
+            heard: None,
+            meters: Vec::new(),
+            metered: 0,
+            peaks: Vec::new(),
+            taken: Vec::new(),
+        }
+    }
+
+    /// Act on `message`.
+    fn receive(&mut self, message: Incoming) -> io::Result<()> {
+        match message {
+            Incoming::Reply(expect, reply) => self.replied(expect, reply)?,
+            Incoming::Refused(Expect::Auth | Expect::Named, error) => {
+                return Err(io::Error::other(format!(
+                    "the server refused the handshake: {error:?}"
+                )));
+            }
+            Incoming::Refused(expect, error) => self.refused(expect, error),
+            Incoming::Unread(_) => {}
+            Incoming::Event(command) => {
+                if let Command::RecordStreamKilled(channel) = *command {
+                    self.recording
+                        .take_if(|recording| recording.channel == Some(channel));
+                    if let Some(at) = self
+                        .meters
+                        .iter()
+                        .position(|meter| meter.channel == Some(channel))
+                    {
+                        let meter = self.meters.remove(at);
+                        self.taken.push(meter.source);
+                    }
+                }
+            }
+            Incoming::Data(channel, data) => self.recorded(channel, &data),
+        }
+        Ok(())
+    }
+
+    fn replied(&mut self, expect: Expect, reply: Reply) -> io::Result<()> {
+        match reply {
+            Reply::Auth(auth) => {
+                self.wire.version = auth.version.min(MAX_VERSION);
+                self.wire
+                    .send(&Command::SetClientName(named()), Expect::Named)?;
+            }
+            // pipewire-pulse answers once it has read what the server holds
+            // for this client, and finds the sources it is to record by.
+            Reply::Named(_) => self.met = true,
+            Reply::Recording(made) => {
+                let made_for = match expect {
+                    Expect::Recording(id) => self
+                        .recording
+                        .as_mut()
+                        .filter(|recording| recording.id == id)
+                        .map(|recording| &mut recording.channel),
+                    Expect::Meter(id) => self
+                        .meters
+                        .iter_mut()
+                        .find(|meter| meter.id == id)
+                        .map(|meter| &mut meter.channel),
+                    _ => return Ok(()),
+                };
+                match made_for {
+                    Some(channel) => *channel = Some(made.channel),
+                    // Let go of before the server made it.
+                    None => self
+                        .wire
+                        .send(&Command::DeleteRecordStream(made.channel), Expect::Done)?,
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn refused(&mut self, expect: Expect, error: PulseError) {
+        match expect {
+            Expect::Meter(id) => {
+                tracing::debug!("a source could not be metered: {error:?}");
+                if let Some(at) = self.meters.iter().position(|meter| meter.id == id) {
+                    let meter = self.meters.remove(at);
+                    self.taken.push(meter.source);
+                }
+            }
+            _ => tracing::warn!("the sound server refused {expect:?}: {error:?}"),
+        }
+    }
+
+    /// Record what is `wanted`, and stop recording the rest, once the
+    /// server has met the recorder.
+    fn follow(&mut self, wanted: &Wanted) -> io::Result<()> {
+        if !self.met {
+            return Ok(());
+        }
+        self.follow_levels(wanted.levels.as_ref())?;
+        self.follow_meters(&wanted.meters)
+    }
+
+    /// Record `wanted`, the monitor the bars read, and stop recording any
+    /// other.
+    fn follow_levels(&mut self, wanted: Option<&String>) -> io::Result<()> {
+        if self.recording.as_ref().map(|recording| &recording.source) == wanted {
+            return Ok(());
+        }
+        if let Some(recording) = self.recording.take() {
+            if let Some(channel) = recording.channel {
+                self.wire
+                    .send(&Command::DeleteRecordStream(channel), Expect::Done)?;
+            } else {
+                tracing::debug!("the bars' recording was let go of before the server made it");
+            }
+            self.heard = Some([0.0; BANDS]);
+        }
+        let Some(source) = wanted.cloned() else {
+            return Ok(());
+        };
+        self.recordings += 1;
+        let mut props = Props::new();
+        props.set(Prop::MediaName, c"Sound levels");
+        let record = RecordStreamParams {
+            sample_spec: SampleSpec {
+                format: SampleFormat::Float32Le,
+                channels: 1,
+                sample_rate: RATE,
+            },
+            channel_map: ChannelMap::mono(),
+            source_name: Some(cstring(source.clone())),
+            buffer_attr: BufferAttr {
+                max_length: u32::MAX,
+                target_length: u32::MAX,
+                pre_buffering: u32::MAX,
+                minimum_request_length: u32::MAX,
+                fragment_size: (HOP * 4) as u32,
+            },
+            flags: StreamFlags {
+                adjust_latency: true,
+                no_inhibit_auto_suspend: true,
+                no_move: true,
+                ..StreamFlags::default()
+            },
+            props,
+            ..RecordStreamParams::default()
+        };
+        self.wire.send(
+            &Command::CreateRecordStream(record),
+            Expect::Recording(self.recordings),
+        )?;
+        self.recording = Some(Recording {
+            id: self.recordings,
+            source,
+            channel: None,
+            leftover: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Meter the sources `wanted`, each with whether it is a monitor, and
+    /// stop metering the rest.
+    fn follow_meters(&mut self, wanted: &[(String, bool)]) -> io::Result<()> {
+        for meter in std::mem::take(&mut self.meters) {
+            if wanted.iter().any(|(source, _)| *source == meter.source) {
+                self.meters.push(meter);
+            } else if let Some(channel) = meter.channel {
+                self.wire
+                    .send(&Command::DeleteRecordStream(channel), Expect::Done)?;
+            } else {
+                tracing::debug!(
+                    source = meter.source,
+                    "a meter was let go of before the server made it"
+                );
+            }
+        }
+        for (source, monitor) in wanted {
+            if self.meters.iter().any(|meter| meter.source == *source) {
+                continue;
+            }
+            self.metered += 1;
+            let mut props = Props::new();
+            props.set(Prop::MediaName, c"Meter");
+            let record = RecordStreamParams {
+                sample_spec: SampleSpec {
+                    format: SampleFormat::Float32Le,
+                    channels: 1,
+                    sample_rate: PEAKS,
+                },
+                channel_map: ChannelMap::mono(),
+                source_name: Some(cstring(source.clone())),
+                buffer_attr: BufferAttr {
+                    max_length: u32::MAX,
+                    target_length: u32::MAX,
+                    pre_buffering: u32::MAX,
+                    minimum_request_length: u32::MAX,
+                    // A peak at a time.
+                    fragment_size: 4,
+                },
+                flags: StreamFlags {
+                    peak_detect: true,
+                    adjust_latency: true,
+                    no_inhibit_auto_suspend: *monitor,
+                    no_move: true,
+                    ..StreamFlags::default()
+                },
+                props,
+                ..RecordStreamParams::default()
+            };
+            self.wire.send(
+                &Command::CreateRecordStream(record),
+                Expect::Meter(self.metered),
+            )?;
+            self.meters.push(Meter {
+                id: self.metered,
+                source: source.clone(),
+                channel: None,
+            });
+        }
+        Ok(())
+    }
+
+    /// What the stream of `channel` recorded.
+    fn recorded(&mut self, channel: u32, data: &[u8]) {
+        if let Some(meter) = self
+            .meters
+            .iter()
+            .find(|meter| meter.channel == Some(channel))
+        {
+            // The newest of the peaks that came at once.
+            if let Some(peak) = data.rchunks_exact(4).next() {
+                let peak = f32::from_le_bytes([peak[0], peak[1], peak[2], peak[3]]);
+                self.peaks.retain(|(source, _)| *source != meter.source);
+                self.peaks.push((meter.source.clone(), peak));
+            }
+            return;
+        }
+        let Some(recording) = self
+            .recording
+            .as_mut()
+            .filter(|recording| recording.channel == Some(channel))
+        else {
+            return;
+        };
+        recording.leftover.extend_from_slice(data);
+        let whole = recording.leftover.len() / 4 * 4;
+        let samples: Vec<f32> = recording.leftover[..whole]
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .collect();
+        recording.leftover.drain(..whole);
+        if let Some(bands) = self.spectrum.feed(&samples) {
+            self.heard = Some(bands);
+        }
+    }
+}
+
+/// The shell, as the server names its clients.
+fn named() -> Props {
+    let mut props = Props::new();
+    props.set(Prop::ApplicationName, c"perspicax-shell");
+    props.set(Prop::ApplicationId, c"perspicax-shell");
+    props
 }
 
 /// A sink, as the shell keeps it.
@@ -1817,6 +2030,20 @@ mod tests {
         }
     }
 
+    /// Wait until `fake` holds `count` record streams, made or not.
+    fn until_recordings(fake: &Fake, count: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while fake.recordings() != count {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the server holds {} record streams, not {count}: {:?}",
+                fake.recordings(),
+                fake.asked()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn the_default_outputs_monitor_is_recorded_only_while_wanted_and_playing() {
         let fake = Fake::start("levels");
@@ -1957,6 +2184,9 @@ mod tests {
     #[test]
     fn a_meters_peaks_are_told_the_newest_and_it_goes_once_not_asked_for() {
         let fake = Fake::start("meter");
+        // An output's meter is asked for while it plays: one of an output
+        // asleep is not made until it wakes.
+        fake.play(0, true);
         let (running, heard) = follow(&fake);
         heard.facts();
         let monitor = format!("{SPEAKERS}.monitor");
@@ -1998,6 +2228,90 @@ mod tests {
             .filter(|asked| asked.starts_with("record peaks of nowhere"))
             .count();
         assert_eq!(tries, 1);
+    }
+
+    #[test]
+    fn a_meter_let_go_of_before_its_sleeping_sink_woke_goes_with_the_recorder_once_nothing_is_metered()
+     {
+        let fake = Fake::start("meter-asleep");
+        let (running, heard) = follow(&fake);
+        heard.facts();
+        let monitor = format!("{SPEAKERS}.monitor");
+        // As one asked for while its output played, which stopped before
+        // the server made it: the server makes it only once the output
+        // plays again, and it has no channel to let go of it by.
+        running.ask(Ask::Meters(vec![monitor.clone()]));
+        until_asked(&fake, &format!("record peaks of {monitor}"));
+        assert_eq!(fake.recordings(), 1, "unmade while its output sleeps");
+        running.ask(Ask::Meters(Vec::new()));
+        until_recordings(&fake, 0);
+        assert_eq!(fake.clients(), 1, "the shell's own connection alone");
+    }
+
+    #[test]
+    fn the_bars_recording_let_go_of_before_the_server_made_it_goes_with_the_recorder_once_nothing_plays()
+     {
+        let fake = Fake::start("levels-unmade");
+        let (running, heard) = follow(&fake);
+        heard.facts();
+        running.ask(Ask::Levels(true));
+        fake.hold_records();
+        fake.play(0, true);
+        until_asked(&fake, &format!("record {SPEAKERS}.monitor"));
+        assert_eq!(fake.recordings(), 1, "asked for, not yet made");
+        fake.play(0, false);
+        until_recordings(&fake, 0);
+    }
+
+    #[test]
+    fn a_meter_let_go_of_before_the_server_made_it_goes_as_soon_as_it_is_made() {
+        let fake = Fake::start("meter-made-late");
+        let (running, heard) = follow(&fake);
+        heard.facts();
+        let monitor = format!("{SPEAKERS}.monitor");
+        running.ask(Ask::Meters(vec![monitor.clone(), MIC.to_owned()]));
+        until_asked(&fake, &format!("record peaks of {MIC}, waking it"));
+        until_asked(&fake, &format!("record peaks of {monitor}"));
+        let mic = fake.recording().expect("the input's meter, made");
+        assert_eq!(fake.clients(), 2, "the shell's connection and its recorder");
+        running.ask(Ask::Meters(vec![MIC.to_owned()]));
+        // Asks are done in turn: once the mute is asked for, the output's
+        // meter has been let go of.
+        running.ask(Ask::Mute {
+            target: Target::Sink(SPEAKERS.to_owned()),
+            on: true,
+        });
+        until_asked(&fake, &format!("mute Some({SPEAKERS:?})"));
+        // The output plays: the server makes the meter, and it goes.
+        fake.play(0, true);
+        until_recordings(&fake, 1);
+        assert_eq!(fake.recording(), Some(mic), "the input's meter stays");
+    }
+
+    #[test]
+    fn meters_still_asked_for_are_made_again_once_a_lost_server_is_back() {
+        let fake = Fake::start("meter-back");
+        let (running, heard) = follow(&fake);
+        heard.facts();
+        running.ask(Ask::Meters(vec![MIC.to_owned()]));
+        until_recordings(&fake, 1);
+        fake.hang_up();
+        assert!(matches!(heard.next(), News::Gone));
+        heard.facts();
+        // Asked for once each time the server was reached.
+        let line = format!("record peaks of {MIC}, waking it");
+        let asked = || fake.asked().iter().filter(|asked| **asked == line).count();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while asked() < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "not asked again: {:?}",
+                fake.asked()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        until_recordings(&fake, 1);
+        assert_eq!(asked(), 2);
     }
 
     #[test]
