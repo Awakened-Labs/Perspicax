@@ -24,6 +24,15 @@
 //! program names only its own windows to another, so no program but the one
 //! in use can have a dialog opened with the keys this way.
 //!
+//! And a prompt a daemon draws for them, in the moment they may be waiting
+//! on it: pinentry for the gpg-agent their `git commit -S` asked, a polkit
+//! agent's dialog for `pkexec`, a keyring's unlock (#268). The person asked
+//! for each through another program, and the daemon was started at login or
+//! by D-Bus, never by their press. So a window of a program `[focus]
+//! prompts` names takes the keys as it opens just after an Enter or a click,
+//! with nothing pressed since ([`Compositor::awaited`]), and never while they
+//! type: one opening mid-password opens without them, as any window does.
+//!
 //! Any other window opens without them, as Mutter and KWin open one: just
 //! beneath the window in use, in sight but behind what the person is typing
 //! into, not told it is active, and marked as wanting attention until it
@@ -84,9 +93,42 @@ impl Compositor {
 
     /// The same, of a window `client` maps: Xwayland, for an X11 window,
     /// which may have no surface yet. Nobody asked for a window of a client
-    /// gone.
+    /// gone. Or a prompt they may be waiting on, if `client` is a program
+    /// that draws one ([`Self::awaited`]); Xwayland never is, being every X
+    /// client at once, and an X11 prompt is known once XRes names its
+    /// process.
     pub(crate) fn client_asked_for(&self, client: Option<&Client>) -> bool {
-        self.asked_by(client, Attention::asked_for)
+        if self.asked_by(client, Attention::asked_for) {
+            return true;
+        }
+        let Some(state) = client.and_then(|client| client.get_data::<ClientState>()) else {
+            return false;
+        };
+        let origin = state.origin();
+        let exe = state.file().of(&origin);
+        let awaited = self.awaited(exe);
+        if awaited {
+            tracing::info!(
+                exe = exe.map(|exe| exe.path),
+                "a prompt opened just after the person's Enter or click: it takes the keys"
+            );
+        }
+        awaited
+    }
+
+    /// Whether a window of a program running `exe` is a prompt the person
+    /// may be waiting on (#268): a program `[focus] prompts` names, opening
+    /// it just after their Enter or click, with nothing pressed since
+    /// ([`Attention::awaits`]). pinentry, for the gpg-agent their `git
+    /// commit -S` asked, descends from no program their press reached.
+    ///
+    /// Never while the session is locked. A prompt that opens behind the
+    /// lock is asked for by nobody looking at it, and one told it was would
+    /// be handed the keys at unlock, where the person may type anything.
+    pub(crate) fn awaited(&self, exe: Option<perspicax_policy::Exe<'_>>) -> bool {
+        self.lock.is_none()
+            && self.attention.awaits(Instant::now())
+            && self.backend.prompts().admits(exe)
     }
 
     /// Whether the person asked for a launcher `surface`'s client shows, as

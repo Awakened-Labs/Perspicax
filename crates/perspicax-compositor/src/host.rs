@@ -107,6 +107,11 @@ pub enum Command {
     /// Headless only, and headless starts with none, so a hand moves no
     /// keyboard until a test says how it should.
     FocusPolicy(perspicax_policy::Focus),
+    /// Put a list of prompt programs in force, as a seat does when a save
+    /// changes `[focus] prompts`: a window of one takes the keys as it opens
+    /// just after the person's Enter or click (#268). Headless only, and
+    /// headless starts with none.
+    Prompts(perspicax_policy::Prompts),
     /// Click a button at a point on the desk, in global coordinates, with
     /// `mods` held, as a person's hand would: the pointer goes there, a
     /// `[mouse]` binding is looked for, and whatever no binding takes goes to

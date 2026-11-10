@@ -27,6 +27,12 @@
 //! as it opens, over that window. One opened for a program the person has
 //! left opens without them, as any other window.
 //!
+//! And a prompt a daemon draws for the person, pinentry or a polkit agent's
+//! dialog, is asked for in the moment they may be waiting on it (#268): a
+//! program named a prompt opens a window with the keys just after their
+//! Enter or click, with nothing pressed since, though the press never reached
+//! or started it. Never while they type.
+//!
 //! Each test has programs, each a client of its own with a window and a
 //! keyboard, and some a program in a process of its own: a copy of this
 //! binary running [`window_probe`], started by this one, as a terminal
@@ -47,9 +53,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::{Desk, Ear, Session, hand_over, heard, until};
+use common::{Desk, Ear, Renamed, Session, hand_over, heard, until};
 use perspicax_compositor::{Backend, Command as Do};
 use perspicax_index::{HostFacts, SurfaceFacts, SurfaceKind};
+use perspicax_policy::{Program, Prompts};
 use perspicax_protocols::shell::v1::client::perspicax_shell_v1::WindowState;
 use smithay_client_toolkit::shell::{WaylandSurface as _, wlr_layer::KeyboardInteractivity};
 use wayland_client::{EventQueue, Proxy as _, QueueHandle, backend::ObjectId, globals::GlobalList};
@@ -529,6 +536,213 @@ fn a_dialog_another_program_opens_for_a_program_not_in_use_opens_without_the_key
     ));
 }
 
+/// A program that draws prompts for a daemon, called as gnome-keyring's
+/// prompter is, and named a prompt by its whole path, this very file. Kept
+/// until its test is done: gone while its probe runs, the probe's file
+/// would be deleted, and no longer the one the list names.
+fn prompter(session: &Session, tag: &str) -> Renamed {
+    let prompter = Renamed::called("gcr-prompter", tag);
+    session.command(Do::Prompts(Prompts::new(vec![Program::parse(
+        &prompter.0.to_string_lossy(),
+    )])));
+    prompter
+}
+
+/// The daemon `exe` is, connected since before the person pressed anything,
+/// as a polkit agent is since login: no press of theirs started it. Its
+/// window opens once the gate does.
+fn daemon(session: &Session, exe: &Path) -> Probe {
+    let probe = Probe::start_as(session, Steps::ConnectWaitWindow, exe);
+    probe.connected();
+    probe
+}
+
+/// The issue's own case (#268). The person signs a commit at the terminal,
+/// with an Enter, and the daemon it asked draws its prompt: a program the
+/// Enter never reached or started, as gpg-agent's pinentry is, or a polkit
+/// agent's dialog for `pkexec`. Named a prompt, it opens with the keys, on
+/// top, and what the person types next goes to it.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_prompt_opens_with_the_keys_after_an_enter_at_the_terminal() {
+    let session = seated("withheld-prompt-enter");
+    let prompter = prompter(&session, "withheld-prompt-enter");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let probe = daemon(&session, &prompter.0);
+    types(&session, &mut desk, &mut queue, "git commit -S\n");
+
+    probe.open_gate();
+    assert!(probe.given_keys(&session), "the prompt has the keys");
+    until(&mut queue, &mut desk, |desk| !has_keys(desk, &ear, 0));
+    assert_eq!(on_top(&session.facts.read()).as_deref(), Some("probe"));
+    drop(probe);
+    session.stop((desk, queue));
+}
+
+/// The person has typed since the Enter: a letter of a password, say, at
+/// the prompt the terminal showed. A prompt opening now is none they wait
+/// on, and opens without the keys, as any window does while they type.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_prompt_opens_without_the_keys_once_the_person_has_typed_since_the_enter() {
+    let session = seated("withheld-prompt-typed");
+    let prompter = prompter(&session, "withheld-prompt-typed");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let probe = daemon(&session, &prompter.0);
+    types(&session, &mut desk, &mut queue, "sudo true\n");
+    types(&session, &mut desk, &mut queue, "hunt");
+
+    probe.open_gate();
+    assert!(!probe.given_keys(&session), "it has none");
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert!(has_keys(&desk, &ear, 0), "the terminal keeps the keys");
+    drop(probe);
+    session.stop((desk, queue));
+}
+
+/// Only a program named a prompt: one that is not opens without the keys,
+/// Enter or no Enter, as before.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_program_not_named_a_prompt_opens_without_the_keys_after_an_enter() {
+    let session = seated("withheld-prompt-unnamed");
+    let _prompter = prompter(&session, "withheld-prompt-unnamed");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let probe = daemon(&session, &std::env::current_exe().expect("this binary"));
+    types(&session, &mut desk, &mut queue, "git commit -S\n");
+
+    probe.open_gate();
+    assert!(!probe.given_keys(&session), "it has none");
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert!(has_keys(&desk, &ear, 0), "the terminal keeps the keys");
+    drop(probe);
+    session.stop((desk, queue));
+}
+
+/// A prompt named bare is the copy the system installed. Anything merely
+/// called so, as this one is in a folder the person may write, is not it:
+/// a program on the list may take the keys from them.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_prompt_named_bare_is_only_the_systems_copy() {
+    let session = seated("withheld-prompt-bare");
+    let called = Renamed::called("gcr-prompter", "withheld-prompt-bare");
+    session.command(Do::Prompts(Prompts::new(vec![Program::parse(
+        "gcr-prompter",
+    )])));
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let probe = daemon(&session, &called.0);
+    types(&session, &mut desk, &mut queue, "git commit -S\n");
+
+    probe.open_gate();
+    assert!(!probe.given_keys(&session), "it has none");
+    queue.roundtrip(&mut desk).expect("dispatch");
+    assert!(has_keys(&desk, &ear, 0), "the terminal keeps the keys");
+    drop(probe);
+    session.stop((desk, queue));
+}
+
+/// The person presses Enter, and locks the session before the prompt comes:
+/// it opens behind the lock, where nobody waits on it, and without the keys.
+/// Told it was asked for, it would be handed them as the session unlocks,
+/// where the person may type anything; the keys go back to the terminal.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_prompt_opening_behind_the_lock_takes_no_keys_at_unlock() {
+    let session = seated("withheld-prompt-locked");
+    let prompter = prompter(&session, "withheld-prompt-locked");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let probe = daemon(&session, &prompter.0);
+    types(&session, &mut desk, &mut queue, "git commit -S\n");
+    let (mut locker, mut locker_queue, locker_qh, locker_globals) = session.client();
+    let locker_ear = locker.bind_keyboard(&locker_globals, &locker_qh);
+    until(&mut locker_queue, &mut locker, |locker| {
+        !locker.outputs_empty()
+    });
+    locker.lock(&locker_globals, &locker_qh);
+    until(&mut locker_queue, &mut locker, |locker| locker.locked);
+    // Covered at once, as swaylock covers every monitor: its cover has the
+    // keys, as the person types the password.
+    let cover = locker.cover(&locker_qh, "HEADLESS-1", 0xff20_2020);
+    until(&mut locker_queue, &mut locker, |_| {
+        heard(&locker_ear).entered.as_ref() == Some(&cover.id())
+    });
+    until(&mut queue, &mut desk, |desk| !has_keys(desk, &ear, 0));
+
+    probe.open_gate();
+    session.wait_for(|facts| titled(facts, "probe").is_some());
+    locker.unlock();
+    locker_queue.roundtrip(&mut locker).expect("unlocked");
+    until(&mut queue, &mut desk, |desk| has_keys(desk, &ear, 0));
+    assert!(
+        !given_keys(&session.facts.read(), "probe"),
+        "the prompt has none"
+    );
+    drop(locker_ear);
+    drop(probe);
+    session.stop(((desk, queue), (locker, locker_queue)));
+}
+
+/// A GUI's Unlock clicked, and a polkit agent's dialog comes up for it: a
+/// click starts something, as an Enter does.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_prompt_opens_with_the_keys_after_a_click_on_the_window_in_use() {
+    use perspicax_policy::{Button, Mods};
+
+    let session = seated("withheld-prompt-click");
+    let prompter = prompter(&session, "withheld-prompt-click");
+    let (mut desk, mut queue, qh, globals, ear) = terminal(&session);
+    desk.bind_pointer(&globals, &qh);
+    queue.roundtrip(&mut desk).expect("a pointer bound");
+    let probe = daemon(&session, &prompter.0);
+    let at = session
+        .wait_for(|facts| titled(facts, "terminal").is_some_and(drawn))
+        .surfaces()
+        .iter()
+        .find(|surface| surface.title.as_deref() == Some("terminal"))
+        .map(|surface| surface.geometry)
+        .expect("waited for");
+    // Its middle.
+    #[expect(clippy::cast_possible_truncation, reason = "a point on the desk")]
+    session.command(Do::Click {
+        at: (
+            ((at.x0 + at.x1) / 2.0) as i32,
+            ((at.y0 + at.y1) / 2.0) as i32,
+        ),
+        button: Button::Left,
+        mods: Mods::default(),
+    });
+    until(&mut queue, &mut desk, |desk| desk.pressed.is_some());
+
+    probe.open_gate();
+    assert!(probe.given_keys(&session), "the prompt has the keys");
+    until(&mut queue, &mut desk, |desk| !has_keys(desk, &ear, 0));
+    drop(probe);
+    session.stop((desk, queue));
+}
+
+/// A binding of the person's starts something -- `pass` from a menu of
+/// their own, say -- and the prompt it asks for comes up: a binding that
+/// starts a program starts something, as an Enter does.
+#[cfg(feature = "capture")]
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_prompt_opens_with_the_keys_after_a_binding_starts_a_program() {
+    let session = seated("withheld-prompt-binding");
+    let prompter = prompter(&session, "withheld-prompt-binding");
+    let (mut desk, mut queue, _, _, ear) = terminal(&session);
+    let probe = daemon(&session, &prompter.0);
+    handed(&session);
+
+    probe.open_gate();
+    assert!(probe.given_keys(&session), "the prompt has the keys");
+    until(&mut queue, &mut desk, |desk| !has_keys(desk, &ear, 0));
+    drop(probe);
+    session.stop((desk, queue));
+}
+
 /// Whether a window has drawn, so has a size.
 fn drawn(window: &SurfaceFacts) -> bool {
     window.geometry.x1 > window.geometry.x0
@@ -870,6 +1084,15 @@ struct Probe {
 
 impl Probe {
     fn start(session: &Session, steps: Steps) -> Self {
+        Self::start_as(
+            session,
+            steps,
+            &std::env::current_exe().expect("this test's binary"),
+        )
+    }
+
+    /// One running from `exe`, a copy of this binary under another name.
+    fn start_as(session: &Session, steps: Steps, exe: &Path) -> Self {
         // Beside the session's socket, and named for it: never the socket.
         let dir = std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR");
         let gate = Path::new(&dir).join(format!("{}.gate", session.socket()));
@@ -877,7 +1100,7 @@ impl Probe {
         let _ = std::fs::remove_file(connected(&gate));
         // Its panics on stderr, beside this test's; its harness's report
         // nowhere.
-        let child = Command::new(std::env::current_exe().expect("this test's binary"))
+        let child = Command::new(exe)
             .args(["--exact", "window_probe", "--ignored", "--nocapture"])
             .env(PROBE, session.socket())
             .env(STEPS, steps.name())

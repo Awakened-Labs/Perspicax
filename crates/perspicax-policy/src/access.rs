@@ -37,6 +37,11 @@
 //! agent whose writes it holds back. [`Never`] names them. It is known by
 //! the executable too, with the same caveat, which here errs the safe way: a
 //! name that matches more than was meant only refuses more.
+//!
+//! And some programs draw a prompt for a daemon -- pinentry, a polkit
+//! agent, a keyring's unlock -- whose window may take the keys as it opens
+//! just after the person's Enter or click ([`Prompts`], #268). Known the
+//! same way, a bare name is the system's copy, as for the lock.
 
 use std::path::Path;
 
@@ -314,9 +319,7 @@ impl Rule {
         match self {
             Self::Off => false,
             Self::Any => true,
-            Self::Only(programs) => exe
-                .filter(|exe| !exe.path.ends_with(" (deleted)"))
-                .is_some_and(|exe| programs.iter().any(|program| program.admits(exe))),
+            Self::Only(programs) => lists(programs, exe),
         }
     }
 
@@ -359,6 +362,105 @@ impl Rule {
             Self::Off | Self::Any => Vec::new(),
             Self::Only(programs) => programs.iter().map(Program::spelled).collect(),
         }
+    }
+}
+
+/// Whether one of `programs` is a client running `exe`. `None` is a client
+/// whose executable is unknown, and one an upgrade has replaced since it
+/// started is no longer the file the list names: neither is any of them.
+fn lists(programs: &[Program], exe: Option<Exe<'_>>) -> bool {
+    exe.filter(|exe| !exe.path.ends_with(" (deleted)"))
+        .is_some_and(|exe| programs.iter().any(|program| program.admits(exe)))
+}
+
+/// The programs that draw a prompt for a daemon, `[focus] prompts`: a
+/// window of one takes the keys as it opens just after the person's Enter
+/// or click, when they may be waiting on it (#268,
+/// [`crate::Attention::awaits`]).
+///
+/// pinentry, which gpg-agent starts for `git commit -S`; a polkit agent's
+/// dialog, for `pkexec`; a keyring's unlock. The person asked for each, but
+/// through another program, and each descends from a daemon their press
+/// never reached or started, so nothing else says they asked for it.
+///
+/// A program is known by its executable, as for [`Rule::admits`]. And
+/// here a bare name is the copy the system installed ([`Program::Installed`],
+/// as `[protocols] session-lock` reads one): a program on this list may take
+/// the keys from the person, so one named so in their own folders is not it.
+/// A full path names that one file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Prompts(Vec<Program>);
+
+impl Prompts {
+    /// These programs, each bare name read as the system's copy.
+    #[must_use]
+    pub fn new(programs: Vec<Program>) -> Self {
+        Self(programs.into_iter().map(Program::installed).collect())
+    }
+
+    /// The prompts a person meets, by the names their packages install them
+    /// under -- the file itself, never a link to it such as `pinentry`, as
+    /// the kernel names what a process runs:
+    ///
+    /// - pinentry, in each of its toolkits. `pinentry-gtk` is Arch's name
+    ///   for `pinentry-gtk-2`;
+    /// - gcr's prompter, which unlocks GNOME's keyring and draws
+    ///   pinentry-gnome3's prompt for it, and its askpass helpers;
+    /// - KWallet's daemon, under each of its names, and KDE's askpass;
+    /// - the polkit agents of GNOME, KDE, MATE, LXQt, LXDE, Xfce and
+    ///   Hyprland.
+    ///
+    /// Not the desktop portal's backends. A dialog one opens for a window of
+    /// the program in use takes the keys already, named through
+    /// xdg-foreign (#235); one opened for no window may be consent to a
+    /// screencast, which should not come up with the keys at a moment
+    /// another program picks.
+    #[must_use]
+    pub fn usual() -> Self {
+        const USUAL: [&str; 21] = [
+            "pinentry-gnome3",
+            "pinentry-gtk",
+            "pinentry-gtk-2",
+            "pinentry-qt",
+            "pinentry-qt5",
+            "pinentry-fltk",
+            "pinentry-efl",
+            "gcr-prompter",
+            "gcr-ssh-askpass",
+            "gcr4-ssh-askpass",
+            "kwalletd5",
+            "kwalletd6",
+            "ksecretd",
+            "ksshaskpass",
+            "polkit-gnome-authentication-agent-1",
+            "polkit-kde-authentication-agent-1",
+            "polkit-mate-authentication-agent-1",
+            "lxqt-policykit-agent",
+            "lxpolkit",
+            "xfce-polkit",
+            "hyprpolkitagent",
+        ];
+        Self::new(USUAL.into_iter().map(Program::parse).collect())
+    }
+
+    /// Whether a client running `exe` is one of these programs. `None` is a
+    /// client whose executable is unknown, which none is.
+    #[must_use]
+    pub fn admits(&self, exe: Option<Exe<'_>>) -> bool {
+        lists(&self.0, exe)
+    }
+
+    /// The programs it names, as written.
+    #[must_use]
+    pub fn named(&self) -> Vec<&str> {
+        self.0.iter().map(Program::spelled).collect()
+    }
+
+    /// The programs it names, for a list in words to tell a name from a
+    /// path.
+    #[must_use]
+    pub fn programs(&self) -> &[Program] {
+        &self.0
     }
 }
 
@@ -758,6 +860,67 @@ mod tests {
         assert_eq!(never.naming("/usr/bin/wallet"), None, "another wallet");
         assert_eq!(never.named(), ["ennius", "/opt/wallet/bin/wallet"]);
         assert!(Never::FLOOR.named().is_empty());
+    }
+
+    /// A program on the list may take the keys, so anything merely called
+    /// so in the person's own folders is not it.
+    #[test]
+    fn a_prompt_named_bare_is_only_the_systems_copy() {
+        let prompts = Prompts::new(vec![Program::parse("pinentry-qt")]);
+        assert!(prompts.admits(Some(Exe::systems("/usr/bin/pinentry-qt"))));
+        assert!(!prompts.admits(Some(Exe::persons("/home/me/bin/pinentry-qt"))));
+        assert!(!prompts.admits(Some(Exe::systems("/usr/bin/pinentry-qt5"))));
+        assert_eq!(prompts.named(), ["pinentry-qt"]);
+    }
+
+    #[test]
+    fn a_prompt_named_by_path_is_that_file_alone() {
+        let prompts = Prompts::new(vec![Program::parse("/opt/p/bin/prompt")]);
+        assert!(prompts.admits(Some(Exe::persons("/opt/p/bin/prompt"))));
+        assert!(!prompts.admits(Some(Exe::systems("/usr/bin/prompt"))));
+        let elsewhere = Exe {
+            path: "/opt/p/bin/prompt",
+            here: false,
+            installed: false,
+        };
+        assert!(!prompts.admits(Some(elsewhere)), "mounts of its own");
+    }
+
+    #[test]
+    fn a_deleted_or_unknown_executable_is_no_prompt() {
+        let prompts = Prompts::usual();
+        assert!(!prompts.admits(None));
+        assert!(!prompts.admits(Some(Exe::systems("/usr/libexec/gcr-prompter (deleted)"))));
+        assert!(prompts.admits(Some(Exe::systems("/usr/libexec/gcr-prompter"))));
+    }
+
+    #[test]
+    fn the_usual_prompts_are_the_systems_copies_and_no_portal() {
+        let prompts = Prompts::usual();
+        for program in prompts.programs() {
+            assert!(
+                matches!(program, Program::Installed(_)),
+                "{program:?} is not the system's copy"
+            );
+        }
+        for portal in [
+            "/usr/libexec/xdg-desktop-portal-gtk",
+            "/usr/libexec/xdg-desktop-portal-gnome",
+            "/usr/libexec/xdg-desktop-portal-kde",
+        ] {
+            assert!(!prompts.admits(Some(Exe::systems(portal))), "{portal}");
+        }
+        assert!(prompts.admits(Some(Exe::systems(
+            "/usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1"
+        ))));
+        assert!(prompts.admits(Some(Exe::systems("/usr/bin/pinentry-gtk-2"))));
+    }
+
+    #[test]
+    fn no_prompts_admit_nothing() {
+        let none = Prompts::default();
+        assert!(!none.admits(Some(Exe::systems("/usr/bin/pinentry-qt"))));
+        assert!(none.named().is_empty());
     }
 
     #[test]

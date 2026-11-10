@@ -18,7 +18,7 @@
 use std::sync::{Arc, PoisonError, RwLock};
 
 use perspicax_node::Origin;
-use perspicax_policy::{Access, Exe, Protocol, Rule};
+use perspicax_policy::{Access, Protocol, Rule};
 use smithay::reexports::wayland_server::Client;
 
 use crate::state::ClientState;
@@ -89,20 +89,11 @@ impl Gate {
         let Some(state) = client.get_data::<ClientState>() else {
             return false;
         };
-        let exe = match state.origin() {
-            Origin::Process(process) => process.exe,
-            _ => None,
-        };
-        let file = state.file();
-        let exe = exe.as_deref().map(|path| Exe {
-            path,
-            here: file.here,
-            installed: file.installed,
-        });
+        let origin = state.origin();
         self.0
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .admits(protocol, exe)
+            .admits(protocol, state.file().of(&origin))
     }
 }
 

@@ -110,6 +110,21 @@ pub(crate) struct ExeFile {
     pub(crate) installed: bool,
 }
 
+impl ExeFile {
+    /// The executable `origin` names, with what this proves of it, as a
+    /// rule asks a program's: `None` if no executable is known.
+    pub(crate) fn of(self, origin: &Origin) -> Option<perspicax_policy::Exe<'_>> {
+        let Origin::Process(process) = origin else {
+            return None;
+        };
+        process.exe.as_deref().map(|path| perspicax_policy::Exe {
+            path,
+            here: self.here,
+            installed: self.installed,
+        })
+    }
+}
+
 /// Whom this compositor runs as, for [`attest`]: `None` if its own status
 /// cannot be read, and then nothing is installed by the system.
 pub(crate) fn this_person() -> Option<Person> {

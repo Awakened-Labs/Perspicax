@@ -416,6 +416,36 @@ impl<S: PartialEq, C: PartialEq> Attention<S, C> {
                     && (press.reached.as_ref() == Some(client) || started_on == Some(press.turn))
             })
     }
+
+    /// Whether the person may be waiting on a prompt (#268): their latest
+    /// press, under [`ACTIVATION_WINDOW`] old, started something -- an Enter
+    /// or a click that reached a program, or a binding that started one --
+    /// and they have pressed nothing since.
+    ///
+    /// What a daemon draws for them: pinentry for the gpg-agent `git commit
+    /// -S` asked, a polkit agent's dialog for `pkexec`, a keyring's unlock.
+    /// Each was asked for through another program, and descends from a
+    /// daemon the press never reached or started, so [`Self::asked_for`]
+    /// never says so. A window of a program the person named a prompt
+    /// (`[focus] prompts`) takes the keys if this says so.
+    ///
+    /// Not while they type: every letter is a press, and starts nothing, so
+    /// a prompt opening mid-password opens without the keys, as any other
+    /// window does. Between the start and the next press, though, it takes
+    /// them, whoever asked for it: pinentry and a keyring's prompter show
+    /// whatever text their caller gives them, and hand back what is typed.
+    /// A program that watched for the person's Enter could put one up in
+    /// that moment. They would see it come up in front, with the keys.
+    ///
+    /// The keys handed on meanwhile change nothing, as for [`Self::asked_of`]:
+    /// a click on a window not in use moves them, and is still the click
+    /// that asked for the prompt.
+    #[must_use]
+    pub fn awaits(&self, now: Instant) -> bool {
+        self.press
+            .as_ref()
+            .is_some_and(|press| fresh(press.at, now) && press.root.is_some())
+    }
 }
 
 /// Whether a press at `at` is under [`ACTIVATION_WINDOW`] old at `now`.
@@ -928,6 +958,77 @@ mod tests {
         let mut attention = attention();
         attention.handed('s');
         assert!(!attention.asked_of(&'s', Some(&'t'), None, Instant::now()));
+    }
+
+    /// `git commit -S` and an Enter, or a GUI's Unlock clicked: pinentry, or
+    /// a polkit agent's dialog, may come up for the person (#268).
+    #[test]
+    fn an_enter_or_a_click_that_reached_a_program_awaits_a_prompt() {
+        let at = Instant::now();
+        let mut attention = pressed_at(at);
+        assert!(!attention.awaits(at), "reached nothing yet");
+        attention.reached(&7, 't', Some(TERMINAL));
+        assert!(attention.awaits(at));
+    }
+
+    /// A binding that runs `pass`, say.
+    #[test]
+    fn a_program_a_binding_started_awaits_a_prompt() {
+        let at = Instant::now();
+        let mut attention = pressed_at(at);
+        attention.spawned(process(50, 101));
+        assert!(attention.awaits(at));
+    }
+
+    /// A password typed at a terminal, letter by letter: none starts
+    /// anything, and a prompt opening meanwhile is no prompt they wait on.
+    #[test]
+    fn a_letter_typed_since_awaits_nothing() {
+        let at = Instant::now();
+        let mut attention = pressed_at(at);
+        attention.reached(&7, 't', Some(TERMINAL));
+        attention.pressed(8, at, 100);
+        assert!(!attention.awaits(at));
+    }
+
+    /// Logo tapped, and the shell asked for its start menu: the menu is
+    /// asked for, and nothing has started yet.
+    #[test]
+    fn a_press_a_binding_handed_on_awaits_nothing() {
+        let at = Instant::now();
+        let mut attention = pressed_at(at);
+        attention.handed('s');
+        assert!(!attention.awaits(at));
+    }
+
+    /// An agent's click, sent with a serial of its own.
+    #[test]
+    fn a_press_not_the_persons_latest_awaits_nothing() {
+        let at = Instant::now();
+        let mut attention = pressed_at(at);
+        attention.reached(&9, 't', Some(TERMINAL));
+        assert!(!attention.awaits(at));
+    }
+
+    #[test]
+    fn a_press_awaits_no_longer_than_the_activation_window() {
+        let at = Instant::now();
+        let mut attention = pressed_at(at);
+        attention.reached(&7, 't', Some(TERMINAL));
+        let just = ACTIVATION_WINDOW - Duration::from_millis(1);
+        assert!(attention.awaits(at + just));
+        assert!(!attention.awaits(at + ACTIVATION_WINDOW));
+    }
+
+    /// A click on a window not in use moves the keys to it, and is still
+    /// the click that asked for its prompt.
+    #[test]
+    fn the_keys_handed_on_since_keep_a_press_awaiting() {
+        let at = Instant::now();
+        let mut attention = pressed_at(at);
+        attention.reached(&7, 'u', Some(TERMINAL));
+        attention.keys_to(Some('u'), false);
+        assert!(attention.awaits(at));
     }
 
     #[test]

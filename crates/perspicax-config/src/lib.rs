@@ -52,8 +52,8 @@ use perspicax_policy::{
     Access, Action, Animation, Bindings, Buttons, Chord, Colour, Context, Decorations, Direction,
     Drag, Effect, Exe, Face, Flipping, Focus, FocusModel, FrameButton, Gesture, Grid, Hatch,
     Keysym, Mods, MouseBindings, MouseChord, Never, Opacity, Owner, Person, Place, Program,
-    Protocol, Remembering, Resistance, Rule, Shadow, Shape, Side, Snapping, Switching, Towards,
-    Transitioning, VolumeKey,
+    Prompts, Protocol, Remembering, Resistance, Rule, Shadow, Shape, Side, Snapping, Switching,
+    Towards, Transitioning, VolumeKey,
 };
 use serde::Deserialize;
 
@@ -217,6 +217,13 @@ impl Profile {
 pub struct Config {
     pub profile: Profile,
     pub focus: Focus,
+    /// `[focus] prompts`: the programs that draw a prompt for a daemon --
+    /// pinentry, a polkit agent, a keyring's unlock -- whose window takes the
+    /// keys as it opens just after the person's Enter or click (#268). Each a
+    /// bare name, the copy the system installed, or a whole path. The usual
+    /// ones in both profiles ([`Prompts::usual`]); `[]` gives none. Not in
+    /// [`Focus`], which is copied wherever the pointer asks it.
+    pub prompts: Prompts,
     pub bindings: Bindings,
     /// What a mouse button or the wheel does, by where the pointer is: the
     /// `[mouse]` tables, over what the profile binds. Minimal binds the
@@ -597,6 +604,7 @@ impl Config {
         Self {
             profile,
             focus,
+            prompts: Prompts::usual(),
             bindings,
             mouse: mouse(profile),
             keyboard: Keyboard::default(),
@@ -1254,29 +1262,7 @@ impl RawAgent {
     fn apply(self, mut agent: Agent) -> Result<Agent, Error> {
         // Before `launch`, which may not name what this withholds.
         if let Some(never) = self.never {
-            for (at, program) in never.iter().enumerate() {
-                if program.is_empty() {
-                    return Err(invalid(
-                        format!("agent.never[{at}]"),
-                        "an empty program name".to_owned(),
-                    ));
-                }
-                if program.contains('/') && !program.starts_with('/') {
-                    return Err(invalid(
-                        format!("agent.never[{at}]"),
-                        format!(
-                            "`{program}` is a path from nowhere in particular; write the whole \
-                             path, from /, or a bare name to match wherever it is"
-                        ),
-                    ));
-                }
-            }
-            agent.never = Never::new(
-                never
-                    .iter()
-                    .map(|program| Program::parse(program))
-                    .collect(),
-            );
+            agent.never = Never::new(programs("agent.never", &never)?);
         }
         if let Some(launch) = self.launch {
             let rule = launch.rule("agent.launch")?;
@@ -1619,6 +1605,7 @@ enum RawSpread {
 struct RawFocus {
     model: Option<RawModel>,
     autoraise: Option<bool>,
+    prompts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -1894,6 +1881,9 @@ impl Raw {
             }
             if let Some(autoraise) = focus.autoraise {
                 config.focus.autoraise = autoraise;
+            }
+            if let Some(prompts) = focus.prompts {
+                config.prompts = Prompts::new(programs("focus.prompts", &prompts)?);
             }
         }
 
@@ -2942,6 +2932,29 @@ impl std::str::FromStr for Mode {
             refresh,
         })
     }
+}
+
+/// The programs a list names, each a bare name or a whole path, refusing an
+/// empty name and a path from nowhere in particular, at `key[n]`.
+fn programs(key: &str, list: &[String]) -> Result<Vec<Program>, Error> {
+    for (at, program) in list.iter().enumerate() {
+        if program.is_empty() {
+            return Err(invalid(
+                format!("{key}[{at}]"),
+                "an empty program name".to_owned(),
+            ));
+        }
+        if program.contains('/') && !program.starts_with('/') {
+            return Err(invalid(
+                format!("{key}[{at}]"),
+                format!(
+                    "`{program}` is a path from nowhere in particular; write the whole path, \
+                     from /, or a bare name"
+                ),
+            ));
+        }
+    }
+    Ok(list.iter().map(|program| Program::parse(program)).collect())
 }
 
 fn invalid(key: String, reason: String) -> Error {
@@ -5849,6 +5862,54 @@ mod tests {
         assert!(
             parse("[agent]\nnever = \"ennius\"", SEAT).is_err(),
             "a list"
+        );
+    }
+
+    #[test]
+    fn the_usual_prompts_in_both_profiles_until_the_person_says() {
+        for profile in [Profile::Classic, Profile::Minimal] {
+            assert_eq!(
+                Config::profile(profile, SEAT).prompts,
+                Prompts::usual(),
+                "{profile:?}"
+            );
+        }
+        let prompts = |toml: &str| parse(toml, SEAT).unwrap().prompts;
+        assert_eq!(prompts("[focus]\nprompts = []"), Prompts::default());
+        let written =
+            prompts("[focus]\nmodel = \"click\"\nprompts = [\"pinentry-qt\", \"/opt/p/prompt\"]");
+        assert_eq!(written.named(), ["pinentry-qt", "/opt/p/prompt"]);
+        assert!(
+            written.admits(Some(Exe::systems("/usr/bin/pinentry-qt"))),
+            "the system's copy"
+        );
+        assert!(
+            !written.admits(Some(Exe::persons("/home/me/bin/pinentry-qt"))),
+            "a bare name is never the person's own"
+        );
+        assert!(
+            !written.admits(Some(Exe::systems("/usr/libexec/gcr-prompter"))),
+            "a list written replaces the usual one"
+        );
+        for (text, key) in [
+            ("prompts = [\"\"]", "focus.prompts[0]"),
+            (
+                "prompts = [\"gcr-prompter\", \"bin/prompt\"]",
+                "focus.prompts[1]",
+            ),
+        ] {
+            match parse(&format!("[focus]\n{text}"), SEAT).unwrap_err() {
+                Error::Invalid { key: at, .. } => assert_eq!(at, key, "{text}"),
+                other => panic!("{text}: {other}"),
+            }
+        }
+        assert!(
+            parse("[focus]\nprompts = \"pinentry-qt\"", SEAT).is_err(),
+            "a list"
+        );
+        assert!(
+            parse("[focus]\nprompt = [\"pinentry-qt\"]", SEAT).is_err(),
+            "a key misspelled"
         );
     }
 

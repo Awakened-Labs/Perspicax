@@ -277,6 +277,9 @@ pub(crate) enum Running {
         /// The focus policy a test put in force
         /// ([`crate::Command::FocusPolicy`]), and none until one does.
         focus: Option<perspicax_policy::Focus>,
+        /// The prompt programs a test put in force
+        /// ([`crate::Command::Prompts`]), and none until one does.
+        prompts: perspicax_policy::Prompts,
         /// Virtual monitors a display tool turned off, kept so it can turn
         /// them on again.
         dark: Vec<Virtual>,
@@ -324,6 +327,7 @@ impl Running {
                 opacity: opacity.clone(),
                 agent: agent.clone(),
                 focus: None,
+                prompts: perspicax_policy::Prompts::default(),
                 dark: Vec::new(),
                 #[cfg(feature = "capture")]
                 pictures: None,
@@ -478,6 +482,19 @@ impl Running {
             Self::Headless { focus, .. } => *focus,
             #[cfg(feature = "seat")]
             Self::Seat(session) => Some(session.settings.focus),
+        }
+    }
+
+    /// The programs that draw a prompt for a daemon, whose window takes the
+    /// keys as it opens just after the person's Enter or click (#268). On a
+    /// seat, `[focus] prompts` as last saved: the usual ones, until the
+    /// person says otherwise. Headless, none, until a test puts some in
+    /// force ([`crate::Command::Prompts`]).
+    pub(crate) fn prompts(&self) -> &perspicax_policy::Prompts {
+        match self {
+            Self::Headless { prompts, .. } => prompts,
+            #[cfg(feature = "seat")]
+            Self::Seat(session) => &session.settings.prompts,
         }
     }
 
@@ -790,6 +807,7 @@ impl Compositor {
             }
             crate::Command::MouseBindings(bindings) => self.mouse = bindings.clone(),
             crate::Command::FocusPolicy(focus) => self.put_focus(*focus),
+            crate::Command::Prompts(prompts) => self.put_prompts(prompts.clone()),
             crate::Command::Click { at, button, mods } => {
                 self.stand_in_click(*at, *button, *mods);
             }
@@ -820,6 +838,19 @@ impl Compositor {
             #[cfg(feature = "seat")]
             Running::Seat(_) => {
                 tracing::warn!("a seat's focus policy is its person's [focus]");
+            }
+        }
+    }
+
+    /// Put a test's prompt programs in force: see [`crate::Command::Prompts`].
+    /// A seat's are its person's `[focus] prompts`, so there it is refused in
+    /// the log.
+    fn put_prompts(&mut self, programs: perspicax_policy::Prompts) {
+        match &mut self.backend {
+            Running::Headless { prompts, .. } => *prompts = programs,
+            #[cfg(feature = "seat")]
+            Running::Seat(_) => {
+                tracing::warn!("a seat's prompts are its person's [focus] prompts");
             }
         }
     }
