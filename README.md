@@ -2518,10 +2518,10 @@ switching = "window"           # each window keeps its own layout; "global",
 
 A layout, a variant or rules xkb does not have are refused with the whole
 file, by the key that names them, at login, at a save and by `perspicax config
-check` alike, and so is a layout list with an empty name in it, as `"us,,ru"`,
-on which xkb itself would crash. A model or an option xkb does not know,
-and a fifth layout, it drops without a word and compiles the rest: those are
-not caught yet (#309).
+check` alike, and so is a layout list with a blank name in it, as `"us,,ru"`,
+which xkb would make a second, nameless copy of the first layout. A model or
+an option xkb does not know, and a fifth layout, it drops without a word and
+compiles the rest: those are not caught yet (#309).
 
 xkb's own switching options, `grp:alt_shift_toggle` and the like, work as
 well. classic binds Logo+Space, so applications no longer get it. A program
