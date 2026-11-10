@@ -1141,10 +1141,35 @@ window takes the keys as it opens, as before. Left open: a program whose
 first window takes more than ten seconds opens without them, as does one
 whose descent from the press is lost -- started through `systemd-run`,
 `gtk-launch` or D-Bus activation, or by a launcher that exited first and
-handed it no token; prompts of daemons started at login that name no window
-they are for, pinentry and polkit agents, open without them (#268); a token
-that names no input is forgotten as it is made, so spending one marks
-nothing (#269).
+handed it no token; a token that names no input is forgotten as it is made,
+so spending one marks nothing (#269).
+
+But a prompt a daemon draws for the person takes them, in the moment they
+wait on it (#268): pinentry for the gpg-agent their `git commit -S` asked, a
+polkit agent's dialog for `pkexec` or a settings app's Unlock, a keyring's
+unlock. Each comes from a daemon started at login or by D-Bus, which no press
+of theirs reached or started, so none of the above asks for it. A window of a
+program `[focus] prompts` names takes the keys as it opens just after an
+Enter or a click, or a binding that started a program, with nothing pressed
+since and the press under ten seconds old; never while they type, so one
+that opens mid-password opens without them as any window does, and never
+behind the lock. An X11 prompt, pinentry-gtk-2 say, takes them a moment
+after it opens, once XRes names its process. A bare name there is the copy
+the system installed, as in `session-lock`, and a full path that one file.
+Unwritten, the list names pinentry in each of its toolkits, gcr's prompter
+(GNOME's keyring, and pinentry-gnome3's prompt) and its askpass helpers,
+KWallet's daemon and ksshaskpass, and the polkit agents of GNOME, KDE, MATE,
+LXQt, LXDE, Xfce and Hyprland; `[]` names none, and a list written replaces
+it. Not the desktop portal's backends: a dialog one opens for the program in
+use takes the keys already, named through xdg-foreign, and one opened for no
+window may be consent to a screencast, which should not come up with the
+keys at a moment another program picks. What it lets in: pinentry and gcr's
+prompter show whatever their caller writes and hand back what is typed, so
+a program the person runs that watched for their Enter could put one up in
+the moment before they type; it comes up in front of them, with the keys.
+Left open: a prompt asked for by another key, Ctrl+O say, or more than ten
+seconds after the press; a portal dialog for no window; a shell's own polkit
+agent, drawn as a layer, which is asked as a launcher is.
 
 Nor does a launcher take the keys by showing (#267). A launcher is a layer
 over the windows that asks for every key: fuzzel, a screenshot tool's
@@ -1485,6 +1510,8 @@ xdg-autostart = true           # and the autostart folders' entries; see below
 [focus]
 model = "sloppy"               # click | sloppy | strict
 autoraise = false
+prompts = ["pinentry-qt", "gcr-prompter"]   # a daemon's prompts, which take
+                               # the keys just after an Enter or click (#268)
 
 [keys]
 "Logo+Return" = { spawn = ["foot"] }
@@ -2783,7 +2810,7 @@ Its pages, down the left of the window:
   Theme and Decorations:** every other setting that holds one value, each
   with whose it is.
 - **Outputs:** each monitor's `[[output]]`.
-- **Protocols:** `[protocols]` and `[agent]`, to read.
+- **Protocols:** `[protocols]`, `[agent]` and `[focus] prompts`, to read.
 
 **A chord is bound by pressing it.** "Add a binding…", or a row's "Move to
 another chord…", asks perspicax for the next chord pressed. perspicax tells
@@ -2850,8 +2877,8 @@ that leaves it out, the page has the file's rules alone, each mode typed:
 `2560x1440@144`.
 
 **Protocols** shows each `[protocols]` rule and `[agent] launch` in force,
-beside the profile's, with `[agent] socket` and `[agent] never`, and changes
-none of them. Under `session-lock` it says what weakens who may lock, as
+beside the profile's, with `[agent] socket`, `[agent] never` and `[focus]
+prompts`, and changes none of them. Under `session-lock` it says what weakens who may lock, as
 `perspicax doctor` does, and so does the Shell page under `lock`. Who
 may reach past their own windows, and what an agent may do, is the file's to
 say, in an editor: the app never writes it, so nothing that drives the app

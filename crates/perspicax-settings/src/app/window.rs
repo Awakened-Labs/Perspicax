@@ -16,7 +16,8 @@ use std::{path::Path, time::Duration};
 use eframe::egui::{self, Ui};
 use perspicax_config::{Agent, Built, Config};
 use perspicax_settings::{
-    Applied, Binding, Document, Edit, Grant, Reason, Refused, Registry, Rule, Section, Setting,
+    Applied, Binding, Document, Edit, Grant, Prompting, Reason, Refused, Registry, Rule, Section,
+    Setting,
 };
 
 use crate::{
@@ -78,6 +79,8 @@ pub(crate) struct App {
     /// The `[agent]` table, for what is not a rule: its socket, and what
     /// no agent is given.
     agent: Agent,
+    /// `[focus] prompts`, as the file stands: shown, never written.
+    prompting: Prompting,
     shown: Shown,
     /// What the last change did.
     notice: Option<Notice>,
@@ -145,6 +148,7 @@ impl App {
             grants: Vec::new(),
             lock_doubts: Vec::new(),
             agent: Agent::default(),
+            prompting: Prompting::default(),
             shown: Shown::Keys,
             notice: None,
             focused: true,
@@ -169,6 +173,7 @@ impl App {
         let config = parsed
             .unwrap_or_else(|| Config::profile(perspicax_config::Profile::Classic, EVERYTHING));
         self.grants = perspicax_settings::grants(text, &config);
+        self.prompting = perspicax_settings::prompting(text, &config);
         let path = std::env::var_os("PATH");
         let person = perspicax_config::person();
         self.lock_doubts = perspicax_config::lock_doubts(&config, path.as_deref(), person.as_ref())
@@ -407,7 +412,13 @@ impl App {
                 None
             }
             Shown::Protocols => {
-                if access::ui(ui, &self.grants, &self.agent, &self.lock_doubts) {
+                if access::ui(
+                    ui,
+                    &self.grants,
+                    &self.agent,
+                    &self.prompting,
+                    &self.lock_doubts,
+                ) {
                     open(self.document.path());
                 }
                 None

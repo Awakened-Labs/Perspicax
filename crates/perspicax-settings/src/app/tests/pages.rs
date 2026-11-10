@@ -336,6 +336,30 @@ fn the_protocols_page_shows_each_rule_and_whose_it_is() {
     harness.get_by_label("none: not offered");
 }
 
+/// `[focus] prompts` is shown, read only, as the rules are: the usual ones
+/// unwritten, and a list written beside the profile's.
+#[test]
+fn the_protocols_page_shows_the_prompts_and_whose_they_are() {
+    use perspicax_policy::Prompts;
+    use perspicax_settings::prompts_words;
+
+    let scratch = Scratch::new("protocols-prompts-usual");
+    let (_, harness) = page(&scratch, "", "Protocols");
+    harness.get_by_label(&prompts_words(&Prompts::usual()));
+
+    let scratch = Scratch::new("protocols-prompts");
+    let (_, harness) = page(
+        &scratch,
+        "[focus]\nprompts = [\"pinentry-qt\", \"/opt/p/prompt\"]\n",
+        "Protocols",
+    );
+    harness.get_by_label("the system's pinentry-qt; /opt/p/prompt");
+    harness.get_by_label(&format!(
+        "yours; the profile's is {}",
+        prompts_words(&Prompts::usual())
+    ));
+}
+
 /// Unwritten, the lock's rule follows `[shell] lock`; written "any", the
 /// page warns of it beside the rule.
 #[test]

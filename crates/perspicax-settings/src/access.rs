@@ -1,5 +1,6 @@
-//! Who may reach past their own windows, and what an agent may do: the
-//! `[protocols]` and `[agent]` tables, read to be shown and never written.
+//! Who may reach past their own windows, what an agent may do, and which
+//! programs' prompts take the keys: the `[protocols]` and `[agent]` tables,
+//! and `[focus] prompts`, read to be shown and never written.
 //!
 //! These rules are the file's boundary. The app shows each one in force
 //! beside its profile's, and leaves changing them to an editor, so that
@@ -7,7 +8,7 @@
 
 use perspicax_config::{AgentSocket, Config, SETTINGS_APP};
 use perspicax_policy::Never;
-use perspicax_policy::{Program, Protocol, Rule};
+use perspicax_policy::{Program, Prompts, Protocol, Rule};
 
 use crate::edit::EVERYTHING;
 
@@ -30,12 +31,7 @@ pub struct Grant {
 #[must_use]
 pub fn grants(text: &str, config: &Config) -> Vec<Grant> {
     let profile = Config::profile(config.profile, EVERYTHING);
-    let root = text.parse::<toml::Table>().unwrap_or_default();
-    let written = |table: &str, key: &str| {
-        root.get(table)
-            .and_then(toml::Value::as_table)
-            .is_some_and(|table| table.contains_key(key))
-    };
+    let written = writes(text);
     Protocol::ALL
         .into_iter()
         .map(|protocol| Grant {
@@ -55,6 +51,37 @@ pub fn grants(text: &str, config: &Config) -> Vec<Grant> {
             written: written("agent", "launch"),
         }))
         .collect()
+}
+
+/// `[focus] prompts`: the programs whose window takes the keys as it opens
+/// just after the person's Enter or click (#268), in force beside the
+/// profile's, and whether the file writes it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Prompting {
+    pub in_force: Prompts,
+    pub profile: Prompts,
+    pub written: bool,
+}
+
+/// `[focus] prompts`, as `text` writes it and `config`, read from it, has
+/// it in force.
+#[must_use]
+pub fn prompting(text: &str, config: &Config) -> Prompting {
+    Prompting {
+        in_force: config.prompts.clone(),
+        profile: Config::profile(config.profile, EVERYTHING).prompts,
+        written: writes(text)("focus", "prompts"),
+    }
+}
+
+/// Whether `text` writes a key of a table.
+fn writes(text: &str) -> impl Fn(&str, &str) -> bool {
+    let root = text.parse::<toml::Table>().unwrap_or_default();
+    move |table, key| {
+        root.get(table)
+            .and_then(toml::Value::as_table)
+            .is_some_and(|table| table.contains_key(key))
+    }
 }
 
 /// What `protocol` lets a program do, in a line.
@@ -87,6 +114,29 @@ pub fn rule_words(rule: &Rule) -> String {
             })
             .collect::<Vec<_>>()
             .join(", "),
+    }
+}
+
+/// The prompt programs in words: the system's copies, by name, then those
+/// named by their whole path.
+#[must_use]
+pub fn prompts_words(prompts: &Prompts) -> String {
+    let (system, paths): (Vec<&Program>, Vec<&Program>) = prompts
+        .programs()
+        .iter()
+        .partition(|program| matches!(program, Program::Installed(_)));
+    let system = (!system.is_empty()).then(|| {
+        let names: Vec<&str> = system.into_iter().map(Program::spelled).collect();
+        format!("the system's {}", names.join(", "))
+    });
+    let words: Vec<String> = system
+        .into_iter()
+        .chain(paths.into_iter().map(|path| path.spelled().to_owned()))
+        .collect();
+    if words.is_empty() {
+        "none".to_owned()
+    } else {
+        words.join("; ")
     }
 }
 
@@ -138,6 +188,45 @@ mod tests {
             never("[agent]\nnever = [\"ennius\", \"/opt/wallet/bin/wallet\"]"),
             "ennius, /opt/wallet/bin/wallet, perspicax-settings"
         );
+    }
+
+    #[test]
+    fn prompts_read_in_words() {
+        let prompts = |text: &str| {
+            prompts_words(
+                &perspicax_config::parse(text, EVERYTHING)
+                    .expect("a config")
+                    .prompts,
+            )
+        };
+        assert_eq!(prompts("[focus]\nprompts = []"), "none");
+        assert_eq!(
+            prompts("[focus]\nprompts = [\"pinentry-qt\", \"/opt/p/prompt\", \"gcr-prompter\"]"),
+            "the system's pinentry-qt, gcr-prompter; /opt/p/prompt"
+        );
+        assert_eq!(
+            prompts("[focus]\nprompts = [\"/opt/p/prompt\"]"),
+            "/opt/p/prompt"
+        );
+        assert!(prompts("").starts_with("the system's pinentry-gnome3, "));
+    }
+
+    #[test]
+    fn the_prompts_are_told_apart_from_the_profiles() {
+        let read = |text: &str| {
+            prompting(
+                text,
+                &perspicax_config::parse(text, EVERYTHING).expect("a config"),
+            )
+        };
+        let unwritten = read("");
+        assert!(!unwritten.written);
+        assert_eq!(unwritten.in_force, Prompts::usual());
+        assert_eq!(unwritten.profile, Prompts::usual());
+        let written = read("[focus]\nprompts = []\n");
+        assert!(written.written);
+        assert_eq!(written.in_force, Prompts::default());
+        assert_eq!(written.profile, Prompts::usual());
     }
 
     fn read(text: &str) -> Vec<Grant> {
