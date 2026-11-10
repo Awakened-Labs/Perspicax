@@ -1957,6 +1957,9 @@ mod tests {
     #[test]
     fn a_meters_peaks_are_told_the_newest_and_it_goes_once_not_asked_for() {
         let fake = Fake::start("meter");
+        // An output's meter is asked for while it plays: one of an output
+        // asleep is not made until it wakes.
+        fake.play(0, true);
         let (running, heard) = follow(&fake);
         heard.facts();
         let monitor = format!("{SPEAKERS}.monitor");
