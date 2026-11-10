@@ -247,15 +247,15 @@ fn a_keymap_xkb_cannot_compile_is_told_to_a_shell_that_knows_refusals() {
 
 #[test]
 #[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
-fn a_keymap_xkb_would_crash_on_is_refused_and_the_compositor_lives() {
+fn a_keymap_naming_a_nul_or_a_blank_layout_is_refused_and_the_compositor_lives() {
     let session = Session::start("shell-keymap-unreadable", backend(Access::open()));
     let (mut desk, mut queue, qh, globals) = session.client();
     desk.bind_shell(&globals, &qh);
     queue.roundtrip(&mut desk).expect("bound");
 
-    // libxkbcommon 1.13 crashes on an empty layout followed by another, and
-    // xkbcommon's binding panics on a NUL: neither reaches it (#215). Nor
-    // does the NUL reach the wire, whose event code panics on one too.
+    // xkbcommon's binding panics on a NUL, and so does the wire's event
+    // code: a NUL reaches neither (#215). A blank layout among others is
+    // refused too, which xkb would make a nameless copy of the first.
     for (layout, told) in [("us,,ru", "us,,ru"), ("us\0", "us\u{fffd}")] {
         desk.told.clear();
         session.command(Command::Keymap(Keymap {

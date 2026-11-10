@@ -17,7 +17,7 @@
 //! them. [`Keymap::check`] asks it without the keyboard, so a name it lacks
 //! is refused where the config is judged, naming the key that wrote it,
 //! rather than only logged when the keyboard is given it (#215). Some names
-//! never reach xkb at all: one it would crash on.
+//! never reach xkb at all: one holding a NUL, and a blank layout in a list.
 //!
 //! Putting the locks back is quiet in smithay: `set_modifier_state` changes
 //! the state without a `modifiers` event, so the focused client would go on
@@ -147,9 +147,11 @@ impl Keymap {
     }
 
     /// Whether xkbcommon may be handed these names at all. Its Rust binding
-    /// panics on a NUL in one, and libxkbcommon 1.13 crashes on a layout list
-    /// with an empty name followed by another, as "us,,ru" (#215): either
-    /// would end the session rather than refuse a save.
+    /// panics on a NUL in one, which would end the session rather than
+    /// refuse a save. A blank name in a layout list, as "us,,ru", is a typo
+    /// xkb never says it took: it fails on a leading one, drops a trailing
+    /// one, and makes one between two a layout with no name and the first
+    /// layout's keys, which the panel would list blank (#215).
     fn readable(&self) -> Result<(), Uncompiled> {
         let names = [
             ("input.keyboard.rules", self.rules.as_str()),
@@ -467,7 +469,8 @@ mod tests {
 
     #[test]
     fn a_layout_with_no_name_among_others_is_refused_without_asking_xkb() {
-        // libxkbcommon 1.13 crashes on the first two.
+        // xkb makes the blank in the first two a nameless copy of “us”,
+        // fails on the third, and drops the fourth's without a word.
         for written in ["us,,ru", "us, ,ru", ",us", "us,ru,"] {
             assert_eq!(
                 refused(&keymap(written, "")),
