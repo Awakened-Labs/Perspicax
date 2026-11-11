@@ -325,7 +325,7 @@ pub struct Compositor {
     pub(crate) gate: crate::access::Gate,
     /// Whom this compositor runs as: whose writes a program the system
     /// installed cannot be. See [`crate::origin::attest`].
-    person: Option<perspicax_policy::Person>,
+    pub(crate) person: Option<perspicax_policy::Person>,
     /// Every window, as the taskbar protocols have been told it. See
     /// [`crate::toplevels`].
     pub(crate) toplevels: crate::toplevels::Toplevels,

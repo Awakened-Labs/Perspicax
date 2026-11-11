@@ -966,7 +966,7 @@ impl Compositor {
     /// XRes answered for `window_id`: upgrade the origin to the server's own
     /// word, or leave the claim standing if it had nothing to say. A window
     /// that opened without the keys takes them now if its process turns out
-    /// to be one the person started.
+    /// to be one the person started, or a prompt they may be waiting on.
     fn attribute_x11(&mut self, window_id: u32, pid: Option<u32>) {
         let deciding = self.xwayland.deciding.remove(&window_id);
         let Some(pid) = pid else {
@@ -976,8 +976,12 @@ impl Compositor {
         else {
             return;
         };
-        let client = match crate::origin::of_pid(i32::try_from(pid).unwrap_or(-1)) {
-            Origin::Process(process) => Some(*process),
+        // With what the path to its executable proves, as a Wayland client's
+        // is proven as it connects: a prompt named bare is the system's copy.
+        let attested =
+            crate::origin::attest(i32::try_from(pid).unwrap_or(-1), self.person.as_ref());
+        let client = match &attested.origin {
+            Origin::Process(process) => Some((**process).clone()),
             _ => None,
         };
         window
@@ -994,7 +998,7 @@ impl Compositor {
             window.user_data().insert_if_missing(|| Attested(process));
         }
         if deciding {
-            self.started_x11(&window, pid);
+            self.started_x11(&window, pid, attested.file.of(&attested.origin));
         }
         self.publish_facts();
     }
@@ -1010,24 +1014,36 @@ impl Compositor {
     }
 
     /// XRes named `pid` the process of a window that opened without the
-    /// keys. If the person's latest press started it --
+    /// keys, running `exe`. If the person's latest press started it --
     /// `xeyes` typed at a Wayland terminal -- they asked for it after all,
     /// and it takes the keys, as a Wayland program started so does as its
     /// window opens; a moment later, XRes answering on a thread of its own.
-    /// Not if the person has given the keys elsewhere since, or it is gone
-    /// from sight.
-    fn started_x11(&mut self, window: &Framed, pid: u32) {
+    /// So does a prompt they may be waiting on, pinentry-gtk-2 for the
+    /// gpg-agent their `git commit -S` asked (#268, [`Self::awaited`]): X11
+    /// being one client for every X client, a prompt is known only now. Not
+    /// if the person has given the keys elsewhere since, or it is gone from
+    /// sight.
+    fn started_x11(&mut self, window: &Framed, pid: u32, exe: Option<perspicax_policy::Exe<'_>>) {
         if !shell::wants_attention(window) || self.space.element_location(window).is_none() {
             return;
         }
         let lineage = crate::origin::lineage(pid);
-        if self.attention.started(&lineage, Instant::now()).is_none() {
+        let started = self.attention.started(&lineage, Instant::now()).is_some();
+        if !(started || self.awaited(exe)) {
             return;
         }
         let Some(id) = shell::id_of(window) else {
             return;
         };
-        tracing::debug!(surface = id.0, "started by the person's latest press");
+        if started {
+            tracing::debug!(surface = id.0, "started by the person's latest press");
+        } else {
+            tracing::info!(
+                surface = id.0,
+                exe = exe.map(|exe| exe.path),
+                "an X11 prompt opened just after the person's Enter or click: it takes the keys"
+            );
+        }
         self.space.raise_element(window, false);
         self.focus_x11(window, id);
         self.backend.redraw();

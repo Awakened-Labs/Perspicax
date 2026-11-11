@@ -1,5 +1,6 @@
-//! The Protocols page: who may reach past their own windows, and what an
-//! agent may do, each rule in force beside its profile's. It only reads.
+//! The Protocols page: who may reach past their own windows, what an agent
+//! may do, and which programs' prompts take the keys, each rule in force
+//! beside its profile's. It only reads.
 //!
 //! These rules are where the file draws its boundary, so the app never
 //! writes them: they are changed in an editor, and nothing that drives the
@@ -8,7 +9,7 @@
 use eframe::egui::{self, Ui};
 use perspicax_config::Agent;
 use perspicax_policy::Protocol;
-use perspicax_settings::{Grant, never_words, rule_words, socket_words};
+use perspicax_settings::{Grant, Prompting, never_words, prompts_words, rule_words, socket_words};
 
 /// How wide a rule's key and what it decides are drawn.
 const KEY_WIDTH: f32 = 230.0;
@@ -22,7 +23,13 @@ pub(crate) const WHY: &str = "This page only reads. What may reach past its own 
 
 /// Draw the page; whether the file is to be opened. `lock_doubts` are said
 /// under the lock's rule, in the colour of a warning.
-pub(crate) fn ui(ui: &mut Ui, grants: &[Grant], agent: &Agent, lock_doubts: &[String]) -> bool {
+pub(crate) fn ui(
+    ui: &mut Ui,
+    grants: &[Grant],
+    agent: &Agent,
+    prompting: &Prompting,
+    lock_doubts: &[String],
+) -> bool {
     ui.heading("Protocols");
     ui.label("Who may reach past their own windows, and what an agent may do.");
     ui.add_space(6.0);
@@ -73,10 +80,28 @@ pub(crate) fn ui(ui: &mut Ui, grants: &[Grant], agent: &Agent, lock_doubts: &[St
                 });
         }
         ui.add_space(8.0);
+        ui.strong(egui::RichText::new("[focus]").monospace());
+        egui::Grid::new(("grants", "focus"))
+            .num_columns(2)
+            .striped(true)
+            .spacing([14.0, 10.0])
+            .show(ui, |ui| {
+                row(
+                    ui,
+                    "prompts",
+                    "the programs whose window takes the keys as it opens, just after your \
+                     Enter or click: pinentry, a polkit agent, a keyring's unlock",
+                    |ui| {
+                        ui.label(prompts_words(&prompting.in_force));
+                        ui.weak(prompts_whose(prompting));
+                    },
+                );
+            });
+        ui.add_space(8.0);
         ui.weak(
-            "A name admits any program of that name, wherever it is, but in session-lock only \
-             the copy the system installed; a path admits only the file there. While the \
-             screen is locked, none of them is but the lock's own.",
+            "A name admits any program of that name, wherever it is, but in session-lock and \
+             prompts only the copy the system installed; a path admits only the file there. \
+             While the screen is locked, none of them is but the lock's own.",
         );
     });
     open
@@ -96,6 +121,18 @@ fn row(ui: &mut Ui, key: &str, about: &str, value: impl FnOnce(&mut Ui)) {
         value(ui);
     });
     ui.end_row();
+}
+
+/// Whose the prompts are, in words.
+fn prompts_whose(prompting: &Prompting) -> String {
+    match (prompting.written, prompting.in_force == prompting.profile) {
+        (false, _) => "the profile's".to_owned(),
+        (true, true) => "yours, the same as the profile's".to_owned(),
+        (true, false) => format!(
+            "yours; the profile's is {}",
+            prompts_words(&prompting.profile)
+        ),
+    }
 }
 
 /// Whose a rule is, in words.
