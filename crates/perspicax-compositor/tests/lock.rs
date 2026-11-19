@@ -16,6 +16,12 @@
 //! them, and taken the password. A resize under way is told it is over. And
 //! no menu opened behind the lock takes anything from it.
 //!
+//! And what an agent reads of the lock screen (#177). A lock surface that has
+//! drawn is on screen in the facts, as any surface is once it has, and covers
+//! the window under it, proven by the monitor perspicax paints beneath it.
+//! What it draws is kept from the facts: swaylock draws its ring again at
+//! every key, and a count of its frames would be a count of the password's.
+//!
 //! With no person at the seat, the first three see the lock alone move the
 //! pointer: with one, a change of the keyboard's focus looks under the
 //! pointer again too, a turn of the loop later. The last three need a
@@ -33,8 +39,8 @@ mod common;
 
 use common::{Desk, Ear, Session, around, copy_all, heard, menu_with_the_keyboard, rgba, until};
 use perspicax_compositor::{Backend, Command, Virtual};
-use perspicax_index::HostFacts;
-use perspicax_node::{Rect, SurfaceId};
+use perspicax_index::{HostFacts, Judgement, SurfaceFacts, SurfaceKind, judge};
+use perspicax_node::{Rect, SurfaceId, Visibility};
 use perspicax_policy::{Access, Button, Mods, Place, Shape, Side};
 use smithay_client_toolkit::shell::{WaylandSurface as _, xdg::XdgSurface as _};
 use wayland_client::{
@@ -44,6 +50,8 @@ use wayland_protocols::xdg::shell::client::xdg_toplevel::ResizeEdge;
 
 const PAGE: u32 = 0xff33_6699;
 const COVER: u32 = 0xff20_2020;
+/// The lock screen drawn again, as swaylock's ring is at each key.
+const TYPED: u32 = 0xff3d_aee9;
 
 fn session(name: &str) -> Session {
     Session::start(name, Backend::headless((1280, 800)))
@@ -139,6 +147,26 @@ fn page(facts: &HostFacts) -> Option<(SurfaceId, Rect)> {
         .iter()
         .find(|surface| surface.mapped && surface.title.as_deref() == Some("page"))
         .map(|surface| (surface.id, surface.geometry))
+}
+
+/// The lock surface the facts describe, if one is: the first, if several.
+fn lock_cover(facts: &HostFacts) -> Option<&SurfaceFacts> {
+    covers_of(facts).first().copied()
+}
+
+/// Every lock surface the facts describe, bottom to top.
+fn covers_of(facts: &HostFacts) -> Vec<&SurfaceFacts> {
+    facts
+        .surfaces()
+        .iter()
+        .filter(|surface| surface.kind == SurfaceKind::LockCover)
+        .collect()
+}
+
+/// The whole of a window at `at`, in its own space, as the index judges a
+/// node.
+fn whole(at: Rect) -> Rect {
+    Rect::new(0.0, 0.0, at.x1 - at.x0, at.y1 - at.y0)
 }
 
 fn middle(at: Rect) -> (i32, i32) {
@@ -409,4 +437,95 @@ fn a_resize_under_way_as_the_session_locks_is_told_it_is_over() {
     until(&mut queue, &mut desk, |desk| !desk.resizing);
 
     session.stop(((desk, queue), (locker, locker_queue)));
+}
+
+/// A lock surface that has drawn is on screen, as any surface is once it
+/// has, and the window under it is judged covered by it, and proven so: by
+/// the whole monitor perspicax paints beneath it (#177). Before, the cover
+/// never counted as drawn, the judge passed over it, and the window was in
+/// sight to anyone reading the facts while the person was away.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn a_drawn_lock_cover_is_mapped_and_occludes_the_window_under_it() {
+    let session = session("cover-mapped");
+    let (desk, queue, _qh, _globals, (page, at)) = with_page(&session);
+    let facts = session.facts.read();
+    assert_eq!(
+        judge(&facts, page, whole(at)).visibility,
+        Visibility::Visible,
+        "in sight before the lock"
+    );
+
+    let (mut locker, mut locker_queue, locker_qh, _) = locked(&session);
+    cover(&mut locker, &mut locker_queue, &locker_qh, "HEADLESS-1");
+    // `cover` waited on the lock client's own connection for its picture to
+    // be taken in, and every commit publishes.
+    let facts = session.wait_for(|facts| lock_cover(facts).is_some());
+    let cover = lock_cover(&facts).expect("waited for");
+    assert!(cover.mapped, "a drawn lock cover counts as mapped");
+    assert_eq!(
+        judge(&facts, page, whole(at)),
+        Judgement {
+            visibility: Visibility::Occluded { by: cover.id },
+            unproven: false,
+        },
+        "the cover's frame proves it"
+    );
+
+    session.stop(((desk, queue), (locker, locker_queue)));
+}
+
+/// Each monitor's lock surface counts once it has drawn, by its own
+/// picture, and covers the windows on its own monitor and no other's.
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn each_monitors_lock_cover_counts_by_its_own_picture() {
+    let session = two_monitors("cover-mapped-each");
+    let (desk, queue, _qh, _globals, (page, at)) = with_page(&session);
+    let (mut locker, mut locker_queue, locker_qh, _) = locked(&session);
+    let second = cover(&mut locker, &mut locker_queue, &locker_qh, "HEADLESS-2");
+    let first = cover(&mut locker, &mut locker_queue, &locker_qh, "HEADLESS-1");
+
+    let facts = session.wait_for(|facts| covers_of(facts).len() == 2);
+    let covers = covers_of(&facts);
+    assert!(
+        covers.iter().all(|cover| cover.mapped),
+        "both drew, and both count: {covers:?}"
+    );
+    // Published in the order they came, HEADLESS-2's first.
+    let on_first = covers[1];
+    assert_eq!(
+        judge(&facts, page, whole(at)).visibility,
+        Visibility::Occluded { by: on_first.id },
+        "the page is on HEADLESS-1, under its lock surface"
+    );
+
+    session.stop(((desk, queue), (locker, locker_queue, first, second)));
+}
+
+/// What a lock surface draws is kept from the facts, however often it draws
+/// it. swaylock draws its ring again at every key typed, and the facts hand
+/// every surface's count of frames to any agent (`window_list`'s
+/// `damage_frames`): a count of the password's keys, while the person is
+/// away. Its picture still counts, so it covers what is under it (#177).
+#[test]
+#[ignore = "binds a real Wayland socket; needs XDG_RUNTIME_DIR"]
+fn what_a_lock_cover_draws_is_kept_from_the_facts() {
+    let session = session("cover-frames-kept");
+    let (mut locker, mut queue, qh, _) = locked(&session);
+    let surface = cover(&mut locker, &mut queue, &qh, "HEADLESS-1");
+    // Two keys typed at it.
+    for _ in 0..2 {
+        locker.paint(&surface, (1280, 800), TYPED);
+        surface.commit();
+        queue.roundtrip(&mut locker).expect("taken in");
+    }
+
+    let facts = session.wait_for(|facts| lock_cover(facts).is_some());
+    let cover = lock_cover(&facts).expect("waited for");
+    assert!(cover.mapped, "its picture counts");
+    assert_eq!(cover.damage_generation, 0, "no frame of it is counted");
+    assert!(cover.damage.is_empty(), "nor where it drew");
+
+    session.stop((locker, queue));
 }

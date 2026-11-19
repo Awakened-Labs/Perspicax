@@ -50,6 +50,11 @@
 //! the stack, so every node beneath is honestly judged occluded, and an act is
 //! refused outright ([`crate::ActError::Locked`]). A person who locked their
 //! screen has walked away, and nobody should be driving their applications.
+//! A lock surface is on screen once it has drawn, as any surface is (#177),
+//! so the gate refuses a node beneath it as covered before it reaches the
+//! compositor. What it draws is kept from the facts: swaylock draws its ring
+//! again at every key, and a count of its frames, which an agent is handed
+//! for every surface, would be a count of the password's keys.
 //!
 //! # Who locks
 //!
@@ -176,11 +181,16 @@ impl Locked {
     /// Whether `surface` is one of the holder's lock surfaces, and still
     /// there.
     pub(crate) fn covers(&self, surface: &WlSurface) -> bool {
-        surface.alive()
-            && self
-                .surfaces
-                .iter()
-                .any(|cover| cover.surface.wl_surface() == surface)
+        surface.alive() && self.id_of(surface).is_some()
+    }
+
+    /// The id the facts know `surface` by, if it is one of the holder's lock
+    /// surfaces.
+    fn id_of(&self, surface: &WlSurface) -> Option<SurfaceId> {
+        self.surfaces
+            .iter()
+            .find(|cover| cover.surface.wl_surface() == surface)
+            .map(|cover| cover.id)
     }
 
     /// Whether a key sent to `target` reaches the lock screen: one of the
@@ -355,6 +365,14 @@ impl Compositor {
         let cover = locked.on(output)?;
         let origin = self.space.output_geometry(output)?.loc.to_f64();
         Some((cover.surface.wl_surface().clone(), origin))
+    }
+
+    /// The id the facts know a lock surface by, if `surface` is one of the
+    /// holder's: what a commit to it is recorded against, as a window's is
+    /// against the window's (#177). Asked of the surface at the top of the
+    /// committed tree.
+    pub(crate) fn cover_id(&self, surface: &WlSurface) -> Option<SurfaceId> {
+        self.lock.as_ref()?.id_of(surface)
     }
 
     /// Whether the keys are where they belong: anywhere while the session is
