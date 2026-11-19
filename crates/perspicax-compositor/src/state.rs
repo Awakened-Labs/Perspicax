@@ -1123,6 +1123,12 @@ impl Compositor {
         self.presented.contains(&id)
     }
 
+    /// Forget whether a surface that has gone had anything in it. Its id
+    /// goes with it, never to be handed out again.
+    pub(crate) fn forget_presented(&mut self, id: SurfaceId) {
+        self.presented.remove(&id);
+    }
+
     /// A window or panel committed with its picture taken away. An xdg
     /// window or a layer surface that had drawn has been unmapped by its
     /// client, and is withdrawn; anything else just shows nothing now, which

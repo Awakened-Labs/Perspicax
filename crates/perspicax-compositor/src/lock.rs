@@ -296,7 +296,9 @@ impl SessionLockHandler for Compositor {
     /// until the window sets its own.
     fn unlock(&mut self) {
         tracing::info!("session unlocked");
-        let launcher = self.lock.take().and_then(|locked| locked.launcher);
+        let locked = self.lock.take();
+        self.forget_covers(locked.iter().flat_map(|locked| &locked.surfaces));
+        let launcher = locked.and_then(|locked| locked.launcher);
         match launcher.and_then(|id| self.launcher_by_id(id)) {
             Some(launcher) => self.focus_plain(launcher),
             None => self.focus_top_window(),
@@ -425,6 +427,15 @@ impl Compositor {
             .map(|cover| cover.surface.wl_surface().clone())
     }
 
+    /// Lock surfaces that cover nothing now, gone or unlocked: what they
+    /// drew is forgotten with them, so no record is kept for every lock
+    /// surface of every lock (#177).
+    fn forget_covers<'a>(&mut self, gone: impl IntoIterator<Item = &'a Cover>) {
+        for cover in gone {
+            self.forget_presented(cover.id);
+        }
+    }
+
     /// Whether `lock` holds the session.
     fn holds(&self, lock: &ExtSessionLockV1) -> bool {
         self.lock
@@ -441,9 +452,12 @@ impl Compositor {
         tracing::warn!(
             "the lock client went without unlocking: the session stays locked until another lock takes it over"
         );
-        if let Some(locked) = self.lock.as_mut() {
-            locked.surfaces.clear();
-        }
+        let gone = self
+            .lock
+            .as_mut()
+            .map(|locked| std::mem::take(&mut locked.surfaces))
+            .unwrap_or_default();
+        self.forget_covers(&gone);
         self.keep_keys_on_lock();
         self.repoint();
         self.backend.redraw();
@@ -463,13 +477,15 @@ impl Compositor {
         let Some(locked) = self.lock.as_mut() else {
             return;
         };
-        let covering = locked.surfaces.len();
-        locked
+        let Some(at) = locked
             .surfaces
-            .retain(|cover| cover.surface.wl_surface() != surface);
-        if locked.surfaces.len() == covering {
+            .iter()
+            .position(|cover| cover.surface.wl_surface() == surface)
+        else {
             return;
-        }
+        };
+        let gone = locked.surfaces.remove(at);
+        self.forget_covers([&gone]);
         tracing::info!("a lock surface went, and covers nothing");
         self.keep_keys_on_lock();
         self.repoint();
