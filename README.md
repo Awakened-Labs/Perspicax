@@ -1692,6 +1692,16 @@ to one still up, the one on the monitor the pointer is on if there is one.
 Nor can a program type for you there: perspicax offers neither a virtual
 keyboard nor an input method.
 
+An agent reading the desk while the screen is locked is told the lock
+screen covers every window, once the lock program has drawn it. Before
+that, or after the lock program dies without unlocking, the windows still
+read as in sight
+([#317](https://github.com/Awakened-Labs/Perspicax/issues/317)), though an
+agent can neither act on them nor take their picture while the screen is
+locked. It is told nothing of what the lock program draws: the ring changes
+as you type, and a count of its frames would be a count of your password's
+keys.
+
 | Protocol | `[protocols]` key | Spoken by | While locked | When the rule narrows |
 |---|---|---|---|---|
 | `ext-foreign-toplevel-list-v1` | `foreign-toplevel-list` | window lists | nothing new is told; told on unlock | every window closed, list finished |
