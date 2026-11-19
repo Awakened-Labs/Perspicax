@@ -270,7 +270,7 @@ impl Panels {
         let mut moved = false;
         if let Some(panel) = &self.panel {
             self.clock = Clock::new(&panel.clock);
-            self.time = self.clock.show(&chrono::Local::now());
+            self.time = self.clock.show(&jiff::Zoned::now());
             // Another edge or height: the compositor sizes each panel again,
             // and it is drawn when it has.
             moved = was.is_some_and(|was| (was.edge, was.height) != (panel.edge, panel.height));
@@ -428,7 +428,7 @@ impl Panels {
         kit: &mut Kit,
         workspaces: &Model,
     ) -> Duration {
-        let now = chrono::Local::now();
+        let now = jiff::Zoned::now();
         let time = self.clock.show(&now);
         if time != self.time {
             self.time = time;

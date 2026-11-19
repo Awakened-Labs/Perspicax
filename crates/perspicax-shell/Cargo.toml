@@ -74,9 +74,11 @@ toml = { version = "1", default-features = false, features = ["std", "serde", "p
 # each of those brings a font stack or image decoders of its own. It draws
 # with the same tiny-skia as everything else.
 resvg = { version = "0.48", default-features = false, optional = true }
-# The panel's clock, in the local time zone. Already in the tree for the MCP
-# server's schemas; `clock` adds only iana-time-zone, which is there too.
-chrono = { version = "0.4", default-features = false, features = ["std", "clock"], optional = true }
+# The panel's clock, in the local time zone: the system's, from TZ or
+# /etc/localtime, its rules read from /usr/share/zoneinfo. Not chrono, which
+# is unmaintained (RUSTSEC-2026-0543, #319). Default features off: on Linux
+# they add only how Android and Windows find a zone database.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"], optional = true }
 # The tray: status icons and their menus, from other programs over the
 # session bus. zbus is in the tree for AccessKit and the agent's reader;
 # its tokio executor, because atspi turns that on for the whole workspace,
@@ -117,7 +119,7 @@ panel = [
     "dep:tiny-skia",
     "dep:png",
     "dep:cosmic-text",
-    "dep:chrono",
+    "dep:jiff",
     "dep:accesskit",
     "dep:accesskit_unix",
     "dep:wayland-protocols-wlr",
