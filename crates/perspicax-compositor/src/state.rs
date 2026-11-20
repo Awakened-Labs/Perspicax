@@ -1123,6 +1123,12 @@ impl Compositor {
         self.presented.contains(&id)
     }
 
+    /// Forget whether a surface that has gone had anything in it. Its id
+    /// goes with it, never to be handed out again.
+    pub(crate) fn forget_presented(&mut self, id: SurfaceId) {
+        self.presented.remove(&id);
+    }
+
     /// A window or panel committed with its picture taken away. An xdg
     /// window or a layer surface that had drawn has been unmapped by its
     /// client, and is withdrawn; anything else just shows nothing now, which
@@ -1289,14 +1295,15 @@ impl CompositorHandler for Compositor {
     /// A client has finished describing a new state for a surface, and for
     /// the subsurfaces under it that were waiting on it.
     ///
-    /// What it drew is recorded against the window or layer at the top of
-    /// its tree, wherever in the tree it drew it, and a commit that brought
-    /// no new buffer and named no damage drew nothing: see [`damage`]. A
-    /// menu's tree tops out at the menu, so what it draws is recorded against
-    /// the window or layer it hangs from, where it is drawn: see [`popup`]. A
-    /// synchronized subsurface's state is applied just before its parent's,
-    /// as part of the parent's commit, and is read there, so its own call
-    /// is passed over.
+    /// What it drew is recorded against the window, layer or lock surface at
+    /// the top of its tree, wherever in the tree it drew it, and a commit
+    /// that brought no new buffer and named no damage drew nothing: see
+    /// [`damage`]. A lock surface's picture is recorded, but never its
+    /// frames (#177). A menu's tree tops out at the menu, so what it draws is
+    /// recorded against the window or layer it hangs from, where it is drawn:
+    /// see [`popup`]. A synchronized subsurface's state is applied just
+    /// before its parent's, as part of the parent's commit, and is read
+    /// there, so its own call is passed over.
     ///
     /// Headless, buffers are released immediately, which a rendering
     /// compositor would not do. It holds a buffer until it has drawn from it,
@@ -1365,9 +1372,11 @@ impl CompositorHandler for Compositor {
             self.map_again(&root, taken.own);
             self.map_layer_again(&root);
         }
-        // A window or a layer surface: both are described to the index, so
-        // both keep the same presentation and damage records. A subsurface's
-        // are its root's, and a menu's are its window's or panel's.
+        // A window, a layer surface or a lock surface: each is described to
+        // the index, so each keeps the same presentation record, and all but
+        // a lock surface the same damage record (below). A subsurface's are
+        // its root's, and a menu's are its window's or panel's.
+        let cover = self.cover_id(&root);
         let id = match (&popup, &hung) {
             (Some(_popup), Some(hung)) => {
                 let id = self.hung_from(hung);
@@ -1411,6 +1420,7 @@ impl CompositorHandler for Compositor {
                     }
                     shell::id_of(&window)
                 }
+                None if cover.is_some() => cover,
                 None if is_root => self.layer_committed(surface),
                 None => self.layer_id(&root),
             },
@@ -1462,8 +1472,13 @@ impl CompositorHandler for Compositor {
                 }
             }
             // One frame for the whole commit, however many surfaces of the
-            // tree it changed.
-            self.record_damage(id, taken.rects);
+            // tree it changed. None for a lock surface's: swaylock draws its
+            // ring again at every key, and every surface's count of frames is
+            // handed to any agent, which would count the password's keys
+            // while the person is away (#177).
+            if cover.is_none() {
+                self.record_damage(id, taken.rects);
+            }
         }
         self.space.refresh();
         self.backend.redraw();
